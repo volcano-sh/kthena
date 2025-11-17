@@ -21,7 +21,7 @@ webhooks:
       {{- if .Values.kthenaRouter.webhook.tls.autoGenerateCert }}
       caBundle: ""
       {{- else }}
-      caBundle: {{ required "A caBundle is required when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
+      caBundle: {{ required "A caBundle is required for the kthena-router validating webhook when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
       - apiGroups: [ "networking.volcano.sh" ]
@@ -43,7 +43,7 @@ webhooks:
       {{- if .Values.kthenaRouter.webhook.tls.autoGenerateCert }}
       caBundle: ""
       {{- else }}
-      caBundle: {{ required "A caBundle is required when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
+      caBundle: {{ required "A caBundle is required for the kthena-router validating webhook when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
       - apiGroups: [ "networking.volcano.sh" ]
