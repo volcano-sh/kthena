@@ -55,16 +55,6 @@ networking:
       outputTokenWeight: 2.0
 
 global:
-  certManager:
-    # Enable or disable cert-manager integration for all subcharts.
-    # If set to true, this chart will attempt to create cert-manager resources (Issuer, Certificate, etc.)
-    # for all components that support it (e.g., admission webhooks).
-    #
-    # IMPORTANT:
-    # - cert-manager must be installed in your cluster before enabling this option.
-    #   See: https://cert-manager.io/docs/installation/
-    # - When enabled, both autoGenerateCert and manual caBundle are ignored
-    enabled: false
   webhook:
     # caBundle is the base64-encoded CA bundle for webhook server certificates.
     # This is ONLY required when BOTH cert-manager AND auto-generate-cert are disabled.

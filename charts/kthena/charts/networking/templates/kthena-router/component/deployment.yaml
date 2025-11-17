@@ -32,10 +32,6 @@ spec:
             - --cert-secret-name={{ .Values.kthenaRouter.webhook.tls.secretName }}
             - --webhook-service-name={{ .Values.kthenaRouter.webhook.tls.serviceName }}
           {{- end }}
-          {{- if and .Values.global.certManager.enabled .Values.kthenaRouter.tls.enabled }}
-            - --tls-cert=/etc/router-tls/tls.crt
-            - --tls-key=/etc/router-tls/tls.key
-          {{- end }}
           ports:
             - containerPort: {{ .Values.kthenaRouter.port }}
               name: http
@@ -89,29 +85,18 @@ spec:
             httpGet:
               path: /healthz
               port: {{ .Values.kthenaRouter.port }}
-              {{- if and .Values.global.certManager.enabled .Values.kthenaRouter.tls.enabled }}
-              scheme: HTTPS
-              {{- end }}
             initialDelaySeconds: 1
             periodSeconds: 5
           readinessProbe:
             httpGet:
               path: /healthz
               port: {{ .Values.kthenaRouter.port }}
-              {{- if and .Values.global.certManager.enabled .Values.kthenaRouter.tls.enabled }}
-              scheme: HTTPS
-              {{- end }}
             initialDelaySeconds: 1
             periodSeconds: 5
           volumeMounts:
           - name: scheduler-config
             mountPath: /etc/config/routerConfiguration.yaml
             subPath: routerConfiguration
-          {{- if and .Values.global.certManager.enabled .Values.kthenaRouter.tls.enabled }}
-          - name: router-tls-certs
-            mountPath: /etc/tls
-            readOnly: true
-          {{- end }}
           {{- if .Values.kthenaRouter.webhook.enabled }}
           - name: webhook-certs
             mountPath: /etc/tls
@@ -121,11 +106,6 @@ spec:
         - name: scheduler-config
           configMap:
             name: kthena-router-config
-        {{- if and .Values.global.certManager.enabled .Values.kthenaRouter.tls.enabled }}
-        - name: router-tls-certs
-          secret:
-            secretName: {{ .Values.kthenaRouter.tls.secretName }}
-        {{- end }}
         {{- if .Values.kthenaRouter.webhook.enabled }}
         - name: webhook-certs
           secret:

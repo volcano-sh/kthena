@@ -6,10 +6,6 @@ metadata:
   labels:
     app.kubernetes.io/component: webhook
     {{- include "kthena.labels" . | nindent 4 }}
-  {{- if .Values.global.certManager.enabled }}
-  annotations:
-    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/kthena-webhook-cert
-  {{- end }}
 webhooks:
   - name: validate-modelbooster.volcano.sh
     admissionReviewVersions: [ "v1" ]
@@ -22,10 +18,10 @@ webhooks:
         namespace: {{ .Release.Namespace }}
         path: "/validate/modelbooster"
         port: 443
-      {{- if or .Values.global.certManager.enabled .Values.controllerManager.webhook.tls.autoGenerateCert }}
+      {{- if .Values.controllerManager.webhook.tls.autoGenerateCert }}
       caBundle: ""
       {{- else }}
-      caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when cert-manager and auto-generate-cert are disabled (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
+      caBundle: {{ required "A caBundle is required when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
       - apiGroups: [ "workload.serving.volcano.sh" ]
@@ -44,10 +40,10 @@ webhooks:
         namespace: {{ .Release.Namespace }}
         path: "/validate/autoscalingpolicy"
         port: 443
-      {{- if or .Values.global.certManager.enabled .Values.controllerManager.webhook.tls.autoGenerateCert }}
+      {{- if .Values.controllerManager.webhook.tls.autoGenerateCert }}
       caBundle: ""
       {{- else }}
-      caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when cert-manager and auto-generate-cert are disabled (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
+      caBundle: {{ required "A caBundle is required when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
       - apiGroups: [ "workload.serving.volcano.sh" ]
@@ -66,10 +62,10 @@ webhooks:
         namespace: {{ .Release.Namespace }}
         path: "/validate/autoscalingpolicybinding"
         port: 443
-      {{- if or .Values.global.certManager.enabled .Values.controllerManager.webhook.tls.autoGenerateCert }}
+      {{- if .Values.controllerManager.webhook.tls.autoGenerateCert }}
       caBundle: ""
       {{- else }}
-      caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when cert-manager and auto-generate-cert are disabled (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
+      caBundle: {{ required "A caBundle is required when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
       - apiGroups: [ "workload.serving.volcano.sh" ]
