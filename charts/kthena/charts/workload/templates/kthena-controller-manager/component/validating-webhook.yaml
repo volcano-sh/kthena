@@ -65,7 +65,7 @@ webhooks:
       {{- if .Values.controllerManager.webhook.tls.autoGenerateCert }}
       caBundle: ""
       {{- else }}
-            caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
+      caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when auto-generate-cert is disabled" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
       - apiGroups: [ "workload.serving.volcano.sh" ]
