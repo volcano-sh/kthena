@@ -2,7 +2,9 @@ FROM quay.io/ascend/vllm-ascend:v0.10.1rc1-a3
 
 ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
 ARG MOONCAKE_TAG=0.3.5
-ARG TARGETARCH
+# TARGETARCH is automatically set by Docker BuildKit during multi-platform builds.
+# Set a default for non-BuildKit builds (e.g., x86_64).
+ARG TARGETARCH=x86_64
 
 WORKDIR /build
 
@@ -11,7 +13,8 @@ RUN git clone --depth 1 $MOONCAKE_REPO --branch v${MOONCAKE_TAG} && \
     sed -i 's/cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ../cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_ASCEND=ON ../' ./Mooncake/scripts/ascend/dependencies_ascend.sh && \
     sed -i 's/add_subdirectory(tests)/# add_subdirectory(tests)/' ./Mooncake/mooncake-store/CMakeLists.txt && \
     find /usr/local/Ascend/ascend-toolkit/ -name "libascend_protobuf.a" -print0 | xargs -0 -I {} mv -- {} {}.backup && \
-    bash ./Mooncake/scripts/ascend/dependencies_ascend.sh
+    bash ./Mooncake/scripts/ascend/dependencies_ascend.sh && \
+    rm -rf /build/Mooncake
 
 WORKDIR /app
 
