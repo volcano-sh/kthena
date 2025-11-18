@@ -1,0 +1,25 @@
+FROM quay.io/ascend/vllm-ascend:v0.10.1rc1-a3
+
+ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
+ARG MOONCAKE_TAG=0.3.5
+ARG TARGETARCH
+
+WORKDIR /build
+
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${TARGETARCH}-linux/include/hccl/:/usr/local/Ascend/ascend-toolkit/latest/${TARGETARCH}-linux/devlib/
+RUN git clone --depth 1 $MOONCAKE_REPO --branch v${MOONCAKE_TAG} && \
+    sed -i 's/cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ../cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_ASCEND=ON ../' ./Mooncake/scripts/ascend/dependencies_ascend.sh && \
+    sed -i 's/add_subdirectory(tests)/# add_subdirectory(tests)/' ./Mooncake/mooncake-store/CMakeLists.txt && \
+    find /usr/local/Ascend/ascend-toolkit/ -name "libascend_protobuf.a" -print0 | xargs -0 -I {} mv -- {} {}.backup && \
+    bash ./Mooncake/scripts/ascend/dependencies_ascend.sh
+
+WORKDIR /app
+
+ENV LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+RUN echo '#!/bin/bash' > entrypoint.sh && \
+    echo '[ -z "$AscendRealDevices" ] && echo "WARNING: AscendRealDevices NOT SET" >&2 && exit 1' >> entrypoint.sh && \
+    echo 'export PHYSICAL_DEVICES=$(echo "$AscendRealDevices" | tr '\'', '\'' '\''\n'\'' | awk -F'\''-'\'' '\''{print $2}'\'' | sort -n | tr '\''\n'\'' '\'', '\'' | sed '\''s/,$//'\'')' >> entrypoint.sh && \
+    echo 'exec vllm serve "$@"' >> entrypoint.sh && \
+    chmod +x entrypoint.sh
+
+ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"]
