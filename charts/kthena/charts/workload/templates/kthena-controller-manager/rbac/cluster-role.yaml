@@ -25,6 +25,7 @@ rules:
       - list
       - patch
       - watch
+      - create
   - apiGroups:
       - workload.serving.volcano.sh
     resources:
