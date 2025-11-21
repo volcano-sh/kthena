@@ -26,12 +26,13 @@ import (
 )
 
 type Server struct {
-	store       datastore.Store
-	controllers Controller
-	EnableTLS   bool
-	TLSCertFile string
-	TLSKeyFile  string
-	Port        string
+	store           datastore.Store
+	controllers     Controller
+	listenerManager *ListenerManager
+	EnableTLS       bool
+	TLSCertFile     string
+	TLSKeyFile      string
+	Port            string
 }
 
 func NewServer(port string, enableTLS bool, cert, key string) *Server {
@@ -62,6 +63,11 @@ func (s *Server) Run(ctx context.Context) {
 	store.Run(ctx)
 	// start router
 	s.startRouter(ctx, r, store)
+
+	// Block until context is cancelled to keep the process running
+	klog.Info("Router server started, waiting for shutdown signal...")
+	<-ctx.Done()
+	klog.Info("Router server shutting down...")
 }
 
 func (s *Server) HasSynced() bool {

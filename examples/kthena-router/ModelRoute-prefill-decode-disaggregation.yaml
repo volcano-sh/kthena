@@ -5,6 +5,10 @@ metadata:
   namespace: dev
 spec:
   modelName: "deepseek-ai/DeepSeekV2"
+  parentRefs:
+  # When Gateway and ModelRoute are in different namespaces, namespace must be specified
+  - name: kthena-gateway
+    namespace: kthena-system  # Required: Gateway is in kthena-system namespace, ModelRoute is in dev namespace
   rules:
     - name: "default"
       targetModels:

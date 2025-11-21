@@ -5,6 +5,11 @@ metadata:
   namespace: default
 spec:
   modelName: "deepseek-r1-with-global-rate-limit"
+  parentRefs:
+  # When Gateway and ModelRoute are in the same namespace, namespace is optional
+  # When they are in different namespaces, namespace must be specified
+  - name: kthena-gateway
+    namespace: kthena-system  # Optional when same namespace, but explicit for clarity
   rules:
   - name: "default"
     targetModels:

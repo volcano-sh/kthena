@@ -8,7 +8,7 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: multi-backend-model
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: 7b67c97bcb
+    workload.serving.volcano.sh/revision: 869fcfcb6b
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1
       kind: ModelBooster

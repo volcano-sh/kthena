@@ -196,6 +196,60 @@ func (m *MockStore) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute 
 	return args.Get(0).(*aiv1alpha1.ModelRoute)
 }
 
+// Gateway methods (using standard Gateway API)
+func (m *MockStore) AddOrUpdateGateway(gateway interface{}) error {
+	args := m.Called(gateway)
+	return args.Error(0)
+}
+
+func (m *MockStore) DeleteGateway(key string) error {
+	args := m.Called(key)
+	return args.Error(0)
+}
+
+func (m *MockStore) GetGateway(key string) interface{} {
+	args := m.Called(key)
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0)
+}
+
+func (m *MockStore) GetGatewaysByNamespace(namespace string) []interface{} {
+	args := m.Called(namespace)
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).([]interface{})
+}
+
+func (m *MockStore) GetAllGateways() []interface{} {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).([]interface{})
+}
+
+// GatewayClass methods (using standard Gateway API)
+func (m *MockStore) AddOrUpdateGatewayClass(gatewayClass interface{}) error {
+	args := m.Called(gatewayClass)
+	return args.Error(0)
+}
+
+func (m *MockStore) DeleteGatewayClass(key string) error {
+	args := m.Called(key)
+	return args.Error(0)
+}
+
+func (m *MockStore) GetGatewayClass(key string) interface{} {
+	args := m.Called(key)
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0)
+}
+
 func TestListModelRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
