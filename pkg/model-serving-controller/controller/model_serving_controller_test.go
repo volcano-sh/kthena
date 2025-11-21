@@ -1129,6 +1129,298 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		// Verify each ServingGroup has correct pods
 		verifyPodCount(t, controller, updatedMI, 2)
 	})
+
+	// case 6: ModelServing Scale Down with BinPack Strategy
+	t.Run("ModelServingBinPackScaleDown", func(t *testing.T) {
+		// Test Case: ModelServing with PodDelectionCost annotation - BinPack Scale
+		mi := createStandardModelServing("test-binpack-scale", 4, 1)
+
+		// Create initial ModelServing
+		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
+			context.Background(), mi, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		// Wait for object to be available in cache
+		found := waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServingLister.ModelServings("default").Get("test-binpack-scale")
+			return err == nil
+		})
+		assert.True(t, found, "ModelServing should be found in cache after creation")
+
+		// Process initial creation
+		err = controller.syncModelServing(context.Background(), "default/test-binpack-scale")
+		assert.NoError(t, err)
+
+		// Wait for pods to be created and synced to cache
+		expectedPodCount := utils.ExpectedPodNum(mi) * int(*mi.Spec.Replicas)
+		found = waitForObjectInCache(t, 2*time.Second, func() bool {
+			selector := labels.SelectorFromSet(map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+			})
+			pods, _ := controller.podsLister.Pods("default").List(selector)
+			return len(pods) == expectedPodCount
+		})
+		assert.True(t, found, "Pods should be created and synced to cache")
+
+		// Initial status check
+		verifyServingGroups(t, controller, mi, 4)
+		verifyPodCount(t, controller, mi, 4)
+		verifyRoles(t, controller, mi, 4)
+
+		// Add PodDelectionCost annotations to pods
+		// Get all pods and add different deletion costs
+		pods, err := controller.podsLister.Pods("default").List(labels.SelectorFromSet(map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+		}))
+		assert.NoError(t, err)
+
+		// Assign different deletion costs to pods in different ServingGroups
+		for _, pod := range pods {
+			// Extract ServingGroup index from pod name or labels
+			groupName, exists := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+			assert.True(t, exists, "Pod should have GroupName label")
+
+			// Determine ServingGroup index from name (e.g., test-binpack-scale-0, test-binpack-scale-1, etc.)
+			var groupIndex int
+			switch groupName {
+			case "test-binpack-scale-0":
+				groupIndex = 0
+			case "test-binpack-scale-1":
+				groupIndex = 1
+			case "test-binpack-scale-2":
+				groupIndex = 2
+			case "test-binpack-scale-3":
+				groupIndex = 3
+			default:
+				groupIndex = 0
+			}
+
+			// Add PodDelectionCost annotation - higher cost for group 0, lower for group 2
+			cost := groupIndex * 30 // Group 0: 0, Group 1: 30, Group 2: 60, Group 3: 90
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			pod.Annotations[PodDeletionCostAnnotation] = fmt.Sprintf("%d", cost)
+
+			// Update pod in indexer to simulate annotation addition
+			podIndexer := controller.podsInformer.GetIndexer()
+			err = podIndexer.Update(pod)
+			assert.NoError(t, err)
+		}
+
+		// Update ModelServing to scale down from 4 to 1 ServingGroup
+		updatedMI := mi.DeepCopy()
+		updatedMI.Spec.Replicas = ptr.To[int32](1) // Scale down to 1 ServingGroup
+
+		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
+			context.Background(), updatedMI, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+
+		// Wait for update to be available in cache
+		found = waitForObjectInCache(t, 2*time.Second, func() bool {
+			mi, err := controller.modelServingLister.ModelServings("default").Get("test-binpack-scale")
+			return err == nil && *mi.Spec.Replicas == 1
+		})
+		assert.True(t, found, "Updated ModelServing should be found in cache")
+
+		// Process the update
+		err = controller.syncModelServing(context.Background(), "default/test-binpack-scale")
+		assert.NoError(t, err)
+
+		// Identify ServingGroups to be deleted (with lower deletion cost)
+		// Based on our cost assignment: Group 0 (cost 0) Group 1 (cost 30) and Group 2 (cost 60) should be deleted first
+		requirement, err := labels.NewRequirement(
+			workloadv1alpha1.GroupNameLabelKey,
+			selection.In,
+			[]string{"test-binpack-scale-0", "test-binpack-scale-1", "test-binpack-scale-2"},
+		)
+		assert.NoError(t, err)
+
+		selector := labels.NewSelector().Add(*requirement)
+		podsToDelete, err := controller.podsLister.Pods("default").List(selector)
+		assert.NoError(t, err)
+		servicesToDelete, err := controller.servicesLister.Services("default").List(selector)
+		assert.NoError(t, err)
+
+		// Get the indexer of the Service Informer for simulating deletion
+		svcIndexer := controller.servicesInformer.GetIndexer()
+
+		// Simulate the deletion process of each Service
+		for _, svc := range servicesToDelete {
+			// Delete the Service from the indexer (simulating the Service disappearing from the cluster)
+			err = svcIndexer.Delete(svc)
+			assert.NoError(t, err)
+		}
+
+		// Get the indexer of the Pod Informer for simulating deletion
+		podIndexer := controller.podsInformer.GetIndexer()
+
+		// Simulate the deletion of each Pod
+		for _, pod := range podsToDelete {
+			// Delete the Pod from the indexer (simulating the Pod disappearing from the cluster)
+			err = podIndexer.Delete(pod)
+			assert.NoError(t, err)
+			controller.deletePod(pod)
+		}
+
+		// Wait for controller to process deletions
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify that pods from the remaining ServingGroup exist
+		selector = labels.SelectorFromSet(map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+		})
+		pods, _ = controller.podsLister.Pods("default").List(selector)
+		assert.Equal(t, 1, len(pods))
+		assert.Equal(t, "test-binpack-scale-3-prefill-0-0", pods[0].Name)
+
+		// Verify that the remaining ServingGroup is the one with highest deletion cost (test-binpack-scale-3)
+		servingGroups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(updatedMI))
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(servingGroups))
+		assert.Equal(t, "test-binpack-scale-3", servingGroups[0].Name)
+	})
+
+	t.Run("RoleBinPackScaleDown", func(t *testing.T) {
+		mi := createStandardModelServing("test-role-binpack", 1, 4)
+
+		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
+			context.Background(), mi, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		found := waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServingLister.ModelServings("default").Get("test-role-binpack")
+			return err == nil
+		})
+		assert.True(t, found, "ModelServing should be found in cache after creation")
+
+		err = controller.syncModelServing(context.Background(), "default/test-role-binpack")
+		assert.NoError(t, err)
+
+		expectedPodCount := utils.ExpectedPodNum(mi) * int(*mi.Spec.Replicas)
+		found = waitForObjectInCache(t, 2*time.Second, func() bool {
+			selector := labels.SelectorFromSet(map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+			})
+			pods, _ := controller.podsLister.Pods("default").List(selector)
+			return len(pods) == expectedPodCount
+		})
+		assert.True(t, found, "Pods should be created and synced to cache")
+
+		// verify ServingGroup and roles
+		servingGroups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(servingGroups))
+
+		roles, err := controller.store.GetRoleList(utils.GetNamespaceName(mi), servingGroups[0].Name, "prefill")
+		assert.NoError(t, err)
+		assert.Equal(t, 4, len(roles))
+
+		pods, err := controller.podsLister.Pods("default").List(labels.SelectorFromSet(map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+		}))
+		assert.NoError(t, err)
+
+		// add PodDeletionCost annotations to pods based on their role ID
+		for _, pod := range pods {
+			roleID, exists := pod.Labels[workloadv1alpha1.RoleIDKey]
+			assert.True(t, exists, "Pod should have RoleID label")
+
+			var roleIndex int
+			switch roleID {
+			case "prefill-0":
+				roleIndex = 0
+			case "prefill-1":
+				roleIndex = 1
+			case "prefill-2":
+				roleIndex = 2
+			case "prefill-3":
+				roleIndex = 3
+			default:
+				roleIndex = 0
+			}
+
+			// Assign PodDeletionCost annotation - higher cost for lower index roles
+			cost := roleIndex * 20 // prefill-0: 0, prefill-1: 20, prefill-2: 40, prefill-3: 60
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			pod.Annotations[PodDeletionCostAnnotation] = fmt.Sprintf("%d", cost)
+
+			// Update pod in indexer to simulate annotation addition
+			podIndexer := controller.podsInformer.GetIndexer()
+			err = podIndexer.Update(pod)
+			assert.NoError(t, err)
+		}
+
+		// Update ModelServing to scale down role replicas from 4 to 1
+		updatedMI := mi.DeepCopy()
+		updatedMI.Spec.Template.Roles[0].Replicas = ptr.To[int32](1)
+
+		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
+			context.Background(), updatedMI, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+
+		// Wait for update to be available in cache
+		found = waitForObjectInCache(t, 2*time.Second, func() bool {
+			mi, err := controller.modelServingLister.ModelServings("default").Get("test-role-binpack")
+			return err == nil && *mi.Spec.Template.Roles[0].Replicas == 1
+		})
+		assert.True(t, found, "Updated ModelServing should be found in cache")
+
+		// Process the update
+		err = controller.syncModelServing(context.Background(), "default/test-role-binpack")
+		assert.NoError(t, err)
+
+		// Identify ServingGroups to be deleted (with lower deletion cost)
+		// Based on our cost assignment: Group 0 (cost 0) Group 1 (cost 20) and Group 2 (cost 40) should be deleted first
+		requirement, err := labels.NewRequirement(
+			workloadv1alpha1.RoleIDKey,
+			selection.In,
+			[]string{"prefill-0", "prefill-1", "prefill-2"},
+		)
+		assert.NoError(t, err)
+
+		selector := labels.NewSelector().Add(*requirement)
+		podsToDelete, err := controller.podsLister.Pods("default").List(selector)
+		assert.NoError(t, err)
+		servicesToDelete, err := controller.servicesLister.Services("default").List(selector)
+		assert.NoError(t, err)
+
+		// Get the indexer of the Service Informer for simulating deletion
+		svcIndexer := controller.servicesInformer.GetIndexer()
+
+		// Simulate the deletion process of each Service
+		for _, svc := range servicesToDelete {
+			// Delete the Service from the indexer (simulating the Service disappearing from the cluster)
+			err = svcIndexer.Delete(svc)
+			assert.NoError(t, err)
+		}
+
+		// Get the indexer of the Pod Informer for simulating deletion
+		podIndexer := controller.podsInformer.GetIndexer()
+
+		// Simulate the deletion of each Pod
+		for _, pod := range podsToDelete {
+			// Delete the Pod from the indexer (simulating the Pod disappearing from the cluster)
+			err = podIndexer.Delete(pod)
+			assert.NoError(t, err)
+			controller.deletePod(pod)
+		}
+
+		// Wait for controller to process deletions
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify that pods from the remaining Role exist
+		remainingRoles, err := controller.store.GetRoleList(utils.GetNamespaceName(updatedMI), servingGroups[0].Name, "prefill")
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(remainingRoles))
+		assert.Equal(t, "prefill-3", remainingRoles[0].Name) // The remaining role should be prefill-3
+
+		// Verify that the remaining pod is from the retained role
+		status := controller.store.GetServingGroupStatus(utils.GetNamespaceName(updatedMI), servingGroups[0].Name)
+		assert.Equal(t, datastore.ServingGroupScaling, status)
+	})
 }
 
 // waitForObjectInCache waits for a specific object to appear in the cache
@@ -1222,8 +1514,10 @@ func verifyPodCount(t *testing.T, controller *ModelServingController, mi *worklo
 // verifyRoles Verify the number and name of Role
 func verifyRoles(t *testing.T, controller *ModelServingController, mi *workloadv1alpha1.ModelServing, expectedGroups int) {
 	// Traverse each ServingGroup
-	for i := 0; i < expectedGroups; i++ {
-		groupName := fmt.Sprintf("%s-%d", mi.Name, i)
+	servingGroups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+	assert.NoError(t, err)
+	for _, group := range servingGroups {
+		groupName := group.Name
 
 		// Traverse each role defined in the ModelServing spec
 		for _, specRole := range mi.Spec.Template.Roles {

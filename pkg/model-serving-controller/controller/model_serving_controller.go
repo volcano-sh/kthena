@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -554,25 +555,59 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 		klog.V(4).Info("The number of replicas is consistent, no need to scale up or down")
 		return nil
 	}
+
+	// Determine whether it is a scale-up or scale-down scenario
+	if curReplicas < expectedCount {
+		err = c.scaleUpServingGroups(ctx, mi, servingGroupList, expectedCount, newRevision)
+		if err != nil {
+			return fmt.Errorf("failed to scale up ServingGroups: %v", err)
+		}
+	} else {
+		err = c.scaleDownServingGroups(ctx, mi, servingGroupList, expectedCount)
+		if err != nil {
+			return fmt.Errorf("failed to scale down ServingGroups: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// scaleUpServingGroups scales up the ServingGroups to the expected count.
+func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
 	// slice that will contain all ServingGroups as excepted
 	replicas := make([]*datastore.ServingGroup, expectedCount)
 	// slice that will contain all ServingGroups Out of except or fails to parse ordinal
 	condemned := make([]datastore.ServingGroup, 0)
+
 	// First we partition ServingGroups into two lists valid replicas and condemned ServingGroups
 	for _, group := range servingGroupList {
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(group.Name)
-		if servingGroupOrdinal >= 0 && servingGroupOrdinal < expectedCount {
-			copyServingGroup := group
-			replicas[servingGroupOrdinal] = &copyServingGroup
+		if servingGroupOrdinal >= 0 {
+			if servingGroupOrdinal < expectedCount {
+				copyServingGroup := group
+				replicas[servingGroupOrdinal] = &copyServingGroup
+			} else {
+				if should, _ := c.shouldUseBinPackScaleDown(mi); should {
+					// During binpack scaledown processing, situations may arise where the group index exceeds the expected value.
+					// We address this by reducing the expected value.
+					for replicas[expectedCount-1] != nil {
+						expectedCount = expectedCount - 1
+					}
+					expectedCount = expectedCount - 1
+				} else {
+					condemned = append(condemned, group)
+				}
+			}
 		} else {
 			// Whether the ServingGroup sequence number fails to parse or out of except, a rebuild should be performed
 			condemned = append(condemned, group)
 		}
 	}
+
 	for idx := 0; idx < expectedCount; idx++ {
 		if replicas[idx] == nil {
 			// Create pods for ServingGroup
-			err = c.CreatePodsForServingGroup(ctx, mi, idx, newRevision)
+			err := c.CreatePodsForServingGroup(ctx, mi, idx, newRevision)
 			if err != nil {
 				// I think that after create a pod failed, a period of time should pass before joining the coordination queue.
 				return fmt.Errorf("create Serving group failed: %v", err)
@@ -580,11 +615,53 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 				// Insert new ServingGroup to global storage
 				c.store.AddServingGroup(utils.GetNamespaceName(mi), idx, newRevision)
 			}
+			// Insert new ServingGroup to global storage
+			c.store.AddServingGroup(utils.GetNamespaceName(mi), idx, newRevision)
 		}
 	}
+
 	for _, group := range condemned {
 		c.DeleteServingGroup(mi, group.Name)
 	}
+
+	return nil
+}
+
+// scaleDownServingGroups scales down the ServingGroups to the expected count.
+func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
+	// Calculate scores for all ServingGroups
+	var servingGroupScores []ServingGroupWithScore
+
+	for _, group := range servingGroupList {
+		score, err := c.calculateServingGroupScore(mi, group.Name)
+		if err != nil {
+			klog.Errorf("Failed to calculate score for ServingGroup %s: %v", group.Name, err)
+			continue
+		}
+		_, groupIndex := utils.GetParentNameAndOrdinal(group.Name)
+		servingGroupScores = append(servingGroupScores, ServingGroupWithScore{
+			Name:  group.Name,
+			Score: score,
+			Index: groupIndex,
+		})
+	}
+
+	// Sort ServingGroups by score in ascending order
+	// If scores are equal, sort by group index in descending order.
+	// Ensure that when binpack scale down is not performed, the previous scaling-down process is followed.
+	sort.Slice(servingGroupScores, func(i, j int) bool {
+		if servingGroupScores[i].Score != servingGroupScores[j].Score {
+			return servingGroupScores[i].Score < servingGroupScores[j].Score
+		}
+		return servingGroupScores[i].Index > servingGroupScores[j].Index
+	})
+
+	// Delete ServingGroups with the lowest scores
+	toDeleteCount := len(servingGroupList) - expectedCount
+	for i := 0; i < toDeleteCount && i < len(servingGroupScores); i++ {
+		c.DeleteServingGroup(mi, servingGroupScores[i].Name)
+	}
+
 	return nil
 }
 
@@ -726,23 +803,53 @@ func (c *ModelServingController) manageRole(ctx context.Context, mi *workloadv1a
 	return nil
 }
 
-// manageRoleReplicas manages the replicas of a specific role within an Serving group
-// It handles both scale up and scale down operations for the role
-func (c *ModelServingController) manageRoleReplicas(ctx context.Context, mi *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) {
-	// TODO: add podGroup update after gang scheduler finished
-	// Get all replicas of a role from storage, for example, prefill-0, prefill-1...
-	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(mi), groupName, targetRole.Name)
-	if err != nil {
-		klog.Errorf("cannot get role %s in ServingGroup %s, err:%v", targetRole.Name, groupName, err)
-		return
+// scaleDownRoles handles Role scaling down
+func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int) {
+	// Calculate scores for all Roles
+	var roleScores []RoleWithScore
+
+	for _, role := range roleList {
+		score, err := c.calculateRoleScore(mi, groupName, targetRole.Name, role.Name)
+		if err != nil {
+			klog.Errorf("Failed to calculate score for role %s: %v", role.Name, err)
+			continue
+		}
+		_, roleIndex := utils.GetParentNameAndOrdinal(role.Name)
+		roleScores = append(roleScores, RoleWithScore{
+			Name:  role.Name,
+			Score: score,
+			Index: roleIndex,
+		})
 	}
 
-	expectedCount := int(*targetRole.Replicas)
-	if len(roleList) == expectedCount {
-		klog.V(4).Infof("The replicas of role %s in ServingGroup %s is consistent, no need to scale up or down", targetRole.Name, groupName)
-		return
+	// Sort Roles by score in ascending order
+	// If scores are equal, sort by group index in descending order.
+	// Ensure that when binpack scale down is not performed, the previous scaling-down process is followed.
+	sort.Slice(roleScores, func(i, j int) bool {
+		if roleScores[i].Score != roleScores[j].Score {
+			return roleScores[i].Score < roleScores[j].Score
+		}
+		return roleScores[i].Index > roleScores[j].Index
+	})
+	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
+	if c.store.GetServingGroupStatus(utils.GetNamespaceName(mi), groupName) != datastore.ServingGroupScaling {
+		err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, datastore.ServingGroupScaling)
+		if err != nil {
+			klog.Errorf("failed to set ServingGroup %s/%s status: %v", mi.Namespace+"/"+mi.Name, groupName, err)
+			return
+		}
 	}
 
+	// Delete Roles with the lowest scores
+	toDeleteCount := len(roleList) - expectedCount
+	for i := 0; i < toDeleteCount && i < len(roleScores); i++ {
+		_, roleID := utils.GetParentNameAndOrdinal(roleScores[i].Name)
+		c.DeleteRole(ctx, mi, groupName, targetRole.Name, utils.GenerateRoleID(targetRole.Name, roleID))
+	}
+}
+
+// scaleUpRoles handles Role scaling up
+func (c *ModelServingController) scaleUpRoles(ctx context.Context, mi *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
 	// slice that will contain all Roles as expected
 	replicas := make([]*datastore.Role, expectedCount)
 	// slice that will contain all Roles out of expected range or fails to parse ordinal
@@ -751,9 +858,22 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, mi *wor
 	// Partition roles into valid replicas and condemned roles
 	for _, role := range roleList {
 		_, roleOrdinal := utils.GetParentNameAndOrdinal(role.Name)
-		if roleOrdinal >= 0 && roleOrdinal < expectedCount {
-			copy := role
-			replicas[roleOrdinal] = &copy
+		if roleOrdinal >= 0 {
+			if roleOrdinal < expectedCount {
+				copy := role
+				replicas[roleOrdinal] = &copy
+			} else {
+				if should, _ := c.shouldUseBinPackScaleDown(mi); should {
+					// During binpack scaledown processing, situations may arise where the role index exceeds the expected value.
+					// We address this by reducing the expected value.
+					for replicas[expectedCount-1] != nil {
+						expectedCount = expectedCount - 1
+					}
+					expectedCount = expectedCount - 1
+				} else {
+					condemned = append(condemned, role)
+				}
+			}
 		} else {
 			// Whether the role sequence number fails to parse or out of expected range, a rebuild should be performed
 			condemned = append(condemned, role)
@@ -772,7 +892,7 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, mi *wor
 				}
 			}
 			// Create pods for role
-			err = c.CreatePodByRole(ctx, *targetRole.DeepCopy(), mi, idx, servingGroupOrdinal, newRevision)
+			err := c.CreatePodByRole(ctx, *targetRole.DeepCopy(), mi, idx, servingGroupOrdinal, newRevision)
 			if err != nil {
 				klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, idx), groupName, err)
 			} else {
@@ -793,6 +913,33 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, mi *wor
 			}
 		}
 		c.DeleteRole(ctx, mi, groupName, targetRole.Name, role.Name)
+	}
+}
+
+// manageRoleReplicas manages the replicas of a specific role within an Serving group
+// It handles both scale up and scale down operations for the role
+func (c *ModelServingController) manageRoleReplicas(ctx context.Context, mi *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) {
+	// TODO: add podGroup update after gang scheduler finished
+	// Get all replicas of a role from storage, for example, prefill-0, prefill-1...
+	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(mi), groupName, targetRole.Name)
+	if err != nil {
+		klog.Errorf("cannot get role %s in ServingGroup %s, err:%v", targetRole.Name, groupName, err)
+		return
+	}
+
+	expectedCount := int(*targetRole.Replicas)
+	if len(roleList) == expectedCount {
+		klog.V(4).Infof("The replicas of role %s in ServingGroup %s is consistent, no need to scale up or down", targetRole.Name, groupName)
+		return
+	}
+
+	// Determine whether it is a scale-up or scale-down scenario
+	if len(roleList) < expectedCount {
+		// Handle scale up by calling scaleUpRoles
+		c.scaleUpRoles(ctx, mi, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, newRevision)
+	} else {
+		// Handle scale down by calling scaleDownRoles
+		c.scaleDownRoles(ctx, mi, groupName, targetRole, roleList, expectedCount)
 	}
 }
 
