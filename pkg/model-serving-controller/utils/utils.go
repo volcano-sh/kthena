@@ -111,7 +111,7 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelSer
 	workerPod := createBasePod(role, mi, workerPodName, groupName, revision, roleIndex)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
-	entryPod.Spec.SchedulerName = mi.Spec.SchedulerName
+	workerPod.Spec.SchedulerName = mi.Spec.SchedulerName
 	// Build environment variables into each container of all pod
 	envVars := createCommonEnvVars(role, entryPod, podIndex)
 	addPodEnvVars(workerPod, envVars...)
