@@ -18,6 +18,8 @@ package util
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
@@ -32,10 +34,12 @@ import (
 )
 
 const (
-	ModelInferEntryPodLabel = "leader"
+	ModelInferEntryPodLabel    = "leader"
+	ModelServingRoleKindSuffix = "/role"
+	Entry                      = "true"
 )
 
-func GetModelInferTarget(lister workloadLister.ModelServingLister, namespace string, name string) (*workload.ModelServing, error) {
+func GetModelServingTarget(lister workloadLister.ModelServingLister, namespace string, name string) (*workload.ModelServing, error) {
 	if instance, err := lister.ModelServings(namespace).Get(name); err != nil {
 		return nil, err
 	} else {
@@ -51,7 +55,7 @@ func GetMetricPods(lister listerv1.PodLister, namespace string, matchLabels map[
 	}
 }
 
-func UpdateModelInfer(ctx context.Context, client clientset.Interface, modelInfer *workload.ModelServing) error {
+func UpdateModelServing(ctx context.Context, client clientset.Interface, modelInfer *workload.ModelServing) error {
 	modelInferCtx, cancel := context.WithTimeout(ctx, AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
 	if oldModelInfer, err := client.WorkloadV1alpha1().ModelServings(modelInfer.Namespace).Get(modelInferCtx, modelInfer.Name, metav1.GetOptions{}); err == nil {
@@ -67,15 +71,50 @@ func UpdateModelInfer(ctx context.Context, client clientset.Interface, modelInfe
 	return nil
 }
 
-func GetTargetLabels(target *workload.Target) map[string]string {
+func GetRoleName(targetRef *corev1.ObjectReference) (string, string, error) {
+	if targetRef == nil || targetRef.Name == "" {
+		return "", "", nil
+	}
+	strs := strings.Split(targetRef.Name, "/")
+	if len(strs) != 2 {
+		klog.Errorf("invalid model serving role name, name: %s", targetRef.Name)
+		return "", "", fmt.Errorf("invalid model serving role name, name: %s", targetRef.Name)
+	}
+	return strs[0], strs[1], nil
+}
+
+func GetTargetLabels(target *workload.Target) (map[string]string, error) {
+	if target == nil || target.TargetRef.Name == "" {
+		return nil, nil
+	}
+	if target.TargetRef.Kind == "" {
+		target.TargetRef.Kind = workload.ModelServingKind.Kind
+	}
+
 	if target.TargetRef.Kind == workload.ModelServingKind.Kind {
 		lbs := map[string]string{}
 		if target.AdditionalMatchLabels != nil {
 			lbs = maps.Clone(target.AdditionalMatchLabels)
 		}
 		lbs[workload.ModelServingNameLabelKey] = target.TargetRef.Name
-		lbs[workload.RoleLabelKey] = ModelInferEntryPodLabel
-		return lbs
+		lbs[workload.EntryLabelKey] = Entry
+		return lbs, nil
+	} else if target.TargetRef.Kind == workload.ModelServingKind.Kind+ModelServingRoleKindSuffix {
+		lbs := map[string]string{}
+		if target.AdditionalMatchLabels != nil {
+			lbs = maps.Clone(target.AdditionalMatchLabels)
+		}
+		servingName, roleName, err := GetRoleName(&target.TargetRef)
+		if err != nil {
+			return nil, err
+		}
+		target.TargetRef.Name = servingName
+		lbs[workload.ModelServingNameLabelKey] = target.TargetRef.Name
+		lbs[workload.EntryLabelKey] = Entry
+		lbs[workload.RoleLabelKey] = roleName
+		return lbs, nil
 	}
-	return nil
+
+	klog.Warningf("invalid target ref kind, kind: %s", target.TargetRef.Kind)
+	return nil, nil
 }

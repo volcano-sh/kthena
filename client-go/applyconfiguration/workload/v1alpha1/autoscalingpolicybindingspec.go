@@ -25,9 +25,9 @@ import (
 // AutoscalingPolicyBindingSpecApplyConfiguration represents a declarative configuration of the AutoscalingPolicyBindingSpec type for use
 // with apply.
 type AutoscalingPolicyBindingSpecApplyConfiguration struct {
-	PolicyRef              *v1.LocalObjectReference                  `json:"policyRef,omitempty"`
-	OptimizerConfiguration *OptimizerConfigurationApplyConfiguration `json:"optimizerConfiguration,omitempty"`
-	ScalingConfiguration   *ScalingConfigurationApplyConfiguration   `json:"scalingConfiguration,omitempty"`
+    PolicyRef              *v1.LocalObjectReference                  `json:"policyRef,omitempty"`
+    HeterogeneousTarget *HeterogeneousTargetApplyConfiguration       `json:"heterogeneousTarget,omitempty"`
+    HomogeneousTarget   *HomogeneousTargetApplyConfiguration         `json:"homogeneousTarget,omitempty"`
 }
 
 // AutoscalingPolicyBindingSpecApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyBindingSpec type for use with
@@ -47,15 +47,15 @@ func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithPolicyRef(value v1.
 // WithOptimizerConfiguration sets the OptimizerConfiguration field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the OptimizerConfiguration field is set to the value of the last call.
-func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithOptimizerConfiguration(value *OptimizerConfigurationApplyConfiguration) *AutoscalingPolicyBindingSpecApplyConfiguration {
-	b.OptimizerConfiguration = value
-	return b
+func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithHeterogeneousTarget(value *HeterogeneousTargetApplyConfiguration) *AutoscalingPolicyBindingSpecApplyConfiguration {
+    b.HeterogeneousTarget = value
+    return b
 }
 
 // WithScalingConfiguration sets the ScalingConfiguration field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the ScalingConfiguration field is set to the value of the last call.
-func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithScalingConfiguration(value *ScalingConfigurationApplyConfiguration) *AutoscalingPolicyBindingSpecApplyConfiguration {
-	b.ScalingConfiguration = value
-	return b
+func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithHomogeneousTarget(value *HomogeneousTargetApplyConfiguration) *AutoscalingPolicyBindingSpecApplyConfiguration {
+    b.HomogeneousTarget = value
+    return b
 }

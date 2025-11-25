@@ -20,47 +20,47 @@ package v1alpha1
 
 // OptimizerParamApplyConfiguration represents a declarative configuration of the OptimizerParam type for use
 // with apply.
-type OptimizerParamApplyConfiguration struct {
-	Target      *TargetApplyConfiguration `json:"target,omitempty"`
-	Cost        *int32                    `json:"cost,omitempty"`
-	MinReplicas *int32                    `json:"minReplicas,omitempty"`
-	MaxReplicas *int32                    `json:"maxReplicas,omitempty"`
+type HeterogeneousTargetParamApplyConfiguration struct {
+    Target      *TargetApplyConfiguration `json:"target,omitempty"`
+    Cost        *int32                    `json:"cost,omitempty"`
+    MinReplicas *int32                    `json:"minReplicas,omitempty"`
+    MaxReplicas *int32                    `json:"maxReplicas,omitempty"`
 }
 
 // OptimizerParamApplyConfiguration constructs a declarative configuration of the OptimizerParam type for use with
 // apply.
-func OptimizerParam() *OptimizerParamApplyConfiguration {
-	return &OptimizerParamApplyConfiguration{}
+func HeterogeneousTargetParam() *HeterogeneousTargetParamApplyConfiguration {
+    return &HeterogeneousTargetParamApplyConfiguration{}
 }
 
 // WithTarget sets the Target field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Target field is set to the value of the last call.
-func (b *OptimizerParamApplyConfiguration) WithTarget(value *TargetApplyConfiguration) *OptimizerParamApplyConfiguration {
+func (b *HeterogeneousTargetParamApplyConfiguration) WithTarget(value *TargetApplyConfiguration) *HeterogeneousTargetParamApplyConfiguration {
 	b.Target = value
-	return b
+    return b
 }
 
 // WithCost sets the Cost field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Cost field is set to the value of the last call.
-func (b *OptimizerParamApplyConfiguration) WithCost(value int32) *OptimizerParamApplyConfiguration {
+func (b *HeterogeneousTargetParamApplyConfiguration) WithCost(value int32) *HeterogeneousTargetParamApplyConfiguration {
 	b.Cost = &value
-	return b
+    return b
 }
 
 // WithMinReplicas sets the MinReplicas field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the MinReplicas field is set to the value of the last call.
-func (b *OptimizerParamApplyConfiguration) WithMinReplicas(value int32) *OptimizerParamApplyConfiguration {
+func (b *HeterogeneousTargetParamApplyConfiguration) WithMinReplicas(value int32) *HeterogeneousTargetParamApplyConfiguration {
 	b.MinReplicas = &value
-	return b
+    return b
 }
 
 // WithMaxReplicas sets the MaxReplicas field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the MaxReplicas field is set to the value of the last call.
-func (b *OptimizerParamApplyConfiguration) WithMaxReplicas(value int32) *OptimizerParamApplyConfiguration {
+func (b *HeterogeneousTargetParamApplyConfiguration) WithMaxReplicas(value int32) *HeterogeneousTargetParamApplyConfiguration {
 	b.MaxReplicas = &value
-	return b
+    return b
 }

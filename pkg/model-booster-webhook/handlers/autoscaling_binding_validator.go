@@ -114,11 +114,11 @@ func (v *AutoscalingBindingValidator) validateAutoscalingPolicyExistence(ctx con
 
 func validateOptimizeAndScalingPolicyExistence(asp_binding *workloadv1alpha1.AutoscalingPolicyBinding) field.ErrorList {
 	var allErrs field.ErrorList
-	if asp_binding.Spec.OptimizerConfiguration == nil && asp_binding.Spec.ScalingConfiguration == nil {
-		allErrs = append(allErrs, field.Required(field.NewPath("spec").Child("ScalingConfiguration"), "spec.ScalingConfiguration should be set if spec.OptimizerConfiguration does not exist"))
-	}
-	if asp_binding.Spec.OptimizerConfiguration != nil && asp_binding.Spec.ScalingConfiguration != nil {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec").Child("ScalingConfiguration"), "both spec.OptimizerConfiguration and spec.ScalingConfiguration can not be set at the same time"))
-	}
-	return allErrs
+    if asp_binding.Spec.OptimizerConfiguration == nil && asp_binding.Spec.ScalingConfiguration == nil {
+        allErrs = append(allErrs, field.Required(field.NewPath("spec").Child("homogeneousTarget"), "spec.homogeneousTarget should be set if spec.heterogeneousTarget does not exist"))
+    }
+    if asp_binding.Spec.OptimizerConfiguration != nil && asp_binding.Spec.ScalingConfiguration != nil {
+        allErrs = append(allErrs, field.Forbidden(field.NewPath("spec").Child("homogeneousTarget"), "both spec.heterogeneousTarget and spec.homogeneousTarget can not be set at the same time"))
+    }
+    return allErrs
 }

@@ -78,7 +78,12 @@ type InstanceInfo struct {
 func (collector *MetricCollector) UpdateMetrics(ctx context.Context, podLister listerv1.PodLister) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, err error) {
 	// Get pod list which will be invoked api to get metrics
 	unreadyInstancesCount = int32(0)
-	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, util.GetTargetLabels(collector.Target))
+	matchLabels, err := util.GetTargetLabels(collector.Target)
+	if err != nil {
+		klog.Errorf("get target labels error: %v", err)
+		return
+	}
+	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, matchLabels)
 	if err != nil {
 		klog.Errorf("list watched pod error: %v in namespace: %s, labels: %v", err, collector.Scope.Namespace, collector.Target.AdditionalMatchLabels)
 		return

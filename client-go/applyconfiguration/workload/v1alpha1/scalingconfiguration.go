@@ -20,38 +20,38 @@ package v1alpha1
 
 // ScalingConfigurationApplyConfiguration represents a declarative configuration of the ScalingConfiguration type for use
 // with apply.
-type ScalingConfigurationApplyConfiguration struct {
-	Target      *TargetApplyConfiguration `json:"target,omitempty"`
-	MinReplicas *int32                    `json:"minReplicas,omitempty"`
-	MaxReplicas *int32                    `json:"maxReplicas,omitempty"`
+type HomogeneousTargetApplyConfiguration struct {
+    Target      *TargetApplyConfiguration `json:"target,omitempty"`
+    MinReplicas *int32                    `json:"minReplicas,omitempty"`
+    MaxReplicas *int32                    `json:"maxReplicas,omitempty"`
 }
 
 // ScalingConfigurationApplyConfiguration constructs a declarative configuration of the ScalingConfiguration type for use with
 // apply.
-func ScalingConfiguration() *ScalingConfigurationApplyConfiguration {
-	return &ScalingConfigurationApplyConfiguration{}
+func HomogeneousTarget() *HomogeneousTargetApplyConfiguration {
+    return &HomogeneousTargetApplyConfiguration{}
 }
 
 // WithTarget sets the Target field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Target field is set to the value of the last call.
-func (b *ScalingConfigurationApplyConfiguration) WithTarget(value *TargetApplyConfiguration) *ScalingConfigurationApplyConfiguration {
+func (b *HomogeneousTargetApplyConfiguration) WithTarget(value *TargetApplyConfiguration) *HomogeneousTargetApplyConfiguration {
 	b.Target = value
-	return b
+    return b
 }
 
 // WithMinReplicas sets the MinReplicas field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the MinReplicas field is set to the value of the last call.
-func (b *ScalingConfigurationApplyConfiguration) WithMinReplicas(value int32) *ScalingConfigurationApplyConfiguration {
+func (b *HomogeneousTargetApplyConfiguration) WithMinReplicas(value int32) *HomogeneousTargetApplyConfiguration {
 	b.MinReplicas = &value
-	return b
+    return b
 }
 
 // WithMaxReplicas sets the MaxReplicas field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the MaxReplicas field is set to the value of the last call.
-func (b *ScalingConfigurationApplyConfiguration) WithMaxReplicas(value int32) *ScalingConfigurationApplyConfiguration {
+func (b *HomogeneousTargetApplyConfiguration) WithMaxReplicas(value int32) *HomogeneousTargetApplyConfiguration {
 	b.MaxReplicas = &value
-	return b
+    return b
 }

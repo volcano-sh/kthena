@@ -22,7 +22,7 @@ import (
 )
 
 // AutoscalingPolicyBindingSpec defines the desired state of AutoscalingPolicyBinding.
-// +kubebuilder:validation:XValidation:rule="has(self.optimizerConfiguration) != has(self.scalingConfiguration)",message="Either optimizerConfiguration or scalingConfiguration must be set, but not both."
+// +kubebuilder:validation:XValidation:rule="has(self.heterogeneousTarget) != has(self.homogeneousTarget)",message="Either heterogeneousTarget or homogeneousTarget must be set, but not both."
 type AutoscalingPolicyBindingSpec struct {
 	// PolicyRef references the autoscaling policy to be optimized scaling base on multiple targets.
 	PolicyRef corev1.LocalObjectReference `json:"policyRef"`
@@ -33,10 +33,10 @@ type AutoscalingPolicyBindingSpec struct {
 	// Dynamically adjust the deployment ratio of H100/A100 instances based on real-time computing power demands
 	// Use integer programming and similar methods to precisely meet computing requirements
 	// Maximize hardware utilization efficiency
-	OptimizerConfiguration *OptimizerConfiguration `json:"optimizerConfiguration,omitempty"`
+    OptimizerConfiguration *HeterogeneousTarget `json:"heterogeneousTarget,omitempty"`
 
 	// Adjust the number of related instances based on specified monitoring metrics and their target values.
-	ScalingConfiguration *ScalingConfiguration `json:"scalingConfiguration,omitempty"`
+    ScalingConfiguration *HomogeneousTarget `json:"homogeneousTarget,omitempty"`
 }
 
 type AutoscalingTargetType string
@@ -52,7 +52,7 @@ type MetricEndpoint struct {
 	Port int32 `json:"port,omitempty"`
 }
 
-type ScalingConfiguration struct {
+type HomogeneousTarget struct {
 	// Target represents the objects be monitored and scaled.
 	Target Target `json:"target,omitempty"`
 	// MinReplicas is the minimum number of replicas.
@@ -65,10 +65,10 @@ type ScalingConfiguration struct {
 	MaxReplicas int32 `json:"maxReplicas"`
 }
 
-type OptimizerConfiguration struct {
+type HeterogeneousTarget struct {
 	// Parameters of multiple Model Serving Groups to be optimized.
 	// +kubebuilder:validation:MinItems=1
-	Params []OptimizerParam `json:"params,omitempty"`
+    Params []HeterogeneousTargetParam `json:"params,omitempty"`
 	// CostExpansionRatePercent is the percentage rate at which the cost expands.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=200
@@ -78,6 +78,8 @@ type OptimizerConfiguration struct {
 
 type Target struct {
 	// TargetRef references the target object.
+	// The default behavior will be set to ModelServingKind.
+	// Current supported kinds are ModelServing and ModelServing/role.
 	TargetRef corev1.ObjectReference `json:"targetRef"`
 	// AdditionalMatchLabels is the additional labels to match the target object.
 	// +optional
@@ -87,7 +89,7 @@ type Target struct {
 	MetricEndpoint MetricEndpoint `json:"metricEndpoint,omitempty"`
 }
 
-type OptimizerParam struct {
+type HeterogeneousTargetParam struct {
 	// The scaling instance configuration
 	Target Target `json:"target,omitempty"`
 	// Cost is the cost associated with running this backend.
@@ -103,6 +105,11 @@ type OptimizerParam struct {
 	// +kubebuilder:validation:Maximum=1000000
 	MaxReplicas int32 `json:"maxReplicas"`
 }
+
+// Backward-compatible aliases
+type OptimizerConfiguration = HeterogeneousTarget
+type ScalingConfiguration = HomogeneousTarget
+type OptimizerParam = HeterogeneousTargetParam
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
