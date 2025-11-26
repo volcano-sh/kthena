@@ -87,6 +87,7 @@ func GetTargetLabels(target *workload.Target) (map[string]string, error) {
 	if target == nil || target.TargetRef.Name == "" {
 		return nil, nil
 	}
+
 	if target.TargetRef.Kind == "" {
 		target.TargetRef.Kind = workload.ModelServingKind.Kind
 	}
@@ -108,8 +109,7 @@ func GetTargetLabels(target *workload.Target) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		target.TargetRef.Name = servingName
-		lbs[workload.ModelServingNameLabelKey] = target.TargetRef.Name
+		lbs[workload.ModelServingNameLabelKey] = servingName
 		lbs[workload.EntryLabelKey] = Entry
 		lbs[workload.RoleLabelKey] = roleName
 		return lbs, nil

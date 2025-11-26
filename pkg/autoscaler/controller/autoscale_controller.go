@@ -188,8 +188,9 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, targetR
 		if instance.Spec.Replicas != nil && *instance.Spec.Replicas == replicas {
 			return nil
 		}
-		instance.Spec.Replicas = &replicas
-		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance, metav1.UpdateOptions{})
+		instance_copy := instance.DeepCopy()
+		instance_copy.Spec.Replicas = &replicas
+		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{})
 		if err != nil {
 			return err
 		}
@@ -202,7 +203,8 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, targetR
 		if err != nil {
 			return err
 		}
-		for _, role := range instance.Spec.Template.Roles {
+		instance_copy := instance.DeepCopy()
+		for _, role := range instance_copy.Spec.Template.Roles {
 			if role.Name == roleName {
 				// need not update replicas
 				if role.Replicas != nil && *role.Replicas == replicas {
@@ -212,7 +214,7 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, targetR
 				break
 			}
 		}
-		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance, metav1.UpdateOptions{})
+		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{})
 		if err != nil {
 			return err
 		}
