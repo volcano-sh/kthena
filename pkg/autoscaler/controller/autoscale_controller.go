@@ -174,9 +174,13 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 }
 
 func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, targetRef *corev1.ObjectReference, replicas int32) error {
+	namespaceScope := targetRef.Namespace
+	if namespaceScope == "" {
+		namespaceScope = ac.namespace
+	}
 	switch targetRef.Kind {
 	case workload.ModelServingKind.Kind:
-		instance, err := ac.modelServingLister.ModelServings(targetRef.Namespace).Get(targetRef.Name)
+		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name)
 		if err != nil {
 			return err
 		}
@@ -185,17 +189,21 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, targetR
 			return nil
 		}
 		instance.Spec.Replicas = &replicas
-		_, err = ac.client.WorkloadV1alpha1().ModelServings(targetRef.Namespace).Update(ctx, instance, metav1.UpdateOptions{})
+		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance, metav1.UpdateOptions{})
 		if err != nil {
 			return err
 		}
 	case workload.ModelServingKind.Kind + util.ModelServingRoleKindSuffix:
-		instance, err := ac.modelServingLister.ModelServings(targetRef.Namespace).Get(targetRef.Name)
+		servingName, roleName, err := util.GetRoleName(targetRef)
+		if err != nil {
+			return err
+		}
+		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(servingName)
 		if err != nil {
 			return err
 		}
 		for _, role := range instance.Spec.Template.Roles {
-			if role.Name == targetRef.Name {
+			if role.Name == roleName {
 				// need not update replicas
 				if role.Replicas != nil && *role.Replicas == replicas {
 					return nil
@@ -204,7 +212,7 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, targetR
 				break
 			}
 		}
-		_, err = ac.client.WorkloadV1alpha1().ModelServings(targetRef.Namespace).Update(ctx, instance, metav1.UpdateOptions{})
+		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance, metav1.UpdateOptions{})
 		if err != nil {
 			return err
 		}
@@ -218,21 +226,28 @@ func (ac *AutoscaleController) getTargetReplicas(targetRef *corev1.ObjectReferen
 	if targetRef == nil {
 		return 0, fmt.Errorf("target ref is nil")
 	}
-
+	namespaceScope := targetRef.Namespace
+	if namespaceScope == "" {
+		namespaceScope = ac.namespace
+	}
 	switch targetRef.Kind {
 	case workload.ModelServingKind.Kind:
-		if instance, err := ac.modelServingLister.ModelServings(targetRef.Namespace).Get(targetRef.Name); err != nil {
+		if instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name); err != nil {
 			return 0, err
 		} else {
 			return *instance.Spec.Replicas, nil
 		}
 	case workload.ModelServingKind.Kind + util.ModelServingRoleKindSuffix:
-		instance, err := ac.modelServingLister.ModelServings(targetRef.Namespace).Get(targetRef.Name)
+		servingName, roleName, err := util.GetRoleName(targetRef)
+		if err != nil {
+			return 0, err
+		}
+		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(servingName)
 		if err != nil {
 			return 0, err
 		}
 		for _, role := range instance.Spec.Template.Roles {
-			if role.Name == targetRef.Name {
+			if role.Name == roleName {
 				return *role.Replicas, nil
 			}
 		}
