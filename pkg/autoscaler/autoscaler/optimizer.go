@@ -30,6 +30,7 @@ type Optimizer struct {
 	Meta       *OptimizerMeta
 	Collectors map[string]*MetricCollector
 	Status     *Status
+	Generations
 }
 
 type OptimizerMeta struct {
@@ -122,7 +123,8 @@ func NewOptimizerMeta(binding *workload.AutoscalingPolicyBinding) *OptimizerMeta
 	}
 }
 
-func NewOptimizer(behavior *workload.AutoscalingPolicyBehavior, binding *workload.AutoscalingPolicyBinding, metricTargets map[string]float64) *Optimizer {
+func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) *Optimizer {
+	metricTargets := GetMetricTargets(autoscalePolicy)
 	collectors := make(map[string]*MetricCollector)
 	for _, param := range binding.Spec.HeterogeneousTarget.Params {
 		collectors[param.Target.TargetRef.Name] = NewMetricCollector(&param.Target, binding, metricTargets)
@@ -133,12 +135,17 @@ func NewOptimizer(behavior *workload.AutoscalingPolicyBehavior, binding *workloa
 	return &Optimizer{
 		Meta:       meta,
 		Collectors: collectors,
-		Status:     NewStatus(behavior),
+		Status:     NewStatus(&autoscalePolicy.Spec.Behavior),
+		Generations: Generations{
+			AutoscalePolicyGeneration: autoscalePolicy.Generation,
+			BindingGeneration:         binding.Generation,
+		},
 	}
 }
 
-func (optimizer *Optimizer) UpdateMeta(binding *workload.AutoscalingPolicyBinding) {
-	optimizer.Meta = NewOptimizerMeta(binding)
+func (optimizer *Optimizer) NeedUpdate(policy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) bool {
+	return optimizer.Generations.AutoscalePolicyGeneration != policy.Generation ||
+		optimizer.Generations.BindingGeneration != binding.Generation
 }
 
 func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCounts map[string]int32) (map[string]int32, error) {

@@ -21,7 +21,6 @@ import (
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
-	"k8s.io/apimachinery/pkg/types"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -34,28 +33,35 @@ type Autoscaler struct {
 
 type ScalingMeta struct {
 	Config    *workload.HomogeneousTarget
-	BindingId types.UID
 	Namespace string
+	Generations
 }
 
-func NewAutoscaler(behavior *workload.AutoscalingPolicyBehavior, binding *workload.AutoscalingPolicyBinding, metricTargets map[string]float64) *Autoscaler {
+func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) *Autoscaler {
 	return &Autoscaler{
-		Status:    NewStatus(behavior),
-		Collector: NewMetricCollector(&binding.Spec.HomogeneousTarget.Target, binding, metricTargets),
+		Status:    NewStatus(&autoscalePolicy.Spec.Behavior),
+		Collector: NewMetricCollector(&binding.Spec.HomogeneousTarget.Target, binding, GetMetricTargets(autoscalePolicy)),
 		Meta: &ScalingMeta{
 			Config:    binding.Spec.HomogeneousTarget,
-			BindingId: binding.UID,
 			Namespace: binding.Namespace,
+			Generations: Generations{
+				AutoscalePolicyGeneration: autoscalePolicy.Generation,
+				BindingGeneration:         binding.Generation,
+			},
 		},
 	}
 }
 
-func (autoscaler *Autoscaler) UpdateMeta(binding *workload.AutoscalingPolicyBinding) {
-	autoscaler.Meta = &ScalingMeta{
-		Config:    binding.Spec.HomogeneousTarget,
-		BindingId: binding.UID,
-		Namespace: binding.Namespace,
+func (autoscaler *Autoscaler) NeedUpdate(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) bool {
+	return autoscaler.Meta.Generations.AutoscalePolicyGeneration != autoscalePolicy.Generation ||
+		autoscaler.Meta.Generations.BindingGeneration != binding.Generation
+}
+
+func (autoscaler *Autoscaler) UpdateAutoscalePolicy(autoscalePolicy *workload.AutoscalingPolicy) {
+	if autoscaler.Meta.Generations.AutoscalePolicyGeneration == autoscalePolicy.Generation {
+		return
 	}
+	autoscaler.Meta.Generations.AutoscalePolicyGeneration = autoscalePolicy.Generation
 }
 
 func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCount int32) (int32, error) {

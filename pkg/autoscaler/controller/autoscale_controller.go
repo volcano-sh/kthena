@@ -28,7 +28,6 @@ import (
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	"istio.io/istio/pkg/util/sets"
 	v1 "k8s.io/api/core/v1"
@@ -283,14 +282,11 @@ func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.A
 }
 
 func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) error {
-	metricTargets := getMetricTargets(autoscalePolicy)
 	optimizerKey := formatAutoscalerMapKey(binding.Name, nil)
 	optimizer, ok := ac.optimizerMap[optimizerKey]
-	if !ok {
-		optimizer = autoscaler.NewOptimizer(&autoscalePolicy.Spec.Behavior, binding, metricTargets)
+	if !ok || optimizer.NeedUpdate(autoscalePolicy, binding) {
+		optimizer = autoscaler.NewOptimizer(autoscalePolicy, binding)
 		ac.optimizerMap[optimizerKey] = optimizer
-	} else {
-		optimizer.UpdateMeta(binding)
 	}
 	// Fetch current replicas
 	replicasMap := make(map[string]int32, len(optimizer.Meta.Config.Params))
@@ -326,15 +322,12 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 }
 
 func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) error {
-	metricTargets := getMetricTargets(autoscalePolicy)
 	target := binding.Spec.HomogeneousTarget.Target
 	instanceKey := formatAutoscalerMapKey(binding.Name, &target.TargetRef)
 	scaler, ok := ac.scalerMap[instanceKey]
-	if !ok {
-		scaler = autoscaler.NewAutoscaler(&autoscalePolicy.Spec.Behavior, binding, metricTargets)
+	if !ok || scaler.NeedUpdate(autoscalePolicy, binding) {
+		scaler = autoscaler.NewAutoscaler(autoscalePolicy, binding)
 		ac.scalerMap[instanceKey] = scaler
-	} else {
-		scaler.UpdateMeta(binding)
 	}
 	// Fetch current replicas
 	currentInstancesCount, err := ac.getTargetReplicas(&target.TargetRef)
@@ -380,17 +373,4 @@ func formatAutoscalerMapKey(bindingName string, targetRef *v1.ObjectReference) s
 	}
 
 	return bindingName + "#" + targetRef.Kind + "#" + targetRef.Name
-}
-
-func getMetricTargets(autoscalePolicy *workload.AutoscalingPolicy) algorithm.Metrics {
-	metricTargets := algorithm.Metrics{}
-	if autoscalePolicy == nil {
-		klog.Warning("autoscalePolicy is nil, can't get metricTargets")
-		return metricTargets
-	}
-
-	for _, metric := range autoscalePolicy.Spec.Metrics {
-		metricTargets[metric.MetricName] = metric.TargetValue.AsFloat64Slow()
-	}
-	return metricTargets
 }

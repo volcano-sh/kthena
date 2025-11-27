@@ -27,6 +27,7 @@ import (
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/datastructure"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
@@ -75,6 +76,24 @@ type InstanceInfo struct {
 	IsReady    bool
 	IsFailed   bool
 	MetricsMap algorithm.Metrics
+}
+
+type Generations struct {
+	AutoscalePolicyGeneration int64
+	BindingGeneration         int64
+}
+
+func GetMetricTargets(autoscalePolicy *workload.AutoscalingPolicy) algorithm.Metrics {
+	metricTargets := algorithm.Metrics{}
+	if autoscalePolicy == nil {
+		klog.Warning("autoscalePolicy is nil, can't get metricTargets")
+		return metricTargets
+	}
+
+	for _, metric := range autoscalePolicy.Spec.Metrics {
+		metricTargets[metric.MetricName] = metric.TargetValue.AsFloat64Slow()
+	}
+	return metricTargets
 }
 
 func (collector *MetricCollector) UpdateMetrics(ctx context.Context, podLister listerv1.PodLister) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, err error) {
