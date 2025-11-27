@@ -92,6 +92,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyStablePolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("GangPolicy"):
 		return &applyconfigurationworkloadv1alpha1.GangPolicyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("HeterogeneousTarget"):
+		return &applyconfigurationworkloadv1alpha1.HeterogeneousTargetApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("HeterogeneousTargetParam"):
+		return &applyconfigurationworkloadv1alpha1.HeterogeneousTargetParamApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("HomogeneousTarget"):
+		return &applyconfigurationworkloadv1alpha1.HomogeneousTargetApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("LoraAdapter"):
 		return &applyconfigurationworkloadv1alpha1.LoraAdapterApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Metadata"):
@@ -116,10 +122,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.ModelStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelWorker"):
 		return &applyconfigurationworkloadv1alpha1.ModelWorkerApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("OptimizerConfiguration"):
-		return &applyconfigurationworkloadv1alpha1.OptimizerConfigurationApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("OptimizerParam"):
-		return &applyconfigurationworkloadv1alpha1.OptimizerParamApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PodTemplateSpec"):
 		return &applyconfigurationworkloadv1alpha1.PodTemplateSpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
@@ -128,8 +130,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.RollingUpdateConfigurationApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RolloutStrategy"):
 		return &applyconfigurationworkloadv1alpha1.RolloutStrategyApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("ScalingConfiguration"):
-		return &applyconfigurationworkloadv1alpha1.ScalingConfigurationApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroup"):
 		return &applyconfigurationworkloadv1alpha1.ServingGroupApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Target"):

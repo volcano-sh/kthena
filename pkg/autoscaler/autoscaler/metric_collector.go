@@ -27,6 +27,7 @@ import (
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/datastructure"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
@@ -45,6 +46,7 @@ type MetricCollector struct {
 	Target          *v1alpha1.Target
 	Scope           Scope
 	WatchMetricList sets.String
+	MetricTargets   map[string]float64
 }
 
 func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPolicyBinding, metricTargets map[string]float64) *MetricCollector {
@@ -55,6 +57,7 @@ func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPo
 			Namespace:      binding.Namespace,
 			OwnedBindingId: binding.UID,
 		},
+		MetricTargets:   metricTargets,
 		WatchMetricList: util.ExtractKeysToSet(metricTargets),
 	}
 }
@@ -75,10 +78,33 @@ type InstanceInfo struct {
 	MetricsMap algorithm.Metrics
 }
 
+type Generations struct {
+	AutoscalePolicyGeneration int64
+	BindingGeneration         int64
+}
+
+func GetMetricTargets(autoscalePolicy *workload.AutoscalingPolicy) algorithm.Metrics {
+	metricTargets := algorithm.Metrics{}
+	if autoscalePolicy == nil {
+		klog.Warning("autoscalePolicy is nil, can't get metricTargets")
+		return metricTargets
+	}
+
+	for _, metric := range autoscalePolicy.Spec.Metrics {
+		metricTargets[metric.MetricName] = metric.TargetValue.AsFloat64Slow()
+	}
+	return metricTargets
+}
+
 func (collector *MetricCollector) UpdateMetrics(ctx context.Context, podLister listerv1.PodLister) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, err error) {
 	// Get pod list which will be invoked api to get metrics
 	unreadyInstancesCount = int32(0)
-	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, util.GetTargetLabels(collector.Target))
+	matchLabels, err := util.GetTargetLabels(collector.Target)
+	if err != nil {
+		klog.Errorf("get target labels error: %v", err)
+		return
+	}
+	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, matchLabels)
 	if err != nil {
 		klog.Errorf("list watched pod error: %v in namespace: %s, labels: %v", err, collector.Scope.Namespace, collector.Target.AdditionalMatchLabels)
 		return

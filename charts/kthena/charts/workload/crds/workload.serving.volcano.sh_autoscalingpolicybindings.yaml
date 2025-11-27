@@ -41,7 +41,7 @@ spec:
             description: AutoscalingPolicyBindingSpec defines the desired state of
               AutoscalingPolicyBinding.
             properties:
-              optimizerConfiguration:
+              heterogeneousTarget:
                 description: |-
                   It dynamically adjusts replicas across different ModelServing objects based on overall computing power requirements - referred to as "optimize" behavior in the code.
                   For example:
@@ -105,7 +105,10 @@ spec:
                                   type: string
                               type: object
                             targetRef:
-                              description: TargetRef references the target object.
+                              description: |-
+                                TargetRef references the target object.
+                                The default behavior will be set to ModelServingKind.
+                                Current supported kinds are ModelServing and ModelServing/role.
                               properties:
                                 apiVersion:
                                   description: API version of the referent.
@@ -157,22 +160,7 @@ spec:
                     minItems: 1
                     type: array
                 type: object
-              policyRef:
-                description: PolicyRef references the autoscaling policy to be optimized
-                  scaling base on multiple targets.
-                properties:
-                  name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                    type: string
-                type: object
-                x-kubernetes-map-type: atomic
-              scalingConfiguration:
+              homogeneousTarget:
                 description: Adjust the number of related instances based on specified
                   monitoring metrics and their target values.
                 properties:
@@ -211,7 +199,10 @@ spec:
                             type: string
                         type: object
                       targetRef:
-                        description: TargetRef references the target object.
+                        description: |-
+                          TargetRef references the target object.
+                          The default behavior will be set to ModelServingKind.
+                          Current supported kinds are ModelServing and ModelServing/role.
                         properties:
                           apiVersion:
                             description: API version of the referent.
@@ -260,13 +251,28 @@ spec:
                 - maxReplicas
                 - minReplicas
                 type: object
+              policyRef:
+                description: PolicyRef references the autoscaling policy to be optimized
+                  scaling base on multiple targets.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
             required:
             - policyRef
             type: object
             x-kubernetes-validations:
-            - message: Either optimizerConfiguration or scalingConfiguration must
-                be set, but not both.
-              rule: has(self.optimizerConfiguration) != has(self.scalingConfiguration)
+            - message: Either heterogeneousTarget or homogeneousTarget must be set,
+                but not both.
+              rule: has(self.heterogeneousTarget) != has(self.homogeneousTarget)
           status:
             description: AutoscalingPolicyBindingStatus defines the status of a autoscaling
               policy binding.

@@ -5,7 +5,7 @@ metadata:
     workload.serving.volcano.sh/backend-name: backend1
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
-    workload.serving.volcano.sh/revision: 658fb58f7f
+    workload.serving.volcano.sh/revision: df676567
     workload.serving.volcano.sh/model-uid: randomUID
   name: test-model-backend1
   namespace: default
@@ -19,7 +19,7 @@ metadata:
 spec:
   policyRef:
     name: test-model-backend1
-  scalingConfiguration:
+  homogeneousTarget:
     maxReplicas: 1
     minReplicas: 0
     target:

@@ -4,8 +4,8 @@
 
 Kthena Autoscaler dynamically adjusts serving instances based on real-time load through two configuration modes:
 
-- **Scaling Configuration**: Manages a group of serving instances with identical configurations, ensuring stable performance while optimizing resource utilization.
-- **Optimizer Configuration**: Optimizes across multiple instance types with different resource requirements and capabilities, achieving cost-efficiency through intelligent scheduling algorithms.
+- **Homogeneous Target**: Manages a group of serving instances with identical configurations, ensuring stable performance while optimizing resource utilization.
+- **Heterogeneous Target**: Optimizes across multiple instance types with different resource requirements and capabilities, achieving cost-efficiency through intelligent scheduling algorithms.
 
 Both modes rely on the same underlying autoscaling mechanisms but differ in how they target and manage resources.
 
@@ -66,14 +66,14 @@ spec:
   policyRef:
     name: your-autoscaling-policy-name
   
-  # Select EITHER scalingConfiguration OR optimizerConfiguration mode, not both
-  scalingConfiguration:
-    # Scaling Configuration mode configuration
-  optimizerConfiguration:
-    # Optimizer Configuration mode configuration
+  # Select EITHER homogeneousTarget OR heterogeneousTarget mode, not both
+  homogeneousTarget:
+    # Homogeneous Target mode configuration
+  heterogeneousTarget:
+    # Heterogeneous Target mode configuration
 ```
 
-##### Scaling Configuration Mode
+##### Homogeneous Target Mode
 
 Configures autoscaling for a single instance type:
 
@@ -91,7 +91,7 @@ Configures autoscaling for a single instance type:
   - Must be greater than or equal to 1
   - Sets a ceiling on scaling operations to prevent excessive resource allocation
 
-##### Optimizer Configuration Mode
+##### Heterogeneous Target Mode
 
 Configures autoscaling across multiple instance types with different capabilities and costs:
 
@@ -120,7 +120,7 @@ The heterogeneous mode's optimization algorithm automatically determines the opt
 
 ### Configuration Example
 
-#### Scaling Configuration Example
+#### Homogeneous Target Example
 
 The following configuration demonstrates scaling configuration for a single instance type:
 
@@ -153,7 +153,7 @@ metadata:
 spec:
   policyRef:
     name: scaling-policy
-  scalingConfiguration:
+  homogeneousTarget:
     target:
       targetRef:
         name: example-model-serving
@@ -173,7 +173,7 @@ spec:
 - Scale-down decisions are executed after a 5-minute stabilization window with a 1-minute period to ensure stable load reduction before scaling down
 - Custom metric endpoint is configured to collect metrics from "/custom-metrics" endpoint on port 9090 instead of using the default values ("/metrics" on port 8100)
 
-#### Optimizer Configuration Example
+#### Heterogeneous Target Example
 
 The following configuration demonstrates optimizer configuration across multiple instance types:
 
@@ -206,7 +206,7 @@ metadata:
 spec:
   policyRef:
     name: optimizer-policy
-  optimizerConfiguration:
+  heterogeneousTarget:
     costExpansionRatePercent: 20
     params:
     - target:

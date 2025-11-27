@@ -18,23 +18,23 @@ limitations under the License.
 
 package v1alpha1
 
-// OptimizerConfigurationApplyConfiguration represents a declarative configuration of the OptimizerConfiguration type for use
+// HeterogeneousTargetApplyConfiguration represents a declarative configuration of the HeterogeneousTarget type for use
 // with apply.
-type OptimizerConfigurationApplyConfiguration struct {
-	Params                   []OptimizerParamApplyConfiguration `json:"params,omitempty"`
-	CostExpansionRatePercent *int32                             `json:"costExpansionRatePercent,omitempty"`
+type HeterogeneousTargetApplyConfiguration struct {
+	Params                   []HeterogeneousTargetParamApplyConfiguration `json:"params,omitempty"`
+	CostExpansionRatePercent *int32                                       `json:"costExpansionRatePercent,omitempty"`
 }
 
-// OptimizerConfigurationApplyConfiguration constructs a declarative configuration of the OptimizerConfiguration type for use with
+// HeterogeneousTargetApplyConfiguration constructs a declarative configuration of the HeterogeneousTarget type for use with
 // apply.
-func OptimizerConfiguration() *OptimizerConfigurationApplyConfiguration {
-	return &OptimizerConfigurationApplyConfiguration{}
+func HeterogeneousTarget() *HeterogeneousTargetApplyConfiguration {
+	return &HeterogeneousTargetApplyConfiguration{}
 }
 
 // WithParams adds the given value to the Params field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Params field.
-func (b *OptimizerConfigurationApplyConfiguration) WithParams(values ...*OptimizerParamApplyConfiguration) *OptimizerConfigurationApplyConfiguration {
+func (b *HeterogeneousTargetApplyConfiguration) WithParams(values ...*HeterogeneousTargetParamApplyConfiguration) *HeterogeneousTargetApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithParams")
@@ -47,7 +47,7 @@ func (b *OptimizerConfigurationApplyConfiguration) WithParams(values ...*Optimiz
 // WithCostExpansionRatePercent sets the CostExpansionRatePercent field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the CostExpansionRatePercent field is set to the value of the last call.
-func (b *OptimizerConfigurationApplyConfiguration) WithCostExpansionRatePercent(value int32) *OptimizerConfigurationApplyConfiguration {
+func (b *HeterogeneousTargetApplyConfiguration) WithCostExpansionRatePercent(value int32) *HeterogeneousTargetApplyConfiguration {
 	b.CostExpansionRatePercent = &value
 	return b
 }
