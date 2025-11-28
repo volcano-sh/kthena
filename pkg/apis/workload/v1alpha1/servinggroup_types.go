@@ -34,6 +34,15 @@ type GangPolicy struct {
 	MinRoleReplicas map[string]int32 `json:"minRoleReplicas,omitempty"`
 }
 
+// NetworkTopologySpec defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
+type NetworkTopology struct {
+	// GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`.
+	GroupPolicy *volcanoV1Beta1.NetworkTopologySpec `json:"groupPolicy,omitempty"`
+
+	// RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`.
+	RolePolicy *volcanoV1Beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
+}
+
 // Role defines the specific pod instance role that performs the inference task.
 type Role struct {
 	// The name of a role. Name must be unique within an ServingGroup
@@ -101,8 +110,10 @@ type ServingGroup struct {
 	// +optional
 	GangPolicy *GangPolicy `json:"gangPolicy,omitempty"`
 
-	// NetworkTopology defines the network topology affinity scheduling policy for the roles of the group, it works only when the scheduler supports network topology feature.	// +optional
-	NetworkTopology *volcanoV1Beta1.NetworkTopologySpec `json:"networkTopology,omitempty"`
+	// NetworkTopology defines the network topology affinity scheduling policy for the roles of the `ServingGroup`,
+	// it works only when the scheduler supports network topology-aware scheduling.
+	// +optional
+	NetworkTopology *NetworkTopology `json:"networkTopology,omitempty"`
 
 	// +kubebuilder:validation:MaxItems=4
 	// +kubebuilder:validation:MinItems=1

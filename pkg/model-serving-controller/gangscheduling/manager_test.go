@@ -746,3 +746,120 @@ func TestEqualResourceList(t *testing.T) {
 		assert.False(t, equalResourceList(a, b))
 	})
 }
+
+func TestEquslSubGroupNetworkTopology(t *testing.T) {
+	// test case 1: both parameters are nil or empty
+	t.Run("both nil or empty", func(t *testing.T) {
+		assert.True(t, equalSubGroupNetworkTopology(nil, nil))
+		assert.True(t, equalSubGroupNetworkTopology([]schedulingv1beta1.SubGroupPolicySpec{}, nil))
+	})
+
+	// test case 2: one parameter is nil or empty, the other is not
+	t.Run("one nil or empty, other not", func(t *testing.T) {
+		highestTierAllowed := 1
+		subGroupPolicy := &schedulingv1beta1.NetworkTopologySpec{
+			Mode:               "hard",
+			HighestTierAllowed: &highestTierAllowed,
+		}
+		assert.False(t, equalSubGroupNetworkTopology(nil, subGroupPolicy))
+		assert.False(t, equalSubGroupNetworkTopology([]schedulingv1beta1.SubGroupPolicySpec{}, subGroupPolicy))
+	})
+
+	// test case 3: MatchPolicy is nil
+	t.Run("match policy is nil", func(t *testing.T) {
+		highestTierAllowed := 1
+		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
+			{
+				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+					Mode:               "hard",
+					HighestTierAllowed: &highestTierAllowed,
+				},
+				MatchPolicy: nil,
+			},
+		}
+		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
+			Mode:               "hard",
+			HighestTierAllowed: &highestTierAllowed,
+		}
+		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
+	})
+
+	// test case 4: MatchPolicy labels mismatch
+	t.Run("match policy labels mismatch", func(t *testing.T) {
+		highestTierAllowed := 1
+		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
+			{
+				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+					Mode:               "hard",
+					HighestTierAllowed: &highestTierAllowed,
+				},
+				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
+					{
+						LabelKey: "wrong-label-key-1",
+					},
+					{
+						LabelKey: "wrong-label-key-2",
+					},
+				},
+			},
+		}
+		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
+			Mode:               "hard",
+			HighestTierAllowed: &highestTierAllowed,
+		}
+		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
+	})
+
+	// test case 5: NetworkTopology mismatch
+	t.Run("network topology mismatch", func(t *testing.T) {
+		highestTierAllowed1 := 1
+		highestTierAllowed2 := 2
+		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
+			{
+				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+					Mode:               "soft",
+					HighestTierAllowed: &highestTierAllowed2,
+				},
+				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
+					{
+						LabelKey: workloadv1alpha1.RoleLabelKey,
+					},
+					{
+						LabelKey: workloadv1alpha1.RoleIDKey,
+					},
+				},
+			},
+		}
+		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
+			Mode:               "hard",
+			HighestTierAllowed: &highestTierAllowed1,
+		}
+		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
+	})
+
+	// test case 6: complete match
+	t.Run("complete match", func(t *testing.T) {
+		highestTierAllowed := 1
+		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
+			{
+				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+					Mode:               "hard",
+					HighestTierAllowed: &highestTierAllowed,
+				},
+				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
+					{
+						LabelKey: workloadv1alpha1.RoleLabelKey,
+					},
+					{
+						LabelKey: workloadv1alpha1.RoleIDKey,
+					},
+				},
+			},
+		}
+		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
+			Mode:               "hard",
+			HighestTierAllowed: &highestTierAllowed,
+		}
+		assert.True(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
+	})
+}

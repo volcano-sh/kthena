@@ -18,17 +18,13 @@ limitations under the License.
 
 package v1alpha1
 
-import (
-	v1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
-)
-
 // ServingGroupApplyConfiguration represents a declarative configuration of the ServingGroup type for use
 // with apply.
 type ServingGroupApplyConfiguration struct {
-	RestartGracePeriodSeconds *int64                        `json:"restartGracePeriodSeconds,omitempty"`
-	GangPolicy                *GangPolicyApplyConfiguration `json:"gangPolicy,omitempty"`
-	NetworkTopology           *v1beta1.NetworkTopologySpec  `json:"networkTopology,omitempty"`
-	Roles                     []RoleApplyConfiguration      `json:"roles,omitempty"`
+	RestartGracePeriodSeconds *int64                             `json:"restartGracePeriodSeconds,omitempty"`
+	GangPolicy                *GangPolicyApplyConfiguration      `json:"gangPolicy,omitempty"`
+	NetworkTopology           *NetworkTopologyApplyConfiguration `json:"networkTopology,omitempty"`
+	Roles                     []RoleApplyConfiguration           `json:"roles,omitempty"`
 }
 
 // ServingGroupApplyConfiguration constructs a declarative configuration of the ServingGroup type for use with
@@ -56,8 +52,8 @@ func (b *ServingGroupApplyConfiguration) WithGangPolicy(value *GangPolicyApplyCo
 // WithNetworkTopology sets the NetworkTopology field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the NetworkTopology field is set to the value of the last call.
-func (b *ServingGroupApplyConfiguration) WithNetworkTopology(value v1beta1.NetworkTopologySpec) *ServingGroupApplyConfiguration {
-	b.NetworkTopology = &value
+func (b *ServingGroupApplyConfiguration) WithNetworkTopology(value *NetworkTopologyApplyConfiguration) *ServingGroupApplyConfiguration {
+	b.NetworkTopology = value
 	return b
 }
 

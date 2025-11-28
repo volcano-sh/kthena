@@ -26,7 +26,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
-	testing "k8s.io/client-go/testing"
+	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
 )
 
 // ForKind returns an apply configuration type for the given GroupVersionKind, or nil if no
@@ -116,6 +116,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.ModelStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelWorker"):
 		return &applyconfigurationworkloadv1alpha1.ModelWorkerApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("NetworkTopology"):
+		return &applyconfigurationworkloadv1alpha1.NetworkTopologyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("OptimizerConfiguration"):
 		return &applyconfigurationworkloadv1alpha1.OptimizerConfigurationApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("OptimizerParam"):
@@ -141,6 +143,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 	return nil
 }
 
-func NewTypeConverter(scheme *runtime.Scheme) *testing.TypeConverter {
-	return &testing.TypeConverter{Scheme: scheme, TypeResolver: internal.Parser()}
+func NewTypeConverter(scheme *runtime.Scheme) managedfields.TypeConverter {
+	return managedfields.NewSchemeTypeConverter(scheme, internal.Parser())
 }
