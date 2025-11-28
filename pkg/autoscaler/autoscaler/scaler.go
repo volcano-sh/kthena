@@ -98,10 +98,10 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 		CurrentInstances:     currentInstancesCount,
 		RecommendedInstances: recommendedInstances,
 	}
-	recommendedInstances = CorrectedInstancesAlgorithm.GetCorrectedInstances()
+	correctedInstances := CorrectedInstancesAlgorithm.GetCorrectedInstances()
 
-	klog.InfoS("autoscale controller", "recommendedInstances", recommendedInstances, "correctedInstances", recommendedInstances)
+	klog.InfoS("autoscale controller", "currentInstancesCount", currentInstancesCount, "recommendedInstances", recommendedInstances, "correctedInstances", correctedInstances)
 	autoscaler.Status.AppendRecommendation(recommendedInstances)
-	autoscaler.Status.AppendCorrected(recommendedInstances)
-	return recommendedInstances, nil
+	autoscaler.Status.AppendCorrected(correctedInstances)
+	return correctedInstances, nil
 }
