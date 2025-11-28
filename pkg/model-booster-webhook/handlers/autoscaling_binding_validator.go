@@ -133,7 +133,7 @@ func validateBindingTargetKind(asp_binding *workloadv1alpha1.AutoscalingPolicyBi
 	if asp_binding.Spec.HeterogeneousTarget != nil {
 		for idx, param := range asp_binding.Spec.HeterogeneousTarget.Params {
 			if !isSupportTargetKind(param.Target.TargetRef.Kind) {
-				allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("heterogeneousTarget").Child("params").Index(idx).Child("targetRef").Child("kind"), param.Target.TargetRef.Kind, fmt.Sprintf("heterogeneousTarget.params[].targetRef.kind must be ModelBooster, but got %s", param.Target.TargetRef.Kind)))
+				allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("heterogeneousTarget").Child("params").Index(idx).Child("targetRef").Child("kind"), param.Target.TargetRef.Kind, fmt.Sprintf("heterogeneousTarget.params[].targetRef.kind must be ModelServing or ModelServing/Role, but got %s", param.Target.TargetRef.Kind)))
 			}
 		}
 	}

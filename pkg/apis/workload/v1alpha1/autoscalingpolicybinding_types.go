@@ -83,7 +83,7 @@ type HeterogeneousTarget struct {
 
 type Target struct {
 	// TargetRef references the target object.
-	// The default behavior will be set to ModelServing.
+	// The default target GVK is ModelServing.
 	// Current supported kinds are ModelServing and ModelServing/Role.
 	TargetRef corev1.ObjectReference `json:"targetRef"`
 	// MetricEndpoint is the metric source.

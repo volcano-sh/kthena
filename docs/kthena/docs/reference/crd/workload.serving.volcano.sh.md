@@ -788,7 +788,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object.<br />The default behavior will be set to ModelServing.<br />Current supported kinds are ModelServing and ModelServing/Role. |  |  |
+| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object.<br />The default target GVK is ModelServing.<br />Current supported kinds are ModelServing and ModelServing/Role. |  |  |
 | `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint is the metric source. |  |  |
 
 

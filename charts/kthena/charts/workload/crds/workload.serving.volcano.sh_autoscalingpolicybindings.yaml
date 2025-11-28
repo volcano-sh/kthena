@@ -151,7 +151,7 @@ spec:
                             targetRef:
                               description: |-
                                 TargetRef references the target object.
-                                The default behavior will be set to ModelServing.
+                                The default target GVK is ModelServing.
                                 Current supported kinds are ModelServing and ModelServing/Role.
                               properties:
                                 apiVersion:
@@ -288,7 +288,7 @@ spec:
                       targetRef:
                         description: |-
                           TargetRef references the target object.
-                          The default behavior will be set to ModelServing.
+                          The default target GVK is ModelServing.
                           Current supported kinds are ModelServing and ModelServing/Role.
                         properties:
                           apiVersion:

@@ -30,7 +30,6 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	"istio.io/istio/pkg/util/sets"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
@@ -233,7 +232,7 @@ func (ac *AutoscaleController) getTargetReplicas(targetRef *corev1.ObjectReferen
 	case workload.ModelServingKind.Kind:
 		if instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name); err != nil {
 			return 0, err
-		} else {
+		} else if instance.Spec.Replicas != nil {
 			return *instance.Spec.Replicas, nil
 		}
 	case workload.ModelServingKind.Kind + util.ModelServingRoleKindSuffix:
@@ -246,11 +245,11 @@ func (ac *AutoscaleController) getTargetReplicas(targetRef *corev1.ObjectReferen
 			return 0, err
 		}
 		for _, role := range instance.Spec.Template.Roles {
-			if role.Name == roleName {
+			if role.Name == roleName && role.Replicas != nil {
 				return *role.Replicas, nil
 			}
 		}
-		return 0, fmt.Errorf("role %s not found", targetRef.Name)
+		return 0, fmt.Errorf("role %s not found in model serving %s", roleName, servingName)
 	}
 	return 0, fmt.Errorf("target ref kind %s not supported", targetRef.Kind)
 }
@@ -312,7 +311,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 			continue
 		}
 		if err := ac.updateTargetReplicas(ctx, &param.Target.TargetRef, instancesCount); err != nil {
-			klog.Errorf("failed to update target replicas %s, err: %v", param.Target.TargetRef.Name, err)
+			klog.Errorf("failed to update target kind:%s name: %s replicas:%d, err: %v", param.Target.TargetRef.Kind, param.Target.TargetRef.Name, instancesCount, err)
 			return err
 		}
 	}
@@ -363,12 +362,12 @@ func (ac *AutoscaleController) getAutoscalePolicy(autoscalingPolicyName string, 
 	return autoscalingPolicy, nil
 }
 
-func formatAutoscalerMapKey(bindingName string, targetRef *v1.ObjectReference) string {
-    if targetRef == nil {
-        return bindingName
-    }
-    if targetRef.Kind == "" {
-        targetRef.Kind = workload.ModelServingKind.Kind
-    }
-    return bindingName + "#" + targetRef.Kind + "#" + targetRef.Name
+func formatAutoscalerMapKey(bindingName string, targetRef *corev1.ObjectReference) string {
+	if targetRef == nil {
+		return bindingName
+	}
+	if targetRef.Kind == "" {
+		targetRef.Kind = workload.ModelServingKind.Kind
+	}
+	return bindingName + "#" + targetRef.Kind + "#" + targetRef.Name
 }

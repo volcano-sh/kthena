@@ -79,7 +79,7 @@ func GetRoleName(targetRef *corev1.ObjectReference) (string, string, error) {
 		return "", "", nil
 	}
 	strs := strings.Split(targetRef.Name, "/")
-	if len(strs) != 2 {
+	if len(strs) != 2 || strs[0] == "" || strs[1] == "" {
 		klog.Errorf("invalid model serving role name, name: %s", targetRef.Name)
 		return "", "", fmt.Errorf("invalid model serving role name, name: %s", targetRef.Name)
 	}
