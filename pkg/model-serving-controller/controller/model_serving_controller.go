@@ -837,6 +837,14 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, mi *workloadv1a
 			klog.Errorf("failed to delete service %s/%s: %v", mi.Namespace, svc.Name, err)
 		}
 	}
+
+	// Ensure that the role of an individual pod can be successfully enqueue.
+	if c.isRoleDeleted(mi, groupName, roleName, roleID) {
+		// role has been deleted, so the storage needs to be updated and need to reconcile.
+		klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, groupName)
+		c.store.DeleteRole(utils.GetNamespaceName(mi), groupName, roleName, roleID)
+		c.enqueueModelServing(mi)
+	}
 }
 
 func (c *ModelServingController) manageServingGroupRollingUpdate(mi *workloadv1alpha1.ModelServing, revision string) error {
