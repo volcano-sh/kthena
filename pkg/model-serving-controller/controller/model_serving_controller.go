@@ -628,7 +628,7 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 	// Check if binpack strategy should be used
 	useBinPack, err := c.shouldUseBinPackStrategy(mi)
 	if err != nil {
-		klog.Errorf("Failed to check binpack strategy for ModelServing %s: %v", mi.Name, err)
+		klog.Errorf("Failed to check binpack strategy for ModelServing %s/%s: %v", mi.Namespace, mi.Name, err)
 		// Fall back to binpack calculation on error
 		useBinPack = true
 	}
@@ -636,7 +636,8 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 	if !useBinPack {
 		// When binpack is not needed, servingGroupList is already sorted by name (ascending).
 		// Delete from the end (highest index first) to maintain previous behavior.
-		for i := len(servingGroupList) - 1; i >= len(servingGroupList)-toDeleteCount; i-- {
+		startIndex := len(servingGroupList) - toDeleteCount
+		for i := len(servingGroupList) - 1; i >= startIndex; i-- {
 			c.DeleteServingGroup(mi, servingGroupList[i].Name)
 			if err := c.gangManager.DeletePodGroupWhenServingGroupDeleted(ctx, mi, servingGroupList[i].Name); err != nil {
 				allErrors = append(allErrors, err)
