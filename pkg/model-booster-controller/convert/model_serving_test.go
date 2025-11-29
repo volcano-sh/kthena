@@ -64,9 +64,19 @@ func TestGetCachePath(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "normal case",
-			input:    "pvc://my-cache-path",
-			expected: "my-cache-path",
+			name:     "normal case1",
+			input:    "pvc://my-cache-path////",
+			expected: "/my-cache-path",
+		},
+		{
+			name:     "normal case2",
+			input:    "pvc:///my-cache-path",
+			expected: "/my-cache-path",
+		},
+		{
+			name:     "normal case3",
+			input:    "pvc:////my-cache-path",
+			expected: "/my-cache-path",
 		},
 		{
 			name:     "empty cache path",
@@ -81,7 +91,7 @@ func TestGetCachePath(t *testing.T) {
 		{
 			name:     "multiple separators",
 			input:    "pvc://path/with/multiple/separators",
-			expected: "path/with/multiple/separators",
+			expected: "/path/with/multiple/separators",
 		},
 	}
 	for _, tt := range tests {
@@ -158,7 +168,7 @@ func TestBuildCacheVolume(t *testing.T) {
 				Name: "test-backend-weights",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "test-pvc",
+						ClaimName: "/test-pvc",
 					},
 				},
 			},
@@ -173,7 +183,7 @@ func TestBuildCacheVolume(t *testing.T) {
 				Name: "test-backend-weights",
 				VolumeSource: corev1.VolumeSource{
 					HostPath: &corev1.HostPathVolumeSource{
-						Path: "test/path",
+						Path: "/test/path",
 						Type: ptr.To(corev1.HostPathDirectoryOrCreate),
 					},
 				},

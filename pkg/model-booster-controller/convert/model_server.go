@@ -45,10 +45,7 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 		default:
 			return nil, fmt.Errorf("not support %s backend yet, please use vLLM backend", backend.Type)
 		}
-		servedModelName, err := getServedModelName(model, backend)
-		if err != nil {
-			return nil, err
-		}
+		servedModelName := getServedModelName(model, backend)
 		pdGroup := getPdGroup(backend)
 		kvConnector, err := getKvConnectorSpec(backend)
 		if err != nil {
@@ -160,14 +157,14 @@ func getPdGroup(backend workload.ModelBackend) *networking.PDGroup {
 }
 
 // getServedModelName gets served model name from the worker config. Default is the model name.
-func getServedModelName(model *workload.ModelBooster, backend workload.ModelBackend) (string, error) {
+func getServedModelName(model *workload.ModelBooster, backend workload.ModelBackend) string {
 	servedModelName := model.Name
 	for _, worker := range backend.Workers {
 		if worker.Type == workload.ModelWorkerTypeServer ||
 			worker.Type == workload.ModelWorkerTypeDecode {
 			valStr, err := utils.TryGetField(worker.Config.Raw, "served-model-name")
 			if err != nil {
-				return "", err
+				return servedModelName
 			}
 			if valStr == nil {
 				continue
@@ -178,5 +175,5 @@ func getServedModelName(model *workload.ModelBooster, backend workload.ModelBack
 			}
 		}
 	}
-	return servedModelName, nil
+	return servedModelName
 }
