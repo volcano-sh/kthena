@@ -826,34 +826,8 @@ func (c *ModelServingController) manageRole(ctx context.Context, mi *workloadv1a
 
 // scaleDownRoles handles Role scaling down
 func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int) {
-	// Calculate scores for all Roles
-	var roleScores []RoleWithScore
+	toDeleteCount := len(roleList) - expectedCount
 
-	for _, role := range roleList {
-		// Get score for each Role.
-		// If not set 'PodDeletionCost` annotation, the score is set to 0.
-		score, err := c.calculateRoleScore(mi, groupName, targetRole.Name, role.Name)
-		if err != nil {
-			klog.Errorf("Failed to calculate score for role %s: %v", role.Name, err)
-			continue
-		}
-		_, roleIndex := utils.GetParentNameAndOrdinal(role.Name)
-		roleScores = append(roleScores, RoleWithScore{
-			Name:  role.Name,
-			Score: score,
-			Index: roleIndex,
-		})
-	}
-
-	// Sort Roles by score in ascending order
-	// If scores are equal, sort by group index in descending order.
-	// Ensure that when binpack scale down is not performed, the previous scaling-down process is followed.
-	sort.Slice(roleScores, func(i, j int) bool {
-		if roleScores[i].Score != roleScores[j].Score {
-			return roleScores[i].Score < roleScores[j].Score
-		}
-		return roleScores[i].Index > roleScores[j].Index
-	})
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
 	if c.store.GetServingGroupStatus(utils.GetNamespaceName(mi), groupName) != datastore.ServingGroupScaling {
 		err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, datastore.ServingGroupScaling)
@@ -863,10 +837,54 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 		}
 	}
 
-	// Delete Roles with the lowest scores
-	toDeleteCount := len(roleList) - expectedCount
-	for i := 0; i < toDeleteCount; i++ {
-		c.DeleteRole(ctx, mi, groupName, targetRole.Name, roleScores[i].Name)
+	// Check if binpack strategy should be used
+	useBinPack, err := c.shouldUseBinPackStrategy(mi)
+	if err != nil {
+		klog.Errorf("Failed to check binpack strategy for ModelServing %s/%s: %v", mi.Namespace, mi.Name, err)
+		// Fall back to binpack calculation on error
+		useBinPack = true
+	}
+
+	if !useBinPack {
+		// When binpack is not needed, roleList is already sorted by name (ascending).
+		// Delete from the end (highest index first) to maintain previous behavior.
+		startIndex := len(roleList) - toDeleteCount
+		for i := len(roleList) - 1; i >= startIndex; i-- {
+			c.DeleteRole(ctx, mi, groupName, targetRole.Name, roleList[i].Name)
+		}
+	} else {
+		// Calculate scores for all Roles when binpack strategy is needed
+		var roleScores []RoleWithScore
+
+		for _, role := range roleList {
+			// Get score for each Role.
+			// If not set 'PodDeletionCost` annotation, the score is set to 0.
+			score, err := c.calculateRoleScore(mi, groupName, targetRole.Name, role.Name)
+			if err != nil {
+				klog.Errorf("Failed to calculate score for role %s: %v", role.Name, err)
+				continue
+			}
+			_, roleIndex := utils.GetParentNameAndOrdinal(role.Name)
+			roleScores = append(roleScores, RoleWithScore{
+				Name:  role.Name,
+				Score: score,
+				Index: roleIndex,
+			})
+		}
+
+		// Sort Roles by score in ascending order
+		// If scores are equal, sort by role index in descending order.
+		sort.Slice(roleScores, func(i, j int) bool {
+			if roleScores[i].Score != roleScores[j].Score {
+				return roleScores[i].Score < roleScores[j].Score
+			}
+			return roleScores[i].Index > roleScores[j].Index
+		})
+
+		// Delete Roles with the lowest scores
+		for i := 0; i < toDeleteCount; i++ {
+			c.DeleteRole(ctx, mi, groupName, targetRole.Name, roleScores[i].Name)
+		}
 	}
 }
 
