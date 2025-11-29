@@ -39,15 +39,16 @@ const validatingWebhookConfigurationName = "kthena-router-validating-webhook"
 
 func main() {
 	var (
-		routerPort     string
-		tlsCert        string
-		tlsKey         string
-		enableWebhook  bool
-		webhookPort    int
-		webhookCert    string
-		webhookKey     string
-		certSecretName string
-		serviceName    string
+		routerPort       string
+		tlsCert          string
+		tlsKey           string
+		enableWebhook    bool
+		enableGatewayAPI bool
+		webhookPort      int
+		webhookCert      string
+		webhookKey       string
+		certSecretName   string
+		serviceName      string
 	)
 
 	klog.InitFlags(nil)
@@ -56,6 +57,7 @@ func main() {
 	pflag.StringVar(&tlsCert, "tls-cert", "", "TLS certificate file path")
 	pflag.StringVar(&tlsKey, "tls-key", "", "TLS key file path")
 	pflag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable built-in admission webhook server")
+	pflag.BoolVar(&enableGatewayAPI, "enable-gateway-api", false, "Enable Gateway API related features")
 	pflag.IntVar(&webhookPort, "webhook-port", 8443, "The port for the webhook server")
 	pflag.StringVar(&webhookCert, "webhook-tls-cert-file", "/etc/tls/tls.crt", "Path to the webhook TLS certificate file")
 	pflag.StringVar(&webhookKey, "webhook-tls-private-key-file", "/etc/tls/tls.key", "Path to the webhook TLS private key file")
@@ -93,7 +95,7 @@ func main() {
 		klog.Info("Webhook server is disabled")
 	}
 
-	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey).Run(ctx)
+	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.

@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // ModelRouteSpec defines the desired state of ModelRoute.
@@ -35,6 +36,11 @@ type ModelRouteSpec struct {
 	//
 	// +kubebuilder:validation:MaxItems=10
 	LoraAdapters []string `json:"loraAdapters,omitempty"`
+
+	// ParentRefs references the Gateways that this ModelRoute should be attached to.
+	// If empty, the ModelRoute will be attached to all Gateways in the same namespace.
+	// +optional
+	ParentRefs []gatewayv1.ParentReference `json:"parentRefs,omitempty"`
 
 	// An ordered list of route rules for LLM traffic. The first rule
 	// matching an incoming request will be used.

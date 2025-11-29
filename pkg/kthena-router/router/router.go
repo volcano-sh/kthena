@@ -251,7 +251,14 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	modelName := modelRequest["model"].(string)
 	// step 3: Find pods and model server details
-	modelServerName, isLora, modelRoute, err := r.store.MatchModelServer(modelName, c.Request)
+	// Get gateway key from context if available (set by Gateway listener)
+	var gatewayKey string
+	if key, exists := c.Get("gatewayKey"); exists {
+		if k, ok := key.(string); ok {
+			gatewayKey = k
+		}
+	}
+	modelServerName, isLora, modelRoute, err := r.store.MatchModelServer(modelName, c.Request, gatewayKey)
 	if err != nil {
 		accesslog.SetError(c, "model_server_matching", fmt.Sprintf("can't find corresponding model server: %v", err))
 		c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find corresponding model server: %v", err))

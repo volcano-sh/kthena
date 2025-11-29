@@ -20,6 +20,7 @@ package v1alpha1
 
 import (
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // ModelRouteSpecApplyConfiguration represents a declarative configuration of the ModelRouteSpec type for use
@@ -27,6 +28,7 @@ import (
 type ModelRouteSpecApplyConfiguration struct {
 	ModelName    *string                      `json:"modelName,omitempty"`
 	LoraAdapters []string                     `json:"loraAdapters,omitempty"`
+	ParentRefs   []v1.ParentReference         `json:"parentRefs,omitempty"`
 	Rules        []*networkingv1alpha1.Rule   `json:"rules,omitempty"`
 	RateLimit    *RateLimitApplyConfiguration `json:"rateLimit,omitempty"`
 }
@@ -51,6 +53,16 @@ func (b *ModelRouteSpecApplyConfiguration) WithModelName(value string) *ModelRou
 func (b *ModelRouteSpecApplyConfiguration) WithLoraAdapters(values ...string) *ModelRouteSpecApplyConfiguration {
 	for i := range values {
 		b.LoraAdapters = append(b.LoraAdapters, values[i])
+	}
+	return b
+}
+
+// WithParentRefs adds the given value to the ParentRefs field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the ParentRefs field.
+func (b *ModelRouteSpecApplyConfiguration) WithParentRefs(values ...v1.ParentReference) *ModelRouteSpecApplyConfiguration {
+	for i := range values {
+		b.ParentRefs = append(b.ParentRefs, values[i])
 	}
 	return b
 }

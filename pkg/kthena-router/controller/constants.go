@@ -18,6 +18,11 @@ package controller
 
 const (
 	maxRetries = 5
+
+	// DefaultGatewayClassName is the name of the default GatewayClass for kthena-router
+	DefaultGatewayClassName = "kthena-router"
+	// ControllerName is the controller name for kthena-router GatewayClass
+	ControllerName = "volcano.sh/kthena-router"
 )
 
 // this is the signal used to indicate that the controllers has reconciled all the initial resources.

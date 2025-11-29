@@ -26,21 +26,24 @@ import (
 )
 
 type Server struct {
-	store       datastore.Store
-	controllers Controller
-	EnableTLS   bool
-	TLSCertFile string
-	TLSKeyFile  string
-	Port        string
+	store            datastore.Store
+	controllers      Controller
+	listenerManager  *ListenerManager
+	EnableTLS        bool
+	TLSCertFile      string
+	TLSKeyFile       string
+	Port             string
+	EnableGatewayAPI bool
 }
 
-func NewServer(port string, enableTLS bool, cert, key string) *Server {
+func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool) *Server {
 	return &Server{
-		store:       nil,
-		EnableTLS:   enableTLS,
-		TLSCertFile: cert,
-		TLSKeyFile:  key,
-		Port:        port,
+		store:            nil,
+		EnableTLS:        enableTLS,
+		TLSCertFile:      cert,
+		TLSKeyFile:       key,
+		Port:             port,
+		EnableGatewayAPI: enableGatewayAPI,
 	}
 }
 
@@ -52,7 +55,7 @@ func (s *Server) Run(ctx context.Context) {
 	// must be run before the controller, because it will register callbacks
 	r := NewRouter(store)
 	// start controller
-	s.controllers = startControllers(store, ctx.Done())
+	s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port)
 
 	// Start store's periodic update loop after controllers have synced
 	if !cache.WaitForCacheSync(ctx.Done(), s.controllers.HasSynced) {
@@ -62,6 +65,11 @@ func (s *Server) Run(ctx context.Context) {
 	store.Run(ctx)
 	// start router
 	s.startRouter(ctx, r, store)
+
+	// Block until context is cancelled to keep the process running
+	klog.Info("Router server started, waiting for shutdown signal...")
+	<-ctx.Done()
+	klog.Info("Router server shutting down...")
 }
 
 func (s *Server) HasSynced() bool {

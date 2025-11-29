@@ -34,6 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
@@ -141,7 +142,7 @@ type Store interface {
 	DeletePod(podName types.NamespacedName) error
 
 	// New methods for routing functionality
-	MatchModelServer(modelName string, request *http.Request) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error)
+	MatchModelServer(modelName string, request *http.Request, gatewayKey ...string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error)
 
 	// Model routing methods
 	AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error
@@ -173,6 +174,18 @@ type Store interface {
 
 	// GetRequestWaitingQueueStats returns per-model queue lengths
 	GetRequestWaitingQueueStats() []QueueStat
+
+	// Gateway methods (using standard Gateway API)
+	AddOrUpdateGateway(gateway interface{}) error
+	DeleteGateway(key string) error
+	GetGateway(key string) interface{}
+	GetGatewaysByNamespace(namespace string) []interface{}
+	GetAllGateways() []interface{}
+
+	// GatewayClass methods (using standard Gateway API)
+	AddOrUpdateGatewayClass(gatewayClass interface{}) error
+	DeleteGatewayClass(key string) error
+	GetGatewayClass(key string) interface{}
 
 	// Debug interface methods
 	GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute
@@ -228,6 +241,14 @@ type store struct {
 	routes     map[string]*aiv1alpha1.ModelRoute
 	loraRoutes map[string]*aiv1alpha1.ModelRoute
 
+	// Gateway fields (using standard Gateway API)
+	gatewayMutex sync.RWMutex
+	gateways     map[string]*gatewayv1.Gateway // key: namespace/name, value: *gatewayv1.Gateway
+
+	// GatewayClass fields (using standard Gateway API)
+	gatewayClassMutex sync.RWMutex
+	gatewayClasses    map[string]*gatewayv1.GatewayClass // key: name (cluster-scoped), value: *gatewayv1.GatewayClass
+
 	// New fields for callback management
 	callbacks map[string][]CallbackFunc
 
@@ -245,6 +266,8 @@ func New() Store {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string]*aiv1alpha1.ModelRoute),
+		gateways:            make(map[string]*gatewayv1.Gateway),
+		gatewayClasses:      make(map[string]*gatewayv1.GatewayClass),
 		callbacks:           make(map[string][]CallbackFunc),
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
@@ -592,7 +615,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	return nil
 }
 
-func (s *store) MatchModelServer(model string, req *http.Request) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error) {
+func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey ...string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error) {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
 
@@ -606,6 +629,32 @@ func (s *store) MatchModelServer(model string, req *http.Request) (types.Namespa
 		isLora = true
 	}
 
+	// Check parentRefs if specified
+	if len(mr.Spec.ParentRefs) > 0 {
+		// If gatewayKey is provided, check if ModelRoute matches the specific gateway
+		if len(gatewayKey) > 0 && gatewayKey[0] != "" {
+			if !s.matchesSpecificGateway(mr, gatewayKey[0]) {
+				return types.NamespacedName{}, false, nil, fmt.Errorf("ModelRoute %s/%s does not match Gateway %s", mr.Namespace, mr.Name, gatewayKey[0])
+			}
+		} else {
+			// No specific gateway specified, check if it matches any gateway
+			if !s.matchesParentRefs(mr) {
+				return types.NamespacedName{}, false, nil, fmt.Errorf("ModelRoute %s/%s does not match any Gateway", mr.Namespace, mr.Name)
+			}
+		}
+	} else {
+		// If ModelRoute has no parentRefs but gatewayKey is specified, it should not match
+		// (ModelRoute without parentRefs attaches to all Gateways in the same namespace)
+		// But if gatewayKey is specified, we should check namespace match
+		if len(gatewayKey) > 0 && gatewayKey[0] != "" {
+			// Extract namespace from gatewayKey (format: namespace/name)
+			parts := strings.Split(gatewayKey[0], "/")
+			if len(parts) == 2 && parts[0] != mr.Namespace {
+				return types.NamespacedName{}, false, nil, fmt.Errorf("ModelRoute %s/%s namespace does not match Gateway namespace %s", mr.Namespace, mr.Name, parts[0])
+			}
+		}
+	}
+
 	rule, err := s.selectRule(model, req, mr.Spec.Rules)
 	if err != nil {
 		return types.NamespacedName{}, false, nil, fmt.Errorf("failed to select route rule: %v", err)
@@ -617,6 +666,82 @@ func (s *store) MatchModelServer(model string, req *http.Request) (types.Namespa
 	}
 
 	return types.NamespacedName{Namespace: mr.Namespace, Name: dst.ModelServerName}, isLora, mr, nil
+}
+
+// matchesParentRefs checks if the ModelRoute matches any of its parentRefs
+func (s *store) matchesParentRefs(mr *aiv1alpha1.ModelRoute) bool {
+	s.gatewayMutex.RLock()
+	defer s.gatewayMutex.RUnlock()
+
+	for _, parentRef := range mr.Spec.ParentRefs {
+		// Get namespace from parentRef, default to ModelRoute's namespace
+		namespace := mr.Namespace
+		if parentRef.Namespace != nil {
+			namespace = string(*parentRef.Namespace)
+		}
+
+		// Get name from parentRef
+		name := string(parentRef.Name)
+		key := fmt.Sprintf("%s/%s", namespace, name)
+		gatewayObj := s.gateways[key]
+		if gatewayObj != nil {
+			// If sectionName is specified, check if the listener exists
+			if parentRef.SectionName != nil {
+				sectionName := string(*parentRef.SectionName)
+				for _, listener := range gatewayObj.Spec.Listeners {
+					if string(listener.Name) == sectionName {
+						return true
+					}
+				}
+			} else {
+				// No sectionName specified, match any listener
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// matchesSpecificGateway checks if the ModelRoute matches a specific gateway
+func (s *store) matchesSpecificGateway(mr *aiv1alpha1.ModelRoute, gatewayKey string) bool {
+	s.gatewayMutex.RLock()
+	defer s.gatewayMutex.RUnlock()
+
+	gatewayObj := s.gateways[gatewayKey]
+	if gatewayObj == nil {
+		return false
+	}
+
+	for _, parentRef := range mr.Spec.ParentRefs {
+		// Get namespace from parentRef, default to ModelRoute's namespace
+		namespace := mr.Namespace
+		if parentRef.Namespace != nil {
+			namespace = string(*parentRef.Namespace)
+		}
+
+		// Get name from parentRef
+		name := string(parentRef.Name)
+		key := fmt.Sprintf("%s/%s", namespace, name)
+
+		// Check if this parentRef matches the specified gateway
+		if key == gatewayKey {
+			// If sectionName is specified, check if the listener exists in the gateway
+			if parentRef.SectionName != nil {
+				sectionName := string(*parentRef.SectionName)
+				for _, listener := range gatewayObj.Spec.Listeners {
+					if string(listener.Name) == sectionName {
+						return true
+					}
+				}
+			} else {
+				// No sectionName specified, match any listener
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (s *store) selectRule(modelName string, req *http.Request, rules []*aiv1alpha1.Rule) (*aiv1alpha1.Rule, error) {
@@ -1034,4 +1159,118 @@ func (s *store) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute {
 	}
 
 	return nil
+}
+
+// Gateway methods (using standard Gateway API)
+
+func (s *store) AddOrUpdateGateway(gateway interface{}) error {
+	gw, ok := gateway.(*gatewayv1.Gateway)
+	if !ok {
+		return fmt.Errorf("invalid gateway type: %T", gateway)
+	}
+
+	key := fmt.Sprintf("%s/%s", gw.Namespace, gw.Name)
+
+	s.gatewayMutex.Lock()
+	s.gateways[key] = gw
+	s.gatewayMutex.Unlock()
+
+	klog.V(4).Infof("Added or updated Gateway: %s", key)
+
+	// Trigger callback outside the lock to avoid potential deadlocks
+	s.triggerCallbacks("Gateway", EventData{
+		EventType: EventAdd,
+		Pod:       types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name},
+	})
+
+	return nil
+}
+
+func (s *store) DeleteGateway(key string) error {
+	// Extract namespace and name before deletion
+	parts := strings.Split(key, "/")
+	var namespace, name string
+	if len(parts) == 2 {
+		namespace, name = parts[0], parts[1]
+	}
+
+	s.gatewayMutex.Lock()
+	delete(s.gateways, key)
+	s.gatewayMutex.Unlock()
+
+	klog.V(4).Infof("Deleted Gateway: %s", key)
+
+	// Trigger callback outside the lock to avoid potential deadlocks
+	if namespace != "" && name != "" {
+		s.triggerCallbacks("Gateway", EventData{
+			EventType: EventDelete,
+			Pod:       types.NamespacedName{Namespace: namespace, Name: name},
+		})
+	}
+
+	return nil
+}
+
+func (s *store) GetGateway(key string) interface{} {
+	s.gatewayMutex.RLock()
+	defer s.gatewayMutex.RUnlock()
+
+	return s.gateways[key]
+}
+
+func (s *store) GetGatewaysByNamespace(namespace string) []interface{} {
+	s.gatewayMutex.RLock()
+	defer s.gatewayMutex.RUnlock()
+
+	var result []interface{}
+	for key, gateway := range s.gateways {
+		if strings.HasPrefix(key, namespace+"/") {
+			result = append(result, gateway)
+		}
+	}
+	return result
+}
+
+func (s *store) GetAllGateways() []interface{} {
+	s.gatewayMutex.RLock()
+	defer s.gatewayMutex.RUnlock()
+
+	var result []interface{}
+	for _, gateway := range s.gateways {
+		result = append(result, gateway)
+	}
+	return result
+}
+
+// GatewayClass methods (using standard Gateway API)
+
+func (s *store) AddOrUpdateGatewayClass(gatewayClass interface{}) error {
+	s.gatewayClassMutex.Lock()
+	defer s.gatewayClassMutex.Unlock()
+
+	gc, ok := gatewayClass.(*gatewayv1.GatewayClass)
+	if !ok {
+		return fmt.Errorf("invalid gatewayclass type: %T", gatewayClass)
+	}
+
+	key := gc.Name
+	s.gatewayClasses[key] = gc
+	klog.V(4).Infof("Added or updated GatewayClass: %s", key)
+	return nil
+}
+
+func (s *store) DeleteGatewayClass(key string) error {
+	s.gatewayClassMutex.Lock()
+	defer s.gatewayClassMutex.Unlock()
+
+	delete(s.gatewayClasses, key)
+	klog.V(4).Infof("Deleted GatewayClass: %s", key)
+	return nil
+}
+
+func (s *store) GetGatewayClass(key string) interface{} {
+	s.gatewayClassMutex.RLock()
+	defer s.gatewayClassMutex.RUnlock()
+
+	return s.gatewayClasses[key]
 }
