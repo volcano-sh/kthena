@@ -622,40 +622,59 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, mi *w
 
 // scaleDownServingGroups scales down the ServingGroups to the expected count.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
-	// Calculate scores for all ServingGroups
-	servingGroupScores := make([]ServingGroupWithScore, 0, len(servingGroupList))
+	toDeleteCount := len(servingGroupList) - expectedCount
+	var allErrors []error
 
-	for _, group := range servingGroupList {
-		score, err := c.calculateServingGroupScore(mi, group.Name)
-		if err != nil {
-			klog.Errorf("Failed to calculate score for ServingGroup %s: %v", group.Name, err)
-			continue
-		}
-		_, groupIndex := utils.GetParentNameAndOrdinal(group.Name)
-		servingGroupScores = append(servingGroupScores, ServingGroupWithScore{
-			Name:  group.Name,
-			Score: score,
-			Index: groupIndex,
-		})
+	// Check if binpack strategy should be used
+	useBinPack, err := c.shouldUseBinPackStrategy(mi)
+	if err != nil {
+		klog.Errorf("Failed to check binpack strategy for ModelServing %s: %v", mi.Name, err)
+		// Fall back to binpack calculation on error
+		useBinPack = true
 	}
 
-	// Sort ServingGroups by score in ascending order
-	// If scores are equal, sort by group index in descending order.
-	// Ensure that when binpack scale down is not performed, the previous scaling-down process is followed.
-	sort.Slice(servingGroupScores, func(i, j int) bool {
-		if servingGroupScores[i].Score != servingGroupScores[j].Score {
-			return servingGroupScores[i].Score < servingGroupScores[j].Score
+	if !useBinPack {
+		// When binpack is not needed, servingGroupList is already sorted by name (ascending).
+		// Delete from the end (highest index first) to maintain previous behavior.
+		for i := len(servingGroupList) - 1; i >= len(servingGroupList)-toDeleteCount; i-- {
+			c.DeleteServingGroup(mi, servingGroupList[i].Name)
+			if err := c.gangManager.DeletePodGroupWhenServingGroupDeleted(ctx, mi, servingGroupList[i].Name); err != nil {
+				allErrors = append(allErrors, err)
+			}
 		}
-		return servingGroupScores[i].Index > servingGroupScores[j].Index
-	})
+	} else {
+		// Calculate scores for all ServingGroups when binpack strategy is needed
+		servingGroupScores := make([]ServingGroupWithScore, 0, len(servingGroupList))
 
-	var allErrors []error
-	// Delete ServingGroups with the lowest scores
-	toDeleteCount := len(servingGroupList) - expectedCount
-	for i := 0; i < toDeleteCount; i++ {
-		c.DeleteServingGroup(mi, servingGroupScores[i].Name)
-		if err := c.gangManager.DeletePodGroupWhenServingGroupDeleted(ctx, mi, servingGroupScores[i].Name); err != nil {
-			allErrors = append(allErrors, err)
+		for _, group := range servingGroupList {
+			score, err := c.calculateServingGroupScore(mi, group.Name)
+			if err != nil {
+				klog.Errorf("Failed to calculate score for ServingGroup %s: %v", group.Name, err)
+				continue
+			}
+			_, groupIndex := utils.GetParentNameAndOrdinal(group.Name)
+			servingGroupScores = append(servingGroupScores, ServingGroupWithScore{
+				Name:  group.Name,
+				Score: score,
+				Index: groupIndex,
+			})
+		}
+
+		// Sort ServingGroups by score in ascending order
+		// If scores are equal, sort by group index in descending order.
+		sort.Slice(servingGroupScores, func(i, j int) bool {
+			if servingGroupScores[i].Score != servingGroupScores[j].Score {
+				return servingGroupScores[i].Score < servingGroupScores[j].Score
+			}
+			return servingGroupScores[i].Index > servingGroupScores[j].Index
+		})
+
+		// Delete ServingGroups with the lowest scores
+		for i := 0; i < toDeleteCount; i++ {
+			c.DeleteServingGroup(mi, servingGroupScores[i].Name)
+			if err := c.gangManager.DeletePodGroupWhenServingGroupDeleted(ctx, mi, servingGroupScores[i].Name); err != nil {
+				allErrors = append(allErrors, err)
+			}
 		}
 	}
 
