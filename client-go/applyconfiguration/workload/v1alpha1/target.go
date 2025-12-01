@@ -26,6 +26,7 @@ import (
 // with apply.
 type TargetApplyConfiguration struct {
 	TargetRef      *v1.ObjectReference               `json:"targetRef,omitempty"`
+	SubTarget      *SubTargetApplyConfiguration      `json:"subTargets,omitempty"`
 	MetricEndpoint *MetricEndpointApplyConfiguration `json:"metricEndpoint,omitempty"`
 }
 
@@ -40,6 +41,14 @@ func Target() *TargetApplyConfiguration {
 // If called multiple times, the TargetRef field is set to the value of the last call.
 func (b *TargetApplyConfiguration) WithTargetRef(value v1.ObjectReference) *TargetApplyConfiguration {
 	b.TargetRef = &value
+	return b
+}
+
+// WithSubTarget sets the SubTarget field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the SubTarget field is set to the value of the last call.
+func (b *TargetApplyConfiguration) WithSubTarget(value *SubTargetApplyConfiguration) *TargetApplyConfiguration {
+	b.SubTarget = value
 	return b
 }
 

@@ -776,6 +776,23 @@ _Appears in:_
 | `roles` _[Role](#role) array_ |  |  | MaxItems: 4 <br />MinItems: 1 <br /> |
 
 
+#### SubTarget
+
+
+
+
+
+
+
+_Appears in:_
+- [Target](#target)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kind` _string_ |  |  |  |
+| `name` _string_ |  |  |  |
+
+
 #### Target
 
 
@@ -790,7 +807,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing and ModelServing/Role. |  |  |
+| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing. |  |  |
+| `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing. |  |  |
 | `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint defines the configuration for scraping metrics from the target pods. |  |  |
 
 

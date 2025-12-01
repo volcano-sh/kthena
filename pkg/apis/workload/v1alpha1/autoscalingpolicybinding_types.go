@@ -87,11 +87,20 @@ type HeterogeneousTarget struct {
 // Target defines a ModelServing deployment that can be monitored and scaled.
 type Target struct {
 	// TargetRef references the target object to be monitored and scaled.
-	// Default target GVK is ModelServing. Currently supported kinds: ModelServing and ModelServing/Role.
+	// Default target GVK is ModelServing. Currently supported kinds: ModelServing.
 	TargetRef corev1.ObjectReference `json:"targetRef"`
+	// SubTarget defines the sub-target object to be monitored and scaled.
+	// Currently supported kinds: `Role` when TargetRef kind is ModelServing.
+	// +optional
+	SubTarget *SubTarget `json:"subTargets,omitempty"`
 	// MetricEndpoint defines the configuration for scraping metrics from the target pods.
 	// +optional
 	MetricEndpoint MetricEndpoint `json:"metricEndpoint,omitempty"`
+}
+
+type SubTarget struct {
+	Kind string `json:"kind,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 // HeterogeneousTargetParam defines the configuration parameters for a specific deployment type in heterogeneous scaling.

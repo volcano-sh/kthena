@@ -5,7 +5,7 @@ metadata:
     workload.serving.volcano.sh/backend-name: ""
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: multi-backend-model
-    workload.serving.volcano.sh/revision: d894fd6bd
+    workload.serving.volcano.sh/revision: 6cf459bf78
     workload.serving.volcano.sh/model-uid: randomUID
   name: multi-backend-model
   namespace: dev

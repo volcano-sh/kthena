@@ -171,87 +171,69 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	}
 }
 
-func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, targetRef *corev1.ObjectReference, replicas int32) error {
+func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, replicas int32) error {
+	targetRef := target.TargetRef
 	namespaceScope := targetRef.Namespace
 	if namespaceScope == "" {
 		namespaceScope = ac.namespace
 	}
-	switch targetRef.Kind {
-	case workload.ModelServingKind.Kind:
+
+	if target.TargetRef.Kind == "" || target.TargetRef.Kind == workload.ModelServingKind.Kind {
 		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name)
 		if err != nil {
 			return err
 		}
-		// need not update replicas
-		if instance.Spec.Replicas != nil && *instance.Spec.Replicas == replicas {
-			return nil
-		}
 		instance_copy := instance.DeepCopy()
-		instance_copy.Spec.Replicas = &replicas
-		if _, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{}); err != nil {
-			return err
-		}
-	case workload.ModelServingKind.Kind + util.ModelServingRoleKindSuffix:
-		servingName, roleName, err := util.GetRoleName(targetRef)
-		if err != nil {
-			return err
-		}
-		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(servingName)
-		if err != nil {
-			return err
-		}
-		instance_copy := instance.DeepCopy()
-		for idx := range instance_copy.Spec.Template.Roles {
-			role := &instance_copy.Spec.Template.Roles[idx]
-			if role.Name == roleName {
-				if role.Replicas != nil && *role.Replicas == replicas {
-					return nil
+
+		if target.SubTarget == nil {
+			if instance_copy.Spec.Replicas != nil && *instance_copy.Spec.Replicas == replicas {
+				return nil
+			}
+			instance_copy.Spec.Replicas = &replicas
+		} else if target.SubTarget.Kind == util.ModelServingRoleKind && target.SubTarget.Name != "" {
+			for idx := range instance_copy.Spec.Template.Roles {
+				role := &instance_copy.Spec.Template.Roles[idx]
+				if role.Name == target.SubTarget.Name {
+					if role.Replicas != nil && *role.Replicas == replicas {
+						return nil
+					}
+					role.Replicas = &replicas
+					break
 				}
-				role.Replicas = &replicas
-				break
 			}
 		}
-		if _, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{}); err != nil {
-			return err
+		if _, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{}); err == nil {
+			return nil
 		}
-	default:
-		return fmt.Errorf("target ref kind %s not supported", targetRef.Kind)
 	}
-	return nil
+	return fmt.Errorf("target ref kind %s, name: %s not supported", targetRef.Kind, targetRef.Name)
 }
 
-func (ac *AutoscaleController) getTargetReplicas(targetRef *corev1.ObjectReference) (int32, error) {
-	if targetRef == nil {
-		return 0, fmt.Errorf("target ref is nil")
-	}
+func (ac *AutoscaleController) getTargetReplicas(target *workload.Target) (int32, error) {
+	targetRef := target.TargetRef
 	namespaceScope := targetRef.Namespace
 	if namespaceScope == "" {
 		namespaceScope = ac.namespace
 	}
-	switch targetRef.Kind {
-	case workload.ModelServingKind.Kind:
-		if instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name); err != nil {
-			return 0, err
-		} else if instance.Spec.Replicas != nil {
-			return *instance.Spec.Replicas, nil
-		}
-	case workload.ModelServingKind.Kind + util.ModelServingRoleKindSuffix:
-		servingName, roleName, err := util.GetRoleName(targetRef)
+
+	if targetRef.Kind == workload.ModelServingKind.Kind || targetRef.Kind == "" {
+		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name)
 		if err != nil {
 			return 0, err
 		}
-		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(servingName)
-		if err != nil {
-			return 0, err
-		}
-		for _, role := range instance.Spec.Template.Roles {
-			if role.Name == roleName && role.Replicas != nil {
-				return *role.Replicas, nil
+		if target.SubTarget == nil {
+			if instance.Spec.Replicas != nil {
+				return *instance.Spec.Replicas, nil
+			}
+		} else if target.SubTarget.Kind == util.ModelServingRoleKind && target.SubTarget.Name != "" {
+			for _, role := range instance.Spec.Template.Roles {
+				if role.Name == target.SubTarget.Name && role.Replicas != nil {
+					return *role.Replicas, nil
+				}
 			}
 		}
-		return 0, fmt.Errorf("role %s not found in model serving %s", roleName, servingName)
 	}
-	return 0, fmt.Errorf("target ref kind %s not supported", targetRef.Kind)
+	return 0, fmt.Errorf("target ref kind %s, name: %s not supported", targetRef.Kind, targetRef.Name)
 }
 
 func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.AutoscalingPolicyBinding) error {
@@ -289,7 +271,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 	// Fetch current replicas
 	replicasMap := make(map[string]int32, len(optimizer.Meta.Config.Params))
 	for _, param := range optimizer.Meta.Config.Params {
-		currentInstancesCount, err := ac.getTargetReplicas(&param.Target.TargetRef)
+		currentInstancesCount, err := ac.getTargetReplicas(&param.Target)
 		if err != nil {
 			klog.Errorf("failed to get current replicas, err: %v", err)
 			return err
@@ -310,7 +292,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 			klog.Warningf("recommended instances not exists, target ref name: %s", param.Target.TargetRef.Name)
 			continue
 		}
-		if err := ac.updateTargetReplicas(ctx, &param.Target.TargetRef, instancesCount); err != nil {
+		if err := ac.updateTargetReplicas(ctx, &param.Target, instancesCount); err != nil {
 			klog.Errorf("failed to update target kind:%s name: %s replicas:%d, err: %v", param.Target.TargetRef.Kind, param.Target.TargetRef.Name, instancesCount, err)
 			return err
 		}
@@ -329,7 +311,7 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 		klog.Infof("asp: %s or binding: %s changed, create new scaler", autoscalePolicy.Name, binding.Name)
 	}
 	// Fetch current replicas
-	currentInstancesCount, err := ac.getTargetReplicas(&target.TargetRef)
+	currentInstancesCount, err := ac.getTargetReplicas(&target)
 	if err != nil {
 		klog.Errorf("failed to get current replicas, err: %v", err)
 		return err
@@ -345,7 +327,7 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 		return nil
 	}
 	// Do update replicas
-	if err := ac.updateTargetReplicas(ctx, &target.TargetRef, recommendedInstances); err != nil {
+	if err := ac.updateTargetReplicas(ctx, &target, recommendedInstances); err != nil {
 		klog.Errorf("failed to update target replicas %s, err: %v", target.TargetRef.Name, err)
 		return err
 	}

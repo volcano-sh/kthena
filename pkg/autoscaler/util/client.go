@@ -33,9 +33,9 @@ import (
 )
 
 const (
-	ModelInferEntryPodLabel    = "leader"
-	ModelServingRoleKindSuffix = "/Role"
-	Entry                      = "true"
+	ModelInferEntryPodLabel = "leader"
+	ModelServingRoleKind    = "Role"
+	Entry                   = "true"
 )
 
 func GetModelServingTarget(lister workloadLister.ModelServingLister, namespace string, name string) (*workload.ModelServing, error) {
@@ -104,20 +104,9 @@ func GetTargetLabels(target *workload.Target) (*labels.Selector, error) {
 		}
 		selector.MatchLabels[workload.ModelServingNameLabelKey] = target.TargetRef.Name
 		selector.MatchLabels[workload.EntryLabelKey] = Entry
-	} else if target.TargetRef.Kind == workload.ModelServingKind.Kind+ModelServingRoleKindSuffix {
-		if target.MetricEndpoint.LabelSelector != nil {
-			selector = *target.MetricEndpoint.LabelSelector
+		if target.SubTarget != nil && target.SubTarget.Kind == ModelServingRoleKind {
+			selector.MatchLabels[workload.RoleLabelKey] = target.SubTarget.Name
 		}
-		if selector.MatchLabels == nil {
-			selector.MatchLabels = map[string]string{}
-		}
-		servingName, roleName, err := GetRoleName(&target.TargetRef)
-		if err != nil {
-			return nil, err
-		}
-		selector.MatchLabels[workload.ModelServingNameLabelKey] = servingName
-		selector.MatchLabels[workload.EntryLabelKey] = Entry
-		selector.MatchLabels[workload.RoleLabelKey] = roleName
 	}
 
 	labelSelector, err := metav1.LabelSelectorAsSelector(&selector)
