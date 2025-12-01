@@ -81,7 +81,7 @@ spec:
     # Heterogeneous Target mode configuration
 ```
 
-##### Homogeneous Target Mode
+#### Homogeneous Target Mode
 
 Configures autoscaling for a single instance type (homogeneous scaling):
 
@@ -100,9 +100,7 @@ Configures autoscaling for a single instance type (homogeneous scaling):
   - Must be greater than or equal to 1
   - Sets a ceiling on scaling operations to prevent excessive resource allocation
 
-##### Heterogeneous Target Mode
-
-#### Optimizer Configuration Mode
+#### Heterogeneous Target Mode
 
 - **costExpansionRatePercent**: Defines the maximum acceptable cost increase percentage (default: 200)
   - When scaling, the algorithm will consider instance combinations that don't exceed the base cost plus this percentage
@@ -145,6 +143,8 @@ Configures autoscaling for a single instance type (homogeneous scaling):
 - **cost**: Relative or actual cost metric
   - Used by optimization algorithm to balance performance and cost
   - Higher values represent more expensive instance types
+
+### Configuration Examples
 
 #### Homogeneous Target Example
 
@@ -232,7 +232,6 @@ For role-level scaling, check the role replica within the `ModelServing`:
 ```bash
 kubectl get modelservers.networking.serving.volcano.sh <serving-name> -o jsonpath='{range .spec.template.roles[?(@.name=="<role-name>")]}{.replicas}{end}'
 ```
-
 
 #### Heterogeneous Target Example
 
