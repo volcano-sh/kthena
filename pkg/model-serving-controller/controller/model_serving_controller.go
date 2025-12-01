@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -639,9 +640,9 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 	if needsSort {
 		slices.SortFunc(servingGroupScores, func(a, b ServingGroupWithScore) int {
 			if a.Score != b.Score {
-				return a.Score - b.Score
+				return cmp.Compare(a.Score, b.Score)
 			}
-			return a.Index - b.Index
+			return cmp.Compare(a.Index, b.Index)
 		})
 	}
 
@@ -840,9 +841,9 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 	if needsSort {
 		slices.SortFunc(roleScores, func(a, b RoleWithScore) int {
 			if a.Score != b.Score {
-				return a.Score - b.Score
+				return cmp.Compare(a.Score, b.Score)
 			}
-			return a.Index - b.Index
+			return cmp.Compare(a.Index, b.Index)
 		})
 	}
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
