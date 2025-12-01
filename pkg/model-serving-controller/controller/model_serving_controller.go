@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -633,32 +633,31 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 		}
 	}
 
-	// Sort ServingGroups by score in ascending order
-	// If scores are equal, sort by group index in descending order.
-	// Ensure that when binpack scale down is not performed, the previous scaling-down process is followed.
+	// Sort ServingGroups by score in ascending order, and by index in ascending order if scores are equal.
+	// When binpack is used, items with lower deletion cost should be deleted first, so we sort ascending by score.
 	// Skip sorting when all scores are 0 because servingGroupList is already sorted by index in ascending order.
 	if needsSort {
-		sort.Slice(servingGroupScores, func(i, j int) bool {
-			if servingGroupScores[i].Score != servingGroupScores[j].Score {
-				return servingGroupScores[i].Score < servingGroupScores[j].Score
+		slices.SortFunc(servingGroupScores, func(a, b ServingGroupWithScore) int {
+			if a.Score != b.Score {
+				return a.Score - b.Score
 			}
-			return servingGroupScores[i].Index > servingGroupScores[j].Index
+			return a.Index - b.Index
 		})
 	}
 
 	var allErrors []error
-	// Delete ServingGroups with the lowest scores
-	// When all scores are 0, delete from the end of the list (highest index) first.
 	toDeleteCount := len(servingGroupList) - expectedCount
-	for i := 0; i < toDeleteCount; i++ {
-		var targetName string
-		if needsSort {
-			// When scores differ, delete ServingGroups with lowest scores first.
-			targetName = servingGroupScores[i].Name
-		} else {
-			// When all scores are 0, delete ServingGroups with highest index first (from the end).
-			targetName = servingGroupScores[len(servingGroupScores)-1-i].Name
-		}
+	// When binpack is used (needsSort=true), delete items with lowest scores (from front of sorted list).
+	// When binpack is not used (all scores=0), delete items with highest indices (from end of sorted list).
+	// In both cases, iterate from the highest position to be deleted down to the lowest.
+	startIdx := toDeleteCount - 1
+	endIdx := 0
+	if !needsSort {
+		startIdx = len(servingGroupScores) - 1
+		endIdx = len(servingGroupScores) - toDeleteCount
+	}
+	for i := startIdx; i >= endIdx; i-- {
+		targetName := servingGroupScores[i].Name
 		c.DeleteServingGroup(mi, targetName)
 		if err := c.gangManager.DeletePodGroupWhenServingGroupDeleted(ctx, mi, targetName); err != nil {
 			allErrors = append(allErrors, err)
@@ -835,16 +834,15 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 		}
 	}
 
-	// Sort Roles by score in ascending order
-	// If scores are equal, sort by role index in descending order.
-	// Ensure that when binpack scale down is not performed, the previous scaling-down process is followed.
+	// Sort Roles by score in ascending order, and by index in ascending order if scores are equal.
+	// When binpack is used, items with lower deletion cost should be deleted first, so we sort ascending by score.
 	// Skip sorting when all scores are 0 because roleList is already sorted by index in ascending order.
 	if needsSort {
-		sort.Slice(roleScores, func(i, j int) bool {
-			if roleScores[i].Score != roleScores[j].Score {
-				return roleScores[i].Score < roleScores[j].Score
+		slices.SortFunc(roleScores, func(a, b RoleWithScore) int {
+			if a.Score != b.Score {
+				return a.Score - b.Score
 			}
-			return roleScores[i].Index > roleScores[j].Index
+			return a.Index - b.Index
 		})
 	}
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
@@ -856,18 +854,18 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 		}
 	}
 
-	// Delete Roles with the lowest scores
-	// When all scores are 0, delete from the end of the list (highest index) first.
 	toDeleteCount := len(roleList) - expectedCount
-	for i := 0; i < toDeleteCount; i++ {
-		var targetName string
-		if needsSort {
-			// When scores differ, delete Roles with lowest scores first.
-			targetName = roleScores[i].Name
-		} else {
-			// When all scores are 0, delete Roles with highest index first (from the end).
-			targetName = roleScores[len(roleScores)-1-i].Name
-		}
+	// When binpack is used (needsSort=true), delete items with lowest scores (from front of sorted list).
+	// When binpack is not used (all scores=0), delete items with highest indices (from end of sorted list).
+	// In both cases, iterate from the highest position to be deleted down to the lowest.
+	startIdx := toDeleteCount - 1
+	endIdx := 0
+	if !needsSort {
+		startIdx = len(roleScores) - 1
+		endIdx = len(roleScores) - toDeleteCount
+	}
+	for i := startIdx; i >= endIdx; i-- {
+		targetName := roleScores[i].Name
 		c.DeleteRole(ctx, mi, groupName, targetRole.Name, targetName)
 	}
 }
