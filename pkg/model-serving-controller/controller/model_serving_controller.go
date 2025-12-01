@@ -634,30 +634,22 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 		}
 	}
 
-	// Sort ServingGroups by score in ascending order, and by index in ascending order if scores are equal.
-	// When binpack is used, items with lower deletion cost should be deleted first, so we sort ascending by score.
+	// Sort ServingGroups by score in descending order, and by index in descending order if scores are equal.
+	// This puts items with lower scores (or higher indices when scores are equal) at the end.
 	// Skip sorting when all scores are 0 because servingGroupList is already sorted by index in ascending order.
 	if needsSort {
 		slices.SortFunc(servingGroupScores, func(a, b ServingGroupWithScore) int {
 			if a.Score != b.Score {
-				return cmp.Compare(a.Score, b.Score)
+				return cmp.Compare(b.Score, a.Score)
 			}
-			return cmp.Compare(a.Index, b.Index)
+			return cmp.Compare(b.Index, a.Index)
 		})
 	}
 
 	var allErrors []error
 	toDeleteCount := len(servingGroupList) - expectedCount
-	// When binpack is used (needsSort=true), delete items with lowest scores (from front of sorted list).
-	// When binpack is not used (all scores=0), delete items with highest indices (from end of sorted list).
-	// In both cases, iterate from the highest position to be deleted down to the lowest.
-	startIdx := toDeleteCount - 1
-	endIdx := 0
-	if !needsSort {
-		startIdx = len(servingGroupScores) - 1
-		endIdx = len(servingGroupScores) - toDeleteCount
-	}
-	for i := startIdx; i >= endIdx; i-- {
+	// Delete items from end to front. Items at the end have lower scores (or higher indices when scores are 0).
+	for i := len(servingGroupScores) - 1; i >= len(servingGroupScores)-toDeleteCount; i-- {
 		targetName := servingGroupScores[i].Name
 		c.DeleteServingGroup(mi, targetName)
 		if err := c.gangManager.DeletePodGroupWhenServingGroupDeleted(ctx, mi, targetName); err != nil {
@@ -835,15 +827,15 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 		}
 	}
 
-	// Sort Roles by score in ascending order, and by index in ascending order if scores are equal.
-	// When binpack is used, items with lower deletion cost should be deleted first, so we sort ascending by score.
+	// Sort Roles by score in descending order, and by index in descending order if scores are equal.
+	// This puts items with lower scores (or higher indices when scores are equal) at the end.
 	// Skip sorting when all scores are 0 because roleList is already sorted by index in ascending order.
 	if needsSort {
 		slices.SortFunc(roleScores, func(a, b RoleWithScore) int {
 			if a.Score != b.Score {
-				return cmp.Compare(a.Score, b.Score)
+				return cmp.Compare(b.Score, a.Score)
 			}
-			return cmp.Compare(a.Index, b.Index)
+			return cmp.Compare(b.Index, a.Index)
 		})
 	}
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
@@ -856,16 +848,8 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 	}
 
 	toDeleteCount := len(roleList) - expectedCount
-	// When binpack is used (needsSort=true), delete items with lowest scores (from front of sorted list).
-	// When binpack is not used (all scores=0), delete items with highest indices (from end of sorted list).
-	// In both cases, iterate from the highest position to be deleted down to the lowest.
-	startIdx := toDeleteCount - 1
-	endIdx := 0
-	if !needsSort {
-		startIdx = len(roleScores) - 1
-		endIdx = len(roleScores) - toDeleteCount
-	}
-	for i := startIdx; i >= endIdx; i-- {
+	// Delete items from end to front. Items at the end have lower scores (or higher indices when scores are 0).
+	for i := len(roleScores) - 1; i >= len(roleScores)-toDeleteCount; i-- {
 		targetName := roleScores[i].Name
 		c.DeleteRole(ctx, mi, groupName, targetRole.Name, targetName)
 	}
