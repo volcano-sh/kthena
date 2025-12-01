@@ -23,79 +23,78 @@ import (
 
 // AutoscalingPolicySpec defines the desired state of AutoscalingPolicy.
 type AutoscalingPolicySpec struct {
-	// TolerancePercent is the percentage of deviation tolerated before scaling actions are triggered.
-	// The current number of instances is current_replicas, and the expected number of instances inferred from monitoring metrics is target_replicas.
-	// The scaling operation will only be actually performed when |current_replicas - target_replicas| >= current_replicas * TolerancePercent.
+	// TolerancePercent defines the percentage of deviation tolerated before scaling actions are triggered.
+	// current_replicas represents the current number of instances, while target_replicas represents the expected number of instances calculated from monitoring metrics.
+	// Scaling operations are performed only when |current_replicas - target_replicas| >= current_replicas * TolerancePercent / 100.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=10
 	TolerancePercent int32 `json:"tolerancePercent"`
-	// Metrics is the list of metrics used to evaluate scaling decisions.
+	// Metrics defines the list of metrics used to evaluate scaling decisions.
 	// +kubebuilder:validation:MinItems=1
 	Metrics []AutoscalingPolicyMetric `json:"metrics"`
-	// Behavior defines the scaling behavior for both scale up and scale down.
+	// Behavior defines the scaling behavior configuration for both scale up and scale down operations.
 	// +optional
 	Behavior AutoscalingPolicyBehavior `json:"behavior"`
 }
 
-// AutoscalingPolicyMetric defines a metric and its target value for scaling.
+// AutoscalingPolicyMetric defines a metric and its target value for scaling decisions.
 type AutoscalingPolicyMetric struct {
-	// MetricName is the name of the metric to monitor.
+	// MetricName defines the name of the metric to monitor for scaling decisions.
 	MetricName string `json:"metricName"`
-	// TargetValue is the target value for the metric to trigger scaling.
+	// TargetValue defines the target value for the metric that triggers scaling operations.
 	TargetValue resource.Quantity `json:"targetValue"`
 }
 
-// AutoscalingPolicyBehavior defines the scaling behaviors for up and down actions.
+// AutoscalingPolicyBehavior defines the scaling behavior configuration for both scale up and scale down operations.
 type AutoscalingPolicyBehavior struct {
-	// ScaleUp defines the policy for scaling up (increasing replicas).
+	// ScaleUp defines the policy configuration for scaling up (increasing replicas).
 	// +optional
 	ScaleUp AutoscalingPolicyScaleUpPolicy `json:"scaleUp"`
-	// ScaleDown defines the policy for scaling down (decreasing replicas).
+	// ScaleDown defines the policy configuration for scaling down (decreasing replicas).
 	// +optional
 	ScaleDown AutoscalingPolicyStablePolicy `json:"scaleDown"`
 }
 
+// AutoscalingPolicyScaleUpPolicy defines the scaling up policy configuration.
 type AutoscalingPolicyScaleUpPolicy struct {
-	// Stable policy usually makes decisions based on the average value of metrics calculated over the past few minutes and introduces a scaling-down cool-down period/delay.
-	// This mechanism is relatively stable, as it can smooth out short-term small fluctuations and avoid overly frequent and unnecessary Pod scaling.
+	// StablePolicy defines the stable scaling policy that uses average metric values over time windows.
+	// This policy smooths out short-term fluctuations and avoids unnecessary frequent scaling operations.
 	// +optional
 	StablePolicy AutoscalingPolicyStablePolicy `json:"stablePolicy"`
-	// When the load surges sharply within a short period (for example, encountering a sudden traffic peak or a rush of sudden computing tasks),
-	// using the average value over a long time window to calculate the required number of replicas will cause significant lag.
-	// If the system needs to scale out quickly to cope with such peaks, the ordinary scaling logic may fail to respond in time,
-	// resulting in delayed Pod startup, slower service response time or timeouts, and may even lead to service paralysis or data backlogs (for workloads such as message queues).
+	// PanicPolicy defines the emergency scaling policy for handling sudden traffic spikes.
+	// This policy activates during rapid load surges to prevent service degradation or timeouts.
 	// +optional
 	PanicPolicy AutoscalingPolicyPanicPolicy `json:"panicPolicy"`
 }
 
-// AutoscalingPolicyStablePolicy defines the policy for stable scaling up or scaling down.
+// AutoscalingPolicyStablePolicy defines the stable scaling policy for both scale up and scale down operations.
 type AutoscalingPolicyStablePolicy struct {
-	// Instances is the maximum number of instances to scale.
+	// Instances defines the maximum absolute number of instances to scale in a single operation.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
 	Instances *int32 `json:"instances,omitempty"`
-	// Percent is the maximum percentage of instances to scaling.
+	// Percent defines the maximum percentage of current instances to scale in a single operation.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000
 	// +kubebuilder:default=100
 	Percent *int32 `json:"percent,omitempty"`
-	// Period is the duration over which scaling is evaluated.
+	// Period defines the time duration over which scaling metrics are evaluated.
 	// +kubebuilder:default="15s"
 	Period *metav1.Duration `json:"period,omitempty"`
+	// SelectPolicy determines the selection strategy for scaling operations.
+	// 'Or' means scaling is performed if either the Percent or Instances requirement is met.
+	// 'And' means scaling is performed only if both Percent and Instances requirements are met.
 	// +kubebuilder:default="Or"
-	// SelectPolicy determines the selection strategy for scaling up (e.g., Or, And).
-	// 'Or' represents the scaling operation will be performed as long as either the Percent requirement or the Instances requirement is met.
-	// 'And' represents the scaling operation will be performed as long as both the Percent requirement and the Instances requirement is met.
 	// +optional
 	SelectPolicy SelectPolicyType `json:"selectPolicy,omitempty"`
-	// StabilizationWindow is the time window to stabilize scaling up actions.
+	// StabilizationWindow defines the time window to stabilize scaling actions and prevent rapid oscillations.
 	// +optional
 	StabilizationWindow *metav1.Duration `json:"stabilizationWindow,omitempty"`
 }
 
-// SelectPolicyType defines the type of select olicy.
+// SelectPolicyType defines the selection strategy type for scaling operations.
 // +kubebuilder:validation:Enum=Or;And
 type SelectPolicyType string
 
@@ -104,21 +103,22 @@ const (
 	SelectPolicyAnd SelectPolicyType = "And"
 )
 
-// AutoscalingPolicyPanicPolicy defines the policy for panic scaling up.
+// AutoscalingPolicyPanicPolicy defines the emergency scaling policy for handling sudden traffic surges.
 type AutoscalingPolicyPanicPolicy struct {
-	// Percent is the maximum percentage of instances to scale up.
+	// Percent defines the maximum percentage of current instances to scale up during panic mode.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000
 	// +kubebuilder:default=1000
 	Percent *int32 `json:"percent,omitempty"`
-	// Period is the duration over which scaling down is evaluated.
+	// Period defines the evaluation period for panic mode scaling decisions.
 	Period metav1.Duration `json:"period"`
-	// PanicThresholdPercent is the threshold percent to enter panic mode.
+	// PanicThresholdPercent defines the metric threshold percentage that triggers panic mode.
+	// When metrics exceed this percentage of target values, panic mode is activated.
 	// +kubebuilder:validation:Minimum=110
 	// +kubebuilder:validation:Maximum=1000
 	// +kubebuilder:default=200
 	PanicThresholdPercent *int32 `json:"panicThresholdPercent,omitempty"`
-	// PanicModeHold is the duration to hold in panic mode before returning to normal.
+	// PanicModeHold defines the duration to remain in panic mode before returning to normal scaling.
 	// +kubebuilder:default="60s"
 	PanicModeHold *metav1.Duration `json:"panicModeHold,omitempty"`
 }
@@ -132,7 +132,8 @@ type AutoscalingPolicyStatus struct {
 // +kubebuilder:storageversion
 // +genclient
 
-// AutoscalingPolicy is the Schema for the autoscalingpolicies API.
+// AutoscalingPolicy defines the autoscaling policy configuration for model serving workloads.
+// It specifies scaling rules, metrics, and behavior for automatic replica adjustment.
 type AutoscalingPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -143,7 +144,7 @@ type AutoscalingPolicy struct {
 
 // +kubebuilder:object:root=true
 
-// AutoscalingPolicyList contains a list of AutoscalingPolicy.
+// AutoscalingPolicyList contains a list of AutoscalingPolicy objects.
 type AutoscalingPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
