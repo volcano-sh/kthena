@@ -301,3 +301,78 @@ func TestAddRole(t *testing.T) {
 	role4 := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
 	assert.Equal(t, "revision4", role4.Revision, "role should be overwritten")
 }
+
+func TestGetServingGroupByModelServingSortingByIndex(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex:        sync.RWMutex{},
+		servingGroup: make(map[types.NamespacedName]map[string]*ServingGroup),
+	}
+
+	// Add groups with non-sequential indices to test sorting by index
+	// Add in arbitrary order to ensure sorting is by index, not insertion order
+	s.AddServingGroup(key, 10, "revision")
+	s.AddServingGroup(key, 2, "revision")
+	s.AddServingGroup(key, 5, "revision")
+	s.AddServingGroup(key, 1, "revision")
+
+	groups, err := s.GetServingGroupByModelServing(key)
+	assert.NoError(t, err)
+	assert.Len(t, groups, 4)
+
+	// Verify groups are sorted by index in ascending order
+	// With string sorting, model1-10 would come before model1-2
+	// With index sorting, order should be: model1-1, model1-2, model1-5, model1-10
+	expectedNames := []string{
+		utils.GenerateServingGroupName(key.Name, 1),
+		utils.GenerateServingGroupName(key.Name, 2),
+		utils.GenerateServingGroupName(key.Name, 5),
+		utils.GenerateServingGroupName(key.Name, 10),
+	}
+
+	for i, group := range groups {
+		assert.Equal(t, expectedNames[i], group.Name, "Groups should be sorted by index, not by name")
+	}
+}
+
+func TestGetRoleListSortingByIndex(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex: sync.RWMutex{},
+		servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+			key: {
+				"group0": &ServingGroup{
+					Name: "group0",
+					roles: map[string]map[string]*Role{
+						"prefill": {
+							"prefill-10": &Role{Name: "prefill-10", Status: RoleCreating},
+							"prefill-2":  &Role{Name: "prefill-2", Status: RoleCreating},
+							"prefill-5":  &Role{Name: "prefill-5", Status: RoleCreating},
+							"prefill-1":  &Role{Name: "prefill-1", Status: RoleCreating},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	roles, err := s.GetRoleList(key, "group0", "prefill")
+	assert.NoError(t, err)
+	assert.Len(t, roles, 4)
+
+	// Verify roles are sorted by index in ascending order
+	// With string sorting, prefill-10 would come before prefill-2
+	// With index sorting, order should be: prefill-1, prefill-2, prefill-5, prefill-10
+	expectedNames := []string{
+		"prefill-1",
+		"prefill-2",
+		"prefill-5",
+		"prefill-10",
+	}
+
+	for i, role := range roles {
+		assert.Equal(t, expectedNames[i], role.Name, "Roles should be sorted by index, not by name")
+	}
+}

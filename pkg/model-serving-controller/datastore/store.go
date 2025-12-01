@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -103,7 +102,7 @@ func (s *store) GetServingGroupByModelServing(modelServingName types.NamespacedN
 		s.mutex.RUnlock()
 		return nil, ErrServingGroupNotFound
 	}
-	// sort ServingGroups by name
+	// sort ServingGroups by index
 	servingGroupsSlice := make([]ServingGroup, 0, len(servingGroups))
 	for _, servingGroup := range servingGroups {
 		// This is o clone to prevent r/w conflict later
@@ -112,7 +111,9 @@ func (s *store) GetServingGroupByModelServing(modelServingName types.NamespacedN
 	s.mutex.RUnlock()
 
 	slices.SortFunc(servingGroupsSlice, func(a, b ServingGroup) int {
-		return strings.Compare(a.Name, b.Name)
+		_, aIndex := utils.GetParentNameAndOrdinal(a.Name)
+		_, bIndex := utils.GetParentNameAndOrdinal(b.Name)
+		return aIndex - bIndex
 	})
 
 	return servingGroupsSlice, nil
@@ -143,7 +144,9 @@ func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, ro
 	}
 
 	slices.SortFunc(roleSlice, func(a, b Role) int {
-		return strings.Compare(a.Name, b.Name)
+		_, aIndex := utils.GetParentNameAndOrdinal(a.Name)
+		_, bIndex := utils.GetParentNameAndOrdinal(b.Name)
+		return aIndex - bIndex
 	})
 
 	return roleSlice, nil
