@@ -22,21 +22,21 @@ import (
 )
 
 // AutoscalingPolicyBindingSpec defines the desired state of AutoscalingPolicyBinding.
-// +kubebuilder:validation:XValidation:rule="has(self.optimizerConfiguration) != has(self.scalingConfiguration)",message="Either optimizerConfiguration or scalingConfiguration must be set, but not both."
+// +kubebuilder:validation:XValidation:rule="has(self.heterogeneousTarget) != has(self.homogeneousTarget)",message="Either heterogeneousTarget or homogeneousTarget must be set, but not both."
 type AutoscalingPolicyBindingSpec struct {
 	// PolicyRef references the AutoscalingPolicy that defines the scaling rules and metrics.
 	PolicyRef corev1.LocalObjectReference `json:"policyRef"`
 
-	// OptimizerConfiguration enables multi-target optimization that dynamically allocates
-	// replicas across heterogeneous ModelServing deployments based on overall compute requirements.
-	// This is ideal for mixed hardware environments (e.g., H100/A100 clusters) where you want to
-	// optimize resource utilization by adjusting deployment ratios between different hardware types
-	// using mathematical optimization methods (e.g. integer programming).
-	OptimizerConfiguration *OptimizerConfiguration `json:"optimizerConfiguration,omitempty"`
+	// It dynamically adjusts replicas across different ModelServing objects based on overall computing power requirements - referred to as "optimize" behavior in the code.
+	// For example:
+	// When dealing with two types of ModelServing objects corresponding to heterogeneous hardware resources with different computing capabilities (e.g., H100/A100), the "optimize" behavior aims to:
+	// Dynamically adjust the deployment ratio of H100/A100 instances based on real-time computing power demands
+	// Use integer programming and similar methods to precisely meet computing requirements
+	// Maximize hardware utilization efficiency
+	HeterogeneousTarget *HeterogeneousTarget `json:"heterogeneousTarget,omitempty"`
 
-	// ScalingConfiguration defines traditional autoscaling behavior that adjusts replica counts
-	// based on monitoring metrics and target values for a single ModelServing deployment.
-	ScalingConfiguration *ScalingConfiguration `json:"scalingConfiguration,omitempty"`
+	// Adjust the number of related instances based on specified monitoring metrics and their target values.
+	HomogeneousTarget *HomogeneousTarget `json:"homogeneousTarget,omitempty"`
 }
 
 // AutoscalingTargetType defines the type of target for autoscaling operations.
@@ -52,11 +52,15 @@ type MetricEndpoint struct {
 	// +optional
 	// +kubebuilder:default=8100
 	Port int32 `json:"port,omitempty"`
+	// LabelSelector is the additional selector to filter the pods exposing metric endpoints.
+	// For example, Ray Leader Pod exposes the interface for retrieving monitoring metrics, but ray worker pods do not, so the labelSelector will be added `ray.io/ray-node-type: 'raylet'`.
+	// When the targetRef kind is `ModelServing` or `ModelServing/Role`, the labelSelector will be added `modelserving.volcano.sh/entry: 'true'` default.
+	// +optional
+	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
 
-// ScalingConfiguration defines the scaling parameters for a single target deployment.
-type ScalingConfiguration struct {
-	// Target specifies the ModelServing deployment to monitor and scale.
+type HomogeneousTarget struct {
+	// Target represents the objects be monitored and scaled.
 	Target Target `json:"target,omitempty"`
 	// MinReplicas is the minimum number of replicas to maintain.
 	// +kubebuilder:validation:Minimum=0
@@ -68,16 +72,11 @@ type ScalingConfiguration struct {
 	MaxReplicas int32 `json:"maxReplicas"`
 }
 
-// OptimizerConfiguration defines parameters for multi-target optimization across
-// multiple ModelServing deployments with different hardware characteristics.
-type OptimizerConfiguration struct {
-	// Params contains the optimization parameters for each ModelServing group.
-	// Each entry defines a different deployment type (e.g., different hardware) to optimize.
+type HeterogeneousTarget struct {
+	// Parameters of multiple Model Serving Groups to be optimized.
 	// +kubebuilder:validation:MinItems=1
-	Params []OptimizerParam `json:"params,omitempty"`
-	// CostExpansionRatePercent defines the acceptable cost expansion percentage
-	// when optimizing across multiple deployment types. A higher value allows more
-	// flexibility in resource allocation but may increase overall costs.
+	Params []HeterogeneousTargetParam `json:"params,omitempty"`
+	// CostExpansionRatePercent is the percentage rate at which the cost expands.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=200
 	// +optional
@@ -86,21 +85,17 @@ type OptimizerConfiguration struct {
 
 // Target defines a ModelServing deployment that can be monitored and scaled.
 type Target struct {
-	// TargetRef references the ModelServing object to monitor and scale.
+	// TargetRef references the target object.
+	// The default target GVK is ModelServing.
+	// Current supported kinds are ModelServing and ModelServing/Role.
 	TargetRef corev1.ObjectReference `json:"targetRef"`
-	// AdditionalMatchLabels provides additional label selectors to refine
-	// which pods within the ModelServing deployment should be monitored.
-	// +optional
-	AdditionalMatchLabels map[string]string `json:"additionalMatchLabels,omitempty"`
-	// MetricEndpoint configures how to scrape metrics from the target pods.
-	// If not specified, defaults to port 8100 and path "/metrics".
+	// MetricEndpoint is the metric source.
 	// +optional
 	MetricEndpoint MetricEndpoint `json:"metricEndpoint,omitempty"`
 }
 
-// OptimizerParam defines optimization parameters for a specific ModelServing deployment type.
-type OptimizerParam struct {
-	// Target specifies the ModelServing deployment and its monitoring configuration.
+type HeterogeneousTargetParam struct {
+	// The scaling instance configuration
 	Target Target `json:"target,omitempty"`
 	// Cost represents the relative cost factor for this deployment type.
 	// Used in optimization calculations to balance performance vs. cost.

@@ -25,9 +25,8 @@ import (
 // TargetApplyConfiguration represents a declarative configuration of the Target type for use
 // with apply.
 type TargetApplyConfiguration struct {
-	TargetRef             *v1.ObjectReference               `json:"targetRef,omitempty"`
-	AdditionalMatchLabels map[string]string                 `json:"additionalMatchLabels,omitempty"`
-	MetricEndpoint        *MetricEndpointApplyConfiguration `json:"metricEndpoint,omitempty"`
+	TargetRef      *v1.ObjectReference               `json:"targetRef,omitempty"`
+	MetricEndpoint *MetricEndpointApplyConfiguration `json:"metricEndpoint,omitempty"`
 }
 
 // TargetApplyConfiguration constructs a declarative configuration of the Target type for use with
@@ -41,20 +40,6 @@ func Target() *TargetApplyConfiguration {
 // If called multiple times, the TargetRef field is set to the value of the last call.
 func (b *TargetApplyConfiguration) WithTargetRef(value v1.ObjectReference) *TargetApplyConfiguration {
 	b.TargetRef = &value
-	return b
-}
-
-// WithAdditionalMatchLabels puts the entries into the AdditionalMatchLabels field in the declarative configuration
-// and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, the entries provided by each call will be put on the AdditionalMatchLabels field,
-// overwriting an existing map entries in AdditionalMatchLabels field with the same key.
-func (b *TargetApplyConfiguration) WithAdditionalMatchLabels(entries map[string]string) *TargetApplyConfiguration {
-	if b.AdditionalMatchLabels == nil && len(entries) > 0 {
-		b.AdditionalMatchLabels = make(map[string]string, len(entries))
-	}
-	for k, v := range entries {
-		b.AdditionalMatchLabels[k] = v
-	}
 	return b
 }
 

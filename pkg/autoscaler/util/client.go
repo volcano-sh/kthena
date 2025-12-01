@@ -18,12 +18,13 @@ package util
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"istio.io/istio/pkg/maps"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -32,10 +33,12 @@ import (
 )
 
 const (
-	ModelInferEntryPodLabel = "leader"
+	ModelInferEntryPodLabel    = "leader"
+	ModelServingRoleKindSuffix = "/Role"
+	Entry                      = "true"
 )
 
-func GetModelInferTarget(lister workloadLister.ModelServingLister, namespace string, name string) (*workload.ModelServing, error) {
+func GetModelServingTarget(lister workloadLister.ModelServingLister, namespace string, name string) (*workload.ModelServing, error) {
 	if instance, err := lister.ModelServings(namespace).Get(name); err != nil {
 		return nil, err
 	} else {
@@ -43,15 +46,19 @@ func GetModelInferTarget(lister workloadLister.ModelServingLister, namespace str
 	}
 }
 
-func GetMetricPods(lister listerv1.PodLister, namespace string, matchLabels map[string]string) ([]*corev1.Pod, error) {
-	if podList, err := lister.Pods(namespace).List(labels.SelectorFromSet(matchLabels)); err != nil {
+func GetMetricPods(lister listerv1.PodLister, namespace string, target *workload.Target) ([]*corev1.Pod, error) {
+	selector, err := GetTargetLabels(target)
+	if err != nil {
+		return nil, err
+	}
+	if podList, err := lister.Pods(namespace).List(*selector); err != nil {
 		return nil, err
 	} else {
 		return podList, nil
 	}
 }
 
-func UpdateModelInfer(ctx context.Context, client clientset.Interface, modelInfer *workload.ModelServing) error {
+func UpdateModelServing(ctx context.Context, client clientset.Interface, modelInfer *workload.ModelServing) error {
 	modelInferCtx, cancel := context.WithTimeout(ctx, AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
 	if oldModelInfer, err := client.WorkloadV1alpha1().ModelServings(modelInfer.Namespace).Get(modelInferCtx, modelInfer.Name, metav1.GetOptions{}); err == nil {
@@ -67,15 +74,57 @@ func UpdateModelInfer(ctx context.Context, client clientset.Interface, modelInfe
 	return nil
 }
 
-func GetTargetLabels(target *workload.Target) map[string]string {
-	if target.TargetRef.Kind == workload.ModelServingKind.Kind {
-		lbs := map[string]string{}
-		if target.AdditionalMatchLabels != nil {
-			lbs = maps.Clone(target.AdditionalMatchLabels)
-		}
-		lbs[workload.ModelServingNameLabelKey] = target.TargetRef.Name
-		lbs[workload.RoleLabelKey] = ModelInferEntryPodLabel
-		return lbs
+func GetRoleName(targetRef *corev1.ObjectReference) (string, string, error) {
+	if targetRef == nil || targetRef.Name == "" {
+		return "", "", nil
 	}
-	return nil
+	strs := strings.Split(targetRef.Name, "/")
+	if len(strs) != 2 || strs[0] == "" || strs[1] == "" {
+		klog.Errorf("invalid model serving role name, name: %s", targetRef.Name)
+		return "", "", fmt.Errorf("invalid model serving role name, name: %s", targetRef.Name)
+	}
+	return strs[0], strs[1], nil
+}
+
+func GetTargetLabels(target *workload.Target) (*labels.Selector, error) {
+	if target == nil || target.TargetRef.Name == "" {
+		return nil, nil
+	}
+	if target.TargetRef.Kind == "" {
+		target.TargetRef.Kind = workload.ModelServingKind.Kind
+	}
+
+	selector := metav1.LabelSelector{}
+	if target.TargetRef.Kind == workload.ModelServingKind.Kind {
+		if target.MetricEndpoint.LabelSelector != nil {
+			selector = *target.MetricEndpoint.LabelSelector
+		}
+		if selector.MatchLabels == nil {
+			selector.MatchLabels = map[string]string{}
+		}
+		selector.MatchLabels[workload.ModelServingNameLabelKey] = target.TargetRef.Name
+		selector.MatchLabels[workload.EntryLabelKey] = Entry
+	} else if target.TargetRef.Kind == workload.ModelServingKind.Kind+ModelServingRoleKindSuffix {
+		if target.MetricEndpoint.LabelSelector != nil {
+			selector = *target.MetricEndpoint.LabelSelector
+		}
+		if selector.MatchLabels == nil {
+			selector.MatchLabels = map[string]string{}
+		}
+		servingName, roleName, err := GetRoleName(&target.TargetRef)
+		if err != nil {
+			return nil, err
+		}
+		selector.MatchLabels[workload.ModelServingNameLabelKey] = servingName
+		selector.MatchLabels[workload.EntryLabelKey] = Entry
+		selector.MatchLabels[workload.RoleLabelKey] = roleName
+	}
+
+	labelSelector, err := metav1.LabelSelectorAsSelector(&selector)
+	if err != nil {
+		return nil, err
+	}
+
+	klog.Warningf("invalid target ref kind, kind: %s", target.TargetRef.Kind)
+	return &labelSelector, nil
 }

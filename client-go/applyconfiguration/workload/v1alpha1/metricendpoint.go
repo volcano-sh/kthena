@@ -18,11 +18,16 @@ limitations under the License.
 
 package v1alpha1
 
+import (
+	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+)
+
 // MetricEndpointApplyConfiguration represents a declarative configuration of the MetricEndpoint type for use
 // with apply.
 type MetricEndpointApplyConfiguration struct {
-	Uri  *string `json:"uri,omitempty"`
-	Port *int32  `json:"port,omitempty"`
+	Uri           *string                             `json:"uri,omitempty"`
+	Port          *int32                              `json:"port,omitempty"`
+	LabelSelector *v1.LabelSelectorApplyConfiguration `json:"labelSelector,omitempty"`
 }
 
 // MetricEndpointApplyConfiguration constructs a declarative configuration of the MetricEndpoint type for use with
@@ -44,5 +49,13 @@ func (b *MetricEndpointApplyConfiguration) WithUri(value string) *MetricEndpoint
 // If called multiple times, the Port field is set to the value of the last call.
 func (b *MetricEndpointApplyConfiguration) WithPort(value int32) *MetricEndpointApplyConfiguration {
 	b.Port = &value
+	return b
+}
+
+// WithLabelSelector sets the LabelSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the LabelSelector field is set to the value of the last call.
+func (b *MetricEndpointApplyConfiguration) WithLabelSelector(value *v1.LabelSelectorApplyConfiguration) *MetricEndpointApplyConfiguration {
+	b.LabelSelector = value
 	return b
 }

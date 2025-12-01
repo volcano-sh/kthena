@@ -106,9 +106,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `policyRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | PolicyRef references the AutoscalingPolicy that defines the scaling rules and metrics. |  |  |
-| `optimizerConfiguration` _[OptimizerConfiguration](#optimizerconfiguration)_ | OptimizerConfiguration enables multi-target optimization that dynamically allocates<br />replicas across heterogeneous ModelServing deployments based on overall compute requirements.<br />This is ideal for mixed hardware environments (e.g., H100/A100 clusters) where you want to<br />optimize resource utilization by adjusting deployment ratios between different hardware types<br />using mathematical optimization methods (e.g. integer programming). |  |  |
-| `scalingConfiguration` _[ScalingConfiguration](#scalingconfiguration)_ | ScalingConfiguration defines traditional autoscaling behavior that adjusts replica counts<br />based on monitoring metrics and target values for a single ModelServing deployment. |  |  |
+| `policyRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | PolicyRef references the autoscaling policy to be optimized scaling base on multiple targets. |  |  |
+| `heterogeneousTarget` _[HeterogeneousTarget](#heterogeneoustarget)_ | It dynamically adjusts replicas across different ModelServing objects based on overall computing power requirements - referred to as "optimize" behavior in the code.<br />For example:<br />When dealing with two types of ModelServing objects corresponding to heterogeneous hardware resources with different computing capabilities (e.g., H100/A100), the "optimize" behavior aims to:<br />Dynamically adjust the deployment ratio of H100/A100 instances based on real-time computing power demands<br />Use integer programming and similar methods to precisely meet computing requirements<br />Maximize hardware utilization efficiency |  |  |
+| `homogeneousTarget` _[HomogeneousTarget](#homogeneoustarget)_ | Adjust the number of related instances based on specified monitoring metrics and their target values. |  |  |
 
 
 #### AutoscalingPolicyBindingStatus
@@ -260,6 +260,60 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `minRoleReplicas` _object (keys:string, values:integer)_ | MinRoleReplicas defines the minimum number of replicas required for each role<br />in gang scheduling. This map allows users to specify different<br />minimum replica requirements for different roles.<br />Notice: In practice, when determining the minTaskMember for a podGroup, it takes the minimum value between `MinRoleReplicas[role.Name]` and role.Replicas.<br />If you set:<br />gangPolicy:<br />  minRoleReplicas:<br />    Prefill: 2<br />    Decode: 2<br />And set the roles as:<br />roles:<br />  - name: P<br />    replicas: 1<br />    workerReplicas: 2<br />  - name: D<br />    replicas: 3<br />    workerReplicas: 1<br />The resulting podGroup will have minTaskMember:<br />minTaskMember:<br />  P-0: 3 (1 entry pod + 2 worker pods)<br />  D-0: 4 (1 entry pod + 3 worker pods)<br />  D-1: 4 (1 entry pod + 3 worker pods)<br />The replicase of P is min(minRoleReplicas['P'], role.Replicas) = min(2, 1) = 1<br />The replicase of D is min(minRoleReplicas['D'], role.Replicas) = min(2, 3) = 2<br />Key: role name<br />Value: minimum number of replicas required for that role |  |  |
+
+
+#### HeterogeneousTarget
+
+
+
+
+
+
+
+_Appears in:_
+- [AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `params` _[HeterogeneousTargetParam](#heterogeneoustargetparam) array_ | Parameters of multiple Model Serving Groups to be optimized. |  | MinItems: 1 <br /> |
+| `costExpansionRatePercent` _integer_ | CostExpansionRatePercent is the percentage rate at which the cost expands. | 200 | Minimum: 0 <br /> |
+
+
+#### HeterogeneousTargetParam
+
+
+
+
+
+
+
+_Appears in:_
+- [HeterogeneousTarget](#heterogeneoustarget)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `target` _[Target](#target)_ | The scaling instance configuration |  |  |
+| `cost` _integer_ | Cost is the cost associated with running this backend. |  | Minimum: 0 <br /> |
+| `minReplicas` _integer_ | MinReplicas is the minimum number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
+| `maxReplicas` _integer_ | MaxReplicas is the maximum number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
+
+
+#### HomogeneousTarget
+
+
+
+
+
+
+
+_Appears in:_
+- [AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `target` _[Target](#target)_ | Target represents the objects be monitored and scaled. |  |  |
+| `minReplicas` _integer_ | MinReplicas is the minimum number of replicas. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
+| `maxReplicas` _integer_ | MaxReplicas is the maximum number of replicas. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 
 
 #### LoraAdapter
@@ -578,43 +632,6 @@ _Appears in:_
 | `coordinator` | ModelWorkerTypeCoordinator represents a coordinator worker.<br /> |
 
 
-#### OptimizerConfiguration
-
-
-
-OptimizerConfiguration defines parameters for multi-target optimization across
-multiple ModelServing deployments with different hardware characteristics.
-
-
-
-_Appears in:_
-- [AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `params` _[OptimizerParam](#optimizerparam) array_ | Params contains the optimization parameters for each ModelServing group.<br />Each entry defines a different deployment type (e.g., different hardware) to optimize. |  | MinItems: 1 <br /> |
-| `costExpansionRatePercent` _integer_ | CostExpansionRatePercent defines the acceptable cost expansion percentage<br />when optimizing across multiple deployment types. A higher value allows more<br />flexibility in resource allocation but may increase overall costs. | 200 | Minimum: 0 <br /> |
-
-
-#### OptimizerParam
-
-
-
-OptimizerParam defines optimization parameters for a specific ModelServing deployment type.
-
-
-
-_Appears in:_
-- [OptimizerConfiguration](#optimizerconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `target` _[Target](#target)_ | Target specifies the ModelServing deployment and its monitoring configuration. |  |  |
-| `cost` _integer_ | Cost represents the relative cost factor for this deployment type.<br />Used in optimization calculations to balance performance vs. cost. |  | Minimum: 0 <br /> |
-| `minReplicas` _integer_ | MinReplicas is the minimum number of replicas to maintain for this deployment type. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
-| `maxReplicas` _integer_ | MaxReplicas is the maximum number of replicas allowed for this deployment type. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
-
-
 #### PodTemplateSpec
 
 
@@ -722,24 +739,6 @@ _Appears in:_
 | `ServingGroupRollingUpdate` | ServingGroupRollingUpdate indicates that ServingGroup replicas will be updated one by one.<br /> |
 
 
-#### ScalingConfiguration
-
-
-
-ScalingConfiguration defines the scaling parameters for a single target deployment.
-
-
-
-_Appears in:_
-- [AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `target` _[Target](#target)_ | Target specifies the ModelServing deployment to monitor and scale. |  |  |
-| `minReplicas` _integer_ | MinReplicas is the minimum number of replicas to maintain. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
-| `maxReplicas` _integer_ | MaxReplicas is the maximum number of replicas allowed. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
-
-
 #### SelectPolicyType
 
 _Underlying type:_ _string_
@@ -786,14 +785,13 @@ Target defines a ModelServing deployment that can be monitored and scaled.
 
 
 _Appears in:_
-- [OptimizerParam](#optimizerparam)
-- [ScalingConfiguration](#scalingconfiguration)
+- [HeterogeneousTargetParam](#heterogeneoustargetparam)
+- [HomogeneousTarget](#homogeneoustarget)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the ModelServing object to monitor and scale. |  |  |
-| `additionalMatchLabels` _object (keys:string, values:string)_ | AdditionalMatchLabels provides additional label selectors to refine<br />which pods within the ModelServing deployment should be monitored. |  |  |
-| `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint configures how to scrape metrics from the target pods.<br />If not specified, defaults to port 8100 and path "/metrics". |  |  |
+| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object.<br />The default target GVK is ModelServing.<br />Current supported kinds are ModelServing and ModelServing/Role. |  |  |
+| `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint is the metric source. |  |  |
 
 
 #### TopologySpreadConstraint

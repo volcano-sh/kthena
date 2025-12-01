@@ -5,7 +5,7 @@ metadata:
     workload.serving.volcano.sh/backend-name: ""
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: multi-backend-model
-    workload.serving.volcano.sh/revision: 6f5c67b457
+    workload.serving.volcano.sh/revision: d894fd6bd
     workload.serving.volcano.sh/model-uid: randomUID
   name: multi-backend-model
   namespace: dev
@@ -19,28 +19,29 @@ metadata:
 spec:
   policyRef:
     name: multi-backend-model
-  optimizerConfiguration:
+  heterogeneousTarget:
     costExpansionRatePercent: 200
     params:
       - maxReplicas: 2
         minReplicas: 0
         cost: 0
         target:
-          additionalMatchLabels:
-            modelserving.volcano.sh/role: leader
           targetRef:
             name: multi-backend-model-backend1
             kind: ModelServing
-          metricFrom: {}
+          metricEndpoint:
+            labelSelector:
+              matchLabels:
+                modelserving.volcano.sh/role: leader
       - maxReplicas: 1
         minReplicas: 0
         cost: 0
         target:
-          additionalMatchLabels:
-            modelserving.volcano.sh/role: leader
           targetRef:
             name: multi-backend-model-backend2
             kind: ModelServing
-          metricFrom: { }
-
+          metricEndpoint:
+            labelSelector:
+              matchLabels:
+                modelserving.volcano.sh/role: leader
 

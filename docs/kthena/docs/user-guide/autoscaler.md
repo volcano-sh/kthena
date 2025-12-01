@@ -4,8 +4,8 @@
 
 Kthena Autoscaler dynamically adjusts serving instances based on real-time workload metrics, ensuring optimal performance and resource utilization. The autoscaler supports two distinct configuration modes:
 
-- **Scaling Configuration**: Manages a homogeneous group of serving instances with identical configurations, ensuring stable performance while optimizing resource utilization.
-- **Optimizer Configuration**: Optimizes across heterogeneous instance types with different resource requirements and capabilities, achieving cost-efficiency through intelligent scheduling algorithms.
+- **Homogeneous Target**: Manages a group of serving instances with identical configurations, ensuring stable performance while optimizing resource utilization.
+- **Heterogeneous Target**: Optimizes across multiple instance types with different resource requirements and capabilities, achieving cost-efficiency through intelligent scheduling algorithms.
 
 Both modes leverage the same core autoscaling mechanisms but differ in their resource targeting and management approaches.
 
@@ -74,34 +74,57 @@ spec:
   policyRef:
     name: your-autoscaling-policy-name
   
-  # Select EITHER scalingConfiguration OR optimizerConfiguration mode, not both
-  scalingConfiguration:
-    # Scaling Configuration mode parameters
-  optimizerConfiguration:
-    # Optimizer Configuration mode parameters
+  # Select EITHER homogeneousTarget OR heterogeneousTarget mode, not both
+  homogeneousTarget:
+    # Homogeneous Target mode configuration
+  heterogeneousTarget:
+    # Heterogeneous Target mode configuration
 ```
 
-#### Scaling Configuration Mode
+##### Homogeneous Target Mode
 
 Configures autoscaling for a single instance type (homogeneous scaling):
 
-**Target Configuration**:
-- **targetRef**: References the target serving instance
-  - **name**: Name of the target resource to scale
-- **additionalMatchLabels**: Optional labels to refine target resource selection
-- **metricEndpoint**: Optional custom metric collection endpoint
-  - **uri**: Path to metrics endpoint on target pods (default: "/metrics")
-  - **port**: Port number where metrics are exposed (default: 8100)
+- **target**:
+  - **targetRef**: References the target serving instance
+    - **kind**: Supported values: `ModelServing` or `ModelServing/Role`
+    - **name**: For `ModelServing`, use the serving name; for `ModelServing/Role`, use `servingName/roleName` format, e.g. `example-model-serving/prefill`
+  - **metricEndpoint**: Optional endpoint configuration for custom metric collection
+    - **uri**: Path to the metrics endpoint on the target pods (default: "/metrics")
+    - **port**: Port number where metrics are exposed on the target pods (default: 8100)
+    - **labelSelector**: Optional label selector to filter target pods for this instance type
+- **minReplicas**: Minimum number of instances to maintain, ensuring baseline availability
+  - Must be greater than or equal to 1
+  - Sets a floor on scaling operations to prevent scaling down below this threshold
+- **maxReplicas**: Maximum number of instances allowed, controlling resource consumption
+  - Must be greater than or equal to 1
+  - Sets a ceiling on scaling operations to prevent excessive resource allocation
 
-**Scaling Boundaries**:
-- **minReplicas**: Minimum number of instances to maintain (≥ 1)
-  - Ensures baseline availability and prevents scaling below this threshold
-- **maxReplicas**: Maximum number of instances allowed (≥ 1)
-  - Controls resource consumption and prevents excessive allocation
+##### Heterogeneous Target Mode
 
 #### Optimizer Configuration Mode
 
-Configures autoscaling across multiple instance types with different capabilities and costs (heterogeneous scaling):
+- **costExpansionRatePercent**: Defines the maximum acceptable cost increase percentage (default: 200)
+  - When scaling, the algorithm will consider instance combinations that don't exceed the base cost plus this percentage
+  - Higher values allow more flexibility in instance selection for better performance
+  - Lower values prioritize strict cost control
+- **params**: Array of configuration parameters for each instance type in the optimizer group (at least 1 is required):
+  - **target**:
+  - **targetRef**: References the specific instance type
+      - **kind**: Supported values: `ModelServing` or `ModelServing/Role`
+      - **name**: For `ModelServing`, use the serving name; for `ModelServing/Role`, use `servingName/roleName` format, e.g. `example-model-serving/gpu`
+    - **metricEndpoint**: Optional endpoint configuration for custom metric collection
+      - **uri**: Path to the metrics endpoint on the target pods (default: "/metrics")
+      - **port**: Port number where metrics are exposed on the target pods (default: 8100)
+      - **labelSelector**: Optional label selector to filter target pods for this instance type
+  - **minReplicas**: Minimum number of instances for this specific type
+    - Ensures availability of this instance type regardless of load conditions
+    - Support 0
+  - **maxReplicas**: Maximum number of instances for this specific type
+    - Caps resource allocation for this particular instance type
+  - **cost**: Relative or actual cost metric for this instance type
+    - Used by the optimization algorithm to balance performance and cost
+    - Higher values represent more expensive instance types
 
 **Cost Optimization**:
 - **costExpansionRatePercent**: Maximum acceptable cost increase percentage (default: 200)
@@ -123,11 +146,7 @@ Configures autoscaling across multiple instance types with different capabilitie
   - Used by optimization algorithm to balance performance and cost
   - Higher values represent more expensive instance types
 
-The optimization algorithm automatically determines the optimal combination of instance types to balance performance against cost constraints, while respecting the defined boundaries for each instance type.
-
-### Configuration Examples
-
-#### Scaling Configuration Example
+#### Homogeneous Target Example
 
 This example demonstrates homogeneous scaling for a single instance type:
 
@@ -160,9 +179,10 @@ metadata:
 spec:
   policyRef:
     name: scaling-policy
-  scalingConfiguration:
+  homogeneousTarget:
     target:
       targetRef:
+        kind: ModelServing
         name: example-model-serving
       # Optional: Customize metric collection endpoint
       metricEndpoint:
@@ -181,9 +201,42 @@ spec:
 - **Conservative Scale-down**: 5-minute stabilization window ensures load reduction is sustained
 - **Custom Metrics**: Collects from `/custom-metrics` on port 9090 instead of defaults
 
-#### Optimizer Configuration Example
+#### Role-Level Target Example
 
-This example demonstrates heterogeneous scaling across multiple instance types with cost optimization:
+The following demonstrates binding directly to a specific role within a `ModelServing` (role-level scaling):
+
+```yaml
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: role-binding
+spec:
+  policyRef:
+    name: scaling-policy
+  homogeneousTarget:
+    target:
+      targetRef:
+        kind: ModelServing/Role
+        name: example-model-serving/prefill   # format: servingName/roleName
+    minReplicas: 1
+    maxReplicas: 5
+```
+
+Behavior details:
+- When the target is `ModelServing`, the controller updates the target object's `spec.replicas`
+- When the target is `ModelServing/Role`, the controller updates `replicas` for the entry in `spec.template.roles[]` whose `name` matches the role
+- If the current replica count already matches the recommended value, the controller skips the update to avoid unnecessary API calls
+
+For role-level scaling, check the role replica within the `ModelServing`:
+
+```bash
+kubectl get modelservers.networking.serving.volcano.sh <serving-name> -o jsonpath='{range .spec.template.roles[?(@.name=="<role-name>")]}{.replicas}{end}'
+```
+
+
+#### Heterogeneous Target Example
+
+The following configuration demonstrates optimizer configuration across multiple instance types:
 
 ```yaml showLineNumbers
 apiVersion: workload.serving.volcano.sh/v1alpha1
@@ -214,17 +267,19 @@ metadata:
 spec:
   policyRef:
     name: optimizer-policy
-  optimizerConfiguration:
+  heterogeneousTarget:
     costExpansionRatePercent: 20
     params:
     - target:
         targetRef:
+          kind: ModelServing
           name: gpu-serving-instance
       minReplicas: 1
       maxReplicas: 5
       cost: 100
     - target:
         targetRef:
+          kind: ModelServing
           name: cpu-serving-instance
       minReplicas: 2
       maxReplicas: 8

@@ -43,7 +43,7 @@ spec:
             description: AutoscalingPolicyBindingSpec defines the desired state of
               AutoscalingPolicyBinding.
             properties:
-              optimizerConfiguration:
+              heterogeneousTarget:
                 description: |-
                   OptimizerConfiguration enables multi-target optimization that dynamically allocates
                   replicas across heterogeneous ModelServing deployments based on overall compute requirements.
@@ -93,18 +93,61 @@ spec:
                           description: Target specifies the ModelServing deployment
                             and its monitoring configuration.
                           properties:
-                            additionalMatchLabels:
-                              additionalProperties:
-                                type: string
-                              description: |-
-                                AdditionalMatchLabels provides additional label selectors to refine
-                                which pods within the ModelServing deployment should be monitored.
-                              type: object
                             metricEndpoint:
                               description: |-
                                 MetricEndpoint configures how to scrape metrics from the target pods.
                                 If not specified, defaults to port 8100 and path "/metrics".
                               properties:
+                                labelSelector:
+                                  description: |-
+                                    LabelSelector is the additional selector to filter the pods exposing metric endpoints.
+                                    For example, Ray Leader Pod exposes the interface for retrieving monitoring metrics, but ray worker pods do not, so the labelSelector will be added `ray.io/ray-node-type: 'raylet'`.
+                                    When the targetRef kind is `ModelServing` or `ModelServing/Role`, the labelSelector will be added `modelserving.volcano.sh/entry: 'true'` default.
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      items:
+                                        description: |-
+                                          A label selector requirement is a selector that contains values, a key, and an operator that
+                                          relates the key and values.
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            type: string
+                                          operator:
+                                            description: |-
+                                              operator represents a key's relationship to a set of values.
+                                              Valid operators are In, NotIn, Exists and DoesNotExist.
+                                            type: string
+                                          values:
+                                            description: |-
+                                              values is an array of string values. If the operator is In or NotIn,
+                                              the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This array is replaced during a strategic
+                                              merge patch.
+                                            items:
+                                              type: string
+                                            type: array
+                                            x-kubernetes-list-type: atomic
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    matchLabels:
+                                      additionalProperties:
+                                        type: string
+                                      description: |-
+                                        matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                        operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                      type: object
+                                  type: object
+                                  x-kubernetes-map-type: atomic
                                 port:
                                   default: 8100
                                   description: Port is the network port where metrics
@@ -118,8 +161,10 @@ spec:
                                   type: string
                               type: object
                             targetRef:
-                              description: TargetRef references the ModelServing object
-                                to monitor and scale.
+                              description: |-
+                                TargetRef references the target object.
+                                The default target GVK is ModelServing.
+                                Current supported kinds are ModelServing and ModelServing/Role.
                               properties:
                                 apiVersion:
                                   description: API version of the referent.
@@ -171,25 +216,9 @@ spec:
                     minItems: 1
                     type: array
                 type: object
-              policyRef:
-                description: PolicyRef references the AutoscalingPolicy that defines
-                  the scaling rules and metrics.
-                properties:
-                  name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                    type: string
-                type: object
-                x-kubernetes-map-type: atomic
-              scalingConfiguration:
-                description: |-
-                  ScalingConfiguration defines traditional autoscaling behavior that adjusts replica counts
-                  based on monitoring metrics and target values for a single ModelServing deployment.
+              homogeneousTarget:
+                description: Adjust the number of related instances based on specified
+                  monitoring metrics and their target values.
                 properties:
                   maxReplicas:
                     description: MaxReplicas is the maximum number of replicas allowed.
@@ -208,18 +237,60 @@ spec:
                     description: Target specifies the ModelServing deployment to monitor
                       and scale.
                     properties:
-                      additionalMatchLabels:
-                        additionalProperties:
-                          type: string
-                        description: |-
-                          AdditionalMatchLabels provides additional label selectors to refine
-                          which pods within the ModelServing deployment should be monitored.
-                        type: object
                       metricEndpoint:
                         description: |-
                           MetricEndpoint configures how to scrape metrics from the target pods.
                           If not specified, defaults to port 8100 and path "/metrics".
                         properties:
+                          labelSelector:
+                            description: |-
+                              LabelSelector is the additional selector to filter the pods exposing metric endpoints.
+                              For example, Ray Leader Pod exposes the interface for retrieving monitoring metrics, but ray worker pods do not, so the labelSelector will be added `ray.io/ray-node-type: 'raylet'`.
+                              When the targetRef kind is `ModelServing` or `ModelServing/Role`, the labelSelector will be added `modelserving.volcano.sh/entry: 'true'` default.
+                            properties:
+                              matchExpressions:
+                                description: matchExpressions is a list of label selector
+                                  requirements. The requirements are ANDed.
+                                items:
+                                  description: |-
+                                    A label selector requirement is a selector that contains values, a key, and an operator that
+                                    relates the key and values.
+                                  properties:
+                                    key:
+                                      description: key is the label key that the selector
+                                        applies to.
+                                      type: string
+                                    operator:
+                                      description: |-
+                                        operator represents a key's relationship to a set of values.
+                                        Valid operators are In, NotIn, Exists and DoesNotExist.
+                                      type: string
+                                    values:
+                                      description: |-
+                                        values is an array of string values. If the operator is In or NotIn,
+                                        the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                        the values array must be empty. This array is replaced during a strategic
+                                        merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                  required:
+                                  - key
+                                  - operator
+                                  type: object
+                                type: array
+                                x-kubernetes-list-type: atomic
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                description: |-
+                                  matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                  map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                  operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                type: object
+                            type: object
+                            x-kubernetes-map-type: atomic
                           port:
                             default: 8100
                             description: Port is the network port where metrics are
@@ -233,8 +304,10 @@ spec:
                             type: string
                         type: object
                       targetRef:
-                        description: TargetRef references the ModelServing object
-                          to monitor and scale.
+                        description: |-
+                          TargetRef references the target object.
+                          The default target GVK is ModelServing.
+                          Current supported kinds are ModelServing and ModelServing/Role.
                         properties:
                           apiVersion:
                             description: API version of the referent.
@@ -283,13 +356,28 @@ spec:
                 - maxReplicas
                 - minReplicas
                 type: object
+              policyRef:
+                description: PolicyRef references the autoscaling policy to be optimized
+                  scaling base on multiple targets.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
             required:
             - policyRef
             type: object
             x-kubernetes-validations:
-            - message: Either optimizerConfiguration or scalingConfiguration must
-                be set, but not both.
-              rule: has(self.optimizerConfiguration) != has(self.scalingConfiguration)
+            - message: Either heterogeneousTarget or homogeneousTarget must be set,
+                but not both.
+              rule: has(self.heterogeneousTarget) != has(self.homogeneousTarget)
           status:
             description: AutoscalingPolicyBindingStatus defines the observed state
               of AutoscalingPolicyBinding.
