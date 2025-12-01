@@ -1852,3 +1852,236 @@ func TestScaleUpRoles(t *testing.T) {
 		})
 	}
 }
+
+// TestScaleDownServingGroups tests the scaleDownServingGroups function with non-binpack scenarios
+func TestScaleDownServingGroups(t *testing.T) {
+	tests := []struct {
+		name                   string
+		existingIndices        []int    // Indices of existing ServingGroups
+		expectedCount          int      // Target count after scale down
+		expectedRemainingNames []string // Expected remaining ServingGroup names (without test prefix)
+	}{
+		{
+			name:                   "scale down from 4 to 2 - delete highest indices",
+			existingIndices:        []int{0, 1, 2, 3},
+			expectedCount:          2,
+			expectedRemainingNames: []string{"0", "1"}, // Higher indices deleted first
+		},
+		{
+			name:                   "scale down from 3 to 1",
+			existingIndices:        []int{0, 1, 2},
+			expectedCount:          1,
+			expectedRemainingNames: []string{"0"},
+		},
+		{
+			name:                   "scale down from 5 to 3",
+			existingIndices:        []int{0, 1, 2, 3, 4},
+			expectedCount:          3,
+			expectedRemainingNames: []string{"0", "1", "2"},
+		},
+		{
+			name:                   "no scale down needed - equal count",
+			existingIndices:        []int{0, 1},
+			expectedCount:          2,
+			expectedRemainingNames: []string{"0", "1"},
+		},
+		{
+			name:                   "scale down with non-continuous indices",
+			existingIndices:        []int{0, 2, 5, 8},
+			expectedCount:          2,
+			expectedRemainingNames: []string{"0", "2"}, // Higher indices (5, 8) deleted first
+		},
+	}
+
+	for idx, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			assert.NoError(t, err)
+
+			miName := fmt.Sprintf("test-scaledown-%d", idx)
+			mi := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      miName,
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
+					SchedulerName: "volcano",
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "prefill-container",
+												Image: "test-image:latest",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+				},
+			}
+
+			// Pre-populate the store with existing ServingGroups
+			for _, ordinal := range tt.existingIndices {
+				controller.store.AddServingGroup(utils.GetNamespaceName(mi), ordinal, "test-revision")
+			}
+
+			// Build the servingGroupList to pass to scaleDownServingGroups
+			existingGroups := make([]datastore.ServingGroup, len(tt.existingIndices))
+			for i, ordinal := range tt.existingIndices {
+				existingGroups[i] = datastore.ServingGroup{
+					Name: utils.GenerateServingGroupName(miName, ordinal),
+				}
+			}
+
+			// Call scaleDownServingGroups directly (no binpack - all scores are 0)
+			err = controller.scaleDownServingGroups(context.Background(), mi, existingGroups, tt.expectedCount)
+			assert.NoError(t, err)
+
+			// Verify the results
+			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+			assert.NoError(t, err)
+
+			// Verify remaining group count
+			assert.Equal(t, tt.expectedCount, len(groups), "Remaining group count should match expected")
+
+			// Verify remaining group names
+			actualNames := make([]string, len(groups))
+			for i, g := range groups {
+				// Extract just the index suffix from the name
+				_, idx := utils.GetParentNameAndOrdinal(g.Name)
+				actualNames[i] = fmt.Sprintf("%d", idx)
+			}
+			assert.ElementsMatch(t, tt.expectedRemainingNames, actualNames, "Remaining group indices should match expected")
+		})
+	}
+}
+
+// TestScaleDownRoles tests the scaleDownRoles function with non-binpack scenarios
+func TestScaleDownRoles(t *testing.T) {
+	tests := []struct {
+		name                   string
+		existingIndices        []int    // Indices of existing Roles
+		expectedCount          int      // Target count after scale down
+		expectedRemainingNames []string // Expected remaining Role names (without test prefix)
+	}{
+		{
+			name:                   "scale down from 4 to 2 - delete highest indices",
+			existingIndices:        []int{0, 1, 2, 3},
+			expectedCount:          2,
+			expectedRemainingNames: []string{"prefill-0", "prefill-1"}, // Higher indices deleted first
+		},
+		{
+			name:                   "scale down from 3 to 1",
+			existingIndices:        []int{0, 1, 2},
+			expectedCount:          1,
+			expectedRemainingNames: []string{"prefill-0"},
+		},
+		{
+			name:                   "scale down from 5 to 3",
+			existingIndices:        []int{0, 1, 2, 3, 4},
+			expectedCount:          3,
+			expectedRemainingNames: []string{"prefill-0", "prefill-1", "prefill-2"},
+		},
+		{
+			name:                   "no scale down needed - equal count",
+			existingIndices:        []int{0, 1},
+			expectedCount:          2,
+			expectedRemainingNames: []string{"prefill-0", "prefill-1"},
+		},
+		{
+			name:                   "scale down with non-continuous indices",
+			existingIndices:        []int{0, 2, 5, 8},
+			expectedCount:          2,
+			expectedRemainingNames: []string{"prefill-0", "prefill-2"}, // Higher indices (5, 8) deleted first
+		},
+	}
+
+	for idx, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			assert.NoError(t, err)
+
+			miName := fmt.Sprintf("test-role-scaledown-%d", idx)
+			groupName := utils.GenerateServingGroupName(miName, 0)
+			mi := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      miName,
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:      ptr.To[int32](1),
+					SchedulerName: "volcano",
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To[int32](int32(tt.expectedCount)),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "prefill-container",
+												Image: "test-image:latest",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+				},
+			}
+
+			targetRole := mi.Spec.Template.Roles[0]
+
+			// Pre-populate the store with ServingGroup and Roles
+			controller.store.AddServingGroup(utils.GetNamespaceName(mi), 0, "test-revision")
+			for _, ordinal := range tt.existingIndices {
+				controller.store.AddRole(utils.GetNamespaceName(mi), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal), "test-revision")
+			}
+
+			// Build the roleList to pass to scaleDownRoles
+			existingRoles := make([]datastore.Role, len(tt.existingIndices))
+			for i, ordinal := range tt.existingIndices {
+				existingRoles[i] = datastore.Role{
+					Name: utils.GenerateRoleID("prefill", ordinal),
+				}
+			}
+
+			// Call scaleDownRoles directly (no binpack - all scores are 0)
+			controller.scaleDownRoles(context.Background(), mi, groupName, targetRole, existingRoles, tt.expectedCount)
+
+			// Verify the results
+			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(mi), groupName, "prefill")
+			assert.NoError(t, err)
+
+			// Verify remaining role count
+			assert.Equal(t, tt.expectedCount, len(roles), "Remaining role count should match expected")
+
+			// Verify remaining role names
+			actualNames := make([]string, len(roles))
+			for i, r := range roles {
+				actualNames[i] = r.Name
+			}
+			assert.ElementsMatch(t, tt.expectedRemainingNames, actualNames, "Remaining role names should match expected")
+		})
+	}
+}

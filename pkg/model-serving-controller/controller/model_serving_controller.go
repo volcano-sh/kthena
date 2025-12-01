@@ -634,7 +634,7 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 		}
 	}
 
-	// Sort ServingGroups by score in descending order, and by index in descending order if scores are equal.
+	// Sort ServingGroups by score in descending order, and by index in ascending order if scores are equal.
 	// This puts items with lower scores (or higher indices when scores are equal) at the end.
 	// Skip sorting when all scores are 0 because servingGroupList is already sorted by index in ascending order.
 	if needsSort {
@@ -642,14 +642,13 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 			if a.Score != b.Score {
 				return cmp.Compare(b.Score, a.Score)
 			}
-			return cmp.Compare(b.Index, a.Index)
+			return cmp.Compare(a.Index, b.Index)
 		})
 	}
 
 	var allErrors []error
-	toDeleteCount := len(servingGroupList) - expectedCount
 	// Delete items from end to front. Items at the end have lower scores (or higher indices when scores are 0).
-	for i := len(servingGroupScores) - 1; i >= len(servingGroupScores)-toDeleteCount; i-- {
+	for i := len(servingGroupScores) - 1; i >= expectedCount; i-- {
 		targetName := servingGroupScores[i].Name
 		c.DeleteServingGroup(mi, targetName)
 		if err := c.gangManager.DeletePodGroupWhenServingGroupDeleted(ctx, mi, targetName); err != nil {
@@ -827,7 +826,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 		}
 	}
 
-	// Sort Roles by score in descending order, and by index in descending order if scores are equal.
+	// Sort Roles by score in descending order, and by index in ascending order if scores are equal.
 	// This puts items with lower scores (or higher indices when scores are equal) at the end.
 	// Skip sorting when all scores are 0 because roleList is already sorted by index in ascending order.
 	if needsSort {
@@ -835,7 +834,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 			if a.Score != b.Score {
 				return cmp.Compare(b.Score, a.Score)
 			}
-			return cmp.Compare(b.Index, a.Index)
+			return cmp.Compare(a.Index, b.Index)
 		})
 	}
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
@@ -847,9 +846,8 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 		}
 	}
 
-	toDeleteCount := len(roleList) - expectedCount
 	// Delete items from end to front. Items at the end have lower scores (or higher indices when scores are 0).
-	for i := len(roleScores) - 1; i >= len(roleScores)-toDeleteCount; i-- {
+	for i := len(roleScores) - 1; i >= expectedCount; i-- {
 		targetName := roleScores[i].Name
 		c.DeleteRole(ctx, mi, groupName, targetRole.Name, targetName)
 	}
