@@ -105,7 +105,7 @@ func (s *store) GetServingGroupByModelServing(modelServingName types.NamespacedN
 	// sort ServingGroups by index
 	servingGroupsSlice := make([]ServingGroup, 0, len(servingGroups))
 	for _, servingGroup := range servingGroups {
-		// This is o clone to prevent r/w conflict later
+		// This is a clone to prevent r/w conflict later
 		servingGroupsSlice = append(servingGroupsSlice, *servingGroup)
 	}
 	s.mutex.RUnlock()
