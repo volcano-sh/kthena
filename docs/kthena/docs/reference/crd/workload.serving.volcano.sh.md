@@ -226,8 +226,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `instances` _integer_ | Instances defines the maximum absolute number of instances to scale in a single operation. | 1 | Minimum: 0 <br /> |
-| `percent` _integer_ | Percent defines the maximum percentage of current instances to scale in a single operation. | 100 | Maximum: 1000 <br />Minimum: 0 <br /> |
+| `instances` _integer_ | Instances defines the maximum absolute number of instances to scale per period. | 1 | Minimum: 0 <br /> |
+| `percent` _integer_ | Percent defines the maximum percentage of current instances to scale per period. | 100 | Maximum: 1000 <br />Minimum: 0 <br /> |
 | `selectPolicy` _[SelectPolicyType](#selectpolicytype)_ | SelectPolicy determines the selection strategy for scaling operations.<br />'Or' means scaling is performed if either the Percent or Instances requirement is met.<br />'And' means scaling is performed only if both Percent and Instances requirements are met. | Or | Enum: [Or And] <br /> |
 
 

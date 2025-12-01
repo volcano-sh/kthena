@@ -54,14 +54,14 @@ spec:
                           instances:
                             default: 1
                             description: Instances defines the maximum absolute number
-                              of instances to scale in a single operation.
+                              of instances to scale per period.
                             format: int32
                             minimum: 0
                             type: integer
                           percent:
                             default: 100
                             description: Percent defines the maximum percentage of
-                              current instances to scale in a single operation.
+                              current instances to scale per period.
                             format: int32
                             maximum: 1000
                             minimum: 0
@@ -133,14 +133,14 @@ spec:
                               instances:
                                 default: 1
                                 description: Instances defines the maximum absolute
-                                  number of instances to scale in a single operation.
+                                  number of instances to scale per period.
                                 format: int32
                                 minimum: 0
                                 type: integer
                               percent:
                                 default: 100
                                 description: Percent defines the maximum percentage
-                                  of current instances to scale in a single operation.
+                                  of current instances to scale per period.
                                 format: int32
                                 maximum: 1000
                                 minimum: 0
@@ -229,14 +229,14 @@ spec:
                                 instances:
                                   default: 1
                                   description: Instances defines the maximum absolute
-                                    number of instances to scale in a single operation.
+                                    number of instances to scale per period.
                                   format: int32
                                   minimum: 0
                                   type: integer
                                 percent:
                                   default: 100
                                   description: Percent defines the maximum percentage
-                                    of current instances to scale in a single operation.
+                                    of current instances to scale per period.
                                   format: int32
                                   maximum: 1000
                                   minimum: 0
@@ -310,15 +310,14 @@ spec:
                                     instances:
                                       default: 1
                                       description: Instances defines the maximum absolute
-                                        number of instances to scale in a single operation.
+                                        number of instances to scale per period.
                                       format: int32
                                       minimum: 0
                                       type: integer
                                     percent:
                                       default: 100
                                       description: Percent defines the maximum percentage
-                                        of current instances to scale in a single
-                                        operation.
+                                        of current instances to scale per period.
                                       format: int32
                                       maximum: 1000
                                       minimum: 0
