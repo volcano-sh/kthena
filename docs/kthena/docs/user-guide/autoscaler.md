@@ -204,21 +204,24 @@ spec:
   homogeneousTarget:
     target:
       targetRef:
-        kind: ModelServing/Role
-        name: example-model-serving/prefill   # format: servingName/roleName
+        kind: ModelServing
+        name: example-model-serving
+      subTargets:
+        kind: Role
+        name: prefill
     minReplicas: 1
     maxReplicas: 5
 ```
 
 **Behavior Details:**
 - When the target is `ModelServing`, the controller updates the target object's `spec.replicas`
-- When the target is `ModelServing/Role`, the controller updates `replicas` for the entry in `spec.template.roles[]` whose `name` matches the role
+- When `subTargets.kind` is `Role`, the controller updates `replicas` for the entry in `spec.template.roles[]` whose `name` matches the role
 - If the current replica count already matches the recommended value, the controller skips the update to avoid unnecessary API calls
 
 For role-level scaling, check the role replica within the `ModelServing`:
 
 ```bash
-kubectl get modelservers.networking.serving.volcano.sh <serving-name> -o jsonpath='{range .spec.template.roles[?(@.name=="<role-name>")]}{.replicas}{end}'
+kubectl get modelservings.workload.serving.volcano.sh <serving-name> -o jsonpath='{range .spec.template.roles[?(@.name=="<role-name>")]}{.replicas}{end}'
 ```
 
 #### Heterogeneous Target Example
