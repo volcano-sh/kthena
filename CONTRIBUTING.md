@@ -117,6 +117,27 @@ To make it easier for your PR to receive reviews, consider the reviewers will ne
 * Subsystem owners review and approve changes in their areas
 * Major design decisions go through design docs in `docs/proposal/`
 
+## 🤖 CI/CD and Status Checks
+
+Kthena uses GitHub Actions for continuous integration. Several workflows use path filters to optimize CI runs:
+
+* `go-tests.yml` - Runs only when Go code changes
+* `python-tests.yml` - Runs only when Python code changes
+* `docs-tests.yml` - Runs only when documentation changes
+* `e2e-tests.yml` - Runs when relevant code or configuration changes
+
+### Status Check Pattern
+
+Each workflow includes a `status-check` job that acts as a reliable status gate for branch protection rules. This job:
+
+* Always runs (even when the main job is skipped due to path filters)
+* Passes if the main job succeeds OR is skipped
+* Fails only if the main job actually fails
+
+This ensures that required status checks don't block PRs when workflows are legitimately skipped due to path filters.
+
+**For Contributors**: When adding new workflows with path filters, include a similar status-check job to ensure they work correctly with branch protection rules.
+
 ## 🛠 Tooling
 
 * `make lint` runs linters (`golangci-lint`)
