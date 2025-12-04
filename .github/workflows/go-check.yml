@@ -55,3 +55,21 @@ jobs:
         shell: bash
         run: |
           make gen-check
+
+  # This job is used as a status check for branch protection
+  # It will pass if the build job succeeds or is skipped (due to path filters)
+  status-check:
+    name: Go Check Status Check
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Check build job status
+        run: |
+          if [ "${{ needs.build.result }}" = "success" ] || [ "${{ needs.build.result }}" = "skipped" ]; then
+            echo "Go check passed or was skipped"
+            exit 0
+          else
+            echo "Go check failed"
+            exit 1
+          fi
