@@ -40,6 +40,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: licenses-lint
     if: always()
+    permissions:
+      contents: read
     steps:
       - name: Check lint job status
         run: |

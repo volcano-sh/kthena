@@ -63,6 +63,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: always()
+    permissions:
+      contents: read
     steps:
       - name: Check build job status
         run: |
