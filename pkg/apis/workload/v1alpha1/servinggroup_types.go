@@ -22,34 +22,21 @@ import (
 )
 
 // GangPolicy defines the gang scheduling configuration.
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minRoleReplicas) || has(self.minRoleReplicas)", message="minRoleReplicas is required once set"
 type GangPolicy struct {
 	// MinRoleReplicas defines the minimum number of replicas required for each role
-	// in gang scheduling. This map allows users to specify different
-	// minimum replica requirements for different roles.
-	// Notice: In practice, when determining the minTaskMember for a podGroup, it takes the minimum value between `MinRoleReplicas[role.Name]` and role.Replicas.
-	// If you set:
+	// in gang scheduling, pods in each role are strictly gang required.
+	// This map allows users to specify different minimum replica requirements for different roles.
+	// If this field is not set, all roles in the ServingGroup are considered gang required by default.
+	// For example if you specify a 2P(prefill) 4D(decode) serving group and set the below gangPolicy:
+	// ```yaml
 	// gangPolicy:
 	//   minRoleReplicas:
-	//     Prefill: 2
-	//     Decode: 2
-	// And set the roles as:
-	// roles:
-	//   - name: P
-	//     replicas: 1
-	//     workerReplicas: 2
-	//   - name: D
-	//     replicas: 3
-	//     workerReplicas: 1
-	// The resulting podGroup will have minTaskMember:
-	// minTaskMember:
-	//   P-0: 3 (1 entry pod + 2 worker pods)
-	//   D-0: 4 (1 entry pod + 3 worker pods)
-	//   D-1: 4 (1 entry pod + 3 worker pods)
-	// The replicase of P is min(minRoleReplicas['P'], role.Replicas) = min(2, 1) = 1
-	// The replicase of D is min(minRoleReplicas['D'], role.Replicas) = min(2, 3) = 2
-	// Key: role name
-	// Value: minimum number of replicas required for that role
+	//     prefill: 1
+	//     decode: 1
+	// ```
+	// It will result in the following behavior:
+	// At least one prefill and one decode must be scheduled before any of the pods in the serving group can run.
+	// And pods within a role must be scheduled together.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="minRoleReplicas is immutable"
 	MinRoleReplicas map[string]int32 `json:"minRoleReplicas,omitempty"`
