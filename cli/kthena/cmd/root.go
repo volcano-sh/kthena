@@ -28,6 +28,8 @@ var rootCmd = &cobra.Command{
 	Short: "Kthena CLI for managing AI inference workloads",
 	Long: `kthena is a CLI tool for managing Kthena AI inference workloads.
 
+For detailed documentation, visit https://kthena.volcano.sh/
+
 It allows you to:
 - Create manifests from predefined templates with custom values
 - List and view Kthena resources in Kubernetes clusters

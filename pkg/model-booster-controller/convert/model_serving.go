@@ -374,11 +374,17 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 	return nil, fmt.Errorf("not support prefix in CacheURI: %s", backend.CacheURI)
 }
 
+// GetCachePath gets the path from string after "://". For example, for "pvc://my-pvc", it returns "/my-pvc".
 func GetCachePath(path string) string {
 	if path == "" || !strings.Contains(path, URIPrefixSeparator) {
 		return ""
 	}
-	return strings.Split(path, URIPrefixSeparator)[1]
+	s := strings.Split(path, URIPrefixSeparator)[1]
+	s = strings.Trim(s, "/")
+	builder := strings.Builder{}
+	builder.WriteString("/")
+	builder.WriteString(s)
+	return builder.String()
 }
 
 func getVolumeName(backendName string) string {
