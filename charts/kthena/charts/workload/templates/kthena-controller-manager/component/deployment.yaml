@@ -59,3 +59,7 @@ spec:
             secretName: {{ .Values.controllerManager.webhook.tls.certSecretName }}
             optional: true
       serviceAccountName: kthena-controller-manager
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
