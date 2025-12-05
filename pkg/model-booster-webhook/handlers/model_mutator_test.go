@@ -33,19 +33,17 @@ func TestCreatePatch(t *testing.T) {
 		},
 		Spec: v1alpha1.ModelBoosterSpec{
 			AutoscalingPolicy: &v1alpha1.AutoscalingPolicySpec{},
-			Backends: []v1alpha1.ModelBackend{
-				{
-					Name:        "backend1",
-					Type:        "vLLM",
-					ModelURI:    "hf://test/model",
-					MinReplicas: 1,
-					MaxReplicas: 10,
-					Workers: []v1alpha1.ModelWorker{
-						{
-							Type:     "server",
-							Image:    "test-image",
-							Replicas: 1,
-						},
+			Backend: v1alpha1.ModelBackend{
+				Name:        "backend1",
+				Type:        "vLLM",
+				ModelURI:    "hf://test/model",
+				MinReplicas: 1,
+				MaxReplicas: 10,
+				Workers: []v1alpha1.ModelWorker{
+					{
+						Type:     "server",
+						Image:    "test-image",
+						Replicas: 1,
 					},
 				},
 			},
@@ -97,19 +95,17 @@ func TestCreatePatchNoChanges(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: v1alpha1.ModelBoosterSpec{
-			Backends: []v1alpha1.ModelBackend{
-				{
-					Name:        "backend1",
-					Type:        "vLLM",
-					ModelURI:    "hf://test/model",
-					MinReplicas: 1,
-					MaxReplicas: 10,
-					Workers: []v1alpha1.ModelWorker{
-						{
-							Type:     "server",
-							Image:    "test-image",
-							Replicas: 1,
-						},
+			Backend: v1alpha1.ModelBackend{
+				Name:        "backend1",
+				Type:        "vLLM",
+				ModelURI:    "hf://test/model",
+				MinReplicas: 1,
+				MaxReplicas: 10,
+				Workers: []v1alpha1.ModelWorker{
+					{
+						Type:     "server",
+						Image:    "test-image",
+						Replicas: 1,
 					},
 				},
 			},

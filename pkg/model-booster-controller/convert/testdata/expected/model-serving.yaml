@@ -6,7 +6,7 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: 75dd7c596d
+    workload.serving.volcano.sh/revision: 69d86dd864
   name: test-model-backend1
   namespace: default
   ownerReferences:
@@ -30,7 +30,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: test-model
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 75dd7c596d
+              workload.serving.volcano.sh/revision: 69d86dd864
           spec:
             containers:
               - args:
@@ -102,11 +102,7 @@ spec:
                     --model /tmp/test/13a7c4d58031cdc502ca1bb4a592f2b9 --block-size 128
                     --gpu-memory-utilization 0.9 --max-model-len 32768 --served-model-name deepseek-v3
                     --tensor-parallel-size 2 --trust-remote-code --distributed_executor_backend ray
-                  - --kv-events-config
-                  - '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
-                  - --enable-lora
-                  - --lora-modules
-                  - lora-sql=/tmp/test/11e9a15be1e19ff056520bf67eaeb688
+                  
                 image: vllm-server:latest
                 lifecycle:
                   preStop:
@@ -166,7 +162,7 @@ spec:
                     path: /health
                     port: 8000
                     scheme: HTTP
-                  initialDelaySeconds: 90
+                  initialDelaySeconds: 180
                   periodSeconds: 5
                   successThreshold: 1
                   timeoutSeconds: 1
@@ -196,25 +192,7 @@ spec:
                 volumeMounts:
                   - mountPath: /tmp/test
                     name: backend1-weights
-              - args:
-                  - --source
-                  - s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend-lora
-                  - --output-dir
-                  - /tmp/test/11e9a15be1e19ff056520bf67eaeb688
-                env:
-                  - name: ENDPOINT
-                    value: https://obs.test.com
-                  - name: RUNTIME_PORT
-                    value: "8900"
-                envFrom:
-                  - secretRef:
-                      name: "test-secret"
-                image: kthena/downloader:latest
-                name: test-model-lora-downloader-0
-                resources: { }
-                volumeMounts:
-                  - mountPath: /tmp/test
-                    name: backend1-weights
+              
             terminationGracePeriodSeconds: 300
             volumes:
               - hostPath:
@@ -266,25 +244,7 @@ spec:
                 volumeMounts:
                   - mountPath: /tmp/test
                     name: backend1-weights
-              - args:
-                  - --source
-                  - s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend-lora
-                  - --output-dir
-                  - /tmp/test/11e9a15be1e19ff056520bf67eaeb688
-                env:
-                  - name: ENDPOINT
-                    value: https://obs.test.com
-                  - name: RUNTIME_PORT
-                    value: "8900"
-                envFrom:
-                  - secretRef:
-                      name: "test-secret"
-                image: kthena/downloader:latest
-                name: test-model-lora-downloader-0
-                resources: { }
-                volumeMounts:
-                  - mountPath: /tmp/test
-                    name: backend1-weights
+              
             volumes:
               - hostPath:
                   path: /tmp/test

@@ -39,11 +39,9 @@ func (mc *ModelBoosterController) createOrUpdateAutoscalingPolicyAndBinding(ctx 
 			return err
 		}
 	} else {
-		// Create autoscaling policy and scaling policy binding
-		for _, backend := range model.Spec.Backends {
-			if backend.AutoscalingPolicy == nil {
-				continue
-			}
+		// Create autoscaling policy and scaling policy binding for single backend
+		backend := model.Spec.Backend
+		if backend.AutoscalingPolicy != nil {
 			asp := convert.BuildAutoscalingPolicy(backend.AutoscalingPolicy, model, backend.Name)
 			aspBinding := convert.BuildScalingPolicyBinding(model, &backend, utils.GetBackendResourceName(model.Name, backend.Name))
 			if err := mc.createOrUpdateAsp(ctx, asp); err != nil {

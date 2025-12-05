@@ -50,11 +50,9 @@ func TestBuildModelServer(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: registry.ModelBoosterSpec{
-					Backends: []registry.ModelBackend{
-						{
-							Name: "invalid",
-							Type: "InvalidType",
-						},
+					Backend: registry.ModelBackend{
+						Name: "invalid",
+						Type: "InvalidType",
 					},
 				},
 			},

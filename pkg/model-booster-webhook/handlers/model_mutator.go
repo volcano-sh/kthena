@@ -86,13 +86,10 @@ func (m *ModelMutator) Handle(w http.ResponseWriter, r *http.Request) {
 func (m *ModelMutator) mutateModel(model *registryv1alpha1.ModelBooster) {
 	klog.Infof("Defaulting for ModelBooster %s", model.GetName())
 
-	// Default ScaleToZeroGracePeriod for all backends if AutoscalingPolicyRef is set
+	// Default ScaleToZeroGracePeriod if AutoscalingPolicy is set
 	if model.Spec.AutoscalingPolicy != nil {
-		for i := range model.Spec.Backends {
-			backend := &model.Spec.Backends[i]
-			if backend.ScaleToZeroGracePeriod == nil {
-				backend.ScaleToZeroGracePeriod = &metav1.Duration{Duration: 30 * time.Second}
-			}
+		if model.Spec.Backend.ScaleToZeroGracePeriod == nil {
+			model.Spec.Backend.ScaleToZeroGracePeriod = &metav1.Duration{Duration: 30 * time.Second}
 		}
 
 		if model.Spec.CostExpansionRatePercent == nil {

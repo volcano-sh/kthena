@@ -29,70 +29,46 @@ import (
 )
 
 // createOrUpdateModelServing attempts to create model serving if model serving does not exist, or update it if it is different from model.
-// Meanwhile, delete model serving if it is not in the model spec anymore.
 func (mc *ModelBoosterController) createOrUpdateModelServing(ctx context.Context, model *workload.ModelBooster) error {
 	existingModelServings, err := mc.listModelServingsByLabel(model)
 	if err != nil {
 		return err
 	}
-	successUpdatedBackends := mc.dynamicUpdateLoraBackends(model)
-	excludedSet := make(map[string]bool)
-	for _, backendName := range successUpdatedBackends {
-		excludedSet[backendName] = true
-	}
 
-	var filteredBackends []workload.ModelBackend
-	for _, backend := range model.Spec.Backends {
-		if !excludedSet[backend.Name] {
-			filteredBackends = append(filteredBackends, backend)
-		}
-	}
-
-	// If all backends are excluded, skip ModelServing updates
-	if len(filteredBackends) == 0 {
-		klog.Infof("All backends excluded from ModelServing update for model %s", model.Name)
-		return nil
-	}
-
-	// Create a temporary model with filtered backends for ModelServing creation
-	tempModel := model.DeepCopy()
-	tempModel.Spec.Backends = filteredBackends
-
-	modelServings, err := convert.BuildModelServing(tempModel)
+	modelServing, err := convert.BuildModelServing(model)
 	if err != nil {
 		klog.Errorf("failed to build model serving for model %s: %v", model.Name, err)
 		return err
 	}
-	modelServingsToKeep := make(map[string]struct{})
-	for _, modelServing := range modelServings {
-		modelServingsToKeep[modelServing.Name] = struct{}{}
-		oldModelServing, err := mc.modelServingLister.ModelServings(modelServing.Namespace).Get(modelServing.Name)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				klog.V(4).Infof("Create ModelServing %s", modelServing.Name)
-				if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Create(ctx, modelServing, metav1.CreateOptions{}); err != nil {
-					klog.Errorf("failed to create ModelServing %s: %v", klog.KObj(modelServing), err)
-					return err
-				}
-				continue
+
+	oldModelServing, err := mc.modelServingLister.ModelServings(modelServing.Namespace).Get(modelServing.Name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			klog.V(4).Infof("Create ModelServing %s", modelServing.Name)
+			if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Create(ctx, modelServing, metav1.CreateOptions{}); err != nil {
+				klog.Errorf("failed to create ModelServing %s: %v", klog.KObj(modelServing), err)
+				return err
 			}
+		} else {
 			klog.Errorf("failed to get ModelServing %s: %v", klog.KObj(modelServing), err)
 			return err
 		}
-		if oldModelServing.Labels[utils.RevisionLabelKey] == modelServing.Labels[utils.RevisionLabelKey] {
+	} else {
+		if oldModelServing.Labels[utils.RevisionLabelKey] != modelServing.Labels[utils.RevisionLabelKey] {
+			modelServing.ResourceVersion = oldModelServing.ResourceVersion
+			if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Update(ctx, modelServing, metav1.UpdateOptions{}); err != nil {
+				klog.Errorf("failed to update ModelServing %s: %v", klog.KObj(modelServing), err)
+				return err
+			}
+			klog.V(4).Infof("Updated ModelServing %s for model %s", modelServing.Name, model.Name)
+		} else {
 			klog.Infof("ModelServing %s of model %s does not need to update", modelServing.Name, model.Name)
-			continue
 		}
-		modelServing.ResourceVersion = oldModelServing.ResourceVersion
-		if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Update(ctx, modelServing, metav1.UpdateOptions{}); err != nil {
-			klog.Errorf("failed to update ModelServing %s: %v", klog.KObj(modelServing), err)
-			return err
-		}
-		klog.V(4).Infof("Updated ModelServing %s for model %s", modelServing.Name, model.Name)
 	}
+
+	// Delete old ModelServings that are not the current one
 	for _, existingModelServing := range existingModelServings {
-		// if not exist in modelServingsToKeep, delete it
-		if _, ok := modelServingsToKeep[existingModelServing.Name]; !ok {
+		if existingModelServing.Name != modelServing.Name {
 			if err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Delete(ctx, existingModelServing.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 				return err
 			}

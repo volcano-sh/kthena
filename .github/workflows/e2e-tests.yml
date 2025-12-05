@@ -26,11 +26,22 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+      - name: Free Disk Space   # GitHub CI limit storage to 14GB, need to clean up some preinstalled tools
+        run: |
+          echo "Before cleanup:"
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          echo "After cleanup:"
+          df -h
       - name: Install helm
         shell: bash
         run: |

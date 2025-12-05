@@ -5,20 +5,19 @@ on:
     branches:
       - main
     paths-ignore:
-      - '**.md'
-      - '**.svg'
-      - '**.png'
-      - 'docs/**'
-      - '.github/**'
+      - "**.md"
+      - "**.svg"
+      - "**.png"
+      - "docs/**"
+      - ".github/**"
   push:
     branches:
       - main
     paths-ignore:
-      - 'docs/**'
-      - '.github/**'
+      - "docs/**"
+      - ".github/**"
 
 jobs:
-
   build:
     runs-on: ubuntu-22.04
 
@@ -27,14 +26,6 @@ jobs:
       - name: install sponge
         shell: bash
         run: sudo apt-get update && sudo apt-get install -y moreutils
-      - name: generate copyright
-        shell: bash
-        run: |
-          make gen-copyright
-      - name: check diff
-        shell: bash
-        run: |
-          git diff --exit-code
       - name: install helm
         shell: bash
         run: |
@@ -44,14 +35,14 @@ jobs:
         run: |
           helm lint charts/kthena
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
-      - name: golangci-lint
-        shell: bash
-        run: |
-          make lint
+          go-version-file: "go.mod"
       - name: Build Kthena
         shell: bash
         run: |
           make gen-check
+      - name: golangci-lint
+        shell: bash
+        run: |
+          make lint

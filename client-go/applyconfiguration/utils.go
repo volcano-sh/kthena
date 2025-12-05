@@ -98,16 +98,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.HeterogeneousTargetParamApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("HomogeneousTarget"):
 		return &applyconfigurationworkloadv1alpha1.HomogeneousTargetApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("LoraAdapter"):
-		return &applyconfigurationworkloadv1alpha1.LoraAdapterApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Metadata"):
 		return &applyconfigurationworkloadv1alpha1.MetadataApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("MetricEndpoint"):
 		return &applyconfigurationworkloadv1alpha1.MetricEndpointApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelBackend"):
 		return &applyconfigurationworkloadv1alpha1.ModelBackendApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelBackendStatus"):
-		return &applyconfigurationworkloadv1alpha1.ModelBackendStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelBooster"):
 		return &applyconfigurationworkloadv1alpha1.ModelBoosterApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelBoosterSpec"):

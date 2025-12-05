@@ -27,7 +27,7 @@ import (
 type ModelBoosterSpecApplyConfiguration struct {
 	Name                     *string                                          `json:"name,omitempty"`
 	Owner                    *string                                          `json:"owner,omitempty"`
-	Backends                 []ModelBackendApplyConfiguration                 `json:"backends,omitempty"`
+	Backend                  *ModelBackendApplyConfiguration                  `json:"backend,omitempty"`
 	AutoscalingPolicy        *AutoscalingPolicySpecApplyConfiguration         `json:"autoscalingPolicy,omitempty"`
 	CostExpansionRatePercent *int32                                           `json:"costExpansionRatePercent,omitempty"`
 	ModelMatch               *networkingv1alpha1.ModelMatchApplyConfiguration `json:"modelMatch,omitempty"`
@@ -55,16 +55,11 @@ func (b *ModelBoosterSpecApplyConfiguration) WithOwner(value string) *ModelBoost
 	return b
 }
 
-// WithBackends adds the given value to the Backends field in the declarative configuration
-// and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, values provided by each call will be appended to the Backends field.
-func (b *ModelBoosterSpecApplyConfiguration) WithBackends(values ...*ModelBackendApplyConfiguration) *ModelBoosterSpecApplyConfiguration {
-	for i := range values {
-		if values[i] == nil {
-			panic("nil value passed to WithBackends")
-		}
-		b.Backends = append(b.Backends, *values[i])
-	}
+// WithBackend sets the Backend field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Backend field is set to the value of the last call.
+func (b *ModelBoosterSpecApplyConfiguration) WithBackend(value *ModelBackendApplyConfiguration) *ModelBoosterSpecApplyConfiguration {
+	b.Backend = value
 	return b
 }
 

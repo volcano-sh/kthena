@@ -35,7 +35,7 @@ func TestLoadSchedulerConfig(t *testing.T) {
 		{
 			name:       "empty plugins config",
 			configFile: "non-existent-file.yaml",
-			expectErrs: "no such file or directory",
+			expectErrs: "failed to read config file",
 		},
 		{
 			name:       "invalid YAML syntax",

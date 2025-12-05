@@ -16,19 +16,11 @@ limitations under the License.
 
 package config
 
-import (
-	"encoding/json"
-	"fmt"
-)
-
 const (
 	// DefaultDownloaderImage is the default image used for downloading models.
 	DefaultDownloaderImage = "kthena/downloader:latest"
 	// DefaultRuntimeImage is the default image used for running model inference.
-	DefaultRuntimeImage      = "kthena/runtime:latest"
-	DefaultKVEventsPublisher = "zmq"
-	DefaultKVEventsTopic     = "kv-events"
-	DefaultKVEventsEndpoint  = "tcp://*:5557"
+	DefaultRuntimeImage = "kthena/runtime:latest"
 )
 
 type ParseConfig struct {
@@ -58,27 +50,4 @@ func (p *ParseConfig) RuntimeImage() string {
 
 func (p *ParseConfig) SetRuntimeImage(image string) {
 	p.runtimeImage = image
-}
-
-type KVEventsConfig struct {
-	EnableKVCacheEvents bool   `json:"enable_kv_cache_events"`
-	Publisher           string `json:"publisher"`
-	Topic               string `json:"topic"`
-	Endpoint            string `json:"endpoint"`
-}
-
-func GetDefaultKVEventsConfig() string {
-	config := KVEventsConfig{
-		EnableKVCacheEvents: true,
-		Publisher:           DefaultKVEventsPublisher,
-		Topic:               DefaultKVEventsTopic,
-		Endpoint:            DefaultKVEventsEndpoint,
-	}
-
-	data, err := json.Marshal(config)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to marshal KVEventsConfig: %v", err))
-	}
-
-	return string(data)
 }

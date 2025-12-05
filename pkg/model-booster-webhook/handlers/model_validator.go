@@ -83,7 +83,6 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 	allErrs = append(allErrs, validateWorkerImages(model)...)
 	allErrs = append(allErrs, validateAutoScalingPolicyScope(model)...)
 	allErrs = append(allErrs, validateBackendWorkerTypes(model)...)
-	allErrs = append(allErrs, validateLoraAdapterName(model)...)
 
 	if len(allErrs) > 0 {
 		// Convert field errors to a formatted multi-line error message
@@ -98,86 +97,79 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 
 func validateBackendWorkerTypes(model *registryv1alpha1.ModelBooster) field.ErrorList {
 	var allErrs field.ErrorList
-	backendsPath := field.NewPath("spec").Child("backends")
+	backendPath := field.NewPath("spec").Child("backend")
+	backend := model.Spec.Backend
+	workers := backend.Workers
 
-	for i, backend := range model.Spec.Backends {
-		workers := backend.Workers
-
-		// Rule 1: vLLM, SGLang, MindIE -> exactly one worker, type 'server'
-		if backend.Type == registryv1alpha1.ModelBackendTypeVLLM ||
-			backend.Type == registryv1alpha1.ModelBackendTypeSGLang ||
-			backend.Type == registryv1alpha1.ModelBackendTypeMindIE {
-			if len(workers) != 1 {
-				allErrs = append(allErrs, field.Invalid(
-					backendsPath.Index(i).Child("workers"),
-					len(workers),
-					fmt.Sprintf("If backend type is '%s', there must be exactly one worker", backend.Type),
-				))
-			} else if workers[0].Type != registryv1alpha1.ModelWorkerTypeServer {
-				allErrs = append(allErrs, field.Invalid(
-					backendsPath.Index(i).Child("workers").Index(0).Child("type"),
-					workers[0].Type,
-					fmt.Sprintf("If backend type is '%s', the worker type must be 'server'", backend.Type),
-				))
-			}
+	if backend.Type == registryv1alpha1.ModelBackendTypeVLLM ||
+		backend.Type == registryv1alpha1.ModelBackendTypeSGLang ||
+		backend.Type == registryv1alpha1.ModelBackendTypeMindIE {
+		if len(workers) != 1 {
+			allErrs = append(allErrs, field.Invalid(
+				backendPath.Child("workers"),
+				len(workers),
+				fmt.Sprintf("If backend type is '%s', there must be exactly one worker", backend.Type),
+			))
+		} else if workers[0].Type != registryv1alpha1.ModelWorkerTypeServer {
+			allErrs = append(allErrs, field.Invalid(
+				backendPath.Child("workers").Index(0).Child("type"),
+				workers[0].Type,
+				fmt.Sprintf("If backend type is '%s', the worker type must be 'server'", backend.Type),
+			))
 		}
+	}
 
-		// Rule 2: vLLMDisaggregated -> all workers must be 'prefill' or 'decode'
-		if backend.Type == registryv1alpha1.ModelBackendTypeVLLMDisaggregated {
-			for j, w := range workers {
-				if w.Type != registryv1alpha1.ModelWorkerTypePrefill && w.Type != registryv1alpha1.ModelWorkerTypeDecode {
-					allErrs = append(allErrs, field.Invalid(
-						backendsPath.Index(i).Child("workers").Index(j).Child("type"),
-						w.Type,
-						"If backend type is 'vLLMDisaggregated', all workers must be type 'prefill' or 'decode'",
-					))
-				}
-			}
-		}
-
-		// Rule 3: MindIEDisaggregated -> all workers must be 'prefill', 'decode', 'controller', or 'coordinator'
-		if backend.Type == registryv1alpha1.ModelBackendTypeMindIEDisaggregated {
-			validTypes := map[registryv1alpha1.ModelWorkerType]struct{}{
-				registryv1alpha1.ModelWorkerTypePrefill:     {},
-				registryv1alpha1.ModelWorkerTypeDecode:      {},
-				registryv1alpha1.ModelWorkerTypeController:  {},
-				registryv1alpha1.ModelWorkerTypeCoordinator: {},
-			}
-			for j, w := range workers {
-				if _, ok := validTypes[w.Type]; !ok {
-					allErrs = append(allErrs, field.Invalid(
-						backendsPath.Index(i).Child("workers").Index(j).Child("type"),
-						w.Type,
-						"If backend type is 'MindIEDisaggregated', all workers must be type 'prefill', 'decode', 'controller', or 'coordinator' (not 'server')",
-					))
-				}
+	if backend.Type == registryv1alpha1.ModelBackendTypeVLLMDisaggregated {
+		for j, w := range workers {
+			if w.Type != registryv1alpha1.ModelWorkerTypePrefill && w.Type != registryv1alpha1.ModelWorkerTypeDecode {
+				allErrs = append(allErrs, field.Invalid(
+					backendPath.Child("workers").Index(j).Child("type"),
+					w.Type,
+					"If backend type is 'vLLMDisaggregated', all workers must be type 'prefill' or 'decode'",
+				))
 			}
 		}
 	}
 
+	// Rule 3: MindIEDisaggregated -> all workers must be 'prefill', 'decode', 'controller', or 'coordinator'
+	if backend.Type == registryv1alpha1.ModelBackendTypeMindIEDisaggregated {
+		validTypes := map[registryv1alpha1.ModelWorkerType]struct{}{
+			registryv1alpha1.ModelWorkerTypePrefill:     {},
+			registryv1alpha1.ModelWorkerTypeDecode:      {},
+			registryv1alpha1.ModelWorkerTypeController:  {},
+			registryv1alpha1.ModelWorkerTypeCoordinator: {},
+		}
+		for j, w := range workers {
+			if _, ok := validTypes[w.Type]; !ok {
+				allErrs = append(allErrs, field.Invalid(
+					backendPath.Child("workers").Index(j).Child("type"),
+					w.Type,
+					"If backend type is 'MindIEDisaggregated', all workers must be type 'prefill', 'decode', 'controller', or 'coordinator' (not 'server')",
+				))
+			}
+		}
+	}
 	return allErrs
 }
 
 func validateBackendReplicaBounds(model *registryv1alpha1.ModelBooster) field.ErrorList {
 	var allErrs field.ErrorList
-	path := field.NewPath("spec").Child("backends")
+	path := field.NewPath("spec").Child("backend")
 	const maxTotalReplicas = 1000000
-	totalMaxReplicas := int32(0)
-	for i, backend := range model.Spec.Backends {
-		if backend.MinReplicas > backend.MaxReplicas {
-			allErrs = append(allErrs, field.Invalid(
-				path.Index(i).Child("minReplicas"),
-				backend.MinReplicas,
-				"minReplicas cannot be greater than maxReplicas",
-			))
-		}
-		totalMaxReplicas += backend.MaxReplicas
+	backend := model.Spec.Backend
+	if backend.MinReplicas > backend.MaxReplicas {
+		allErrs = append(allErrs, field.Invalid(
+			path.Child("minReplicas"),
+			backend.MinReplicas,
+			"minReplicas cannot be greater than maxReplicas",
+		))
 	}
-	if totalMaxReplicas > maxTotalReplicas {
+
+	if backend.MaxReplicas > maxTotalReplicas {
 		allErrs = append(allErrs, field.Invalid(
 			path,
-			totalMaxReplicas,
-			fmt.Sprintf("sum of maxReplicas across all backends (%d) cannot exceed %d", totalMaxReplicas, maxTotalReplicas),
+			backend.MaxReplicas,
+			fmt.Sprintf("sum of maxReplicas across all backends (%d) cannot exceed %d", backend.MaxReplicas, maxTotalReplicas),
 		))
 	}
 	return allErrs
@@ -186,41 +178,39 @@ func validateBackendReplicaBounds(model *registryv1alpha1.ModelBooster) field.Er
 func validateScaleToZeroGracePeriod(model *registryv1alpha1.ModelBooster) field.ErrorList {
 	const maxScaleToZeroSeconds = 1800
 	var allErrs field.ErrorList
-	for i, backend := range model.Spec.Backends {
-		if backend.ScaleToZeroGracePeriod == nil {
-			continue
-		}
-		d := backend.ScaleToZeroGracePeriod.Duration
-		if d > time.Duration(maxScaleToZeroSeconds)*time.Second {
-			allErrs = append(allErrs, field.Invalid(
-				field.NewPath("spec").Child("backends").Index(i).Child("scaleToZeroGracePeriod"),
-				d.String(),
-				fmt.Sprintf("scaleToZeroGracePeriod cannot exceed %d seconds", maxScaleToZeroSeconds),
-			))
-		}
-		if d < 0 {
-			allErrs = append(allErrs, field.Invalid(
-				field.NewPath("spec").Child("backends").Index(i).Child("scaleToZeroGracePeriod"),
-				d.String(),
-				"scaleToZeroGracePeriod cannot be negative",
-			))
-		}
+	backend := model.Spec.Backend
+	if backend.ScaleToZeroGracePeriod == nil {
+		return allErrs
+	}
+	d := backend.ScaleToZeroGracePeriod.Duration
+	if d > time.Duration(maxScaleToZeroSeconds)*time.Second {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec").Child("backend").Child("scaleToZeroGracePeriod"),
+			d.String(),
+			fmt.Sprintf("scaleToZeroGracePeriod cannot exceed %d seconds", maxScaleToZeroSeconds),
+		))
+	}
+	if d < 0 {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec").Child("backend").Child("scaleToZeroGracePeriod"),
+			d.String(),
+			"scaleToZeroGracePeriod cannot be negative",
+		))
 	}
 	return allErrs
 }
 
 func validateWorkerImages(model *registryv1alpha1.ModelBooster) field.ErrorList {
 	var allErrs field.ErrorList
-	for i, backend := range model.Spec.Backends {
-		for j, worker := range backend.Workers {
-			if worker.Image != "" {
-				if err := validateImageField(worker.Image); err != nil {
-					allErrs = append(allErrs, field.Invalid(
-						field.NewPath("spec").Child("backends").Index(i).Child("workers").Index(j).Child("image"),
-						worker.Image,
-						fmt.Sprintf("invalid container image reference: %v", err),
-					))
-				}
+	backend := model.Spec.Backend
+	for j, worker := range backend.Workers {
+		if worker.Image != "" {
+			if err := validateImageField(worker.Image); err != nil {
+				allErrs = append(allErrs, field.Invalid(
+					field.NewPath("spec").Child("backend").Child("workers").Index(j).Child("image"),
+					worker.Image,
+					fmt.Sprintf("invalid container image reference: %v", err),
+				))
 			}
 		}
 	}
@@ -257,26 +247,34 @@ func validateAutoScalingPolicyScope(model *registryv1alpha1.ModelBooster) field.
 	var allErrs field.ErrorList
 
 	modelAutoScalingEmpty := spec.AutoscalingPolicy == nil
-	allBackendAutoScalingEmpty := true
-	for _, backend := range spec.Backends {
-		if backend.AutoscalingPolicy != nil {
-			allBackendAutoScalingEmpty = false
-			break
-		}
-	}
+	backend := spec.Backend
 
 	if modelAutoScalingEmpty {
-		for i, backend := range spec.Backends {
-			if backend.ScalingCost != 0 {
-				allErrs = append(allErrs, field.Forbidden(
-					field.NewPath("spec").Child("backends").Index(i).Child("cost"),
-					"cost must not be provided when model-level autoscaling is not set",
-				))
-			}
-			if backend.ScaleToZeroGracePeriod != nil {
-				allErrs = append(allErrs, field.Forbidden(
-					field.NewPath("spec").Child("backends").Index(i).Child("scaleToZeroGracePeriod"),
-					"scaleToZeroGracePeriod must not be provided when model-level autoscaling is not set",
+		if backend.ScalingCost != 0 {
+			allErrs = append(allErrs, field.Forbidden(
+				field.NewPath("spec").Child("backend").Child("cost"),
+				"cost must not be provided when model-level autoscaling is not set",
+			))
+		}
+		if backend.ScaleToZeroGracePeriod != nil {
+			allErrs = append(allErrs, field.Forbidden(
+				field.NewPath("spec").Child("backend").Child("scaleToZeroGracePeriod"),
+				"scaleToZeroGracePeriod must not be provided when model-level autoscaling is not set",
+			))
+		}
+		if backend.AutoscalingPolicy != nil && backend.MinReplicas < 1 {
+			allErrs = append(allErrs, field.Invalid(
+				field.NewPath("spec").Child("backend").Child("minReplicas"),
+				backend.MinReplicas,
+				"minReplicas must be >= 1 when backend-level autoscaling is set",
+			))
+		}
+		if backend.AutoscalingPolicy == nil {
+			if backend.MinReplicas != backend.MaxReplicas {
+				allErrs = append(allErrs, field.Invalid(
+					field.NewPath("spec").Child("backend"),
+					fmt.Sprintf("minReplicas=%d, maxReplicas=%d", backend.MinReplicas, backend.MaxReplicas),
+					"minReplicas and maxReplicas must be equal and > 0 when no autoscaling is set",
 				))
 			}
 		}
@@ -286,61 +284,25 @@ func validateAutoScalingPolicyScope(model *registryv1alpha1.ModelBooster) field.
 				"costExpansionRatePercent must not be provided when model-level autoscaling is not set",
 			))
 		}
-		for i, backend := range spec.Backends {
-			if backend.AutoscalingPolicy != nil && backend.MinReplicas < 1 {
+	} else {
+		if backend.AutoscalingPolicy == nil {
+			if backend.MinReplicas < 0 {
 				allErrs = append(allErrs, field.Invalid(
-					field.NewPath("spec").Child("backends").Index(i).Child("minReplicas"),
+					field.NewPath("spec").Child("backend").Child("minReplicas"),
 					backend.MinReplicas,
-					"minReplicas must be >= 1 when backend-level autoscaling is set",
+					"minReplicas must be >= 0 when model-level autoscaling is set",
 				))
 			}
-		}
-		if allBackendAutoScalingEmpty {
-			// Case 1 (No Auto Scaling): All backend autoscaling empty
-			// minReplicas == maxReplicas for all backends
-			for i, backend := range spec.Backends {
-				if backend.MinReplicas != backend.MaxReplicas {
-					allErrs = append(allErrs, field.Invalid(
-						field.NewPath("spec").Child("backends").Index(i),
-						fmt.Sprintf("minReplicas=%d, maxReplicas=%d", backend.MinReplicas, backend.MaxReplicas),
-						"minReplicas and maxReplicas must be equal and > 0 when no autoscaling is set",
-					))
-				}
+			if backend.ScalingCost == 0 {
+				allErrs = append(allErrs, field.Required(
+					field.NewPath("spec").Child("backend").Child("cost"),
+					"cost must be provided when model-level autoscaling is set",
+				))
 			}
-		}
-	} else {
-		if allBackendAutoScalingEmpty {
-			// Case 3 (Global Scope): ModelBooster autoscaling set, all backend autoscaling empty
-			// minReplicas >= 0 for all backends, sum(minReplicas) >= 1
-			// Cost, ScaleToZeroGracePeriod, CostExpansionRatePercent must be provided
-			minSum := int32(0)
-			for i, backend := range spec.Backends {
-				if backend.MinReplicas < 0 {
-					allErrs = append(allErrs, field.Invalid(
-						field.NewPath("spec").Child("backends").Index(i).Child("minReplicas"),
-						backend.MinReplicas,
-						"minReplicas must be >= 0 when model-level autoscaling is set",
-					))
-				}
-				minSum += backend.MinReplicas
-				if backend.ScalingCost == 0 {
-					allErrs = append(allErrs, field.Required(
-						field.NewPath("spec").Child("backends").Index(i).Child("cost"),
-						"cost must be provided when model-level autoscaling is set",
-					))
-				}
-				if backend.ScaleToZeroGracePeriod == nil {
-					allErrs = append(allErrs, field.Required(
-						field.NewPath("spec").Child("backends").Index(i).Child("scaleToZeroGracePeriod"),
-						"scaleToZeroGracePeriod must be provided when model-level autoscaling is set",
-					))
-				}
-			}
-			if minSum < 1 {
-				allErrs = append(allErrs, field.Invalid(
-					field.NewPath("spec").Child("backends"),
-					minSum,
-					"sum of all minReplicas must be >= 1 when model-level autoscaling is set",
+			if backend.ScaleToZeroGracePeriod == nil {
+				allErrs = append(allErrs, field.Required(
+					field.NewPath("spec").Child("backend").Child("scaleToZeroGracePeriod"),
+					"scaleToZeroGracePeriod must be provided when model-level autoscaling is set",
 				))
 			}
 			if spec.CostExpansionRatePercent == nil {
@@ -350,44 +312,11 @@ func validateAutoScalingPolicyScope(model *registryv1alpha1.ModelBooster) field.
 				))
 			}
 		} else {
-			// Case 4: Both model and at least one backend set autoscaling -> error
 			allErrs = append(allErrs, field.Forbidden(
 				field.NewPath("spec").Child("autoscalingPolicyRef"),
-				"spec.autoscalingPolicyRef and spec.backends[].autoscalingPolicyRef cannot both be set; choose model-level or backend-level autoscaling, not both",
+				"spec.autoscalingPolicyRef and spec.backend.autoscalingPolicyRef cannot both be set; choose model-level or backend-level autoscaling, not both",
 			))
 		}
 	}
-	return allErrs
-}
-
-func validateLoraAdapterName(model *registryv1alpha1.ModelBooster) field.ErrorList {
-	var allErrs field.ErrorList
-	modelName := model.Name
-	spec := model.Spec
-
-	for i, backend := range spec.Backends {
-		if backend.LoraAdapters != nil {
-			loraName := make(map[string]struct{})
-			for j, lora := range backend.LoraAdapters {
-				loraPath := field.NewPath("spec").Child("backends").Index(i).Child("loraAdapters").Index(j)
-				if lora.Name == modelName {
-					allErrs = append(allErrs, field.Invalid(
-						loraPath.Child("name"),
-						lora.Name,
-						"lora name cannot be the same as model name"))
-				}
-				if _, exists := loraName[lora.Name]; exists {
-					allErrs = append(allErrs, field.Invalid(
-						loraPath.Child("name"),
-						lora.Name,
-						"lora name must be unique within the backend",
-					))
-				} else {
-					loraName[lora.Name] = struct{}{}
-				}
-			}
-		}
-	}
-
 	return allErrs
 }

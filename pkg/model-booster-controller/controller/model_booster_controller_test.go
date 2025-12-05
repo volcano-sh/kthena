@@ -91,30 +91,16 @@ func TestReconcile(t *testing.T) {
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue) && model.Generation == model.Status.ObservedGeneration
 	}))
 
-	// Case2: update model weight, and model route should be updated.
-	// Step1. update weight
-	weight := uint32(50)
-	model.Spec.Backends[0].RouteWeight = &weight
+	// Case2: noop update and ensure route still exists
 	model.Generation += 1
 	_, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Update(ctx, model, metav1.UpdateOptions{})
 	assert.NoError(t, err)
-	// Step2. Check that model route is updated
 	assert.True(t, waitForCondition(func() bool {
-		modelRoutes, err = kthenaClient.NetworkingV1alpha1().ModelRoutes(model.Namespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
+		routes, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(model.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil || len(routes.Items) == 0 {
 			return false
 		}
-		route := modelRoutes.Items[0]
-		if len(route.Spec.Rules) == 0 {
-			return false
-		}
-
-		rule := route.Spec.Rules[0]
-		if len(rule.TargetModels) == 0 || rule.TargetModels[0].Weight == nil {
-			return false
-		}
-
-		return weight == *rule.TargetModels[0].Weight
+		return true
 	}))
 
 	// Case3: delete model. Because we are not running in a real K8s cluster, model server, model route, model serving,
@@ -157,11 +143,9 @@ func TestReconcile_ReturnsError(t *testing.T) {
 				Namespace: "default",
 			},
 			Spec: workload.ModelBoosterSpec{
-				Backends: []workload.ModelBackend{
-					{
-						Name: "not-supported-backend-type",
-						Type: workload.ModelBackendTypeMindIEDisaggregated,
-					},
+				Backend: workload.ModelBackend{
+					Name: "not-supported-backend-type",
+					Type: workload.ModelBackendTypeMindIEDisaggregated,
 				},
 			},
 		}
@@ -221,283 +205,7 @@ func TestTriggerModel(t *testing.T) {
 	assert.Equal(t, 0, controller.workQueue.Len())
 }
 
-func TestHasOnlyLoraAdaptersChanged(t *testing.T) {
-	kubeClient := fake.NewClientset()
-	kthenaClient := kthenafake.NewClientset()
-	controller := NewModelBoosterController(kubeClient, kthenaClient)
-
-	tests := []struct {
-		name     string
-		oldModel *workload.ModelBooster
-		newModel *workload.ModelBooster
-		expected bool
-	}{
-		{
-			name: "No changes at all",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-					},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "Only LoRA adapters changed - added new adapter",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-								{Name: "adapter3", ArtifactURL: "uri3"},
-							},
-						},
-					},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-								{Name: "adapter2", ArtifactURL: "uri2"},
-							},
-						},
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "Only LoRA adapters changed - modified adapter",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-					},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1-modified"},
-							},
-						},
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "Backend name changed",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-					},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend2",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "ModelBooster URI changed",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-					},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri-changed",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-								{Name: "adapter2", ArtifactURL: "uri2"},
-							},
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "Number of backends changed",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-					},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "backend1",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-						{
-							Name:     "backend2",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri2",
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "VLLM backend with LoRA adapters changed and other backend unchanged",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "vllm-backend",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-							},
-						},
-						{
-							Name:     "sglang-backend",
-							Type:     workload.ModelBackendTypeSGLang,
-							ModelURI: "model-uri2",
-						},
-					},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{
-						{
-							Name:     "vllm-backend",
-							Type:     workload.ModelBackendTypeVLLM,
-							ModelURI: "model-uri",
-							LoraAdapters: []workload.LoraAdapter{
-								{Name: "adapter1", ArtifactURL: "uri1"},
-								{Name: "adapter2", ArtifactURL: "uri2"},
-							},
-						},
-						{
-							Name:     "sglang-backend",
-							Type:     workload.ModelBackendTypeSGLang,
-							ModelURI: "model-uri2",
-						},
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "Empty backends",
-			oldModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{},
-				},
-			},
-			newModel: &workload.ModelBooster{
-				Spec: workload.ModelBoosterSpec{
-					Backends: []workload.ModelBackend{},
-				},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := controller.hasOnlyLoraAdaptersChanged(tt.oldModel, tt.newModel)
-			assert.Equal(t, tt.expected, result, "Test case: %s", tt.name)
-		})
-	}
-}
+// Removed tests for LoRA adapter changes as the current API defines a single backend without loraAdapters
 
 // loadYaml transfer yaml data into a struct of type T.
 // Used for test.

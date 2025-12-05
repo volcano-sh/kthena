@@ -197,30 +197,28 @@ func createTestModel() *workload.ModelBooster {
 		},
 		Spec: workload.ModelBoosterSpec{
 			Name: "test-model",
-			Backends: []workload.ModelBackend{
-				{
-					Name:        "backend1",
-					Type:        workload.ModelBackendTypeVLLM,
-					ModelURI:    "hf://Qwen/Qwen2.5-0.5B-Instruct",
-					CacheURI:    "hostpath:///tmp/cache",
-					MinReplicas: 1,
-					MaxReplicas: 1,
-					Workers: []workload.ModelWorker{
-						{
-							Type:     workload.ModelWorkerTypeServer,
-							Image:    "ghcr.io/huntersman/vllm-cpu-env:latest", // Use CPU image for testing
-							Replicas: 1,
-							Pods:     1,
-							Config:   *config,
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("2"),
-									corev1.ResourceMemory: resource.MustParse("4Gi"),
-								},
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("4"),
-									corev1.ResourceMemory: resource.MustParse("16Gi"),
-								},
+			Backend: workload.ModelBackend{
+				Name:        "backend1",
+				Type:        workload.ModelBackendTypeVLLM,
+				ModelURI:    "hf://Qwen/Qwen2.5-0.5B-Instruct",
+				CacheURI:    "hostpath:///tmp/cache",
+				MinReplicas: 1,
+				MaxReplicas: 1,
+				Workers: []workload.ModelWorker{
+					{
+						Type:     workload.ModelWorkerTypeServer,
+						Image:    "ghcr.io/huntersman/vllm-cpu-env:latest",
+						Replicas: 1,
+						Pods:     1,
+						Config:   *config,
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("2"),
+								corev1.ResourceMemory: resource.MustParse("4Gi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("4"),
+								corev1.ResourceMemory: resource.MustParse("16Gi"),
 							},
 						},
 					},

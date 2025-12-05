@@ -2,12 +2,12 @@ apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: AutoscalingPolicy
 metadata:
   labels:
-    workload.serving.volcano.sh/backend-name: backend1
+    workload.serving.volcano.sh/backend-name: ""
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
     workload.serving.volcano.sh/revision: 656cd7ccb9
     workload.serving.volcano.sh/model-uid: randomUID
-  name: test-model-backend1
+  name: test-model
   namespace: default
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1

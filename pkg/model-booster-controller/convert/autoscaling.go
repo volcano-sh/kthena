@@ -92,32 +92,31 @@ func BuildScalingPolicyBinding(model *workload.ModelBooster, backend *workload.M
 }
 
 func BuildOptimizePolicyBindingSpec(model *workload.ModelBooster, name string) *workload.AutoscalingPolicyBindingSpec {
-	params := make([]workload.HeterogeneousTargetParam, 0, len(model.Spec.Backends))
+	params := make([]workload.HeterogeneousTargetParam, 0, 1)
 	if model.Spec.CostExpansionRatePercent == nil {
 		klog.Error("ModelBooster", model.Name, "Spec.CostExpansionRatePercent can not be nil when set optimize autoscaling policy")
 		return nil
 	}
-	for _, backend := range model.Spec.Backends {
-		targetName := utils.GetBackendResourceName(model.Name, backend.Name)
-		params = append(params, workload.HeterogeneousTargetParam{
-			Target: workload.Target{
-				TargetRef: corev1.ObjectReference{
-					Name: targetName,
-					Kind: workload.ModelServingKind.Kind,
-				},
-				MetricEndpoint: workload.MetricEndpoint{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							workload.RoleLabelKey: workload.ModelServingEntryPodLeaderLabel,
-						},
+	backend := model.Spec.Backend
+	targetName := utils.GetBackendResourceName(model.Name, backend.Name)
+	params = append(params, workload.HeterogeneousTargetParam{
+		Target: workload.Target{
+			TargetRef: corev1.ObjectReference{
+				Name: targetName,
+				Kind: workload.ModelServingKind.Kind,
+			},
+			MetricEndpoint: workload.MetricEndpoint{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						workload.RoleLabelKey: workload.ModelServingEntryPodLeaderLabel,
 					},
 				},
 			},
-			MinReplicas: backend.MinReplicas,
-			MaxReplicas: backend.MaxReplicas,
-			Cost:        backend.ScalingCost,
-		})
-	}
+		},
+		MinReplicas: backend.MinReplicas,
+		MaxReplicas: backend.MaxReplicas,
+		Cost:        backend.ScalingCost,
+	})
 	return &workload.AutoscalingPolicyBindingSpec{
 		HeterogeneousTarget: &workload.HeterogeneousTarget{
 			Params:                   params,

@@ -17,8 +17,6 @@ limitations under the License.
 package convert
 
 import (
-	"slices"
-
 	networking "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
@@ -28,7 +26,7 @@ import (
 
 func BuildModelRoute(model *workload.ModelBooster) *networking.ModelRoute {
 	routeName := model.Name
-	rules, loraAdapters := getRulesAndLoraAdapters(model)
+	rules := getRules(model)
 	route := &networking.ModelRoute{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       networking.ModelRouteKind,
@@ -47,83 +45,33 @@ func BuildModelRoute(model *workload.ModelBooster) *networking.ModelRoute {
 			},
 		},
 		Spec: networking.ModelRouteSpec{
-			ModelName:    model.Name,
-			LoraAdapters: loraAdapters,
-			Rules:        rules,
+			ModelName: model.Name,
+			Rules:     rules,
 		},
 	}
 	route.Labels = utils.GetModelControllerLabels(model, "", icUtils.Revision(route.Spec))
 	return route
 }
 
-// getRulesAndLoraAdapters generates routing rules and LoRA adapter names based on the model's backends and LoRA adapters.
-func getRulesAndLoraAdapters(model *workload.ModelBooster) ([]*networking.Rule, []string) {
-	targetModels, loraMap, loraMapNum := getTargetModelAndLoraMap(model)
+// getRules generates routing rules based on the model's backend.
+func getRules(model *workload.ModelBooster) []*networking.Rule {
+	targetModels := getTargetModels(model)
 
 	var rules []*networking.Rule
-	var loraAdapters []string
-	for loraName := range loraMap {
-		loraAdapters = append(loraAdapters, loraName)
-	}
-	slices.Sort(loraAdapters)
-	if len(model.Spec.Backends) == 1 {
-		rules = append(rules, &networking.Rule{
-			Name:         modelRouteRuleName,
-			ModelMatch:   model.Spec.ModelMatch,
-			TargetModels: targetModels,
-		})
-	} else {
-		loraTarget := make(map[string][]*networking.TargetModel)
-		modelMatchWithBody := getModelMatchWithBody(model, model.Name)
-		rules = append(rules, &networking.Rule{
-			Name:         modelRouteRuleName,
-			ModelMatch:   modelMatchWithBody,
-			TargetModels: targetModels,
-		})
-		for _, loraName := range loraAdapters {
-			for _, loraNum := range loraMapNum[loraName] {
-				loraTarget[loraName] = append(loraTarget[loraName], targetModels[loraNum])
-			}
-			modelMatchLora := getModelMatchWithBody(model, loraName)
-			rules = append(rules, &networking.Rule{
-				Name:         loraName,
-				ModelMatch:   modelMatchLora,
-				TargetModels: loraTarget[loraName],
-			})
-		}
-	}
-	return rules, loraAdapters
+	rules = append(rules, &networking.Rule{
+		Name:         modelRouteRuleName,
+		ModelMatch:   model.Spec.ModelMatch,
+		TargetModels: targetModels,
+	})
+	return rules
 }
 
-// getModelMatchWithBody ensures that the ModelMatch has a Body field with the model/lora name set.
-func getModelMatchWithBody(model *workload.ModelBooster, name string) *networking.ModelMatch {
-	var modelMatch *networking.ModelMatch
-	modelMatch = model.Spec.ModelMatch.DeepCopy()
-	if modelMatch == nil {
-		modelMatch = &networking.ModelMatch{}
-	}
-	if modelMatch.Body == nil {
-		modelMatch.Body = &networking.BodyMatch{}
-	}
-	modelMatch.Body.Model = &name
-	return modelMatch
-}
-
-// getTargetModelAndLoraMap returns the target models, a map of lora adapter names to backend names.
-func getTargetModelAndLoraMap(model *workload.ModelBooster) ([]*networking.TargetModel, map[string]string, map[string][]int) {
+// getTargetModels returns the target models.
+func getTargetModels(model *workload.ModelBooster) []*networking.TargetModel {
 	var targetModels []*networking.TargetModel
-	// Use map to deduplicate lora adapters
-	loraMap := make(map[string]string)
-	loraMapNum := make(map[string][]int)
-	for idx, backend := range model.Spec.Backends {
-		for _, lora := range backend.LoraAdapters {
-			loraMap[lora.Name] = backend.Name
-			loraMapNum[lora.Name] = append(loraMapNum[lora.Name], idx)
-		}
-		targetModels = append(targetModels, &networking.TargetModel{
-			ModelServerName: utils.GetBackendResourceName(model.Name, backend.Name),
-			Weight:          backend.RouteWeight,
-		})
-	}
-	return targetModels, loraMap, loraMapNum
+	backend := model.Spec.Backend
+	targetModels = append(targetModels, &networking.TargetModel{
+		ModelServerName: utils.GetBackendResourceName(model.Name, backend.Name),
+	})
+	return targetModels
 }

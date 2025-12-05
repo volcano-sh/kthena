@@ -97,18 +97,18 @@ func TestCreateModelServingResources(t *testing.T) {
 	tests := []struct {
 		name         string
 		input        *workload.ModelBooster
-		expected     []*workload.ModelServing
+		expected     *workload.ModelServing
 		expectErrMsg string
 	}{
 		{
 			name:     "CacheVolume_HuggingFace_HostPath",
 			input:    loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
-			expected: []*workload.ModelServing{loadYaml[workload.ModelServing](t, "testdata/expected/model-serving.yaml")},
+			expected: loadYaml[workload.ModelServing](t, "testdata/expected/model-serving.yaml"),
 		},
 		{
 			name:     "PD disaggregation",
 			input:    loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model.yaml"),
-			expected: []*workload.ModelServing{loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving.yaml")},
+			expected: loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving.yaml"),
 		},
 	}
 	for _, tt := range tests {

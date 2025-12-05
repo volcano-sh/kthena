@@ -34,12 +34,9 @@ type ModelBoosterSpec struct {
 	// Owner is the owner of the model.
 	// +optional
 	Owner string `json:"owner,omitempty"`
-	// Backends is the list of model backends associated with this model. A ModelBooster CR at lease has one ModelBackend.
-	// ModelBackend is the minimum unit of inference instance. It can be vLLM, SGLang, MindIE or other types.
-	// +kubebuilder:validation:MinItems=1
-	// +listType=map
-	// +listMapKey=name
-	Backends []ModelBackend `json:"backends"`
+	// Backend is the model backend associated with this model.
+	// ModelBackend is the minimum unit of inference instance. It can be vLLM or vLLMDisaggregated.
+	Backend ModelBackend `json:"backend"`
 	// AutoscalingPolicy references the autoscaling policy to be used for this model.
 	// +optional
 	AutoscalingPolicy *AutoscalingPolicySpec `json:"autoscalingPolicy,omitempty"`
@@ -104,13 +101,6 @@ type ModelBackend struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	ScalingCost int32 `json:"scalingCost,omitempty"`
-	// RouteWeight is used to specify the percentage of traffic should be sent to the target backend.
-	// It's used to create model route.
-	// +optional
-	// +kubebuilder:default=100
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=100
-	RouteWeight *uint32 `json:"routeWeight,omitempty"`
 	// ScaleToZeroGracePeriod is the duration to wait before scaling to zero.
 	// +optional
 	ScaleToZeroGracePeriod *metav1.Duration `json:"scaleToZeroGracePeriod,omitempty"`
@@ -118,10 +108,7 @@ type ModelBackend struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=1000
 	Workers []ModelWorker `json:"workers"`
-	// LoraAdapter is a list of LoRA adapters.
-	// +optional
-	LoraAdapters []LoraAdapter `json:"loraAdapters,omitempty"`
-	// AutoscalingPolicyRef references the autoscaling policy for this backend.
+	// AutoscalingPolicy references the autoscaling policy for this backend.
 	// +optional
 	AutoscalingPolicy *AutoscalingPolicySpec `json:"autoscalingPolicy,omitempty"`
 	// SchedulerName defines the name of the scheduler used by ModelServing for this backend.
@@ -129,18 +116,8 @@ type ModelBackend struct {
 	SchedulerName string `json:"schedulerName,omitempty"`
 }
 
-// LoraAdapter defines a LoRA (Low-Rank Adaptation) adapter configuration.
-type LoraAdapter struct {
-	// Name is the name of the LoRA adapter.
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	Name string `json:"name"`
-	// ArtifactURL is the URL where the LoRA adapter artifact is stored.
-	// +kubebuilder:validation:Pattern=`^(hf://|s3://|pvc://).+`
-	ArtifactURL string `json:"artifactURL"`
-}
-
 // ModelBackendType defines the type of model backend.
-// +kubebuilder:validation:Enum=vLLM;vLLMDisaggregated;SGLang;MindIE;MindIEDisaggregated
+// +kubebuilder:validation:Enum=vLLM;vLLMDisaggregated
 type ModelBackendType string
 
 const (
@@ -206,9 +183,6 @@ type ModelStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	// BackendStatuses contains the status of each backend.
-	// +listType=atomic
-	BackendStatuses []ModelBackendStatus `json:"backendStatuses,omitempty"`
 	// ObservedGeneration track of generation
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -221,14 +195,6 @@ const (
 	ModelStatusConditionTypeActive      ModelStatusConditionType = "Active"
 	ModelStatusConditionTypeFailed      ModelStatusConditionType = "Failed"
 )
-
-// ModelBackendStatus defines the status of a model backend.
-type ModelBackendStatus struct {
-	// Name is the name of the backend.
-	Name string `json:"name"`
-	// Replicas is the number of replicas currently running for the backend.
-	Replicas int32 `json:"replicas"`
-}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

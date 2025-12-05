@@ -41,29 +41,8 @@ func TestBuildScalingPolicyBinding(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, backend := range tt.input.Spec.Backends {
-				got := BuildScalingPolicyBinding(tt.input, &backend, utils.GetBackendResourceName(tt.input.Name, backend.Name))
-				assert.Equal(t, tt.expected, got)
-			}
-		})
-	}
-}
-
-func TestBuildOptimizePolicyBinding(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    *v1alpha1.ModelBooster
-		expected *v1alpha1.AutoscalingPolicyBinding
-	}{
-		{
-			name:     "model with multiple backends",
-			input:    loadYaml[v1alpha1.ModelBooster](t, "testdata/input/multi-backends-model.yaml"),
-			expected: loadYaml[v1alpha1.AutoscalingPolicyBinding](t, "testdata/expected/optimize-asp-binding.yaml"),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := BuildOptimizePolicyBinding(tt.input, utils.GetBackendResourceName(tt.input.Name, ""))
+			backend := tt.input.Spec.Backend
+			got := BuildScalingPolicyBinding(tt.input, &backend, utils.GetBackendResourceName(tt.input.Name, backend.Name))
 			assert.Equal(t, tt.expected, got)
 		})
 	}
@@ -80,11 +59,6 @@ func TestBuildAutoscalingPolicy(t *testing.T) {
 			input:    loadYaml[v1alpha1.ModelBooster](t, "testdata/input/model.yaml"),
 			expected: loadYaml[v1alpha1.AutoscalingPolicy](t, "testdata/expected/scaling-asp.yaml"),
 		},
-		{
-			name:     "multi-backends",
-			input:    loadYaml[v1alpha1.ModelBooster](t, "testdata/input/multi-backends-model.yaml"),
-			expected: loadYaml[v1alpha1.AutoscalingPolicy](t, "testdata/expected/optimize-asp.yaml"),
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,11 +68,9 @@ func TestBuildAutoscalingPolicy(t *testing.T) {
 				expectedYAML, _ := yaml.Marshal(tt.expected)
 				assert.Equal(t, string(expectedYAML), string(actualYAML))
 			} else {
-				for _, backend := range tt.input.Spec.Backends {
-					if backend.AutoscalingPolicy == nil {
-						continue
-					}
-					got := BuildAutoscalingPolicy(backend.AutoscalingPolicy, tt.input, backend.Name)
+				backend := tt.input.Spec.Backend
+				if backend.AutoscalingPolicy != nil {
+					got := BuildAutoscalingPolicy(backend.AutoscalingPolicy, tt.input, "")
 					assert.Equal(t, tt.expected, got)
 				}
 			}

@@ -8,7 +8,7 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: 757f69bc97
+    workload.serving.volcano.sh/revision: b466c9bf6
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1
       blockOwnerDeletion: true
@@ -34,5 +34,4 @@ spec:
     retry:
       attempts: 5
       retryInterval: 0s
-  kvConnector:
-    type: mooncake
+  

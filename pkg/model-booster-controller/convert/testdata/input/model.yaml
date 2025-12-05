@@ -5,41 +5,38 @@ metadata:
   namespace: default
   uid: randomUID
 spec:
-  backends:
-    - name: backend1
-      type: vLLM
-      modelURI: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend
-      cacheURI: hostpath:///tmp/test
-      minReplicas: 0
-      maxReplicas: 1
-      autoscalingPolicy:
-        metrics:
-          - metricName: "vllm:iteration_tokens_total"
-            targetValue: 10
-      env:
-        - name: ENDPOINT
-          value: https://obs.test.com
-        - name: RUNTIME_PORT
-          value: "8900"
-      envFrom:
-        - secretRef:
-            name: test-secret
-      workers:
-        - image: vllm-server:latest
-          pods: 2
-          config:
-            block-size: 128
-            gpu-memory-utilization: 0.9
-            max-model-len: 32768
-            tensor-parallel-size: 2
-            trust-remote-code: ""
-            served-model-name: "deepseek-v3"
-          resources:
-            requests:
-              cpu: 100m
-              huawei.com/ascend-1980: "1"
-              memory: 1Gi
-          type: server
-      loraAdapters:
-        - name: lora-sql
-          artifactURL: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend-lora
+  backend:
+    name: backend1
+    type: vLLM
+    modelURI: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend
+    cacheURI: hostpath:///tmp/test
+    minReplicas: 0
+    maxReplicas: 1
+    autoscalingPolicy:
+      metrics:
+        - metricName: "vllm:iteration_tokens_total"
+          targetValue: 10
+    env:
+      - name: ENDPOINT
+        value: https://obs.test.com
+      - name: RUNTIME_PORT
+        value: "8900"
+    envFrom:
+      - secretRef:
+          name: test-secret
+    workers:
+      - image: vllm-server:latest
+        pods: 2
+        config:
+          block-size: 128
+          gpu-memory-utilization: 0.9
+          max-model-len: 32768
+          tensor-parallel-size: 2
+          trust-remote-code: ""
+          served-model-name: "deepseek-v3"
+        resources:
+          requests:
+            cpu: 100m
+            huawei.com/ascend-1980: "1"
+            memory: 1Gi
+        type: server

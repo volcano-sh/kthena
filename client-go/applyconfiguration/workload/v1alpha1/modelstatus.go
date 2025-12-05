@@ -25,9 +25,8 @@ import (
 // ModelStatusApplyConfiguration represents a declarative configuration of the ModelStatus type for use
 // with apply.
 type ModelStatusApplyConfiguration struct {
-	Conditions         []v1.ConditionApplyConfiguration       `json:"conditions,omitempty"`
-	BackendStatuses    []ModelBackendStatusApplyConfiguration `json:"backendStatuses,omitempty"`
-	ObservedGeneration *int64                                 `json:"observedGeneration,omitempty"`
+	Conditions         []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	ObservedGeneration *int64                           `json:"observedGeneration,omitempty"`
 }
 
 // ModelStatusApplyConfiguration constructs a declarative configuration of the ModelStatus type for use with
@@ -45,19 +44,6 @@ func (b *ModelStatusApplyConfiguration) WithConditions(values ...*v1.ConditionAp
 			panic("nil value passed to WithConditions")
 		}
 		b.Conditions = append(b.Conditions, *values[i])
-	}
-	return b
-}
-
-// WithBackendStatuses adds the given value to the BackendStatuses field in the declarative configuration
-// and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, values provided by each call will be appended to the BackendStatuses field.
-func (b *ModelStatusApplyConfiguration) WithBackendStatuses(values ...*ModelBackendStatusApplyConfiguration) *ModelStatusApplyConfiguration {
-	for i := range values {
-		if values[i] == nil {
-			panic("nil value passed to WithBackendStatuses")
-		}
-		b.BackendStatuses = append(b.BackendStatuses, *values[i])
 	}
 	return b
 }

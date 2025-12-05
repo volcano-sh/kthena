@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -237,9 +238,9 @@ func (mc *ModelBoosterController) isModelServingActive(model *workload.ModelBoos
 	if err != nil {
 		return false, err
 	}
-	// Ensure the number of ModelServings matches the number of backends
-	if len(modelServings) != len(model.Spec.Backends) {
-		klog.Infof("Number of ModelServings: %d, number of backends: %d", len(modelServings), len(model.Spec.Backends))
+	// Ensure exactly one ModelServing exists for the single backend
+	if len(modelServings) != 1 {
+		klog.Infof("Number of ModelServings: %d, expected: %d", len(modelServings), 1)
 		return false, fmt.Errorf("ModelServing number not equal to backend number")
 	}
 	// Check if all ModelServings are available
@@ -255,18 +256,6 @@ func (mc *ModelBoosterController) isModelServingActive(model *workload.ModelBoos
 
 // updateModelBoosterStatus updates model status.
 func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, modelBooster *workload.ModelBooster) error {
-	modelServings, err := mc.listModelServingsByLabel(modelBooster)
-	if err != nil {
-		return err
-	}
-	var backendStatus []workload.ModelBackendStatus
-	for _, modelServing := range modelServings {
-		backendStatus = append(backendStatus, workload.ModelBackendStatus{
-			Name:     modelServing.Name,
-			Replicas: modelServing.Status.Replicas,
-		})
-	}
-	modelBooster.Status.BackendStatuses = backendStatus
 	modelBooster.Status.ObservedGeneration = modelBooster.Generation
 	if _, err := mc.client.WorkloadV1alpha1().ModelBoosters(modelBooster.Namespace).UpdateStatus(ctx, modelBooster, metav1.UpdateOptions{}); err != nil {
 		klog.Errorf("update modelBooster status failed: %v", err)
@@ -276,6 +265,21 @@ func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, 
 	// Clean up outdated cache entries for this modelBooster
 	mc.cleanupOutdatedLoraUpdateCache(modelBooster)
 	return nil
+}
+
+// cleanupOutdatedLoraUpdateCache removes stale cache entries for the given modelBooster
+// Cache key format: "namespace/name:generation"
+func (mc *ModelBoosterController) cleanupOutdatedLoraUpdateCache(modelBooster *workload.ModelBooster) {
+	prefix := fmt.Sprintf("%s/%s:", modelBooster.Namespace, modelBooster.Name)
+	for key := range mc.loraUpdateCache {
+		if strings.HasPrefix(key, prefix) {
+			// Keep only the current generation entry, remove others
+			expectedKey := fmt.Sprintf("%s%d", prefix, modelBooster.Generation)
+			if key != expectedKey {
+				delete(mc.loraUpdateCache, key)
+			}
+		}
+	}
 }
 
 func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset.Interface) *ModelBoosterController {

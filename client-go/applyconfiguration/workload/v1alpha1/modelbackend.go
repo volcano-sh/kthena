@@ -36,10 +36,8 @@ type ModelBackendApplyConfiguration struct {
 	MinReplicas            *int32                                   `json:"minReplicas,omitempty"`
 	MaxReplicas            *int32                                   `json:"maxReplicas,omitempty"`
 	ScalingCost            *int32                                   `json:"scalingCost,omitempty"`
-	RouteWeight            *uint32                                  `json:"routeWeight,omitempty"`
 	ScaleToZeroGracePeriod *metav1.Duration                         `json:"scaleToZeroGracePeriod,omitempty"`
 	Workers                []ModelWorkerApplyConfiguration          `json:"workers,omitempty"`
-	LoraAdapters           []LoraAdapterApplyConfiguration          `json:"loraAdapters,omitempty"`
 	AutoscalingPolicy      *AutoscalingPolicySpecApplyConfiguration `json:"autoscalingPolicy,omitempty"`
 	SchedulerName          *string                                  `json:"schedulerName,omitempty"`
 }
@@ -126,14 +124,6 @@ func (b *ModelBackendApplyConfiguration) WithScalingCost(value int32) *ModelBack
 	return b
 }
 
-// WithRouteWeight sets the RouteWeight field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the RouteWeight field is set to the value of the last call.
-func (b *ModelBackendApplyConfiguration) WithRouteWeight(value uint32) *ModelBackendApplyConfiguration {
-	b.RouteWeight = &value
-	return b
-}
-
 // WithScaleToZeroGracePeriod sets the ScaleToZeroGracePeriod field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the ScaleToZeroGracePeriod field is set to the value of the last call.
@@ -151,19 +141,6 @@ func (b *ModelBackendApplyConfiguration) WithWorkers(values ...*ModelWorkerApply
 			panic("nil value passed to WithWorkers")
 		}
 		b.Workers = append(b.Workers, *values[i])
-	}
-	return b
-}
-
-// WithLoraAdapters adds the given value to the LoraAdapters field in the declarative configuration
-// and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, values provided by each call will be appended to the LoraAdapters field.
-func (b *ModelBackendApplyConfiguration) WithLoraAdapters(values ...*LoraAdapterApplyConfiguration) *ModelBackendApplyConfiguration {
-	for i := range values {
-		if values[i] == nil {
-			panic("nil value passed to WithLoraAdapters")
-		}
-		b.LoraAdapters = append(b.LoraAdapters, *values[i])
 	}
 	return b
 }

@@ -51,37 +51,34 @@ const (
 //go:embed templates/*
 var templateFS embed.FS
 
-// BuildModelServing creates ModelServing objects based on the model's backends.
-func BuildModelServing(model *workload.ModelBooster) ([]*workload.ModelServing, error) {
-	var servings []*workload.ModelServing
-	for idx, backend := range model.Spec.Backends {
-		var serving *workload.ModelServing
-		var err error
-		switch backend.Type {
-		case workload.ModelBackendTypeVLLM:
-			serving, err = buildVllmModelServing(model, idx)
-		case workload.ModelBackendTypeVLLMDisaggregated:
-			serving, err = buildVllmDisaggregatedModelServing(model, idx)
-		default:
-			return nil, fmt.Errorf("not support model backend type: %s", backend.Type)
-		}
-		if err != nil {
-			return nil, err
-		}
-		servings = append(servings, serving)
+// BuildModelServing creates a ModelServing object based on the model's backend.
+func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, error) {
+	backend := &model.Spec.Backend
+	var serving *workload.ModelServing
+	var err error
+	switch backend.Type {
+	case workload.ModelBackendTypeVLLM:
+		serving, err = buildVllmModelServing(model)
+	case workload.ModelBackendTypeVLLMDisaggregated:
+		serving, err = buildVllmDisaggregatedModelServing(model)
+	default:
+		return nil, fmt.Errorf("not support model backend type: %s", backend.Type)
 	}
-	return servings, nil
+	if err != nil {
+		return nil, err
+	}
+	return serving, nil
 }
 
 // buildVllmDisaggregatedModelServing handles VLLM disaggregated backend creation.
-func buildVllmDisaggregatedModelServing(model *workload.ModelBooster, idx int) (*workload.ModelServing, error) {
-	backend := &model.Spec.Backends[idx]
+func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload.ModelServing, error) {
+	backend := &model.Spec.Backend
 	workersMap := mapWorkers(backend.Workers)
 	if workersMap[workload.ModelWorkerTypePrefill] == nil {
-		return nil, fmt.Errorf("prefill worker not found in backend: %s", backend.Name)
+		return nil, fmt.Errorf("prefill worker not found in backend")
 	}
 	if workersMap[workload.ModelWorkerTypeDecode] == nil {
-		return nil, fmt.Errorf("decode worker not found in backend: %s", backend.Name)
+		return nil, fmt.Errorf("decode worker not found in backend")
 	}
 	cacheVolume, err := buildCacheVolume(backend)
 	if err != nil {
@@ -134,14 +131,6 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster, idx int) (
 				return nil, err
 			}
 		}
-	}
-
-	// Handle LoRA adapters
-	if len(backend.LoraAdapters) > 0 {
-		loraCommands, loraContainers := buildLoraComponents(model, backend, cacheVolume.Name)
-		preFillCommand = append(preFillCommand, loraCommands...)
-		decodeCommand = append(decodeCommand, loraCommands...)
-		initContainers = append(initContainers, loraContainers...)
 	}
 
 	prefillEngineEnv := buildEngineEnvVars(backend,
@@ -205,8 +194,8 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster, idx int) (
 }
 
 // buildVllmModelServing handles VLLM backend creation.
-func buildVllmModelServing(model *workload.ModelBooster, idx int) (*workload.ModelServing, error) {
-	backend := &model.Spec.Backends[idx]
+func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing, error) {
+	backend := &model.Spec.Backend
 	workersMap := mapWorkers(backend.Workers)
 	if workersMap[workload.ModelWorkerTypeServer] == nil {
 		return nil, fmt.Errorf("server worker not found in backend: %s", backend.Name)
@@ -253,12 +242,6 @@ func buildVllmModelServing(model *workload.ModelBooster, idx int) (*workload.Mod
 		},
 	}
 
-	// Handle LoRA adapters
-	if len(backend.LoraAdapters) > 0 {
-		loraCommands, loraContainers := buildLoraComponents(model, backend, cacheVolume.Name)
-		commands = append(commands, loraCommands...)
-		initContainers = append(initContainers, loraContainers...)
-	}
 	engineEnv := buildEngineEnvVars(backend)
 	data := map[string]interface{}{
 		"MODEL_SERVING_TEMPLATE_METADATA": &metav1.ObjectMeta{
@@ -328,7 +311,6 @@ func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 		commands = append(commands, "--distributed_executor_backend", "ray")
 		commands = []string{"bash", "-c", fmt.Sprintf("chmod u+x %s && %s leader --ray_cluster_size=%d --num-gpus=%d && %s", VllmMultiNodeServingScriptPath, VllmMultiNodeServingScriptPath, workersMap[workload.ModelWorkerTypeServer].Pods, utils.GetDeviceNum(workersMap[workload.ModelWorkerTypeServer]), strings.Join(commands, " "))}
 	}
-	commands = append(commands, "--kv-events-config", config.GetDefaultKVEventsConfig())
 	return commands, err
 }
 
@@ -415,24 +397,6 @@ func loadModelServingTemplate(templatePath string, data *map[string]interface{})
 	return modelServing, nil
 }
 
-// buildDownloaderContainer builds downloader container to reduce code duplication
-func buildDownloaderContainer(name, image, source, outputDir string, backend *workload.ModelBackend, cacheVolumeName string) corev1.Container {
-	return corev1.Container{
-		Name:  name,
-		Image: image,
-		Args: []string{
-			"--source", source,
-			"--output-dir", outputDir,
-		},
-		Env:     backend.Env,
-		EnvFrom: backend.EnvFrom,
-		VolumeMounts: []corev1.VolumeMount{{
-			Name:      cacheVolumeName,
-			MountPath: GetCachePath(backend.CacheURI),
-		}},
-	}
-}
-
 func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1.EnvVar) []corev1.EnvVar {
 	standardEnvs := []corev1.EnvVar{
 		{
@@ -480,36 +444,4 @@ func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1
 		},
 	}
 	return append(append(append([]corev1.EnvVar(nil), backend.Env...), standardEnvs...), additionalEnvs...)
-}
-
-// buildLoraComponents builds LoRA related commands and containers
-func buildLoraComponents(model *workload.ModelBooster, backend *workload.ModelBackend, cacheVolumeName string) ([]string, []corev1.Container) {
-	adapterCount := len(backend.LoraAdapters)
-	loras := make([]string, 0, adapterCount)
-	loraContainers := make([]corev1.Container, 0, adapterCount)
-
-	for i, adapter := range backend.LoraAdapters {
-		// Create LoRA downloader container
-		containerName := fmt.Sprintf("%s-lora-downloader-%d", model.Name, i)
-		outputDir := GetCachePath(backend.CacheURI) + GetMountPath(adapter.ArtifactURL)
-
-		// Build LoRA module string
-		loraModule := fmt.Sprintf("%s=%s", adapter.Name, outputDir)
-		loras = append(loras, loraModule)
-
-		loraContainer := buildDownloaderContainer(
-			containerName,
-			config.Config.DownloaderImage(),
-			adapter.ArtifactURL,
-			outputDir,
-			backend,
-			cacheVolumeName,
-		)
-		loraContainers = append(loraContainers, loraContainer)
-	}
-
-	// Build LoRA command arguments
-	loraCommands := append([]string{"--enable-lora", "--lora-modules"}, loras...)
-
-	return loraCommands, loraContainers
 }
