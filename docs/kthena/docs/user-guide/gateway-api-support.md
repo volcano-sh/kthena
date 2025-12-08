@@ -122,7 +122,7 @@ spec:
   modelName: "deepseek-r1"
   parentRefs:
   - name: "default"      # Bind to the default Gateway
-    namespace: "default"
+    namespace: "kthena-system"
     kind: "Gateway"
   rules:
   - name: "default"
@@ -331,43 +331,6 @@ curl http://${ROUTER_IP}:8081/v1/completions \
 ```
 
 Although both requests use the same `modelName` (`deepseek-r1`), they are routed to different backend model services because they access through different ports (corresponding to different Gateways). This demonstrates how Gateway API resolves the global modelName conflict problem.
-
-## Best Practices
-
-### 1. Naming Conventions
-
-It's recommended to use clear naming conventions for Gateways and ModelRoutes:
-
-- Gateway: Include port or purpose, e.g., `kthena-gateway-8081`, `kthena-gateway-internal`
-- ModelRoute: Include model name and purpose, e.g., `deepseek-production`, `deepseek-canary`
-
-### 2. Port Management
-
-- The default Gateway uses Kthena Router's default port
-- Assign a unique port for each new Gateway
-- Ensure ports are properly exposed in the Service
-- Use port range 8080-8090 to avoid conflicts with system ports
-
-### 3. Namespace Isolation
-
-Leverage Kubernetes namespaces for better isolation. You can create Gateways in different namespaces to logically separate environments (production, development, testing), and bind ModelRoutes in those namespaces to their respective Gateways.
-
-### 4. Monitoring and Observability
-
-Monitor your Gateway and ModelRoute resources:
-
-```bash
-# Check Gateway status
-kubectl get gateway -A
-kubectl describe gateway <gateway-name> -n <namespace>
-
-# Check ModelRoute status
-kubectl get modelroute -A
-kubectl describe modelroute <modelroute-name> -n <namespace>
-
-# Check GatewayClass
-kubectl get gatewayclass
-```
 
 ## Cleanup
 
