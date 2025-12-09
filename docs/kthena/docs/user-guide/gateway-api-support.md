@@ -60,6 +60,8 @@ For more information about Gateway API Inference Extension, please refer to [Gat
 
 ## Gateway API Architecture
 
+![Gateway API Architecture](../assets/diagrams/gateway-api-arch.svg)
+
 In Kthena Router, Gateway API works as follows:
 
 1. **GatewayClass**: Kthena Router automatically creates a GatewayClass named `kthena-router`
@@ -75,9 +77,10 @@ When deploying Kthena Router, enable Gateway API support by setting the `--enabl
 
 ```bash
 # Configure during Helm installation
-helm install kthena-router \
-  --set enableGatewayAPI=true \
-  oci://registry.example.com/kthena/kthena-router
+helm install kthena \
+  --set networking.kthenaRouter.gatewayAPI.enabled=true \
+  --version v0.2.0 \
+  oci://ghcr.io/volcano-sh/charts/kthena
 ```
 
 Or modify the configuration in an already deployed Kthena Router:
@@ -101,7 +104,7 @@ When Gateway API support is enabled, Kthena Router automatically creates a defau
 View the default Gateway:
 
 ```bash
-kubectl get gateway -n default
+kubectl get gateway
 
 # Example output:
 # NAME      CLASS           ADDRESS   PROGRAMMED   AGE

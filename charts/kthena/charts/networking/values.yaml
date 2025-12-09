@@ -53,6 +53,13 @@ kthenaRouter:
     format: "text"
     # output specifies where to write logs: "stdout", "stderr", or file path (default: stdout)
     output: "stdout"
+  # gatewayAPI configuration
+  gatewayAPI:
+    # enabled controls whether Gateway API related features are enabled
+    enabled: false
+    # inferenceExtension controls whether Gateway API Inference Extension features are enabled
+    # This requires gatewayAPI.enabled to be true
+    inferenceExtension: false
 
 webhook:
   enabled: true

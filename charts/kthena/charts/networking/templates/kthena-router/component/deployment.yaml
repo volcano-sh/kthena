@@ -25,6 +25,10 @@ spec:
           args:
             - --port={{ .Values.kthenaRouter.port }}
             - --enable-webhook={{ .Values.kthenaRouter.webhook.enabled }}
+            - --enable-gateway-api={{ .Values.kthenaRouter.gatewayAPI.enabled }}
+            {{- if .Values.kthenaRouter.gatewayAPI.enabled }}
+            - --enable-gateway-api-inference-extension={{ .Values.kthenaRouter.gatewayAPI.inferenceExtension }}
+            {{- end }}
           {{- if .Values.kthenaRouter.webhook.enabled }}
             - --webhook-port={{ .Values.kthenaRouter.webhook.port }}
             - --webhook-tls-cert-file={{ .Values.kthenaRouter.webhook.tls.certFile }}

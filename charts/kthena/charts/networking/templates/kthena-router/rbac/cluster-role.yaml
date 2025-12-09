@@ -50,6 +50,7 @@ rules:
       - get
       - update
       - patch
+  {{- if .Values.kthenaRouter.gatewayAPI.enabled }}
   - apiGroups:
       - gateway.networking.k8s.io
     resources:
@@ -74,6 +75,8 @@ rules:
       - get
       - patch
       - update
+  {{- end }}
+  {{- if .Values.kthenaRouter.gatewayAPI.inferenceExtension }}
   - apiGroups:
       - inference.networking.k8s.io
     resources:
@@ -90,6 +93,7 @@ rules:
       - get
       - patch
       - update
+  {{- end }}
   - apiGroups:
       - ""
     resources:

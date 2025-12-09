@@ -52,6 +52,13 @@ networking:
       inputTokenWeight: 1.0
       # outputTokenWeight is the weight multiplier for output tokens
       outputTokenWeight: 2.0
+    # gatewayAPI configuration
+    gatewayAPI:
+      # enabled controls whether Gateway API related features are enabled
+      enabled: false
+      # inferenceExtension controls whether Gateway API Inference Extension features are enabled
+      # This requires gatewayAPI.enabled to be true
+      inferenceExtension: false
 
 global:
   # Certificate Management Mode
