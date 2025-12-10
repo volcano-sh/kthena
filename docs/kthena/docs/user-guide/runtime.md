@@ -18,7 +18,7 @@ Notes:
 - When deploying via the ModelBooster CR (one-stop deployment), no additional configuration is needed; ModelServing will automatically enable the runtime feature.
 - For standalone deployment using ModelServing YAML, you can add the following configuration to start Runtime as sidecar container:
 
-  ```
+  ```yaml showLineNumbers
   - name: runtime
     ports:
       - containerPort: 8900
@@ -75,7 +75,7 @@ Startup arguments:
 
 In the ModelBooster YAML, you can control Runtime startup values via `spec.backend.env`:
 
-```
+```yaml showLineNumbers
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelBooster
 metadata:
@@ -138,7 +138,7 @@ Notes:
 You can use ModelBooster YAML to configure LoRA adapters for automatic download and loading during the model startup.
 If you only change loraAdapters in ModelBooster YAML, Runtime will dynamically download and load/unload the adapters without restarting the Pod.
 
-```
+```yaml showLineNumbers
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelBooster
 metadata:
