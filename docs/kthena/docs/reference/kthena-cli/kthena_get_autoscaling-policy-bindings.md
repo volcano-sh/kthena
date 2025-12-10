@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena get autoscaling-policy-bindings
 
 List autoscaling policy bindings

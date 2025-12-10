@@ -102,11 +102,6 @@ const sidebars: SidebarsConfig = {
       items: [
         {
           type: 'doc',
-          id: 'reference/router-access-log-fields',
-          label: 'Router Access Log Fields',
-        },
-        {
-          type: 'doc',
           id: 'reference/helm-chart-values',
           label: 'Helm Chart Values',
         },
@@ -206,6 +201,11 @@ const sidebars: SidebarsConfig = {
               label: 'Describe template',
             },
           ],
+        },
+        {
+          type: 'doc',
+          id: 'reference/router-access-log-fields',
+          label: 'Router Access Log Fields',
         },
       ],
     },

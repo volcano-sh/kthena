@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena describe template
 
 Show detailed information about a template

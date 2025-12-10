@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena describe
 
 Show detailed information about a specific resource
