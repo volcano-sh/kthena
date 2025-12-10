@@ -48,7 +48,7 @@ kind load docker-image ${HUB}/runtime:${TAG} --name "${CLUSTER_NAME}"
 
 # Install cert-manager
 echo "Start to install cert-manager"
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.1/cert-manager.yaml
 echo "Waiting for cert-manager to be ready..."
 go install github.com/cert-manager/cmctl/v2@latest && $(go env GOPATH)/bin/cmctl check api --wait=5m
 # Install Volcano
