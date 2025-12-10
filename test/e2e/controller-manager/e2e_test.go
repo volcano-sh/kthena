@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -178,16 +180,35 @@ func getKubeConfig() (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 }
 
+func getArchitecture() string {
+	if arch := os.Getenv("TARGET_ARCH"); arch != "" {
+		return arch
+	}
+	return runtime.GOARCH
+}
+
 func createTestModel() *workload.ModelBooster {
 	// Create a simple config as JSON
 	config := &apiextensionsv1.JSON{}
-	configRaw := `{
-		"served-model-name": "test-model",
-		"max-model-len": 32768,
-		"max-num-batched-tokens": 65536,
-		"block-size": 128,
-		"enable-prefix-caching": ""
-	}`
+	arch := getArchitecture()
+	var configRaw string
+	if arch == "arm64" {
+		// vLLM ARM64 does not support block-size
+		configRaw = `{
+		   "served-model-name": "test-model",
+		   "max-model-len": 32768,
+		   "max-num-batched-tokens": 65536,
+		   "enable-prefix-caching": ""
+		  }`
+	} else {
+		configRaw = `{
+		   "served-model-name": "test-model",
+		   "max-model-len": 32768,
+		   "max-num-batched-tokens": 65536,
+		   "block-size": 128,
+		   "enable-prefix-caching": ""
+		  }`
+	}
 	config.Raw = []byte(configRaw)
 
 	return &workload.ModelBooster{
