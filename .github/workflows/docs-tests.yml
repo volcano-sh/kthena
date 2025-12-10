@@ -27,9 +27,5 @@ jobs:
       - name: Install dependencies
         working-directory: ./docs/kthena
         run: npm ci
-      - name: Type check
-        working-directory: ./docs/kthena
-        run: npm run typecheck
-      - name: Build documentation
-        working-directory: ./docs/kthena
-        run: npm run build
+      - name: Run documentation tests
+        run: make test-docs
