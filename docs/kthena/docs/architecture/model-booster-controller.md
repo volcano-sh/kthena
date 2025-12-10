@@ -17,7 +17,7 @@ The Model Booster Controller subscribes to the creation/modification/deletion ev
 
 ## Example
 
-Read the [examples](https://github.com/volcano-sh/kthena/blob/main/examples/model/) to learn more.
+Read the [examples](https://github.com/volcano-sh/kthena/tree/main/examples/model-booster) to learn more.
 
 ## Limitations
 
