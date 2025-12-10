@@ -37,7 +37,12 @@ kubectl wait --for=condition=Ready nodes --all --timeout=300s
 
 # Docker build
 echo "Start to build Docker images"
-make docker-build-all HUB=${HUB} TAG=${TAG}
+if [ "$(uname -m)" = "x86_64" ]; then
+  export DOCKER_BUILDX_PLATFORM=linux/amd64
+else
+  export DOCKER_BUILDX_PLATFORM=linux/arm64
+fi
+make docker-buildx-all HUB=${HUB} TAG=${TAG} PLATFORMS=${DOCKER_BUILDX_PLATFORM}
 
 # Load images into Kind cluster
 echo "Loading Docker images into Kind cluster"

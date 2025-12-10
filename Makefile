@@ -144,10 +144,6 @@ docker-build-downloader: generate
 docker-build-runtime: generate
 	$(CONTAINER_TOOL) build -t ${IMG_RUNTIME} --target runtime -f python/Dockerfile python
 
-.PHONY: docker-build-all
-docker-build-all: docker-build-router docker-build-controller docker-build-downloader docker-build-runtime## Build all images.
-	@echo "All images built."
-
 .PHONY: docker-push
 docker-push: docker-build-router docker-build-controller ## Push all images to the registry.
 	$(CONTAINER_TOOL) push ${IMG_ROUTER}
@@ -174,6 +170,13 @@ docker-buildx: ## Build and push docker image for cross-platform support
 		-f docker/Dockerfile.kthena-controller-manager \
 		--push .
 
+.PHONY: docker-buildx-all
+docker-buildx-all: ## Build all images.
+	$(CONTAINER_TOOL) buildx build --platform ${PLATFORMS} --load -t ${IMG_ROUTER} -f docker/Dockerfile.kthena-router .
+	$(CONTAINER_TOOL) buildx build --platform ${PLATFORMS} --load -t ${IMG_CONTROLLER} -f docker/Dockerfile.kthena-controller-manager .
+	$(CONTAINER_TOOL) buildx build --platform ${PLATFORMS} --load -t ${IMG_DOWNLOADER} --target downloader -f python/Dockerfile python
+	$(CONTAINER_TOOL) buildx build --platform ${PLATFORMS} --load -t ${IMG_RUNTIME} --target runtime -f python/Dockerfile python
+	@echo "All images built."
 
 ##@ Dependencies
 

@@ -21,7 +21,11 @@ on:
 jobs:
   e2e-tests:
     name: E2E Tests
-    runs-on: ubuntu-latest
+    # test e2e on both amd64 and arm64
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, ubuntu-24.04-arm ]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - name: Free Disk Space
@@ -44,6 +48,8 @@ jobs:
         shell: bash
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Create k8s Kind Cluster
         uses: helm/kind-action@v1
         with:
