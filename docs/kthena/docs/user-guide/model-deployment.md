@@ -1,22 +1,4 @@
-# Model Booster
-
-### How Model Booster Controller works
-
-Model Booster Controller watches for changes to `ModelBooster` CR in the Kubernetes cluster. When a `ModelBooster` CR is created or updated,
-the controller performs the following steps:
-
-1. Convert the `ModelBooster` CR to `ModelServing` CR, `ModelServer` CR, `ModelRoute` CR. `AutoscalingPolicy` CR and
-   `AutoscalingPolicyBinding` CR are optional, only created when the `ModelBooster` CR has `autoscalingPolicy` defined.
-2. Use the result of step 1 to create or update the `ModelServing`, `ModelServer`, `ModelRoute` , `AutoscalingPolicy`,
-   `AutoscalingPolicyBinding`in the Kubernetes.
-3. Set the conditions of `ModelBooster` CR.
-    - After creating the related resources, the `Initialized` condition is set to `true`.
-    - The controller then monitors the status of the `ModelServing` resources. Once all `ModelServing` resources are
-      `Available`, the `Active` condition on the `ModelBooster` is set to `true`.
-    - If any error occurs during the process, set the `Failed` condition to true and provide an error message.
-
-The `OwnerReference` is set to the `ModelBooster` CR for all the created resources, so that when the `ModelBooster` CR is deleted, all
-the related resources will be deleted as well.
+# Model Deployment
 
 ## ModelBooster vs ModelServing Deployment Approaches
 
@@ -90,9 +72,9 @@ Kthena provides two approaches for deploying LLM inference workloads: the **Mode
 | `Active`      | The ModelBooster is ready for inference.                                    |
 | `Failed`      | The ModelBooster failed to become active. See the message for more details. |
 
-## Examples of ModelBooster CR
+## Examples
 
-You can find examples of model CR [here](https://github.com/volcano-sh/kthena/tree/main/examples/model-booster)
+You can find examples of model booster CR [here](https://github.com/volcano-sh/kthena/tree/main/examples/model-booster), and model serving CR [here](https://github.com/volcano-sh/kthena/tree/main/examples/model-serving).
 
 ## Advanced features
 

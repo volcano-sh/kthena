@@ -44,7 +44,7 @@ const sidebars: SidebarsConfig = {
         description: 'A comprehensive overview of all the user guides.',
       },
       items: [
-        'user-guide/model-booster',
+        'user-guide/model-deployment',
         'user-guide/multi-node-inference',
         {
           type: 'doc',
