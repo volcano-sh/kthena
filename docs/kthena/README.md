@@ -211,7 +211,7 @@ If you are using GitHub pages for hosting, this command is a convenient way to b
 Release a version 1.0 of your project:
 
 ```shell
-npm run docusaurus docs:version v0.1.0
+npm run docusaurus docs:version v0.2.0
 ```
 
 Please refer to [this guide](https://tutorial.docusaurus.io/docs/tutorial-extras/manage-docs-versions/) for more information.

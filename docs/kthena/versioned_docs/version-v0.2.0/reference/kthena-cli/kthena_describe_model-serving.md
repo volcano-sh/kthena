@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena describe model-serving
 
 Show detailed information about a model serving workload

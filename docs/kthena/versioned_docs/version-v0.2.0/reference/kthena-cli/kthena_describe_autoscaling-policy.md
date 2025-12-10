@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena describe autoscaling-policy
 
 Show detailed information about an autoscaling policy

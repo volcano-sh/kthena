@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena get template
 
 Get a specific template

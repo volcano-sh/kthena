@@ -73,7 +73,7 @@ Startup arguments:
 - `-I, --pod` (required): current instance/Pod identifier, used for events and Redis keys
 - `-N, --model` (required): model name
 
-In the ModelBooster YAML, you can control Runtime startup values via `spec.backends.env`:
+In the ModelBooster YAML, you can control Runtime startup values via `spec.backend.env`:
 
 ```
 apiVersion: workload.serving.volcano.sh/v1alpha1
@@ -85,37 +85,37 @@ metadata:
 spec:
   name: qwen25-coder-32b
   owner: example
-  backends:
-    - name: "qwen25-coder-32b-server"
-      type: "vLLM" # --engine
-      modelURI: s3://kthena/Qwen/Qwen2.5-Coder-32B-Instruct
-      cacheURI: hostpath:///cache/
-      envFrom:
-        - secretRef:
-            name: your-secrets
-      env:
-        - name: "RUNTIME_PORT"  # default 8100
-          value: "8200"
-        - name: "RUNTIME_URL"   # default http://localhost:8000/metrics
-          value: "http://localhost:8100"
-        - name: "RUNTIME_METRICS_PATH" # default /metrics
-          value: "/metrics"
-      minReplicas: 1
-      maxReplicas: 1
-      workers:
-        - type: server
-          image: openeuler/vllm-ascend:latest
-          replicase: 1
-          pods: 1
-          resources:
-            limits:
-              cpu: "8"
-              memory: 96Gi
-              huawei.com/ascend-1980: "2"
-            requests:
-              cpu: "1"
-              memory: 96Gi
-              huawei.com/ascend-1980: "2"
+  backend:
+    name: "qwen25-coder-32b-server"
+    type: "vLLM" # --engine
+    modelURI: s3://kthena/Qwen/Qwen2.5-Coder-32B-Instruct
+    cacheURI: hostpath:///cache/
+    envFrom:
+      - secretRef:
+          name: your-secrets
+    env:
+      - name: "RUNTIME_PORT"  # default 8100
+        value: "8200"
+      - name: "RUNTIME_URL"   # default http://localhost:8000/metrics
+        value: "http://localhost:8100"
+      - name: "RUNTIME_METRICS_PATH" # default /metrics
+        value: "/metrics"
+    minReplicas: 1
+    maxReplicas: 1
+    workers:
+      - type: server
+        image: openeuler/vllm-ascend:latest
+        replicase: 1
+        pods: 1
+        resources:
+          limits:
+            cpu: "8"
+            memory: 96Gi
+            huawei.com/ascend-1980: "2"
+          requests:
+            cpu: "1"
+            memory: 96Gi
+            huawei.com/ascend-1980: "2"
 ```
 
 ## Metric Standardization
@@ -148,29 +148,26 @@ metadata:
 spec:
   name: deepseek-r1-distill-llama-8b
   owner: example
-  backends:
-    - name: "deepseek-r1-distill-llama-8b-vllm"
-      type: "vLLM"
-      modelURI: "s3://model-bucket/deepseek-r1-distill-llama-8b"
-      cacheURI: hostpath:///cache/
-      envFrom:
-        - secretRef:
-            name: your-secrets  # AccessKey/SecretKey for S3/OBS or HF_AUTH_TOKEN for HuggingFace
-      env:
-        - name: "ENDPOINT"
-          value: "https://obs.test.com"
-        - name: "VLLM_ALLOW_RUNTIME_LORA_UPDATING"
-          value: "True"  # Enable dynamic LoRA load/unload
-      minReplicas: 1
-      maxReplicas: 1
-      workers:
-        - type: server
-          image: openeuler/vllm-ascend:latest
-          replicase: 1
-          pods: 1
-      loraAdapters:
-        - name: lora-sql
-          artifactURL: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend-lora
+  backend:
+    name: "deepseek-r1-distill-llama-8b-vllm"
+    type: "vLLM"
+    modelURI: "s3://model-bucket/deepseek-r1-distill-llama-8b"
+    cacheURI: hostpath:///cache/
+    envFrom:
+      - secretRef:
+          name: your-secrets  # AccessKey/SecretKey for S3/OBS or HF_AUTH_TOKEN for HuggingFace
+    env:
+      - name: "ENDPOINT"
+        value: "https://obs.test.com"
+      - name: "VLLM_ALLOW_RUNTIME_LORA_UPDATING"
+        value: "True"  # Enable dynamic LoRA load/unload
+    minReplicas: 1
+    maxReplicas: 1
+    workers:
+      - type: server
+        image: openeuler/vllm-ascend:latest
+        replicase: 1
+        pods: 1
 ```
 
 Notes:

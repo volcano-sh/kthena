@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena
 
 Kthena CLI for managing AI inference workloads
