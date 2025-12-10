@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/volcano-sh/kthena/cli/kthena/cmd"
 
@@ -51,6 +52,12 @@ func main() {
 	if err := doc.GenMarkdownTree(rootCmd, outputDir); err != nil {
 		log.Fatalf("Error generating Markdown documentation: %v", err)
 	}
+
+	// Add front matter to all generated markdown files
+	if err := addFrontMatter(outputDir); err != nil {
+		log.Fatalf("Error adding front matter: %v", err)
+	}
+
 	fmt.Printf("Markdown documentation generated in %s\n", outputDir)
 }
 
@@ -79,5 +86,35 @@ func clearDirectory(dir string) error {
 		}
 	}
 
+	return nil
+}
+
+// addFrontMatter prepends front matter to all .md files in the directory
+func addFrontMatter(dir string) error {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("error reading directory %s: %w", dir, err)
+	}
+	for _, file := range files {
+		if !file.IsDir() && filepath.Ext(file.Name()) == ".md" {
+			filePath := filepath.Join(dir, file.Name())
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				return fmt.Errorf("error reading file %s: %w", filePath, err)
+			}
+			content := string(data)
+			// Check if front matter already exists (simple check)
+			if strings.HasPrefix(content, "---\n") {
+				// Already has front matter, skip
+				continue
+			}
+			// Prepend front matter
+			newContent := "---\ntitle: Kthena CLI\n---\n" + content
+			if err := os.WriteFile(filePath, []byte(newContent), 0o644); err != nil {
+				return fmt.Errorf("error writing file %s: %w", filePath, err)
+			}
+			fmt.Printf("Added front matter to %s\n", filePath)
+		}
+	}
 	return nil
 }

@@ -445,7 +445,6 @@ Now that you have a working multi‑node inference deployment, you can explore o
 
 - **[Autoscaling](./autoscaler.md)** – Configure automatic scaling of your ModelServing based on metrics like request queue length or GPU utilization.
 - **[Router & Routing](./router-routing.md)** – Set up intelligent request routing, canary deployments, and traffic splitting across multiple model versions.
-- **[ModelBooster](./model-booster.md)** – Use ModelBooster to deploy and manage individual models with simplified configuration.
 - **[Prefill‑Decode Disaggregation](./prefill-decode-disaggregation/)** – Learn how to split the prefill and decode stages across different hardware for better resource utilization.
 
 For detailed API references, see the [ModelServing CRD reference](../reference/crd/workload.serving.volcano.sh.md).

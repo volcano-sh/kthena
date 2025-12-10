@@ -202,7 +202,6 @@ AutoscalingPolicySpec defines the desired state of AutoscalingPolicy.
 
 _Appears in:_
 - [AutoscalingPolicy](#autoscalingpolicy)
-- [ModelBackend](#modelbackend)
 - [ModelBoosterSpec](#modelboosterspec)
 
 | Field | Description | Default | Validation |
@@ -316,23 +315,6 @@ _Appears in:_
 | `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas allowed. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 
 
-#### LoraAdapter
-
-
-
-LoraAdapter defines a LoRA (Low-Rank Adaptation) adapter configuration.
-
-
-
-_Appears in:_
-- [ModelBackend](#modelbackend)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ | Name is the name of the LoRA adapter. |  | Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
-| `artifactURL` _string_ | ArtifactURL is the URL where the LoRA adapter artifact is stored. |  | Pattern: `^(hf://\|s3://\|pvc://).+` <br /> |
-
-
 #### Metadata
 
 
@@ -381,36 +363,15 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the backend. Can't duplicate with other ModelBackend name in the same ModelBooster CR.<br />Note: update name will cause the old modelInfer deletion and a new modelInfer creation. |  | Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
-| `type` _[ModelBackendType](#modelbackendtype)_ | Type is the type of the backend. |  | Enum: [vLLM vLLMDisaggregated SGLang MindIE MindIEDisaggregated] <br /> |
+| `type` _[ModelBackendType](#modelbackendtype)_ | Type is the type of the backend. |  | Enum: [vLLM vLLMDisaggregated] <br /> |
 | `modelURI` _string_ | ModelURI is the URI where you download the model. Support hf://, s3://, pvc://. |  | Pattern: `^(hf://\|s3://\|pvc://).+` <br /> |
 | `cacheURI` _string_ | CacheURI is the URI where the downloaded model stored. Support hostpath://, pvc://. |  | Pattern: `^(hostpath://\|pvc://).+` <br /> |
 | `envFrom` _[EnvFromSource](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#envfromsource-v1-core) array_ | List of sources to populate environment variables in the container.<br />The keys defined within a source must be a C_IDENTIFIER. All invalid keys<br />will be reported as an event when the container is starting. When a key exists in multiple<br />sources, the value associated with the last source will take precedence.<br />Values defined by an Env with a duplicate key will take precedence.<br />Cannot be updated. |  |  |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#envvar-v1-core) array_ | List of environment variables to set in the container.<br />Supported names:<br />"ENDPOINT": When you download model from s3, you have to specify it.<br />"RUNTIME_URL": default is http://localhost:8000<br />"RUNTIME_PORT": default is 8100<br />"RUNTIME_METRICS_PATH": default is /metrics<br />"HF_ENDPOINT":The url of hugging face. Default is https://huggingface.co/<br />Cannot be updated. |  |  |
 | `minReplicas` _integer_ | MinReplicas is the minimum number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
 | `maxReplicas` _integer_ | MaxReplicas is the maximum number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
-| `scalingCost` _integer_ | ScalingCost is the cost associated with running this backend. |  | Minimum: 0 <br /> |
-| `routeWeight` _integer_ | RouteWeight is used to specify the percentage of traffic should be sent to the target backend.<br />It's used to create model route. | 100 | Maximum: 100 <br />Minimum: 0 <br /> |
 | `workers` _[ModelWorker](#modelworker) array_ | Workers is the list of workers associated with this backend. |  | MaxItems: 1000 <br />MinItems: 1 <br /> |
-| `loraAdapters` _[LoraAdapter](#loraadapter) array_ | LoraAdapter is a list of LoRA adapters. |  |  |
-| `autoscalingPolicy` _[AutoscalingPolicySpec](#autoscalingpolicyspec)_ | AutoscalingPolicyRef references the autoscaling policy for this backend. |  |  |
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing for this backend. |  |  |
-
-
-#### ModelBackendStatus
-
-
-
-ModelBackendStatus defines the status of a model backend.
-
-
-
-_Appears in:_
-- [ModelStatus](#modelstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ | Name is the name of the backend. |  |  |
-| `replicas` _integer_ | Replicas is the number of replicas currently running for the backend. |  |  |
 
 
 #### ModelBackendType
@@ -420,7 +381,7 @@ _Underlying type:_ _string_
 ModelBackendType defines the type of model backend.
 
 _Validation:_
-- Enum: [vLLM vLLMDisaggregated SGLang MindIE MindIEDisaggregated]
+- Enum: [vLLM vLLMDisaggregated]
 
 _Appears in:_
 - [ModelBackend](#modelbackend)
@@ -485,9 +446,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the model. ModelBooster CR name is restricted by kubernetes, for example, can't contain uppercase letters.<br />So we use this field to specify the ModelBooster name. |  | MaxLength: 64 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
 | `owner` _string_ | Owner is the owner of the model. |  |  |
-| `backends` _[ModelBackend](#modelbackend) array_ | Backends is the list of model backends associated with this model. A ModelBooster CR at lease has one ModelBackend.<br />ModelBackend is the minimum unit of inference instance. It can be vLLM, SGLang, MindIE or other types. |  | MinItems: 1 <br /> |
+| `backend` _[ModelBackend](#modelbackend)_ | Backend is the model backend associated with this model.<br />ModelBackend is the minimum unit of inference instance. It can be vLLM or vLLMDisaggregated. |  |  |
 | `autoscalingPolicy` _[AutoscalingPolicySpec](#autoscalingpolicyspec)_ | AutoscalingPolicy references the autoscaling policy to be used for this model. |  |  |
-| `costExpansionRatePercent` _integer_ | CostExpansionRatePercent is the percentage rate at which the cost expands. |  | Maximum: 1000 <br />Minimum: 0 <br /> |
 | `modelMatch` _[ModelMatch](#modelmatch)_ | ModelMatch defines the predicate used to match LLM inference requests to a given<br />TargetModels. Multiple match conditions are ANDed together, i.e. the match will<br />evaluate to true only if all conditions are satisfied. |  |  |
 
 
@@ -582,7 +542,6 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `backendStatuses` _[ModelBackendStatus](#modelbackendstatus) array_ | BackendStatuses contains the status of each backend. |  |  |
 | `observedGeneration` _integer_ | ObservedGeneration track of generation |  |  |
 
 

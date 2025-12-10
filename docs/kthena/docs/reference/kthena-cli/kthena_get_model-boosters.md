@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena get model-boosters
 
 List registered models

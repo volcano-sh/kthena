@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena get autoscaling-policies
 
 List autoscaling policies

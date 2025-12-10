@@ -32,7 +32,7 @@
         "description": "A comprehensive overview of all the user guides."
       },
       "items": [
-        "user-guide/model-booster",
+        "user-guide/model-deployment",
         "user-guide/multi-node-inference",
         {
           "type": "doc",
@@ -96,11 +96,6 @@
       "items": [
         {
           "type": "doc",
-          "id": "reference/router-access-log-fields",
-          "label": "Router Access Log Fields"
-        },
-        {
-          "type": "doc",
           "id": "reference/helm-chart-values",
           "label": "Helm Chart Values"
         },
@@ -134,76 +129,96 @@
               "label": "Kthena"
             },
             {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_create",
-              "label": "Create"
+              "type": "category",
+              "label": "Create",
+              "link": {
+                "type": "doc",
+                "id": "reference/kthena-cli/kthena_create"
+              },
+              "items": [
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_create_manifest",
+                  "label": "Create manifest"
+                }
+              ]
             },
             {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_create_manifest",
-              "label": "Create manifest"
+              "type": "category",
+              "label": "Get",
+              "link": {
+                "type": "doc",
+                "id": "reference/kthena-cli/kthena_get"
+              },
+              "items": [
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_get_autoscaling-policies",
+                  "label": "Get autoscaling-policies"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_get_autoscaling-policy-bindings",
+                  "label": "Get autoscaling-policy-bindings"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_get_model-boosters",
+                  "label": "Get model-boosters"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_get_model-servings",
+                  "label": "Get model-servings"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_get_template",
+                  "label": "Get template"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_get_templates",
+                  "label": "Get templates"
+                }
+              ]
             },
             {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_get",
-              "label": "Get"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_get_autoscaling-policies",
-              "label": "Get autoscaling-policies"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_get_autoscaling-policy-bindings",
-              "label": "Get autoscaling-policy-bindings"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_get_model-boosters",
-              "label": "Get model-boosters"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_get_model-servings",
-              "label": "Get model-servings"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_get_template",
-              "label": "Get template"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_get_templates",
-              "label": "Get templates"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_describe",
-              "label": "Describe"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_describe_autoscaling-policy",
-              "label": "Describe autoscaling-policy"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_describe_model-booster",
-              "label": "Describe model-booster"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_describe_model-serving",
-              "label": "Describe model-serving"
-            },
-            {
-              "type": "doc",
-              "id": "reference/kthena-cli/kthena_describe_template",
-              "label": "Describe template"
+              "type": "category",
+              "label": "Describe",
+              "link": {
+                "type": "doc",
+                "id": "reference/kthena-cli/kthena_describe"
+              },
+              "items": [
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_describe_autoscaling-policy",
+                  "label": "Describe autoscaling-policy"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_describe_model-booster",
+                  "label": "Describe model-booster"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_describe_model-serving",
+                  "label": "Describe model-serving"
+                },
+                {
+                  "type": "doc",
+                  "id": "reference/kthena-cli/kthena_describe_template",
+                  "label": "Describe template"
+                }
+              ]
             }
           ]
+        },
+        {
+          "type": "doc",
+          "id": "reference/router-access-log-fields",
+          "label": "Router Access Log Fields"
         }
       ]
     }

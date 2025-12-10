@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena create manifest
 
 Create resources from a manifest template

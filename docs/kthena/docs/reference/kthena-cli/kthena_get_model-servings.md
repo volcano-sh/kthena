@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena get model-servings
 
 List model serving workloads

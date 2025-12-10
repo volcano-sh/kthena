@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena get templates
 
 List available manifest templates

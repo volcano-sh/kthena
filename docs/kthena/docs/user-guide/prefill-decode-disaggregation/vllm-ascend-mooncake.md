@@ -65,7 +65,7 @@ features like KV cache transfer and specialized NPU hardware configurations opti
 **Important Note:** When using the ModelBooster approach, ModelServer and ModelRoute are automatically created and
 managed - users do not need to manually deploy these resources. The configuration is optimized for NPU resource allocation.
 
-For a detailed comparison of the ModelBooster approach's advantages, automatically managed components, and when to use it, see the [ModelBooster Approach](../model-booster.md#modelbooster-approach) section in the ModelBooster documentation.
+For a detailed comparison of the ModelBooster approach's advantages, automatically managed components, and when to use it, see the [ModelBooster Approach](../model-deployment.md#modelbooster-approach) section in the ModelBooster documentation.
 
 Deploy the [ModelBooster configuration](../../assets/examples/model-booster/prefill-decode-disaggregation.yaml) for prefill-decode disaggregated inference:
 
@@ -120,7 +120,7 @@ deepseek-v2-lite-deepseek-v2-lite-0-prefill-0-0   2/2     Running    0          
 For environments that require more granular control over the NPU deployment configuration, you can use the ModelServing
 approach with fine-tuned NPU resource specifications and Ascend-specific optimizations.
 
-For a detailed comparison of the ModelServing approach's advantages, manually created components, and when to use it, see the [ModelServing Approach](../model-booster.md#modelserving-approach) section in the ModelBooster documentation.
+For a detailed comparison of the ModelServing approach's advantages, manually created components, and when to use it, see the [ModelServing Approach](../model-deployment.md#modelserving-approach) section in the ModelBooster documentation.
 
 **Important Note:** When using the ModelServing approach, you need to manually create the following CRD resources:
 

@@ -78,6 +78,11 @@ gen-check: generate
 test: generate ## Run tests. Exclude e2e, client-go.
 	go test $$(go list ./... | grep -v /e2e | grep -v /client-go) -coverprofile cover.out
 
+.PHONY: test-docs
+test-docs: ## Run documentation tests (type check and build)
+	cd docs/kthena && npm run typecheck
+	cd docs/kthena && npm run build
+
 .PHONY: test-e2e
 test-e2e: ## Run the e2e tests. Expected an isolated environment using Kind.
 	@command -v kind >/dev/null 2>&1 || { \

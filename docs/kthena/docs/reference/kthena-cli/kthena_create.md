@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena create
 
 Create kthena resources

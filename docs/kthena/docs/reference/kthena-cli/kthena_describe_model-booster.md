@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena describe model-booster
 
 Show detailed information about a model booster

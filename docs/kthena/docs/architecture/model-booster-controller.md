@@ -15,9 +15,27 @@ The Model Booster Controller provides one-stop deployment capabilities, enabling
 
 The Model Booster Controller subscribes to the creation/modification/deletion events of the `ModelBooster` CR and synchronizes them to the CRs of `ModelServer`, `ModelRoute`, `ModelServing`, `AutoscalingPolicy`, and `AutoscalingPolicyBinding` that have the same semantic content as the corresponding events. All these CRs will carry the label `registry.volcano.sh/managed-by=registry.volcano.sh`.
 
+### How Model Booster Controller works
+
+Model Booster Controller watches for changes to `ModelBooster` CR in the Kubernetes cluster. When a `ModelBooster` CR is created or updated,
+the controller performs the following steps:
+
+1. Convert the `ModelBooster` CR to `ModelServing` CR, `ModelServer` CR, `ModelRoute` CR. `AutoscalingPolicy` CR and
+   `AutoscalingPolicyBinding` CR are optional, only created when the `ModelBooster` CR has `autoscalingPolicy` defined.
+2. Use the result of step 1 to create or update the `ModelServing`, `ModelServer`, `ModelRoute` , `AutoscalingPolicy`,
+   `AutoscalingPolicyBinding`in the Kubernetes.
+3. Set the conditions of `ModelBooster` CR.
+    - After creating the related resources, the `Initialized` condition is set to `true`.
+    - The controller then monitors the status of the `ModelServing` resources. Once all `ModelServing` resources are
+      `Available`, the `Active` condition on the `ModelBooster` is set to `true`.
+    - If any error occurs during the process, set the `Failed` condition to true and provide an error message.
+
+The `OwnerReference` is set to the `ModelBooster` CR for all the created resources, so that when the `ModelBooster` CR is deleted, all
+the related resources will be deleted as well.
+
 ## Example
 
-Read the [examples](https://github.com/volcano-sh/kthena/blob/main/examples/model/) to learn more.
+Read the [Model Booster CR Examples](https://github.com/volcano-sh/kthena/tree/main/examples/model-booster) to learn more.
 
 ## Limitations
 

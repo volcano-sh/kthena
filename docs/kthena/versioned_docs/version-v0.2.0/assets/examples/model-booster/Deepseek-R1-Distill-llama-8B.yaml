@@ -11,27 +11,22 @@ spec:
     metrics:
       - metricName: "kthena:num_requests_waiting"
         targetValue: 10
-  backends:
-    - name: "deepseek-r1-distill-llama-8b-vllm"
-      type: "vLLM"
-      modelURI: "s3://model-bucket/deepseek-r1-distill-llama-8b"
-      cacheURI: "hostpath://tmp/test"
-      minReplicas: 1
-      maxReplicas: 3
-      scalingCost: 1
-      scaleToZeroGracePeriod: 60s
-      workers:
-        - type: "server"
-          image: "vllm/vllm-openai:v0.7.1"
-          replicas: 0
-          pods: 0
-          config:
-            maxModelLen: 12288
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-            requests:
-              nvidia.com/gpu: "1"
-      loraAdapters:
-        - name: lora-sql
-          artifactURL: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend-lora
+  backend:
+    name: "deepseek-r1-distill-llama-8b-vllm"
+    type: "vLLM"
+    modelURI: "s3://model-bucket/deepseek-r1-distill-llama-8b"
+    cacheURI: "hostpath://tmp/test"
+    minReplicas: 1
+    maxReplicas: 3
+    workers:
+      - type: "server"
+        image: "vllm/vllm-openai:v0.7.1"
+        replicas: 0
+        pods: 0
+        config:
+          maxModelLen: 12288
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+          requests:
+            nvidia.com/gpu: "1"

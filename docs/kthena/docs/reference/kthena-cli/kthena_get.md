@@ -1,3 +1,6 @@
+---
+title: Kthena CLI
+---
 ## kthena get
 
 Display one or many resources
