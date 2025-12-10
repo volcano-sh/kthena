@@ -131,74 +131,45 @@ const sidebars: SidebarsConfig = {
           items: [
             { type: 'doc', id: 'reference/kthena-cli/kthena', label: 'Kthena' },
             {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_create',
+              type: 'category',
               label: 'Create',
+              link: {
+                type: 'doc',
+                id: 'reference/kthena-cli/kthena_create',
+              },
+              items: [
+                { type: 'doc', id: 'reference/kthena-cli/kthena_create_manifest', label: 'Create manifest' },
+              ],
             },
             {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_create_manifest',
-              label: 'Create manifest',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_get',
+              type: 'category',
               label: 'Get',
+              link: {
+                type: 'doc',
+                id: 'reference/kthena-cli/kthena_get',
+              },
+              items: [
+                { type: 'doc', id: 'reference/kthena-cli/kthena_get_autoscaling-policies', label: 'Get autoscaling-policies' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_get_autoscaling-policy-bindings', label: 'Get autoscaling-policy-bindings' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_get_model-boosters', label: 'Get model-boosters' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_get_model-servings', label: 'Get model-servings' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_get_template', label: 'Get template' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_get_templates', label: 'Get templates' },
+              ],
             },
             {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_get_autoscaling-policies',
-              label: 'Get autoscaling-policies',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_get_autoscaling-policy-bindings',
-              label: 'Get autoscaling-policy-bindings',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_get_model-boosters',
-              label: 'Get model-boosters',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_get_model-servings',
-              label: 'Get model-servings',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_get_template',
-              label: 'Get template',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_get_templates',
-              label: 'Get templates',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_describe',
+              type: 'category',
               label: 'Describe',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_describe_autoscaling-policy',
-              label: 'Describe autoscaling-policy',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_describe_model-booster',
-              label: 'Describe model-booster',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_describe_model-serving',
-              label: 'Describe model-serving',
-            },
-            {
-              type: 'doc',
-              id: 'reference/kthena-cli/kthena_describe_template',
-              label: 'Describe template',
+              link: {
+                type: 'doc',
+                id: 'reference/kthena-cli/kthena_describe',
+              },
+              items: [
+                { type: 'doc', id: 'reference/kthena-cli/kthena_describe_autoscaling-policy', label: 'Describe autoscaling-policy' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_describe_model-booster', label: 'Describe model-booster' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_describe_model-serving', label: 'Describe model-serving' },
+                { type: 'doc', id: 'reference/kthena-cli/kthena_describe_template', label: 'Describe template' },
+              ],
             },
           ],
         },
