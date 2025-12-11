@@ -34,6 +34,7 @@
       "items": [
         "user-guide/model-deployment",
         "user-guide/multi-node-inference",
+        "user-guide/binpack-scale-down",
         {
           "type": "doc",
           "label": "Autoscaler",

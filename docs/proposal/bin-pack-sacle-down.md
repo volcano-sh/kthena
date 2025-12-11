@@ -142,17 +142,18 @@ The current `modelServing` pods operate similarly to `statefulSet`. During scali
 
 To ensure maximum compatibility with existing logic, we have implemented this approach.
 
-The logic behind scaling down is as described above. During the scaling up process, the ModelServing Controller will first fill any vacancies before scaling out further.
+The logic behind scaling down is as described above. During the scaling up process, the ModelServing Controller will locates the largest index and then creates replicas incrementally.
 
 For example:
 
-|        | R-0 | R-1 | R-2 | R-3 | Note                                                                          |
-|--------|-----|-----|-----|-----|-------------------------------------------------------------------------------|
-| Stage1 | ✅   | ✅   | ✅   || Before Scaling update |
-| Stage2 | ✅   | ⏳   | ✅   || Scaling down started, The replica with the lowest score(R-1) is deleting |
-| Stage3 | ✅   || ✅   || After Scaling down |
-| Stage4 | ✅   | ⏳ | ✅ | ⏳ | Scale up 2 replicas. First create R-1. Then create R-3 |
-| Stage5 | ✅   | ✅ | ✅   | ✅   | After Scaling up |
+|        | R-0 | R-1 | R-2 | R-3 | R-4 | Note                                                                          |
+|--------|-----|-----|-----|-----|-----|-------------------------------------------------------------------------------|
+| Stage1 | ✅   | ✅   | ✅   | | | Before Scaling update |
+| Stage2 | ✅   | ⏳   | ✅   | | | Scaling down started, The replica with the lowest score(R-1) is deleting |
+| Stage3 | ✅   | | ✅   | | | After Scaling down |
+| Stage4 | ✅   | | ✅ | ⏳ | | Scale up 2 replicas. First create R-3. Then create R-4 |
+| Stage5 | ✅   | | ✅ | ✅   | ⏳ | After Scaling up R-3 |
+| Stage6 | ✅   | | ✅   | ✅   | ✅ | After Scaling up R-4 |
 
 #### Impact of Binpacking on PodGroups
 

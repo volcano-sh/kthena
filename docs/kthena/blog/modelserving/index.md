@@ -185,8 +185,6 @@ And because the pods in the role are carrying sequential and labeled. All scalin
 
 #### Role Scaling Process
 
-Symbol meaning identical to [ServingGroup Scaling Process](#servinggroup-scaling-process)
-
 |        | G-0 | G-1 | G-2 | G-3 | Note                                                                          |
 |--------|-----|-----|-----|-----|-------------------------------------------------------------------------------|
 | Stage1 | ✅   | ✅   | ✅   | ✅   | Before scaling up/down                                                         |
