@@ -71,17 +71,6 @@ func (m *Manager) EnsurePodGroup(ctx context.Context, mi *workloadv1alpha1.Model
 		return nil
 	}
 
-	// Check if PodGroup already exists for this ServingGroup.
-	existing, err := m.getExistingPodGroups(ctx, mi)
-	if err != nil {
-		return fmt.Errorf("failed to get existing PodGroups: %v", err)
-	}
-
-	if _, ok := existing[servingGroupName]; ok {
-		// Already exists, nothing to do.
-		return nil
-	}
-
 	// Create a new PodGroup for this ServingGroup.
 	if err := m.createPodGroup(ctx, mi, servingGroupName); err != nil {
 		return fmt.Errorf("failed to create PodGroup %s: %v", servingGroupName, err)
@@ -259,7 +248,6 @@ func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGr
 			}
 		}
 	}
-	fmt.Printf("minMember: %d, minTaskMember: %v, minResources: %v\n", minMember, minTaskMember, minResources)
 	return minMember, minTaskMember, minResources
 }
 
@@ -391,7 +379,7 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, mi *workloadv1alpha1.Mod
 }
 
 // AnnotatePodWithPodGroup annotates a pod with the appropriate PodGroup information
-func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.ModelServing, minMember int, groupName, taskName string) {
+func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.ModelServing, groupName, taskName string) {
 	if !m.shouldCreatePodGroup(mi) {
 		return
 	}
