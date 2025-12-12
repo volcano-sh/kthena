@@ -1184,7 +1184,10 @@ func (c *ModelServingController) DeleteServingGroup(ctx context.Context, mi *wor
 		return fmt.Errorf("failed to delete PodGroup for ServingGroup %s: %v", servingGroupName, err)
 	}
 
-	c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), servingGroupName, datastore.ServingGroupDeleting)
+	if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), servingGroupName, datastore.ServingGroupDeleting); err != nil {
+		klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", mi.Namespace, "servingGroup", servingGroupName)
+		return err
+	}
 
 	selector := labels.SelectorFromSet(map[string]string{
 		workloadv1alpha1.GroupNameLabelKey: servingGroupName,

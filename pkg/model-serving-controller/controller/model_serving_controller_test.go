@@ -1347,7 +1347,6 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 			return pgForMI == 2
 		})
 		assert.True(t, found, "two PodGroups should be created for two ServingGroups of this ModelServing")
-		return
 		// Verify PodGroup spec fields
 		pgList, err := volcanoClient.SchedulingV1beta1().PodGroups("default").List(
 			context.Background(), metav1.ListOptions{},
@@ -1397,7 +1396,6 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 					count++
 				}
 			}
-			t.Logf("Found %d PodGroups for ModelServing %s after scale up", count, updatedMI.Name)
 			return count == 3
 		})
 		assert.True(t, found, "three PodGroups should exist after scaling up to three ServingGroups for this ModelServing")
