@@ -57,15 +57,51 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 
 // ManagePodGroups manages PodGroups for a ModelServing instance
 func (m *Manager) ManagePodGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing) error {
-	if m.isSchedulingEnabled(mi) {
+	if m.shouldCreatePodGroup(mi) {
 		return m.managePodGroups(ctx, mi)
 	}
 	return nil
 }
 
-// isSchedulingEnabled checks if gang scheduling or networkTopology scheduling is enabled for the ModelServing.
+// EnsurePodGroup ensures a PodGroup exists for the given ServingGroup name.
+// It is a thin wrapper over the internal managePodGroups logic and is intended
+// for callers that operate at ServingGroup granularity.
+func (m *Manager) EnsurePodGroup(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupName string) error {
+	if !m.shouldCreatePodGroup(mi) {
+		return nil
+	}
+
+	// Create a new PodGroup for this ServingGroup.
+	if err := m.createPodGroup(ctx, mi, servingGroupName); err != nil {
+		return fmt.Errorf("failed to create PodGroup %s: %v", servingGroupName, err)
+	}
+	return nil
+}
+
+// UpdatePodGroup updates the PodGroup for the given ServingGroup if needed
+// based on current roles and gang/network topology settings.
+func (m *Manager) UpdatePodGroup(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupName string) error {
+	if !m.shouldCreatePodGroup(mi) {
+		return nil
+	}
+
+	existing, err := m.getExistingPodGroups(ctx, mi)
+	if err != nil {
+		return fmt.Errorf("failed to get existing PodGroups: %v", err)
+	}
+
+	pg, ok := existing[servingGroupName]
+	if !ok {
+		// PodGroup not found; caller may not have created it yet. Best-effort create.
+		return m.createPodGroup(ctx, mi, servingGroupName)
+	}
+
+	return m.updatePodGroupIfNeeded(ctx, pg, mi)
+}
+
+// shouldCreatePodGroup checks if gang scheduling or networkTopology scheduling is enabled for the ModelServing.
 // These advanced scheduling features are only effective when used with the "volcano" scheduler.
-func (m *Manager) isSchedulingEnabled(mi *workloadv1alpha1.ModelServing) bool {
+func (m *Manager) shouldCreatePodGroup(mi *workloadv1alpha1.ModelServing) bool {
 	schedulerName := mi.Spec.SchedulerName
 	// If schedulerName is empty, Kubernetes uses the default scheduler, which doesn't support gang/network topology.
 	isVolcano := schedulerName == "volcano"
@@ -206,7 +242,6 @@ func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGr
 			}
 		}
 	}
-	fmt.Printf("minMember: %d, minTaskMember: %v, minResources: %v\n", minMember, minTaskMember, minResources)
 	return minMember, minTaskMember, minResources
 }
 
@@ -239,6 +274,7 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, mi *workloadv1alpha1
 		workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
 	})
 
+	// TODO: optimize by get from the cache
 	podGroupList, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector.String(),
 	})
@@ -279,7 +315,7 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 	return nil
 }
 
-func (m *Manager) DeletePodGroupWhenServingGroupDeleted(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupName string) error {
+func (m *Manager) DeletePodGroup(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupName string) error {
 	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return err
@@ -307,8 +343,8 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, mi *workloadv1alpha1.Mod
 }
 
 // AnnotatePodWithPodGroup annotates a pod with the appropriate PodGroup information
-func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.ModelServing, minMember int, groupName, taskName string) {
-	if !m.isSchedulingEnabled(mi) {
+func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.ModelServing, groupName, taskName string) {
+	if !m.shouldCreatePodGroup(mi) {
 		return
 	}
 
