@@ -66,6 +66,22 @@ helm install kthena ./charts/kthena --namespace dev --create-namespace \
 echo "Waiting for pods to be ready..."
 kubectl wait --for=condition=Ready pod --all -n=dev --timeout=300s
 
+# Setup port-forward to router service
+echo "Setting up port-forward to router service..."
+kubectl port-forward -n dev svc/kthena-router 80:80 > /tmp/port-forward.log 2>&1 &
+PORT_FORWARD_PID=$!
+echo $PORT_FORWARD_PID > /tmp/port-forward.pid
+
+# Wait a bit for port-forward to be ready
+sleep 2
+
+# Verify port-forward is working
+if ! kill -0 $PORT_FORWARD_PID 2>/dev/null; then
+    echo "Warning: Port-forward process may have failed. Check /tmp/port-forward.log"
+fi
+
 echo "E2E setup completed successfully"
 echo "Cluster: ${CLUSTER_NAME}"
 echo "KUBECONFIG: /tmp/kubeconfig-e2e"
+echo "Router service is available at localhost:8080"
+echo "Port-forward PID: ${PORT_FORWARD_PID} (saved to /tmp/port-forward.pid)"
