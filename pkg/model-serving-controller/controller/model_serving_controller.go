@@ -372,7 +372,7 @@ func (c *ModelServingController) processNextWorkItem(ctx context.Context) bool {
 }
 
 func (c *ModelServingController) syncModelServing(ctx context.Context, key string) error {
-	klog.V(4).Info("Started syncing ModelServing", key)
+	klog.V(4).InfoS("Started syncing ModelServing", "key", key)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return fmt.Errorf("invalid resource key: %s", err)
@@ -1119,7 +1119,7 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 
 	var err []error
 	for i := len(groupScores) - 1; i >= expectedCount; i-- {
-		if e := c.DeleteServingGroup(context.TODO(), mi, groupScores[i].Name); e != nil {
+		if e := c.DeleteServingGroup(ctx, mi, groupScores[i].Name); e != nil {
 			err = append(err, e)
 		}
 	}
@@ -1203,17 +1203,19 @@ func (c *ModelServingController) DeleteServingGroup(ctx context.Context, mi *wor
 	services, err := c.getServicesByIndex(GroupNameKey, fmt.Sprintf("%s/%s", mi.Namespace, servingGroupName))
 	if err != nil {
 		return fmt.Errorf("failed to get services for ServingGroup %s: %v", servingGroupName, err)
-	} else {
-		for _, svc := range services {
-			err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{})
-			if err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("failed to delete service %s: %v", svc.Name, err)
-			}
+	}
+
+	for _, svc := range services {
+		err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete service %s: %v", svc.Name, err)
 		}
 	}
 
 	if c.isServingGroupDeleted(mi, servingGroupName) {
+		klog.V(2).Infof("ServingGroup %s has been deleted", servingGroupName)
 		c.store.DeleteServingGroup(utils.GetNamespaceName(mi), servingGroupName)
+		c.enqueueModelServing(mi)
 	}
 	return nil
 }

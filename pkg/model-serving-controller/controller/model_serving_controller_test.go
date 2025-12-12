@@ -1160,7 +1160,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 	// Test Case 6: ModelServing Scale Down with BinPack Strategy
 	t.Run("ModelServingBinPackScaleDown", func(t *testing.T) {
-		// Test Case: ModelServing with PodDelectionCost annotation - BinPack Scale
+		// ModelServing with PodDeletionCost annotation - BinPack Scale
 		mi := createStandardModelServing("test-binpack-scale", 4, 1)
 
 		// Create initial ModelServing
