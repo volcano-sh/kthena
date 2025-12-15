@@ -216,7 +216,7 @@ func TestModelRouteSimple(t *testing.T) {
 	messages := []utils.ChatMessage{
 		utils.NewChatMessage("user", "Hello"),
 	}
-	utils.TestChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }
 
 func getKubeConfig() (*rest.Config, error) {

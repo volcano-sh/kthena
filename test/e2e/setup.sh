@@ -69,7 +69,7 @@ kubectl wait --for=condition=Ready pod --all -n=dev --timeout=300s
 # Setup port-forward to router service
 echo "Setting up port-forward to router service..."
 # Use 127.0.0.1 explicitly to avoid IPv6 issues in CI environments
-kubectl port-forward -n dev --address 127.0.0.1 svc/kthena-router 80:80 > /tmp/port-forward.log 2>&1 &
+kubectl port-forward -n dev --address 127.0.0.1 svc/kthena-router 8080:80 > /tmp/port-forward.log 2>&1 &
 PORT_FORWARD_PID=$!
 echo $PORT_FORWARD_PID > /tmp/port-forward.pid
 
@@ -84,5 +84,5 @@ fi
 echo "E2E setup completed successfully"
 echo "Cluster: ${CLUSTER_NAME}"
 echo "KUBECONFIG: /tmp/kubeconfig-e2e"
-echo "Router service is available at 127.0.0.1:80"
+echo "Router service is available at 127.0.0.1:8080"
 echo "Port-forward PID: ${PORT_FORWARD_PID} (saved to /tmp/port-forward.pid)"

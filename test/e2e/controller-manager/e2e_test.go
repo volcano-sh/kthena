@@ -68,7 +68,7 @@ func TestModelCR(t *testing.T) {
 	messages := []utils.ChatMessage{
 		utils.NewChatMessage("user", "Where is the capital of China?"),
 	}
-	utils.TestChatCompletions(t, "test-model", messages)
+	utils.CheckChatCompletions(t, "test-model", messages)
 	// todo: test update modelBooster, delete modelBooster
 }
 

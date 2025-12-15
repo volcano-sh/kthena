@@ -32,7 +32,7 @@ import (
 const (
 	// DefaultRouterURL is the default URL for the router service via port-forward
 	// Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI environments
-	DefaultRouterURL = "http://127.0.0.1:80/v1/chat/completions"
+	DefaultRouterURL = "http://127.0.0.1:8080/v1/chat/completions"
 )
 
 // ChatMessage represents a chat message in the request
@@ -54,15 +54,15 @@ type ChatCompletionsResponse struct {
 	Body       string
 }
 
-// TestChatCompletions sends a chat completions request to the router service and verifies the response.
+// CheckChatCompletions sends a chat completions request to the router service and verifies the response.
 // It uses the port-forwarded router service at localhost:8080.
-func TestChatCompletions(t *testing.T, modelName string, messages []ChatMessage) *ChatCompletionsResponse {
-	return TestChatCompletionsWithURL(t, DefaultRouterURL, modelName, messages)
+func CheckChatCompletions(t *testing.T, modelName string, messages []ChatMessage) *ChatCompletionsResponse {
+	return CheckChatCompletionsWithURL(t, DefaultRouterURL, modelName, messages)
 }
 
-// TestChatCompletionsWithURL sends a chat completions request to the specified URL and verifies the response.
+// CheckChatCompletionsWithURL sends a chat completions request to the specified URL and verifies the response.
 // It retries with exponential backoff if the request fails or returns a non-200 status code.
-func TestChatCompletionsWithURL(t *testing.T, url string, modelName string, messages []ChatMessage) *ChatCompletionsResponse {
+func CheckChatCompletionsWithURL(t *testing.T, url string, modelName string, messages []ChatMessage) *ChatCompletionsResponse {
 	requestBody := ChatCompletionsRequest{
 		Model:    modelName,
 		Messages: messages,
