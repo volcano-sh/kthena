@@ -17,7 +17,7 @@ spec:
     modelURI: {{ .Values.modelURI | default "hf://deepseek-ai/DeepSeek-R1-Distill-Qwen-32B" | quote }}
     cacheURI: {{ .Values.cacheURI | default "hostpath://mnt/cache" | quote }}
     minReplicas: {{ .Values.minReplicas | default 1 }}
-    maxReplicas: {{ .Values.maxReplicas | default 3 }}
+    maxReplicas: {{ .Values.maxReplicas | default 1 }}
     workers:
       - type: {{ .Values.workerType | default "server" | quote }}
         image: {{ .Values.workerImage | default "vllm/vllm-openai:latest" | quote }}
