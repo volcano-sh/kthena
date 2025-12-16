@@ -26,15 +26,6 @@ spec:
     roles:
       - entryTemplate:
           spec:
-            affinity:
-              nodeAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                  nodeSelectorTerms:
-                    - matchExpressions:
-                        - key: node.kubernetes.io/npu.chip.name
-                          operator: In
-                          values:
-                            - Ascend910
             containers:
               - args:
                   - --port
@@ -211,15 +202,6 @@ spec:
             containers: []
       - entryTemplate:
           spec:
-            affinity:
-              nodeAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                  nodeSelectorTerms:
-                    - matchExpressions:
-                        - key: node.kubernetes.io/npu.chip.name
-                          operator: In
-                          values:
-                            - Ascend910
             containers:
               - args:
                   - --port

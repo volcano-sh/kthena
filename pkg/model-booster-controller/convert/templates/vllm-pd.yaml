@@ -59,15 +59,6 @@ spec:
                     port: 8000
                 volumeMounts: ${VOLUME_MOUNTS}
             volumes: ${VOLUMES}
-            affinity:
-              nodeAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                  nodeSelectorTerms:
-                    - matchExpressions:
-                        - key: node.kubernetes.io/npu.chip.name
-                          operator: In
-                          values:
-                            - Ascend910
         workerReplicas: 0
         workerTemplate:
           spec:
@@ -120,15 +111,6 @@ spec:
                     path: /health
                     port: 8000
                 volumeMounts: ${VOLUME_MOUNTS}
-            affinity:
-              nodeAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                  nodeSelectorTerms:
-                    - matchExpressions:
-                        - key: node.kubernetes.io/npu.chip.name
-                          operator: In
-                          values:
-                            - Ascend910
             volumes: ${VOLUMES}
         workerReplicas: 0
         workerTemplate:
