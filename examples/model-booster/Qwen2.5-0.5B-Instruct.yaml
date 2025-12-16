@@ -7,7 +7,7 @@ spec:
     name: "backend1"
     type: "vLLM"
     modelURI: "hf://Qwen/Qwen2.5-0.5B-Instruct"
-    cacheURI: "hostpath:///tmp/cache"
+    cacheURI: "hostpath://tmp/cache"
     minReplicas: 1
     maxReplicas: 1
     env:
