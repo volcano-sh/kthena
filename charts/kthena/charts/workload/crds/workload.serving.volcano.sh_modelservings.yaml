@@ -17593,6 +17593,10 @@ spec:
                   by the ModelServing controller from the ModelServing version
                 format: int32
                 type: integer
+              labelSelector:
+                description: LabelSelector is a label query over pods that should
+                  match the replica count.
+                type: string
               observedGeneration:
                 description: |-
                   observedGeneration is the most recent generation observed for ModelServing. It corresponds to the
@@ -17614,4 +17618,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.labelSelector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
       status: {}

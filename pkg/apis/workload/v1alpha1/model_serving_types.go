@@ -168,10 +168,14 @@ type ModelServingStatus struct {
 
 	// Conditions track the condition of the ModelServing.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LabelSelector is a label query over pods that should match the replica count.
+	LabelSelector string `json:"labelSelector,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.labelSelector
 // +kubebuilder:storageversion
 // +genclient
 
