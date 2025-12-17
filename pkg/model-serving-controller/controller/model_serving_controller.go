@@ -981,34 +981,45 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, mi *workloadv1a
 }
 
 func (c *ModelServingController) manageServingGroupRollingUpdate(mi *workloadv1alpha1.ModelServing, revision string) error {
-	// we compute the minimum ordinal of the target sequence for a destructive update based on the strategy.
-	updateMin := 0
-	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		updateMin = int(*mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
-	}
+	// Default values is updateMin=0, maxUnavailable=1, maxSurge=0
+	updateMin, maxUnavailable, _ := utils.GetRollingUpdateConfiguration(mi)
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
 	if err != nil {
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
+
+	unavailableCount := 0
+	for _, sg := range servingGroupList {
+		if sg.Status != datastore.ServingGroupRunning {
+			// ServingGroup is not running, we need to wait for the status to change to running.
+			// If the group fails after rolling, it will automatically be deleted and rebuilt when detecting the pod failure.
+			// If the group still pending due to reasons such as being unable to be scheduled, rolling update process will stop
+			// to avoid affecting other groups that are running normally.
+			unavailableCount++
+		}
+	}
+	if unavailableCount > maxUnavailable {
+		klog.V(4).Infof("Reached max unavailable ServingGroups (%d), waiting for recovery before continuing update", maxUnavailable)
+		return nil
+	}
+
+	allowedToUpdate := maxUnavailable - unavailableCount
+	updatedCount := 0
+
 	// we terminate the ServingGroup with the largest ordinal that does not match the update revision.
-	for i := len(servingGroupList) - 1; i >= updateMin; i-- {
+	for i := len(servingGroupList) - 1; i >= updateMin && updatedCount < allowedToUpdate; i-- {
 		if c.isServingGroupOutdated(servingGroupList[i], mi.Namespace, revision) {
 			// target ServingGroup is not the latest version, needs to be updated
 			klog.V(2).Infof("ServingGroup %s will be terminating for update", servingGroupList[i].Name)
 			c.DeleteServingGroup(mi, servingGroupList[i].Name)
-			return nil
+			updatedCount++
 		}
-		if servingGroupList[i].Status != datastore.ServingGroupRunning {
-			// target ServingGroup is the latest version, but not running. We need to wait for the status to change to running.
-			// If the group fails after rolling, it will automatically be deleted and rebuilt when detecting the pod failure.
-			// If the group still pending due to reasons such as being unable to be scheduled, rolling update process will stop
-			// to avoid affecting other groups that are running normally.
-			klog.V(4).Infof("waiting for the ServingGroup %s status become running", servingGroupList[i].Name)
-			return nil
-		}
-		// target ServingGroup is already the latest version and running, processing the rolling update of the next group.
 	}
-	klog.V(2).Infof("all target groups of modelServing %s have been updated", mi.Name)
+
+	if updatedCount == 0 && allowedToUpdate > 0 {
+		klog.V(2).Infof("all target groups of modelServing %s have been updated", mi.Name)
+	}
+
 	return nil
 }
 

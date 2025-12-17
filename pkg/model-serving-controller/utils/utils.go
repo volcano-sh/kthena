@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -542,4 +543,30 @@ func RoleIDIndexFunc(obj interface{}) ([]string, error) {
 
 	compositeKey := fmt.Sprintf("%s/%s/%s/%s", namespace, groupName, roleName, roleID)
 	return []string{compositeKey}, nil
+}
+
+func GetRollingUpdateConfiguration(mi *workloadv1alpha1.ModelServing) (int, int, int) {
+	maxUnavailable := 1
+	partition := 0
+	maxSurge := 0
+	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
+		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
+			partition = int(*mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+		}
+
+		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge.Type == intstr.Int {
+			maxSurge = mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge.IntValue()
+		} else {
+			percentage, _ := intstr.GetScaledValueFromIntOrPercent(&mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge, int(*mi.Spec.Replicas), true)
+			maxSurge = percentage
+		}
+
+		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable.Type == intstr.Int {
+			maxUnavailable = mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable.IntValue()
+		} else {
+			percentage, _ := intstr.GetScaledValueFromIntOrPercent(&mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable, int(*mi.Spec.Replicas), false)
+			maxUnavailable = percentage
+		}
+	}
+	return partition, maxUnavailable, maxSurge
 }
