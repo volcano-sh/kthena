@@ -30,5 +30,3 @@ spec:
         resources:
           limits:
             nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
-          requests:
-            nvidia.com/gpu: {{ .Values.gpuRequest | default "2" | quote }}
