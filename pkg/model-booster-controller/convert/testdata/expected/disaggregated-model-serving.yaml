@@ -25,6 +25,13 @@ spec:
         decode: 1
     roles:
       - entryTemplate:
+          metadata:
+            labels:
+              workload.serving.volcano.sh/backend-name: ds-r1-qwen-7b-pd
+              workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
+              workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
+              workload.serving.volcano.sh/model-uid: randomUID
+              workload.serving.volcano.sh/revision: 5f6898b9fb
           spec:
             containers:
               - args:
@@ -201,6 +208,13 @@ spec:
           spec:
             containers: []
       - entryTemplate:
+          metadata:
+            labels:
+              workload.serving.volcano.sh/backend-name: ds-r1-qwen-7b-pd
+              workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
+              workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
+              workload.serving.volcano.sh/model-uid: randomUID
+              workload.serving.volcano.sh/revision: 5f6898b9fb
           spec:
             containers:
               - args:

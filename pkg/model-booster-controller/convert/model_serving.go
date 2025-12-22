@@ -168,12 +168,15 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		"VOLUMES": []*corev1.Volume{
 			cacheVolume,
 		},
-		"MODEL_NAME":                         model.Name,
-		"BACKEND_REPLICAS":                   backend.MinReplicas, // todo: backend replicas
-		"INIT_CONTAINERS":                    initContainers,
-		"MODEL_DOWNLOAD_ENVFROM":             backend.EnvFrom,
-		"ENGINE_PREFILL_COMMAND":             preFillCommand,
-		"ENGINE_DECODE_COMMAND":              decodeCommand,
+		"MODEL_NAME":             model.Name,
+		"BACKEND_REPLICAS":       backend.MinReplicas, // todo: backend replicas
+		"INIT_CONTAINERS":        initContainers,
+		"MODEL_DOWNLOAD_ENVFROM": backend.EnvFrom,
+		"ENGINE_PREFILL_COMMAND": preFillCommand,
+		"ENGINE_DECODE_COMMAND":  decodeCommand,
+		"SERVER_ENTRY_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+		},
 		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
 		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
 		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:8000"),
