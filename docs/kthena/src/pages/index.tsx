@@ -33,8 +33,8 @@ export default function Home(): ReactNode {
   const {siteConfig} = useDocusaurusContext();
   return (
     <Layout
-      title={`Hello from ${siteConfig.title}`}
-      description="Description will go into a meta tag in <head />">
+      title={`${siteConfig.title} - AI Model Serving Platform for Kubernetes`}
+      description="Kubernetes-native AI serving platform for scalable model serving.">
       <HomepageHeader />
       <main>
         <HomepageFeatures />
