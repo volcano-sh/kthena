@@ -4,15 +4,15 @@ kind: ModelBooster
 metadata:
   annotations:
     api.kubernetes.io/name: {{ .Values.annotationName | default "example" | quote }}
-  name: {{ .Values.name | default "example" | quote }}
+  name: {{ .Values.name | default "qwen3-coder-30b" | quote }}
   {{- if .Values.namespace }}
   namespace: {{ .Values.namespace | quote }}
   {{- end }}
 spec:
-  name: {{ .Values.modelName | default .Values.name | default "example" | quote }}
+  name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b" | quote }}
   owner: {{ .Values.owner | default "example" | quote }}
   backend:
-    name: {{ .Values.backendName | default "example" | quote }}
+    name: {{ .Values.backendName | default "qwen3-coder-30b" | quote }}
     type: {{ .Values.backendType | default "vLLM" | quote }}
     modelURI: {{ .Values.modelURI | default "hf://Qwen/Qwen3-Coder-30B-A3B-Instruct" | quote }}
     cacheURI: {{ .Values.cacheURI | default "hostpath://mnt/cache" | quote }}
