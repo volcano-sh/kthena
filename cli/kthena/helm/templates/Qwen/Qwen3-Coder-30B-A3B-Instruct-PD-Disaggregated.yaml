@@ -30,7 +30,7 @@ spec:
           served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b" | quote }}
           tensor-parallel-size: {{ .Values.tensorParallelSize | default 2 }}
           enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
-          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}  # Set GPU memory utilization to 85%
+          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
           max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
           kv-transfer-config: |
@@ -53,7 +53,7 @@ spec:
           served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b" | quote }}
           tensor-parallel-size: {{ .Values.tensorParallelSize | default 2 }}
           enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
-          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}  # Set GPU memory utilization to 85%
+          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
           max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
           kv-transfer-config: |

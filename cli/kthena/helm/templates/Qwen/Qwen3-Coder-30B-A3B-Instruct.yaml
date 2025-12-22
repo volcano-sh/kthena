@@ -27,7 +27,7 @@ spec:
           served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b" | quote }}
           tensor-parallel-size: {{ .Values.tensorParallelSize | default 4 }}
           enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
-          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.85" }}  # Set GPU memory utilization to 85%
+          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.85" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
         resources:
           limits:
