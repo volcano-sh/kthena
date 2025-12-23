@@ -1,4 +1,4 @@
-# Description: Template for Qwen3 8b model deployment with vLLM backend
+# Description: Template for Qwen3 8B model deployment with vLLM backend
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelBooster
 metadata:
