@@ -100,9 +100,8 @@ func TestCalculateRequirements(t *testing.T) {
 
 		// Check task members
 		expectedTaskMembers := map[string]int32{
-			"prefill-0": 4, // 1 entry + 3 workers
-			"prefill-1": 4, // 1 entry + 3 workers
-			"decode-0":  3, // 1 entry + 2 workers
+			"prefill": 4, // 1 entry + 3 workers
+			"decode":  3, // 1 entry + 2 workers
 		}
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
@@ -141,8 +140,8 @@ func TestCalculateRequirements(t *testing.T) {
 
 		// Check task members - should only include prefill-0 and decode-0
 		expectedTaskMembers := map[string]int32{
-			"prefill-0": 4, // 1 entry + 3 workers
-			"decode-0":  3, // 1 entry + 2 workers
+			"prefill": 4, // 1 entry + 3 workers
+			"decode":  3, // 1 entry + 2 workers
 		}
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
@@ -208,9 +207,8 @@ func TestCalculateRequirements(t *testing.T) {
 
 		// Check task members
 		expectedTaskMembers := map[string]int32{
-			"prefill-0": 4, // 1 entry + 3 workers
-			"prefill-1": 4, // 1 entry + 3 workers
-			"decode-0":  1, // 1 entry only (no workers)
+			"prefill": 4, // 1 entry + 3 workers
+			"decode":  1, // 1 entry only (no workers)
 		}
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 	})
@@ -233,9 +231,8 @@ func TestCalculateRequirements(t *testing.T) {
 
 		// Check task members
 		expectedTaskMembers := map[string]int32{
-			"prefill-0": 1, // 1 entry only (no workers)
-			"prefill-1": 1, // 1 entry only (no workers)
-			"decode-0":  3, // 1 entry + 2 workers
+			"prefill": 1, // 1 entry only (no workers)
+			"decode":  3, // 1 entry + 2 workers
 		}
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 	})
@@ -270,7 +267,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		expectedCPU := resource.MustParse("3")
 		expectedMemory := resource.MustParse("3Gi")
@@ -297,7 +294,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		assert.NotNil(t, total)
 		assert.Len(t, total, 1)
@@ -313,7 +310,7 @@ func TestAggregateResources(t *testing.T) {
 			Containers: []corev1.Container{}, // Empty containers
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
@@ -327,7 +324,7 @@ func TestAggregateResources(t *testing.T) {
 			Containers: nil, // Nil containers
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
@@ -346,7 +343,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
@@ -367,7 +364,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
@@ -404,11 +401,11 @@ func TestAggregateResources(t *testing.T) {
 		}
 
 		// First call
-		manager.aggregateResources(&total, podSpec1)
+		manager.aggregateResources(&total, podSpec1, 1)
 		assert.True(t, resource.MustParse("1").Equal(total[corev1.ResourceCPU]))
 
 		// Second call
-		manager.aggregateResources(&total, podSpec2)
+		manager.aggregateResources(&total, podSpec2, 1)
 		assert.True(t, resource.MustParse("3").Equal(total[corev1.ResourceCPU]))
 	})
 
@@ -432,7 +429,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		assert.Len(t, total, 3)
 		assert.True(t, resource.MustParse("1").Equal(total[corev1.ResourceCPU]))
@@ -460,7 +457,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		manager.aggregateResources(&total, podSpec, 1)
 
 		// Should have 1+2=3 CPUs
 		assert.True(t, resource.MustParse("3").Equal(total[corev1.ResourceCPU]))
@@ -622,9 +619,9 @@ func TestHasPodGroupChanged(t *testing.T) {
 							Mode:               "sub-test-mode",
 							HighestTierAllowed: &subgroupHighestTierAllowed,
 						},
-						MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-							{LabelKey: workloadv1alpha1.RoleLabelKey},
-							{LabelKey: workloadv1alpha1.RoleIDKey},
+						MatchLabelKeys: []string{
+							workloadv1alpha1.RoleLabelKey,
+							workloadv1alpha1.RoleIDKey,
 						},
 					},
 				},
@@ -753,79 +750,79 @@ func TestHasPodGroupChanged(t *testing.T) {
 	})
 }
 
-func TestNeedHandledRoleNameList(t *testing.T) {
-	tests := []struct {
-		name             string
-		expectedReplicas int
-		existRoleList    []datastore.Role
-		roleName         string
-		expectedResult   []string
-	}{
-		{
-			name:             "scale up from zero",
-			expectedReplicas: 3,
-			existRoleList:    []datastore.Role{},
-			roleName:         "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 0),
-				utils.GenerateRoleID("test-role", 1),
-				utils.GenerateRoleID("test-role", 2),
-			},
-		},
-		{
-			name:             "scale up from existing roles",
-			expectedReplicas: 5,
-			existRoleList: []datastore.Role{
-				{Name: utils.GenerateRoleID("test-role", 0)},
-				{Name: utils.GenerateRoleID("test-role", 1)},
-			},
-			roleName: "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 0),
-				utils.GenerateRoleID("test-role", 1),
-				utils.GenerateRoleID("test-role", 2),
-				utils.GenerateRoleID("test-role", 3),
-				utils.GenerateRoleID("test-role", 4),
-			},
-		},
-		{
-			name:             "scale up with gap in indices",
-			expectedReplicas: 4,
-			existRoleList: []datastore.Role{
-				{Name: utils.GenerateRoleID("test-role", 0)},
-				{Name: utils.GenerateRoleID("test-role", 2)},
-			},
-			roleName: "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 0),
-				utils.GenerateRoleID("test-role", 2),
-				utils.GenerateRoleID("test-role", 3),
-				utils.GenerateRoleID("test-role", 4),
-			},
-		},
-		{
-			name:             "scale up, exist role index is larger than expectedReplicas",
-			expectedReplicas: 3,
-			existRoleList: []datastore.Role{
-				{Name: utils.GenerateRoleID("test-role", 10)},
-				{Name: utils.GenerateRoleID("test-role", 11)},
-			},
-			roleName: "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 10),
-				utils.GenerateRoleID("test-role", 11),
-				utils.GenerateRoleID("test-role", 12),
-			},
-		},
-	}
+// func TestNeedHandledRoleNameList(t *testing.T) {
+// 	tests := []struct {
+// 		name             string
+// 		expectedReplicas int
+// 		existRoleList    []datastore.Role
+// 		roleName         string
+// 		expectedResult   []string
+// 	}{
+// 		{
+// 			name:             "scale up from zero",
+// 			expectedReplicas: 3,
+// 			existRoleList:    []datastore.Role{},
+// 			roleName:         "test-role",
+// 			expectedResult: []string{
+// 				utils.GenerateRoleID("test-role", 0),
+// 				utils.GenerateRoleID("test-role", 1),
+// 				utils.GenerateRoleID("test-role", 2),
+// 			},
+// 		},
+// 		{
+// 			name:             "scale up from existing roles",
+// 			expectedReplicas: 5,
+// 			existRoleList: []datastore.Role{
+// 				{Name: utils.GenerateRoleID("test-role", 0)},
+// 				{Name: utils.GenerateRoleID("test-role", 1)},
+// 			},
+// 			roleName: "test-role",
+// 			expectedResult: []string{
+// 				utils.GenerateRoleID("test-role", 0),
+// 				utils.GenerateRoleID("test-role", 1),
+// 				utils.GenerateRoleID("test-role", 2),
+// 				utils.GenerateRoleID("test-role", 3),
+// 				utils.GenerateRoleID("test-role", 4),
+// 			},
+// 		},
+// 		{
+// 			name:             "scale up with gap in indices",
+// 			expectedReplicas: 4,
+// 			existRoleList: []datastore.Role{
+// 				{Name: utils.GenerateRoleID("test-role", 0)},
+// 				{Name: utils.GenerateRoleID("test-role", 2)},
+// 			},
+// 			roleName: "test-role",
+// 			expectedResult: []string{
+// 				utils.GenerateRoleID("test-role", 0),
+// 				utils.GenerateRoleID("test-role", 2),
+// 				utils.GenerateRoleID("test-role", 3),
+// 				utils.GenerateRoleID("test-role", 4),
+// 			},
+// 		},
+// 		{
+// 			name:             "scale up, exist role index is larger than expectedReplicas",
+// 			expectedReplicas: 3,
+// 			existRoleList: []datastore.Role{
+// 				{Name: utils.GenerateRoleID("test-role", 10)},
+// 				{Name: utils.GenerateRoleID("test-role", 11)},
+// 			},
+// 			roleName: "test-role",
+// 			expectedResult: []string{
+// 				utils.GenerateRoleID("test-role", 10),
+// 				utils.GenerateRoleID("test-role", 11),
+// 				utils.GenerateRoleID("test-role", 12),
+// 			},
+// 		},
+// 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := needHandledRoleNameList(tt.expectedReplicas, tt.existRoleList, tt.roleName)
-			assert.Equal(t, tt.expectedResult, result)
-		})
-	}
-}
+// 	for _, tt := range tests {
+// 		t.Run(tt.name, func(t *testing.T) {
+// 			result := needHandledRoleNameList(tt.expectedReplicas, tt.existRoleList, tt.roleName)
+// 			assert.Equal(t, tt.expectedResult, result)
+// 		})
+// 	}
+// }
 
 func TestNeededHandledPodGroupNameList(t *testing.T) {
 	testModelServing := &workloadv1alpha1.ModelServing{
@@ -957,7 +954,7 @@ func TestEqualSubGroupNetworkTopology(t *testing.T) {
 					Mode:               "hard",
 					HighestTierAllowed: &highestTierAllowed,
 				},
-				MatchPolicy: nil,
+				MatchLabelKeys: nil,
 			},
 		}
 		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
@@ -976,13 +973,9 @@ func TestEqualSubGroupNetworkTopology(t *testing.T) {
 					Mode:               "hard",
 					HighestTierAllowed: &highestTierAllowed,
 				},
-				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-					{
-						LabelKey: "wrong-label-key-1",
-					},
-					{
-						LabelKey: "wrong-label-key-2",
-					},
+				MatchLabelKeys: []string{
+					"wrong-label-key-1",
+					"wrong-label-key-2",
 				},
 			},
 		}
@@ -1003,13 +996,9 @@ func TestEqualSubGroupNetworkTopology(t *testing.T) {
 					Mode:               "soft",
 					HighestTierAllowed: &highestTierAllowed2,
 				},
-				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-					{
-						LabelKey: workloadv1alpha1.RoleLabelKey,
-					},
-					{
-						LabelKey: workloadv1alpha1.RoleIDKey,
-					},
+				MatchLabelKeys: []string{
+					workloadv1alpha1.RoleLabelKey,
+					workloadv1alpha1.RoleIDKey,
 				},
 			},
 		}
@@ -1029,13 +1018,9 @@ func TestEqualSubGroupNetworkTopology(t *testing.T) {
 					Mode:               "hard",
 					HighestTierAllowed: &highestTierAllowed,
 				},
-				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-					{
-						LabelKey: workloadv1alpha1.RoleLabelKey,
-					},
-					{
-						LabelKey: workloadv1alpha1.RoleIDKey,
-					},
+				MatchLabelKeys: []string{
+					workloadv1alpha1.RoleLabelKey,
+					workloadv1alpha1.RoleIDKey,
 				},
 			},
 		}

@@ -87,7 +87,10 @@ func (m *Manager) shouldCreatePodGroup(mi *workloadv1alpha1.ModelServing) bool {
 // createPodGroup creates a PodGroup for group-level gang scheduling
 func (m *Manager) createPodGroup(ctx context.Context, mi *workloadv1alpha1.ModelServing, podGroupName string) error {
 	// Calculate total pods and resources for this ServingGroup
-	minMember, minTaskMember, minResources := m.calculateRequirements(mi, podGroupName)
+	// minMember: total pods across all roles
+	// minRoleMember: map of roleName to number of pods in that role
+	// minResources: aggregated resource requirements of all pods in the ServingGroup
+	minMember, minRoleMember, minResources := m.calculateRequirements(mi, podGroupName)
 
 	podGroup := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -103,13 +106,19 @@ func (m *Manager) createPodGroup(ctx context.Context, mi *workloadv1alpha1.Model
 			OwnerReferences: m.buildOwnerReference(mi),
 		},
 		Spec: schedulingv1beta1.PodGroupSpec{
-			MinMember:     int32(minMember),
-			MinTaskMember: minTaskMember,
-			MinResources:  &minResources,
+			MinMember:    int32(minMember),
+			MinResources: &minResources,
 		},
 	}
 
-	podGroup = appendNetworkTopologyPolicy(mi, podGroup)
+	if mi.Spec.Template.NetworkTopology != nil {
+		// set NetworkTopology if configured in ModelServing
+		if mi.Spec.Template.NetworkTopology.GroupPolicy != nil {
+			podGroup.Spec.NetworkTopology = mi.Spec.Template.NetworkTopology.GroupPolicy
+		}
+	}
+
+	podGroup = appendSubGroupPolicy(mi, podGroup, minRoleMember)
 
 	_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Create(ctx, podGroup, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
@@ -136,7 +145,7 @@ func (m *Manager) buildOwnerReference(mi *workloadv1alpha1.ModelServing) []metav
 // calculateRequirements calculates requirements for role-level gang scheduling
 func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGroupName string) (int, map[string]int32, corev1.ResourceList) {
 	minMember := 0
-	minTaskMember := make(map[string]int32)
+	minRoleMember := make(map[string]int32)
 	minResources := corev1.ResourceList{}
 
 	// For role-level, only include roles up to MinRoleReplicas limit
@@ -164,39 +173,40 @@ func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGr
 		}
 		// When length(roleList) <= expectReplicas, that is, when scaling up or updating.
 		// Provide the roleNameList to be updated.
-		needHandledRoleNameList := needHandledRoleNameList(expectReplicas, roleList, role.Name)
+		// needHandledRoleNameList := needHandledRoleNameList(expectReplicas, roleList, role.Name)
 
 		// Only include role replicas up to the minimum required
-		for _, taskName := range needHandledRoleNameList {
-			podsPerTask := 1 + int(role.WorkerReplicas) // entry + workers
-			minTaskMember[taskName] = int32(podsPerTask)
-			minMember += podsPerTask
+		podsPerTask := 1 + int(role.WorkerReplicas) // entry + workers
+		minRoleMember[role.Name] = int32(podsPerTask)
+		minMember = minMember + (podsPerTask * expectReplicas)
 
-			// Aggregate resources
-			m.aggregateResources(&minResources, &role.EntryTemplate.Spec)
-			if role.WorkerTemplate != nil {
-				for i := 0; i < int(role.WorkerReplicas); i++ {
-					m.aggregateResources(&minResources, &role.WorkerTemplate.Spec)
-				}
+		// Aggregate resources
+		m.aggregateResources(&minResources, &role.EntryTemplate.Spec, expectReplicas)
+		if role.WorkerTemplate != nil {
+			for i := 0; i < int(role.WorkerReplicas); i++ {
+				m.aggregateResources(&minResources, &role.WorkerTemplate.Spec, expectReplicas)
 			}
 		}
 	}
-	return minMember, minTaskMember, minResources
+	return minMember, minRoleMember, minResources
 }
 
 // aggregateResources aggregates resource requirements from a pod spec
-func (m *Manager) aggregateResources(total *corev1.ResourceList, podSpec *corev1.PodSpec) {
+func (m *Manager) aggregateResources(total *corev1.ResourceList, podSpec *corev1.PodSpec, replicas int) {
 	if *total == nil {
 		*total = corev1.ResourceList{}
 	}
 
 	for _, container := range podSpec.Containers {
 		for resourceName, quantity := range container.Resources.Requests {
+			quantityCopy := quantity.DeepCopy()
+			quantityCopy.Mul(int64(replicas))
+
 			if existing, exists := (*total)[resourceName]; exists {
-				existing.Add(quantity)
+				existing.Add(quantityCopy)
 				(*total)[resourceName] = existing
 			} else {
-				(*total)[resourceName] = quantity.DeepCopy()
+				(*total)[resourceName] = quantityCopy
 			}
 		}
 	}
@@ -241,7 +251,7 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 	updated.Spec.MinResources = &minResources
 
 	// Apply network topology policy
-	updated = appendNetworkTopologyPolicy(mi, updated)
+	updated = appendSubGroupPolicy(mi, updated, minTaskMember)
 
 	if hasPodGroupChanged(existing, updated) {
 		_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
@@ -336,30 +346,30 @@ func neededHandledPodGroupNameList(expectedReplicas int, mi *workloadv1alpha1.Mo
 // NeedHandledRoleNameList is used in Role scale up scenario to get the roleName list that need scale up.
 // Therefore, the default value for `expectedReplicas` is greater than `length(RoleList)`.
 // Or the Role update scenario. (This scenario is This scenario is relatively rare. Since it is not permitted to modify an already configured gangPolicy,
-// and in practical applications, the workerReplicas within a deployed role are rarely altered.)
-func needHandledRoleNameList(expectedReplicas int, existRoleList []datastore.Role, roleName string) []string {
-	scaleUpRoleNameList := make([]string, 0)
+// // and in practical applications, the workerReplicas within a deployed role are rarely altered.)
+// func needHandledRoleNameList(expectedReplicas int, existRoleList []datastore.Role, roleName string) []string {
+// 	scaleUpRoleNameList := make([]string, 0)
 
-	maxIndex := -1
-	for _, role := range existRoleList {
-		_, index := utils.GetParentNameAndOrdinal(role.Name)
-		scaleUpRoleNameList = append(scaleUpRoleNameList, role.Name)
-		if index > maxIndex {
-			maxIndex = index
-		}
-	}
+// 	maxIndex := -1
+// 	for _, role := range existRoleList {
+// 		_, index := utils.GetParentNameAndOrdinal(role.Name)
+// 		scaleUpRoleNameList = append(scaleUpRoleNameList, role.Name)
+// 		if index > maxIndex {
+// 			maxIndex = index
+// 		}
+// 	}
 
-	toCreate := expectedReplicas - len(scaleUpRoleNameList)
-	if toCreate <= 0 {
-		return scaleUpRoleNameList
-	}
+// 	toCreate := expectedReplicas - len(scaleUpRoleNameList)
+// 	if toCreate <= 0 {
+// 		return scaleUpRoleNameList
+// 	}
 
-	for i := 0; i < toCreate; i++ {
-		newIndex := maxIndex + 1 + i
-		scaleUpRoleNameList = append(scaleUpRoleNameList, utils.GenerateRoleID(roleName, newIndex))
-	}
-	return scaleUpRoleNameList
-}
+// 	for i := 0; i < toCreate; i++ {
+// 		newIndex := maxIndex + 1 + i
+// 		scaleUpRoleNameList = append(scaleUpRoleNameList, utils.GenerateRoleID(roleName, newIndex))
+// 	}
+// 	return scaleUpRoleNameList
+// }
 
 // equalSubGroupNetworkTopology compares two volcano SubGroupPolicySpec pointers for equality
 func equalSubGroupNetworkTopology(a []schedulingv1beta1.SubGroupPolicySpec, b *schedulingv1beta1.NetworkTopologySpec) bool {
@@ -388,26 +398,30 @@ func equalSubGroupNetworkTopology(a []schedulingv1beta1.SubGroupPolicySpec, b *s
 		a[0].NetworkTopology.HighestTierAllowed == b.HighestTierAllowed
 }
 
-func appendNetworkTopologyPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup) *schedulingv1beta1.PodGroup {
-	if mi.Spec.Template.NetworkTopology != nil {
-		// set NetworkTopology if configured in ModelServing
-		if mi.Spec.Template.NetworkTopology.GroupPolicy != nil {
-			podGroup.Spec.NetworkTopology = mi.Spec.Template.NetworkTopology.GroupPolicy
-		}
+func appendSubGroupPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minTaskMember map[string]int32) *schedulingv1beta1.PodGroup {
+	subGroupPolicy := make([]schedulingv1beta1.SubGroupPolicySpec, 0, len(minTaskMember))
+	for roleName, subGroupSize := range minTaskMember {
+		subGroupPolicy = append(subGroupPolicy, schedulingv1beta1.SubGroupPolicySpec{
+			Name: roleName,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+					workloadv1alpha1.RoleLabelKey:             roleName,
+				},
+			},
+			MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+			SubGroupSize:   &subGroupSize,
+		})
+	}
 
+	if mi.Spec.Template.NetworkTopology != nil {
 		// set SubGroupPolicy if configured in ModelServing
 		if mi.Spec.Template.NetworkTopology.RolePolicy != nil {
-			podGroup.Spec.SubGroupPolicy = []schedulingv1beta1.SubGroupPolicySpec{
-				{
-					Name:            podGroup.GetName(),
-					NetworkTopology: mi.Spec.Template.NetworkTopology.RolePolicy,
-					MatchLabelKeys: []string{
-						workloadv1alpha1.RoleLabelKey,
-						workloadv1alpha1.RoleIDKey,
-					},
-				},
+			for _, subGroup := range subGroupPolicy {
+				subGroup.NetworkTopology = mi.Spec.Template.NetworkTopology.RolePolicy
 			}
 		}
 	}
+	podGroup.Spec.SubGroupPolicy = subGroupPolicy
 	return podGroup
 }
