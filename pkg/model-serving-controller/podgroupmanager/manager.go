@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package gangscheduling
+package podgroupmanager
 
 import (
 	"context"
@@ -171,9 +171,6 @@ func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGr
 		if len(roleList) > expectReplicas {
 			continue
 		}
-		// When length(roleList) <= expectReplicas, that is, when scaling up or updating.
-		// Provide the roleNameList to be updated.
-		// needHandledRoleNameList := needHandledRoleNameList(expectReplicas, roleList, role.Name)
 
 		// Only include role replicas up to the minimum required
 		podsPerTask := 1 + int(role.WorkerReplicas) // entry + workers
@@ -308,7 +305,6 @@ func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
 	return current.Spec.MinMember != updated.Spec.MinMember ||
-		!reflect.DeepEqual(current.Spec.MinTaskMember, updated.Spec.MinTaskMember) ||
 		!reflect.DeepEqual(current.Spec.MinResources, updated.Spec.MinResources) ||
 		!reflect.DeepEqual(current.Spec.NetworkTopology, updated.Spec.NetworkTopology) ||
 		!reflect.DeepEqual(current.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy)
@@ -343,64 +339,9 @@ func neededHandledPodGroupNameList(expectedReplicas int, mi *workloadv1alpha1.Mo
 	return nameList
 }
 
-// NeedHandledRoleNameList is used in Role scale up scenario to get the roleName list that need scale up.
-// Therefore, the default value for `expectedReplicas` is greater than `length(RoleList)`.
-// Or the Role update scenario. (This scenario is This scenario is relatively rare. Since it is not permitted to modify an already configured gangPolicy,
-// // and in practical applications, the workerReplicas within a deployed role are rarely altered.)
-// func needHandledRoleNameList(expectedReplicas int, existRoleList []datastore.Role, roleName string) []string {
-// 	scaleUpRoleNameList := make([]string, 0)
-
-// 	maxIndex := -1
-// 	for _, role := range existRoleList {
-// 		_, index := utils.GetParentNameAndOrdinal(role.Name)
-// 		scaleUpRoleNameList = append(scaleUpRoleNameList, role.Name)
-// 		if index > maxIndex {
-// 			maxIndex = index
-// 		}
-// 	}
-
-// 	toCreate := expectedReplicas - len(scaleUpRoleNameList)
-// 	if toCreate <= 0 {
-// 		return scaleUpRoleNameList
-// 	}
-
-// 	for i := 0; i < toCreate; i++ {
-// 		newIndex := maxIndex + 1 + i
-// 		scaleUpRoleNameList = append(scaleUpRoleNameList, utils.GenerateRoleID(roleName, newIndex))
-// 	}
-// 	return scaleUpRoleNameList
-// }
-
-// equalSubGroupNetworkTopology compares two volcano SubGroupPolicySpec pointers for equality
-func equalSubGroupNetworkTopology(a []schedulingv1beta1.SubGroupPolicySpec, b *schedulingv1beta1.NetworkTopologySpec) bool {
-	if len(a) == 0 && b == nil {
-		return true
-	}
-
-	if len(a) == 0 || b == nil {
-		return false
-	}
-
-	if a[0].MatchLabelKeys == nil {
-		return false
-	}
-
-	if len(a[0].MatchLabelKeys) < 2 || a[0].MatchLabelKeys[0] != workloadv1alpha1.RoleLabelKey ||
-		a[0].MatchLabelKeys[1] != workloadv1alpha1.RoleIDKey {
-		return false
-	}
-
-	if a[0].NetworkTopology == nil {
-		return false
-	}
-	// The podGroup.SubGroupPolicy created by modelServing has a length of 1, so only the first element needs to be compared
-	return a[0].NetworkTopology.Mode == b.Mode &&
-		a[0].NetworkTopology.HighestTierAllowed == b.HighestTierAllowed
-}
-
-func appendSubGroupPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minTaskMember map[string]int32) *schedulingv1beta1.PodGroup {
-	subGroupPolicy := make([]schedulingv1beta1.SubGroupPolicySpec, 0, len(minTaskMember))
-	for roleName, subGroupSize := range minTaskMember {
+func appendSubGroupPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {
+	subGroupPolicy := make([]schedulingv1beta1.SubGroupPolicySpec, 0, len(minRoleMember))
+	for roleName, subGroupSize := range minRoleMember {
 		subGroupPolicy = append(subGroupPolicy, schedulingv1beta1.SubGroupPolicySpec{
 			Name: roleName,
 			LabelSelector: &metav1.LabelSelector{
@@ -417,8 +358,8 @@ func appendSubGroupPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulin
 	if mi.Spec.Template.NetworkTopology != nil {
 		// set SubGroupPolicy if configured in ModelServing
 		if mi.Spec.Template.NetworkTopology.RolePolicy != nil {
-			for _, subGroup := range subGroupPolicy {
-				subGroup.NetworkTopology = mi.Spec.Template.NetworkTopology.RolePolicy
+			for i := range subGroupPolicy {
+				subGroupPolicy[i].NetworkTopology = mi.Spec.Template.NetworkTopology.RolePolicy
 			}
 		}
 	}

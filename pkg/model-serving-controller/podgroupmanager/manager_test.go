@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package gangscheduling
+package podgroupmanager
 
 import (
 	"context"
@@ -646,24 +646,6 @@ func TestHasPodGroupChanged(t *testing.T) {
 		assert.True(t, result, "Expected change when MinMember differs")
 	})
 
-	t.Run("MinTaskMemberChanged", func(t *testing.T) {
-		current := basePodGroup()
-		updated := basePodGroup()
-		updated.Spec.MinTaskMember["task1"] = 2
-
-		result := hasPodGroupChanged(current, updated)
-		assert.True(t, result, "Expected change when MinTaskMember differs")
-	})
-
-	t.Run("MinTaskMemberAdded", func(t *testing.T) {
-		current := basePodGroup()
-		updated := basePodGroup()
-		updated.Spec.MinTaskMember["task3"] = 1
-
-		result := hasPodGroupChanged(current, updated)
-		assert.True(t, result, "Expected change when MinTaskMember has additional entry")
-	})
-
 	t.Run("MinResourcesChanged", func(t *testing.T) {
 		current := basePodGroup()
 		updated := basePodGroup()
@@ -732,97 +714,7 @@ func TestHasPodGroupChanged(t *testing.T) {
 		result := hasPodGroupChanged(current, updated)
 		assert.False(t, result, "Expected no change when all fields are nil/empty")
 	})
-
-	t.Run("EmptyVsNilMinTaskMember", func(t *testing.T) {
-		current := &schedulingv1beta1.PodGroup{
-			Spec: schedulingv1beta1.PodGroupSpec{
-				MinTaskMember: map[string]int32{},
-			},
-		}
-		updated := &schedulingv1beta1.PodGroup{
-			Spec: schedulingv1beta1.PodGroupSpec{
-				MinTaskMember: nil,
-			},
-		}
-
-		result := hasPodGroupChanged(current, updated)
-		assert.True(t, result, "Expected change when MinTaskMember changes from empty map to nil")
-	})
 }
-
-// func TestNeedHandledRoleNameList(t *testing.T) {
-// 	tests := []struct {
-// 		name             string
-// 		expectedReplicas int
-// 		existRoleList    []datastore.Role
-// 		roleName         string
-// 		expectedResult   []string
-// 	}{
-// 		{
-// 			name:             "scale up from zero",
-// 			expectedReplicas: 3,
-// 			existRoleList:    []datastore.Role{},
-// 			roleName:         "test-role",
-// 			expectedResult: []string{
-// 				utils.GenerateRoleID("test-role", 0),
-// 				utils.GenerateRoleID("test-role", 1),
-// 				utils.GenerateRoleID("test-role", 2),
-// 			},
-// 		},
-// 		{
-// 			name:             "scale up from existing roles",
-// 			expectedReplicas: 5,
-// 			existRoleList: []datastore.Role{
-// 				{Name: utils.GenerateRoleID("test-role", 0)},
-// 				{Name: utils.GenerateRoleID("test-role", 1)},
-// 			},
-// 			roleName: "test-role",
-// 			expectedResult: []string{
-// 				utils.GenerateRoleID("test-role", 0),
-// 				utils.GenerateRoleID("test-role", 1),
-// 				utils.GenerateRoleID("test-role", 2),
-// 				utils.GenerateRoleID("test-role", 3),
-// 				utils.GenerateRoleID("test-role", 4),
-// 			},
-// 		},
-// 		{
-// 			name:             "scale up with gap in indices",
-// 			expectedReplicas: 4,
-// 			existRoleList: []datastore.Role{
-// 				{Name: utils.GenerateRoleID("test-role", 0)},
-// 				{Name: utils.GenerateRoleID("test-role", 2)},
-// 			},
-// 			roleName: "test-role",
-// 			expectedResult: []string{
-// 				utils.GenerateRoleID("test-role", 0),
-// 				utils.GenerateRoleID("test-role", 2),
-// 				utils.GenerateRoleID("test-role", 3),
-// 				utils.GenerateRoleID("test-role", 4),
-// 			},
-// 		},
-// 		{
-// 			name:             "scale up, exist role index is larger than expectedReplicas",
-// 			expectedReplicas: 3,
-// 			existRoleList: []datastore.Role{
-// 				{Name: utils.GenerateRoleID("test-role", 10)},
-// 				{Name: utils.GenerateRoleID("test-role", 11)},
-// 			},
-// 			roleName: "test-role",
-// 			expectedResult: []string{
-// 				utils.GenerateRoleID("test-role", 10),
-// 				utils.GenerateRoleID("test-role", 11),
-// 				utils.GenerateRoleID("test-role", 12),
-// 			},
-// 		},
-// 	}
-
-// 	for _, tt := range tests {
-// 		t.Run(tt.name, func(t *testing.T) {
-// 			result := needHandledRoleNameList(tt.expectedReplicas, tt.existRoleList, tt.roleName)
-// 			assert.Equal(t, tt.expectedResult, result)
-// 		})
-// 	}
-// }
 
 func TestNeededHandledPodGroupNameList(t *testing.T) {
 	testModelServing := &workloadv1alpha1.ModelServing{
@@ -925,109 +817,4 @@ func TestNeededHandledPodGroupNameList(t *testing.T) {
 			assert.Equal(t, tt.expectedResult, result)
 		})
 	}
-}
-
-func TestEqualSubGroupNetworkTopology(t *testing.T) {
-	// test case 1: both parameters are nil or empty
-	t.Run("both nil or empty", func(t *testing.T) {
-		assert.True(t, equalSubGroupNetworkTopology(nil, nil))
-		assert.True(t, equalSubGroupNetworkTopology([]schedulingv1beta1.SubGroupPolicySpec{}, nil))
-	})
-
-	// test case 2: one parameter is nil or empty, the other is not
-	t.Run("one nil or empty, other not", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(nil, subGroupPolicy))
-		assert.False(t, equalSubGroupNetworkTopology([]schedulingv1beta1.SubGroupPolicySpec{}, subGroupPolicy))
-	})
-
-	// test case 3: MatchPolicy is nil
-	t.Run("match policy is nil", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "hard",
-					HighestTierAllowed: &highestTierAllowed,
-				},
-				MatchLabelKeys: nil,
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
-
-	// test case 4: MatchPolicy labels mismatch
-	t.Run("match policy labels mismatch", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "hard",
-					HighestTierAllowed: &highestTierAllowed,
-				},
-				MatchLabelKeys: []string{
-					"wrong-label-key-1",
-					"wrong-label-key-2",
-				},
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
-
-	// test case 5: NetworkTopology mismatch
-	t.Run("network topology mismatch", func(t *testing.T) {
-		highestTierAllowed1 := 1
-		highestTierAllowed2 := 2
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "soft",
-					HighestTierAllowed: &highestTierAllowed2,
-				},
-				MatchLabelKeys: []string{
-					workloadv1alpha1.RoleLabelKey,
-					workloadv1alpha1.RoleIDKey,
-				},
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed1,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
-
-	// test case 6: complete match
-	t.Run("complete match", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "hard",
-					HighestTierAllowed: &highestTierAllowed,
-				},
-				MatchLabelKeys: []string{
-					workloadv1alpha1.RoleLabelKey,
-					workloadv1alpha1.RoleIDKey,
-				},
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.True(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
 }

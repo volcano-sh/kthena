@@ -171,11 +171,13 @@ spec:
                           highestTierAllowed:
                             description: HighestTierAllowed specifies the highest
                               tier that a job allowed to cross when scheduling.
+                            minimum: 0
                             type: integer
                           highestTierName:
                             description: |-
                               HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
                               HighestTierName and HighestTierAllowed cannot be set simultaneously.
+                            maxLength: 253
                             type: string
                           mode:
                             default: hard
@@ -193,11 +195,13 @@ spec:
                           highestTierAllowed:
                             description: HighestTierAllowed specifies the highest
                               tier that a job allowed to cross when scheduling.
+                            minimum: 0
                             type: integer
                           highestTierName:
                             description: |-
                               HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
                               HighestTierName and HighestTierAllowed cannot be set simultaneously.
+                            maxLength: 253
                             type: string
                           mode:
                             default: hard

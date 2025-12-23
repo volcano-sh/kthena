@@ -46,7 +46,7 @@ import (
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/gangscheduling"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -60,7 +60,7 @@ type ModelServingController struct {
 	modelServingClient clientset.Interface
 
 	syncHandler           func(ctx context.Context, miKey string) error
-	gangManager           gangscheduling.Manager
+	podGroupManager       podgroupmanager.Manager
 	podsLister            listerv1.PodLister
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
@@ -114,7 +114,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	c := &ModelServingController{
 		kubeClientSet:         kubeClientSet,
 		modelServingClient:    modelServingClient,
-		gangManager:           gangscheduling.NewManager(kubeClientSet, volcanoClient, store),
+		podGroupManager:       podgroupmanager.NewManager(kubeClientSet, volcanoClient, store),
 		podsLister:            podsInformer.Lister(),
 		podsInformer:          podsInformer.Informer(),
 		servicesLister:        servicesInformer.Lister(),
@@ -188,7 +188,7 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 	// Because MinRoleReplicas is not allowed to be updated, so we do not need to check it here.
 	if oldMI.Spec.Template.NetworkTopology != nil && curMI.Spec.Template.NetworkTopology == nil {
 		if curMI.Spec.Template.GangPolicy.MinRoleReplicas == nil {
-			if err := c.gangManager.CleanupPodGroups(context.TODO(), curMI); err != nil {
+			if err := c.podGroupManager.CleanupPodGroups(context.TODO(), curMI); err != nil {
 				klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", curMI.Namespace, curMI.Name, err)
 			}
 		}
@@ -468,7 +468,7 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 	if curReplicas < expectedCount {
 		// update pod groups if needed
 		for _, servingGroup := range servingGroupList {
-			if err := c.gangManager.CreateOrUpdatePodGroup(ctx, mi, servingGroup.Name); err != nil {
+			if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, mi, servingGroup.Name); err != nil {
 				klog.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
 			}
 		}
@@ -490,7 +490,7 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 		}
 		for _, servingGroup := range servingGroupList {
 			if servingGroup.Status != datastore.ServingGroupDeleting {
-				if err := c.gangManager.CreateOrUpdatePodGroup(ctx, mi, servingGroup.Name); err != nil {
+				if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, mi, servingGroup.Name); err != nil {
 					klog.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
 				}
 			}
@@ -516,7 +516,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, mi *w
 		newIndex := startingIndex + i
 		groupName := utils.GenerateServingGroupName(mi.Name, newIndex)
 		// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
-		if err := c.gangManager.CreateOrUpdatePodGroup(ctx, mi, groupName); err != nil {
+		if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, mi, groupName); err != nil {
 			return err
 		}
 
@@ -1151,8 +1151,8 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	servingGroupName := utils.GenerateServingGroupName(mi.Name, servingGroupOrdinal)
 
 	entryPod := utils.GenerateEntryPod(role, mi, servingGroupName, roleIndex, revision)
-	taskName := c.gangManager.GenerateTaskName(role.Name, roleIndex)
-	c.gangManager.AnnotatePodWithPodGroup(entryPod, mi, servingGroupName, taskName)
+	taskName := c.podGroupManager.GenerateTaskName(role.Name, roleIndex)
+	c.podGroupManager.AnnotatePodWithPodGroup(entryPod, mi, servingGroupName, taskName)
 	_, err := c.kubeClientSet.CoreV1().Pods(mi.Namespace).Create(ctx, entryPod, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
@@ -1172,7 +1172,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
 		workerPod := utils.GenerateWorkerPod(role, mi, entryPod, servingGroupName, roleIndex, i, revision)
-		c.gangManager.AnnotatePodWithPodGroup(workerPod, mi, servingGroupName, taskName)
+		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, mi, servingGroupName, taskName)
 		_, err := c.kubeClientSet.CoreV1().Pods(mi.Namespace).Create(ctx, workerPod, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create worker pod %s: %v", workerPod.Name, err)
@@ -1187,7 +1187,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, mi *wor
 		return nil
 	}
 
-	if err := c.gangManager.DeletePodGroup(ctx, mi, servingGroupName); err != nil {
+	if err := c.podGroupManager.DeletePodGroup(ctx, mi, servingGroupName); err != nil {
 		return fmt.Errorf("failed to delete PodGroup for ServingGroup %s: %v", servingGroupName, err)
 	}
 
