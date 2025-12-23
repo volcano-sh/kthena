@@ -1,0 +1,32 @@
+# Description: Template for Qwen3 8b model deployment with vLLM backend
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  annotations:
+    api.kubernetes.io/name: {{ .Values.annotationName | default "example" | quote }}
+  name: {{ .Values.name | default "qwen3-8b" | quote }}
+  {{- if .Values.namespace }}
+  namespace: {{ .Values.namespace | quote }}
+  {{- end }}
+spec:
+  name: {{ .Values.modelName | default .Values.name | default "qwen3-8b" | quote }}
+  owner: {{ .Values.owner | default "example" | quote }}
+  backend:
+    name: {{ .Values.backendName | default "qwen3-8b-vllm" | quote }}
+    type: {{ .Values.backendType | default "vLLM" | quote }}
+    modelURI: {{ .Values.modelURI | default "hf://Qwen/Qwen3-8B" | quote }}
+    cacheURI: {{ .Values.cacheURI | default "hostpath://mnt/cache" | quote }}
+    minReplicas: {{ .Values.minReplicas | default 1 }}
+    maxReplicas: {{ .Values.maxReplicas | default 1 }}
+    workers:
+      - type: {{ .Values.workerType | default "server" | quote }}
+        image: {{ .Values.workerImage | default "quay.io/ascend/vllm-ascend:v0.12.0rc1" | quote }}
+        replicas: {{ .Values.workerReplicas | default 1 }}
+        pods: {{ .Values.workerPods | default 1 }}
+        config:
+          served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-8b" | quote }}
+          tensor-parallel-size: {{ .Values.tensorParallelSize | default 2 }}
+          enforce-eager: ""
+        resources:
+          limits:
+            huawei.com/ascend-1980: {{ .Values.npuLimit | default "2" | quote }}
