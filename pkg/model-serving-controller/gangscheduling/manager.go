@@ -371,12 +371,12 @@ func equalSubGroupNetworkTopology(a []schedulingv1beta1.SubGroupPolicySpec, b *s
 		return false
 	}
 
-	if a[0].MatchPolicy == nil {
+	if a[0].MatchLabelKeys == nil {
 		return false
 	}
 
-	if len(a[0].MatchPolicy) < 2 || a[0].MatchPolicy[0].LabelKey != workloadv1alpha1.RoleLabelKey ||
-		a[0].MatchPolicy[1].LabelKey != workloadv1alpha1.RoleIDKey {
+	if len(a[0].MatchLabelKeys) < 2 || a[0].MatchLabelKeys[0] != workloadv1alpha1.RoleLabelKey ||
+		a[0].MatchLabelKeys[1] != workloadv1alpha1.RoleIDKey {
 		return false
 	}
 
@@ -401,13 +401,9 @@ func appendNetworkTopologyPolicy(mi *workloadv1alpha1.ModelServing, podGroup *sc
 				{
 					Name:            podGroup.GetName(),
 					NetworkTopology: mi.Spec.Template.NetworkTopology.RolePolicy,
-					MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-						{
-							LabelKey: workloadv1alpha1.RoleLabelKey,
-						},
-						{
-							LabelKey: workloadv1alpha1.RoleIDKey,
-						},
+					MatchLabelKeys: []string{
+						workloadv1alpha1.RoleLabelKey,
+						workloadv1alpha1.RoleIDKey,
 					},
 				},
 			}
