@@ -29,8 +29,9 @@ import (
 )
 
 var VLLMKvConnectorType = map[string]networking.KVConnectorType{
-	"MooncakeConnectorV1": networking.ConnectorTypeMoonCake,
-	"LMCacheConnectorV1":  networking.ConnectorTypeLMCache,
+	"MooncakeConnector":  networking.ConnectorTypeMoonCake,
+	"NixlConnector":      networking.ConnectorTypeNIXL,
+	"LMCacheConnectorV1": networking.ConnectorTypeLMCache,
 }
 
 // BuildModelServer creates arrays of ModelServer for the given model.
