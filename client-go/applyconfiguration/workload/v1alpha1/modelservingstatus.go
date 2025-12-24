@@ -32,6 +32,7 @@ type ModelServingStatusApplyConfiguration struct {
 	AvailableReplicas  *int32                           `json:"availableReplicas,omitempty"`
 	Conditions         []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	LabelSelector      *string                          `json:"labelSelector,omitempty"`
+	VersionInfo        *VersionInfoApplyConfiguration   `json:"versionInfo,omitempty"`
 }
 
 // ModelServingStatusApplyConfiguration constructs a declarative configuration of the ModelServingStatus type for use with
@@ -98,5 +99,13 @@ func (b *ModelServingStatusApplyConfiguration) WithConditions(values ...*v1.Cond
 // If called multiple times, the LabelSelector field is set to the value of the last call.
 func (b *ModelServingStatusApplyConfiguration) WithLabelSelector(value string) *ModelServingStatusApplyConfiguration {
 	b.LabelSelector = &value
+	return b
+}
+
+// WithVersionInfo sets the VersionInfo field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the VersionInfo field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithVersionInfo(value *VersionInfoApplyConfiguration) *ModelServingStatusApplyConfiguration {
+	b.VersionInfo = value
 	return b
 }

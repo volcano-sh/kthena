@@ -122,6 +122,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.NetworkTopologyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PodTemplateSpec"):
 		return &applyconfigurationworkloadv1alpha1.PodTemplateSpecApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RevisionInfo"):
+		return &applyconfigurationworkloadv1alpha1.RevisionInfoApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RollingUpdateConfiguration"):
@@ -134,6 +136,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.SubTargetApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Target"):
 		return &applyconfigurationworkloadv1alpha1.TargetApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("VersionInfo"):
+		return &applyconfigurationworkloadv1alpha1.VersionInfoApplyConfiguration{}
 
 	}
 	return nil

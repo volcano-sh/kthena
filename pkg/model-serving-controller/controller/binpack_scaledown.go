@@ -30,9 +30,10 @@ const (
 
 // ServingGroupWithScore stores serving group name and its score
 type ServingGroupWithScore struct {
-	Name  string
-	Score int
-	Index int
+	Name     string
+	Score    int
+	Index    int
+	Revision string // Revision of the serving group
 }
 
 // RoleWithScore stores role name and its score
