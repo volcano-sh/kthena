@@ -1,0 +1,62 @@
+# Description: Template for Qwen3-Coder-30B-A3B-Instruct model deployment with vLLMDisaggregated backend.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  annotations:
+    api.kubernetes.io/name: {{ .Values.annotationName | default "example" | quote }}
+  name: {{ .Values.name | default "qwen3-coder-30b-lmcache" | quote }}
+  {{- if .Values.namespace }}
+  namespace: {{ .Values.namespace | quote }}
+  {{- end }}
+spec:
+  name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b-lmcache" | quote }}
+  owner: {{ .Values.owner | default "example" | quote }}
+  backend:
+    name: {{ .Values.backendName | default "qwen3-coder-30b-lmcache" | quote }}
+    type: {{ .Values.backendType | default "vLLMDisaggregated" | quote }}
+    modelURI: {{ .Values.modelURI | default "hf://Qwen/Qwen3-Coder-30B-A3B-Instruct" | quote }}
+    cacheURI: {{ .Values.cacheURI | default "hostpath://mnt/cache" | quote }}
+    minReplicas: {{ .Values.minReplicas | default 1 }}
+    maxReplicas: {{ .Values.maxReplicas | default 1 }}
+    env:
+      - name: PYTORCH_CUDA_ALLOC_CONF
+        value: "expandable_segments:True"
+    workers:
+      - type: {{ .Values.workerType | default "prefill" | quote }}
+        image: {{ .Values.workerImage | default "vllm/vllm-openai:latest" | quote }}
+        replicas: {{ .Values.workerReplicas | default 1 }}
+        pods: {{ .Values.workerPods | default 1 }}
+        config:
+          served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b" | quote }}
+          tensor-parallel-size: {{ .Values.tensorParallelSize | default 2 }}
+          enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
+          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
+          max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
+          max-model-len: {{ .Values.maxModelLen | default "2048" }}
+          kv-transfer-config: |
+            {
+              "kv_connector": "MooncakeConnector",
+              "kv_role": "kv_producer"
+            }
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
+      - type: {{ .Values.decodeWorkerType | default "decode" | quote }}
+        image: {{ .Values.decodeWorkerImage | default "vllm/vllm-openai:latest" | quote }}
+        replicas: {{ .Values.decodeWorkerReplicas | default 1 }}
+        pods: {{ .Values.decodeWorkerPods | default 1 }}
+        config:
+          served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b" | quote }}
+          tensor-parallel-size: {{ .Values.tensorParallelSize | default 2 }}
+          enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
+          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
+          max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
+          max-model-len: {{ .Values.maxModelLen | default "2048" }}
+          kv-transfer-config: |
+            {
+              "kv_connector": "MooncakeConnector",
+              "kv_role": "kv_producer"
+            }
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
