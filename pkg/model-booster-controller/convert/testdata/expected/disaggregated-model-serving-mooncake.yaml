@@ -6,7 +6,7 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: b9c86698
+    workload.serving.volcano.sh/revision: 59fc79f5f5
   name: ds-r1-qwen-7b-pd-ds-r1-qwen-7b-pd
   namespace: demo
   ownerReferences:
@@ -31,7 +31,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: b9c86698
+              workload.serving.volcano.sh/revision: 59fc79f5f5
           spec:
             containers:
               - args:
@@ -90,26 +90,18 @@ spec:
                   - containerPort: 8100
                 resources: {}
               - command:
-                  - python3
-                  - -m
-                  - vllm.entrypoints.openai.api_server
-                  - --model
-                  - /cache/568a486051fd302c338d84946c4f3d48
-                  - --disable-frontend-multiprocessing
-                  - --gpu-memory-utilization
-                  - "0.99"
-                  - --kv-transfer-config
-                  - '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
-                  - --max-model-len
-                  - "2048"
-                  - --quantization
-                  - ascend
-                  - --served-model-name
-                  - ds-r1-qwen-7b-pd
-                  - --tensor-parallel-size
-                  - "16"
-                  - --trust-remote-code
-                  
+                  - bash
+                  - -c
+                  - "pip install mooncake-transfer-engine && python3 -m vllm.entrypoints.openai.api_server \
+                    --model /cache/568a486051fd302c338d84946c4f3d48 \
+                    --disable-frontend-multiprocessing \
+                    --gpu-memory-utilization 0.99 \
+                    --kv-transfer-config {\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_producer\"} \
+                    --max-model-len 2048 \
+                    --quantization ascend \
+                    --served-model-name ds-r1-qwen-7b-pd \
+                    --tensor-parallel-size 16 \
+                    --trust-remote-code"
                 env:
                   - name: ENDPOINT
                     value: https://obs.test.com
@@ -168,13 +160,7 @@ spec:
                   periodSeconds: 5
                 resources:
                   limits:
-                    cpu: "16"
-                    huawei.com/ascend-1980: "1"
-                    memory: 1Gi
-                  requests:
-                    cpu: "16"
-                    huawei.com/ascend-1980: "1"
-                    memory: 1Gi
+                    nvidia.com/gpu: "2"
                 volumeMounts:
                   - mountPath: /cache
                     name: ds-r1-qwen-7b-pd-weights
@@ -214,7 +200,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: b9c86698
+              workload.serving.volcano.sh/revision: 59fc79f5f5
           spec:
             containers:
               - args:
@@ -278,26 +264,18 @@ spec:
                   - containerPort: 8100
                 resources: {}
               - command:
-                  - python3
-                  - -m
-                  - vllm.entrypoints.openai.api_server
-                  - --model
-                  - /cache/568a486051fd302c338d84946c4f3d48
-                  - --disable-frontend-multiprocessing
-                  - --gpu-memory-utilization
-                  - "0.95"
-                  - --kv-transfer-config
-                  - '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
-                  - --max-model-len
-                  - "1024"
-                  - --quantization
-                  - ascend
-                  - --served-model-name
-                  - ds-r1-qwen-7b-pd
-                  - --tensor-parallel-size
-                  - "16"
-                  - --trust-remote-code
-                  
+                  - bash
+                  - -c
+                  - "pip install mooncake-transfer-engine && python3 -m vllm.entrypoints.openai.api_server \
+                    --model /cache/568a486051fd302c338d84946c4f3d48 \
+                    --disable-frontend-multiprocessing \
+                    --gpu-memory-utilization 0.95 \
+                    --kv-transfer-config {\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_consumer\"} \
+                    --max-model-len 1024 \
+                    --quantization ascend \
+                    --served-model-name ds-r1-qwen-7b-pd \
+                    --tensor-parallel-size 16 \
+                    --trust-remote-code"
                 env:
                   - name: ENDPOINT
                     value: https://obs.test.com
@@ -358,13 +336,7 @@ spec:
                   periodSeconds: 5
                 resources:
                   limits:
-                    cpu: "16"
-                    huawei.com/ascend-1980: "1"
-                    memory: 1Gi
-                  requests:
-                    cpu: "16"
-                    huawei.com/ascend-1980: "1"
-                    memory: 1Gi
+                    nvidia.com/gpu: "2"
                 volumeMounts:
                   - mountPath: /cache
                     name: ds-r1-qwen-7b-pd-weights
