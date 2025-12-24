@@ -33,11 +33,7 @@ spec:
           gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
           max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
-          kv-transfer-config: |
-            {
-              "kv_connector": "MooncakeConnector",
-              "kv_role": "kv_producer"
-            }
+          kv-transfer-config: '{"kv_connector": "MooncakeConnector","kv_role": "kv_producer"}'
         resources:
           limits:
             nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
@@ -52,11 +48,7 @@ spec:
           gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
           max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
-          kv-transfer-config: |
-            {
-              "kv_connector": "MooncakeConnector",
-              "kv_role": "kv_producer"
-            }
+          kv-transfer-config: '{"kv_connector": "MooncakeConnector","kv_role": "kv_producer"}'
         resources:
           limits:
             nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}

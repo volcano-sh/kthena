@@ -33,15 +33,7 @@ spec:
           gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
           max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
-          kv-transfer-config: |
-            {
-              "kv_connector": "LMCacheConnectorV1",
-              "kv_role": "kv_producer",
-              "kv_connector_extra_config": {
-                "discard_partial_chunks": true,
-                "lmcache_rpc_port": "10086"
-              }
-            }
+          kv-transfer-config: '{"kv_connector": "LMCacheConnectorV1","kv_role": "kv_producer","kv_connector_extra_config": {"discard_partial_chunks": true,"lmcache_rpc_port": "10086"}}'
         resources:
           limits:
             nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
@@ -56,15 +48,7 @@ spec:
           gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
           max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
-          kv-transfer-config: |
-            {
-              "kv_connector": "LMCacheConnectorV1",
-              "kv_role": "kv_consumer",
-              "kv_connector_extra_config": {
-                "discard_partial_chunks": true,
-                "lmcache_rpc_port": "10086"
-              }
-            }
+          kv-transfer-config: '{"kv_connector": "LMCacheConnectorV1","kv_role": "kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": true,"lmcache_rpc_port": "10086"}}'
         resources:
           limits:
             nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
