@@ -8,7 +8,7 @@ spec:
   rules:
   - name: "deepseek-r1-route"
     targetModels:
-    - modelServerName: "deepseek-r1-1-5b-v1"
+    - modelServerName: "deepseek-r1-1-5b"
       weight: 70
-    - modelServerName: "deepseek-r1-1-5b-v2"
+    - modelServerName: "deepseek-r1-7b"
       weight: 30
