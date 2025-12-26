@@ -216,7 +216,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		utils.NewChatMessage("user", "Hello world"),
 	}
 
-	// Verify input token rate limit (10 tokens/minute)
+	// Verify input token rate limit
 	t.Run("InputTokenRateLimit", func(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
@@ -233,25 +233,29 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, _ := client.Do(req)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
 		defer resp.Body.Close()
 
 		assert.Equal(t, 429, resp.StatusCode, "4th request should be rate limited")
 	})
 
-	// Verify output token rate limit 
+	// Verify output token rate limit
 	t.Run("OutputTokenRateLimit", func(t *testing.T) {
-		resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-		assert.Equal(t, 200, resp.StatusCode, "Normal request should not be blocked by output limit")
+		// Make multiple requests to accumulate some output tokens
+		for i := 0; i < 5; i++ {
+			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+			assert.Equal(t, 200, resp.StatusCode, "Request %d should succeed (output limit is high)", i+1)
+		}
+		t.Log("Output token rate limit is configured and not blocking normal requests")
 	})
 
-	//Verify error response (429) when rate limit is exceeded
+	//  Verify error response (429) when rate limit is exceeded
 	t.Run("ErrorResponse429", func(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 		}
 
-		// Verify 429 status and error message
 		requestBody := utils.ChatCompletionsRequest{
 			Model:    modelRoute.Spec.ModelName,
 			Messages: messages,
@@ -262,7 +266,8 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, _ := client.Do(req)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
 		defer resp.Body.Close()
 
 		assert.Equal(t, 429, resp.StatusCode, "Should return 429 when rate limited")
@@ -273,7 +278,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 
 	// Verify rate limit window accuracy
 	t.Run("RateLimitWindowAccuracy", func(t *testing.T) {
-		
+
 		for i := 0; i < 3; i++ {
 			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 		}
@@ -289,7 +294,8 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, _ := client.Do(req)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
 		resp.Body.Close()
 
 		assert.Equal(t, 429, resp.StatusCode, "Should still be rate limited after 6 seconds")
@@ -302,7 +308,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 
 	// Verify rate limit reset mechanism
 	t.Run("ResetMechanism", func(t *testing.T) {
-		// Exhaust rate limit
+
 		for i := 0; i < 3; i++ {
 			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 		}
@@ -318,7 +324,8 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, _ := client.Do(req)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
 		resp.Body.Close()
 
 		assert.Equal(t, 429, resp.StatusCode, "Should be rate limited before reset")
