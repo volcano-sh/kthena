@@ -189,11 +189,9 @@ func TestModelRouteMultiModels(t *testing.T) {
 	})
 }
 
-// TestModelRouteWithRateLimit tests rate limiting functionality based on local storage.
 func TestModelRouteWithRateLimit(t *testing.T) {
 	ctx := context.Background()
 
-	// Deploy ModelRoute with rate limiting configuration
 	t.Log("Deploying ModelRoute with rate limiting...")
 	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
 	modelRoute.Namespace = testNamespace
@@ -202,7 +200,6 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 	require.NoError(t, err, "Failed to create ModelRoute")
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
 
-	// Cleanup resources after test
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
@@ -211,127 +208,97 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		}
 	})
 
-	// Prepare test messages
 	messages := []utils.ChatMessage{
 		utils.NewChatMessage("user", "Hello world"),
 	}
 
-	// Verify input token rate limit
-	t.Run("InputTokenRateLimit", func(t *testing.T) {
-		for i := 0; i < 3; i++ {
-			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-			assert.Equal(t, 200, resp.StatusCode, "Request %d should succeed", i+1)
-		}
+	// Input token rate limit (10 tokens/minute)
+	t.Log("Testing input token rate limit...")
+	for i := 0; i < 3; i++ {
+		resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode, "Request %d should succeed", i+1)
+	}
 
-		requestBody := utils.ChatCompletionsRequest{
-			Model:    modelRoute.Spec.ModelName,
-			Messages: messages,
-			Stream:   false,
-		}
-		jsonData, _ := json.Marshal(requestBody)
-		req, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData))
-		req.Header.Set("Content-Type", "application/json")
+	requestBody := utils.ChatCompletionsRequest{
+		Model:    modelRoute.Spec.ModelName,
+		Messages: messages,
+		Stream:   false,
+	}
+	jsonData, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
 
-		assert.Equal(t, 429, resp.StatusCode, "4th request should be rate limited")
-	})
+	assert.Equal(t, 429, resp.StatusCode, "4th request should be rate limited")
 
-	// Verify output token rate limit
-	t.Run("OutputTokenRateLimit", func(t *testing.T) {
-		// Make multiple requests to accumulate some output tokens
-		for i := 0; i < 5; i++ {
-			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-			assert.Equal(t, 200, resp.StatusCode, "Request %d should succeed (output limit is high)", i+1)
-		}
-		t.Log("Output token rate limit is configured and not blocking normal requests")
-	})
+	//  Output token rate limit 
+	t.Log("Testing output token rate limit...")
+	time.Sleep(12 * time.Second)
 
-	//  Verify error response (429) when rate limit is exceeded
-	t.Run("ErrorResponse429", func(t *testing.T) {
-		for i := 0; i < 3; i++ {
-			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-		}
+	resp2 := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	assert.Equal(t, 200, resp2.StatusCode, "Request should succeed")
 
-		requestBody := utils.ChatCompletionsRequest{
-			Model:    modelRoute.Spec.ModelName,
-			Messages: messages,
-			Stream:   false,
-		}
-		jsonData, _ := json.Marshal(requestBody)
-		req, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData))
-		req.Header.Set("Content-Type", "application/json")
+	t.Log("Testing 429 error response...")
+	for i := 0; i < 3; i++ {
+		utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	}
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
+	jsonData2, _ := json.Marshal(requestBody)
+	req2, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData2))
+	req2.Header.Set("Content-Type", "application/json")
 
-		assert.Equal(t, 429, resp.StatusCode, "Should return 429 when rate limited")
+	resp3, err := client.Do(req2)
+	require.NoError(t, err)
+	defer resp3.Body.Close()
 
-		body, _ := io.ReadAll(resp.Body)
-		assert.Contains(t, strings.ToLower(string(body)), "rate limit", "Error should mention rate limit")
-	})
+	assert.Equal(t, 429, resp3.StatusCode, "Should return 429 when rate limited")
 
-	// Test Point 4: Verify rate limit window accuracy
-	t.Run("RateLimitWindowAccuracy", func(t *testing.T) {
-		for i := 0; i < 3; i++ {
-			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-		}
-		time.Sleep(6 * time.Second)
+	body, _ := io.ReadAll(resp3.Body)
+	assert.Contains(t, strings.ToLower(string(body)), "rate limit", "Error should mention rate limit")
 
-		requestBody := utils.ChatCompletionsRequest{
-			Model:    modelRoute.Spec.ModelName,
-			Messages: messages,
-			Stream:   false,
-		}
-		jsonData, _ := json.Marshal(requestBody)
-		req, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData))
-		req.Header.Set("Content-Type", "application/json")
+	// Test Point 4: Rate limit window accuracy
+	t.Log("Testing rate limit window accuracy...")
+	time.Sleep(6 * time.Second)
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		resp.Body.Close()
+	jsonData3, _ := json.Marshal(requestBody)
+	req3, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData3))
+	req3.Header.Set("Content-Type", "application/json")
 
-		assert.Equal(t, 429, resp.StatusCode, "Should still be rate limited after 6 seconds")
+	resp4, err := client.Do(req3)
+	require.NoError(t, err)
+	resp4.Body.Close()
 
-		time.Sleep(12 * time.Second)
+	assert.Equal(t, 429, resp4.StatusCode, "Should still be rate limited after 6 seconds")
 
-		resp2 := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-		assert.Equal(t, 200, resp2.StatusCode, "Should succeed after 18 seconds total")
-	})
+	time.Sleep(12 * time.Second)
 
-	// Test Point 5: Verify rate limit reset mechanism
-	t.Run("ResetMechanism", func(t *testing.T) {
-		for i := 0; i < 3; i++ {
-			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-		}
+	resp5 := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	assert.Equal(t, 200, resp5.StatusCode, "Should succeed after 18 seconds total")
 
-		// Verify rate limited
-		requestBody := utils.ChatCompletionsRequest{
-			Model:    modelRoute.Spec.ModelName,
-			Messages: messages,
-			Stream:   false,
-		}
-		jsonData, _ := json.Marshal(requestBody)
-		req, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData))
-		req.Header.Set("Content-Type", "application/json")
+	//  Rate limit reset mechanism
+	t.Log("Testing rate limit reset mechanism...")
+	for i := 0; i < 3; i++ {
+		utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	}
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		resp.Body.Close()
+	jsonData4, _ := json.Marshal(requestBody)
+	req4, _ := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData4))
+	req4.Header.Set("Content-Type", "application/json")
 
-		assert.Equal(t, 429, resp.StatusCode, "Should be rate limited before reset")
-		time.Sleep(60 * time.Second)
+	resp6, err := client.Do(req4)
+	require.NoError(t, err)
+	resp6.Body.Close()
 
-		for i := 0; i < 3; i++ {
-			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-			assert.Equal(t, 200, resp.StatusCode, "Request %d should succeed after reset", i+1)
-		}
-	})
+	assert.Equal(t, 429, resp6.StatusCode, "Should be rate limited before reset")
+
+	time.Sleep(60 * time.Second)
+
+	for i := 0; i < 3; i++ {
+		resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode, "Request %d should succeed after reset", i+1)
+	}
 }
