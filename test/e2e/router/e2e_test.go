@@ -235,13 +235,14 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 
 	assert.Equal(t, 429, resp.StatusCode, "4th request should be rate limited")
 
-	//  Output token rate limit 
+	// Output token rate limit
 	t.Log("Testing output token rate limit...")
 	time.Sleep(12 * time.Second)
 
 	resp2 := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 	assert.Equal(t, 200, resp2.StatusCode, "Request should succeed")
 
+	//  429 error response
 	t.Log("Testing 429 error response...")
 	for i := 0; i < 3; i++ {
 		utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
@@ -260,7 +261,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 	body, _ := io.ReadAll(resp3.Body)
 	assert.Contains(t, strings.ToLower(string(body)), "rate limit", "Error should mention rate limit")
 
-	// Test Point 4: Rate limit window accuracy
+	//  Rate limit window accuracy
 	t.Log("Testing rate limit window accuracy...")
 	time.Sleep(6 * time.Second)
 
