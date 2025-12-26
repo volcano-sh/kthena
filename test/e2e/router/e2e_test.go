@@ -276,8 +276,12 @@ func TestModelRouteSubset(t *testing.T) {
 		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, updatedModelRoute, metav1.UpdateOptions{})
 		require.NoError(t, err, "Failed to update ModelRoute")
 
-		// Wait a bit for the update to propagate
-		time.Sleep(2 * time.Second)
+		// Wait for the update to propagate - verify by sending test requests until they succeed
+		require.Eventually(t, func() bool {
+			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+			return resp.StatusCode == 200 && resp.Body != "" &&
+				(strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B") || strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-7B"))
+		}, 1*time.Minute, 2*time.Second, "ModelRoute update should propagate and requests should route successfully")
 
 		// Verify requests still work (should normalize weights internally)
 		resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
@@ -299,7 +303,7 @@ func TestModelRouteSubset(t *testing.T) {
 
 	t.Run("FailoverWhenSingleModelServerUnavailable", func(t *testing.T) {
 		// Scale down 1.5B deployment to simulate unavailability
-		deployment, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, "deepseek-r1-1-5b", metav1.GetOptions{})
+		deployment, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, routercontext.Deployment1_5bName, metav1.GetOptions{})
 		require.NoError(t, err)
 
 		originalReplicas := *deployment.Spec.Replicas
@@ -308,8 +312,14 @@ func TestModelRouteSubset(t *testing.T) {
 		_, err = testCtx.KubeClient.AppsV1().Deployments(testNamespace).Update(ctx, deployment, metav1.UpdateOptions{})
 		require.NoError(t, err, "Failed to scale down 1.5B deployment")
 
-		// Wait for deployment to scale down
-		time.Sleep(5 * time.Second)
+		// Wait for deployment to scale down - poll until ReadyReplicas is 0
+		require.Eventually(t, func() bool {
+			deploy, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, routercontext.Deployment1_5bName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			return deploy.Status.ReadyReplicas == 0
+		}, 2*time.Minute, 2*time.Second, "Deployment should scale down to 0 replicas")
 
 		// Verify requests still work (should failover to 7B)
 		resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
@@ -318,10 +328,19 @@ func TestModelRouteSubset(t *testing.T) {
 		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-7B", "Request should failover to 7B when 1.5B is unavailable")
 
 		// Restore deployment - re-fetch to avoid conflict
-		deployment, err = testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, "deepseek-r1-1-5b", metav1.GetOptions{})
+		deployment, err = testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, routercontext.Deployment1_5bName, metav1.GetOptions{})
 		require.NoError(t, err)
 		deployment.Spec.Replicas = &originalReplicas
 		_, err = testCtx.KubeClient.AppsV1().Deployments(testNamespace).Update(ctx, deployment, metav1.UpdateOptions{})
 		require.NoError(t, err, "Failed to restore 1.5B deployment")
+
+		// Wait for deployment to be fully restored - poll until ReadyReplicas matches originalReplicas
+		require.Eventually(t, func() bool {
+			deploy, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, routercontext.Deployment1_5bName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			return deploy.Status.ReadyReplicas == originalReplicas
+		}, 2*time.Minute, 2*time.Second, "Deployment should be fully restored with %d ready replicas", originalReplicas)
 	})
 }
