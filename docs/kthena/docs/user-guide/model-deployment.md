@@ -6,56 +6,59 @@ Kthena provides two approaches for deploying LLM inference workloads: the **Mode
 
 ### Deployment Approach Comparison
 
-| Deployment Method | Manually Created CRDs                 | Automatically Managed Components        | Use Case                                     |
-|-------------------|---------------------------------------|-----------------------------------------|----------------------------------------------|
-| **ModelBooster**  | ModelBooster                          | ModelServer, ModelRoute, Pod Management | Simplified deployment, automated management  |
-| **ModelServing**  | ModelServing, ModelServer, ModelRoute | Pod Management                          | Fine-grained control, complex configurations |
+| Deployment Method | Manually Created CRDs                 | Automatically Managed Components      | Use Case                                     |
+|-------------------|---------------------------------------|---------------------------------------|----------------------------------------------|
+| **ModelBooster**  | ModelBooster                          | ModelServing, ModelServer, ModelRoute | Simplified deployment, automated management  |
+| **ModelServing**  | ModelServing, ModelServer, ModelRoute | Pod Management                        | Fine-grained control, complex configurations |
 
 ### ModelBooster Approach
 
 **Advantages:**
 
-- Simplified configuration with built-in disaggregation support optimized for NPUs
-- Automatic KV cache transfer configuration using NPU-optimized protocols
-- Integrated support for Huawei Ascend NPUs with automatic resource allocation
-- Streamlined deployment process with NPU-specific optimizations
-- Built-in HCCL (Huawei Collective Communication Library) configuration
+- Simplified configuration with built-in disaggregation support optimized for AI accelerators
+- Automatic KV cache transfer configuration using accelerator-optimized protocols
+- Integrated support for major accelerators (e.g., NVIDIA GPUs, Huawei Ascend NPUs) with automatic resource allocation
+- Streamlined deployment process with hardware-specific optimizations
+- Built-in communication backend configuration (e.g., NCCL, HCCL)
 
 **Automatically Managed Components:**
 
-- ✅ ModelServer (automatically created and managed with NPU awareness)
-- ✅ ModelRoute (automatically created and managed)
-- ✅ Inter-service communication configuration (HCCL-optimized)
-- ✅ Load balancing and routing for NPU workloads
-- ✅ NPU resource scheduling and allocation
+- ModelServing (automatically created and managed for workload orchestration)
+- ModelServer (automatically created and managed with hardware awareness)
+- ModelRoute (automatically created and managed)
+- AutoscalingPolicy and Binding (automatically created when `autoscalingPolicy` is defined in ModelBooster spec)
+- Inter-service communication configuration (backend-optimized)
+- Load balancing and routing for AI workloads
+- Accelerator resource scheduling and allocation
 
 **User Only Needs to Create:**
 
-- ModelBooster CRD with NPU resource specifications
+- ModelBooster CRD with accelerator resource specifications
 
 ### ModelServing Approach
 
 **Advantages:**
 
-- Fine-grained control over NPU container configuration
-- Support for init containers and complex volume mounts for NPU drivers
-- Detailed environment variable configuration for Ascend NPU settings
-- Flexible NPU resource allocation (`huawei.com/ascend-1980`)
-- Custom HCCL network interface configuration
+- Fine-grained control over accelerator container configuration
+- Support for init containers and complex volume mounts for device drivers
+- Detailed environment variable configuration for hardware-specific settings
+- Flexible accelerator resource allocation (e.g., `nvidia.com/gpu`, `huawei.com/ascend-1980`)
+- Custom network interface configuration for communication backends
 
 **Manually Created Components:**
 
-- ❌ ModelServing CRD with NPU resource specifications
-- ❌ ModelServer CRD with NPU-aware workload selection
-- ❌ ModelRoute CRD for NPU service routing
-- ❌ Manual inter-service communication configuration (HCCL settings)
+- ModelServing CRD with accelerator resource specifications
+- ModelServer CRD with hardware-aware workload selection
+- ModelRoute CRD for AI service routing
+- AutoscalingPolicy and Binding CRDs (if autoscaling is required)
+- Manual inter-service communication configuration (e.g., NCCL/HCCL settings)
 
-**NPU-Specific Networking Components:**
+**Networking Components:**
 
-- **ModelServer** - Manages inter-service communication and load balancing for NPU workloads
-- **ModelRoute** - Provides request routing and traffic distribution to NPU services
-- **Supported KV Connector Types** - nixl, mooncake (optimized for NPU communication)
-- **HCCL Integration** - Huawei Collective Communication Library for NPU-to-NPU communication
+- **ModelServer** - Manages inter-service communication and load balancing for AI workloads
+- **ModelRoute** - Provides request routing and traffic distribution to AI services
+- **Supported KV Connector Types** - nixl, mooncake, lmcache (optimized for accelerator communication)
+- **Communication Backend Integration** - Libraries (e.g., NCCL, HCCL) for accelerator-to-accelerator communication
 
 ### Selection Guidance
 
