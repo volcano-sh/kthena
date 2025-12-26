@@ -11,7 +11,7 @@ spec:
     name: "qwen25-coder-32b-server"
     type: "vLLM"
     modelURI: s3://kthena/Qwen/Qwen2.5-Coder-32B-Instruct
-    cacheURI: hostpath:///cache/
+    cacheURI: hostpath://cache/
     envFrom:
       - secretRef:
           name: your-secrets

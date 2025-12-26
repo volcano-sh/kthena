@@ -18,8 +18,8 @@ Among the structures above, the `Tier` represents the hierarchy of the HyperNode
 Volcano PodGroup can set the topology constraints of the job through the networkTopology field, supporting the following configurations:
 
 - mode: Supports hard and soft modes.
-  - hard: Hard constraint, tasks within the job must be deployed within the same HyperNode.
-  - soft: Soft constraint, tasks are deployed within the same HyperNode as much as possible.
+    - hard: Hard constraint, tasks within the job must be deployed within the same HyperNode.
+    - soft: Soft constraint, tasks are deployed within the same HyperNode as much as possible.
 - highestTierAllowed: Used with hard mode, indicating the highest tier of HyperNode allowed for job deployment. This field is not required when mode is soft.
 
 For example, the following configuration means the job can only be deployed within HyperNodes of tier 1 or lower, such as s0 and s1. Otherwise, the job will remain in the Pending state:
@@ -31,7 +31,7 @@ spec:
     highestTierAllowed: 1
 ```
 
-kthena's model serving, provides fields to configure Network Topology constraints for Serving Groups and Roles. For example, the following configuration means the ServingGroup can be deployed within HyperNodes of tier 2 or lower, such as s2. The Role can be deployed within HyperNodes of tier 1 or lower, such as s0 and s1.
+kthena's model serving, provides fields to configure Network Topology constraints for `Serving Groups` and `Roles`. For example, the following configuration means the ServingGroup can be deployed within HyperNodes of tier 2 or lower, such as s2. The Role can be deployed within HyperNodes of tier 1 or lower, such as s0 and s1.
 
 ```yaml
 spec:
@@ -67,12 +67,12 @@ metadata:
 spec:
   tier: 1 # s0 is at tier1
   members:
-  - type: Node
-    selector:
-      labelMatch:
-        matchLabels:
-          kubernetes.io/hostname: kthena-worker
-------
+    - type: Node
+      selector:
+        labelMatch:
+          matchLabels:
+            kubernetes.io/hostname: kthena-worker
+  ------
 apiVersion: topology.volcano.sh/v1alpha1
 kind: HyperNode
 metadata:
@@ -80,10 +80,10 @@ metadata:
 spec:
   tier: 2
   members:
-  - type: HyperNode
-    selector:
-      exactMatch:
-        name: "s0"
+    - type: HyperNode
+      selector:
+        exactMatch:
+          name: "s0"
 ```
 
 This creates a network topology structure of s2 → s0 → kthena-worker.

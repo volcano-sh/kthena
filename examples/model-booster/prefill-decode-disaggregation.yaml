@@ -10,7 +10,7 @@ spec:
     name: deepseek-v2-lite
     type: vLLMDisaggregated
     modelURI: hf://deepseek-ai/DeepSeek-V2-Lite
-    cacheURI: hostpath:///mnt/cache/
+    cacheURI: hostpath://mnt/cache/
     minReplicas: 1
     maxReplicas: 1
     workers:
