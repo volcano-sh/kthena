@@ -39,7 +39,7 @@ func TestBuildModelServer(t *testing.T) {
 		},
 		{
 			name:     "PD disaggregation case",
-			input:    loadYaml[registry.ModelBooster](t, "testdata/input/pd-disaggregated-model.yaml"),
+			input:    loadYaml[registry.ModelBooster](t, "testdata/input/pd-disaggregated-model-npu.yaml"),
 			expected: []*networking.ModelServer{loadYaml[networking.ModelServer](t, "testdata/expected/pd-model-server.yaml")},
 		},
 		{
