@@ -132,6 +132,8 @@ func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName s
 
 		// Check if response is successful
 		if resp.StatusCode == http.StatusOK && responseStr != "" && !containsError(responseStr) {
+			t.Logf("Chat response status: %d", resp.StatusCode)
+			t.Logf("Chat response: %s", responseStr)
 			break
 		}
 
