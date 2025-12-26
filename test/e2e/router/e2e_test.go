@@ -276,9 +276,8 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		assert.Contains(t, strings.ToLower(string(body)), "rate limit", "Error should mention rate limit")
 	})
 
-	// Verify rate limit window accuracy
+	// Test Point 4: Verify rate limit window accuracy
 	t.Run("RateLimitWindowAccuracy", func(t *testing.T) {
-
 		for i := 0; i < 3; i++ {
 			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 		}
@@ -306,9 +305,8 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		assert.Equal(t, 200, resp2.StatusCode, "Should succeed after 18 seconds total")
 	})
 
-	// Verify rate limit reset mechanism
+	// Test Point 5: Verify rate limit reset mechanism
 	t.Run("ResetMechanism", func(t *testing.T) {
-
 		for i := 0; i < 3; i++ {
 			utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 		}
