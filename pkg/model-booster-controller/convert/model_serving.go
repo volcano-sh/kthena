@@ -315,8 +315,8 @@ func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 		commands = []string{"bash", "-c", fmt.Sprintf("chmod u+x %s && %s leader --ray_cluster_size=%d --num-gpus=%d && %s", VllmMultiNodeServingScriptPath, VllmMultiNodeServingScriptPath, workersMap[workload.ModelWorkerTypeServer].Pods, utils.GetDeviceNum(workersMap[workload.ModelWorkerTypeServer]), strings.Join(commands, " "))}
 	}
 
-	// When use mooncake or nixl kv connector, need install corresponding python package first.
-	// only install connector packages when cluster uses GPU; not needed when use NPU
+	// vllm image does not have mooncake-transfer-engine or nixl installed by default
+	// so we need to install them if GPU is requested
 	kvConnector := getKvConnectorFromConfig(workerConfig)
 	if hasGPU(workersMap) {
 		if kvConnector == "MooncakeConnector" {

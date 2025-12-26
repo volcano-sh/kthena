@@ -4,15 +4,15 @@ kind: ModelBooster
 metadata:
   annotations:
     api.kubernetes.io/name: {{ .Values.annotationName | default "example" | quote }}
-  name: {{ .Values.name | default "qwen3-coder-30b-lmcache" | quote }}
+  name: {{ .Values.name | default "qwen3-coder-30b-mooncake" | quote }}
   {{- if .Values.namespace }}
   namespace: {{ .Values.namespace | quote }}
   {{- end }}
 spec:
-  name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b-lmcache" | quote }}
+  name: {{ .Values.modelName | default .Values.name | default "qwen3-coder-30b-mooncake" | quote }}
   owner: {{ .Values.owner | default "example" | quote }}
   backend:
-    name: {{ .Values.backendName | default "qwen3-coder-30b-lmcache" | quote }}
+    name: {{ .Values.backendName | default "qwen3-coder-30b-mooncake" | quote }}
     type: {{ .Values.backendType | default "vLLMDisaggregated" | quote }}
     modelURI: {{ .Values.modelURI | default "hf://Qwen/Qwen3-Coder-30B-A3B-Instruct" | quote }}
     cacheURI: {{ .Values.cacheURI | default "hostpath://mnt/cache" | quote }}
@@ -48,7 +48,7 @@ spec:
           gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.98" }}
           max-num-batched-tokens: {{ .Values.maxNumBatchedTokens | default "4096" }}
           max-model-len: {{ .Values.maxModelLen | default "2048" }}
-          kv-transfer-config: '{"kv_connector": "MooncakeConnector","kv_role": "kv_producer"}'
+          kv-transfer-config: '{"kv_connector": "MooncakeConnector","kv_role": "kv_consumer"}'
         resources:
           limits:
             nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
