@@ -436,7 +436,10 @@ func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, err
 
 	for _, podName := range podNames {
 		if value, ok := s.pods.Load(podName); ok {
-			pods = append(pods, value.(*PodInfo))
+			podInfo := value.(*PodInfo)
+			if podInfo.HasModelServer(name) {
+				pods = append(pods, podInfo)
+			}
 		}
 	}
 
@@ -525,6 +528,7 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 			ms := value.(*modelServer)
 			ms.addPod(podName)
 			// Categorize the pod for PDGroup scheduling
+			klog.Infof("Categorizing pod %s for PDGroup scheduling, model server %s", podName, modelServerName)
 			ms.categorizePodForPDGroup(podName, pod.Labels)
 		}
 	}

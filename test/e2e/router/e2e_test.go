@@ -21,14 +21,17 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/framework"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 var (
@@ -181,4 +184,88 @@ func TestModelRouteMultiModels(t *testing.T) {
 		assert.NotEmpty(t, resp.Body)
 		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B", "Empty header should fall back to 1.5B model")
 	})
+}
+
+// TestModelRoutePrefillDecodeDisaggregation tests PD disaggregation with ModelServing, ModelServer, and ModelRoute.
+func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
+	ctx := context.Background()
+
+	// Deploy ModelServing
+	t.Log("Deploying ModelServing for PD disaggregation...")
+	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing]("examples/kthena-router/ModelServing-ds1.5b-pd-disaggragation.yaml")
+	modelServing.Namespace = testNamespace
+	createdModelServing, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+	assert.NotNil(t, createdModelServing)
+	t.Logf("Created ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
+
+	// Register cleanup function to delete ModelServing after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
+		if err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, createdModelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", createdModelServing.Namespace, createdModelServing.Name, err)
+		}
+	})
+
+	// Wait for ModelServing to be ready
+	t.Log("Waiting for ModelServing to be ready...")
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	err = wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+		ms, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, createdModelServing.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Error getting ModelServing %s, retrying: %v", createdModelServing.Name, err)
+			return false, err
+		}
+		// Check if all replicas are available
+		expectedReplicas := int32(1)
+		if ms.Spec.Replicas != nil {
+			expectedReplicas = *ms.Spec.Replicas
+		}
+		return ms.Status.AvailableReplicas >= expectedReplicas, nil
+	})
+	require.NoError(t, err, "ModelServing did not become ready")
+
+	// Deploy ModelServer
+	t.Log("Deploying ModelServer for PD disaggregation...")
+	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer]("examples/kthena-router/ModelServer-ds1.5b-pd-disaggragation.yaml")
+	modelServer.Namespace = testNamespace
+	createdModelServer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServer")
+	assert.NotNil(t, createdModelServer)
+	t.Logf("Created ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
+
+	// Register cleanup function to delete ModelServer after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(cleanupCtx, createdModelServer.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServer %s/%s: %v", createdModelServer.Namespace, createdModelServer.Name, err)
+		}
+	})
+
+	// Deploy ModelRoute
+	t.Log("Deploying ModelRoute for PD disaggregation...")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-ds1.5b-pd-disaggragation.yaml")
+	modelRoute.Namespace = testNamespace
+	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelRoute")
+	assert.NotNil(t, createdModelRoute)
+	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	// Register cleanup function to delete ModelRoute after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	// Test accessing the model route (with retry logic)
+	messages := []utils.ChatMessage{
+		utils.NewChatMessage("user", "Hello"),
+	}
+	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }

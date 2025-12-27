@@ -176,6 +176,7 @@ func (c *ModelServerController) processNextWorkItem() bool {
 }
 
 func (c *ModelServerController) syncModelServerHandler(key string) error {
+	klog.Infof("syncing model server %s", key)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
@@ -208,6 +209,8 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		}
 	}
 
+	klog.Infof("In syncModelServerHandler, pods: %v", pods)
+
 	_ = c.store.AddOrUpdateModelServer(ms, pods)
 
 	// Get already bound pods to avoid unnecessary updates
@@ -235,6 +238,8 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 			continue
 		}
 
+		klog.Infof("In syncModelServerHandler, adding or updating pod %s", podName)
+
 		// Find all ModelServers that match this pod and update the store
 		if err := c.addOrUpdatePod(pod); err != nil {
 			klog.Errorf("failed to add or update pod %s/%s: %v", pod.Namespace, pod.Name, err)
@@ -245,6 +250,7 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 }
 
 func (c *ModelServerController) syncPodHandler(key string) error {
+	klog.Infof("syncing pod %s", key)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))

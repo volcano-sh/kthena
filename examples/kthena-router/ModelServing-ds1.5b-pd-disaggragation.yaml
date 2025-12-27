@@ -1,0 +1,50 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek-r1-1-5b
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          metadata:
+            labels:
+              app: deepseek-r1-1-5b
+              modelinfer/infergroupname: "group-0"
+              modelinfer/rolename: "P-instance"
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/yaozengzeng/vllm-mock:latest
+                imagePullPolicy: IfNotPresent
+                env:
+                  # specify the model name to mock
+                  - name: MODEL_NAME
+                    value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+                ports:
+                  - containerPort: 8000
+        workerReplicas: 0
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          metadata:
+            labels:
+              app: deepseek-r1-1-5b
+              modelinfer/infergroupname: "group-0"
+              modelinfer/rolename: "D-instance"
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/yaozengzeng/vllm-mock:latest
+                imagePullPolicy: IfNotPresent
+                env:
+                  # specify the model name to mock
+                  - name: MODEL_NAME
+                    value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+                ports:
+                  - containerPort: 8000
+        workerReplicas: 0

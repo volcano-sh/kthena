@@ -1,7 +1,7 @@
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:
-  name: deepseek-r1-1-5b
+  name: deepseek-r1-1-5b-pd-disaggragation
   namespace: default
 spec:
   workloadSelector:
