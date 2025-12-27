@@ -209,6 +209,8 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		}
 	}
 
+	klog.Infof("In syncModelServerHandler, pods: %v", pods)
+
 	_ = c.store.AddOrUpdateModelServer(ms, pods)
 
 	// Get already bound pods to avoid unnecessary updates
@@ -235,6 +237,8 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		if existingPodNames.Contains(podName) {
 			continue
 		}
+
+		klog.Infof("In syncModelServerHandler, adding or updating pod %s", podName)
 
 		// Find all ModelServers that match this pod and update the store
 		if err := c.addOrUpdatePod(pod); err != nil {

@@ -436,7 +436,10 @@ func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, err
 
 	for _, podName := range podNames {
 		if value, ok := s.pods.Load(podName); ok {
-			pods = append(pods, value.(*PodInfo))
+			podInfo := value.(*PodInfo)
+			if podInfo.HasModelServer(name) {
+				pods = append(pods, podInfo)
+			}
 		}
 	}
 
