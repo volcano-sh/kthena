@@ -77,21 +77,21 @@ func TestMain(m *testing.M) {
 
 	// Run tests
 	code := m.Run()
+	/*
+		// Cleanup common components
+		if err := testCtx.CleanupCommonComponents(); err != nil {
+			fmt.Printf("Failed to cleanup common components: %v\n", err)
+		}
 
-	// Cleanup common components
-	if err := testCtx.CleanupCommonComponents(); err != nil {
-		fmt.Printf("Failed to cleanup common components: %v\n", err)
-	}
+		// Delete test namespace
+		if err := testCtx.DeleteTestNamespace(); err != nil {
+			fmt.Printf("Failed to delete test namespace: %v\n", err)
+		}
 
-	// Delete test namespace
-	if err := testCtx.DeleteTestNamespace(); err != nil {
-		fmt.Printf("Failed to delete test namespace: %v\n", err)
-	}
-
-	if err := framework.UninstallKthena(config.Namespace); err != nil {
-		fmt.Printf("Failed to uninstall kthena: %v\n", err)
-	}
-
+		if err := framework.UninstallKthena(config.Namespace); err != nil {
+			fmt.Printf("Failed to uninstall kthena: %v\n", err)
+		}
+	*/
 	os.Exit(code)
 }
 
@@ -199,14 +199,15 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	assert.NotNil(t, createdModelServing)
 	t.Logf("Created ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
 
-	// Register cleanup function to delete ModelServing after test completes
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
-		if err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, createdModelServing.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", createdModelServing.Namespace, createdModelServing.Name, err)
-		}
-	})
+	/*
+		// Register cleanup function to delete ModelServing after test completes
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			t.Logf("Cleaning up ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
+			if err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, createdModelServing.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", createdModelServing.Namespace, createdModelServing.Name, err)
+			}
+		})*/
 
 	// Wait for ModelServing to be ready
 	t.Log("Waiting for ModelServing to be ready...")
@@ -215,7 +216,8 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	err = wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		ms, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, createdModelServing.Name, metav1.GetOptions{})
 		if err != nil {
-			return false, nil
+			t.Logf("Error getting ModelServing %s, retrying: %v", createdModelServing.Name, err)
+			return false, err
 		}
 		// Check if all replicas are available
 		expectedReplicas := int32(1)
@@ -235,35 +237,34 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	assert.NotNil(t, createdModelServer)
 	t.Logf("Created ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
 
-	// Register cleanup function to delete ModelServer after test completes
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
-		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(cleanupCtx, createdModelServer.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServer %s/%s: %v", createdModelServer.Namespace, createdModelServer.Name, err)
-		}
-	})
+	/*
+		// Register cleanup function to delete ModelServer after test completes
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			t.Logf("Cleaning up ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(cleanupCtx, createdModelServer.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelServer %s/%s: %v", createdModelServer.Namespace, createdModelServer.Name, err)
+			}
+		})*/
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute for PD disaggregation...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-prefill-decode-disaggregation.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-ds1.5b-pd-disaggragation.yaml")
 	modelRoute.Namespace = testNamespace
-	modelRoute.Name = "deepseek-r1-1-5b"
-	modelRoute.Spec.ModelName = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-	modelRoute.Spec.Rules[0].TargetModels[0].ModelServerName = "deepseek-r1-1-5b"
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
 	assert.NotNil(t, createdModelRoute)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
 
-	// Register cleanup function to delete ModelRoute after test completes
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
-		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
-		}
-	})
+	/*
+		// Register cleanup function to delete ModelRoute after test completes
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+			}
+		})*/
 
 	// Test accessing the model route (with retry logic)
 	messages := []utils.ChatMessage{

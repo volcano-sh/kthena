@@ -61,6 +61,8 @@ type ModelServerResponse struct {
 	Namespace      string                     `json:"namespace"`
 	Spec           aiv1alpha1.ModelServerSpec `json:"spec"`
 	AssociatedPods []string                   `json:"associatedPods,omitempty"`
+	DecodePods     []string                   `json:"decodePods,omitempty"`
+	PrefillPods    []string                   `json:"prefillPods,omitempty"`
 }
 
 type PodResponse struct {
@@ -156,6 +158,28 @@ func (h *DebugHandler) ListModelServers(c *gin.Context) {
 				}
 			}
 			response.AssociatedPods = podNames
+		}
+
+		// Get decode pods
+		if decodePods, err := h.store.GetDecodePods(namespacedName); err == nil {
+			var decodePodNames []string
+			for _, pod := range decodePods {
+				if pod.Pod != nil {
+					decodePodNames = append(decodePodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+				}
+			}
+			response.DecodePods = decodePodNames
+		}
+
+		// Get prefill pods
+		if prefillPods, err := h.store.GetPrefillPods(namespacedName); err == nil {
+			var prefillPodNames []string
+			for _, pod := range prefillPods {
+				if pod.Pod != nil {
+					prefillPodNames = append(prefillPodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+				}
+			}
+			response.PrefillPods = prefillPodNames
 		}
 
 		responses = append(responses, response)
@@ -302,6 +326,28 @@ func (h *DebugHandler) GetModelServer(c *gin.Context) {
 			}
 		}
 		response.AssociatedPods = podNames
+	}
+
+	// Get decode pods
+	if decodePods, err := h.store.GetDecodePods(namespacedName); err == nil {
+		var decodePodNames []string
+		for _, pod := range decodePods {
+			if pod.Pod != nil {
+				decodePodNames = append(decodePodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+			}
+		}
+		response.DecodePods = decodePodNames
+	}
+
+	// Get prefill pods
+	if prefillPods, err := h.store.GetPrefillPods(namespacedName); err == nil {
+		var prefillPodNames []string
+		for _, pod := range prefillPods {
+			if pod.Pod != nil {
+				prefillPodNames = append(prefillPodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+			}
+		}
+		response.PrefillPods = prefillPodNames
 	}
 
 	c.JSON(http.StatusOK, response)

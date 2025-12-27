@@ -22,6 +22,7 @@ import (
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"istio.io/istio/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 )
 
 type modelServer struct {
@@ -76,6 +77,7 @@ func (m *modelServer) categorizePodForPDGroup(podName types.NamespacedName, podL
 	if pdGroupValue == "" {
 		return
 	}
+	klog.Infof("Categorizing pod %s for PDGroup scheduling, model server %s, pd group value %s", podName, m.modelServer.Name, pdGroupValue)
 	// Get or create PDGroupPods for this group value
 	if _, exists := m.pdGroups[pdGroupValue]; !exists {
 		m.pdGroups[pdGroupValue] = NewPDGroupPods()
@@ -85,6 +87,7 @@ func (m *modelServer) categorizePodForPDGroup(podName types.NamespacedName, podL
 	// Check if pod matches decode labels
 	isDecodePod := matchesLabels(podLabels, pdGroup.DecodeLabels)
 	if isDecodePod {
+		klog.Infof("Pod %s is a decode pod", podName)
 		pdGroupPods.AddDecodePod(podName)
 		return
 	}
@@ -92,6 +95,7 @@ func (m *modelServer) categorizePodForPDGroup(podName types.NamespacedName, podL
 	// Check if pod matches prefill labels
 	isPrefillPod := matchesLabels(podLabels, pdGroup.PrefillLabels)
 	if isPrefillPod {
+		klog.Infof("Pod %s is a prefill pod", podName)
 		pdGroupPods.AddPrefillPod(podName)
 	}
 }

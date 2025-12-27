@@ -525,6 +525,7 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 			ms := value.(*modelServer)
 			ms.addPod(podName)
 			// Categorize the pod for PDGroup scheduling
+			klog.Infof("Categorizing pod %s for PDGroup scheduling, model server %s", podName, modelServerName)
 			ms.categorizePodForPDGroup(podName, pod.Labels)
 		}
 	}
