@@ -228,11 +228,12 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 
 		// Because the Service has an OwnerReference set, removing the finalizers allows it to be deleted successfully.
 		for _, svc := range services {
+			svcDeepCopy := svc.DeepCopy()
 			// remove finalizer first to avoid being blocked by deleting headless service
-			utils.RemoveHeadlessServiceProtectionFinalizer(svc)
-			_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svc, metav1.UpdateOptions{})
+			utils.RemoveHeadlessServiceProtectionFinalizer(svcDeepCopy)
+			_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svcDeepCopy, metav1.UpdateOptions{})
 			if err != nil {
-				klog.Errorf("failed to update service %v to remove finalizer", err)
+				klog.Errorf("failed to update service %s: %v to remove finalizer", svcDeepCopy.Name, err)
 				continue
 			}
 		}
@@ -722,11 +723,12 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, mi *workloadv1a
 		return
 	}
 	for _, svc := range services {
+		svcDeepCopy := svc.DeepCopy()
 		// remove finalizer first to avoid being blocked by deleting headless service
-		utils.RemoveHeadlessServiceProtectionFinalizer(svc)
-		_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svc, metav1.UpdateOptions{})
+		utils.RemoveHeadlessServiceProtectionFinalizer(svcDeepCopy)
+		_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svcDeepCopy, metav1.UpdateOptions{})
 		if err != nil {
-			klog.Errorf("failed to update service %v to remove finalizer", err)
+			klog.Errorf("failed to update service %s: %v to remove finalizer", svcDeepCopy.Name, err)
 			continue
 		}
 		err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
@@ -1240,11 +1242,12 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, mi *wor
 	}
 
 	for _, svc := range services {
+		svcDeepCopy := svc.DeepCopy()
 		// remove finalizer first to avoid being blocked by deleting headless service
-		utils.RemoveHeadlessServiceProtectionFinalizer(svc)
-		_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svc, metav1.UpdateOptions{})
+		utils.RemoveHeadlessServiceProtectionFinalizer(svcDeepCopy)
+		_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svcDeepCopy, metav1.UpdateOptions{})
 		if err != nil {
-			klog.Errorf("failed to update service %v to remove finalizer", err)
+			klog.Errorf("failed to update service %s: %v to remove finalizer", svcDeepCopy.Name, err)
 			continue
 		}
 		err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{})

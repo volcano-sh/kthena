@@ -551,11 +551,12 @@ func RoleIDIndexFunc(obj interface{}) ([]string, error) {
 
 func RemoveHeadlessServiceProtectionFinalizer(svc *corev1.Service) {
 	finalizers := svc.GetFinalizers()
-	newFinalizers := []string{}
-	for _, finalizer := range finalizers {
-		if finalizer != HeadlessServiceFinalizer {
-			newFinalizers = append(newFinalizers, finalizer)
+	j := 0
+	for i := range finalizers {
+		if finalizers[i] != HeadlessServiceFinalizer {
+			finalizers[j] = finalizers[i]
+			j++
 		}
 	}
-	svc.SetFinalizers(newFinalizers)
+	svc.SetFinalizers(finalizers[:j])
 }
