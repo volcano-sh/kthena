@@ -25,6 +25,13 @@ spec:
             {{- toYaml .Values.controllerManager.image.args | nindent 12 }}
             - --cert-secret-name={{ .Values.controllerManager.webhook.tls.certSecretName }}
             - --service-name={{ .Values.controllerManager.webhook.tls.serviceName }}
+            {{- if .Values.controllerManager.controllers }}
+            {{- if kindIs "string" .Values.controllerManager.controllers }}
+            - "--controllers={{ .Values.controllerManager.controllers }}"
+            {{- else }}
+            - "--controllers={{ join "," .Values.controllerManager.controllers }}"
+            {{- end }}
+            {{- end }}
           imagePullPolicy: {{ .Values.controllerManager.image.pullPolicy }}
           resources:
             {{- toYaml .Values.controllerManager.resource | nindent 12 }}

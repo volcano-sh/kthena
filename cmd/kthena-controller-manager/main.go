@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,6 +53,7 @@ func main() {
 	var enableWebhook bool
 	var wc webhookConfig
 	var cc controller.Config
+	var controllers []string
 	// Initialize klog flags
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
@@ -67,7 +69,12 @@ func main() {
 	pflag.BoolVar(&cc.EnableLeaderElection, "leader-elect", false, "Enable leader election for controller. "+
 		"Enabling this will ensure there is only one active controller. Default is false.")
 	pflag.IntVar(&cc.Workers, "workers", 5, "number of workers to run. Default is 5")
+	pflag.StringSliceVar(&controllers, "controllers", []string{"*"}, "A list of controllers to enable. '*' enables all controllers, 'foo' enables the controller "+
+		"named 'foo', '-foo' disables the controller named 'foo'.\nIf both '+foo' and '-foo' are set simultaneously, then controller named 'foo' will be enabled.\nAll controllers: 'modelserving', 'modelbooster', 'autoscaler'")
 	pflag.Parse()
+
+	cc.Controllers = parseControllers(controllers)
+
 	pflag.CommandLine.VisitAll(func(f *pflag.Flag) {
 		klog.Infof("Flag: %s, Value: %s", f.Name, f.Value.String())
 	})
@@ -236,4 +243,69 @@ func waitForCertsReady(keyFile, CertFile string) bool {
 		}
 		time.Sleep(waitInterval)
 	}
+}
+
+func parseControllers(controllers []string) map[string]bool {
+	// defaultControllers defines all available controllers as enabled
+	defaultControllers := map[string]bool{
+		controller.ModelServingController: true,
+		controller.ModelBoosterController: true,
+		controller.AutoscalerController:   true,
+	}
+
+	enableControllers := make(map[string]bool)
+
+	for i := range controllers {
+		controllers[i] = strings.TrimSpace(controllers[i])
+		if controllers[i] == "" {
+			continue
+		}
+	}
+
+	for ctrlName := range defaultControllers {
+		// Determine if the controller should be enabled based on user input
+		if isControllerEnabled(ctrlName, controllers) {
+			enableControllers[ctrlName] = true
+		} else {
+			klog.Infof("Controller <%s> is disabled", ctrlName)
+		}
+	}
+
+	if len(enableControllers) == 0 {
+		klog.Warning("No controllers are enabled")
+		return defaultControllers
+	}
+
+	return enableControllers
+}
+
+// isControllerEnabled check if a specified controller enabled or not.
+// If the input controllers starts with a "+name" or "name", it is considered as an explicit inclusion.
+// Otherwise, it is considered as an explicit exclusion.
+func isControllerEnabled(name string, controllers []string) bool {
+	// Because controllers are enabled by default, the default return value is true.
+	hasStar := false
+	// if no explicit inclusion or exclusion, enable all controllers by default
+	if len(controllers) == 0 {
+		return true
+	}
+	for _, ctrl := range controllers {
+		// if we get here, there was an explicit inclusion
+		if ctrl == name {
+			return true
+		}
+		// if we get here, there was an explicit inclusion
+		if ctrl == "+"+name {
+			return true
+		}
+		// if we get here, there was an explicit exclusion
+		if ctrl == "-"+name {
+			return false
+		}
+		if ctrl == "*" {
+			hasStar = true
+		}
+	}
+	// if we get here, there was no explicit inclusion or exclusion
+	return hasStar
 }

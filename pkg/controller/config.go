@@ -21,4 +21,5 @@ type Config struct {
 	Workers              int
 	Kubeconfig           string
 	MasterURL            string
+	Controllers          map[string]bool
 }

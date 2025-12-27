@@ -22,6 +22,10 @@ controllerManager:
     requests:
       cpu: 100m
       memory: 128Mi
+  # controllers specifies which controllers to enable
+  # Available options: modelserving, modelbooster, autoscaler
+  # If empty or not specified, all controllers are enabled
+  controllers: ""
   # downloaderImage is the container image used for downloading models.
   downloaderImage:
     repository: ghcr.io/volcano-sh/downloader
