@@ -47,11 +47,12 @@ func TestMain(m *testing.M) {
 	// Router tests need networking enabled
 	config.NetworkingEnabled = true
 
-	if err := framework.InstallKthena(config); err != nil {
-		fmt.Printf("Failed to install kthena: %v\n", err)
-		os.Exit(1)
-	}
-
+	/*
+		if err := framework.InstallKthena(config); err != nil {
+			fmt.Printf("Failed to install kthena: %v\n", err)
+			os.Exit(1)
+		}
+	*/
 	var err error
 	testCtx, err = routercontext.NewRouterTestContext(testNamespace)
 	if err != nil {

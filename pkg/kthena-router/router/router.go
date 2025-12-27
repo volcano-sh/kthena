@@ -910,7 +910,7 @@ func (r *Router) proxyToPDDisaggregated(
 		prefillAddr := fmt.Sprintf("%s:%d", ctx.PrefillPods[i].Pod.Status.PodIP, port)
 		decodeAddr := fmt.Sprintf("%s:%d", ctx.DecodePods[i].Pod.Status.PodIP, port)
 
-		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
+		klog.Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 
 		// Execute the PD disaggregated proxy operation
 		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr)

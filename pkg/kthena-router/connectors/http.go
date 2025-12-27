@@ -47,7 +47,7 @@ func (h *HTTPConnector) prefill(req *http.Request, prefillAddr string) error {
 	req.URL.Host = prefillAddr
 	req.URL.Scheme = "http"
 
-	klog.V(4).Infof("Sending prefill request to %s", prefillAddr)
+	klog.Infof("Sending prefill request to %s", prefillAddr)
 	return prefillerProxy(nil, req)
 }
 
@@ -56,7 +56,7 @@ func (h *HTTPConnector) decode(c *gin.Context, req *http.Request, decodeAddr str
 	req.URL.Host = decodeAddr
 	req.URL.Scheme = "http"
 
-	klog.V(4).Infof("Sending decode request to %s", decodeAddr)
+	klog.Infof("Sending decode request to %s", decodeAddr)
 	return decoderProxy(c, req)
 }
 

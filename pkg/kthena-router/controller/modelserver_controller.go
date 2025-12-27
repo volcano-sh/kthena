@@ -176,6 +176,7 @@ func (c *ModelServerController) processNextWorkItem() bool {
 }
 
 func (c *ModelServerController) syncModelServerHandler(key string) error {
+	klog.Infof("syncing model server %s", key)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
@@ -245,6 +246,7 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 }
 
 func (c *ModelServerController) syncPodHandler(key string) error {
+	klog.Infof("syncing pod %s", key)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
