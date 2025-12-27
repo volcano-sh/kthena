@@ -44,6 +44,8 @@ const (
 	AllGroupsIsReady         = "All Serving groups are ready"
 	SomeGroupsAreProgressing = "Some groups is progressing"
 	SomeGroupsAreUpdated     = "Updated Groups are"
+
+	HeadlessServiceFinalizer = "workload.serving.volcano.sh/entrypod-protection"
 )
 
 func GetNamespaceName(obj metav1.Object) types.NamespacedName {
@@ -232,6 +234,9 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 			Namespace: mi.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(mi),
+			},
+			Finalizers: []string{
+				HeadlessServiceFinalizer,
 			},
 			Labels: map[string]string{
 				workloadv1alpha1.GroupNameLabelKey: groupName,
@@ -542,4 +547,16 @@ func RoleIDIndexFunc(obj interface{}) ([]string, error) {
 
 	compositeKey := fmt.Sprintf("%s/%s/%s/%s", namespace, groupName, roleName, roleID)
 	return []string{compositeKey}, nil
+}
+
+func RemoveHeadlessServiceProtectionFinalizer(svc *corev1.Service) {
+	finalizers := svc.GetFinalizers()
+	j := 0
+	for i := range finalizers {
+		if finalizers[i] != HeadlessServiceFinalizer {
+			finalizers[j] = finalizers[i]
+			j++
+		}
+	}
+	svc.SetFinalizers(finalizers[:j])
 }

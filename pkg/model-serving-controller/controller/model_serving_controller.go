@@ -213,6 +213,32 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 		}
 	}
 
+	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
+		klog.Errorf("cannot get servingGroup of modelServing: %s from map: %v", mi.GetName(), err)
+		return
+	}
+
+	for i := range servingGroupList {
+		services, err := c.getServicesByIndex(GroupNameKey, fmt.Sprintf("%s/%s", mi.Namespace, servingGroupList[i].Name))
+		if err != nil {
+			klog.Errorf("failed to get services for ServingGroup %s: %v", servingGroupList[i].Name, err)
+			return
+		}
+
+		// Because the Service has an OwnerReference set, removing the finalizers allows it to be deleted successfully.
+		for _, svc := range services {
+			svcDeepCopy := svc.DeepCopy()
+			// remove finalizer first to avoid being blocked by deleting headless service
+			utils.RemoveHeadlessServiceProtectionFinalizer(svcDeepCopy)
+			_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svcDeepCopy, metav1.UpdateOptions{})
+			if err != nil {
+				klog.Errorf("failed to update service %s: %v to remove finalizer", svcDeepCopy.Name, err)
+				continue
+			}
+		}
+	}
+
 	c.store.DeleteModelServing(types.NamespacedName{
 		Namespace: mi.Namespace,
 		Name:      mi.Name,
@@ -697,6 +723,14 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, mi *workloadv1a
 		return
 	}
 	for _, svc := range services {
+		svcDeepCopy := svc.DeepCopy()
+		// remove finalizer first to avoid being blocked by deleting headless service
+		utils.RemoveHeadlessServiceProtectionFinalizer(svcDeepCopy)
+		_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svcDeepCopy, metav1.UpdateOptions{})
+		if err != nil {
+			klog.Errorf("failed to update service %s: %v to remove finalizer", svcDeepCopy.Name, err)
+			continue
+		}
 		err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -1208,6 +1242,14 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, mi *wor
 	}
 
 	for _, svc := range services {
+		svcDeepCopy := svc.DeepCopy()
+		// remove finalizer first to avoid being blocked by deleting headless service
+		utils.RemoveHeadlessServiceProtectionFinalizer(svcDeepCopy)
+		_, err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Update(context.TODO(), svcDeepCopy, metav1.UpdateOptions{})
+		if err != nil {
+			klog.Errorf("failed to update service %s: %v to remove finalizer", svcDeepCopy.Name, err)
+			continue
+		}
 		err = c.kubeClientSet.CoreV1().Services(mi.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete service %s: %v", svc.Name, err)
