@@ -477,7 +477,7 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 		}
 	} else {
 		if curReplicas > expectedCount {
-			if err := c.scaleDownServingGroups(ctx, mi, servingGroupList, expectedCount); err != nil {
+			if err := c.scaleDownServingGroups(ctx, mi, servingGroupList, expectedCount, newRevision); err != nil {
 				return fmt.Errorf("failed to scale down ServingGroups: %v", err)
 			}
 		}
@@ -500,8 +500,11 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 }
 
 // scaleUpServingGroups scales up the ServingGroups to the expected count.
-// It creates new ServingGroups with increasing indices starting from the current max index + 1.
+// It prioritizes reusing deleted old version indices before creating new ones.
 func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
+	// Find deleted old version indices that can be reused
+	deletedIndices := c.findDeletedOldVersionIndices(mi, servingGroupList)
+
 	startingIndex := 0
 	// servingGroupList is already sorted in ascending order by index
 	if len(servingGroupList) > 0 {
@@ -511,9 +514,27 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, mi *w
 
 	// Calculate how many new ServingGroups we need to create
 	toCreate := expectedCount - len(servingGroupList)
-	// Create new ServingGroups with increasing indices
-	for i := 0; i < toCreate; i++ {
-		newIndex := startingIndex + i
+
+	// If no scaling up is needed, return early
+	if toCreate <= 0 {
+		return nil
+	}
+
+	// Prioritize using deleted old version indices
+	indicesToUse := make([]int, 0, toCreate)
+	for i := 0; i < toCreate && len(deletedIndices) > 0; i++ {
+		indicesToUse = append(indicesToUse, deletedIndices[0])
+		deletedIndices = deletedIndices[1:]
+	}
+
+	// If we still need more indices, use new indices starting from startingIndex
+	for i := len(indicesToUse); i < toCreate; i++ {
+		indicesToUse = append(indicesToUse, startingIndex)
+		startingIndex++
+	}
+
+	// Create new ServingGroups with the determined indices
+	for _, newIndex := range indicesToUse {
 		groupName := utils.GenerateServingGroupName(mi.Name, newIndex)
 		// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
 		if err := c.gangManager.CreateOrUpdatePodGroup(ctx, mi, groupName); err != nil {
@@ -529,6 +550,37 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, mi *w
 	}
 
 	return nil
+}
+
+// findDeletedOldVersionIndices finds indices that were previously used but are now deleted
+// These indices can be reused when scaling up
+func (c *ModelServingController) findDeletedOldVersionIndices(
+	mi *workloadv1alpha1.ModelServing,
+	currentGroups []datastore.ServingGroup,
+) []int {
+	// Get all possible indices from existing groups
+	maxIndex := -1
+	existingIndices := make(map[int]bool)
+	for _, group := range currentGroups {
+		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+		existingIndices[ordinal] = true
+		if ordinal > maxIndex {
+			maxIndex = ordinal
+		}
+	}
+
+	// Find deleted indices (indices between 0 and maxIndex that don't exist in currentGroups)
+	deletedIndices := []int{}
+	for i := 0; i <= maxIndex; i++ {
+		if !existingIndices[i] {
+			deletedIndices = append(deletedIndices, i)
+		}
+	}
+
+	// Sort deleted indices in ascending order for consistent reuse
+	slices.Sort(deletedIndices)
+
+	return deletedIndices
 }
 
 func (c *ModelServingController) manageRole(ctx context.Context, mi *workloadv1alpha1.ModelServing, newRevision string) error {
@@ -603,6 +655,9 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloa
 // scaleUpRoles handles Role scaling up.
 // It creates new Roles with increasing indices starting from the current max index + 1.
 func (c *ModelServingController) scaleUpRoles(ctx context.Context, mi *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
+	// Find deleted old version indices that can be reused
+	deletedIndices := c.findDeletedRoleIndices(groupName, roleList)
+
 	startingIndex := 0
 	if len(roleList) > 0 {
 		_, ordinal := utils.GetParentNameAndOrdinal(roleList[len(roleList)-1].Name)
@@ -613,6 +668,11 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, mi *workloadv
 	// Calculate how many new Roles we need to create
 	toCreate := expectedCount - len(roleList)
 
+	// If no scaling up is needed, return early
+	if toCreate <= 0 {
+		return
+	}
+
 	// Role needs to scale up, and the ServingGroup status needs to be set to Scaling
 	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, datastore.ServingGroupScaling)
 	if err != nil {
@@ -621,9 +681,22 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, mi *workloadv
 	}
 
 	klog.V(2).Infof("Scaling up role %s in ServingGroup %s: creating %d new replicas", targetRole.Name, groupName, toCreate)
-	// Create new Roles with increasing indices
-	for i := 0; i < toCreate; i++ {
-		newIndex := startingIndex + i
+
+	// Prioritize using deleted old version indices
+	indicesToUse := make([]int, 0, toCreate)
+	for i := 0; i < toCreate && len(deletedIndices) > 0; i++ {
+		indicesToUse = append(indicesToUse, deletedIndices[0])
+		deletedIndices = deletedIndices[1:]
+	}
+
+	// If we still need more indices, use new indices starting from startingIndex
+	for i := len(indicesToUse); i < toCreate; i++ {
+		indicesToUse = append(indicesToUse, startingIndex)
+		startingIndex++
+	}
+
+	// Create new Roles with the determined indices
+	for _, newIndex := range indicesToUse {
 		// Create pods for role
 		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), mi, newIndex, servingGroupOrdinal, newRevision)
 		if err != nil {
@@ -633,6 +706,37 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, mi *workloadv
 			c.store.AddRole(utils.GetNamespaceName(mi), groupName, targetRole.Name, utils.GenerateRoleID(targetRole.Name, newIndex), newRevision)
 		}
 	}
+}
+
+// findDeletedRoleIndices finds indices that were previously used but are now deleted for a specific role
+// These indices can be reused when scaling up the role
+func (c *ModelServingController) findDeletedRoleIndices(
+	groupName string,
+	currentRoles []datastore.Role,
+) []int {
+	// Get all possible indices from existing roles
+	maxIndex := -1
+	existingIndices := make(map[int]bool)
+	for _, role := range currentRoles {
+		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
+		existingIndices[ordinal] = true
+		if ordinal > maxIndex {
+			maxIndex = ordinal
+		}
+	}
+
+	// Find deleted indices (indices between 0 and maxIndex that don't exist in currentRoles)
+	deletedIndices := []int{}
+	for i := 0; i <= maxIndex; i++ {
+		if !existingIndices[i] {
+			deletedIndices = append(deletedIndices, i)
+		}
+	}
+
+	// Sort deleted indices in ascending order for consistent reuse
+	slices.Sort(deletedIndices)
+
+	return deletedIndices
 }
 
 // manageRoleReplicas manages the replicas of a specific role within an Serving group
@@ -1020,8 +1124,43 @@ func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.M
 
 	available, updated, current := 0, 0, 0
 	progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
+
+	// Collect version information
+	versionInfo := &workloadv1alpha1.VersionInfo{
+		CurrentRevision: revision,
+		Revisions:       make(map[string]workloadv1alpha1.RevisionInfo),
+	}
+
 	for index := range groups {
-		if groups[index].Status == datastore.ServingGroupDeleting {
+		group := groups[index]
+		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+
+		// Collect version information
+		rev := group.Revision
+		if rev == "" {
+			rev = "unknown"
+		}
+
+		revInfo, exists := versionInfo.Revisions[rev]
+		if !exists {
+			revInfo = workloadv1alpha1.RevisionInfo{
+				Revision:       rev,
+				Count:          0,
+				ServingGroups:  []int32{},
+				AvailableCount: 0,
+			}
+		}
+
+		revInfo.Count++
+		revInfo.ServingGroups = append(revInfo.ServingGroups, int32(ordinal))
+
+		if group.Status == datastore.ServingGroupRunning {
+			revInfo.AvailableCount++
+		}
+
+		versionInfo.Revisions[rev] = revInfo
+
+		if group.Status == datastore.ServingGroupDeleting {
 			// Scaling -> Running or
 			// Creating -> Running
 			// No Deleting -> Running.
@@ -1030,21 +1169,21 @@ func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.M
 			continue
 		}
 
-		if groups[index].Status == datastore.ServingGroupRunning {
+		if group.Status == datastore.ServingGroupRunning {
 			available = available + 1
-		} else if ok, err := c.checkServingGroupReady(mi, groups[index].Name); ok && err == nil {
+		} else if ok, err := c.checkServingGroupReady(mi, group.Name); ok && err == nil {
 			// some scenarios, pod events may not trigger group status updates, such as role scaling down.
-			err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groups[index].Name, datastore.ServingGroupRunning)
+			err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), group.Name, datastore.ServingGroupRunning)
 			if err != nil {
-				return fmt.Errorf("failed to set servingGroup %s status: %v", groups[index].Name, err)
+				return fmt.Errorf("failed to set servingGroup %s status: %v", group.Name, err)
 			}
 			available = available + 1
-			klog.V(2).Infof("Update servingGroup %s status to Running", groups[index].Name)
+			klog.V(2).Infof("Update servingGroup %s status to Running", group.Name)
 		} else {
 			progressingGroups = append(progressingGroups, index)
 		}
 
-		if groups[index].Revision == revision {
+		if group.Revision == revision {
 			updated = updated + 1
 			updatedGroups = append(updatedGroups, index)
 		} else {
@@ -1079,6 +1218,12 @@ func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.M
 		copy.Status.ObservedGeneration = mi.Generation
 	}
 
+	// Update version information
+	if !reflect.DeepEqual(copy.Status.VersionInfo, versionInfo) {
+		shouldUpdate = true
+		copy.Status.VersionInfo = versionInfo
+	}
+
 	if shouldUpdate {
 		_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
 		if err != nil {
@@ -1090,9 +1235,17 @@ func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.M
 }
 
 // scaleDownServingGroups scales down the ServingGroups to the expected count.
-func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
+// It prioritizes deleting old version ServingGroups over current version ones.
+func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, currentRevision string) error {
 	var groupScores []ServingGroupWithScore
 	needsSort := false
+
+	// Get current revision from ModelServing spec if not provided
+	if currentRevision == "" {
+		copy := utils.RemoveRoleReplicasForRevision(mi)
+		currentRevision = utils.Revision(copy.Spec.Template.Roles)
+	}
+
 	for _, group := range servingGroupList {
 		score, err := c.calculateServingGroupScore(mi, group.Name)
 		if err != nil {
@@ -1100,12 +1253,22 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 			continue
 		}
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+
+		// Version priority: old versions get higher score (priority for deletion)
+		// Convert score to int64 for version priority calculation
+		versionPriority := int64(0)
+		if group.Revision != "" && group.Revision != currentRevision {
+			// Old version gets higher priority for deletion (add 1000 to score)
+			versionPriority = 1000
+		}
+
 		groupScores = append(groupScores, ServingGroupWithScore{
-			Name:  group.Name,
-			Score: score,
-			Index: ordinal,
+			Name:     group.Name,
+			Score:    int(versionPriority) + score, // Old versions get higher score
+			Index:    ordinal,
+			Revision: group.Revision,
 		})
-		if score != 0 {
+		if score != 0 || versionPriority > 0 {
 			needsSort = true
 		}
 	}

@@ -1611,17 +1611,17 @@ func TestScaleUpServingGroups(t *testing.T) {
 			expectNoCreation:   false,
 		},
 		{
-			name:               "scale up with gap in indices - should use increasing indices from max",
-			existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing
+			name:               "scale up with gap in indices - should reuse deleted indices",
+			existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing (deleted)
 			expectedCount:      4,
-			expectedNewIndices: []int{6, 7}, // Should continue from max index (5) + 1
+			expectedNewIndices: []int{1, 2}, // Should reuse deleted indices 1-4 first (need 2 more, so reuse 1, 2)
 			expectNoCreation:   false,
 		},
 		{
 			name:               "scale up with only high index existing",
 			existingIndices:    []int{10},
 			expectedCount:      3,
-			expectedNewIndices: []int{11, 12}, // Should continue from max index (10) + 1
+			expectedNewIndices: []int{0, 1}, // Should reuse deleted indices 0-9 first (need 2 more, so reuse 0, 1)
 			expectNoCreation:   false,
 		},
 		{
@@ -1762,17 +1762,17 @@ func TestScaleUpRoles(t *testing.T) {
 			expectNoCreation:   false,
 		},
 		{
-			name:               "scale up with gap in indices - should use increasing indices from max",
-			existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing
+			name:               "scale up with gap in indices - should reuse deleted indices",
+			existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing (deleted)
 			expectedCount:      4,
-			expectedNewIndices: []int{6, 7}, // Should continue from max index (5) + 1
+			expectedNewIndices: []int{1, 2}, // Should reuse deleted indices 1-4 first (need 2 more, so reuse 1, 2)
 			expectNoCreation:   false,
 		},
 		{
 			name:               "scale up with only high index existing",
 			existingIndices:    []int{10},
 			expectedCount:      3,
-			expectedNewIndices: []int{11, 12}, // Should continue from max index (10) + 1
+			expectedNewIndices: []int{0, 1}, // Should reuse deleted indices 0-9 first (need 2 more, so reuse 0, 1)
 			expectNoCreation:   false,
 		},
 		{
@@ -1985,7 +1985,10 @@ func TestScaleDownServingGroups(t *testing.T) {
 			}
 
 			// Call scaleDownServingGroups directly (no binpack - all scores are 0)
-			err = controller.scaleDownServingGroups(context.Background(), mi, existingGroups, tt.expectedCount)
+			// Get current revision for the test
+			copy := utils.RemoveRoleReplicasForRevision(mi)
+			currentRevision := utils.Revision(copy.Spec.Template.Roles)
+			err = controller.scaleDownServingGroups(context.Background(), mi, existingGroups, tt.expectedCount, currentRevision)
 			assert.NoError(t, err)
 
 			// Verify the results

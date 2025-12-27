@@ -171,6 +171,39 @@ type ModelServingStatus struct {
 
 	// LabelSelector is a label query over pods that should match the replica count.
 	LabelSelector string `json:"labelSelector,omitempty"`
+
+	// VersionInfo tracks version information for all ServingGroups
+	// +optional
+	VersionInfo *VersionInfo `json:"versionInfo,omitempty"`
+}
+
+// VersionInfo contains version distribution information
+type VersionInfo struct {
+	// CurrentRevision is the latest revision that should be applied
+	// +optional
+	CurrentRevision string `json:"currentRevision,omitempty"`
+
+	// Revisions tracks the distribution of ServingGroups by revision
+	// Key: revision hash, Value: information about that revision
+	// +optional
+	Revisions map[string]RevisionInfo `json:"revisions,omitempty"`
+}
+
+// RevisionInfo contains information about a specific revision
+type RevisionInfo struct {
+	// Revision is the revision hash
+	Revision string `json:"revision"`
+
+	// Count is the number of ServingGroups with this revision
+	Count int32 `json:"count"`
+
+	// ServingGroups is the list of ServingGroup ordinals with this revision
+	// +optional
+	ServingGroups []int32 `json:"servingGroups,omitempty"`
+
+	// AvailableCount is the number of available ServingGroups with this revision
+	// +optional
+	AvailableCount int32 `json:"availableCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -528,6 +528,7 @@ _Appears in:_
 | `updatedReplicas` _integer_ | UpdatedReplicas track the number of ServingGroup that have been updated (ready or not). |  |  |
 | `availableReplicas` _integer_ | AvailableReplicas track the number of ServingGroup that are in ready state (updated or not). |  |  |
 | `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
+| `versionInfo` _[VersionInfo](#versioninfo)_ | VersionInfo tracks version information for all ServingGroups |  |  |
 
 
 #### ModelStatus
@@ -641,6 +642,25 @@ _Appears in:_
 | `ServingGroupRecreate` | ServingGroupRecreate will recreate all the pods in the ServingGroup if<br />1. Any individual pod in the group is recreated; 2. Any containers/init-containers<br />in a pod is restarted. This is to ensure all pods/containers in the group will be<br />started in the same time.<br /> |
 | `RoleRecreate` | RoleRecreate will recreate all pods in one Role if<br />1. Any individual pod in the group is recreated; 2. Any containers/init-containers<br />in a pod is restarted.<br /> |
 | `None` | NoneRestartPolicy will follow the same behavior as the default pod or deployment.<br /> |
+
+
+#### RevisionInfo
+
+
+
+RevisionInfo contains information about a specific revision
+
+
+
+_Appears in:_
+- [VersionInfo](#versioninfo)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `revision` _string_ | Revision is the revision hash |  |  |
+| `count` _integer_ | Count is the number of ServingGroups with this revision |  |  |
+| `servingGroups` _integer array_ | ServingGroups is the list of ServingGroup ordinals with this revision |  |  |
+| `availableCount` _integer_ | AvailableCount is the number of available ServingGroups with this revision |  |  |
 
 
 #### Role
@@ -786,5 +806,22 @@ _Appears in:_
 | `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing. |  |  |
 | `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing. |  |  |
 | `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint defines the configuration for scraping metrics from the target pods. |  |  |
+
+
+#### VersionInfo
+
+
+
+VersionInfo contains version distribution information
+
+
+
+_Appears in:_
+- [ModelServingStatus](#modelservingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `currentRevision` _string_ | CurrentRevision is the latest revision that should be applied |  |  |
+| `revisions` _object (keys:string, values:[RevisionInfo](#revisioninfo))_ | Revisions tracks the distribution of ServingGroups by revision<br />Key: revision hash, Value: information about that revision |  |  |
 
 

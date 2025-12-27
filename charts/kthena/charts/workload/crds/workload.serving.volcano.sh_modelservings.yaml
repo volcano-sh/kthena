@@ -17613,6 +17613,47 @@ spec:
                   have been updated (ready or not).
                 format: int32
                 type: integer
+              versionInfo:
+                description: VersionInfo tracks version information for all ServingGroups
+                properties:
+                  currentRevision:
+                    description: CurrentRevision is the latest revision that should
+                      be applied
+                    type: string
+                  revisions:
+                    additionalProperties:
+                      description: RevisionInfo contains information about a specific
+                        revision
+                      properties:
+                        availableCount:
+                          description: AvailableCount is the number of available ServingGroups
+                            with this revision
+                          format: int32
+                          type: integer
+                        count:
+                          description: Count is the number of ServingGroups with this
+                            revision
+                          format: int32
+                          type: integer
+                        revision:
+                          description: Revision is the revision hash
+                          type: string
+                        servingGroups:
+                          description: ServingGroups is the list of ServingGroup ordinals
+                            with this revision
+                          items:
+                            format: int32
+                            type: integer
+                          type: array
+                      required:
+                      - count
+                      - revision
+                      type: object
+                    description: |-
+                      Revisions tracks the distribution of ServingGroups by revision
+                      Key: revision hash, Value: information about that revision
+                    type: object
+                type: object
             type: object
         type: object
     served: true
