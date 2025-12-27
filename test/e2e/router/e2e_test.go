@@ -47,12 +47,11 @@ func TestMain(m *testing.M) {
 	// Router tests need networking enabled
 	config.NetworkingEnabled = true
 
-	/*
-		if err := framework.InstallKthena(config); err != nil {
-			fmt.Printf("Failed to install kthena: %v\n", err)
-			os.Exit(1)
-		}
-	*/
+	if err := framework.InstallKthena(config); err != nil {
+		fmt.Printf("Failed to install kthena: %v\n", err)
+		os.Exit(1)
+	}
+
 	var err error
 	testCtx, err = routercontext.NewRouterTestContext(testNamespace)
 	if err != nil {
@@ -78,21 +77,21 @@ func TestMain(m *testing.M) {
 
 	// Run tests
 	code := m.Run()
-	/*
-		// Cleanup common components
-		if err := testCtx.CleanupCommonComponents(); err != nil {
-			fmt.Printf("Failed to cleanup common components: %v\n", err)
-		}
 
-		// Delete test namespace
-		if err := testCtx.DeleteTestNamespace(); err != nil {
-			fmt.Printf("Failed to delete test namespace: %v\n", err)
-		}
+	// Cleanup common components
+	if err := testCtx.CleanupCommonComponents(); err != nil {
+		fmt.Printf("Failed to cleanup common components: %v\n", err)
+	}
 
-		if err := framework.UninstallKthena(config.Namespace); err != nil {
-			fmt.Printf("Failed to uninstall kthena: %v\n", err)
-		}
-	*/
+	// Delete test namespace
+	if err := testCtx.DeleteTestNamespace(); err != nil {
+		fmt.Printf("Failed to delete test namespace: %v\n", err)
+	}
+
+	if err := framework.UninstallKthena(config.Namespace); err != nil {
+		fmt.Printf("Failed to uninstall kthena: %v\n", err)
+	}
+
 	os.Exit(code)
 }
 
@@ -200,15 +199,14 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	assert.NotNil(t, createdModelServing)
 	t.Logf("Created ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
 
-	/*
-		// Register cleanup function to delete ModelServing after test completes
-		t.Cleanup(func() {
-			cleanupCtx := context.Background()
-			t.Logf("Cleaning up ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
-			if err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, createdModelServing.Name, metav1.DeleteOptions{}); err != nil {
-				t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", createdModelServing.Namespace, createdModelServing.Name, err)
-			}
-		})*/
+	// Register cleanup function to delete ModelServing after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", createdModelServing.Namespace, createdModelServing.Name)
+		if err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, createdModelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", createdModelServing.Namespace, createdModelServing.Name, err)
+		}
+	})
 
 	// Wait for ModelServing to be ready
 	t.Log("Waiting for ModelServing to be ready...")
@@ -238,15 +236,14 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	assert.NotNil(t, createdModelServer)
 	t.Logf("Created ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
 
-	/*
-		// Register cleanup function to delete ModelServer after test completes
-		t.Cleanup(func() {
-			cleanupCtx := context.Background()
-			t.Logf("Cleaning up ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
-			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(cleanupCtx, createdModelServer.Name, metav1.DeleteOptions{}); err != nil {
-				t.Logf("Warning: Failed to delete ModelServer %s/%s: %v", createdModelServer.Namespace, createdModelServer.Name, err)
-			}
-		})*/
+	// Register cleanup function to delete ModelServer after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(cleanupCtx, createdModelServer.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServer %s/%s: %v", createdModelServer.Namespace, createdModelServer.Name, err)
+		}
+	})
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute for PD disaggregation...")
@@ -257,15 +254,14 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	assert.NotNil(t, createdModelRoute)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
 
-	/*
-		// Register cleanup function to delete ModelRoute after test completes
-		t.Cleanup(func() {
-			cleanupCtx := context.Background()
-			t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
-			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
-				t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
-			}
-		})*/
+	// Register cleanup function to delete ModelRoute after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
 
 	// Test accessing the model route (with retry logic)
 	messages := []utils.ChatMessage{
