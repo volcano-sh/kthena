@@ -1,0 +1,16 @@
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: deepseek-r1-1-5b
+spec:
+  targetPorts:
+    - number: 8000
+  selector:
+    matchLabels:
+      app: deepseek-r1-1-5b
+  # Kthena Router natively supports Gateway Inference Extension and does not require the Endpoint Picker Extension.
+  # It's just a placeholder for API validation.
+  endpointPickerRef:
+    name: deepseek-r1-1-5b
+    port:
+      number: 8080

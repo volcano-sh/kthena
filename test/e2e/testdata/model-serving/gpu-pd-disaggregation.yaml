@@ -1,0 +1,190 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: PD-sample
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: IfNotPresent
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - Qwen/Qwen3-8B
+                  - --output-dir
+                  - /models/Qwen3-8B/
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+            containers:
+              - name: prefill
+                image: kvcache-container-image-hb2-cn-beijing.cr.volces.com/aibrix/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
+                command: [ "sh", "-c" ]
+                args:
+                  - |
+                    python3 -m vllm.entrypoints.openai.api_server \
+                    --host "0.0.0.0" \
+                    --port "8000" \
+                    --uvicorn-log-level warning \
+                    --model /models/Qwen3-8B \
+                    --served-model-name qwen3-8B \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                env:
+                  - name: PYTHONHASHSEED
+                    value: "1047"
+                  - name: VLLM_SERVER_DEV_MODE
+                    value: "1"
+                  - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                    value: "0.0.0.0"
+                  - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+                    value: "5558"
+                  - name: VLLM_WORKER_MULTIPROC_METHOD
+                    value: spawn
+                  - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                    value: "0"
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  - name: NCCL_IB_GID_INDEX
+                    value: "7"
+                  - name: NCCL_DEBUG
+                    value: "INFO"
+                  - name: UCX_TLS
+                    value: ^gga
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                securityContext:
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                readinessProbe:
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+                livenessProbe:
+                  initialDelaySeconds: 900
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+            volumes:
+              - name: models
+                emptyDir: {}
+              - name: shared-mem
+                emptyDir:
+                  sizeLimit: 256Mi
+                  medium: Memory
+        workerReplicas: 0
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: IfNotPresent
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - Qwen/Qwen3-8B
+                  - --output-dir
+                  - /models/Qwen3-8B/
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+            containers:
+              - name: decode
+                image: kvcache-container-image-hb2-cn-beijing.cr.volces.com/aibrix/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
+                command: [ "sh", "-c" ]
+                args:
+                  - |
+                    python3 -m vllm.entrypoints.openai.api_server \
+                    --host "0.0.0.0" \
+                    --port "8000" \
+                    --uvicorn-log-level warning \
+                    --model /models/Qwen3-8B \
+                    --served-model-name qwen3-8B \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                env:
+                  - name: PYTHONHASHSEED
+                    value: "1047"
+                  - name: VLLM_SERVER_DEV_MODE
+                    value: "1"
+                  - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                    value: "0.0.0.0"
+                  - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+                    value: "5558"
+                  - name: VLLM_WORKER_MULTIPROC_METHOD
+                    value: spawn
+                  - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                    value: "0"
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  - name: NCCL_IB_GID_INDEX
+                    value: "7"
+                  - name: NCCL_DEBUG
+                    value: "INFO"
+                  - name: UCX_TLS
+                    value: ^gga
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                securityContext:
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                readinessProbe:
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+                livenessProbe:
+                  initialDelaySeconds: 900
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+            volumes:
+              - name: models
+                emptyDir: {}
+              - name: shared-mem
+                emptyDir:
+                  sizeLimit: 256Mi
+                  medium: Memory
+        workerReplicas: 0

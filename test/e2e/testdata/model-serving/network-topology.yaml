@@ -1,0 +1,72 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: sample
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1  # servingGroup replicas
+  template:
+    restartGracePeriodSeconds: 60
+    networkTopology:
+      rolePolicy:
+        mode: hard
+        highestTierAllowed: 1
+      groupPolicy:
+        mode: hard
+        highestTierAllowed: 1
+    roles:
+      - name: prefill
+        replicas: 1       # role replicas, for example, 1P1D
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: nginx
+                ports:
+                  - containerPort: 8080
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            containers:
+              - name: worker
+                image: nginx
+                ports:
+                  - containerPort: 8080
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
+      - name: decode
+        replicas: 1  # role replicas, for example, 1P1D
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: nginx
+                ports:
+                  - containerPort: 8080
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            containers:
+              - name: worker
+                image: nginx
+                ports:
+                  - containerPort: 8080
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
