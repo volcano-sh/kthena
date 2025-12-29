@@ -1,0 +1,61 @@
+name: Approve Workflows
+
+on:
+  pull_request_target:
+    types:
+      - labeled
+    branches:
+      - main
+      - release-*
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  approve:
+    name: Approve workflows based on label
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'ok-to-test') || 
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+
+    steps:
+      - name: Wait for workflows to initialize
+        run: sleep 10
+
+      - name: Approve Pending Workflows
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const head_sha = context.payload.pull_request.head.sha;
+
+            const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner,
+              repo,
+              event: "pull_request",
+              status: "action_required",
+              head_sha,
+              per_page: 100
+            });
+
+            if (runs.total_count === 0) {
+              console.log("No workflows waiting for approval.");
+              return;
+            }
+
+            console.log(`Found ${runs.total_count} workflow(s) waiting for approval.`);
+
+            for (const run of runs.workflow_runs) {
+              try {
+                await github.rest.actions.approveWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: run.id
+                });
+                console.log(`Approved workflow run ID: ${run.id}`);
+              } catch (error) {
+                console.log(`Failed to approve run ${run.id}: ${error.message}`);
+              }
+            }
