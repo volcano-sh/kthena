@@ -34,15 +34,18 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 )
 
-const (
-	// TODO: separate kthena system components and e2e test namespace
-	testNamespace = "dev"
+var (
+	testNamespace string
 )
 
 func TestMain(m *testing.M) {
+	testNamespace = "kthena-e2e-controller-" + utils.RandomString(5)
+
 	config := framework.NewDefaultConfig()
 	// Controller manager tests need workload enabled
 	config.WorkloadEnabled = true
@@ -52,8 +55,58 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Create test namespace
+	kubeConfig, err := utils.GetKubeConfig()
+	if err != nil {
+		fmt.Printf("Failed to get kubeconfig: %v\n", err)
+		_ = framework.UninstallKthena(config.Namespace)
+		os.Exit(1)
+	}
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		fmt.Printf("Failed to create Kubernetes client: %v\n", err)
+		_ = framework.UninstallKthena(config.Namespace)
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testNamespace,
+		},
+	}
+	_, err = kubeClient.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
+	if err != nil {
+		fmt.Printf("Failed to create test namespace %s: %v\n", testNamespace, err)
+		_ = framework.UninstallKthena(config.Namespace)
+		os.Exit(1)
+	}
+	fmt.Printf("Created test namespace: %s\n", testNamespace)
+
 	// Run tests
 	code := m.Run()
+
+	// Cleanup test namespace
+	fmt.Printf("Deleting test namespace: %s\n", testNamespace)
+	err = kubeClient.CoreV1().Namespaces().Delete(ctx, testNamespace, metav1.DeleteOptions{})
+	if err != nil {
+		fmt.Printf("Failed to delete test namespace %s: %v\n", testNamespace, err)
+	}
+
+	// Wait for namespace to be deleted
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	err = wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+		_, err := kubeClient.CoreV1().Namespaces().Get(ctx, testNamespace, metav1.GetOptions{})
+		if err != nil {
+			return true, nil // namespace is gone
+		}
+		return false, nil
+	})
+	if err != nil {
+		fmt.Printf("Timeout waiting for namespace %s deletion: %v\n", testNamespace, err)
+	}
 
 	if err := framework.UninstallKthena(config.Namespace); err != nil {
 		fmt.Printf("Failed to uninstall kthena: %v\n", err)
