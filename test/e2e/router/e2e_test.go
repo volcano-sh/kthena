@@ -99,7 +99,7 @@ func TestModelRouteSimple(t *testing.T) {
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSimple.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("test/e2e/router/testdata/ModelRouteSimple.yaml")
 	modelRoute.Namespace = testNamespace
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -125,7 +125,7 @@ func TestModelRouteSimple(t *testing.T) {
 func TestModelRouteMultiModels(t *testing.T) {
 	ctx := context.Background()
 
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteMultiModels.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("test/e2e/router/testdata/ModelRouteMultiModels.yaml")
 	modelRoute.Namespace = testNamespace
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")

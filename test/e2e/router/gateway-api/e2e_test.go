@@ -102,7 +102,7 @@ func TestModelRouteBindingGateway(t *testing.T) {
 
 	// 1. Deploy ModelRoute
 	t.Log("Deploying ModelRoute binding to Gateway...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-binding-gateway.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("test/e2e/router/testdata/ModelRoute-binding-gateway.yaml")
 	modelRoute.Namespace = testNamespace
 
 	// Update the parentRef namespace to match the kthena installation namespace
