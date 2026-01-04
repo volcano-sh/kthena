@@ -329,7 +329,7 @@ Kthena creates PodGroups based on the ModelServing. Among these, the important f
 
 ### MinRoleReplicas and PodGroup Mapping
 
-The `MinRoleReplicas` map is translated directly into the PodGroup's `spec.minTaskMember` field. Each entry becomes a key‑value pair where the key is the role name and the value is the minimum number of pods that must be scheduled for that role before the gang can start.
+The `MinRoleReplicas` map is used to generate the PodGroup's `spec.minTaskMember` field. Each entry becomes a key-value pair where the key is `{roleName}-{index}` and the value is the number of pods per role replica (`1 + workerReplicas`). Only role replicas with index less than `minRoleReplicas` are included, allowing the gang to start before all replicas are ready.
 
 **Example:** In the `multi-node.yaml` example, the gang policy is defined as:
 
@@ -344,10 +344,10 @@ This results in the following PodGroup spec (shown earlier):
 ```yaml
 spec:
   minTaskMember:
-    405b: 2
+    "405b-0": 2   # roleName-index: (1 entry + workerReplicas)
 ```
 
-Note that the value `2` comes from the role's `replicas` field (which is `2`), not from `minRoleReplicas`. The `minRoleReplicas` defines the minimum required for gang scheduling, while the actual replica count is taken from the role's `replicas`. If `minRoleReplicas` is less than the role's replicas, the gang will still require at least `minRoleReplicas` pods to be scheduled before the job can start.
+In this example, `minRoleReplicas.405b: 1` means only the first role replica (`405b-0`) is included in `minTaskMember`. The value `2` represents the total number of pods in this role replica: 1 entry pod + 1 worker pod (the role has `workerReplicas: 1`).
 
 ### Network‑Topology Scheduling
 
