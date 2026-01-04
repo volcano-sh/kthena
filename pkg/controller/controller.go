@@ -26,6 +26,7 @@ import (
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	modelserving "github.com/volcano-sh/kthena/pkg/model-serving-controller/controller"
+	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
@@ -59,6 +60,10 @@ func SetupController(ctx context.Context, cc Config) {
 	if err != nil {
 		klog.Fatalf("failed to create volcano client: %v", err)
 	}
+	apiextClient, err := apiextclient.NewForConfig(config)
+	if err != nil {
+		klog.Fatalf("failed to create apiext client: %v", err)
+	}
 
 	var mc *modelbooster.ModelBoosterController
 	var msc *modelserving.ModelServingController
@@ -70,7 +75,7 @@ func SetupController(ctx context.Context, cc Config) {
 			case ModelBoosterController:
 				mc = modelbooster.NewModelBoosterController(kubeClient, client)
 			case ModelServingController:
-				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient)
+				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient, apiextClient)
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controller: %v", err)
 				}

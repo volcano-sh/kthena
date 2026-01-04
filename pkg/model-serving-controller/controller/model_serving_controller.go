@@ -27,6 +27,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextClientSet "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -60,7 +61,7 @@ type ModelServingController struct {
 	modelServingClient clientset.Interface
 
 	syncHandler           func(ctx context.Context, miKey string) error
-	podGroupManager       podgroupmanager.Manager
+	podGroupManager       *podgroupmanager.Manager
 	podsLister            listerv1.PodLister
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
@@ -75,7 +76,7 @@ type ModelServingController struct {
 	initialSync bool     // indicates whether the initial sync has been completed
 }
 
-func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface) (*ModelServingController, error) {
+func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
 	selector, err := labels.NewRequirement(workloadv1alpha1.GroupNameLabelKey, selection.Exists, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create label selector, err: %v", err)
@@ -114,7 +115,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	c := &ModelServingController{
 		kubeClientSet:         kubeClientSet,
 		modelServingClient:    modelServingClient,
-		podGroupManager:       podgroupmanager.NewManager(kubeClientSet, volcanoClient, store),
+		podGroupManager:       podgroupmanager.NewManager(kubeClientSet, volcanoClient, apiextClient, store),
 		podsLister:            podsInformer.Lister(),
 		podsInformer:          podsInformer.Informer(),
 		servicesLister:        servicesInformer.Lister(),
@@ -418,11 +419,13 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	go c.podsInformer.RunWithContext(ctx)
 	go c.servicesInformer.RunWithContext(ctx)
 	go c.modelServingsInformer.RunWithContext(ctx)
+	go c.podGroupManager.CrdInformer.RunWithContext(ctx)
 
 	cache.WaitForCacheSync(ctx.Done(),
 		c.podsInformer.HasSynced,
 		c.servicesInformer.HasSynced,
 		c.modelServingsInformer.HasSynced,
+		c.podGroupManager.CrdInformer.HasSynced,
 	)
 
 	// sync pods first

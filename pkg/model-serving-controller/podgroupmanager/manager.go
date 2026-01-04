@@ -20,15 +20,19 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
-
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcanoclient "volcano.sh/apis/pkg/client/clientset/versioned"
@@ -40,18 +44,112 @@ import (
 
 // Manager manages PodGroups for gang scheduling
 type Manager struct {
-	kubeClient    kubernetes.Interface
-	volcanoClient volcanoclient.Interface
-	store         datastore.Store
+	kubeClient        kubernetes.Interface
+	volcanoClient     volcanoclient.Interface
+	store             datastore.Store
+	hasPodGroupCRD    atomic.Bool
+	hasSubGroupPolicy atomic.Bool
+
+	CrdInformer cache.SharedIndexInformer
 }
 
 // NewManager creates a new gang scheduling manager
-func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Interface, store datastore.Store) Manager {
-	return Manager{
+func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Interface, apiextClient apiextclient.Interface, store datastore.Store) *Manager {
+	newManager := Manager{
 		kubeClient:    kubeClient,
 		volcanoClient: volcanoClient,
 		store:         store,
 	}
+
+	newManager.hasPodGroupCRD.Store(false)
+	newManager.hasSubGroupPolicy.Store(false)
+
+	// init the hasPodGroupCRD and hasSubGroupPolicy values
+	crd, err := apiextClient.ApiextensionsV1().CustomResourceDefinitions().Get(
+		context.TODO(),
+		"podgroups.scheduling.volcano.sh",
+		metav1.GetOptions{},
+	)
+
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			newManager.hasPodGroupCRD.Store(false)
+			// If PodGroup CRD is not found, we can safely assume that
+			// gang scheduling is not supported.
+			newManager.hasSubGroupPolicy.Store(false)
+		} else {
+			klog.Errorf("failed to get PodGroup CRD: %v", err)
+			return nil
+		}
+	} else {
+		newManager.hasPodGroupCRD.Store(true)
+		klog.Info("[CRD Added] PodGroup CRD detected")
+		if podGroupCRDHasSubGroup(crd) {
+			klog.Info("[CRD Added] PodGroup CRD has subGroupPolicy")
+			newManager.hasSubGroupPolicy.Store(true)
+		} else {
+			klog.Info("[CRD Added] PodGroup CRD does not have subGroupPolicy")
+			newManager.hasSubGroupPolicy.Store(false)
+		}
+	}
+
+	// Set up informer to watch for PodGroup CRD changes
+	factory := apiextinformers.NewSharedInformerFactory(apiextClient, 0)
+	crdInformer := factory.Apiextensions().V1().CustomResourceDefinitions().Informer()
+	crdInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			crd := obj.(*apiextv1.CustomResourceDefinition)
+			if crd.Name == "podgroups.scheduling.volcano.sh" {
+				klog.Info("[CRD Added] PodGroup CRD detected")
+				newManager.hasPodGroupCRD.Store(true)
+				if podGroupCRDHasSubGroup(crd) {
+					klog.Info("[CRD Added] PodGroup CRD has subGroupPolicy feature")
+					newManager.hasSubGroupPolicy.Store(true)
+				} else {
+					klog.Info("[CRD Added] PodGroup CRD does not have subGroupPolicy feature")
+					newManager.hasSubGroupPolicy.Store(false)
+				}
+			}
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			newCrd, ok := newObj.(*apiextv1.CustomResourceDefinition)
+			if !ok {
+				klog.Error("failed to parse newCrd type when update CustomResourceDefinition")
+				return
+			}
+			_, ok = oldObj.(*apiextv1.CustomResourceDefinition)
+			if !ok {
+				klog.Error("failed to parse curCrd type when update CustomResourceDefinition")
+				return
+			}
+
+			if newCrd.Name != "podgroups.scheduling.volcano.sh" {
+				return
+			}
+
+			newManager.hasPodGroupCRD.Store(true)
+
+			if podGroupCRDHasSubGroup(newCrd) {
+				klog.Info("[CRD Updated] PodGroup CRD has subGroupPolicy feature")
+				newManager.hasSubGroupPolicy.Store(true)
+			} else {
+				klog.Info("[CRD Updated] PodGroup CRD does not have subGroupPolicy feature")
+				newManager.hasSubGroupPolicy.Store(false)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			crd := obj.(*apiextv1.CustomResourceDefinition)
+			if crd.Name == "podgroups.scheduling.volcano.sh" {
+				klog.Info("[CRD Deleted] PodGroup CRD removed")
+				newManager.hasPodGroupCRD.Store(false)
+				newManager.hasSubGroupPolicy.Store(false)
+			}
+		},
+	})
+
+	newManager.CrdInformer = crdInformer
+
+	return &newManager
 }
 
 // CreateOrUpdatePodGroup creates a PodGroup for the given ServingGroup if it doesn't exist,
@@ -75,6 +173,11 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, mi *workloadv1alph
 // shouldCreatePodGroup checks if gang scheduling or networkTopology scheduling is enabled for the ModelServing.
 // These advanced scheduling features are only effective when used with the "volcano" scheduler.
 func (m *Manager) shouldCreatePodGroup(mi *workloadv1alpha1.ModelServing) bool {
+	// If PodGroup CRD is not present, gang scheduling is not supported.
+	if !m.hasPodGroupCRD.Load() {
+		return false
+	}
+
 	schedulerName := mi.Spec.SchedulerName
 	// If schedulerName is empty, Kubernetes uses the default scheduler, which doesn't support gang/network topology.
 	isVolcano := schedulerName == "volcano"
@@ -89,8 +192,9 @@ func (m *Manager) createPodGroup(ctx context.Context, mi *workloadv1alpha1.Model
 	// Calculate total pods and resources for this ServingGroup
 	// minMember: total pods across all roles
 	// minRoleMember: map of roleName to number of pods in that role
+	// minTaskMember: map of taskName to number of pods in that task
 	// minResources: aggregated resource requirements of all pods in the ServingGroup
-	minMember, minRoleMember, minResources := m.calculateRequirements(mi, podGroupName)
+	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(mi, podGroupName)
 
 	podGroup := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -118,7 +222,11 @@ func (m *Manager) createPodGroup(ctx context.Context, mi *workloadv1alpha1.Model
 		}
 	}
 
-	podGroup = appendSubGroupPolicy(mi, podGroup, minRoleMember)
+	if m.hasSubGroupPolicy.Load() {
+		podGroup = appendSubGroupPolicy(mi, podGroup, minRoleMember)
+	} else {
+		podGroup.Spec.MinTaskMember = minTaskMember
+	}
 
 	_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Create(ctx, podGroup, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
@@ -143,9 +251,10 @@ func (m *Manager) buildOwnerReference(mi *workloadv1alpha1.ModelServing) []metav
 }
 
 // calculateRequirements calculates requirements for role-level gang scheduling
-func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGroupName string) (int, map[string]int32, corev1.ResourceList) {
+func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGroupName string) (int, map[string]int32, map[string]int32, corev1.ResourceList) {
 	minMember := 0
 	minRoleMember := make(map[string]int32)
+	minTaskMember := make(map[string]int32)
 	minResources := corev1.ResourceList{}
 
 	// For role-level, only include roles up to MinRoleReplicas limit
@@ -172,10 +281,19 @@ func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGr
 			continue
 		}
 
+		// When length(roleList) <= expectReplicas, that is, when scaling up or updating.
+		// Provide the roleNameList to be updated.
+		needHandledRoleNameList := needHandledRoleNameList(expectReplicas, roleList, role.Name)
+
 		// Only include role replicas up to the minimum required
 		podsPerTask := 1 + int(role.WorkerReplicas) // entry + workers
 		minRoleMember[role.Name] = int32(podsPerTask)
 		minMember = minMember + (podsPerTask * expectReplicas)
+
+		// Only include role replicas up to the minimum required
+		for _, taskName := range needHandledRoleNameList {
+			minTaskMember[taskName] = int32(podsPerTask)
+		}
 
 		// Aggregate resources
 		m.aggregateResources(&minResources, &role.EntryTemplate.Spec, expectReplicas)
@@ -185,7 +303,7 @@ func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGr
 			}
 		}
 	}
-	return minMember, minRoleMember, minResources
+	return minMember, minRoleMember, minTaskMember, minResources
 }
 
 // aggregateResources aggregates resource requirements from a pod spec
@@ -240,14 +358,18 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, mi *workloadv1alpha1
 // updatePodGroupIfNeeded updates a PodGroup if needed for group-level scheduling
 func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, mi *workloadv1alpha1.ModelServing) error {
 	// Calculate current requirements
-	minMember, minRoleMember, minResources := m.calculateRequirements(mi, existing.GetName())
+	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(mi, existing.GetName())
 
 	updated := existing.DeepCopy()
 	updated.Spec.MinMember = int32(minMember)
 	updated.Spec.MinResources = &minResources
 
 	// Apply network topology policy
-	updated = appendSubGroupPolicy(mi, updated, minRoleMember)
+	if m.hasSubGroupPolicy.Load() {
+		updated = appendSubGroupPolicy(mi, updated, minRoleMember)
+	} else {
+		updated.Spec.MinTaskMember = minTaskMember
+	}
 
 	if hasPodGroupChanged(existing, updated) {
 		_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
@@ -287,6 +409,34 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, mi *workloadv1alpha1.Mod
 	return nil
 }
 
+// NeedHandledRoleNameList is used in Role scale up scenario to get the roleName list that need scale up.
+// Therefore, the default value for `expectedReplicas` is greater than `length(RoleList)`.
+// Or the Role update scenario. (This scenario is This scenario is relatively rare. Since it is not permitted to modify an already configured gangPolicy,
+// and in practical applications, the workerReplicas within a deployed role are rarely altered.)
+func needHandledRoleNameList(expectedReplicas int, existRoleList []datastore.Role, roleName string) []string {
+	scaleUpRoleNameList := make([]string, 0)
+
+	maxIndex := -1
+	for _, role := range existRoleList {
+		_, index := utils.GetParentNameAndOrdinal(role.Name)
+		scaleUpRoleNameList = append(scaleUpRoleNameList, role.Name)
+		if index > maxIndex {
+			maxIndex = index
+		}
+	}
+
+	toCreate := expectedReplicas - len(scaleUpRoleNameList)
+	if toCreate <= 0 {
+		return scaleUpRoleNameList
+	}
+
+	for i := 0; i < toCreate; i++ {
+		newIndex := maxIndex + 1 + i
+		scaleUpRoleNameList = append(scaleUpRoleNameList, utils.GenerateRoleID(roleName, newIndex))
+	}
+	return scaleUpRoleNameList
+}
+
 // AnnotatePodWithPodGroup annotates a pod with the appropriate PodGroup information
 func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.ModelServing, groupName, taskName string) {
 	if !m.shouldCreatePodGroup(mi) {
@@ -300,6 +450,29 @@ func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.
 	// Add volcano annotation
 	pod.Annotations[schedulingv1beta1.KubeGroupNameAnnotationKey] = groupName
 	pod.Annotations[batchv1alpha1.TaskSpecKey] = taskName
+}
+
+func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
+	if crd == nil {
+		return false
+	}
+
+	for _, version := range crd.Spec.Versions {
+		schema := version.Schema
+		if schema == nil || schema.OpenAPIV3Schema == nil {
+			continue
+		}
+
+		specProps, ok := schema.OpenAPIV3Schema.Properties["spec"]
+		if !ok {
+			continue
+		}
+
+		if _, ok := specProps.Properties["subGroupPolicy"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
