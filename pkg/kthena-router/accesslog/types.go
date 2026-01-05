@@ -39,6 +39,11 @@ type AccessLogEntry struct {
 	SelectedPod string `json:"selected_pod,omitempty"`
 	RequestID   string `json:"request_id,omitempty"`
 
+	// Gateway API information
+	Gateway       string `json:"gateway,omitempty"`
+	HTTPRoute     string `json:"http_route,omitempty"`
+	InferencePool string `json:"inference_pool,omitempty"`
+
 	// Token information
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
@@ -68,6 +73,11 @@ type AccessLogContext struct {
 	ModelRoute  string
 	ModelServer string
 	SelectedPod string
+
+	// Gateway API information
+	Gateway       string
+	HTTPRoute     string
+	InferencePool string
 
 	// Token counts
 	InputTokens  int
@@ -189,6 +199,9 @@ func (ctx *AccessLogContext) ToAccessLogEntry(statusCode int) *AccessLogEntry {
 		RequestID:                  ctx.RequestID,
 		InputTokens:                ctx.InputTokens,
 		OutputTokens:               ctx.OutputTokens,
+		Gateway:                    ctx.Gateway,
+		HTTPRoute:                  ctx.HTTPRoute,
+		InferencePool:              ctx.InferencePool,
 		DurationTotal:              total,
 		DurationRequestProcessing:  requestProcessing,
 		DurationUpstreamProcessing: upstreamProcessing,

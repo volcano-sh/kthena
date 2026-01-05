@@ -171,6 +171,18 @@ func (l *accessLoggerImpl) formatText(entry *AccessLogEntry) (string, error) {
 	if entry.ModelServer != "" {
 		line += fmt.Sprintf(" model_server=%s", entry.ModelServer)
 	}
+
+	// Add Gateway API fields
+	if entry.Gateway != "" {
+		line += fmt.Sprintf(" gateway=%s", entry.Gateway)
+	}
+	if entry.HTTPRoute != "" {
+		line += fmt.Sprintf(" http_route=%s", entry.HTTPRoute)
+	}
+	if entry.InferencePool != "" {
+		line += fmt.Sprintf(" inference_pool=%s", entry.InferencePool)
+	}
+
 	if entry.SelectedPod != "" {
 		line += fmt.Sprintf(" selected_pod=%s", entry.SelectedPod)
 	}
