@@ -54,7 +54,9 @@ import (
 
 const (
 	// Context keys for gin context
-	GatewayKey = "gatewayKey"
+	GatewayKey       = "gatewayKey"
+	HTTPRouteKey     = "httpRouteName"
+	InferencePoolKey = "inferencePoolName"
 )
 
 var EnableFairnessScheduling = env.RegisterBoolVar("ENABLE_FAIRNESS_SCHEDULING", false, "Enable fairness scheduling for inference requests").Get()
@@ -386,6 +388,25 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		c.Set("modelRouteName", modelRouteName)
 	}
 
+	// Set Gateway API info from context
+	var gatewayKeyForLog, httpRouteKey, inferencePoolKey string
+	if key, exists := c.Get(GatewayKey); exists {
+		if k, ok := key.(string); ok {
+			gatewayKeyForLog = k
+		}
+	}
+	if httpRouteName, exists := c.Get(HTTPRouteKey); exists {
+		if name, ok := httpRouteName.(types.NamespacedName); ok {
+			httpRouteKey = fmt.Sprintf("%s/%s", name.Namespace, name.Name)
+		}
+	}
+	if inferencePoolName, exists := c.Get(InferencePoolKey); exists {
+		if name, ok := inferencePoolName.(types.NamespacedName); ok {
+			inferencePoolKey = fmt.Sprintf("%s/%s", name.Namespace, name.Name)
+		}
+	}
+	accesslog.SetGatewayAPIInfo(c, gatewayKeyForLog, httpRouteKey, inferencePoolKey)
+
 	if len(ctx.BestPods) > 0 && ctx.BestPods[0].Pod != nil {
 		selectedPod := ctx.BestPods[0].Pod.Name
 		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, selectedPod)
@@ -507,6 +528,18 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 		return false, types.NamespacedName{}
 	}
 
+	// Store Gateway key in context for access log
+	if gatewayKey != "" {
+		c.Set(GatewayKey, gatewayKey)
+	}
+
+	// Store HTTPRoute name in context for access log
+	httpRouteName := types.NamespacedName{
+		Namespace: matchedRoute.Namespace,
+		Name:      matchedRoute.Name,
+	}
+	c.Set(HTTPRouteKey, httpRouteName)
+
 	// Store the matched prefix in context for URL rewriting
 	if matchedPrefix != "" {
 		c.Set("matchedPrefix", matchedPrefix)
@@ -539,6 +572,9 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	if !found {
 		return false, types.NamespacedName{}
 	}
+
+	// Store InferencePool name in context for access log
+	c.Set(InferencePoolKey, inferencePoolName)
 
 	// Apply HTTPURLRewriteFilter if present
 	if matchedRule != nil && matchedRule.Filters != nil {
