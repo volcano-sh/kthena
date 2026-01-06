@@ -102,7 +102,7 @@ func TestModelRouteSimple(t *testing.T) {
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSimple.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("test/e2e/router/testdata/kthena-router/ModelRouteSimple.yaml")
 	modelRoute.Namespace = testNamespace
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -128,7 +128,7 @@ func TestModelRouteSimple(t *testing.T) {
 func TestModelRouteMultiModels(t *testing.T) {
 	ctx := context.Background()
 
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteMultiModels.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("test/e2e/router/testdata/kthena-router/ModelRouteMultiModels.yaml")
 	modelRoute.Namespace = testNamespace
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -193,7 +193,7 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 
 	// Deploy ModelServing
 	t.Log("Deploying ModelServing for PD disaggregation...")
-	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing]("examples/kthena-router/ModelServing-ds1.5b-pd-disaggragation.yaml")
+	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing]("test/e2e/router/testdata/kthena-router/ModelServing-ds1.5b-pd-disaggragation.yaml")
 	modelServing.Namespace = testNamespace
 	createdModelServing, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -214,7 +214,7 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 
 	// Deploy ModelServer
 	t.Log("Deploying ModelServer for PD disaggregation...")
-	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer]("examples/kthena-router/ModelServer-ds1.5b-pd-disaggragation.yaml")
+	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer]("test/e2e/router/testdata/kthena-router/ModelServer-ds1.5b-pd-disaggragation.yaml")
 	modelServer.Namespace = testNamespace
 	createdModelServer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServer")
@@ -232,7 +232,7 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute for PD disaggregation...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-ds1.5b-pd-disaggragation.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("test/e2e/router/testdata/kthena-router/ModelRoute-ds1.5b-pd-disaggragation.yaml")
 	modelRoute.Namespace = testNamespace
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
