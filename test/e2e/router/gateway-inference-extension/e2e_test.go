@@ -94,7 +94,7 @@ func TestGatewayInferenceExtension(t *testing.T) {
 
 	// 1. Deploy InferencePool
 	t.Log("Deploying InferencePool...")
-	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool]("test/e2e/router/testdata/InferencePool.yaml")
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool]("test/e2e/router/testdata/kthena-router/InferencePool.yaml")
 	inferencePool.Namespace = testNamespace
 
 	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
@@ -108,7 +108,7 @@ func TestGatewayInferenceExtension(t *testing.T) {
 
 	// 2. Deploy HTTPRoute
 	t.Log("Deploying HTTPRoute...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("test/e2e/router/testdata/HTTPRoute.yaml")
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("test/e2e/router/testdata/kthena-router/HTTPRoute.yaml")
 	httpRoute.Namespace = testNamespace
 
 	// Update parentRefs to point to the kthena installation namespace
