@@ -60,8 +60,9 @@ func TestEnsureCertificate_ReuseExistingSecret(t *testing.T) {
 		},
 	}
 
-	_, _ = client.CoreV1().Secrets("default").Create(ctx, secret, metav1.CreateOptions{})
-
+	if _, err := client.CoreV1().Secrets("default").Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create secret for test: %v", err)
+	}
 	ca, err := EnsureCertificate(
 		ctx,
 		client,
@@ -103,6 +104,19 @@ func TestUpdateValidatingWebhookCABundle(t *testing.T) {
 	err := UpdateValidatingWebhookCABundle(ctx, client, "test-validating", []byte("ca"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updatedVWC, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, "test-validating", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get updated validating webhook config: %v", err)
+	}
+
+	if len(updatedVWC.Webhooks) == 0 {
+		t.Fatal("expected webhooks in updated config, but got none")
+	}
+
+	if string(updatedVWC.Webhooks[0].ClientConfig.CABundle) != "ca" {
+		t.Errorf("expected CA bundle to be 'ca', but got '%s'", string(updatedVWC.Webhooks[0].ClientConfig.CABundle))
 	}
 }
 
