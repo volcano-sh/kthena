@@ -48,6 +48,8 @@ Kthena provides comprehensive observability features for monitoring and debuggin
 
 ## Prometheus Configuration
 
+To scrape Kthena router metrics, configure your Prometheus server or ServiceMonitor to target the router service. Here's an example ServiceMonitor configuration:
+
 ```yaml
 global:
   scrape_interval: 15s
@@ -128,40 +130,6 @@ observability:
     path: /metrics
 ```
 
-## Grafana Dashboard
-
-Based on the proposal metrics, create dashboard panels for:
-
-1. Request Rate by Model: rate(kthena_router_requests_total[5m])
-2. Token Processing Rate: rate(kthena_router_tokens_total[5m])
-3. Request Latency: histogram_quantile(0.95, kthena_router_request_duration_seconds)
-4. Rate Limit Violations: rate(kthena_router_rate_limit_exceeded_total[5m])
-
-## Alerting Rules
-
-```yaml
-groups:
-- name: kthena_router_alerts
-  rules:
-  - alert: HighRouterErrorRate
-    expr: rate(kthena_router_requests_total{status_code=~"5.."}[5m]) > 0.1
-    for: 2m
-    labels:
-      severity: critical
-    annotations:
-      summary: "High error rate in Kthena router"
-      description: "Router error rate is {{ $value | humanizePercentage }} for model {{ $labels.model }}"
-
-  - alert: HighRequestLatency
-    expr: histogram_quantile(0.95, kthena_router_request_duration_seconds) > 5
-    for: 5m
-    labels:
-      severity: warning
-    annotations:
-      summary: "High request latency detected"
-      description: "95th percentile latency is {{ $value }}s for model {{ $labels.model }}"
-```
-
 ## Troubleshooting
 
 ### Check Metrics Endpoint
@@ -180,4 +148,112 @@ curl http://localhost:15000/metrics
 # Test debug endpoints (if implemented)
 curl http://localhost:15000/debug/config_dump/modelroutes
 curl http://localhost:15000/debug/config_dump/modelservers
+```
+
+**1. Initial Problem Assessment**
+
+```bash
+# Check if router is healthy
+kubectl get pods -n kthena-system -l app=kthena-router
+kubectl logs -n kthena-system deployment/kthena-router --tail=50
+
+# Check basic metrics
+kubectl port-forward -n kthena-system svc/kthena-router 15000:15000 &
+curl -s http://localhost:15000/metrics | grep kthena_router_requests_total
+```
+
+**2. Request Flow Analysis**
+
+```bash
+# Monitor live request rates by model
+watch 'curl -s http://localhost:15000/metrics | grep -E "kthena_router_requests_total.*model=" | sort'
+
+# Check for error patterns
+watch 'curl -s http://localhost:15000/metrics | grep -E "kthena_router_requests_total.*status_code=5[0-9][0-9]"'
+```
+
+**3. Performance Investigation**
+
+```bash
+# Check latency percentiles
+curl -s http://localhost:15000/metrics | grep "kthena_router_request_duration_seconds" | grep -E '(quantile=|count|sum)'
+
+# Monitor active requests
+watch 'curl -s http://localhost:15000/metrics | grep kthena_router_active_downstream_requests'
+```
+
+**4. Detailed Request Tracing**
+
+```bash
+# Enable access logs if not already enabled
+kubectl patch deployment kthena-router -n kthena-system -p '{"spec":{"template":{"spec":{"containers":[{"name":"router","env":[{"name":"ACCESS_LOG_ENABLED","value":"true"}]}]}}}}'
+
+# Follow logs with routing information
+kubectl logs -n kthena-system deployment/kthena-router -f | jq 'select(.model_name != null)'
+
+# Trace specific request by ID
+kubectl logs -n kthena-system deployment/kthena-router | grep "request_id=550e8400-e29b-41d4-a716-446655440000"
+```
+
+## Common Debugging Scenarios
+
+**Scenario 1: High Error Rate**
+
+```bash
+# 1. Identify error types and models affected
+curl -s http://localhost:15000/metrics | grep 'status_code="5' | sort
+
+# 2. Check detailed error information in access logs
+kubectl logs -n kthena-system deployment/kthena-router | jq 'select(.status_code >= 500)'
+
+# 3. Look for patterns in error timing
+kubectl logs -n kthena-system deployment/kthena-router --since=10m | jq 'select(.error != null) | {timestamp, model_name, error_type, error_message}'
+
+# 4. Check if specific models are affected
+kubectl logs -n kthena-system deployment/kthena-router | jq 'select(.error != null) | .model_name' | sort | uniq -c
+```
+
+**Scenario 2: High Latency Issues**
+
+```bash
+# 1. Check latency distribution
+curl -s http://localhost:15000/metrics | grep "kthena_router_request_duration_seconds" | grep -E '(quantile=|count|sum)'
+
+# 2. Identify slow components from access logs
+kubectl logs -n kthena-system deployment/kthena-router | jq 'select(.duration_total > 5000) | {timestamp, model_name, duration_total, duration_upstream_processing}'
+
+# 3. Check if prefill/decode phases are slow
+kubectl logs -n kthena-system deployment/kthena-router | jq 'select(.duration_prefill > 1000 or .duration_decode > 4000) | {model_name, duration_prefill, duration_decode}'
+
+# 4. Monitor active requests for queuing
+watch 'curl -s http://localhost:15000/metrics | grep -E "active_(downstream|upstream)_requests"'
+```
+
+**Scenario 3: Token Processing Issues**
+
+```bash
+# 1. Check token processing rates
+curl -s http://localhost:15000/metrics | grep "kthena_router_tokens_total"
+
+# 2. Analyze token patterns in access logs
+kubectl logs -n kthena-system deployment/kthena-router | jq 'select(.input_tokens > 1000 or .output_tokens > 500) | {model_name, input_tokens, output_tokens, timestamp}'
+
+# 3. Check for rate limiting violations
+curl -s http://localhost:15000/metrics | grep "kthena_router_rate_limit_exceeded_total"
+```
+
+**Scenario 4: Routing Problems**
+
+```bash
+# 1. Check routing configuration
+curl http://localhost:15000/debug/config_dump/modelroutes
+
+# 2. Verify ModelServer health
+curl http://localhost:15000/debug/config_dump/modelservers
+
+# 3. Check specific pod assignments
+kubectl logs -n kthena-system deployment/kthena-router | jq '{model_name, selected_pod, model_server, model_route}'
+
+# 4. Debug routing decisions
+kubectl logs -n kthena-system deployment/kthena-router | jq 'select(.status_code == 404) | {path, model_name, error}'
 ```
