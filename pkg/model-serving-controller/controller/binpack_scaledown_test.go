@@ -49,7 +49,6 @@ func (f *fakeModelServingController) calculateRoleScore(
 	mi *workloadv1alpha1.ModelServing,
 	groupName, roleName, roleID string,
 ) (int, error) {
-
 	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", mi.Namespace, groupName, roleName, roleID)
 
 	pods, err := f.getPodsByIndex(RoleIDKey, roleIDValue)
@@ -68,7 +67,6 @@ func (f *fakeModelServingController) calculateServingGroupScore(
 	mi *workloadv1alpha1.ModelServing,
 	groupName string,
 ) (int, error) {
-
 	groupNameValue := fmt.Sprintf("%s/%s", mi.Namespace, groupName)
 
 	pods, err := f.getPodsByIndex(GroupNameKey, groupNameValue)
