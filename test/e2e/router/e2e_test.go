@@ -570,7 +570,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		for i := 0; i < expectedSuccessfulRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			resp.Body.Close()
-			require.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed", i+1)
+			assert.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed", i+1)
 		}
 
 		// Verify rate limit is active
@@ -579,9 +579,9 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		assert.Equal(t, http.StatusTooManyRequests, rateLimitedResp.StatusCode,
 			"Rate limit should be active after exhausting quota")
 
-		const shortWaitWithinWindow = 10 * time.Second
-		t.Logf("Waiting %v (within rate limit window)...", shortWaitWithinWindow)
-		time.Sleep(shortWaitWithinWindow)
+		const halfWindowDuration = 10 * time.Second
+		t.Logf("Waiting %v (within rate limit window)...", halfWindowDuration)
+		time.Sleep(halfWindowDuration)
 
 		midWindowResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 		midWindowResp.Body.Close()
@@ -589,9 +589,9 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 			"Rate limit should persist within the time window")
 
 		// Verify rate limit resets after window expiration (65 seconds > 60 seconds)
-		remainingWindowDuration := (rateLimitWindowSeconds * time.Second) - shortWaitWithinWindow + windowResetBuffer
+		remainingWindowDuration := (rateLimitWindowSeconds * time.Second) - halfWindowDuration + windowResetBuffer
 		t.Logf("Waiting additional %v for window reset (total: %v)...",
-			remainingWindowDuration, shortWaitWithinWindow+remainingWindowDuration)
+			remainingWindowDuration, halfWindowDuration+remainingWindowDuration)
 		time.Sleep(remainingWindowDuration)
 
 		postWindowResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
