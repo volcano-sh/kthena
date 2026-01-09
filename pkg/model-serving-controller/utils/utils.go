@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -543,4 +544,30 @@ func RoleIDIndexFunc(obj interface{}) ([]string, error) {
 
 	compositeKey := fmt.Sprintf("%s/%s/%s/%s", namespace, groupName, roleName, roleID)
 	return []string{compositeKey}, nil
+}
+
+func GetMaxUnavailable(mi *workloadv1alpha1.ModelServing) (int, error) {
+	maxUnavailable := intstr.FromInt(1) // Default value
+	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
+		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable.IntVal != 0 ||
+			mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable.StrVal != "" {
+			maxUnavailable = mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
+		}
+	}
+	// Calculate maxUnavailable as absolute numbers
+	replicas := int(*mi.Spec.Replicas)
+	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, true)
+}
+
+func GetMaxSurge(mi *workloadv1alpha1.ModelServing) (int, error) {
+	maxSurge := intstr.FromInt(0)
+	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
+		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge.IntVal != 0 ||
+			mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge.StrVal != "" {
+			maxSurge = mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge
+		}
+	}
+	// Calculate maxUnavailable and maxSurge as absolute numbers
+	replicas := int(*mi.Spec.Replicas)
+	return intstr.GetScaledValueFromIntOrPercent(&maxSurge, replicas, true)
 }
