@@ -9,9 +9,7 @@ spec:
   - name: "default"
     targetModels:
     - modelServerName: "deepseek-r1-1-5b"
-  # This configuration applies to all rules in this ModelRoute
-  # - 10 input tokens per minute to be convenient to test
   rateLimit:
-    inputTokensPerUnit: 10
-    outputTokensPerUnit: 5000
+    inputTokensPerUnit: 30
+    outputTokensPerUnit: 100
     unit: minute
