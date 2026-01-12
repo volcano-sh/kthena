@@ -3127,3 +3127,215 @@ func TestCheckRoleReady(t *testing.T) {
 		})
 	}
 }
+
+func TestManageHeadlessService(t *testing.T) {
+	tests := []struct {
+		name                 string
+		modelServing         *workloadv1alpha1.ModelServing
+		existingRoles        []datastore.Role
+		existingServices     []*corev1.Service
+		expectedServiceCount int
+		expectServiceCreated bool
+	}{
+		{
+			name: "create headless service when none exists",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](2),
+								WorkerReplicas: 2,
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "container",
+												Image: "nginx",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
+				{Name: "prefill-1", Status: datastore.RoleRunning, Revision: "v1"},
+			},
+			existingServices:     []*corev1.Service{},
+			expectedServiceCount: 2, // One for each role
+			expectServiceCreated: true,
+		},
+		{
+			name: "do not create headless service when one already exists",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](1),
+								WorkerReplicas: 2,
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "container",
+												Image: "nginx",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
+			},
+			existingServices: []*corev1.Service{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-ms-0-prefill-0-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							workloadv1alpha1.GroupNameLabelKey: "test-ms-0",
+							workloadv1alpha1.RoleLabelKey:      "prefill",
+							workloadv1alpha1.RoleIDKey:         "prefill-0",
+						},
+					},
+				},
+			},
+			expectedServiceCount: 1,
+			expectServiceCreated: false,
+		},
+		{
+			name: "skip creating service when WorkerTemplate is nil",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](1),
+								WorkerReplicas: 0,
+								WorkerTemplate: nil, // No worker template
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
+			},
+			existingServices:     []*corev1.Service{},
+			expectedServiceCount: 0,
+			expectServiceCreated: false,
+		},
+		{
+			name: "skip creating service for deleting roles",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](1),
+								WorkerReplicas: 2,
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "container",
+												Image: "nginx",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleDeleting, Revision: "v1"}, // Role is deleting
+			},
+			existingServices:     []*corev1.Service{},
+			expectedServiceCount: 0,
+			expectServiceCreated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup fake clients
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextClient := apiextfake.NewSimpleClientset()
+
+			// Create controller
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			assert.NoError(t, err)
+
+			// Setup the datastore with serving groups and roles
+			groupName := utils.GenerateServingGroupName(tt.modelServing.Name, 0)
+			controller.store.AddServingGroup(utils.GetNamespaceName(tt.modelServing), 0, "v1")
+
+			for _, role := range tt.existingRoles {
+				controller.store.AddRole(utils.GetNamespaceName(tt.modelServing), groupName, "prefill", role.Name, role.Revision)
+				controller.store.UpdateRoleStatus(utils.GetNamespaceName(tt.modelServing), groupName, "prefill", role.Name, role.Status)
+			}
+
+			// Add existing services to the fake client
+			for _, svc := range tt.existingServices {
+				_, err := kubeClient.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+				assert.NoError(t, err)
+			}
+
+			// Call the function being tested
+			err = controller.manageHeadlessService(context.TODO(), tt.modelServing)
+			assert.NoError(t, err)
+
+			// Verify the expected number of services exist
+			svcList, err := kubeClient.CoreV1().Services("default").List(context.TODO(), metav1.ListOptions{})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedServiceCount, len(svcList.Items))
+
+			// Check if services were created based on the expected outcome
+			if tt.expectServiceCreated {
+				// If we expect services to be created, verify they have the correct labels
+				for _, item := range svcList.Items {
+					assert.Contains(t, item.Labels, workloadv1alpha1.GroupNameLabelKey)
+					assert.Contains(t, item.Labels, workloadv1alpha1.RoleLabelKey)
+					assert.Contains(t, item.Labels, workloadv1alpha1.RoleIDKey)
+				}
+			}
+		})
+	}
+}
