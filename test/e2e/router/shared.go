@@ -451,3 +451,89 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		require.NoError(t, err, "Failed to restore ModelRoute weights")
 	})
 }
+
+// TestModelRouteLoraShared is a shared test function that can be used by both
+// router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
+// with ParentRefs to the default Gateway.
+func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	ctx := context.Background()
+
+	// Deploy ModelRoute with LoRA adapters
+	t.Log("Deploying ModelRoute with LoRA adapters...")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteLora.yaml")
+	modelRoute.Namespace = testNamespace
+
+	// Configure ParentRefs if using Gateway API
+	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelRoute")
+	assert.NotNil(t, createdModelRoute)
+	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	// Register cleanup function to delete ModelRoute after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	t.Log("Loading LoRA adapters on backend...")
+	utils.LoadLoRAAdapter(t, utils.DefaultRouterURL, "lora-A", "/models/lora-A")
+	utils.LoadLoRAAdapter(t, utils.DefaultRouterURL, "lora-B", "/models/lora-B")
+	t.Log("LoRA adapters loaded successfully")
+
+	t.Log("Waiting for Router to discover LoRA adapters on pods...")
+	time.Sleep(5 * time.Second)
+
+	messages := []utils.ChatMessage{
+		utils.NewChatMessage("user", "Hello"),
+	}
+
+	// Verify LoRA adapter parameter passing and support for multiple LoRA adapters
+	t.Run("VerifyLoRAAdapterParameterPassing", func(t *testing.T) {
+		t.Log("Testing LoRA adapter parameter passing in requests...")
+
+		// Test with lora-A - verify route matching works
+		t.Run("TestWithLoraA", func(t *testing.T) {
+			t.Log("Testing request with lora-A adapter...")
+			resp := utils.CheckChatCompletions(t, "lora-A", messages)
+
+			// Verify LLM-Mock accepts LoRA adapter names and processes the request successfully
+			assert.Equal(t, 200, resp.StatusCode, "Expected HTTP 200 for successful LoRA adapter request")
+			assert.NotEmpty(t, resp.Body, "Response body should not be empty")
+			assert.NotContains(t, resp.Body, "route not found", "Route should be matched, not 'route not found'")
+			// Verify response contains the LoRA adapter name in the model field
+			assert.Contains(t, resp.Body, "lora-A", "Response should contain the LoRA adapter name 'lora-A'")
+		})
+
+		// Test with lora-B - verify route matching works
+		t.Run("TestWithLoraB", func(t *testing.T) {
+			t.Log("Testing request with lora-B adapter...")
+			resp := utils.CheckChatCompletions(t, "lora-B", messages)
+
+			// Verify LLM-Mock accepts LoRA adapter names and processes the request successfully
+			assert.Equal(t, 200, resp.StatusCode, "Expected HTTP 200 for successful LoRA adapter request")
+			assert.NotEmpty(t, resp.Body, "Response body should not be empty")
+			assert.NotContains(t, resp.Body, "route not found", "Route should be matched, not 'route not found'")
+			// Verify response contains the LoRA adapter name in the model field
+			assert.Contains(t, resp.Body, "lora-B", "Response should contain the LoRA adapter name 'lora-B'")
+		})
+	})
+
+	// Verify error handling when LoRA adapter doesn't exist
+	t.Run("VerifyErrorHandlingForNonExistentAdapter", func(t *testing.T) {
+		t.Log("Testing error handling for non-existent LoRA adapter...")
+		messages := []utils.ChatMessage{
+			utils.NewChatMessage("user", "Hello"),
+		}
+
+		resp := utils.CheckChatCompletions(t, "lora-NonExistent", messages)
+
+		// Non-existent LoRA adapter should return 404
+		assert.Equal(t, 404, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
+		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, resp.Body)
+	})
+}

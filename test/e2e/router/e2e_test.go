@@ -121,3 +121,9 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 func TestModelRouteSubset(t *testing.T) {
 	TestModelRouteSubsetShared(t, testCtx, testNamespace, false, "")
 }
+
+// TestModelRouteLora tests ModelRoute with LoRA adapter routing.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestModelRouteLora(t *testing.T) {
+	TestModelRouteLoraShared(t, testCtx, testNamespace, false, "")
+}

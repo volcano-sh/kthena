@@ -181,3 +181,37 @@ func NewChatMessage(role, content string) ChatMessage {
 		Content: content,
 	}
 }
+
+// LoadLoRAAdapter loads a LoRA adapter on the backend by sending a request to /v1/load_lora_adapter
+// The request is sent through the router at the specified base URL (e.g., http://127.0.0.1:8080)
+func LoadLoRAAdapter(t *testing.T, baseURL string, loraName string, loraPath string) {
+	loadURL := strings.TrimSuffix(baseURL, "/v1/chat/completions") + "/v1/load_lora_adapter"
+
+	requestBody := map[string]interface{}{
+		"model":     loraName, // Router requires "model" field to match ModelRoute
+		"prompt":    "",       // Router requires "prompt" or "messages" field, use empty string for management endpoints
+		"lora_name": loraName, // LLM-Mock requires "lora_name" field
+		"lora_path": loraPath, // LLM-Mock requires "lora_path" field
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	require.NoError(t, err, "Failed to marshal load LoRA adapter request body")
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequest("POST", loadURL, bytes.NewBuffer(jsonData))
+	require.NoError(t, err, "Failed to create HTTP request")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	require.NoError(t, err, "Failed to send HTTP request")
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "Failed to read response body")
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 for loading LoRA adapter")
+	t.Logf("Successfully loaded LoRA adapter %s: %s", loraName, string(responseBody))
+}
