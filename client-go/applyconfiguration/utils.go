@@ -120,6 +120,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.ModelWorkerApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("NetworkTopology"):
 		return &applyconfigurationworkloadv1alpha1.NetworkTopologyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("PluginScope"):
+		return &applyconfigurationworkloadv1alpha1.PluginScopeApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("PluginSpec"):
+		return &applyconfigurationworkloadv1alpha1.PluginSpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PodTemplateSpec"):
 		return &applyconfigurationworkloadv1alpha1.PodTemplateSpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):

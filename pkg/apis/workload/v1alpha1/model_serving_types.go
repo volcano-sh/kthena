@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -46,6 +47,10 @@ type ModelServingSpec struct {
 	// +kubebuilder:default=volcano
 	SchedulerName string `json:"schedulerName"`
 
+	// Plugins defines optional plugin chain to customize serving pods.
+	// +optional
+	Plugins []PluginSpec `json:"plugins,omitempty"`
+
 	// Template defines the template for ServingGroup
 	Template ServingGroup `json:"template"`
 
@@ -61,6 +66,51 @@ type ModelServingSpec struct {
 }
 
 type RecoveryPolicy string
+
+// PluginType represents the implementation category of a plugin.
+type PluginType string
+
+const (
+	PluginTypeBuiltIn PluginType = "BuiltIn"
+)
+
+// PluginTarget specifies which pod kinds a plugin applies to.
+// If empty, it defaults to All.
+type PluginTarget string
+
+const (
+	PluginTargetAll    PluginTarget = "All"
+	PluginTargetEntry  PluginTarget = "Entry"
+	PluginTargetWorker PluginTarget = "Worker"
+)
+
+// PluginScope restricts where a plugin is applied.
+// Roles is a whitelist; empty means all roles.
+// Targets limits to entry/worker pods; empty means all pods.
+type PluginScope struct {
+	// Roles limits the plugin to the specified role names.
+	// +optional
+	Roles []string `json:"roles,omitempty"`
+	// Targets limits the plugin to specific pod targets (entry/worker/all).
+	// +optional
+	Targets []PluginTarget `json:"targets,omitempty"`
+}
+
+// PluginSpec declares a plugin instance attached to a ModelServing.
+type PluginSpec struct {
+	// Name uniquely identifies the plugin instance within the ModelServing.
+	Name string `json:"name"`
+	// Type indicates plugin category. For now, only BuiltIn is supported.
+	// +kubebuilder:default=BuiltIn
+	Type PluginType `json:"type"`
+	// Config is an opaque JSON blob interpreted by the plugin implementation.
+	// +optional
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
+	// Scope optionally narrows where this plugin runs.
+	// By default, it runs on all pods.
+	// +optional
+	Scope *PluginScope `json:"scope,omitempty"`
+}
 
 const (
 	// ServingGroupRecreate will recreate all the pods in the ServingGroup if

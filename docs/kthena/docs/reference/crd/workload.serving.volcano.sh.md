@@ -504,6 +504,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `replicas` _integer_ | Number of ServingGroups. That is the number of instances that run serving tasks<br />Default to 1. | 1 |  |
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing | volcano |  |
+| `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugin chain to customize serving pods. |  |  |
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
@@ -606,6 +607,79 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `groupPolicy` _[NetworkTopologySpec](#networktopologyspec)_ | GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`. |  |  |
 | `rolePolicy` _[NetworkTopologySpec](#networktopologyspec)_ | RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`. |  |  |
+
+
+#### PluginScope
+
+
+
+PluginScope restricts where a plugin is applied.
+Roles is a whitelist; empty means all roles.
+Targets limits to entry/worker pods; empty means all pods.
+
+
+
+_Appears in:_
+- [PluginSpec](#pluginspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `roles` _string array_ | Roles limits the plugin to the specified role names. |  |  |
+| `targets` _[PluginTarget](#plugintarget) array_ | Targets limits the plugin to specific pod targets (entry/worker/all). |  |  |
+
+
+#### PluginSpec
+
+
+
+PluginSpec declares a plugin instance attached to a ModelServing.
+
+
+
+_Appears in:_
+- [ModelServingSpec](#modelservingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name uniquely identifies the plugin instance within the ModelServing. |  |  |
+| `type` _[PluginType](#plugintype)_ | Type indicates plugin category. For now, only BuiltIn is supported. | BuiltIn |  |
+| `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#json-v1-apiextensions-k8s-io)_ | Config is an opaque JSON blob interpreted by the plugin implementation. |  |  |
+| `scope` _[PluginScope](#pluginscope)_ | Scope optionally narrows where this plugin runs.<br />By default, it runs on all pods. |  |  |
+
+
+#### PluginTarget
+
+_Underlying type:_ _string_
+
+PluginTarget specifies which pod kinds a plugin applies to.
+If empty, it defaults to All.
+
+
+
+_Appears in:_
+- [PluginScope](#pluginscope)
+
+| Field | Description |
+| --- | --- |
+| `All` |  |
+| `Entry` |  |
+| `Worker` |  |
+
+
+#### PluginType
+
+_Underlying type:_ _string_
+
+PluginType represents the implementation category of a plugin.
+
+
+
+_Appears in:_
+- [PluginSpec](#pluginspec)
+
+| Field | Description |
+| --- | --- |
+| `BuiltIn` |  |
 
 
 #### PodTemplateSpec

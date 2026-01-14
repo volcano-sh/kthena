@@ -27,6 +27,7 @@ import (
 type ModelServingSpecApplyConfiguration struct {
 	Replicas        *int32                             `json:"replicas,omitempty"`
 	SchedulerName   *string                            `json:"schedulerName,omitempty"`
+	Plugins         []PluginSpecApplyConfiguration     `json:"plugins,omitempty"`
 	Template        *ServingGroupApplyConfiguration    `json:"template,omitempty"`
 	RolloutStrategy *RolloutStrategyApplyConfiguration `json:"rolloutStrategy,omitempty"`
 	RecoveryPolicy  *workloadv1alpha1.RecoveryPolicy   `json:"recoveryPolicy,omitempty"`
@@ -51,6 +52,19 @@ func (b *ModelServingSpecApplyConfiguration) WithReplicas(value int32) *ModelSer
 // If called multiple times, the SchedulerName field is set to the value of the last call.
 func (b *ModelServingSpecApplyConfiguration) WithSchedulerName(value string) *ModelServingSpecApplyConfiguration {
 	b.SchedulerName = &value
+	return b
+}
+
+// WithPlugins adds the given value to the Plugins field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Plugins field.
+func (b *ModelServingSpecApplyConfiguration) WithPlugins(values ...*PluginSpecApplyConfiguration) *ModelServingSpecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithPlugins")
+		}
+		b.Plugins = append(b.Plugins, *values[i])
+	}
 	return b
 }
 
