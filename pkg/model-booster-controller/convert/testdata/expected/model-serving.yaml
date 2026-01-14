@@ -6,7 +6,7 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: 6845b4bf4
+    workload.serving.volcano.sh/revision: 55d7bd6c6d
   name: test-model-backend1
   namespace: default
   ownerReferences:
@@ -30,7 +30,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: test-model
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 6845b4bf4
+              workload.serving.volcano.sh/revision: 55d7bd6c6d
           spec:
             containers:
               - args:
@@ -96,8 +96,8 @@ spec:
               - command:
                   - bash
                   - -c
-                  - chmod u+x /vllm-workspace/vllm/examples/online_serving/multi-node-serving.sh
-                    && /vllm-workspace/vllm/examples/online_serving/multi-node-serving.sh
+                  - chmod u+x examples/online_serving/multi-node-serving.sh
+                    && examples/online_serving/multi-node-serving.sh
                     leader --ray_cluster_size=2 --num-gpus=1 && python3 -m vllm.entrypoints.openai.api_server
                     --model /tmp/test/13a7c4d58031cdc502ca1bb4a592f2b9 --block-size 128
                     --gpu-memory-utilization 0.9 --max-model-len 32768 --served-model-name deepseek-v3
@@ -167,13 +167,15 @@ spec:
                   successThreshold: 1
                   timeoutSeconds: 1
                 resources:
-                  requests:
+                  limits:
                     cpu: 100m
                     huawei.com/ascend-1980: "1"
                     memory: 1Gi
                 volumeMounts:
                   - mountPath: /tmp/test
                     name: backend1-weights
+                  - mountPath: /dev/shm
+                    name: dshm
             initContainers:
               - args:
                   - --source
@@ -192,24 +194,33 @@ spec:
                 volumeMounts:
                   - mountPath: /tmp/test
                     name: backend1-weights
-              
             terminationGracePeriodSeconds: 300
             volumes:
               - hostPath:
                   path: /tmp/test
                   type: DirectoryOrCreate
                 name: backend1-weights
+              - emptyDir:
+                  medium: Memory
+                name: dshm
         name: leader
         replicas: 0
         workerReplicas: 1
         workerTemplate:
+          metadata:
+            labels:
+              workload.serving.volcano.sh/backend-name: backend1
+              workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
+              workload.serving.volcano.sh/model-name: test-model
+              workload.serving.volcano.sh/model-uid: randomUID
+              workload.serving.volcano.sh/revision: 55d7bd6c6d
           spec:
             containers:
               - command:
                   - bash
                   - -c
-                  - chmod u+x /vllm-workspace/vllm/examples/online_serving/multi-node-serving.sh
-                    && /vllm-workspace/vllm/examples/online_serving/multi-node-serving.sh
+                  - chmod u+x examples/online_serving/multi-node-serving.sh
+                    && examples/online_serving/multi-node-serving.sh
                     worker --ray_address=$(ENTRY_ADDRESS)
                 env:
                   - name: "ENDPOINT"
@@ -219,13 +230,15 @@ spec:
                 image: vllm-server:latest
                 name: backend1-vllm-worker
                 resources:
-                  requests:
+                  limits:
                     cpu: 100m
                     huawei.com/ascend-1980: "1"
                     memory: 1Gi
                 volumeMounts:
                   - mountPath: /tmp/test
                     name: backend1-weights
+                  - mountPath: /dev/shm
+                    name: dshm
             initContainers:
               - args:
                   - --source
@@ -244,12 +257,14 @@ spec:
                 volumeMounts:
                   - mountPath: /tmp/test
                     name: backend1-weights
-              
             volumes:
               - hostPath:
                   path: /tmp/test
                   type: DirectoryOrCreate
                 name: backend1-weights
+              - emptyDir:
+                  medium: Memory
+                name: dshm
   topologySpreadConstraints:
     - labelSelector:
         matchLabels:

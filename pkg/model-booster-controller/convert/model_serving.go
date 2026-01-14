@@ -44,8 +44,10 @@ const (
 	URIPrefixSeparator             = "://"
 	VllmTemplatePath               = "templates/vllm.yaml"
 	VllmDisaggregatedTemplatePath  = "templates/vllm-pd.yaml"
-	VllmMultiNodeServingScriptPath = "/vllm-workspace/vllm/examples/online_serving/multi-node-serving.sh"
+	VllmMultiNodeServingScriptPath = "examples/online_serving/multi-node-serving.sh"
 	modelRouteRuleName             = "default"
+	// /dev/shm is too small to support NCCL, we need a larger memory volume
+	dshm = "dshm"
 )
 
 //go:embed templates/*
@@ -267,13 +269,26 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"SERVER_ENTRY_TEMPLATE_METADATA": &metav1.ObjectMeta{
 			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 		},
-		"SERVER_WORKER_TEMPLATE_METADATA": nil,
+		"SERVER_WORKER_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+		},
 		"VOLUMES": []*corev1.Volume{
 			cacheVolume,
+			{
+				Name: dshm,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{
+						Medium: corev1.StorageMediumMemory,
+					},
+				},
+			},
 		},
 		"VOLUME_MOUNTS": []corev1.VolumeMount{{
 			Name:      cacheVolume.Name,
 			MountPath: GetCachePath(backend.CacheURI),
+		}, {
+			Name:      dshm,
+			MountPath: "/dev/shm",
 		}},
 		"INIT_CONTAINERS":                    initContainers,
 		"MODEL_DOWNLOAD_ENVFROM":             backend.EnvFrom,

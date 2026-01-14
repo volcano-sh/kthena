@@ -35,7 +35,7 @@ spec:
           trust-remote-code: ""
           served-model-name: "deepseek-v3"
         resources:
-          requests:
+          limits:
             cpu: 100m
             huawei.com/ascend-1980: "1"
             memory: 1Gi
