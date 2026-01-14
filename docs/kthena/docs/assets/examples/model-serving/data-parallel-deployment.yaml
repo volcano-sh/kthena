@@ -1,0 +1,211 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: my-model
+  namespace: kthena-system
+spec:
+  schedulerName: volcano
+  replicas: 1
+  template:
+    gangPolicy:
+      minRoleReplicas:
+        leader: 1
+    roles:
+      - name: leader0
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: engine
+                image: vllm/vllm-openai:v0.13.0
+                command:
+                  - python3
+                  - -m
+                  - vllm.entrypoints.openai.api_server
+                  - --model
+                  - /tmp/cache/Qwen3
+                  - --data-parallel-address
+                  - my-model-0-leader0-0-0.kthena-system.svc.cluster.local # Use the internal address of pod to communicate. Can not use Pod IP here. Because Pod IP will change. Also, can not use node IP, because node IP is invisible inside pod.
+                  - --data-parallel-rank
+                  - "0" # rank 0
+                  - --data-parallel-rpc-port
+                  - "13345"
+                  - --data-parallel-size
+                  - "2" # 2 pods total, each with 1 GPU, so size is 2
+                  - --enforce-eager
+                  - --gpu-memory-utilization
+                  - "0.9"
+                  - --max-model-len
+                  - "2048"
+                  - --max-num-seqs
+                  - "16"
+                  - --served-model-name
+                  - my-model
+                env:
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: VLLM_USE_V1
+                    value: "1"
+                lifecycle:
+                  preStop:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - |
+                          while true; do
+                            RUNNING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_running' | grep -v '#' | awk '{print $2}')
+                            WAITING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_waiting' | grep -v '#' | awk '{print $2}')
+                            if [ "$RUNNING" = "0.0" ] && [ "$WAITING" = "0.0" ]; then
+                              echo "Terminating: No active or waiting requests, safe to terminate" >> /proc/1/fd/1
+                              exit 0
+                            else
+                              echo "Terminating: Running: $RUNNING, Waiting: $WAITING" >> /proc/1/fd/1
+                              sleep 5
+                            fi
+                          done
+                readinessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+                    scheme: HTTP
+                  initialDelaySeconds: 180
+                  periodSeconds: 5
+                  successThreshold: 1
+                  timeoutSeconds: 1
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - mountPath: /tmp/cache
+                    name: example-weights
+                  - mountPath: /dev/shm
+                    name: dshm
+            initContainers:
+              - args:
+                  - --source
+                  - hf://Qwen/Qwen3-0.6B
+                  - --output-dir
+                  - /tmp/cache/Qwen3
+                image: ghcr.io/volcano-sh/downloader:v0.2.0
+                name: downloader
+                resources: { }
+                volumeMounts:
+                  - mountPath: /tmp/cache
+                    name: models
+            terminationGracePeriodSeconds: 300
+            volumes:
+              - hostPath:
+                  path: /tmp/cache
+                  type: DirectoryOrCreate
+                name: example-weights
+              - emptyDir:
+                  medium: Memory
+                name: dshm
+        workerReplicas: 0
+      - name: leader1
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: engine
+                image: vllm/vllm-openai:v0.13.0
+                command:
+                  - python3
+                  - -m
+                  - vllm.entrypoints.openai.api_server
+                  - --model
+                  - /tmp/cache/Qwen3
+                  - --data-parallel-address
+                  - my-model-0-leader0-0-0.kthena-system.svc.cluster.local
+                  - --data-parallel-rank
+                  - "1" # rank 1
+                  - --data-parallel-rpc-port
+                  - "13345"
+                  - --data-parallel-size
+                  - "2"
+                  - --enforce-eager
+                  - --gpu-memory-utilization
+                  - "0.9"
+                  - --max-model-len
+                  - "2048"
+                  - --max-num-seqs
+                  - "16"
+                  - --served-model-name
+                  - my-model
+                env:
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: VLLM_USE_V1
+                    value: "1"
+                lifecycle:
+                  preStop:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - |
+                          while true; do
+                            RUNNING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_running' | grep -v '#' | awk '{print $2}')
+                            WAITING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_waiting' | grep -v '#' | awk '{print $2}')
+                            if [ "$RUNNING" = "0.0" ] && [ "$WAITING" = "0.0" ]; then
+                              echo "Terminating: No active or waiting requests, safe to terminate" >> /proc/1/fd/1
+                              exit 0
+                            else
+                              echo "Terminating: Running: $RUNNING, Waiting: $WAITING" >> /proc/1/fd/1
+                              sleep 5
+                            fi
+                          done
+                readinessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+                    scheme: HTTP
+                  initialDelaySeconds: 180
+                  periodSeconds: 5
+                  successThreshold: 1
+                  timeoutSeconds: 1
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - mountPath: /tmp/cache
+                    name: example-weights
+                  - mountPath: /dev/shm
+                    name: dshm
+            initContainers:
+              - args:
+                  - --source
+                  - hf://Qwen/Qwen3-0.6B
+                  - --output-dir
+                  - /tmp/cache/Qwen3
+                image: ghcr.io/volcano-sh/downloader:v0.2.0
+                name: my-model-model-downloader
+                resources: { }
+                volumeMounts:
+                  - mountPath: /tmp/cache
+                    name: example-weights
+            terminationGracePeriodSeconds: 300
+            volumes:
+              - hostPath:
+                  path: /tmp/cache
+                  type: DirectoryOrCreate
+                name: example-weights
+              - emptyDir:
+                  medium: Memory
+                name: dshm
+        workerReplicas: 0
