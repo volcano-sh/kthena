@@ -789,16 +789,44 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
 		updateMin = int(*mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
 	}
+
+	maxUnavailable, err := utils.GetMaxUnavailable(mi)
+	if err != nil {
+		return fmt.Errorf("failed to calculate maxUnavailable: %v", err)
+	}
+
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
 	if err != nil {
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
+
+	// Count how many groups are currently not running (unavailable)
+	unavailableCount := 0
+	for _, sg := range servingGroupList {
+		if sg.Status != datastore.ServingGroupRunning {
+			unavailableCount++
+		}
+	}
+
+	// Check if we've reached the maxUnavailable limit
+	if unavailableCount >= maxUnavailable {
+		// Wait until some groups become available before continuing updates
+		return nil
+	}
+	// Calculate how many more groups we can make unavailable
+	remainingUnavailable := maxUnavailable - unavailableCount
+
 	// we terminate the ServingGroup with the largest ordinal that does not match the update revision.
-	for i := len(servingGroupList) - 1; i >= updateMin; i-- {
+	// Update outdated groups respecting the maxUnavailable constraint
+	updatedCount := 0
+	for i := len(servingGroupList) - 1; i >= updateMin && updatedCount < remainingUnavailable; i-- {
 		if c.isServingGroupOutdated(servingGroupList[i], mi.Namespace, revision) {
 			// target ServingGroup is not the latest version, needs to be updated
 			klog.V(2).Infof("ServingGroup %s will be terminated for update", servingGroupList[i].Name)
-			return c.deleteServingGroup(ctx, mi, servingGroupList[i].Name)
+			if err := c.deleteServingGroup(ctx, mi, servingGroupList[i].Name); err != nil {
+				return err
+			}
+			updatedCount += 1
 		}
 		if servingGroupList[i].Status != datastore.ServingGroupRunning {
 			// target ServingGroup is the latest version, but not running. We need to wait for the status to change to running.
