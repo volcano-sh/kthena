@@ -91,13 +91,13 @@ func TestCalculateRequirements(t *testing.T) {
 		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, nil, apiextfake, store)
-		mi := createBasicModelServing()
+		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
 
 		// For 2 prefill roles (each with 1 entry + 3 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+3)*2 + (1+2)*1 = 8 + 3 = 11
@@ -113,7 +113,7 @@ func TestCalculateRequirements(t *testing.T) {
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
 		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		_, _, minTaskMember, minResources := manager.calculateRequirements(ms, "test-serving-group")
 		expectedTaskMembers = map[string]int32{
 			"prefill-0": 4, // 1 entry + 3 workers
 			"prefill-1": 4, // 1 entry + 3 workers
@@ -138,7 +138,7 @@ func TestCalculateRequirements(t *testing.T) {
 		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, nil, apiextfake, store)
-		mi := createBasicModelServing()
+		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
@@ -147,11 +147,11 @@ func TestCalculateRequirements(t *testing.T) {
 			"prefill": 1, // Only consider 1 prefill role instead of 2
 			"decode":  1, // Consider all decode roles (1)
 		}
-		mi.Spec.Template.GangPolicy.MinRoleReplicas = minRoleReplicas
+		ms.Spec.Template.GangPolicy.MinRoleReplicas = minRoleReplicas
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
 
 		// For 1 prefill role (1 entry + 3 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+3)*1 + (1+2)*1 = 4 + 3 = 7
@@ -167,7 +167,7 @@ func TestCalculateRequirements(t *testing.T) {
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
 		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		_, _, minTaskMember, minResources := manager.calculateRequirements(ms, "test-serving-group")
 		expectedTaskMembers = map[string]int32{
 			"prefill-0": 4, // 1 entry + 3 workers
 			"decode-0":  3, // 1 entry + 2 workers
@@ -191,14 +191,14 @@ func TestCalculateRequirements(t *testing.T) {
 		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, nil, apiextfake, store)
-		mi := createBasicModelServing()
-		mi.Spec.Template.GangPolicy.MinRoleReplicas = nil
+		ms := createBasicModelServing()
+		ms.Spec.Template.GangPolicy.MinRoleReplicas = nil
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, _, _, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, _, _, _ := manager.calculateRequirements(ms, "test-serving-group")
 
 		// Should consider all roles without constraint
 		// Same as basic calculation: 11 pods
@@ -209,14 +209,14 @@ func TestCalculateRequirements(t *testing.T) {
 		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, nil, apiextfake, store)
-		mi := createBasicModelServing()
-		mi.Spec.Template.Roles = []workloadv1alpha1.Role{} // Empty roles
+		ms := createBasicModelServing()
+		ms.Spec.Template.Roles = []workloadv1alpha1.Role{} // Empty roles
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, minResources := manager.calculateRequirements(ms, "test-serving-group")
 
 		// Should have no requirements
 		assert.Equal(t, 0, minMember)
@@ -229,16 +229,16 @@ func TestCalculateRequirements(t *testing.T) {
 		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, nil, apiextfake, store)
-		mi := createBasicModelServing()
+		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
 		// Modify one role to have no worker template
-		mi.Spec.Template.Roles[1].WorkerTemplate = nil
-		mi.Spec.Template.Roles[1].WorkerReplicas = 0
+		ms.Spec.Template.Roles[1].WorkerTemplate = nil
+		ms.Spec.Template.Roles[1].WorkerReplicas = 0
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
 
 		// For 2 prefill roles (each with 1 entry + 3 workers) and 1 decode role (1 entry only)
 		// Total pods = (1+3)*2 + (1+0)*1 = 8 + 1 = 9
@@ -254,7 +254,7 @@ func TestCalculateRequirements(t *testing.T) {
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
 		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, _ = manager.calculateRequirements(mi, "test-serving-group")
+		_, _, minTaskMember, _ = manager.calculateRequirements(ms, "test-serving-group")
 		expectedTaskMembers = map[string]int32{
 			"prefill-0": 4, // 1 entry + 3 workers
 			"prefill-1": 4, // 1 entry + 3 workers
@@ -267,16 +267,16 @@ func TestCalculateRequirements(t *testing.T) {
 		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, nil, apiextfake, store)
-		mi := createBasicModelServing()
+		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
 		// Set worker replicas to zero for one role
-		mi.Spec.Template.Roles[0].WorkerReplicas = 0
+		ms.Spec.Template.Roles[0].WorkerReplicas = 0
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
 
 		// For 2 prefill roles (each with 1 entry + 0 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+0)*2 + (1+2)*1 = 2 + 3 = 5
@@ -292,7 +292,7 @@ func TestCalculateRequirements(t *testing.T) {
 		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
 		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, _ = manager.calculateRequirements(mi, "test-serving-group")
+		_, _, minTaskMember, _ = manager.calculateRequirements(ms, "test-serving-group")
 		expectedTaskMembers = map[string]int32{
 			"prefill-0": 1, // 1 entry only (no workers)
 			"prefill-1": 1, // 1 entry only (no workers)

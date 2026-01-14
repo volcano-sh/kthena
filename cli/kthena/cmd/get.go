@@ -336,13 +336,13 @@ func runGetModelServings(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(w, "NAME\tAGE")
 	}
 
-	// Print ModelInfers
-	for _, mi := range modelServingList.Items {
-		age := time.Since(mi.CreationTimestamp.Time).Truncate(time.Second)
+	// Print ModelServings
+	for _, ms := range modelServingList.Items {
+		age := time.Since(ms.CreationTimestamp.Time).Truncate(time.Second)
 		if getAllNamespaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", mi.Namespace, mi.Name, age)
+			fmt.Fprintf(w, "%s\t%s\t%s\n", ms.Namespace, ms.Name, age)
 		} else {
-			fmt.Fprintf(w, "%s\t%s\n", mi.Name, age)
+			fmt.Fprintf(w, "%s\t%s\n", ms.Name, age)
 		}
 	}
 

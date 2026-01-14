@@ -2161,7 +2161,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 			assert.NoError(t, err)
 
 			miName := fmt.Sprintf("test-priority-scaledown-%d", idx)
-			mi := &workloadv1alpha1.ModelServing{
+			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      miName,
@@ -2196,15 +2196,15 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 			// Pre-populate the store with existing ServingGroups and set their statuses
 			for _, ordinal := range tt.existingIndices {
 				groupName := utils.GenerateServingGroupName(miName, ordinal)
-				controller.store.AddServingGroup(utils.GetNamespaceName(mi), ordinal, "test-revision")
+				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, "test-revision")
 				if status, exists := tt.groupStatuses[ordinal]; exists {
-					controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, status)
+					controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, status)
 				}
 
 				// Create a mock pod for each group with deletion cost annotation
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: mi.Namespace,
+						Namespace: ms.Namespace,
 						Name:      fmt.Sprintf("pod-%s", groupName),
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: miName,
@@ -2236,33 +2236,33 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 			}
 
 			// Call scaleDownServingGroups with priority and deletion cost
-			err = controller.scaleDownServingGroups(context.Background(), mi, existingGroups, tt.expectedCount)
+			err = controller.scaleDownServingGroups(context.Background(), ms, existingGroups, tt.expectedCount)
 			assert.NoError(t, err)
 
 			// Manually delete ServingGroups that are marked as Deleting from the store
 			// This simulates the deletion process that would happen in the real controller
 			for _, ordinal := range tt.existingIndices {
 				groupName := utils.GenerateServingGroupName(miName, ordinal)
-				status := controller.store.GetServingGroupStatus(utils.GetNamespaceName(mi), groupName)
+				status := controller.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName)
 				if status == datastore.ServingGroupDeleting {
 					// Simulate pods and services being deleted
 					selector := labels.SelectorFromSet(map[string]string{
 						workloadv1alpha1.GroupNameLabelKey: groupName,
 					})
-					pods, _ := controller.podsLister.Pods(mi.Namespace).List(selector)
+					pods, _ := controller.podsLister.Pods(ms.Namespace).List(selector)
 					for _, pod := range pods {
 						podIndexer.Delete(pod)
 					}
 
 					// Check if ServingGroup is fully deleted and remove from store
-					if controller.isServingGroupDeleted(mi, groupName) {
-						controller.store.DeleteServingGroup(utils.GetNamespaceName(mi), groupName)
+					if controller.isServingGroupDeleted(ms, groupName) {
+						controller.store.DeleteServingGroup(utils.GetNamespaceName(ms), groupName)
 					}
 				}
 			}
 
 			// Verify the results
-			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 			assert.NoError(t, err)
 
 			// Verify remaining group count
@@ -2567,7 +2567,7 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 
 			miName := fmt.Sprintf("test-role-priority-scaledown-%d", idx)
 			groupName := utils.GenerateServingGroupName(miName, 0)
-			mi := &workloadv1alpha1.ModelServing{
+			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      miName,
@@ -2597,22 +2597,22 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 				},
 			}
 
-			targetRole := mi.Spec.Template.Roles[0]
+			targetRole := ms.Spec.Template.Roles[0]
 			podIndexer := controller.podsInformer.GetIndexer()
 
 			// Pre-populate the store with ServingGroup and Roles
-			controller.store.AddServingGroup(utils.GetNamespaceName(mi), 0, "test-revision")
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
 			for _, ordinal := range tt.existingIndices {
 				roleID := utils.GenerateRoleID("prefill", ordinal)
-				controller.store.AddRole(utils.GetNamespaceName(mi), groupName, "prefill", roleID, "test-revision")
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", roleID, "test-revision")
 				if status, exists := tt.roleStatuses[ordinal]; exists {
-					controller.store.UpdateRoleStatus(utils.GetNamespaceName(mi), groupName, "prefill", roleID, status)
+					controller.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", roleID, status)
 				}
 
 				// Create a mock pod for each role with deletion cost annotation
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: mi.Namespace,
+						Namespace: ms.Namespace,
 						Name:      fmt.Sprintf("pod-%s", roleID),
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: miName,
@@ -2644,13 +2644,13 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 			}
 
 			// Call scaleDownRoles with priority and deletion cost
-			controller.scaleDownRoles(context.Background(), mi, groupName, targetRole, existingRoles, tt.expectedCount)
+			controller.scaleDownRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount)
 
 			// Manually delete Roles that are marked as Deleting from the store
 			// This simulates the deletion process that would happen in the real controller
 			for _, ordinal := range tt.existingIndices {
 				roleID := utils.GenerateRoleID("prefill", ordinal)
-				status := controller.store.GetRoleStatus(utils.GetNamespaceName(mi), groupName, "prefill", roleID)
+				status := controller.store.GetRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", roleID)
 				if status == datastore.RoleDeleting {
 					// Simulate pods and services being deleted
 					selector := labels.SelectorFromSet(map[string]string{
@@ -2658,20 +2658,20 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 						workloadv1alpha1.RoleLabelKey:      "prefill",
 						workloadv1alpha1.RoleIDKey:         roleID,
 					})
-					pods, _ := controller.podsLister.Pods(mi.Namespace).List(selector)
+					pods, _ := controller.podsLister.Pods(ms.Namespace).List(selector)
 					for _, pod := range pods {
 						podIndexer.Delete(pod)
 					}
 
 					// Check if Role is fully deleted and remove from store
-					if controller.isRoleDeleted(mi, groupName, "prefill", roleID) {
-						controller.store.DeleteRole(utils.GetNamespaceName(mi), groupName, "prefill", roleID)
+					if controller.isRoleDeleted(ms, groupName, "prefill", roleID) {
+						controller.store.DeleteRole(utils.GetNamespaceName(ms), groupName, "prefill", roleID)
 					}
 				}
 			}
 
 			// Verify the results
-			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(mi), groupName, "prefill")
+			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, "prefill")
 			assert.NoError(t, err)
 
 			// Verify remaining role count
@@ -2699,7 +2699,7 @@ func TestCalculateRoleScore(t *testing.T) {
 	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
 	assert.NoError(t, err)
 
-	mi := &workloadv1alpha1.ModelServing{
+	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "test-scoring",
@@ -2729,7 +2729,7 @@ func TestCalculateRoleScore(t *testing.T) {
 		},
 	}
 
-	groupName := utils.GenerateServingGroupName(mi.Name, 0)
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
 
 	tests := []struct {
 		name             string
@@ -2802,9 +2802,9 @@ func TestCalculateRoleScore(t *testing.T) {
 			controller.store = datastore.New()
 
 			// Pre-populate the store with ServingGroup and Role
-			controller.store.AddServingGroup(utils.GetNamespaceName(mi), 0, "test-revision")
-			controller.store.AddRole(utils.GetNamespaceName(mi), groupName, "prefill", "prefill-0", "test-revision")
-			controller.store.UpdateRoleStatus(utils.GetNamespaceName(mi), groupName, "prefill", "prefill-0", tt.roleStatus)
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
+			controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", "test-revision")
+			controller.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", tt.roleStatus)
 
 			// Create a mock pod with deletion cost
 			podIndexer := controller.podsInformer.GetIndexer()
@@ -2813,7 +2813,7 @@ func TestCalculateRoleScore(t *testing.T) {
 					Namespace: "default",
 					Name:      "pod-prefill-0",
 					Labels: map[string]string{
-						workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 						workloadv1alpha1.GroupNameLabelKey:        groupName,
 						workloadv1alpha1.RoleLabelKey:             "prefill",
 						workloadv1alpha1.RoleIDKey:                "prefill-0",
@@ -2828,7 +2828,7 @@ func TestCalculateRoleScore(t *testing.T) {
 			assert.NoError(t, err)
 
 			// Calculate score
-			score := controller.calculateRoleScore(mi, groupName, "prefill", "prefill-0")
+			score := controller.calculateRoleScore(ms, groupName, "prefill", "prefill-0")
 
 			// Verify the Priority field
 			assert.Equal(t, tt.expectedPriority, score.Priority,
@@ -2850,7 +2850,7 @@ func TestCalculateServingGroupScore(t *testing.T) {
 	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
 	assert.NoError(t, err)
 
-	mi := &workloadv1alpha1.ModelServing{
+	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "test-scoring",
@@ -2958,9 +2958,9 @@ func TestCalculateServingGroupScore(t *testing.T) {
 			controller.store = datastore.New()
 
 			// Pre-populate the store with ServingGroup
-			groupName := utils.GenerateServingGroupName(mi.Name, 0)
-			controller.store.AddServingGroup(utils.GetNamespaceName(mi), 0, "test-revision")
-			controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, tt.groupStatus)
+			groupName := utils.GenerateServingGroupName(ms.Name, 0)
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
+			controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, tt.groupStatus)
 
 			// Create a mock pod with deletion cost
 			podIndexer := controller.podsInformer.GetIndexer()
@@ -2969,7 +2969,7 @@ func TestCalculateServingGroupScore(t *testing.T) {
 					Namespace: "default",
 					Name:      "pod-test",
 					Labels: map[string]string{
-						workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 						workloadv1alpha1.GroupNameLabelKey:        groupName,
 						workloadv1alpha1.RoleLabelKey:             "prefill",
 						workloadv1alpha1.RoleIDKey:                "prefill-0",
@@ -2984,7 +2984,7 @@ func TestCalculateServingGroupScore(t *testing.T) {
 			assert.NoError(t, err)
 
 			// Calculate score
-			score := controller.calculateServingGroupScore(mi, groupName)
+			score := controller.calculateServingGroupScore(ms, groupName)
 
 			// Verify the Priority field
 			assert.Equal(t, tt.expectedPriority, score.Priority,
@@ -3003,7 +3003,7 @@ func TestCheckRoleReady(t *testing.T) {
 	// Expected pods per role replica = 1 entry + 2 workers = 3 pods per replica
 	// Total expected = 3 * 1 = 3 pods
 	workerReplicas := int32(2)
-	mi := &workloadv1alpha1.ModelServing{
+	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-model-serving",
 			Namespace: "default",
@@ -3084,17 +3084,17 @@ func TestCheckRoleReady(t *testing.T) {
 			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
 			assert.NoError(t, err)
 
-			groupName := utils.GenerateServingGroupName(mi.Name, 0)
+			groupName := utils.GenerateServingGroupName(ms.Name, 0)
 
 			// Create pods for the role
 			podIndexer := controller.podsInformer.GetIndexer()
 			for i := 0; i < tt.podCount; i++ {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: mi.Namespace,
+						Namespace: ms.Namespace,
 						Name:      fmt.Sprintf("%s-%s-%d", tt.roleID, tt.roleName, i),
 						Labels: map[string]string{
-							workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+							workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
 							workloadv1alpha1.RoleLabelKey:             tt.roleName,
 							workloadv1alpha1.RoleIDKey:                tt.roleID,
@@ -3118,7 +3118,7 @@ func TestCheckRoleReady(t *testing.T) {
 			}
 
 			// Check role readiness
-			ready, err := controller.checkRoleReady(mi, groupName, tt.roleName, tt.roleID)
+			ready, err := controller.checkRoleReady(ms, groupName, tt.roleName, tt.roleID)
 
 			// Verify results
 			assert.NoError(t, err)

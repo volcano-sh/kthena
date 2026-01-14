@@ -118,13 +118,13 @@ func (c *ModelServingController) getPodDeletionCost(pod *corev1.Pod) int {
 // calculateRoleScore calculates priority information for role scale-down that considers:
 // 1. Role readiness (primary factor): Running vs not-running
 // 2. Pod deletion cost (secondary factor)
-func (c *ModelServingController) calculateRoleScore(mi *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) RoleWithScore {
+func (c *ModelServingController) calculateRoleScore(ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) RoleWithScore {
 	// Get role status from store
-	roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(mi), groupName, roleName, roleID)
+	roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID)
 	priority := getRoleStatusPriority(roleStatus)
 
 	// Get pod deletion cost as secondary factor
-	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", mi.Namespace, groupName, roleName, roleID)
+	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID)
 	pods, err := c.getPodsByIndex(RoleIDKey, roleIDValue)
 	if err != nil {
 		_, index := utils.GetParentNameAndOrdinal(roleID)
@@ -155,13 +155,13 @@ func (c *ModelServingController) calculateRoleScore(mi *workloadv1alpha1.ModelSe
 // calculateServingGroupScore calculates priority information for serving group scale-down with two-level sorting:
 // 1. Status readiness (primary): Not-ready groups should be deleted first
 // 2. Pod deletion cost (secondary): Among groups with same status, lower cost = delete first
-func (c *ModelServingController) calculateServingGroupScore(mi *workloadv1alpha1.ModelServing, groupName string) ServingGroupWithScore {
+func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1.ModelServing, groupName string) ServingGroupWithScore {
 	// Get serving group status from store
-	groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(mi), groupName)
+	groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName)
 	priority := getServingGroupStatusPriority(groupStatus)
 
 	// Get pod deletion cost as secondary factor
-	groupNameValue := fmt.Sprintf("%s/%s", mi.Namespace, groupName)
+	groupNameValue := fmt.Sprintf("%s/%s", ms.Namespace, groupName)
 	pods, err := c.getPodsByIndex(GroupNameKey, groupNameValue)
 	if err != nil {
 		_, index := utils.GetParentNameAndOrdinal(groupName)

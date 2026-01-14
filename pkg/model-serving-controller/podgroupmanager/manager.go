@@ -130,60 +130,60 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 
 // CreateOrUpdatePodGroup creates a PodGroup for the given ServingGroup if it doesn't exist,
 // or updates it if it does.
-func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, mi *workloadv1alpha1.ModelServing, pgName string) error {
-	if !m.shouldCreatePodGroup(mi) {
+func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) error {
+	if !m.shouldCreatePodGroup(ms) {
 		return nil
 	}
 
-	podGroup, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Get(ctx, pgName, metav1.GetOptions{})
+	podGroup, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, pgName, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to get PodGroup %s: %v", pgName, err)
 		}
-		return m.createPodGroup(ctx, mi, pgName)
+		return m.createPodGroup(ctx, ms, pgName)
 	}
 
-	return m.updatePodGroupIfNeeded(ctx, podGroup, mi)
+	return m.updatePodGroupIfNeeded(ctx, podGroup, ms)
 }
 
 // shouldCreatePodGroup checks if gang scheduling or networkTopology scheduling is enabled for the ModelServing.
 // These advanced scheduling features are only effective when used with the "volcano" scheduler.
-func (m *Manager) shouldCreatePodGroup(mi *workloadv1alpha1.ModelServing) bool {
+func (m *Manager) shouldCreatePodGroup(ms *workloadv1alpha1.ModelServing) bool {
 	// If PodGroup CRD is not present, gang scheduling is not supported.
 	if !m.hasPodGroupCRD.Load() {
 		return false
 	}
 
-	schedulerName := mi.Spec.SchedulerName
+	schedulerName := ms.Spec.SchedulerName
 	// If schedulerName is empty, Kubernetes uses the default scheduler, which doesn't support gang/network topology.
 	isVolcano := schedulerName == "volcano"
 
-	hasGangOrTopology := mi.Spec.Template.GangPolicy != nil || mi.Spec.Template.NetworkTopology != nil
+	hasGangOrTopology := ms.Spec.Template.GangPolicy != nil || ms.Spec.Template.NetworkTopology != nil
 
 	return isVolcano && hasGangOrTopology
 }
 
 // createPodGroup creates a PodGroup for group-level gang scheduling
-func (m *Manager) createPodGroup(ctx context.Context, mi *workloadv1alpha1.ModelServing, podGroupName string) error {
+func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, podGroupName string) error {
 	// Calculate total pods and resources for this ServingGroup
 	// minMember: total pods across all roles
 	// minRoleMember: map of roleName to number of pods in that role
 	// minTaskMember: map of taskName to number of pods in that task
 	// minResources: aggregated resource requirements of all pods in the ServingGroup
-	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(mi, podGroupName)
+	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(ms, podGroupName)
 
 	podGroup := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podGroupName,
-			Namespace: mi.Namespace,
+			Namespace: ms.Namespace,
 			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 				workloadv1alpha1.GroupNameLabelKey:        podGroupName,
 			},
 			Annotations: map[string]string{
 				schedulingv1beta1.KubeGroupNameAnnotationKey: podGroupName,
 			},
-			OwnerReferences: m.buildOwnerReference(mi),
+			OwnerReferences: m.buildOwnerReference(ms),
 		},
 		Spec: schedulingv1beta1.PodGroupSpec{
 			MinMember:    int32(minMember),
@@ -191,20 +191,20 @@ func (m *Manager) createPodGroup(ctx context.Context, mi *workloadv1alpha1.Model
 		},
 	}
 
-	if mi.Spec.Template.NetworkTopology != nil {
+	if ms.Spec.Template.NetworkTopology != nil {
 		// set NetworkTopology if configured in ModelServing
-		if mi.Spec.Template.NetworkTopology.GroupPolicy != nil {
-			podGroup.Spec.NetworkTopology = mi.Spec.Template.NetworkTopology.GroupPolicy
+		if ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
+			podGroup.Spec.NetworkTopology = ms.Spec.Template.NetworkTopology.GroupPolicy
 		}
 	}
 
 	if m.hasSubGroupPolicy.Load() {
-		podGroup = appendSubGroupPolicy(mi, podGroup, minRoleMember)
+		podGroup = appendSubGroupPolicy(ms, podGroup, minRoleMember)
 	} else {
 		podGroup.Spec.MinTaskMember = minTaskMember
 	}
 
-	_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Create(ctx, podGroup, metav1.CreateOptions{})
+	_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Create(ctx, podGroup, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
@@ -214,38 +214,38 @@ func (m *Manager) createPodGroup(ctx context.Context, mi *workloadv1alpha1.Model
 }
 
 // To build ownerReferences of PodGroup
-func (m *Manager) buildOwnerReference(mi *workloadv1alpha1.ModelServing) []metav1.OwnerReference {
+func (m *Manager) buildOwnerReference(ms *workloadv1alpha1.ModelServing) []metav1.OwnerReference {
 	return []metav1.OwnerReference{
 		{
 			APIVersion: workloadv1alpha1.GroupVersion.String(),
 			Kind:       workloadv1alpha1.ModelServingKind.Kind,
-			Name:       mi.Name,
-			UID:        mi.UID,
+			Name:       ms.Name,
+			UID:        ms.UID,
 			Controller: ptr.To(true),
 		},
 	}
 }
 
 // calculateRequirements calculates requirements for role-level gang scheduling
-func (m *Manager) calculateRequirements(mi *workloadv1alpha1.ModelServing, podGroupName string) (int, map[string]int32, map[string]int32, corev1.ResourceList) {
+func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing, podGroupName string) (int, map[string]int32, map[string]int32, corev1.ResourceList) {
 	minMember := 0
 	minRoleMember := make(map[string]int32)
 	minTaskMember := make(map[string]int32)
 	minResources := corev1.ResourceList{}
 
 	// For role-level, only include roles up to MinRoleReplicas limit
-	for _, role := range mi.Spec.Template.Roles {
+	for _, role := range ms.Spec.Template.Roles {
 		roleReplicas := int(*role.Replicas)
 		minRoleReplicas := roleReplicas // Default to all replicas
 
-		if mi.Spec.Template.GangPolicy != nil && mi.Spec.Template.GangPolicy.MinRoleReplicas != nil {
-			if minReplicas, exists := mi.Spec.Template.GangPolicy.MinRoleReplicas[role.Name]; exists {
+		if ms.Spec.Template.GangPolicy != nil && ms.Spec.Template.GangPolicy.MinRoleReplicas != nil {
+			if minReplicas, exists := ms.Spec.Template.GangPolicy.MinRoleReplicas[role.Name]; exists {
 				minRoleReplicas = int(minReplicas)
 			}
 		}
 
 		expectReplicas := min(minRoleReplicas, roleReplicas)
-		roleList, err := m.store.GetRoleList(utils.GetNamespaceName(mi), podGroupName, role.Name)
+		roleList, err := m.store.GetRoleList(utils.GetNamespaceName(ms), podGroupName, role.Name)
 		if err != nil {
 			klog.V(2).Infof("Failed to get role list for role %s: %v", role.Name, err)
 		}
@@ -314,13 +314,13 @@ func (m *Manager) GenerateTaskName(roleName string, roleIndex int) string {
 }
 
 // getExistingPodGroups gets existing PodGroups for a ModelServing
-func (m *Manager) getExistingPodGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing) (map[string]*schedulingv1beta1.PodGroup, error) {
+func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) (map[string]*schedulingv1beta1.PodGroup, error) {
 	selector := labels.SelectorFromSet(map[string]string{
-		workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 	})
 
 	// TODO: optimize by get from the cache
-	podGroupList, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).List(ctx, metav1.ListOptions{
+	podGroupList, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector.String(),
 	})
 	if err != nil {
@@ -337,9 +337,9 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, mi *workloadv1alpha1
 }
 
 // updatePodGroupIfNeeded updates a PodGroup if needed for group-level scheduling
-func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, mi *workloadv1alpha1.ModelServing) error {
+func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing) error {
 	// Calculate current requirements
-	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(mi, existing.GetName())
+	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(ms, existing.GetName())
 
 	updated := existing.DeepCopy()
 	updated.Spec.MinMember = int32(minMember)
@@ -347,13 +347,13 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 
 	// Apply network topology policy
 	if m.hasSubGroupPolicy.Load() {
-		updated = appendSubGroupPolicy(mi, updated, minRoleMember)
+		updated = appendSubGroupPolicy(ms, updated, minRoleMember)
 	} else {
 		updated.Spec.MinTaskMember = minTaskMember
 	}
 
 	if hasPodGroupChanged(existing, updated) {
-		_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 		if err != nil {
 			return err
 		}
@@ -363,8 +363,8 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 	return nil
 }
 
-func (m *Manager) DeletePodGroup(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupName string) error {
-	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
+func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
+	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -373,14 +373,14 @@ func (m *Manager) DeletePodGroup(ctx context.Context, mi *workloadv1alpha1.Model
 }
 
 // cleanupPodGroups cleans up all PodGroups for a ModelServing
-func (m *Manager) CleanupPodGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing) error {
-	existingPodGroups, err := m.getExistingPodGroups(ctx, mi)
+func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	existingPodGroups, err := m.getExistingPodGroups(ctx, ms)
 	if err != nil {
 		return fmt.Errorf("failed to get existing PodGroups for cleanup: %v", err)
 	}
 
 	for _, podGroup := range existingPodGroups {
-		err := m.volcanoClient.SchedulingV1beta1().PodGroups(mi.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{})
+		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
 		}
@@ -416,8 +416,8 @@ func calculateRequiredRoleNames(expectedReplicas int, existRoleList []datastore.
 }
 
 // AnnotatePodWithPodGroup annotates a pod with the appropriate PodGroup information
-func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, mi *workloadv1alpha1.ModelServing, groupName, taskName string) {
-	if !m.shouldCreatePodGroup(mi) {
+func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing, groupName, taskName string) {
+	if !m.shouldCreatePodGroup(ms) {
 		return
 	}
 
@@ -480,14 +480,14 @@ func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
 		!reflect.DeepEqual(current.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy)
 }
 
-func appendSubGroupPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {
+func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {
 	subGroupPolicy := make([]schedulingv1beta1.SubGroupPolicySpec, 0, len(minRoleMember))
-	for _, role := range mi.Spec.Template.Roles {
+	for _, role := range ms.Spec.Template.Roles {
 		roleReplicas := int(*role.Replicas)
 		minRoleReplicas := roleReplicas
 
-		if mi.Spec.Template.GangPolicy != nil && mi.Spec.Template.GangPolicy.MinRoleReplicas != nil {
-			if minReplicas, exists := mi.Spec.Template.GangPolicy.MinRoleReplicas[role.Name]; exists {
+		if ms.Spec.Template.GangPolicy != nil && ms.Spec.Template.GangPolicy.MinRoleReplicas != nil {
+			if minReplicas, exists := ms.Spec.Template.GangPolicy.MinRoleReplicas[role.Name]; exists {
 				minRoleReplicas = int(minReplicas)
 			}
 		}
@@ -498,7 +498,7 @@ func appendSubGroupPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulin
 			Name: role.Name,
 			LabelSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+					workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 					workloadv1alpha1.RoleLabelKey:             role.Name,
 				},
 			},
@@ -508,11 +508,11 @@ func appendSubGroupPolicy(mi *workloadv1alpha1.ModelServing, podGroup *schedulin
 		})
 	}
 
-	if mi.Spec.Template.NetworkTopology != nil {
+	if ms.Spec.Template.NetworkTopology != nil {
 		// set SubGroupPolicy if configured in ModelServing
-		if mi.Spec.Template.NetworkTopology.RolePolicy != nil {
+		if ms.Spec.Template.NetworkTopology.RolePolicy != nil {
 			for i := range subGroupPolicy {
-				subGroupPolicy[i].NetworkTopology = mi.Spec.Template.NetworkTopology.RolePolicy
+				subGroupPolicy[i].NetworkTopology = ms.Spec.Template.NetworkTopology.RolePolicy
 			}
 		}
 	}

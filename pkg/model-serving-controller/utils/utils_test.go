@@ -27,7 +27,7 @@ import (
 
 func TestSetCondition(t *testing.T) {
 	t.Run("All groups ready", func(t *testing.T) {
-		mi := &workloadv1alpha1.ModelServing{
+		ms := &workloadv1alpha1.ModelServing{
 			Spec: workloadv1alpha1.ModelServingSpec{},
 			Status: workloadv1alpha1.ModelServingStatus{
 				Conditions: []metav1.Condition{},
@@ -38,17 +38,17 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2, 3}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(mi, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
 		assert.True(t, shouldUpdate)
-		assert.Len(t, mi.Status.Conditions, 1)
-		cond := mi.Status.Conditions[0]
+		assert.Len(t, ms.Status.Conditions, 1)
+		cond := ms.Status.Conditions[0]
 		assert.Equal(t, string(workloadv1alpha1.ModelServingAvailable), cond.Type)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Equal(t, "AllGroupsReady", cond.Reason)
 	})
 
 	t.Run("set updating in progress", func(t *testing.T) {
-		mi := &workloadv1alpha1.ModelServing{
+		ms := &workloadv1alpha1.ModelServing{
 			Spec: workloadv1alpha1.ModelServingSpec{},
 			Status: workloadv1alpha1.ModelServingStatus{
 				Conditions: []metav1.Condition{},
@@ -59,10 +59,10 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2, 3}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(mi, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
 		assert.True(t, shouldUpdate)
-		assert.Len(t, mi.Status.Conditions, 1)
-		cond := mi.Status.Conditions[0]
+		assert.Len(t, ms.Status.Conditions, 1)
+		cond := ms.Status.Conditions[0]
 		assert.Equal(t, string(workloadv1alpha1.ModelServingUpdateInProgress), cond.Type)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)
@@ -71,7 +71,7 @@ func TestSetCondition(t *testing.T) {
 
 	t.Run("set partition, is updating", func(t *testing.T) {
 		partition := int32(2)
-		mi := &workloadv1alpha1.ModelServing{
+		ms := &workloadv1alpha1.ModelServing{
 			Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
@@ -88,10 +88,10 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(mi, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
 		assert.True(t, shouldUpdate)
-		assert.Len(t, mi.Status.Conditions, 1)
-		cond := mi.Status.Conditions[0]
+		assert.Len(t, ms.Status.Conditions, 1)
+		cond := ms.Status.Conditions[0]
 		assert.Equal(t, string(workloadv1alpha1.ModelServingProgressing), cond.Type)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)

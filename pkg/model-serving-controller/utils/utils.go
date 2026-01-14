@@ -93,32 +93,32 @@ func generateWorkerPodName(groupName, roleName string, podIndex int) string {
 	return groupName + "-" + roleName + "-" + strconv.Itoa(podIndex)
 }
 
-func GenerateEntryPod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision string) *corev1.Pod {
+func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision string) *corev1.Pod {
 	entryPodName := generateEntryPodName(groupName, GenerateRoleID(role.Name, roleIndex))
-	entryPod := createBasePod(role, mi, entryPodName, groupName, revision, roleIndex)
+	entryPod := createBasePod(role, ms, entryPodName, groupName, revision, roleIndex)
 	entryPod.ObjectMeta.Labels[workloadv1alpha1.EntryLabelKey] = Entry
 	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
 	entryPod.Spec = role.EntryTemplate.Spec
-	entryPod.Spec.SchedulerName = mi.Spec.SchedulerName
+	entryPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	// Build environment variables into each container of all pod
 	envVars := createCommonEnvVars(role, entryPod, 0)
 	addPodEnvVars(entryPod, envVars...)
 	return entryPod
 }
 
-func GenerateWorkerPod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision string) *corev1.Pod {
+func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision string) *corev1.Pod {
 	workerPodName := generateWorkerPodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
-	workerPod := createBasePod(role, mi, workerPodName, groupName, revision, roleIndex)
+	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleIndex)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
-	workerPod.Spec.SchedulerName = mi.Spec.SchedulerName
+	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	// Build environment variables into each container of all pod
 	envVars := createCommonEnvVars(role, entryPod, podIndex)
 	addPodEnvVars(workerPod, envVars...)
 	return workerPod
 }
 
-func createBasePod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing, name, groupName, revision string, roleIndex int) *corev1.Pod {
+func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, revision string, roleIndex int) *corev1.Pod {
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -126,16 +126,16 @@ func createBasePod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: mi.Namespace,
+			Namespace: ms.Namespace,
 			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 				workloadv1alpha1.GroupNameLabelKey:        groupName,
 				workloadv1alpha1.RoleLabelKey:             role.Name,
 				workloadv1alpha1.RoleIDKey:                GenerateRoleID(role.Name, roleIndex),
 				workloadv1alpha1.RevisionLabelKey:         revision,
 			},
 			OwnerReferences: []metav1.OwnerReference{
-				newModelServingOwnerRef(mi),
+				newModelServingOwnerRef(ms),
 			},
 		},
 	}
@@ -213,28 +213,28 @@ func addEnvVars(container *corev1.Container, newEnvVars ...corev1.EnvVar) {
 }
 
 // newModelServingOwnerRef creates an OwnerReference pointing to the given ModelServing.
-func newModelServingOwnerRef(mi *workloadv1alpha1.ModelServing) metav1.OwnerReference {
+func newModelServingOwnerRef(ms *workloadv1alpha1.ModelServing) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion:         workloadv1alpha1.ModelServingKind.GroupVersion().String(),
 		Kind:               workloadv1alpha1.ModelServingKind.Kind,
-		Name:               mi.Name,
-		UID:                mi.UID,
+		Name:               ms.Name,
+		UID:                ms.UID,
 		BlockOwnerDeletion: ptr.To(true),
 		Controller:         ptr.To(true),
 	}
 }
 
-func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, mi *workloadv1alpha1.ModelServing, serviceSelector map[string]string, groupName, roleLabel string, roleIndex int) error {
+func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, ms *workloadv1alpha1.ModelServing, serviceSelector map[string]string, groupName, roleLabel string, roleIndex int) error {
 	serviceName := generateEntryPodName(groupName, GenerateRoleID(roleLabel, roleIndex))
 	headlessService := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
-			Namespace: mi.Namespace,
+			Namespace: ms.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
-				newModelServingOwnerRef(mi),
+				newModelServingOwnerRef(ms),
 			},
 			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 				workloadv1alpha1.GroupNameLabelKey:        groupName,
 				workloadv1alpha1.RoleLabelKey:             roleLabel,
 				workloadv1alpha1.RoleIDKey:                GenerateRoleID(roleLabel, roleIndex),
@@ -248,7 +248,7 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 	}
 	// create the service in the cluster
 	klog.V(4).Infof("Creating headless service %s", headlessService.Name)
-	_, err := k8sClient.CoreV1().Services(mi.Namespace).Create(ctx, &headlessService, metav1.CreateOptions{})
+	_, err := k8sClient.CoreV1().Services(ms.Namespace).Create(ctx, &headlessService, metav1.CreateOptions{})
 
 	if err != nil {
 		if !apierrors.IsAlreadyExists(err) {
@@ -334,9 +334,9 @@ func IsPodFailed(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodFailed
 }
 
-func ExpectedPodNum(mi *workloadv1alpha1.ModelServing) int {
+func ExpectedPodNum(ms *workloadv1alpha1.ModelServing) int {
 	num := 0
-	for _, role := range mi.Spec.Template.Roles {
+	for _, role := range ms.Spec.Template.Roles {
 		// Calculate the expected number of pod replicas when the role is running normally
 		// For each role, the expected number of pods is (entryPod.num + workerPod.num) * role.replicas
 		num += (1 + int(role.WorkerReplicas)) * int(*role.Replicas)
@@ -386,14 +386,14 @@ func newCondition(condType workloadv1alpha1.ModelServingConditionType, message s
 	}
 }
 
-func SetCondition(mi *workloadv1alpha1.ModelServing, progressingGroups, updatedGroups, currentGroups []int) bool {
+func SetCondition(ms *workloadv1alpha1.ModelServing, progressingGroups, updatedGroups, currentGroups []int) bool {
 	var newCond metav1.Condition
 	found := false
 	shouldUpdate := false
 
 	partition := 0
-	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partition = int(*mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
+		partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
 	}
 
 	// If progressingGroups is empty, all groups are running. In addition, we still need to check revision.
@@ -413,24 +413,24 @@ func SetCondition(mi *workloadv1alpha1.ModelServing, progressingGroups, updatedG
 	}
 
 	newCond.LastTransitionTime = metav1.Now()
-	for i, curCondition := range mi.Status.Conditions {
+	for i, curCondition := range ms.Status.Conditions {
 		if newCond.Type == curCondition.Type {
 			if newCond.Status != curCondition.Status {
-				mi.Status.Conditions[i] = newCond
+				ms.Status.Conditions[i] = newCond
 				shouldUpdate = true
 			}
 			found = true
 		} else {
 			// Available and progressing/updateInprogress are not allowed to be true at the same time.
 			if exclusiveConditionTypes(curCondition, newCond) && curCondition.Status == metav1.ConditionTrue && newCond.Status == metav1.ConditionTrue {
-				mi.Status.Conditions[i].Status = metav1.ConditionFalse
+				ms.Status.Conditions[i].Status = metav1.ConditionFalse
 				shouldUpdate = true
 			}
 		}
 	}
 
 	if newCond.Status == metav1.ConditionTrue && !found {
-		mi.Status.Conditions = append(mi.Status.Conditions, newCond)
+		ms.Status.Conditions = append(ms.Status.Conditions, newCond)
 		shouldUpdate = true
 	}
 
@@ -476,12 +476,12 @@ func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview
 		return nil, nil, fmt.Errorf("failed to decode body: %v", err)
 	}
 
-	var mi workloadv1alpha1.ModelServing
-	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &mi); err != nil {
+	var ms workloadv1alpha1.ModelServing
+	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &ms); err != nil {
 		return nil, nil, fmt.Errorf("failed to decode modelServing: %v", err)
 	}
 
-	return &admissionReview, &mi, nil
+	return &admissionReview, &ms, nil
 }
 
 // SendAdmissionResponse sends the AdmissionReview response back to the client
