@@ -1,3 +1,4 @@
+# DP=2
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
@@ -7,9 +8,6 @@ spec:
   schedulerName: volcano
   replicas: 1
   template:
-    gangPolicy:
-      minRoleReplicas:
-        leader: 1
     restartGracePeriodSeconds: 60
     roles:
       - entryTemplate:
