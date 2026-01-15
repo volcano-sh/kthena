@@ -552,4 +552,10 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 		assert.Equal(t, 404, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
 		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, resp.Body)
 	})
+
+	// Unload LoRA adapters after test is complete
+	t.Log("Unloading LoRA adapters after test...")
+	utils.UnloadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-A")
+	utils.UnloadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-B")
+	t.Log("LoRA adapters unloaded successfully")
 }
