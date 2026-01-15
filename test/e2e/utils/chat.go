@@ -181,3 +181,68 @@ func NewChatMessage(role, content string) ChatMessage {
 		Content: content,
 	}
 }
+
+// LoadLoRAAdapter loads a LoRA adapter directly on the LLM-Mock pod by sending a request to /v1/load_lora_adapter
+// The request is sent directly to the specified pod URL (e.g., http://127.0.0.1:9000/v1/load_lora_adapter)
+// Note: This should NOT be sent through the router, as /v1/load_lora_adapter is a management endpoint
+func LoadLoRAAdapter(t *testing.T, podURL string, loraName string, loraPath string) {
+	loadURL := strings.TrimSuffix(podURL, "/") + "/v1/load_lora_adapter"
+
+	requestBody := map[string]interface{}{
+		"lora_name": loraName,
+		"lora_path": loraPath,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	require.NoError(t, err, "Failed to marshal load LoRA adapter request body")
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequest("POST", loadURL, bytes.NewBuffer(jsonData))
+	require.NoError(t, err, "Failed to create HTTP request")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	require.NoError(t, err, "Failed to send HTTP request")
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "Failed to read response body")
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 for loading LoRA adapter")
+	t.Logf("Successfully loaded LoRA adapter %s: %s", loraName, string(responseBody))
+}
+
+// UnloadLoRAAdapter unloads a LoRA adapter directly on the LLM-Mock pod by sending a request to /v1/unload_lora_adapter
+// The request is sent directly to the specified pod URL (e.g., http://127.0.0.1:9000/v1/unload_lora_adapter)
+// Note: This should NOT be sent through the router, as /v1/unload_lora_adapter is a management endpoint
+func UnloadLoRAAdapter(t *testing.T, podURL string, loraName string) {
+	unloadURL := strings.TrimSuffix(podURL, "/") + "/v1/unload_lora_adapter"
+
+	requestBody := map[string]interface{}{
+		"lora_name": loraName,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	require.NoError(t, err, "Failed to marshal unload LoRA adapter request body")
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequest("POST", unloadURL, bytes.NewBuffer(jsonData))
+	require.NoError(t, err, "Failed to create HTTP request")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	require.NoError(t, err, "Failed to send HTTP request")
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "Failed to read response body")
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 for unloading LoRA adapter")
+	t.Logf("Successfully unloaded LoRA adapter %s: %s", loraName, string(responseBody))
+}

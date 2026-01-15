@@ -41,6 +41,10 @@ func (engine *vllmEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get models from pod %s/%s: HTTP %d", pod.GetNamespace(), pod.GetName(), resp.StatusCode)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
