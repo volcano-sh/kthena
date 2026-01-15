@@ -1,0 +1,70 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: ds-r1-qwen-7b-pd
+  namespace: demo
+  uid: randomUID
+spec:
+  name: ds-r1-qwen-7b-pd
+  owner: example
+  backend:
+    name: ds-r1-qwen-7b-pd
+    type: "vLLMDisaggregated"
+    modelURI: s3://aios_models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+    cacheURI: hostpath:///cache
+    schedulerName: volcano
+    maxReplicas: 2
+    minReplicas: 1
+    env:
+      - name: ENDPOINT
+        value: "https://obs.test.com"
+    envFrom:
+      - secretRef:
+          name: downloader-secrets
+    workers:
+      - type: prefill
+        image: vllm-prefill:latest
+        pods: 1
+        replicas: 1
+        config:
+          served-model-name: "ds-r1-qwen-7b-pd"
+          tensor-parallel-size: 16
+          gpu-memory-utilization: 0.99
+          disable-frontend-multiprocessing: ""
+          max-model-len: 2048
+          trust-remote-code: ""
+          quantization: "ascend"
+          kv-transfer-config:
+            '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+        resources:
+          limits:
+            cpu: "16"
+            huawei.com/ascend-1980: "1"
+            memory: 1Gi
+          requests:
+            cpu: "16"
+            huawei.com/ascend-1980: "1"
+            memory: 1Gi
+      - type: decode
+        image: vllm-decode:latest
+        pods: 1
+        replicas: 1
+        config:
+          served-model-name: "ds-r1-qwen-7b-pd"
+          tensor-parallel-size: 16
+          gpu-memory-utilization: 0.95
+          disable-frontend-multiprocessing: ""
+          max-model-len: 1024
+          trust-remote-code: ""
+          quantization: "ascend"
+          kv-transfer-config:
+            '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+        resources:
+          limits:
+            cpu: "16"
+            huawei.com/ascend-1980: "1"
+            memory: 1Gi
+          requests:
+            cpu: "16"
+            huawei.com/ascend-1980: "1"
+            memory: 1Gi

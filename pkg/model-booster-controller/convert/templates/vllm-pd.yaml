@@ -14,6 +14,7 @@ spec:
       - name: prefill
         replicas: ${PREFILL_REPLICAS}
         entryTemplate:
+          metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
             initContainers: ${INIT_CONTAINERS}
             containers:
@@ -59,15 +60,6 @@ spec:
                     port: 8000
                 volumeMounts: ${VOLUME_MOUNTS}
             volumes: ${VOLUMES}
-            affinity:
-              nodeAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                  nodeSelectorTerms:
-                    - matchExpressions:
-                        - key: node.kubernetes.io/npu.chip.name
-                          operator: In
-                          values:
-                            - Ascend910
         workerReplicas: 0
         workerTemplate:
           spec:
@@ -75,6 +67,7 @@ spec:
       - name: decode
         replicas: ${DECODE_REPLICAS}
         entryTemplate:
+          metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
             initContainers: ${INIT_CONTAINERS}
             containers:
@@ -120,15 +113,6 @@ spec:
                     path: /health
                     port: 8000
                 volumeMounts: ${VOLUME_MOUNTS}
-            affinity:
-              nodeAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                  nodeSelectorTerms:
-                    - matchExpressions:
-                        - key: node.kubernetes.io/npu.chip.name
-                          operator: In
-                          values:
-                            - Ascend910
             volumes: ${VOLUMES}
         workerReplicas: 0
         workerTemplate:

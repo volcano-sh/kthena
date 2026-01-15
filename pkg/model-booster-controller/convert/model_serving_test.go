@@ -116,9 +116,14 @@ func TestCreateModelServingResources(t *testing.T) {
 			expected: loadYaml[workload.ModelServing](t, "testdata/expected/model-serving.yaml"),
 		},
 		{
-			name:     "PD disaggregation",
-			input:    loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model.yaml"),
+			name:     "PD disaggregation NPU",
+			input:    loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-npu.yaml"),
 			expected: loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving.yaml"),
+		},
+		{
+			name:     "PD disaggregation Mooncake",
+			input:    loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-mooncake.yaml"),
+			expected: loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving-mooncake.yaml"),
 		},
 	}
 	for _, tt := range tests {
@@ -127,9 +132,8 @@ func TestCreateModelServingResources(t *testing.T) {
 			if tt.expectErrMsg != "" {
 				assert.Contains(t, err.Error(), tt.expectErrMsg)
 				return
-			} else {
-				assert.NoError(t, err)
 			}
+			assert.NoError(t, err)
 			diff := cmp.Diff(tt.expected, got)
 			if diff != "" {
 				t.Errorf("ModelServing mismatch (-expected +actual):\n%s", diff)

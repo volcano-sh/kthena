@@ -168,12 +168,15 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		"VOLUMES": []*corev1.Volume{
 			cacheVolume,
 		},
-		"MODEL_NAME":                         model.Name,
-		"BACKEND_REPLICAS":                   backend.MinReplicas, // todo: backend replicas
-		"INIT_CONTAINERS":                    initContainers,
-		"MODEL_DOWNLOAD_ENVFROM":             backend.EnvFrom,
-		"ENGINE_PREFILL_COMMAND":             preFillCommand,
-		"ENGINE_DECODE_COMMAND":              decodeCommand,
+		"MODEL_NAME":             model.Name,
+		"BACKEND_REPLICAS":       backend.MinReplicas, // todo: backend replicas
+		"INIT_CONTAINERS":        initContainers,
+		"MODEL_DOWNLOAD_ENVFROM": backend.EnvFrom,
+		"ENGINE_PREFILL_COMMAND": preFillCommand,
+		"ENGINE_DECODE_COMMAND":  decodeCommand,
+		"SERVER_ENTRY_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+		},
 		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
 		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
 		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:8000"),
@@ -311,7 +314,59 @@ func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 		commands = append(commands, "--distributed_executor_backend", "ray")
 		commands = []string{"bash", "-c", fmt.Sprintf("chmod u+x %s && %s leader --ray_cluster_size=%d --num-gpus=%d && %s", VllmMultiNodeServingScriptPath, VllmMultiNodeServingScriptPath, workersMap[workload.ModelWorkerTypeServer].Pods, utils.GetDeviceNum(workersMap[workload.ModelWorkerTypeServer]), strings.Join(commands, " "))}
 	}
+
+	// vllm image does not have mooncake-transfer-engine or nixl installed by default
+	// so we need to install them if GPU is requested
+	kvConnector := getKvConnectorFromConfig(workerConfig)
+	if hasGPU(workersMap) {
+		if kvConnector == "MooncakeConnector" {
+			commands = []string{"bash", "-c", "pip install mooncake-transfer-engine && " + strings.Join(commands, " ")}
+		} else if kvConnector == "NixlConnector" {
+			commands = []string{"bash", "-c", "PIP_DISABLE_PIP_VERSION_CHECK=1 pip install -U --no-cache-dir nixl && " + strings.Join(commands, " ")}
+		}
+	}
+
 	return commands, err
+}
+
+// hasGPU returns true if any worker in the map requests GPU resources (nvidia.com/gpu).
+func hasGPU(workersMap map[workload.ModelWorkerType]*workload.ModelWorker) bool {
+	for _, w := range workersMap {
+		if w == nil {
+			continue
+		}
+		if w.Resources.Limits != nil {
+			if val, ok := w.Resources.Limits["nvidia.com/gpu"]; ok {
+				if val.Value() > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// getKvConnectorFromConfig extracts the kv_connector value from worker config.
+func getKvConnectorFromConfig(config *apiextensionsv1.JSON) string {
+	if config == nil || config.Raw == nil {
+		return ""
+	}
+	kvTransferConfig, err := utils.TryGetField(config.Raw, "kv-transfer-config")
+	if err != nil || kvTransferConfig == nil {
+		return ""
+	}
+	kvTransferConfigStr, ok := kvTransferConfig.(string)
+	if !ok {
+		return ""
+	}
+	kvTransferType, err := utils.TryGetField([]byte(kvTransferConfigStr), "kv_connector")
+	if err != nil || kvTransferType == nil {
+		return ""
+	}
+	if converted, ok := kvTransferType.(string); ok {
+		return converted
+	}
+	return ""
 }
 
 // GetMountPath returns the mount path for the given ModelBackend in the format "/<backend.Name>".

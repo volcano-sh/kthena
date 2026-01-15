@@ -20,13 +20,13 @@ spec:
     maxReplicas: {{ .Values.maxReplicas | default 1 }}
     workers:
       - type: {{ .Values.workerType | default "server" | quote }}
-        image: {{ .Values.workerImage | default "vllm/vllm-openai:latest" | quote }}
+        image: {{ .Values.workerImage | default "quay.io/ascend/vllm-ascend:v0.12.0rc1" | quote }}
         replicas: {{ .Values.workerReplicas | default 1 }}
         pods: {{ .Values.workerPods | default 1 }}
         config:
           served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-8b" | quote }}
           tensor-parallel-size: {{ .Values.tensorParallelSize | default 2 }}
-          enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
+          enforce-eager: ""
         resources:
           limits:
-            nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
+            huawei.com/ascend-1980: {{ .Values.npuLimit | default "2" | quote }}

@@ -20,15 +20,15 @@ spec:
     maxReplicas: {{ .Values.maxReplicas | default 1 }}
     workers:
       - type: {{ .Values.workerType | default "server" | quote }}
-        image: {{ .Values.workerImage | default "vllm/vllm-openai:latest" | quote }}
+        image: {{ .Values.workerImage | default "quay.io/ascend/vllm-ascend:v0.12.0rc1" | quote }}
         replicas: {{ .Values.workerReplicas | default 1 }}
         pods: {{ .Values.workerPods | default 1 }}
         config:
           served-model-name: {{ .Values.modelName | default .Values.name | default "deepseek-r1-distill-qwen-32b" | quote }}
-            tensor-parallel-size: {{ .Values.tensorParallelSize | default 4 }}
-            enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
-            gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.85" }}  # Set GPU memory utilization to 85%
-            max-model-len: {{ .Values.maxModelLen | default "2048" }}
+          tensor-parallel-size: {{ .Values.tensorParallelSize | default 4 }}
+          enforce-eager: ""
+          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.85" }}
+          max-model-len: {{ .Values.maxModelLen | default "2048" }}
         resources:
           limits:
-            nvidia.com/gpu: {{ .Values.gpuLimit | default "4" | quote }}
+            huawei.com/ascend-1980: {{ .Values.npuLimit | default "4" | quote }}
