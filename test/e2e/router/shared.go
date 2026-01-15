@@ -480,9 +480,25 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 		}
 	})
 
+	// Set up port-forward to LLM-Mock pod to load LoRA adapters directly
+	// Note: /v1/load_lora_adapter is a management endpoint that should be called directly on the pod, not through the router
+	t.Log("Setting up port-forward to LLM-Mock pod for LoRA adapter loading...")
+	podList, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=deepseek-r1-1-5b",
+	})
+	require.NoError(t, err, "Failed to list LLM-Mock pods")
+	require.Greater(t, len(podList.Items), 0, "At least one LLM-Mock pod should be available")
+
+	podName := podList.Items[0].Name
+	t.Logf("Using pod %s for LoRA adapter loading", podName)
+
+	pf, err := utils.SetupPortForwardToPod(testNamespace, podName, "9000", "8000")
+	require.NoError(t, err, "Failed to setup port-forward to LLM-Mock pod")
+	defer pf.Close()
+
 	t.Log("Loading LoRA adapters on backend...")
-	utils.LoadLoRAAdapter(t, utils.DefaultRouterURL, "lora-A", "/models/lora-A")
-	utils.LoadLoRAAdapter(t, utils.DefaultRouterURL, "lora-B", "/models/lora-B")
+	utils.LoadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-A", "/models/lora-A")
+	utils.LoadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-B", "/models/lora-B")
 	t.Log("LoRA adapters loaded successfully")
 
 	t.Log("Waiting for Router to discover LoRA adapters on pods...")

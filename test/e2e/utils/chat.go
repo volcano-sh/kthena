@@ -182,16 +182,15 @@ func NewChatMessage(role, content string) ChatMessage {
 	}
 }
 
-// LoadLoRAAdapter loads a LoRA adapter on the backend by sending a request to /v1/load_lora_adapter
-// The request is sent through the router at the specified base URL (e.g., http://127.0.0.1:8080)
-func LoadLoRAAdapter(t *testing.T, baseURL string, loraName string, loraPath string) {
-	loadURL := strings.TrimSuffix(baseURL, "/v1/chat/completions") + "/v1/load_lora_adapter"
+// LoadLoRAAdapter loads a LoRA adapter directly on the LLM-Mock pod by sending a request to /v1/load_lora_adapter
+// The request is sent directly to the specified pod URL (e.g., http://127.0.0.1:9000/v1/load_lora_adapter)
+// Note: This should NOT be sent through the router, as /v1/load_lora_adapter is a management endpoint
+func LoadLoRAAdapter(t *testing.T, podURL string, loraName string, loraPath string) {
+	loadURL := strings.TrimSuffix(podURL, "/") + "/v1/load_lora_adapter"
 
 	requestBody := map[string]interface{}{
-		"model":     loraName, // Router requires "model" field to match ModelRoute
-		"prompt":    "",       // Router requires "prompt" or "messages" field, use empty string for management endpoints
-		"lora_name": loraName, // LLM-Mock requires "lora_name" field
-		"lora_path": loraPath, // LLM-Mock requires "lora_path" field
+		"lora_name": loraName,
+		"lora_path": loraPath,
 	}
 
 	jsonData, err := json.Marshal(requestBody)
