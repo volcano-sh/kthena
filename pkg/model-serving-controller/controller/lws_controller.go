@@ -43,16 +43,46 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
+func InitializeLWSController(
+	cfg *rest.Config,
+	kubeClient kubernetes.Interface,
+	kthenaClient kthenaclientset.Interface,
+) (*LWSController, error) {
+	exists, err := ResourceExists(kubeClient, "leaderworkerset.x-k8s.io/v1", "LeaderWorkerSet")
+	if err != nil {
+		return nil, fmt.Errorf("failed to check LWS CRD existence: %v", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	lwsClient, err := lwsclientset.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create lws client: %v", err)
+	}
+
+	lwsInformerFactory := lwsinformers.NewSharedInformerFactory(lwsClient, time.Second*30)
+	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(kthenaClient, time.Second*30)
+
+	controller, err := NewLWSController(kubeClient, kthenaClient, lwsClient, lwsInformerFactory, kthenaInformerFactory)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create LWS controller: %v", err)
+	}
+
+	return controller, nil
+}
+
 // LWSController reconciles a LeaderWorkerSet object
 type LWSController struct {
-	kubeClient   kubernetes.Interface
-	kthenaClient kthenaclientset.Interface
-	lwsClient    lwsclientset.Interface
-
-	lwsLister          lwslisters.LeaderWorkerSetLister
-	lwsSynced          cache.InformerSynced
-	modelServingLister kthenalisters.ModelServingLister
-	modelServingSynced cache.InformerSynced
+	kubeClient            kubernetes.Interface
+	kthenaClient          kthenaclientset.Interface
+	lwsClient             lwsclientset.Interface
+	lwsInformerFactory    lwsinformers.SharedInformerFactory
+	kthenaInformerFactory kthenainformers.SharedInformerFactory
+	lwsLister             lwslisters.LeaderWorkerSetLister
+	lwsSynced             cache.InformerSynced
+	modelServingLister    kthenalisters.ModelServingLister
+	modelServingSynced    cache.InformerSynced
 
 	workqueue workqueue.TypedRateLimitingInterface[string]
 }
@@ -68,13 +98,15 @@ func NewLWSController(
 	modelServingInformerInstance := kthenaInformer.Workload().V1alpha1().ModelServings()
 
 	c := &LWSController{
-		kubeClient:         kubeClient,
-		kthenaClient:       kthenaClient,
-		lwsClient:          lwsClient,
-		lwsLister:          lwsInformerInstance.Lister(),
-		lwsSynced:          lwsInformerInstance.Informer().HasSynced,
-		modelServingLister: modelServingInformerInstance.Lister(),
-		modelServingSynced: modelServingInformerInstance.Informer().HasSynced,
+		kubeClient:            kubeClient,
+		kthenaClient:          kthenaClient,
+		lwsClient:             lwsClient,
+		lwsInformerFactory:    lwsInformer,
+		kthenaInformerFactory: kthenaInformer,
+		lwsLister:             lwsInformerInstance.Lister(),
+		lwsSynced:             lwsInformerInstance.Informer().HasSynced,
+		modelServingLister:    modelServingInformerInstance.Lister(),
+		modelServingSynced:    modelServingInformerInstance.Informer().HasSynced,
 		workqueue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "LeaderWorkerSets"},
@@ -116,6 +148,9 @@ func (c *LWSController) Run(ctx context.Context, workers int) error {
 	defer c.workqueue.ShutDown()
 
 	klog.Info("Starting LWS controller")
+
+	c.lwsInformerFactory.Start(ctx.Done())
+	c.kthenaInformerFactory.Start(ctx.Done())
 
 	klog.Info("Waiting for informer caches to sync")
 	if ok := cache.WaitForCacheSync(ctx.Done(), c.lwsSynced, c.modelServingSynced); !ok {
@@ -335,53 +370,7 @@ func (c *LWSController) updateLWSStatus(ctx context.Context, lws *lwsv1.LeaderWo
 	return nil
 }
 
-func StartLWSController(ctx context.Context, cfg *rest.Config) {
-	kubeClient, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		klog.Errorf("Failed to create kube client for LWS check: %v", err)
-		return
-	}
-
-	exists, err := resourceExists(kubeClient, "leaderworkerset.x-k8s.io/v1", "LeaderWorkerSet")
-	if err != nil {
-		klog.Errorf("Failed to check LWS CRD existence: %v", err)
-		return
-	}
-	if !exists {
-		klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
-		return
-	}
-
-	lwsClient, err := lwsclientset.NewForConfig(cfg)
-	if err != nil {
-		klog.Errorf("Failed to create lws client: %v", err)
-		return
-	}
-
-	kthenaClient, err := kthenaclientset.NewForConfig(cfg)
-	if err != nil {
-		klog.Errorf("Failed to create kthena client: %v", err)
-		return
-	}
-
-	lwsInformerFactory := lwsinformers.NewSharedInformerFactory(lwsClient, time.Second*30)
-	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(kthenaClient, time.Second*30)
-
-	controller, err := NewLWSController(kubeClient, kthenaClient, lwsClient, lwsInformerFactory, kthenaInformerFactory)
-	if err != nil {
-		klog.Errorf("Failed to create LWS controller: %v", err)
-		return
-	}
-
-	lwsInformerFactory.Start(ctx.Done())
-	kthenaInformerFactory.Start(ctx.Done())
-
-	if err = controller.Run(ctx, 1); err != nil {
-		klog.Errorf("Error running LWS controller: %s", err.Error())
-	}
-}
-
-func resourceExists(client kubernetes.Interface, groupVersion string, kind string) (bool, error) {
+func ResourceExists(client kubernetes.Interface, groupVersion string, kind string) (bool, error) {
 	resources, err := client.Discovery().ServerResourcesForGroupVersion(groupVersion)
 	if err != nil {
 		if errors.IsNotFound(err) {
