@@ -97,7 +97,7 @@ spec:
                 command:
                   - bash
                   - "-c"
-                  - "chmod u+x /vllm-workspace/vllm/examples/online_serving/multi-node-serving.sh && /vllm-workspace/vllm/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
+                  - "chmod u+x examples/online_serving/multi-node-serving.sh && examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
                 env: ${WORKER_ENV}
                 resources: ${ENGINE_SERVER_RESOURCES}
                 volumeMounts: ${VOLUME_MOUNTS}

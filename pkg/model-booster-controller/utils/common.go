@@ -46,9 +46,11 @@ func TryGetField(config []byte, key string) (any, error) {
 
 func GetDeviceNum(worker *workloadv1alpha1.ModelWorker) int64 {
 	sum := int64(0)
-	if worker.Resources.Requests != nil {
+	// For GPU (extended) resources, if limits are specified, Kubernetes defaults requests to match limits.
+	// Requests may be absent according to k8s docs, so we rely on limits here: https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/
+	if worker.Resources.Limits != nil {
 		for _, xpu := range XPUList {
-			if val, exists := worker.Resources.Requests[xpu]; exists {
+			if val, exists := worker.Resources.Limits[xpu]; exists {
 				sum += val.Value()
 			}
 		}
