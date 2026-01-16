@@ -67,6 +67,7 @@ func SetupController(ctx context.Context, cc Config) {
 
 	var mc *modelbooster.ModelBoosterController
 	var msc *modelserving.ModelServingController
+	var lwsc *modelserving.LWSController
 	var ac *autoscaler.AutoscaleController
 
 	for ctrl, enable := range cc.Controllers {
@@ -78,6 +79,12 @@ func SetupController(ctx context.Context, cc Config) {
 				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient, apiextClient)
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controller: %v", err)
+				}
+				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
+				if err != nil {
+					klog.Errorf("Failed to initialize LWS controller: %v", err)
+				} else if lwsc == nil {
+					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
 			case AutoscalerController:
 				namespace, err := utils.GetInClusterNameSpace()
@@ -97,6 +104,15 @@ func SetupController(ctx context.Context, cc Config) {
 		if msc != nil {
 			go msc.Run(ctx, cc.Workers)
 			klog.Info("ModelServing controller started")
+
+			if lwsc != nil {
+				go func() {
+					if err = lwsc.Run(ctx, 1); err != nil {
+						klog.Errorf("Error running LWS controller: %s", err.Error())
+					}
+				}()
+				klog.Info("ModelServing lws controller started")
+			}
 		}
 		if ac != nil {
 			go ac.Run(ctx)

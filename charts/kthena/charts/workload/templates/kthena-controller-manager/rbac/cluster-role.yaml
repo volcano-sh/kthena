@@ -148,3 +148,13 @@ rules:
       - get
       - update
       - patch
+  - apiGroups:
+      - leaderworkerset.x-k8s.io
+    resources:
+      - leaderworkersets
+      - leaderworkersets/status
+    verbs:
+      - get
+      - list
+      - watch
+      - update
