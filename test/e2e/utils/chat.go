@@ -181,3 +181,27 @@ func NewChatMessage(role, content string) ChatMessage {
 		Content: content,
 	}
 }
+func SendChatRequest(t *testing.T, modelName string, messages []ChatMessage) *http.Response {
+	return SendChatRequestWithURL(t, DefaultRouterURL, modelName, messages)
+}
+
+func SendChatRequestWithURL(t *testing.T, url string, modelName string, messages []ChatMessage) *http.Response {
+	requestBody := ChatCompletionsRequest{
+		Model:    modelName,
+		Messages: messages,
+		Stream:   false,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	require.NoError(t, err, "Failed to marshal request body")
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	require.NoError(t, err, "Failed to create HTTP request")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err, "Failed to send HTTP request")
+
+	return resp
+}

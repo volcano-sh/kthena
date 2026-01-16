@@ -18,6 +18,8 @@ package router
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -449,5 +451,272 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		updatedModelRoute.Spec.Rules[0].TargetModels[1].Weight = &weight30Restore
 		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, updatedModelRoute, metav1.UpdateOptions{})
 		require.NoError(t, err, "Failed to restore ModelRoute weights")
+	})
+}
+
+func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayApi bool, kthenaNamespace string) {
+	const (
+		rateLimitWindowSeconds = 60
+		windowResetBuffer      = 10 * time.Second
+		inputTokenLimit        = 30
+		outputTokenLimit       = 100
+		tokensPerRequest       = 10
+	)
+	ctx := context.Background()
+
+	standardMessage := []utils.ChatMessage{
+		utils.NewChatMessage("user", "hello world"),
+	}
+
+	// Test 1: Verify input token rate limit enforcement (30 tokens/minute)
+	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
+		t.Log("Test 1: Verifying input token rate limit")
+
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		// Calculate expected successful requests
+		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
+		if expectedSuccessfulRequests == 0 {
+			t.Fatalf("Invalid test configuration: inputTokenLimit (%d) / tokensPerRequest (%d) = 0",
+				inputTokenLimit, tokensPerRequest)
+		}
+
+		// Send requests until we exhaust the quota
+		for i := 0; i < expectedSuccessfulRequests; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			responseBody, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			require.NoError(t, readErr, "Failed to read response body on request %d", i+1)
+			require.Equal(t, http.StatusOK, resp.StatusCode,
+				"Request %d should succeed (consumed ~%d/%d tokens). Response: %s",
+				i+1, (i+1)*tokensPerRequest, inputTokenLimit, string(responseBody))
+			t.Logf("Request %d succeeded (consumed ~%d/%d tokens)", i+1, (i+1)*tokensPerRequest, inputTokenLimit)
+		}
+
+		// Next request should be rate limited (quota exhausted)
+		rateLimitedResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+		defer rateLimitedResp.Body.Close()
+
+		assert.Equal(t, http.StatusTooManyRequests, rateLimitedResp.StatusCode,
+			"Request %d should be rate limited", expectedSuccessfulRequests+1)
+
+		errorBody, err := io.ReadAll(rateLimitedResp.Body)
+		require.NoError(t, err, "Failed to read rate limit error response body")
+		assert.Contains(t, strings.ToLower(string(errorBody)), "rate limit",
+			"Rate limit error response must contain descriptive message")
+
+		t.Logf("Input token rate limit enforced after %d requests", expectedSuccessfulRequests)
+	})
+
+	// Test 2 Verify rate limit window accuracy and persistence
+	t.Run("VerifyRateLimitWindowAccuracy", func(t *testing.T) {
+		t.Log("Test 2: Verifying rate limit window accuracy...")
+
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		// Exhaust quota to ensure rate limit is active
+		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
+		for i := 0; i < expectedSuccessfulRequests; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed", i+1)
+		}
+
+		// Verify rate limit is active
+		rateLimitedResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+		rateLimitedResp.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, rateLimitedResp.StatusCode,
+			"Rate limit should be active after exhausting quota")
+
+		const halfWindowDuration = 10 * time.Second
+		t.Logf("Waiting %v (within rate limit window)...", halfWindowDuration)
+		time.Sleep(halfWindowDuration)
+
+		midWindowResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+		midWindowResp.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, midWindowResp.StatusCode,
+			"Rate limit should persist within the time window")
+
+		// Verify rate limit resets after window expiration (65 seconds > 60 seconds)
+		remainingWindowDuration := (rateLimitWindowSeconds * time.Second) - halfWindowDuration + windowResetBuffer
+		t.Logf("Waiting additional %v for window reset (total: %v)...",
+			remainingWindowDuration, halfWindowDuration+remainingWindowDuration)
+		time.Sleep(remainingWindowDuration)
+
+		postWindowResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+		postWindowResp.Body.Close()
+		assert.Equal(t, http.StatusOK, postWindowResp.StatusCode,
+			"Request should succeed after rate limit window expires")
+
+		t.Log(" Rate limit window accuracy verified")
+	})
+
+	// Test 3: Verify rate limit reset mechanism
+	t.Run("VerifyRateLimitResetMechanism", func(t *testing.T) {
+		t.Log("Test 3: Verifying rate limit reset mechanism...")
+
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		// Consume the quota
+		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
+		for i := 0; i < expectedSuccessfulRequests; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode,
+				"Request %d should succeed", i+1)
+		}
+
+		// Confirm rate limiting is active
+		preResetResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+		preResetResp.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, preResetResp.StatusCode,
+			"Rate limit should be active before window reset")
+
+		// Wait for complete window reset
+		windowResetDuration := (rateLimitWindowSeconds * time.Second) + windowResetBuffer
+		t.Logf("Waiting %v for complete rate limit window reset...", windowResetDuration)
+		time.Sleep(windowResetDuration)
+
+		// Verify quota is restored after reset (should allow 2 requests again)
+		for i := 0; i < expectedSuccessfulRequests; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode,
+				"Request %d should succeed after reset", i+1)
+		}
+
+		// Verify rate limiting kicks in again after consuming quota
+		postResetRateLimitedResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+		postResetRateLimitedResp.Body.Close()
+		assert.Equal(t, http.StatusTooManyRequests, postResetRateLimitedResp.StatusCode,
+			"Rate limit should be active again after consuming quota")
+
+		t.Logf("Rate limit reset mechanism verified (quota restored: %d requests)", expectedSuccessfulRequests)
+	})
+
+	// Test 4: Verify output token rate limit enforcement
+	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
+		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
+
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		// Update ModelRoute to disable input token limit
+		createdModelRoute.Spec.RateLimit.InputTokensPerUnit = nil
+		outputLimit := uint32(outputTokenLimit)
+		createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
+
+		updatedModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to update ModelRoute")
+
+		// Wait for update to propagate
+		time.Sleep(2 * time.Second)
+
+		longerPrompt := []utils.ChatMessage{
+			utils.NewChatMessage("user", "Write a detailed explanation of rate limiting"),
+		}
+
+		// Send requests until we hit the output token limit
+		var successfulRequests int
+		var totalResponseSize int
+		var rateLimited bool
+
+		for attempt := 0; attempt < 20; attempt++ {
+			resp := utils.SendChatRequest(t, updatedModelRoute.Spec.ModelName, longerPrompt)
+			responseBody, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			require.NoError(t, readErr, "Failed to read response body")
+
+			if resp.StatusCode == http.StatusOK {
+				successfulRequests++
+				totalResponseSize += len(responseBody)
+				t.Logf("Request %d succeeded, response size: %d bytes (total: %d bytes)",
+					attempt+1, len(responseBody), totalResponseSize)
+			} else if resp.StatusCode == http.StatusTooManyRequests {
+				t.Logf("Output rate limited after %d requests", successfulRequests)
+				assert.Contains(t, strings.ToLower(string(responseBody)), "rate limit",
+					"Output rate limit error should mention rate limit")
+				rateLimited = true
+				break
+			} else {
+				t.Fatalf("Unexpected HTTP status code %d on attempt %d", resp.StatusCode, attempt+1)
+			}
+		}
+
+		// Verify output rate limiting was enforced
+		assert.True(t, rateLimited, "Expected output rate limiting to be enforced")
+		assert.Greater(t, successfulRequests, 0,
+			"Expected at least one successful request before output rate limiting")
+
+		t.Logf(" Output token rate limit enforced after %d requests", successfulRequests)
 	})
 }
