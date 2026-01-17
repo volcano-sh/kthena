@@ -262,7 +262,11 @@ func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing, podGr
 		roleNames := calculateRequiredRoleNames(expectReplicas, roleList, role.Name)
 
 		// Only include role replicas up to the minimum required
-		podsPerTask := 1 + int(role.WorkerReplicas) // entry + workers
+		workerReplicase := 0
+		if role.WorkerReplicas != nil {
+			workerReplicase = int(*role.WorkerReplicas)
+		}
+		podsPerTask := 1 + workerReplicase // entry + workers
 		minMember = minMember + (podsPerTask * expectReplicas)
 
 		if m.hasSubGroupPolicy.Load() {
@@ -277,7 +281,7 @@ func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing, podGr
 		// Aggregate resources
 		minResources = m.aggregateResources(minResources, &role.EntryTemplate.Spec, expectReplicas)
 		if role.WorkerTemplate != nil {
-			for i := 0; i < int(role.WorkerReplicas); i++ {
+			for i := 0; i < workerReplicase; i++ {
 				minResources = m.aggregateResources(minResources, &role.WorkerTemplate.Spec, expectReplicas)
 			}
 		}

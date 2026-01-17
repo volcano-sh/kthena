@@ -69,14 +69,14 @@ func TestCalculateRequirements(t *testing.T) {
 						{
 							Name:           "prefill",
 							Replicas:       ptr.To[int32](2),
-							WorkerReplicas: 3,
+							WorkerReplicas: ptr.To[int32](3),
 							EntryTemplate:  *createPodTemplate("prefill-entry", "1", "2Gi"),
 							WorkerTemplate: createPodTemplate("prefill-worker", "2", "4Gi"),
 						},
 						{
 							Name:           "decode",
 							Replicas:       ptr.To[int32](1),
-							WorkerReplicas: 2,
+							WorkerReplicas: ptr.To[int32](2),
 							EntryTemplate:  *createPodTemplate("decode-entry", "1", "1Gi"),
 							WorkerTemplate: createPodTemplate("decode-worker", "1", "2Gi"),
 						},
@@ -235,7 +235,7 @@ func TestCalculateRequirements(t *testing.T) {
 
 		// Modify one role to have no worker template
 		ms.Spec.Template.Roles[1].WorkerTemplate = nil
-		ms.Spec.Template.Roles[1].WorkerReplicas = 0
+		ms.Spec.Template.Roles[1].WorkerReplicas = nil
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
 		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
@@ -272,7 +272,7 @@ func TestCalculateRequirements(t *testing.T) {
 		manager.hasSubGroupPolicy.Store(true)
 
 		// Set worker replicas to zero for one role
-		ms.Spec.Template.Roles[0].WorkerReplicas = 0
+		ms.Spec.Template.Roles[0].WorkerReplicas = nil
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.

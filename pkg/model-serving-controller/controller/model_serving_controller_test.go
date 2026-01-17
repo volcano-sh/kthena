@@ -3543,7 +3543,7 @@ func TestCheckRoleReady(t *testing.T) {
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:           "prefill",
-						WorkerReplicas: workerReplicas,
+						WorkerReplicas: &workerReplicas,
 						Replicas:       ptr.To[int32](1),
 					},
 				},
@@ -3680,7 +3680,7 @@ func TestManageHeadlessService(t *testing.T) {
 							{
 								Name:           "prefill",
 								Replicas:       ptr.To[int32](2),
-								WorkerReplicas: 2,
+								WorkerReplicas: ptr.To[int32](2),
 								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
 									Spec: corev1.PodSpec{
 										Containers: []corev1.Container{
@@ -3718,7 +3718,7 @@ func TestManageHeadlessService(t *testing.T) {
 							{
 								Name:           "prefill",
 								Replicas:       ptr.To[int32](1),
-								WorkerReplicas: 2,
+								WorkerReplicas: ptr.To[int32](2),
 								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
 									Spec: corev1.PodSpec{
 										Containers: []corev1.Container{
@@ -3765,10 +3765,8 @@ func TestManageHeadlessService(t *testing.T) {
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
-								Name:           "prefill",
-								Replicas:       ptr.To[int32](1),
-								WorkerReplicas: 0,
-								WorkerTemplate: nil, // No worker template
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
 							},
 						},
 					},
@@ -3795,7 +3793,7 @@ func TestManageHeadlessService(t *testing.T) {
 							{
 								Name:           "prefill",
 								Replicas:       ptr.To[int32](1),
-								WorkerReplicas: 2,
+								WorkerReplicas: ptr.To[int32](2),
 								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
 									Spec: corev1.PodSpec{
 										Containers: []corev1.Container{

@@ -158,10 +158,15 @@ func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metada
 }
 
 func createCommonEnvVars(role workloadv1alpha1.Role, entryPod *corev1.Pod, workerIndex int) []corev1.EnvVar {
+	workerReplicas := 0
+	if role.WorkerReplicas != nil {
+		workerReplicas = int(*role.WorkerReplicas)
+	}
+
 	return []corev1.EnvVar{
 		{
 			Name:  workloadv1alpha1.GroupSizeEnv,
-			Value: strconv.Itoa(int(role.WorkerReplicas) + 1),
+			Value: strconv.Itoa(workerReplicas + 1),
 		},
 		{
 			Name: workloadv1alpha1.EntryAddressEnv,
@@ -339,7 +344,11 @@ func ExpectedPodNum(ms *workloadv1alpha1.ModelServing) int {
 	for _, role := range ms.Spec.Template.Roles {
 		// Calculate the expected number of pod replicas when the role is running normally
 		// For each role, the expected number of pods is (entryPod.num + workerPod.num) * role.replicas
-		num += (1 + int(role.WorkerReplicas)) * int(*role.Replicas)
+		workerReplicas := 0
+		if role.WorkerReplicas != nil {
+			workerReplicas = int(*role.WorkerReplicas)
+		}
+		num += (1 + workerReplicas) * int(*role.Replicas)
 	}
 	return num
 }

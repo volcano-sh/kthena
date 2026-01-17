@@ -142,7 +142,6 @@ func createInvalidModelServing() *workload.ModelServing {
 								},
 							},
 						},
-						WorkerReplicas: 0,
 					},
 				},
 			},
