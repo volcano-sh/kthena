@@ -37,6 +37,9 @@ func TestAccessLogEntry_ToJSON(t *testing.T) {
 		ModelServer:                "default/llama2-server",
 		SelectedPod:                "llama2-deployment-5f7b8c9d-xk2p4",
 		RequestID:                  "test-request-id",
+		Gateway:                    "default/test-gateway",
+		HTTPRoute:                  "default/test-httproute",
+		InferencePool:              "default/test-inferencepool",
 		InputTokens:                150,
 		OutputTokens:               75,
 		DurationTotal:              2350,
@@ -68,6 +71,9 @@ func TestAccessLogEntry_ToJSON(t *testing.T) {
 	assert.Equal(t, "default/llama2-route-v1", parsed["model_route"])
 	assert.Equal(t, "default/llama2-server", parsed["model_server"])
 	assert.Equal(t, "llama2-deployment-5f7b8c9d-xk2p4", parsed["selected_pod"])
+	assert.Equal(t, "default/test-gateway", parsed["gateway"])
+	assert.Equal(t, "default/test-httproute", parsed["http_route"])
+	assert.Equal(t, "default/test-inferencepool", parsed["inference_pool"])
 	assert.Equal(t, float64(150), parsed["input_tokens"])
 	assert.Equal(t, float64(75), parsed["output_tokens"])
 
@@ -90,6 +96,9 @@ func TestAccessLogEntry_ToText(t *testing.T) {
 		ModelServer:                "default/llama2-server",
 		SelectedPod:                "llama2-deployment-5f7b8c9d-xk2p4",
 		RequestID:                  "test-request-id",
+		Gateway:                    "default/test-gateway",
+		HTTPRoute:                  "default/test-httproute",
+		InferencePool:              "default/test-inferencepool",
 		InputTokens:                150,
 		OutputTokens:               75,
 		DurationTotal:              2350,
@@ -118,6 +127,9 @@ func TestAccessLogEntry_ToText(t *testing.T) {
 		`model_server=default/llama2-server`,
 		`selected_pod=llama2-deployment-5f7b8c9d-xk2p4`,
 		`request_id=test-request-id`,
+		`gateway=default/test-gateway`,
+		`http_route=default/test-httproute`,
+		`inference_pool=default/test-inferencepool`,
 		`tokens=150/75`,
 		`timings=2350ms(45+2180+5)`,
 	}
@@ -139,6 +151,9 @@ func TestAccessLogEntry_WithError(t *testing.T) {
 			Message: "Model inference timeout after 30s",
 		},
 		ModelName:                  "llama2-7b",
+		Gateway:                    "default/test-gateway",
+		HTTPRoute:                  "default/test-httproute",
+		InferencePool:              "default/test-inferencepool",
 		DurationTotal:              100,
 		DurationRequestProcessing:  50,
 		DurationUpstreamProcessing: 0,
@@ -163,12 +178,18 @@ func TestAccessLogEntry_WithError(t *testing.T) {
 	errorInfo := parsed["error"].(map[string]interface{})
 	assert.Equal(t, "timeout", errorInfo["type"])
 	assert.Equal(t, "Model inference timeout after 30s", errorInfo["message"])
+	assert.Equal(t, "default/test-gateway", parsed["gateway"])
+	assert.Equal(t, "default/test-httproute", parsed["http_route"])
+	assert.Equal(t, "default/test-inferencepool", parsed["inference_pool"])
 
 	// Test text format
 	config.Format = FormatText
 	output, err = logger.formatText(entry)
 	require.NoError(t, err)
 	assert.Contains(t, output, "error=timeout:Model inference timeout after 30s")
+	assert.Contains(t, output, "gateway=default/test-gateway")
+	assert.Contains(t, output, "http_route=default/test-httproute")
+	assert.Contains(t, output, "inference_pool=default/test-inferencepool")
 }
 
 func TestAccessLogContext_Lifecycle(t *testing.T) {
@@ -203,6 +224,11 @@ func TestAccessLogContext_Lifecycle(t *testing.T) {
 	assert.Equal(t, "rate_limit", ctx.Error.Type)
 	assert.Equal(t, "Too many requests", ctx.Error.Message)
 
+	// Set Gateway API info
+	ctx.Gateway = "default/test-gateway"
+	ctx.HTTPRoute = "default/test-httproute"
+	ctx.InferencePool = "default/test-inferencepool"
+
 	// Mark timing phases
 	time.Sleep(1 * time.Millisecond) // Ensure time difference
 	ctx.MarkRequestProcessingEnd()
@@ -230,6 +256,9 @@ func TestAccessLogContext_Lifecycle(t *testing.T) {
 	assert.Greater(t, entry.DurationTotal, int64(0))
 	assert.NotNil(t, entry.Error)
 	assert.Equal(t, "rate_limit", entry.Error.Type)
+	assert.Equal(t, "default/test-gateway", entry.Gateway)
+	assert.Equal(t, "default/test-httproute", entry.HTTPRoute)
+	assert.Equal(t, "default/test-inferencepool", entry.InferencePool)
 }
 
 func TestNoopAccessLogger(t *testing.T) {
