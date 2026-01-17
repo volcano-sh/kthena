@@ -24,6 +24,7 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 )
 
 func TestValidPodNameLength(t *testing.T) {
@@ -47,7 +48,7 @@ func TestValidPodNameLength(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
+								{Name: "role1", Replicas: &replicas, WorkerReplicas: ptr.To[int32](1)},
 							},
 						},
 					},
@@ -66,7 +67,7 @@ func TestValidPodNameLength(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
+								{Name: "role1", Replicas: &replicas, WorkerReplicas: ptr.To[int32](2)},
 							},
 						},
 					},
@@ -402,8 +403,8 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(3),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: ptr.To[int32](1)},
+								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: ptr.To[int32](1)},
 							},
 						},
 					},
@@ -419,8 +420,8 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32PtrNil(),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: ptr.To[int32](1)},
+								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: ptr.To[int32](1)},
 							},
 						},
 					},
@@ -442,8 +443,8 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(-1),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: ptr.To[int32](1)},
+								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: ptr.To[int32](1)},
 							},
 						},
 					},
@@ -465,8 +466,8 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(3),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(-1), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{Name: "role1", Replicas: int32Ptr(-1), WorkerReplicas: ptr.To[int32](1)},
+								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: ptr.To[int32](1)},
 							},
 						},
 					},
@@ -488,8 +489,8 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(3),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32PtrNil(), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{Name: "role1", Replicas: int32PtrNil(), WorkerReplicas: ptr.To[int32](1)},
+								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: ptr.To[int32](1)},
 							},
 						},
 					},
@@ -558,7 +559,7 @@ func TestValidateGangPolicy(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -583,7 +584,7 @@ func TestValidateGangPolicy(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -614,7 +615,7 @@ func TestValidateGangPolicy(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -645,7 +646,7 @@ func TestValidateGangPolicy(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -676,7 +677,7 @@ func TestValidateGangPolicy(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 							},
 							GangPolicy: nil,
@@ -697,7 +698,7 @@ func TestValidateGangPolicy(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -744,7 +745,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 							},
 						},
@@ -762,9 +763,8 @@ func TestValidateWorkerReplicas(t *testing.T) {
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
 								{
-									Name:           "worker",
-									Replicas:       &roleReplicas,
-									WorkerReplicas: 0,
+									Name:     "worker",
+									Replicas: &roleReplicas,
 								},
 							},
 						},
@@ -784,7 +784,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: -1,
+									WorkerReplicas: ptr.To[int32](-1),
 								},
 							},
 						},
@@ -794,7 +794,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 			want: field.ErrorList{
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("workerReplicas"),
-					int32(-1),
+					ptr.To[int32](-1),
 					"workerReplicas must be a non-negative integer",
 				),
 			},
@@ -810,12 +810,12 @@ func TestValidateWorkerReplicas(t *testing.T) {
 								{
 									Name:           "worker1",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: ptr.To[int32](3),
 								},
 								{
 									Name:           "worker2",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: -1,
+									WorkerReplicas: ptr.To[int32](-1),
 								},
 							},
 						},
@@ -825,7 +825,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 			want: field.ErrorList{
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("roles").Index(1).Child("workerReplicas"),
-					int32(-1),
+					ptr.To[int32](-1),
 					"workerReplicas must be a non-negative integer",
 				),
 			},

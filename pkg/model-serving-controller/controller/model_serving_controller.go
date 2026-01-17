@@ -1089,7 +1089,11 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 
 	// Calculate expected pod count for this role replica
 	// Each role replica has 1 entry pod + workerReplicas worker pods
-	expectedPods := 1 + int(targetRole.WorkerReplicas)
+	workerReplicas := 0
+	if targetRole.WorkerReplicas != nil {
+		workerReplicas = int(*targetRole.WorkerReplicas)
+	}
+	expectedPods := 1 + workerReplicas
 
 	// Count running and ready pods
 	runningPods := 0
@@ -1512,7 +1516,11 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
 	}
 
-	for i := 1; i <= int(role.WorkerReplicas); i++ {
+	workerReplicas := 0
+	if role.WorkerReplicas != nil {
+		workerReplicas = int(*role.WorkerReplicas)
+	}
+	for i := 1; i <= workerReplicas; i++ {
 		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleIndex, i, revision)
 		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, ms, servingGroupName, taskName)
 		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, workerPod, metav1.CreateOptions{})

@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -41,21 +42,21 @@ func TestHashModelInferRevision(t *testing.T) {
 		Name:           "prefill",
 		Replicas:       &replicas,
 		EntryTemplate:  nginxPodTemplate,
-		WorkerReplicas: 0,
+		WorkerReplicas: nil,
 		WorkerTemplate: nil,
 	}
 	role2 := workloadv1alpha1.Role{
 		Name:           "decode",
 		Replicas:       &replicas,
 		EntryTemplate:  nginxPodTemplate,
-		WorkerReplicas: 2,
+		WorkerReplicas: ptr.To[int32](2),
 		WorkerTemplate: &nginxPodTemplate,
 	}
 	role3 := workloadv1alpha1.Role{
 		Name:           "prefill",
 		Replicas:       &replicas,
 		EntryTemplate:  nginxPodTemplate,
-		WorkerReplicas: 0,
+		WorkerReplicas: nil,
 		WorkerTemplate: nil,
 	}
 
@@ -77,7 +78,7 @@ func TestDeepHashObject(t *testing.T) {
 		Name:           "prefill",
 		Replicas:       &replicas,
 		EntryTemplate:  nginxPodTemplate,
-		WorkerReplicas: 0,
+		WorkerReplicas: nil,
 		WorkerTemplate: nil,
 	}
 	DeepHashObject(hasher, role1)
