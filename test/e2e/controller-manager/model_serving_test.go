@@ -110,7 +110,6 @@ func createBasicModelServing(name string, servingGroupReplicas, roleReplicas int
 								},
 							},
 						},
-						WorkerReplicas: 0,
 					},
 				},
 			},
