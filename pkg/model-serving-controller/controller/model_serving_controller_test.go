@@ -3839,6 +3839,7 @@ func TestManageHeadlessService(t *testing.T) {
 			for _, role := range tt.existingRoles {
 				controller.store.AddRole(utils.GetNamespaceName(tt.modelServing), groupName, "prefill", role.Name, role.Revision)
 				controller.store.UpdateRoleStatus(utils.GetNamespaceName(tt.modelServing), groupName, "prefill", role.Name, role.Status)
+				controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(tt.modelServing), groupName, datastore.ServingGroupRunning)
 			}
 
 			// Add existing services to the fake client
