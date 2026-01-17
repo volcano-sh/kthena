@@ -375,6 +375,13 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 	if ms == nil {
 		return
 	}
+	// check servingGroup status
+	// If servingGroup is being deleted, the deletion of the service is a expected.
+	// Not reconcile
+	if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting {
+		return
+	}
+
 	// check role status
 	// If role is deletion, means the deletion of the svc is a normal occurrence.
 	// Not reconcile
@@ -1451,6 +1458,10 @@ func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *
 	}
 
 	for _, sg := range servingGroups {
+		if sg.Status != datastore.ServingGroupRunning {
+			continue
+		}
+
 		for _, role := range ms.Spec.Template.Roles {
 			roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, role.Name)
 			if err != nil {
