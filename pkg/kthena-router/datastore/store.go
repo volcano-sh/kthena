@@ -304,8 +304,8 @@ func New() Store {
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
-		tokenTracker: createTokenTracker(),
-		listenerStatuses:    make(map[string]map[string]error),
+		tokenTracker:     createTokenTracker(),
+		listenerStatuses: make(map[string]map[string]error),
 	}
 }
 
