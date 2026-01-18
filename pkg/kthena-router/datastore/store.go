@@ -207,6 +207,10 @@ type Store interface {
 	GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute
 	GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelServer
 	GetAllPods() map[types.NamespacedName]*PodInfo
+
+	// Listener status methods
+	SetListenerStatus(gatewayKey, listenerName string, err error)
+	GetListenerStatus(gatewayKey, listenerName string) error
 }
 
 // QueueStat holds per-model queue metrics to aid scheduling decisions
@@ -278,6 +282,10 @@ type store struct {
 	// model -> RequestPriorityQueue
 	requestWaitingQueue sync.Map
 	tokenTracker        TokenTracker
+
+	// Listener status tracking
+	listenerStatusMutex sync.RWMutex
+	listenerStatuses    map[string]map[string]error // gatewayKey -> listenerName -> error
 }
 
 func New() Store {
@@ -296,7 +304,8 @@ func New() Store {
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
-		tokenTracker: createTokenTracker(),
+		tokenTracker:     createTokenTracker(),
+		listenerStatuses: make(map[string]map[string]error),
 	}
 }
 
@@ -1366,6 +1375,10 @@ func (s *store) DeleteGateway(key string) error {
 	delete(s.gateways, key)
 	s.gatewayMutex.Unlock()
 
+	s.listenerStatusMutex.Lock()
+	delete(s.listenerStatuses, key)
+	s.listenerStatusMutex.Unlock()
+
 	klog.V(4).Infof("Deleted Gateway: %s", key)
 
 	// Trigger callback outside the lock to avoid potential deadlocks
@@ -1408,6 +1421,26 @@ func (s *store) GetAllGateways() []*gatewayv1.Gateway {
 		result = append(result, gateway)
 	}
 	return result
+}
+
+func (s *store) SetListenerStatus(gatewayKey, listenerName string, err error) {
+	s.listenerStatusMutex.Lock()
+	defer s.listenerStatusMutex.Unlock()
+
+	if _, ok := s.listenerStatuses[gatewayKey]; !ok {
+		s.listenerStatuses[gatewayKey] = make(map[string]error)
+	}
+	s.listenerStatuses[gatewayKey][listenerName] = err
+}
+
+func (s *store) GetListenerStatus(gatewayKey, listenerName string) error {
+	s.listenerStatusMutex.RLock()
+	defer s.listenerStatusMutex.RUnlock()
+
+	if listeners, ok := s.listenerStatuses[gatewayKey]; ok {
+		return listeners[listenerName]
+	}
+	return nil
 }
 
 // InferencePool methods (using Gateway API Inference Extension)
