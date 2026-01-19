@@ -3765,10 +3765,8 @@ func TestManageHeadlessService(t *testing.T) {
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
-								Name:           "prefill",
-								Replicas:       ptr.To[int32](1),
-								WorkerReplicas: 0,
-								WorkerTemplate: nil, // No worker template
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
 							},
 						},
 					},
