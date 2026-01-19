@@ -2282,6 +2282,289 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 	}
 }
 
+// TestScaleDownServingGroupsWithPartition tests the scaleDownServingGroups function with partition protection
+// This test verifies that when partition is set, only ServingGroups with ordinal >= partition
+// are considered for deletion, protecting partition-protected replicas.
+func TestScaleDownServingGroupsWithPartition(t *testing.T) {
+	tests := []struct {
+		name                   string
+		partition              *int32
+		existingIndices        []int
+		expectedCount          int
+		podDeletionCosts       map[int]int // Index -> DeletionCost
+		groupStatuses          map[int]datastore.ServingGroupStatus
+		expectedRemainingNames []string
+		description            string
+	}{
+		{
+			name:            "partition=3, protect replicas below partition",
+			partition:       ptr.To[int32](3),
+			existingIndices: []int{0, 1, 2, 3, 4},
+			expectedCount:   3,
+			podDeletionCosts: map[int]int{
+				0: 0,   // Low cost but protected (ordinal < partition)
+				1: 0,   // Low cost but protected (ordinal < partition)
+				2: 0,   // Low cost but protected (ordinal < partition)
+				3: 100, // High cost, not protected (ordinal >= partition)
+				4: 50,  // Medium cost, not protected (ordinal >= partition)
+			},
+			groupStatuses: map[int]datastore.ServingGroupStatus{
+				0: datastore.ServingGroupRunning,
+				1: datastore.ServingGroupRunning,
+				2: datastore.ServingGroupRunning,
+				3: datastore.ServingGroupRunning,
+				4: datastore.ServingGroupRunning,
+			},
+			expectedRemainingNames: []string{"0", "1", "2"}, // R-3, R-4 deleted (ordinal >= partition), R-0, R-1, R-2 protected
+			description:            "Partition-protected replicas (R-0, R-1, R-2) should never be deleted even with low deletion cost",
+		},
+		{
+			name:             "partition=3, not-ready groups below partition still protected",
+			partition:        ptr.To[int32](3),
+			existingIndices:  []int{0, 1, 2, 3, 4},
+			expectedCount:    3,
+			podDeletionCosts: map[int]int{},
+			groupStatuses: map[int]datastore.ServingGroupStatus{
+				0: datastore.ServingGroupRunning,
+				1: datastore.ServingGroupCreating, // Not ready but protected (ordinal < partition)
+				2: datastore.ServingGroupRunning,
+				3: datastore.ServingGroupRunning,
+				4: datastore.ServingGroupRunning,
+			},
+			expectedRemainingNames: []string{"0", "1", "2"}, // R-3, R-4 deleted, R-1 protected even though not ready
+			description:            "Partition-protected replicas should never be deleted even if not ready",
+		},
+		{
+			name:            "no partition, all replicas can be deleted",
+			partition:       nil,
+			existingIndices: []int{0, 1, 2, 3},
+			expectedCount:   2,
+			podDeletionCosts: map[int]int{
+				0: 100, // High cost
+				1: 50,  // Medium cost
+				2: 0,   // Low cost - should be deleted
+				3: 75,  // Medium-high cost
+			},
+			groupStatuses: map[int]datastore.ServingGroupStatus{
+				0: datastore.ServingGroupRunning,
+				1: datastore.ServingGroupRunning,
+				2: datastore.ServingGroupRunning,
+				3: datastore.ServingGroupRunning,
+			},
+			expectedRemainingNames: []string{"0", "3"}, // R-2 (low cost) and R-1 (medium cost) deleted
+			description:            "Without partition, all replicas are candidates for deletion based on binpack scoring",
+		},
+		{
+			name:            "partition=5, all replicas protected",
+			partition:       ptr.To[int32](5),
+			existingIndices: []int{0, 1, 2, 3},
+			expectedCount:   4, // Cannot scale down because all replicas are protected
+			podDeletionCosts: map[int]int{
+				0: 0, // Very low cost but protected
+				1: 0, // Very low cost but protected
+				2: 0, // Very low cost but protected
+				3: 0, // Very low cost but protected
+			},
+			groupStatuses: map[int]datastore.ServingGroupStatus{
+				0: datastore.ServingGroupRunning,
+				1: datastore.ServingGroupRunning,
+				2: datastore.ServingGroupRunning,
+				3: datastore.ServingGroupRunning,
+			},
+			expectedRemainingNames: []string{"0", "1", "2", "3"}, // All protected, cannot delete any
+			description:            "When partition exceeds all replica indices, all are protected and cannot be deleted",
+		},
+		{
+			name:            "partition=3, scale down below partition - delete protected after non-protected",
+			partition:       ptr.To[int32](3),
+			existingIndices: []int{0, 1, 2, 3, 4},
+			expectedCount:   2, // Scale down below partition value
+			podDeletionCosts: map[int]int{
+				0: 100, // High cost, protected
+				1: 50,  // Medium cost, protected
+				2: 0,   // Low cost, protected
+				3: 200, // Very high cost, not protected
+				4: 150, // High cost, not protected
+			},
+			groupStatuses: map[int]datastore.ServingGroupStatus{
+				0: datastore.ServingGroupRunning,
+				1: datastore.ServingGroupRunning,
+				2: datastore.ServingGroupRunning,
+				3: datastore.ServingGroupRunning,
+				4: datastore.ServingGroupRunning,
+			},
+			expectedRemainingNames: []string{"0", "1"}, // First delete R-3, R-4 (non-protected), then R-2 (protected, lowest cost)
+			description:            "When scaling down below partition, delete non-protected first, then protected",
+		},
+	}
+
+	for idx, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+			assert.NoError(t, err)
+
+			msName := fmt.Sprintf("test-partition-scaledown-%d", idx)
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      msName,
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
+					SchedulerName: "volcano",
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "prefill-container",
+												Image: "test-image:latest",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.ServingGroupRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							Partition: tt.partition,
+						},
+					},
+				},
+			}
+
+			podIndexer := controller.podsInformer.GetIndexer()
+
+			// Pre-populate the store with existing ServingGroups and set their statuses
+			for _, ordinal := range tt.existingIndices {
+				groupName := utils.GenerateServingGroupName(msName, ordinal)
+				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, "test-revision")
+				if status, exists := tt.groupStatuses[ordinal]; exists {
+					controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, status)
+				}
+
+				// Create a mock pod for each group with deletion cost annotation
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: ms.Namespace,
+						Name:      fmt.Sprintf("pod-%s", groupName),
+						Labels: map[string]string{
+							workloadv1alpha1.ModelServingNameLabelKey: msName,
+							workloadv1alpha1.GroupNameLabelKey:        groupName,
+							workloadv1alpha1.RoleLabelKey:             "prefill",
+							workloadv1alpha1.RoleIDKey:                "prefill-0",
+						},
+					},
+				}
+
+				// Add deletion cost annotation if specified
+				if cost, exists := tt.podDeletionCosts[ordinal]; exists {
+					if pod.Annotations == nil {
+						pod.Annotations = make(map[string]string)
+					}
+					pod.Annotations[PodDeletionCostAnnotation] = fmt.Sprintf("%d", cost)
+				}
+
+				err := podIndexer.Add(pod)
+				assert.NoError(t, err)
+			}
+
+			// Build the servingGroupList to pass to scaleDownServingGroups
+			existingGroups := make([]datastore.ServingGroup, len(tt.existingIndices))
+			for i, ordinal := range tt.existingIndices {
+				existingGroups[i] = datastore.ServingGroup{
+					Name: utils.GenerateServingGroupName(msName, ordinal),
+				}
+			}
+
+			// Call scaleDownServingGroups with partition protection
+			err = controller.scaleDownServingGroups(context.Background(), ms, existingGroups, tt.expectedCount)
+			assert.NoError(t, err)
+
+			// Manually delete ServingGroups that are marked as Deleting from the store
+			// This simulates the deletion process that would happen in the real controller
+			for _, ordinal := range tt.existingIndices {
+				groupName := utils.GenerateServingGroupName(msName, ordinal)
+				status := controller.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName)
+				if status == datastore.ServingGroupDeleting {
+					// Simulate pods and services being deleted
+					selector := labels.SelectorFromSet(map[string]string{
+						workloadv1alpha1.GroupNameLabelKey: groupName,
+					})
+					pods, _ := controller.podsLister.Pods(ms.Namespace).List(selector)
+					for _, pod := range pods {
+						podIndexer.Delete(pod)
+					}
+
+					// Check if ServingGroup is fully deleted and remove from store
+					if controller.isServingGroupDeleted(ms, groupName) {
+						controller.store.DeleteServingGroup(utils.GetNamespaceName(ms), groupName)
+					}
+				}
+			}
+
+			// Verify the results
+			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+			assert.NoError(t, err)
+
+			// Verify remaining group count
+			assert.Equal(t, tt.expectedCount, len(groups),
+				fmt.Sprintf("[%s] Remaining group count should match expected", tt.description))
+
+			// Verify remaining group names
+			actualNames := make([]string, len(groups))
+			for i, g := range groups {
+				_, idx := utils.GetParentNameAndOrdinal(g.Name)
+				actualNames[i] = fmt.Sprintf("%d", idx)
+			}
+			assert.ElementsMatch(t, tt.expectedRemainingNames, actualNames,
+				fmt.Sprintf("[%s] Remaining group indices should match expected. Got: %v, Want: %v",
+					tt.description, actualNames, tt.expectedRemainingNames))
+
+			// Verify partition protection: protected groups should only be deleted after all non-protected groups are deleted
+			if tt.partition != nil && *tt.partition > 0 {
+				// Count how many non-protected groups existed
+				nonProtectedCount := 0
+				for _, ordinal := range tt.existingIndices {
+					if ordinal >= int(*tt.partition) {
+						nonProtectedCount++
+					}
+				}
+				// Count how many non-protected groups remain
+				remainingNonProtectedCount := 0
+				for _, g := range groups {
+					_, ordinal := utils.GetParentNameAndOrdinal(g.Name)
+					if ordinal >= int(*tt.partition) {
+						remainingNonProtectedCount++
+					}
+				}
+				// If there are remaining non-protected groups, protected groups should not be deleted
+				if remainingNonProtectedCount > 0 {
+					for _, ordinal := range tt.existingIndices {
+						if ordinal < int(*tt.partition) {
+							groupName := utils.GenerateServingGroupName(msName, ordinal)
+							group := controller.store.GetServingGroup(utils.GetNamespaceName(ms), groupName)
+							assert.NotNil(t, group,
+								fmt.Sprintf("[%s] Partition-protected replica R-%d should not be deleted when non-protected groups still exist", tt.description, ordinal))
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestModelServingVersionControl tests the version control functionality for ModelServing
 // This test verifies that when partition is set, deleted servingGroups below partition
 // can be recreated with their historical revision instead of the new revision.

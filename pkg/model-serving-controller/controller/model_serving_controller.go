@@ -1396,20 +1396,36 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 // scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
 // 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
 // 2. Secondary: Among groups with same status, lower deletion cost = delete first
+// When partition is set, ServingGroups with ordinal >= partition are deleted first.
+// After all non-protected groups are deleted, protected groups (ordinal < partition) are deleted if needed.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
-	// Calculate priority information for all ServingGroups
-	var groupScores []ServingGroupWithScore
+	var partition int
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
+		partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+	}
+
+	var nonProtectedScores []ServingGroupWithScore
+	var protectedScores []ServingGroupWithScore
 
 	for _, group := range servingGroupList {
 		scoreInfo := c.calculateServingGroupScore(ms, group.Name)
-		groupScores = append(groupScores, scoreInfo)
+		if partition > 0 {
+			_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+			if ordinal < partition {
+				protectedScores = append(protectedScores, scoreInfo)
+			} else {
+				nonProtectedScores = append(nonProtectedScores, scoreInfo)
+			}
+		} else {
+			nonProtectedScores = append(nonProtectedScores, scoreInfo)
+		}
 	}
 
-	// Sort by priority tuple: (priority, deletionCost, index)
+	// Sort both lists by priority tuple: (priority, deletionCost, index)
 	// Lower priority value = higher deletion priority (delete first)
 	// Lower deletion cost = higher deletion priority
 	// Higher index = higher deletion priority (backward compatibility)
-	slices.SortFunc(groupScores, func(a, b ServingGroupWithScore) int {
+	sortGroups := func(a, b ServingGroupWithScore) int {
 		// Primary: Sort by priority (not-ready first)
 		if a.Priority != b.Priority {
 			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
@@ -1422,18 +1438,50 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 
 		// Tertiary: Higher index comes first (backward compatibility)
 		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
-	})
+	}
 
-	// Delete from beginning (not-ready, low cost, high index first)
-	numToDelete := len(groupScores) - expectedCount
+	slices.SortFunc(nonProtectedScores, sortGroups)
+	if partition > 0 {
+		slices.SortFunc(protectedScores, sortGroups)
+	}
+
+	totalToDelete := len(servingGroupList) - expectedCount
+	if totalToDelete < 0 {
+		totalToDelete = 0
+	}
+
 	var err []error
-	for i := 0; i < numToDelete; i++ {
-		targetGroup := groupScores[i]
-		klog.V(2).Infof("Scaling down serving group %s (priority: %d, deletion cost: %d, index: %d)",
+	// Delete non-protected groups first (ordinal >= partition)
+	numNonProtectedToDelete := totalToDelete
+	if numNonProtectedToDelete > len(nonProtectedScores) {
+		numNonProtectedToDelete = len(nonProtectedScores)
+	}
+
+	for i := 0; i < numNonProtectedToDelete; i++ {
+		targetGroup := nonProtectedScores[i]
+		klog.V(2).Infof("Scaling down non-protected serving group %s (priority: %d, deletion cost: %d, index: %d)",
 			targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index)
-		// Note: ControllerRevision history recording for partition-protected groups is handled in deleteServingGroup
 		if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
 			err = append(err, e)
+		}
+	}
+
+	// After all non-protected groups are deleted, proceed to delete protected groups if needed
+	remainingToDelete := totalToDelete - numNonProtectedToDelete
+	if remainingToDelete > 0 && partition > 0 && len(protectedScores) > 0 {
+		numProtectedToDelete := remainingToDelete
+		if numProtectedToDelete > len(protectedScores) {
+			numProtectedToDelete = len(protectedScores)
+		}
+
+		for i := 0; i < numProtectedToDelete; i++ {
+			targetGroup := protectedScores[i]
+			klog.V(2).Infof("Scaling down protected serving group %s (priority: %d, deletion cost: %d, index: %d, partition=%d)",
+				targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index, partition)
+			// Note: ControllerRevision history recording for partition-protected groups is handled in deleteServingGroup
+			if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
+				err = append(err, e)
+			}
 		}
 	}
 
