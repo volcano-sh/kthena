@@ -20,7 +20,7 @@ spec:
                   - --model
                   - /tmp/cache/Qwen3
                   - --data-parallel-address
-                  - my-model-0-leader-0-0.kthena-system.svc.cluster.local # Use the internal address of pod to communicate.
+                  - $(ENTRY_ADDRESS) # Use the internal address of pod to communicate.
                   - --data-parallel-rank
                   - "0"
                   - --data-parallel-rpc-port
@@ -99,9 +99,9 @@ spec:
                   - -m
                   - vllm.entrypoints.openai.api_server
                   - --model
-                  - /tmp/cache/4005c13ab5d91cb094e41048356abe39
+                  - /tmp/cache/Qwen3
                   - --data-parallel-address
-                  - my-model-0-leader-0-0.kthena-system.svc.cluster.local
+                  - $(ENTRY_ADDRESS)
                   - --data-parallel-rank
                   - "1"
                   - --data-parallel-rpc-port

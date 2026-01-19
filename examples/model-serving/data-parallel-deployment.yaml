@@ -20,7 +20,7 @@ spec:
                   - --model
                   - /tmp/cache/Qwen3
                   - --data-parallel-address
-                  - my-model-0-leader-0-0.kthena-system.svc.cluster.local # Use the internal address of pod to communicate.
+                  - $(ENTRY_ADDRESS)
                   - --data-parallel-rank
                   - "0"
                   - --data-parallel-rpc-port
@@ -101,7 +101,7 @@ spec:
                   - --model
                   - /tmp/cache/Qwen3
                   - --data-parallel-address
-                  - my-model-0-leader-0-0.kthena-system.svc.cluster.local
+                  - $(ENTRY_ADDRESS)
                   - --data-parallel-rank
                   - "1"
                   - --data-parallel-rpc-port
