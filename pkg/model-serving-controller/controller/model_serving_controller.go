@@ -1440,9 +1440,6 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 	}
 
 	slices.SortFunc(nonProtectedScores, sortGroups)
-	if partition > 0 {
-		slices.SortFunc(protectedScores, sortGroups)
-	}
 
 	totalToDelete := max(0, len(servingGroupList)-expectedCount)
 
@@ -1462,6 +1459,8 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 	// After all non-protected groups are deleted, proceed to delete protected groups if needed
 	remainingToDelete := totalToDelete - numNonProtectedToDelete
 	if remainingToDelete > 0 && partition > 0 {
+		// Sort protected scores only when we need to delete them
+		slices.SortFunc(protectedScores, sortGroups)
 		numProtectedToDelete := min(remainingToDelete, len(protectedScores))
 
 		for i := 0; i < numProtectedToDelete; i++ {
