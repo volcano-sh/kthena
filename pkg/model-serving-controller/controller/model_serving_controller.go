@@ -1396,8 +1396,8 @@ func (c *ModelServingController) getPartition(ms *workloadv1alpha1.ModelServing)
 // scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
 // 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
 // 2. Secondary: Among groups with same status, lower deletion cost = delete first
-// When partition is set, ServingGroups with ordinal >= partition are deleted first.
-// After all non-protected groups are deleted, protected groups (ordinal < partition) are deleted if needed.
+// When partition is set, the first N replicas (where N = partition) are protected.
+// Non-protected replicas (after the first N) are deleted first, then protected replicas if needed.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
 	partition := c.getPartition(ms)
 
@@ -1413,20 +1413,10 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 	var nonProtectedScores []ServingGroupWithScore
 
 	if partition > 0 {
-		// Find the split point: first group with ordinal >= partition
-		splitIndex := len(allScores)
-		for i, score := range allScores {
-			if score.Index >= partition {
-				splitIndex = i
-				break
-			}
-		}
-		// Protected groups: allScores[0:splitIndex] (ordinal < partition)
-		// Non-protected groups: allScores[splitIndex:] (ordinal >= partition)
+		splitIndex := min(partition, len(allScores))
 		protectedScores = allScores[:splitIndex]
 		nonProtectedScores = allScores[splitIndex:]
 	} else {
-		// No partition, all groups are non-protected
 		nonProtectedScores = allScores
 	}
 
@@ -1454,17 +1444,11 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 		slices.SortFunc(protectedScores, sortGroups)
 	}
 
-	totalToDelete := len(servingGroupList) - expectedCount
-	if totalToDelete < 0 {
-		totalToDelete = 0
-	}
+	totalToDelete := max(0, len(servingGroupList)-expectedCount)
 
 	var err []error
-	// Delete non-protected groups first (ordinal >= partition)
-	numNonProtectedToDelete := totalToDelete
-	if numNonProtectedToDelete > len(nonProtectedScores) {
-		numNonProtectedToDelete = len(nonProtectedScores)
-	}
+	// Delete non-protected groups first (replicas after the first partition replicas)
+	numNonProtectedToDelete := min(totalToDelete, len(nonProtectedScores))
 
 	for i := 0; i < numNonProtectedToDelete; i++ {
 		targetGroup := nonProtectedScores[i]
@@ -1477,11 +1461,8 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 
 	// After all non-protected groups are deleted, proceed to delete protected groups if needed
 	remainingToDelete := totalToDelete - numNonProtectedToDelete
-	if remainingToDelete > 0 && partition > 0 && len(protectedScores) > 0 {
-		numProtectedToDelete := remainingToDelete
-		if numProtectedToDelete > len(protectedScores) {
-			numProtectedToDelete = len(protectedScores)
-		}
+	if remainingToDelete > 0 && partition > 0 {
+		numProtectedToDelete := min(remainingToDelete, len(protectedScores))
 
 		for i := 0; i < numProtectedToDelete; i++ {
 			targetGroup := protectedScores[i]

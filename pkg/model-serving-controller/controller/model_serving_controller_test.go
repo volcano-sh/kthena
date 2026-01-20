@@ -2358,12 +2358,12 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			name:            "partition=5, all replicas protected",
 			partition:       ptr.To[int32](5),
 			existingIndices: []int{0, 1, 2, 3},
-			expectedCount:   4, // Cannot scale down because all replicas are protected
+			expectedCount:   2, // Scale down to trigger deletion of protected replicas
 			podDeletionCosts: map[int]int{
-				0: 0, // Very low cost but protected
-				1: 0, // Very low cost but protected
-				2: 0, // Very low cost but protected
-				3: 0, // Very low cost but protected
+				0: 100, // High cost, protected
+				1: 50,  // Medium cost, protected
+				2: 0,   // Low cost, protected (should be deleted first)
+				3: 200, // Very high cost, protected (should be deleted last)
 			},
 			groupStatuses: map[int]datastore.ServingGroupStatus{
 				0: datastore.ServingGroupRunning,
@@ -2371,8 +2371,8 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				2: datastore.ServingGroupRunning,
 				3: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "1", "2", "3"}, // All protected, cannot delete any
-			description:            "When partition exceeds all replica indices, all are protected and cannot be deleted",
+			expectedRemainingNames: []string{"0", "3"}, // R-2 (lowest cost) and R-1 (medium cost) deleted based on binpack scoring
+			description:            "When partition exceeds all replica indices, all replicas are classified as protected and deletion is based on binpack scoring within protected list",
 		},
 		{
 			name:            "partition=3, scale down below partition - delete protected after non-protected",
