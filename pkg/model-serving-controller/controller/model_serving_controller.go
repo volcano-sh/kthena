@@ -559,11 +559,7 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 // When partition is set, it fills missing ordinals in [0, partition) using CurrentRevision.
 // Otherwise, it creates new ServingGroups with increasing indices starting from the current max index + 1.
 func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
-	// Determine the partition value
-	partition := 0
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
-	}
+	partition := c.getPartition(ms)
 
 	// Find the maximum ordinal in existing servingGroups
 	// Since servingGroupList is already sorted in ascending order by ordinal,
@@ -869,11 +865,7 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
 
-	// Determine if partition is set
-	var partition int
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
-	}
+	partition := c.getPartition(ms)
 
 	if partition > 0 {
 		// When partition is set, delete ServingGroups with ordinal >= partition
@@ -1393,32 +1385,49 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 	return nil
 }
 
+// getPartition returns the partition value from ModelServing spec, or 0 if not set.
+func (c *ModelServingController) getPartition(ms *workloadv1alpha1.ModelServing) int {
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
+		return int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+	}
+	return 0
+}
+
 // scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
 // 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
 // 2. Secondary: Among groups with same status, lower deletion cost = delete first
 // When partition is set, ServingGroups with ordinal >= partition are deleted first.
 // After all non-protected groups are deleted, protected groups (ordinal < partition) are deleted if needed.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
-	var partition int
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
-	}
+	partition := c.getPartition(ms)
 
-	var nonProtectedScores []ServingGroupWithScore
-	var protectedScores []ServingGroupWithScore
-
+	// Calculate scores for all servingGroups first
+	allScores := make([]ServingGroupWithScore, 0, len(servingGroupList))
 	for _, group := range servingGroupList {
 		scoreInfo := c.calculateServingGroupScore(ms, group.Name)
-		if partition > 0 {
-			_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
-			if ordinal < partition {
-				protectedScores = append(protectedScores, scoreInfo)
-			} else {
-				nonProtectedScores = append(nonProtectedScores, scoreInfo)
+		allScores = append(allScores, scoreInfo)
+	}
+
+	// Split scores by partition (servingGroupList is sorted by ordinal in ascending order)
+	var protectedScores []ServingGroupWithScore
+	var nonProtectedScores []ServingGroupWithScore
+
+	if partition > 0 {
+		// Find the split point: first group with ordinal >= partition
+		splitIndex := len(allScores)
+		for i, score := range allScores {
+			if score.Index >= partition {
+				splitIndex = i
+				break
 			}
-		} else {
-			nonProtectedScores = append(nonProtectedScores, scoreInfo)
 		}
+		// Protected groups: allScores[0:splitIndex] (ordinal < partition)
+		// Non-protected groups: allScores[splitIndex:] (ordinal >= partition)
+		protectedScores = allScores[:splitIndex]
+		nonProtectedScores = allScores[splitIndex:]
+	} else {
+		// No partition, all groups are non-protected
+		nonProtectedScores = allScores
 	}
 
 	// Sort both lists by priority tuple: (priority, deletionCost, index)
@@ -1583,11 +1592,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	group := c.store.GetServingGroup(utils.GetNamespaceName(ms), servingGroupName)
 	if group != nil {
 		_, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
-		// Determine partition value
-		partition := 0
-		if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-			partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
-		}
+		partition := c.getPartition(ms)
 		// Record revision history using ControllerRevision for partition-protected servingGroups
 		if partition > 0 && ordinal < partition {
 			// Create ControllerRevision to persist the revision history
