@@ -83,7 +83,7 @@ func TestGatewayAndHTTPRouteStatus(t *testing.T) {
 	t.Log("Deploying HTTPRoute and verifying status...")
 	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
 	httpRoute.Namespace = testNamespace
-	
+
 	// Update parentRefs to point to kthenaNamespace and the "default" Gateway
 	ktNs := gatewayv1.Namespace(kthenaNamespace)
 	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
@@ -95,7 +95,7 @@ func TestGatewayAndHTTPRouteStatus(t *testing.T) {
 
 	createdHTTPRoute, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create HTTPRoute")
-	
+
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		_ = testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(cleanupCtx, createdHTTPRoute.Name, metav1.DeleteOptions{})
