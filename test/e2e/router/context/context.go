@@ -40,6 +40,7 @@ const (
 	Deployment7bName    = "deepseek-r1-7b"
 	ModelServer1_5bName = "deepseek-r1-1-5b"
 	ModelServer7bName   = "deepseek-r1-7b"
+	ControllerName      = "volcano.sh/kthena-router"
 )
 
 // RouterTestContext holds the clients needed for router tests

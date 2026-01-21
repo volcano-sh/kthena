@@ -226,7 +226,7 @@ func (c *HTTPRouteController) updateHTTPRouteStatus(httpRoute *gatewayv1.HTTPRou
 		c.setHTTPRouteParentStatus(httpRoute, parentStatus)
 	}
 
-	_, err := c.gatewayClient.GatewayV1().HTTPRoutes(httpRoute.Namespace).UpdateStatus(context.TODO(), httpRoute, metav1.UpdateOptions{})
+	_, err := c.gatewayClient.GatewayV1().HTTPRoutes(httpRoute.Namespace).UpdateStatus(context.Background(), httpRoute, metav1.UpdateOptions{})
 	return err
 }
 

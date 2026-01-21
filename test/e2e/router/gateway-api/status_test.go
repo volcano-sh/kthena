@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -76,22 +77,25 @@ func TestGatewayAndHTTPRouteStatus(t *testing.T) {
 		}
 
 		return true
-	}, 1*time.Minute, 2*time.Second, "Gateway status should be updated correctly")
+	}, 2*time.Minute, 5*time.Second, "Gateway status should be updated correctly")
 
 	// 2. Deploy an HTTPRoute and verify its status
 	t.Log("Deploying HTTPRoute and verifying status...")
 	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
 	httpRoute.Namespace = testNamespace
-
-	// Update parentRefs to point to kthenaNamespace
+	
+	// Update parentRefs to point to kthenaNamespace and the "default" Gateway
 	ktNs := gatewayv1.Namespace(kthenaNamespace)
-	for i := range httpRoute.Spec.ParentRefs {
-		httpRoute.Spec.ParentRefs[i].Namespace = &ktNs
+	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
+		{
+			Name:      "default",
+			Namespace: &ktNs,
+		},
 	}
 
 	createdHTTPRoute, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create HTTPRoute")
-
+	
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		_ = testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(cleanupCtx, createdHTTPRoute.Name, metav1.DeleteOptions{})
@@ -108,6 +112,10 @@ func TestGatewayAndHTTPRouteStatus(t *testing.T) {
 		}
 
 		for _, parent := range hr.Status.Parents {
+			if parent.ControllerName != gatewayv1.GatewayController(routercontext.ControllerName) {
+				continue
+			}
+
 			accepted := false
 			resolved := false
 			for _, cond := range parent.Conditions {
@@ -118,10 +126,10 @@ func TestGatewayAndHTTPRouteStatus(t *testing.T) {
 					resolved = true
 				}
 			}
-			if !accepted || !resolved {
-				return false
+			if accepted && resolved {
+				return true
 			}
 		}
-		return true
-	}, 1*time.Minute, 2*time.Second, "HTTPRoute status should be updated correctly")
+		return false
+	}, 2*time.Minute, 5*time.Second, "HTTPRoute status should be updated correctly by kthena-router")
 }

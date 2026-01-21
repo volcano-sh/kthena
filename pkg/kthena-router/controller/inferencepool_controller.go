@@ -165,14 +165,12 @@ func (c *InferencePoolController) syncHandler(key string) error {
 	return c.updateInferencePoolStatus(inferencePool)
 }
 
-func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *inferencev1.InferencePool) error {
+func (s *InferencePoolController) updateInferencePoolStatus(inferencePool *inferencev1.InferencePool) error {
 	inferencePool = inferencePool.DeepCopy()
 
+	// TODO: Implement proper InferencePool status updates according to version 1.2.0 spec.
 	// In version 1.2.0, InferencePool status is per-parent.
-	// For now, we'll maintain a generic parent status if it's referenced by any HTTPRoute.
-	// This is a simplified implementation.
-
-	// For now, let's just update the object to trigger any observers.
+	// Finding and updating individual parent status requires traversing HTTPRoutes referencing this pool.
 
 	// Convert back to unstructured to update status
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(inferencePool)
@@ -182,7 +180,7 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 
 	unstructuredObj := &unstructured.Unstructured{Object: content}
 	gvr := inferencev1.SchemeGroupVersion.WithResource("inferencepools")
-	_, err = c.dynamicClient.Resource(gvr).Namespace(inferencePool.Namespace).UpdateStatus(context.TODO(), unstructuredObj, metav1.UpdateOptions{})
+	_, err = s.dynamicClient.Resource(gvr).Namespace(inferencePool.Namespace).UpdateStatus(context.Background(), unstructuredObj, metav1.UpdateOptions{})
 	return err
 }
 

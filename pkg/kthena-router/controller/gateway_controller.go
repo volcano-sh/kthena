@@ -199,45 +199,11 @@ func (c *GatewayController) updateGatewayStatus(gateway *gatewayv1.Gateway) erro
 	for _, listener := range gateway.Spec.Listeners {
 		listenerErr := c.store.GetListenerStatus(gatewayKey, string(listener.Name))
 
-		acceptedStatus := metav1.ConditionTrue
-		acceptedReason := string(gatewayv1.ListenerReasonAccepted)
-		acceptedMessage := "Listener has been accepted"
-
-		programmedStatus := metav1.ConditionTrue
-		programmedReason := string(gatewayv1.ListenerReasonProgrammed)
-		programmedMessage := "Listener has been programmed"
-
-		if listenerErr != nil {
-			acceptedStatus = metav1.ConditionFalse
-			acceptedReason = "PortUnavailable"
-			acceptedMessage = fmt.Sprintf("Failed to start listener: %v", listenerErr)
-
-			programmedStatus = metav1.ConditionFalse
-			programmedReason = "Invalid"
-			programmedMessage = "Listener could not be programmed due to error"
-		}
-
-		c.setGatewayListenerStatus(gateway, listener.Name, []metav1.Condition{
-			{
-				Type:               string(gatewayv1.ListenerConditionAccepted),
-				Status:             acceptedStatus,
-				Reason:             acceptedReason,
-				Message:            acceptedMessage,
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: gateway.Generation,
-			},
-			{
-				Type:               string(gatewayv1.ListenerConditionProgrammed),
-				Status:             programmedStatus,
-				Reason:             programmedReason,
-				Message:            programmedMessage,
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: gateway.Generation,
-			},
-		})
+		acceptedCond, programmedCond := c.getGatewayListenerConditions(listenerErr, gateway.Generation)
+		c.setGatewayListenerStatus(gateway, listener.Name, []metav1.Condition{acceptedCond, programmedCond})
 	}
 
-	_, err := c.gatewayClient.GatewayV1().Gateways(gateway.Namespace).UpdateStatus(context.TODO(), gateway, metav1.UpdateOptions{})
+	_, err := c.gatewayClient.GatewayV1().Gateways(gateway.Namespace).UpdateStatus(context.Background(), gateway, metav1.UpdateOptions{})
 	return err
 }
 
@@ -293,6 +259,46 @@ func (c *GatewayController) setGatewayListenerStatus(gateway *gatewayv1.Gateway,
 			listenerStatus.Conditions = append(listenerStatus.Conditions, newCond)
 		}
 	}
+}
+
+func (c *GatewayController) getGatewayListenerConditions(listenerErr error, generation int64) (metav1.Condition, metav1.Condition) {
+	acceptedStatus := metav1.ConditionTrue
+	acceptedReason := string(gatewayv1.ListenerReasonAccepted)
+	acceptedMessage := "Listener has been accepted"
+
+	programmedStatus := metav1.ConditionTrue
+	programmedReason := string(gatewayv1.ListenerReasonProgrammed)
+	programmedMessage := "Listener has been programmed"
+
+	if listenerErr != nil {
+		acceptedStatus = metav1.ConditionFalse
+		acceptedReason = "PortUnavailable"
+		acceptedMessage = fmt.Sprintf("Failed to start listener: %v", listenerErr)
+
+		programmedStatus = metav1.ConditionFalse
+		programmedReason = "Invalid"
+		programmedMessage = "Listener could not be programmed due to error"
+	}
+
+	acceptedCond := metav1.Condition{
+		Type:               string(gatewayv1.ListenerConditionAccepted),
+		Status:             acceptedStatus,
+		Reason:             acceptedReason,
+		Message:            acceptedMessage,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: generation,
+	}
+
+	programmedCond := metav1.Condition{
+		Type:               string(gatewayv1.ListenerConditionProgrammed),
+		Status:             programmedStatus,
+		Reason:             programmedReason,
+		Message:            programmedMessage,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: generation,
+	}
+
+	return acceptedCond, programmedCond
 }
 
 func (c *GatewayController) enqueueGateway(obj interface{}) {
