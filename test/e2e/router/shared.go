@@ -919,14 +919,16 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 	})
 
 	t.Run("VerifyErrorMetrics", func(t *testing.T) {
-		resp := utils.CheckChatCompletions(t, "non-existent-model-xyz", messages)
+		// SendChatRequest without retry since we expect 404 for non-existent model
+		resp := utils.SendChatRequest(t, "non-existent-model-xyz", messages)
+		defer resp.Body.Close()
 		assert.Equal(t, 404, resp.StatusCode)
 
 		time.Sleep(2 * time.Second)
 
 		metricsBody := fetchMetrics()
 
-		assert.Contains(t, metricsBody, `status_code="404"`, "Error responses should be tracked")
+		assert.Contains(t, metricsBody, `model="non-existent-model-xyz"`, "Error model should be tracked in metrics")
 	})
 }
 
@@ -981,26 +983,33 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 	t.Run("VerifyRateLimitExceededMetrics", func(t *testing.T) {
 		messages := []utils.ChatMessage{
-			utils.NewChatMessage("user", "This is a test message with many tokens to trigger rate limiting quickly"),
+			utils.NewChatMessage("user", "hello world"),
 		}
 
-		var rateLimitedCount int
-		for i := 0; i < 5; i++ {
-			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
-			if resp.StatusCode == 429 {
+		// First request with retry to ensure route is ready
+		utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+
+		// Subsequent requests without retry to capture 429 responses
+		var successCount, rateLimitedCount int
+		for i := 0; i < 10; i++ {
+			resp := utils.SendChatRequest(t, modelRoute.Spec.ModelName, messages)
+			switch resp.StatusCode {
+			case 200:
+				successCount++
+			case 429:
 				rateLimitedCount++
 			}
+			resp.Body.Close()
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		t.Logf("Requests that were rate-limited: %d", rateLimitedCount)
+		t.Logf("Requests: %d successful, %d rate-limited", successCount, rateLimitedCount)
 
 		time.Sleep(2 * time.Second)
 
 		metricsBody := fetchMetrics()
 
-		if rateLimitedCount > 0 {
-			assert.Contains(t, metricsBody, "kthena_router_rate_limit_exceeded_total", "Rate limit exceeded metric should exist")
-		}
+		assert.Contains(t, metricsBody, "kthena_router_rate_limit_exceeded_total", "Rate limit exceeded metric should exist")
+		assert.Contains(t, metricsBody, fmt.Sprintf(`model="%s"`, modelRoute.Spec.ModelName), "Metric should have model label")
 	})
 }
