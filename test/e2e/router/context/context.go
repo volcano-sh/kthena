@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	inferenceclientset "sigs.k8s.io/gateway-api-inference-extension/client-go/clientset/versioned"
 	gatewayclientset "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
@@ -44,6 +45,7 @@ const (
 // RouterTestContext holds the clients needed for router tests
 type RouterTestContext struct {
 	KubeClient      *kubernetes.Clientset
+	DynamicClient   dynamic.Interface
 	KthenaClient    *clientset.Clientset
 	GatewayClient   *gatewayclientset.Clientset
 	InferenceClient *inferenceclientset.Clientset
@@ -60,6 +62,10 @@ func NewRouterTestContext(namespace string) (*RouterTestContext, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
 	kthenaClient, err := clientset.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kthena client: %w", err)
@@ -75,6 +81,7 @@ func NewRouterTestContext(namespace string) (*RouterTestContext, error) {
 
 	return &RouterTestContext{
 		KubeClient:      kubeClient,
+		DynamicClient:   dynamicClient,
 		KthenaClient:    kthenaClient,
 		GatewayClient:   gatewayClient,
 		InferenceClient: inferenceClient,

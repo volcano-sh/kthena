@@ -211,6 +211,7 @@ type Store interface {
 	// Listener status methods
 	SetListenerStatus(gatewayKey, listenerName string, err error)
 	GetListenerStatus(gatewayKey, listenerName string) error
+	RemoveListenerStatus(gatewayKey, listenerName string)
 }
 
 // QueueStat holds per-model queue metrics to aid scheduling decisions
@@ -1441,6 +1442,19 @@ func (s *store) GetListenerStatus(gatewayKey, listenerName string) error {
 		return listeners[listenerName]
 	}
 	return nil
+}
+
+func (s *store) RemoveListenerStatus(gatewayKey, listenerName string) {
+	s.listenerStatusMutex.Lock()
+	defer s.listenerStatusMutex.Unlock()
+
+	if listeners, ok := s.listenerStatuses[gatewayKey]; ok {
+		delete(listeners, listenerName)
+		// If the inner map is empty, we could potentially delete it too
+		if len(listeners) == 0 {
+			delete(s.listenerStatuses, gatewayKey)
+		}
+	}
 }
 
 // InferencePool methods (using Gateway API Inference Extension)

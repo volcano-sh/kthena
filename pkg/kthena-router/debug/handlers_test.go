@@ -327,6 +327,10 @@ func (m *MockStore) GetListenerStatus(gatewayKey, listenerName string) error {
 	return args.Error(0)
 }
 
+func (m *MockStore) RemoveListenerStatus(gatewayKey, listenerName string) {
+	m.Called(gatewayKey, listenerName)
+}
+
 func TestListModelRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

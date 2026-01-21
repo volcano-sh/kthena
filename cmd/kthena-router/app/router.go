@@ -411,8 +411,8 @@ func (lm *ListenerManager) removeListenerFromPort(port int32, configToRemove Lis
 	portInfo.Listeners = filtered
 	portInfo.mu.Unlock()
 
-	// Clear listener status in store
-	lm.store.SetListenerStatus(configToRemove.GatewayKey, configToRemove.ListenerName, nil)
+	// Remove listener status from store to prevent memory leaks
+	lm.store.RemoveListenerStatus(configToRemove.GatewayKey, configToRemove.ListenerName)
 }
 
 // addListenerToPort adds a listener config to a port
@@ -441,9 +441,11 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		portInfo.ShutdownFunc = cancel
 
 		// Start the server
+		// Set status to nil to indicate a clean state (no errors detected yet)
+		// This will translate to Accepted: True and Programmed: True in the Gateway status
 		lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, nil)
 
-		go func(p int32, srv *http.Server, ctx context.Context, tls bool, cert, key string) {
+		go func(p int32, srv *http.Server, pi *PortListenerInfo, tls bool, cert, key string) {
 			klog.Infof("Starting Gateway listener server on port %d", p)
 			var err error
 			if tls {
@@ -458,18 +460,16 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 				klog.Errorf("listen failed for port %d: %v", p, err)
 
 				// Update all listeners on this port with the error
-				lm.mu.RLock()
-				if pi, ok := lm.portListeners[p]; ok {
-					pi.mu.Lock()
-					pi.LastError = err
-					for _, l := range pi.Listeners {
-						lm.store.SetListenerStatus(l.GatewayKey, l.ListenerName, err)
-					}
-					pi.mu.Unlock()
+				// pi is a pointer to the PortListenerInfo, so we can lock it directly
+				// without needing to lock the top-level ListenerManager
+				pi.mu.Lock()
+				pi.LastError = err
+				for _, l := range pi.Listeners {
+					lm.store.SetListenerStatus(l.GatewayKey, l.ListenerName, err)
 				}
-				lm.mu.RUnlock()
+				pi.mu.Unlock()
 			}
-		}(port, server, listenerCtx, enableTLS, tlsCertFile, tlsKeyFile)
+		}(port, server, portInfo, enableTLS, tlsCertFile, tlsKeyFile)
 
 		// Start graceful shutdown goroutine
 		go func(p int32, srv *http.Server, cancel context.CancelFunc) {
