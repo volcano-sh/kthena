@@ -1,0 +1,49 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: sample
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 4  # inferGroup replicas
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    rollingUpdateConfiguration:
+      maxUnavailable: 2
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: prefill
+        replicas: 1       # role replicas, for example, 1P1D
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: nginx
+                ports:
+                  - containerPort: 8080
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            containers:
+              - name: worker
+                image: nginx
+                ports:
+                  - containerPort: 8080
+      - name: decode
+        replicas: 1  # role replicas, for example, 1P1D
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: nginx
+                ports:
+                  - containerPort: 8080
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            containers:
+              - name: worker
+                image: nginx
+                ports:
+                  - containerPort: 8080
