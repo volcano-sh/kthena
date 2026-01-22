@@ -934,11 +934,6 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
 				// target ServingGroup is not the latest version, needs to be updated
 				klog.V(2).Infof("ServingGroup %s will be terminated for update (partition=%d)", servingGroupList[i].Name, partition)
-				// Set ServingGroup status to Scaling before deletion.
-				// To enable faster response to the statistics for currentUnavailableCount.
-				if err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupList[i].Name, datastore.ServingGroupScaling); err != nil {
-					return err
-				}
 				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
 					return err
 				}
@@ -952,11 +947,6 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
 				// target ServingGroup is not the latest version, needs to be updated
 				klog.V(2).Infof("ServingGroup %s will be terminated for update", servingGroupList[i].Name)
-				// Set ServingGroup status to Scaling before deletion.
-				// To enable faster response to the statistics for currentUnavailableCount.
-				if err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupList[i].Name, datastore.ServingGroupScaling); err != nil {
-					return err
-				}
 				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
 					return err
 				}
