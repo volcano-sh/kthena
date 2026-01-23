@@ -4268,13 +4268,12 @@ func TestManageServingGroupRollingUpdate_SeparateAndSortUnavailableAvailable(t *
 		status       datastore.ServingGroupStatus
 		revision     string
 		deletionCost int
-		shouldDelete bool
 	}{
-		{0, datastore.ServingGroupCreating, oldRevision, 100, true},  // unavailable outdated
-		{1, datastore.ServingGroupRunning, oldRevision, 50, true},   // available outdated, lowest cost
-		{2, datastore.ServingGroupRunning, oldRevision, 200, false}, // available outdated, highest cost (won't be deleted due to maxUnavailable=2)
-		{3, datastore.ServingGroupRunning, oldRevision, 75, true},   // available outdated, medium cost
-		{4, datastore.ServingGroupRunning, newRevision, 0, false},   // up-to-date, should not be deleted
+		{0, datastore.ServingGroupCreating, oldRevision, 100}, // unavailable outdated
+		{1, datastore.ServingGroupRunning, oldRevision, 50},   // available outdated, lowest cost
+		{2, datastore.ServingGroupRunning, oldRevision, 200},  // available outdated, highest cost (won't be deleted due to maxUnavailable=2)
+		{3, datastore.ServingGroupRunning, oldRevision, 75},   // available outdated, medium cost
+		{4, datastore.ServingGroupRunning, newRevision, 0},    // up-to-date, should not be deleted
 	}
 
 	for _, tg := range testGroups {
