@@ -562,21 +562,12 @@ func GetMaxUnavailable(mi *workloadv1alpha1.ModelServing) (int, error) {
 	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
 }
 
-// HasSameOwner checks if two OwnerReference slices have any common UID
-func HasSameOwner(refs1, refs2 []metav1.OwnerReference) bool {
-	uidMap := make(map[types.UID]bool)
-
-	// Add all UIDs from the first slice to the map
-	for _, ref := range refs1 {
-		uidMap[ref.UID] = true
-	}
-
-	// Check if any UID from the second slice exists in the map
-	for _, ref := range refs2 {
-		if uidMap[ref.UID] {
+// IsOwnedByModelServing checks if the given OwnerReferences contain the specified UID
+func IsOwnedByModelServing(ownerRefs []metav1.OwnerReference, uid types.UID) bool {
+	for _, ref := range ownerRefs {
+		if ref.UID == uid {
 			return true
 		}
 	}
-
 	return false
 }

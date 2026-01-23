@@ -243,134 +243,94 @@ func TestGetMaxUnavailable(t *testing.T) {
 	}
 }
 
-func TestHasSameOwner(t *testing.T) {
+func TestIsOwnedByModelServing(t *testing.T) {
 	testCases := []struct {
-		name     string
-		refs1    []metav1.OwnerReference
-		refs2    []metav1.OwnerReference
-		expected bool
+		name      string
+		ownerRefs []metav1.OwnerReference
+		uid       types.UID
+		expected  bool
 	}{
 		{
-			name:     "both slices empty",
-			refs1:    []metav1.OwnerReference{},
-			refs2:    []metav1.OwnerReference{},
-			expected: false,
+			name:      "empty owner references",
+			ownerRefs: []metav1.OwnerReference{},
+			uid:       types.UID("some-uid"),
+			expected:  false,
 		},
 		{
-			name:  "first slice empty",
-			refs1: []metav1.OwnerReference{},
-			refs2: []metav1.OwnerReference{
+			name: "owner reference matches UID",
+			ownerRefs: []metav1.OwnerReference{
 				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod",
-					UID:        types.UID("uid-1"),
+					APIVersion: "workload.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServing",
+					Name:       "test-model-serving",
+					UID:        types.UID("matching-uid"),
 				},
 			},
-			expected: false,
-		},
-		{
-			name: "second slice empty",
-			refs1: []metav1.OwnerReference{
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod",
-					UID:        types.UID("uid-1"),
-				},
-			},
-			refs2:    []metav1.OwnerReference{},
-			expected: false,
-		},
-		{
-			name: "no common UIDs",
-			refs1: []metav1.OwnerReference{
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-1",
-					UID:        types.UID("uid-1"),
-				},
-			},
-			refs2: []metav1.OwnerReference{
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-2",
-					UID:        types.UID("uid-2"),
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "has common UIDs",
-			refs1: []metav1.OwnerReference{
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-1",
-					UID:        types.UID("uid-1"),
-				},
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-2",
-					UID:        types.UID("uid-2"),
-				},
-			},
-			refs2: []metav1.OwnerReference{
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-3",
-					UID:        types.UID("uid-3"),
-				},
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-1",
-					UID:        types.UID("uid-1"),
-				},
-			},
+			uid:      types.UID("matching-uid"),
 			expected: true,
 		},
 		{
-			name: "multiple common UIDs",
-			refs1: []metav1.OwnerReference{
+			name: "owner reference does not match UID",
+			ownerRefs: []metav1.OwnerReference{
 				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-1",
-					UID:        types.UID("uid-1"),
-				},
-				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-2",
-					UID:        types.UID("uid-2"),
+					APIVersion: "workload.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServing",
+					Name:       "test-model-serving",
+					UID:        types.UID("different-uid"),
 				},
 			},
-			refs2: []metav1.OwnerReference{
+			uid:      types.UID("expected-uid"),
+			expected: false,
+		},
+		{
+			name: "multiple owner references with matching UID",
+			ownerRefs: []metav1.OwnerReference{
 				{
-					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-3",
-					UID:        types.UID("uid-1"),
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
+					Name:       "test-deployment",
+					UID:        types.UID("non-matching-uid-1"),
+				},
+				{
+					APIVersion: "workload.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServing",
+					Name:       "test-model-serving",
+					UID:        types.UID("matching-uid"),
 				},
 				{
 					APIVersion: "v1",
-					Kind:       "Pod",
-					Name:       "test-pod-4",
-					UID:        types.UID("uid-2"),
+					Kind:       "Service",
+					Name:       "test-service",
+					UID:        types.UID("non-matching-uid-2"),
 				},
 			},
+			uid:      types.UID("matching-uid"),
 			expected: true,
+		},
+		{
+			name: "multiple owner references without matching UID",
+			ownerRefs: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
+					Name:       "test-deployment",
+					UID:        types.UID("non-matching-uid-1"),
+				},
+				{
+					APIVersion: "v1",
+					Kind:       "Service",
+					Name:       "test-service",
+					UID:        types.UID("non-matching-uid-2"),
+				},
+			},
+			uid:      types.UID("expected-uid"),
+			expected: false,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := HasSameOwner(tc.refs1, tc.refs2)
+			result := IsOwnedByModelServing(tc.ownerRefs, tc.uid)
 			assert.Equal(t, tc.expected, result)
 		})
 	}
