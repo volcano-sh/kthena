@@ -1154,7 +1154,12 @@ func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.Mode
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
 	}, servingGroupName)
-	if servingGroup != nil && servingGroup.Revision != podRevision {
+	// If all three conditions are met, skip processing this pod.
+	// 1. ServingGroup exists
+	// 2. Pod revision is not equal to ServingGroup revision meeting the rollingupdate scenario
+	// 3. Pod and ModelServing have the same owner references. If the OwnerReferences are all different,
+	// this indicates that the pods are remnants of previously modelserving with identical names. Should not skip handling in this case.
+	if servingGroup != nil && servingGroup.Revision != podRevision && utils.HasSameOwner(pod.GetOwnerReferences(), ms.GetOwnerReferences()) {
 		// If the pod revision is not equal to the ServingGroup revision, we do not need to handle it.
 		klog.V(4).Infof("pod %s/%s revision %s is not equal to ServingGroup %s revision %s, skip handling",
 			pod.Namespace, pod.Name, podRevision, servingGroupName, servingGroup.Revision)

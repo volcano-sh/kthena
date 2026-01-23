@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -238,6 +239,139 @@ func TestGetMaxUnavailable(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedResult, result)
 			}
+		})
+	}
+}
+
+func TestHasSameOwner(t *testing.T) {
+	testCases := []struct {
+		name     string
+		refs1    []metav1.OwnerReference
+		refs2    []metav1.OwnerReference
+		expected bool
+	}{
+		{
+			name:     "both slices empty",
+			refs1:    []metav1.OwnerReference{},
+			refs2:    []metav1.OwnerReference{},
+			expected: false,
+		},
+		{
+			name:  "first slice empty",
+			refs1: []metav1.OwnerReference{},
+			refs2: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod",
+					UID:        types.UID("uid-1"),
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "second slice empty",
+			refs1: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod",
+					UID:        types.UID("uid-1"),
+				},
+			},
+			refs2:    []metav1.OwnerReference{},
+			expected: false,
+		},
+		{
+			name: "no common UIDs",
+			refs1: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-1",
+					UID:        types.UID("uid-1"),
+				},
+			},
+			refs2: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-2",
+					UID:        types.UID("uid-2"),
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "has common UIDs",
+			refs1: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-1",
+					UID:        types.UID("uid-1"),
+				},
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-2",
+					UID:        types.UID("uid-2"),
+				},
+			},
+			refs2: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-3",
+					UID:        types.UID("uid-3"),
+				},
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-1",
+					UID:        types.UID("uid-1"),
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "multiple common UIDs",
+			refs1: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-1",
+					UID:        types.UID("uid-1"),
+				},
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-2",
+					UID:        types.UID("uid-2"),
+				},
+			},
+			refs2: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-3",
+					UID:        types.UID("uid-1"),
+				},
+				{
+					APIVersion: "v1",
+					Kind:       "Pod",
+					Name:       "test-pod-4",
+					UID:        types.UID("uid-2"),
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := HasSameOwner(tc.refs1, tc.refs2)
+			assert.Equal(t, tc.expected, result)
 		})
 	}
 }
