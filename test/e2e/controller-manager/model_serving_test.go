@@ -107,31 +107,26 @@ func TestModelServingPodRecovery(t *testing.T) {
 	// Wait until ModelServing is ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// Get the ModelServing to obtain its UID
-	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get ModelServing")
+	// List pods using label selector scoped to the current ModelServing instance
+	labelSelector := "kthena.volcano.sh/model-serving-name=" + modelServing.Name
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods with label selector")
 
-	// List pods in the namespace and filter by OwnerReferences
-	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{})
-	require.NoError(t, err, "Failed to list pods")
-
-	// Find a pod owned by this ModelServing
+	// Find the original pod by label value
 	var originalPod *corev1.Pod
-	for _, pod := range podList.Items {
-		for _, ref := range pod.OwnerReferences {
-			if ref.UID == ms.UID {
-				originalPod = &pod
-				break
-			}
-		}
-		if originalPod != nil {
+	for i := range podList.Items {
+		p := &podList.Items[i]
+		if v, ok := p.Labels["kthena.volcano.sh/model-serving-name"]; ok && v == modelServing.Name {
+			originalPod = p
 			break
 		}
 	}
 
-	// If no pod owned by the ModelServing is found, skip the test
+	// If no pod with the label is found, skip the test
 	if originalPod == nil {
-		t.Log("No pod owned by ModelServing found, skipping pod recovery test")
+		t.Logf("No pod found with label selector %q, skipping pod recovery test", labelSelector)
 		t.Skip()
 	}
 
@@ -143,29 +138,28 @@ func TestModelServingPodRecovery(t *testing.T) {
 	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, originalPodName, metav1.DeleteOptions{})
 	require.NoError(t, err, "Failed to delete pod")
 
-	// Wait for a new pod owned by the same ModelServing with a different UID to reach Running
+	// Wait for a new pod with different UID and PodReady condition set to True
 	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{})
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
 		if err != nil {
 			return false
 		}
 		for _, pod := range pods.Items {
-			// Check if pod is owned by the same ModelServing
-			ownedByMS := false
-			for _, ref := range pod.OwnerReferences {
-				if ref.UID == ms.UID {
-					ownedByMS = true
-					break
+			// Check if it's a new pod (different UID from original)
+			if pod.UID != originalPodUID {
+				// Check for PodReady condition with status True
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+						t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
+						return true
+					}
 				}
-			}
-			// Return true if it's a new pod (different UID) owned by the ModelServing and is Running
-			if ownedByMS && pod.UID != originalPodUID && pod.Status.Phase == corev1.PodRunning {
-				t.Logf("New pod created: %s (UID: %s)", pod.Name, pod.UID)
-				return true
 			}
 		}
 		return false
-	}, 2*time.Minute, 5*time.Second, "New pod owned by ModelServing was not recreated after deletion")
+	}, 2*time.Minute, 5*time.Second, "New pod was not recreated with PodReady condition after deletion")
 
 	t.Log("Pod recovery test passed successfully")
 }
@@ -198,8 +192,11 @@ func TestModelServingServiceRecovery(t *testing.T) {
 	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing")
 
-	// List all Services in the namespace
-	serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{})
+	// List Services with label selector scoped to the current ModelServing
+	labelSelector := "kthena.volcano.sh/model-serving-name=" + modelServing.Name
+	serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
 	require.NoError(t, err, "Failed to list Services in namespace")
 
 	// Filter Services owned by this ModelServing and find the headless one
@@ -236,7 +233,9 @@ func TestModelServingServiceRecovery(t *testing.T) {
 
 	// Wait for a new headless Service with same owner but different UID to appear
 	require.Eventually(t, func() bool {
-		serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{})
+		serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
 		if err != nil {
 			return false
 		}
