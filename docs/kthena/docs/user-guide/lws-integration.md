@@ -27,16 +27,24 @@ When Kthena's LWS integration is enabled:
 
 ## Configuration Mapping
 
-Kthena maps `LeaderWorkerSet` fields to `ModelServing` concepts as follows:
+### Spec Mapping (LeaderWorkerSet -> ModelServing)
 
-| LeaderWorkerSet Field | Kthena ModelServing Equivalent | Description |
-|-----------------------|--------------------------------|-------------|
-| `metadata.name` | `ModelServing` Name | Identifies the workload. |
-| `spec.replicas` | `spec.replicas` | The number of independent serving groups (e.g., number of model replicas). |
-| `spec.leaderWorkerTemplate.leaderTemplate` | Role: `leader` | Defines the configuration for the Leader Pod. |
-| `spec.leaderWorkerTemplate.workerTemplate` | Role: `worker` | Defines the configuration for Worker Pods. |
-| `spec.leaderWorkerTemplate.size` | Worker Count Calculation | Determines the number of workers per group. `Worker Replicas = Size - 1`. |
-| `spec.startupPolicy` | Startup Policy | Maps to the startup ordering (e.g., LeaderFirst). |
+| LeaderWorkerSet Field | ModelServing Internal Semantics | Description |
+|-----------------------|---------------------------------|-------------|
+| `metadata.name` | `metadata.name` | Mapped to the ModelServing identifier. |
+| `spec.replicas` | `spec.replicas` | Defines the number of independent serving groups. |
+| `spec.leaderWorkerTemplate.leaderTemplate` | `spec.template.roles.EntryTemplate` | Parsed as Leader role definition. If nil, `workerTemplate` is used as Entry Pod. |
+| `spec.leaderWorkerTemplate.workerTemplate` | `spec.template.roles.WorkerTemplate` | Parsed as Worker role definition. |
+| `spec.leaderWorkerTemplate.size` | Worker Role Replicas | Used to calculate replica count for Worker Role: `Replicas = Size - 1` (Assuming Leader is 1). |
+| `spec.startupPolicy` | Startup Policy | Maps startup order policy (e.g., `LeaderFirst`). |
+
+### Status Mapping (ModelServing -> LeaderWorkerSet)
+
+| ModelServing Internal Status | LeaderWorkerSet Status | Description |
+|------------------------------|------------------------|-------------|
+| ServingGroup Ready Count | `status.readyReplicas` | Number of ready groups. |
+| ServingGroup Total Count | `status.replicas` | Number of currently existing groups. |
+| Conditions | `status.conditions` | Aggregated health status (Available, Progressing). |
 
 ## Deployment Example
 
@@ -64,7 +72,7 @@ This example defines a deployment with 1 replica group. Each group consists of 1
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
-  name: qwen-72b-inference
+  name: llama-multinode
   namespace: default
 spec:
   # Number of independent model replicas (Serving Groups)
@@ -79,40 +87,77 @@ spec:
       metadata:
         labels:
           role: leader
-          model: qwen-72b
+          model: llama-405b
       spec:
         containers:
-        - name: inference-server
+        - name: leader
           image: vllm/vllm-openai:latest
           env:
-          - name: ROLE
-            value: "leader"
-          - name: MASTER_ADDR
-            value: "localhost" 
-          ports:
-          - containerPort: 8000
-            name: http
+          - name: HUGGING_FACE_HUB_TOKEN
+            value: $HUGGING_FACE_HUB_TOKEN
+          command:
+            - sh
+            - -c
+            - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2; 
+              python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline_parallel_size 2"
           resources:
             limits:
               nvidia.com/gpu: "8"
-            
+              memory: 1124Gi
+              ephemeral-storage: 800Gi
+            requests:
+              ephemeral-storage: 800Gi
+              cpu: 125
+          ports:
+          - containerPort: 8080
+            name: http
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+          - mountPath: /dev/shm
+            name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
+
     # Worker Pod Configuration
     workerTemplate:
       metadata:
         labels:
           role: worker
-          model: qwen-72b
+          model: llama-405b
       spec:
         containers:
-        - name: inference-worker
+        - name: worker
           image: vllm/vllm-openai:latest
-          env:
-          - name: ROLE
-            value: "worker"
-          command: ["/bin/sh", "-c", "python3 -m vllm.entrypoints.worker ..."]
+          command:
+            - sh
+            - -c
+            - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
           resources:
             limits:
               nvidia.com/gpu: "8"
+              memory: 1124Gi
+              ephemeral-storage: 800Gi
+            requests:
+              ephemeral-storage: 800Gi
+              cpu: 125
+          env:
+          - name: HUGGING_FACE_HUB_TOKEN
+            value: $HUGGING_FACE_HUB_TOKEN
+          volumeMounts:
+          - mountPath: /dev/shm
+            name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
 ```
 
 </details>
