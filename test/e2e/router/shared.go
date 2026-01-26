@@ -875,8 +875,8 @@ func deployRedisForTest(t *testing.T, ctx context.Context, testCtx *routercontex
 
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
-		testCtx.KubeClient.AppsV1().Deployments(namespace).Delete(cleanupCtx, redisServerName, metav1.DeleteOptions{})
-		testCtx.KubeClient.CoreV1().Services(namespace).Delete(cleanupCtx, redisServerName, metav1.DeleteOptions{})
+		_ = testCtx.KubeClient.AppsV1().Deployments(namespace).Delete(cleanupCtx, redisServerName, metav1.DeleteOptions{})
+		_ = testCtx.KubeClient.CoreV1().Services(namespace).Delete(cleanupCtx, redisServerName, metav1.DeleteOptions{})
 	})
 
 	require.Eventually(t, func() bool {
