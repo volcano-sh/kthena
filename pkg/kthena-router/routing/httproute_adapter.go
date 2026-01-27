@@ -219,7 +219,6 @@ func (a *HTTPRouteAdapter) selectInferencePoolTarget(rule *gatewayv1.HTTPRouteRu
 	for _, backendRef := range rule.BackendRefs {
 		if backendRef.Group != nil && *backendRef.Group == "inference.networking.k8s.io" &&
 			backendRef.Kind != nil && *backendRef.Kind == "InferencePool" {
-
 			namespace := a.httpRoute.Namespace
 			if backendRef.Namespace != nil {
 				namespace = string(*backendRef.Namespace)
