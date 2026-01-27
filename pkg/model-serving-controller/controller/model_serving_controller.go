@@ -852,61 +852,80 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
 
-	// Count how many groups are currently not running(Unavailable)
+	// Count unavailable groups and filter outdated groups
+	// Following Kubernetes deployment controller's behavior: delete unavailable groups first
+	partition := c.getPartition(ms)
 	currentUnavailableCount := 0
+	var outdatedGroups []ServingGroupWithScore
+	var unavailableOutdatedGroups []ServingGroupWithScore
+	var availableOutdatedGroups []ServingGroupWithScore
+
 	for _, sg := range servingGroupList {
 		if sg.Status != datastore.ServingGroupRunning {
 			currentUnavailableCount++
 		}
+
+		// Filter outdated groups and calculate scores for priority-based deletion
+		_, ordinal := utils.GetParentNameAndOrdinal(sg.Name)
+		if (partition == 0 || ordinal >= partition) && c.isServingGroupOutdated(sg, ms.Namespace, revision) {
+			score := c.calculateServingGroupScore(ms, sg.Name)
+			outdatedGroups = append(outdatedGroups, score)
+			// Separate unavailable and available outdated groups
+			if sg.Status != datastore.ServingGroupRunning {
+				unavailableOutdatedGroups = append(unavailableOutdatedGroups, score)
+			} else {
+				availableOutdatedGroups = append(availableOutdatedGroups, score)
+			}
+		}
 	}
-	// Check if kthena have reached the maxUnavailable limit
-	if currentUnavailableCount >= maxUnavailable {
-		// Wait until some groups become available before continuing updates
-		klog.V(4).Infof("current unavailable ServingGroup count %d has reached the maxUnavailable limit %d, waiting for next reconcile", currentUnavailableCount, maxUnavailable)
+
+	if len(outdatedGroups) == 0 {
+		klog.V(4).Infof("no outdated groups to update for modelServing %s", ms.Name)
 		return nil
 	}
-	// Calculate how many more groups we can delete in this reconcile.
-	groupToDelete := maxUnavailable - currentUnavailableCount
 
-	// Determine if partition is set
-	partition := c.getPartition(ms)
+	// Sort outdated groups by priority: unavailable groups first, then by deletion cost and index
+	slices.SortFunc(unavailableOutdatedGroups, compareServingGroupScore)
+	slices.SortFunc(availableOutdatedGroups, compareServingGroupScore)
 
-	// we terminate the ServingGroup with the largest ordinal that does not match the update revision.
-	// Update outdated groups respecting the maxUnavailable constraint
+	// Delete unavailable outdated groups first (they don't increase unavailable count)
+	// Then delete available outdated groups respecting maxUnavailable constraint
 	updateCount := 0
-	if partition > 0 {
-		// When partition is set, delete ServingGroups with ordinal >= partition
-		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
-			_, ordinal := utils.GetParentNameAndOrdinal(servingGroupList[i].Name)
-			if ordinal < partition {
-				// Skip partition-protected ServingGroups
-				break
-			}
 
-			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
-				// target ServingGroup is not the latest version, needs to be updated
-				klog.V(2).Infof("ServingGroup %s will be terminated for update (partition=%d)", servingGroupList[i].Name, partition)
-				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
-					return err
-				}
-				updateCount += 1
-			}
+	// First, delete all unavailable outdated groups (they're already unavailable, so deleting them is safe)
+	for i := 0; i < len(unavailableOutdatedGroups); i++ {
+		targetGroup := unavailableOutdatedGroups[i]
+		klog.V(2).Infof("ServingGroup %s will be terminated for update (priority: %d, deletion cost: %d, index: %d, partition=%d) - unavailable group",
+			targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index, partition)
+		if err := c.deleteServingGroup(ctx, ms, targetGroup.Name); err != nil {
+			return err
 		}
-		klog.V(2).Infof("all target groups of modelServing %s have been updated (partition=%d)", ms.Name, partition)
-	} else {
-		// Original behavior: terminate the ServingGroup with the largest ordinal that does not match the update revision
-		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
-			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
-				// target ServingGroup is not the latest version, needs to be updated
-				klog.V(2).Infof("ServingGroup %s will be terminated for update", servingGroupList[i].Name)
-				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
-					return err
-				}
-				updateCount += 1
-			}
-		}
-		klog.V(2).Infof("all target groups of modelServing %s have been updated", ms.Name)
+		updateCount++
 	}
+
+	// Then, delete available outdated groups respecting maxUnavailable constraint
+	// After deleting unavailable groups, we can delete up to (maxUnavailable - remaining unavailable count) available groups
+	remainingUnavailableCount := currentUnavailableCount - len(unavailableOutdatedGroups)
+	groupToDelete := maxUnavailable - remainingUnavailableCount
+	if groupToDelete > 0 {
+		availableToDelete := min(len(availableOutdatedGroups), groupToDelete)
+		for i := 0; i < availableToDelete; i++ {
+			targetGroup := availableOutdatedGroups[i]
+			klog.V(2).Infof("ServingGroup %s will be terminated for update (priority: %d, deletion cost: %d, index: %d, partition=%d) - available group",
+				targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index, partition)
+			if err := c.deleteServingGroup(ctx, ms, targetGroup.Name); err != nil {
+				return err
+			}
+			updateCount++
+		}
+	} else if len(availableOutdatedGroups) > 0 {
+		klog.V(4).Infof("cannot delete available outdated groups: remaining unavailable count %d would exceed maxUnavailable %d", remainingUnavailableCount, maxUnavailable)
+	}
+
+	if updateCount > 0 {
+		klog.V(2).Infof("terminated %d outdated groups for modelServing %s (partition=%d)", updateCount, ms.Name, partition)
+	}
+
 	return nil
 }
 
@@ -1491,25 +1510,7 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 	}
 
 	// Sort both lists by priority tuple: (priority, deletionCost, index)
-	// Lower priority value = higher deletion priority (delete first)
-	// Lower deletion cost = higher deletion priority
-	// Higher index = higher deletion priority (backward compatibility)
-	sortGroups := func(a, b ServingGroupWithScore) int {
-		// Primary: Sort by priority (not-ready first)
-		if a.Priority != b.Priority {
-			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
-		}
-
-		// Secondary: Among groups with same priority, lower deletion cost comes first
-		if a.DeletionCost != b.DeletionCost {
-			return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
-		}
-
-		// Tertiary: Higher index comes first (backward compatibility)
-		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
-	}
-
-	slices.SortFunc(nonProtectedScores, sortGroups)
+	slices.SortFunc(nonProtectedScores, compareServingGroupScore)
 
 	totalToDelete := max(0, len(servingGroupList)-expectedCount)
 
@@ -1530,7 +1531,7 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 	remainingToDelete := totalToDelete - numNonProtectedToDelete
 	if remainingToDelete > 0 && partition > 0 {
 		// Sort protected scores only when we need to delete them
-		slices.SortFunc(protectedScores, sortGroups)
+		slices.SortFunc(protectedScores, compareServingGroupScore)
 		numProtectedToDelete := min(remainingToDelete, len(protectedScores))
 
 		for i := 0; i < numProtectedToDelete; i++ {

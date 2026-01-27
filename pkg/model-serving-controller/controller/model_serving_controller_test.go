@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -4194,5 +4195,144 @@ func TestManageHeadlessService(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestManageServingGroupRollingUpdate_SeparateAndSortUnavailableAvailable tests that
+// unavailable and available outdated groups are properly separated and sorted
+func TestManageServingGroupRollingUpdate_SeparateAndSortUnavailableAvailable(t *testing.T) {
+	ctx := context.Background()
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextfake := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+	assert.NoError(t, err)
+
+	msName := "test-rolling-update-separation"
+	oldRevision := "revision-v1"
+	newRevision := "revision-v2"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      msName,
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:      ptr.To[int32](5),
+			SchedulerName: "volcano",
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "prefill-container",
+										Image: "test-image:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: &intstr.IntOrString{
+						Type:   intstr.Int,
+						IntVal: 2,
+					},
+				},
+			},
+		},
+	}
+
+	// Create ModelServing in API server
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(ctx, ms, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	podIndexer := controller.podsInformer.GetIndexer()
+
+	// Setup serving groups:
+	// - Group 0: unavailable (Creating), outdated, deletion cost 100
+	// - Group 1: available (Running), outdated, deletion cost 50 (should be deleted first among available)
+	// - Group 2: available (Running), outdated, deletion cost 200 (should be deleted last among available)
+	// - Group 3: available (Running), outdated, deletion cost 75
+	// - Group 4: available (Running), up-to-date (not outdated, should not be deleted)
+	testGroups := []struct {
+		ordinal      int
+		status       datastore.ServingGroupStatus
+		revision     string
+		deletionCost int
+	}{
+		{0, datastore.ServingGroupCreating, oldRevision, 100}, // unavailable outdated
+		{1, datastore.ServingGroupRunning, oldRevision, 50},   // available outdated, lowest cost
+		{2, datastore.ServingGroupRunning, oldRevision, 200},  // available outdated, highest cost (won't be deleted due to maxUnavailable=2)
+		{3, datastore.ServingGroupRunning, oldRevision, 75},   // available outdated, medium cost
+		{4, datastore.ServingGroupRunning, newRevision, 0},    // up-to-date, should not be deleted
+	}
+
+	for _, tg := range testGroups {
+		groupName := utils.GenerateServingGroupName(msName, tg.ordinal)
+		controller.store.AddServingGroup(utils.GetNamespaceName(ms), tg.ordinal, tg.revision)
+		controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, tg.status)
+
+		// Create a pod with the old revision to make the group outdated
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: ms.Namespace,
+				Name:      fmt.Sprintf("pod-%s", groupName),
+				Labels: map[string]string{
+					workloadv1alpha1.ModelServingNameLabelKey: msName,
+					workloadv1alpha1.GroupNameLabelKey:        groupName,
+					workloadv1alpha1.RoleLabelKey:             "prefill",
+					workloadv1alpha1.RoleIDKey:                "prefill-0",
+					workloadv1alpha1.RevisionLabelKey:         tg.revision,
+				},
+			},
+		}
+
+		// Add deletion cost annotation
+		if tg.deletionCost > 0 {
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			pod.Annotations[PodDeletionCostAnnotation] = fmt.Sprintf("%d", tg.deletionCost)
+		}
+
+		err := podIndexer.Add(pod)
+		assert.NoError(t, err)
+	}
+
+	// Call manageServingGroupRollingUpdate
+	err = controller.manageServingGroupRollingUpdate(ctx, ms, newRevision)
+	assert.NoError(t, err)
+
+	// Verify deletion order:
+	// 1. Group 0 (unavailable outdated) should be deleted first
+	// 2. Then Group 1 (available outdated, lowest cost) should be deleted
+	// 3. Group 3 (available outdated, medium cost) should be deleted (maxUnavailable=2 allows 2 available deletions)
+	// 4. Group 2 (available outdated, highest cost) should NOT be deleted (would exceed maxUnavailable)
+	// 5. Group 4 (up-to-date) should NOT be deleted
+
+	expectedDeleted := []int{0, 1, 3}
+	expectedNotDeleted := []int{2, 4}
+
+	for _, ordinal := range expectedDeleted {
+		groupName := utils.GenerateServingGroupName(msName, ordinal)
+		status := controller.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName)
+		assert.Equal(t, datastore.ServingGroupDeleting, status,
+			"Group %d (%s) should be marked as Deleting", ordinal, groupName)
+	}
+
+	for _, ordinal := range expectedNotDeleted {
+		groupName := utils.GenerateServingGroupName(msName, ordinal)
+		status := controller.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName)
+		assert.NotEqual(t, datastore.ServingGroupDeleting, status,
+			"Group %d (%s) should NOT be marked as Deleting", ordinal, groupName)
 	}
 }

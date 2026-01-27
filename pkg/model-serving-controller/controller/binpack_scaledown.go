@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"fmt"
 	"strconv"
 
@@ -187,4 +188,25 @@ func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1
 		DeletionCost: deletionCost,
 		Index:        index,
 	}
+}
+
+// compareServingGroupScore compares two ServingGroupWithScore for sorting.
+// Returns: negative if a should be deleted before b, positive if b should be deleted before a, 0 if equal.
+// Priority order: (priority, deletionCost, index)
+// Lower priority value = higher deletion priority (delete first)
+// Lower deletion cost = higher deletion priority
+// Higher index = higher deletion priority (backward compatibility)
+func compareServingGroupScore(a, b ServingGroupWithScore) int {
+	// Primary: Sort by priority (not-ready first)
+	if a.Priority != b.Priority {
+		return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
+	}
+
+	// Secondary: Among groups with same priority, lower deletion cost comes first
+	if a.DeletionCost != b.DeletionCost {
+		return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+	}
+
+	// Tertiary: Higher index comes first (backward compatibility)
+	return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
 }
