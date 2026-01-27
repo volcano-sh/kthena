@@ -255,7 +255,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Store metrics recorder in context for use in other functions
 		c.Set("metricsRecorder", metricsRecorder)
 
-		// step 3: routing and load balancing
+		// step 3.1: routing and load balancing
 		if !EnableFairnessScheduling {
 			// Choose routing implementation based on feature flag
 			if UseUnifiedRouting {
