@@ -381,6 +381,149 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 	t.Log("ModelServing with duplicate IP hostAliases test passed successfully")
 }
 
+func TestModelServingRecoveryPolicyServingGroupRecreate(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create Kubernetes client locally
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a ModelServing with 2 ServingGroup replicas and RecoveryPolicy set to ServingGroupRecreate
+	modelServing := createBasicModelServing("test-recovery-sg-recreate", 2, 2)
+	modelServing.Spec.RecoveryPolicy = workload.ServingGroupRecreate
+
+	t.Log("Creating ModelServing with RecoveryPolicy set to ServingGroupRecreate")
+	_, err = kthenaClient.WorkloadV1alpha1().
+		ModelServings(testNamespace).
+		Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
+	// Wait until ModelServing is ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Get initial pods to identify pods belonging to one ServingGroup
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods with label selector")
+
+	// Group pods by their ServingGroup (using labels to identify which ServingGroup they belong to)
+	servingGroupPods := make(map[string][]*corev1.Pod)
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		// Look for the label that indicates which ServingGroup the pod belongs to
+		sgLabel, exists := pod.Labels["servinggroup.volcano.sh/name"]
+		if !exists {
+			continue
+		}
+		servingGroupPods[sgLabel] = append(servingGroupPods[sgLabel], pod)
+	}
+
+	// Select a ServingGroup that has pods to delete a pod from
+	var targetServingGroup string
+	var targetPod *corev1.Pod
+	for sg, pods := range servingGroupPods {
+		if len(pods) > 0 {
+			targetServingGroup = sg
+			targetPod = pods[0] // Take the first pod from this ServingGroup
+			break
+		}
+	}
+
+	if targetPod == nil {
+		t.Fatal("No pods found in any ServingGroup")
+	}
+
+	t.Logf("Selected pod %s from ServingGroup %s to delete", targetPod.Name, targetServingGroup)
+
+	// Store original UIDs of all pods in the target ServingGroup
+	originalPodUIDs := make(map[string]string)
+	for _, pod := range servingGroupPods[targetServingGroup] {
+		originalPodUIDs[pod.Name] = string(pod.UID)
+	}
+	t.Logf("Original pod UIDs in ServingGroup %s: %v", targetServingGroup, originalPodUIDs)
+
+	// Record original number of pods in the target ServingGroup
+	originalPodCount := len(servingGroupPods[targetServingGroup])
+
+	// Delete the selected pod
+	t.Logf("Deleting pod %s from ServingGroup %s", targetPod.Name, targetServingGroup)
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete pod")
+
+	// Wait for all pods in the target ServingGroup to be recreated
+	// We expect all original pods to be replaced with new ones
+	t.Log("Waiting for all pods in the target ServingGroup to be recreated due to ServingGroupRecreate policy...")
+
+	require.Eventually(t, func() bool {
+		// Get current pods
+		currentPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+
+		// Group current pods by ServingGroup
+		currentServingGroupPods := make(map[string][]*corev1.Pod)
+		for i := range currentPodList.Items {
+			pod := &currentPodList.Items[i]
+			sgLabel, exists := pod.Labels["servinggroup.volcano.sh/name"]
+			if !exists {
+				continue
+			}
+			currentServingGroupPods[sgLabel] = append(currentServingGroupPods[sgLabel], pod)
+		}
+
+		// Check if all pods in the target ServingGroup have been replaced (different UIDs)
+		currentTargetPods := currentServingGroupPods[targetServingGroup]
+		if len(currentTargetPods) != originalPodCount {
+			// Still waiting for all pods to be recreated
+			t.Logf("Current pod count in target ServingGroup %s: %d, expecting: %d", targetServingGroup, len(currentTargetPods), originalPodCount)
+			return false
+		}
+
+		// Check if all pods in the target ServingGroup are new (different UIDs from original)
+		allReplaced := true
+		for _, currentPod := range currentTargetPods {
+			originalUID, exists := originalPodUIDs[currentPod.Name]
+			if exists && originalUID == string(currentPod.UID) {
+				// Found a pod with same UID as original - not all pods have been replaced yet
+				t.Logf("Pod %s still has original UID %s", currentPod.Name, originalUID)
+				allReplaced = false
+				break
+			}
+		}
+
+		if allReplaced {
+			t.Logf("All pods in ServingGroup %s have been replaced with new UIDs", targetServingGroup)
+		} else {
+			t.Logf("Still waiting for all pods in ServingGroup %s to be replaced")
+		}
+
+		return allReplaced
+	}, 3*time.Minute, 5*time.Second, "Not all pods in the target ServingGroup were recreated with new UIDs after pod deletion")
+
+	// Verify the ModelServing eventually becomes ready again
+	t.Log("Waiting for ModelServing to become ready again after ServingGroup recreation")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	t.Log("ServingGroupRecreate recovery policy test passed successfully")
+}
+
 func createBasicModelServing(name string, servingGroupReplicas, roleReplicas int32) *workload.ModelServing {
 	return &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
