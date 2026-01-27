@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"k8s.io/apimachinery/pkg/types"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -187,7 +188,7 @@ type Store interface {
 	GetPodsByModelServer(name types.NamespacedName) ([]*datastore.PodInfo, error)
 
 	// GetInferencePool retrieves an InferencePool by namespaced name key
-	GetInferencePool(key string) interface{} // Returns *inferencev1.InferencePool
+	GetInferencePool(key string) *inferencev1.InferencePool
 
 	// GetPodsByInferencePool retrieves pods for an InferencePool
 	GetPodsByInferencePool(name types.NamespacedName) ([]*datastore.PodInfo, error)

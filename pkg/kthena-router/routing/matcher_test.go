@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/types"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -32,7 +33,7 @@ type MockStore struct {
 	modelRoutes    map[string]*aiv1alpha1.ModelRoute
 	modelServers   map[types.NamespacedName]*aiv1alpha1.ModelServer
 	httpRoutes     map[string][]*gatewayv1.HTTPRoute
-	inferencePools map[string]interface{}
+	inferencePools map[string]*inferencev1.InferencePool
 	gateways       map[string]*gatewayv1.Gateway
 	podsByMS       map[types.NamespacedName][]*datastore.PodInfo
 	podsByIP       map[types.NamespacedName][]*datastore.PodInfo
@@ -43,7 +44,7 @@ func NewMockStore() *MockStore {
 		modelRoutes:    make(map[string]*aiv1alpha1.ModelRoute),
 		modelServers:   make(map[types.NamespacedName]*aiv1alpha1.ModelServer),
 		httpRoutes:     make(map[string][]*gatewayv1.HTTPRoute),
-		inferencePools: make(map[string]interface{}),
+		inferencePools: make(map[string]*inferencev1.InferencePool),
 		gateways:       make(map[string]*gatewayv1.Gateway),
 		podsByMS:       make(map[types.NamespacedName][]*datastore.PodInfo),
 		podsByIP:       make(map[types.NamespacedName][]*datastore.PodInfo),
@@ -66,7 +67,7 @@ func (m *MockStore) GetPodsByModelServer(name types.NamespacedName) ([]*datastor
 	return pods, nil
 }
 
-func (m *MockStore) GetInferencePool(key string) interface{} {
+func (m *MockStore) GetInferencePool(key string) *inferencev1.InferencePool {
 	return m.inferencePools[key]
 }
 

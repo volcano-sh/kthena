@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
-	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -291,14 +290,8 @@ func (t *InferencePoolTarget) GetPods() ([]*datastore.PodInfo, error) {
 // GetPort returns the port for this InferencePool
 func (t *InferencePoolTarget) GetPort() int32 {
 	key := fmt.Sprintf("%s/%s", t.name.Namespace, t.name.Name)
-	poolInterface := t.store.GetInferencePool(key)
-	if poolInterface == nil {
-		return 0
-	}
-
-	// Type assert to InferencePool
-	pool, ok := poolInterface.(*inferencev1.InferencePool)
-	if !ok {
+	pool := t.store.GetInferencePool(key)
+	if pool == nil {
 		return 0
 	}
 

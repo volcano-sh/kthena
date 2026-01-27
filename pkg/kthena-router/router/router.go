@@ -301,8 +301,8 @@ func (r *Router) doLoadbalanceUnified(c *gin.Context, modelRequest ModelRequest)
 	routeMatch, err := r.routeMatcher.Match(routeRequest)
 	if err != nil {
 		klog.Errorf("Route matching failed: %v", err)
-		accesslog.SetError(c, "route_matching", fmt.Sprintf("no matching route found: %v", err))
-		c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("no matching route found: %v", err))
+		accesslog.SetError(c, "route_not_found", "route not found")
+		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
 		return
 	}
 
