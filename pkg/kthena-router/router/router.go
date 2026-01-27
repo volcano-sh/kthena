@@ -67,6 +67,7 @@ func getEnvBool(key string, fallback bool) bool {
 }
 
 var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
+var UseUnifiedRouting = getEnvBool("USE_UNIFIED_ROUTING", true)
 
 type Router struct {
 	scheduler       scheduler.Scheduler
@@ -254,9 +255,18 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Store metrics recorder in context for use in other functions
 		c.Set("metricsRecorder", metricsRecorder)
 
-		// step 3.1: load balancing
+		// step 3: routing and load balancing
 		if !EnableFairnessScheduling {
-			r.doLoadbalance(c, modelRequest)
+			// Choose routing implementation based on feature flag
+			if UseUnifiedRouting {
+				klog.V(4).Info("Using unified routing matcher")
+				r.metrics.RecordRoutingPath(metrics.RoutingPathUnified, modelName)
+				r.doLoadbalanceUnified(c, modelRequest)
+			} else {
+				klog.V(4).Info("Using legacy routing")
+				r.metrics.RecordRoutingPath(metrics.RoutingPathLegacy, modelName)
+				r.doLoadbalance(c, modelRequest)
+			}
 			return
 		}
 
@@ -1102,7 +1112,16 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 
 	select {
 	case <-queueReq.NotifyChan:
-		r.doLoadbalance(c, modelRequest)
+		// Use the same routing logic as the main path
+		if UseUnifiedRouting {
+			klog.V(4).Info("Using unified routing matcher (fairness path)")
+			r.metrics.RecordRoutingPath(metrics.RoutingPathUnified, modelName)
+			r.doLoadbalanceUnified(c, modelRequest)
+		} else {
+			klog.V(4).Info("Using legacy routing (fairness path)")
+			r.metrics.RecordRoutingPath(metrics.RoutingPathLegacy, modelName)
+			r.doLoadbalance(c, modelRequest)
+		}
 		return nil
 	case <-time.After(60 * time.Second):
 		// avoid blocking indefinitely
