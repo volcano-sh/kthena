@@ -82,12 +82,6 @@ func GenerateRoleID(roleName string, idx int) string {
 	return roleName + "-" + strconv.Itoa(idx)
 }
 
-func generateEntryPodName(groupName, roleName string) string {
-	// entry-pod number starts from 0
-	// For example, EntryPodName is vllm-sample-0-prefill-1-0, represents the entry-pod in the second replica of the prefill role
-	return groupName + "-" + roleName + "-" + "0"
-}
-
 func GenerateControllerRevisionName(msName, revision string) string {
 	return msName + "-" + revision
 }

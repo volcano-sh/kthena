@@ -1258,9 +1258,8 @@ func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.Mode
 	// If all three conditions are met, skip processing this pod.
 	// 1. ServingGroup exists
 	// 2. Pod revision is not equal to ServingGroup revision meeting the rollingupdate scenario
-	// 3. Pod is owned by the ModelServing. This indicates that the pods are remnants of previously modelserving with identical names.
 	// Should not skip handling in this case.
-	if servingGroup != nil && servingGroup.Revision != podRevision && utils.IsOwnedByModelServing(obj.GetOwnerReferences(), ms.GetUID()) {
+	if servingGroup != nil && servingGroup.Revision != podRevision {
 		// If the pod revision is not equal to the ServingGroup revision, we do not need to handle it.
 		klog.V(4).Infof("pod %s/%s revision %s is not equal to ServingGroup %s revision %s, skip handling",
 			obj.GetNamespace(), obj.GetName(), podRevision, servingGroupName, servingGroup.Revision)
@@ -1691,6 +1690,16 @@ func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *
 					continue
 				}
 
+				for _, svc := range services {
+					// If the service is not owned by the ModelServing,
+					// means this svc is created by the modelserving with the same name has already been deleted.
+					// Should re-enqueue after enqueueTimeInterval(1 second).
+					if !utils.IsOwnedByModelServing(svc.GetOwnerReferences(), ms.UID) {
+						c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+						return nil
+					}
+				}
+
 				if len(services) == 0 && role.WorkerTemplate != nil {
 					_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 					if err := utils.CreateHeadlessService(ctx, c.kubeClientSet, ms, serviceSelector, sg.Name, role.Name, roleIndex); err != nil {
@@ -1757,13 +1766,16 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 
 	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, entryPod, metav1.CreateOptions{})
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) && c.isPodFromPreviousModelServing(ms, entryPod) {
-			// If the entry pod already exists but is outdated, enqueue the modelserving after 1 second
-			klog.V(4).Infof("Entry pod %s is outdated, enqueue to reconcile", entryPod.Name)
-			c.enqueueModelServingAfter(ms, enqueueTimeInterval)
-			return nil
+		if apierrors.IsAlreadyExists(err) {
+			if c.isPodFromPreviousModelServing(ms, entryPod) {
+				// If the entry pod already exists but is outdated, enqueue the modelserving after 1 second
+				klog.V(4).Infof("Entry pod %s is outdated, enqueue to reconcile", entryPod.Name)
+				c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+				return nil
+			}
+		} else {
+			return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
 		}
-		return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
 	}
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
@@ -1784,13 +1796,16 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		}
 		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, workerPod, metav1.CreateOptions{})
 		if err != nil {
-			if apierrors.IsAlreadyExists(err) && c.isPodFromPreviousModelServing(ms, workerPod) {
-				// If the worker pod already exists but is outdated, enqueue the modelserving after 1 second
-				klog.V(4).Infof("worker pod %s is outdated, enqueue to reconcile", workerPod.Name)
-				c.enqueueModelServingAfter(ms, enqueueTimeInterval)
-				return nil
+			if apierrors.IsAlreadyExists(err) {
+				if c.isPodFromPreviousModelServing(ms, workerPod) {
+					// If the worker pod already exists but is outdated, enqueue the modelserving after 1 second
+					klog.V(4).Infof("worker pod %s is outdated, enqueue to reconcile", workerPod.Name)
+					c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+					return nil
+				}
+			} else {
+				return fmt.Errorf("failed to create worker pod %s: %v", workerPod.Name, err)
 			}
-			return fmt.Errorf("failed to create worker pod %s: %v", workerPod.Name, err)
 		}
 	}
 	return nil
