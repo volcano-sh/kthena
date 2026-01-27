@@ -508,7 +508,7 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 	expectedCount := int(*ms.Spec.Replicas)
 	curReplicas := len(servingGroupList)
 
-	// Determsne whether it is a scale-up or scale-down scenario
+	// Determine whether it is a scale-up or scale-down scenario
 	if curReplicas < expectedCount {
 		// update pod groups if needed
 		for _, servingGroup := range servingGroupList {
@@ -762,9 +762,29 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		return
 	}
 
+	// TODO: need to check the pod spec match the modelserving spec, if not, recreate the pod
+
 	expectedCount := int(*targetRole.Replicas)
 	if len(roleList) == expectedCount {
-		klog.V(4).Infof("The replicas of role %s in ServingGroup %s is consistent, no need to scale up or down", targetRole.Name, groupName)
+		expectedPods := 1 + int(targetRole.WorkerReplicas)
+		for _, roleObj := range roleList {
+			if roleObj.Status == datastore.RoleDeleting {
+				continue
+			}
+			roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, targetRole.Name, roleObj.Name)
+			pods, err := c.getPodsByIndex(RoleIDKey, roleIDValue)
+			if err != nil {
+				klog.Warningf("failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+				continue
+			}
+			if len(pods) < expectedPods {
+				klog.V(2).Infof("role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+				_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
+				if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
+					klog.Errorf("failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+				}
+			}
+		}
 		return
 	}
 
