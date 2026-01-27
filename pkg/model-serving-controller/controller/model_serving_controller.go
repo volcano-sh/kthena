@@ -56,6 +56,8 @@ import (
 )
 
 const (
+	// enqueueTimeInterval is the time interval to re-enqueue.:
+	// 1. The resource being processed is a remnant resource from the previously named model serving.
 	enqueueTimeInterval = 1 * time.Second
 
 	GroupNameKey = "GroupName"
@@ -253,7 +255,7 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 func (c *ModelServingController) deleteModelServing(obj interface{}) {
 	ms, ok := obj.(*workloadv1alpha1.ModelServing)
 	if !ok {
-		// If the object is not a ModelServing, it msght be a tombstone object.
+		// If the object is not a ModelServing, it might be a tombstone object.
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
 			klog.Errorf("failed to parse ModelServing type when deletems %#v", obj)
@@ -438,7 +440,7 @@ func (c *ModelServingController) deletePodGroup(obj interface{}) {
 		}
 	}
 
-	// Is servingGroup is deleting, skip handling.
+	// If servingGroup is deleting, skip handling.
 	if c.handleDeletionInProgress(ms, servingGroupName, "", "") {
 		return
 	}
@@ -542,12 +544,14 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	go c.podsInformer.RunWithContext(ctx)
 	go c.servicesInformer.RunWithContext(ctx)
 	go c.modelServingsInformer.RunWithContext(ctx)
+	go c.podGroupInformer.RunWithContext(ctx)
 	go c.podGroupManager.CrdInformer.RunWithContext(ctx)
 
 	cache.WaitForCacheSync(ctx.Done(),
 		c.podsInformer.HasSynced,
 		c.servicesInformer.HasSynced,
 		c.modelServingsInformer.HasSynced,
+		c.podGroupInformer.HasSynced,
 		c.podGroupManager.CrdInformer.HasSynced,
 	)
 
@@ -1255,10 +1259,9 @@ func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.Mode
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
 	}, servingGroupName)
-	// If all three conditions are met, skip processing this pod.
-	// 1. ServingGroup exists
-	// 2. Pod revision is not equal to ServingGroup revision meeting the rollingupdate scenario
-	// Should not skip handling in this case.
+	// Skip processing this pod when:
+	// 1. The ServingGroup exists.
+	// 2. The pod revision differs from the ServingGroup revision (rolling update scenario).
 	if servingGroup != nil && servingGroup.Revision != podRevision {
 		// If the pod revision is not equal to the ServingGroup revision, we do not need to handle it.
 		klog.V(4).Infof("pod %s/%s revision %s is not equal to ServingGroup %s revision %s, skip handling",
@@ -1882,9 +1885,10 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	return nil
 }
 
-// isPodGroupFromPreviousModelServing checks if the PodGroup is a remnant resource from a previously same-named ModelServing
-// Returns true if the PodGroup exists but is not owned by the current ModelServing (indicating it's from a previous instance)
-// Returns false if the has an error when getting PodGroup or is owned by the current ModelServing
+// isPodGroupFromPreviousModelServing checks if the PodGroup is a remnant resource from a previously same-named ModelServing.
+// Returns true if there's a non-NotFound error when getting the PodGroup or if the PodGroup exists but is not owned by
+// the current ModelServing (indicating it's from a previous instance). Returns false if the PodGroup is not found or is
+// owned by the current ModelServing.
 func (c *ModelServingController) isPodGroupFromPreviousModelServing(ms *workloadv1alpha1.ModelServing, servingGroupName string) bool {
 	if ms == nil || servingGroupName == "" {
 		return false
@@ -1908,9 +1912,10 @@ func (c *ModelServingController) isPodGroupFromPreviousModelServing(ms *workload
 	return !utils.IsOwnedByModelServing(pg.GetOwnerReferences(), ms.GetUID())
 }
 
-// isPodFromPreviousModelServing checks if the Pod is a remnant resource from a previously same-named ModelServing
-// Returns true if the Pod exists but is not owned by the current ModelServing (indicating it's from a previous instance)
-// Returns false if the has an error when getting Pod or is owned by the current ModelServing
+// isPodFromPreviousModelServing checks if the Pod is a remnant resource from a previously same-named ModelServing.
+// Returns true if there's a non-NotFound error when getting the Pod or if the Pod exists but is not owned by
+// the current ModelServing (indicating it's from a previous instance). Returns false if the Pod is not found or is
+// owned by the current ModelServing.
 func (c *ModelServingController) isPodFromPreviousModelServing(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) bool {
 	if ms == nil || pod == nil {
 		return false
@@ -1922,7 +1927,7 @@ func (c *ModelServingController) isPodFromPreviousModelServing(ms *workloadv1alp
 			return false
 		}
 		klog.Errorf("Failed to get Pod %s: %v", pod.GetNamespace()+"/"+pod.GetName(), err)
-		// We expect to be able to obtain the PodG normally or encounter a notFound error.
+		// We expect to be able to obtain the Pod normally or encounter a notFound error.
 		// Therefore, when an error occurs, we expect to be able to reconcile normally after resolving the error.
 		// Hence, we return true to enqueue.
 		return true
