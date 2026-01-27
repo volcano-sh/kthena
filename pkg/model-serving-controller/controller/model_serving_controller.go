@@ -853,7 +853,17 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	)
 	if err != nil {
 		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, err)
+		// Due to the failure to delete the pod.
+		// It is necessary to roll back the roleStatus to enable subsequent deletion of the role.
+		err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, roleStatus)
+		if err != nil {
+			klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
+		}
+		c.enqueueModelServing(ms)
+		return
 	}
+
+	// Delete all services of role
 	// There is no DeleteCollection operation in the service of client-go. We need to list and delete them one by one.
 	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID)
 	services, err := c.getServicesByIndex(RoleIDKey, roleIDValue)
@@ -866,8 +876,17 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				klog.V(4).Infof("service %s/%s has been deleted", ms.Namespace, svc.Name)
+			} else {
+				klog.Errorf("failed to delete service %s/%s: %v", ms.Namespace, svc.Name, err)
+				// Due to the failure to delete the svc.
+				// It is necessary to roll back the roleStatus to enable subsequent deletion of the role.
+				err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, roleStatus)
+				if err != nil {
+					klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
+				}
+				c.enqueueModelServing(ms)
+				return
 			}
-			klog.Errorf("failed to delete service %s/%s: %v", ms.Namespace, svc.Name, err)
 		}
 	}
 
@@ -1760,7 +1779,20 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 		}
 	}
 
+	// update ServingGroup status to Deleting before deleting pods and services.
+	// To avoid unnecessary recreation of headless services.
+	if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupDeleting); err != nil {
+		klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", ms.Namespace, "servingGroup", servingGroupName)
+		return err
+	}
+
 	if err := c.podGroupManager.DeletePodGroup(ctx, ms, servingGroupName); err != nil {
+		// Due to the failure to delete the PodGroup.
+		// It is necessary to roll back the servingGroupStatus to enable subsequent deletion of the servingGroup.
+		if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, status); err != nil {
+			klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", ms.Namespace, "servingGroup", servingGroupName)
+		}
+		c.enqueueModelServing(ms)
 		return fmt.Errorf("failed to delete PodGroup for ServingGroup %s: %v", servingGroupName, err)
 	}
 
@@ -1771,6 +1803,12 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 		LabelSelector: selector.String(),
 	})
 	if err != nil {
+		// Due to the failure to delete the pod.
+		// It is necessary to roll back the servingGroupStatus to enable subsequent deletion of the servingGroup.
+		if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, status); err != nil {
+			klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", ms.Namespace, "servingGroup", servingGroupName)
+		}
+		c.enqueueModelServing(ms)
 		return fmt.Errorf("failed to delete pods of ServingGroup %s: %v", servingGroupName, err)
 	}
 
@@ -1783,14 +1821,14 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	for _, svc := range services {
 		err = c.kubeClientSet.CoreV1().Services(ms.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
+			// Due to the failure to delete the svc.
+			// It is necessary to roll back the servingGroupStatus to enable subsequent deletion of the servingGroup.
+			if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, status); err != nil {
+				klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", ms.Namespace, "servingGroup", servingGroupName)
+			}
+			c.enqueueModelServing(ms)
 			return fmt.Errorf("failed to delete service %s: %v", svc.Name, err)
 		}
-	}
-
-	// update ServingGroup status to Deleting after deleting pods and services
-	if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupDeleting); err != nil {
-		klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", ms.Namespace, "servingGroup", servingGroupName)
-		return err
 	}
 
 	if c.isServingGroupDeleted(ms, servingGroupName) {
