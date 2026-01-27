@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -238,6 +239,99 @@ func TestGetMaxUnavailable(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedResult, result)
 			}
+		})
+	}
+}
+
+func TestIsOwnedByModelServing(t *testing.T) {
+	testCases := []struct {
+		name      string
+		ownerRefs []metav1.OwnerReference
+		uid       types.UID
+		expected  bool
+	}{
+		{
+			name:      "empty owner references",
+			ownerRefs: []metav1.OwnerReference{},
+			uid:       types.UID("some-uid"),
+			expected:  false,
+		},
+		{
+			name: "owner reference matches UID",
+			ownerRefs: []metav1.OwnerReference{
+				{
+					APIVersion: "workload.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServing",
+					Name:       "test-model-serving",
+					UID:        types.UID("matching-uid"),
+				},
+			},
+			uid:      types.UID("matching-uid"),
+			expected: true,
+		},
+		{
+			name: "owner reference does not match UID",
+			ownerRefs: []metav1.OwnerReference{
+				{
+					APIVersion: "workload.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServing",
+					Name:       "test-model-serving",
+					UID:        types.UID("different-uid"),
+				},
+			},
+			uid:      types.UID("expected-uid"),
+			expected: false,
+		},
+		{
+			name: "multiple owner references with matching UID",
+			ownerRefs: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
+					Name:       "test-deployment",
+					UID:        types.UID("non-matching-uid-1"),
+				},
+				{
+					APIVersion: "workload.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServing",
+					Name:       "test-model-serving",
+					UID:        types.UID("matching-uid"),
+				},
+				{
+					APIVersion: "v1",
+					Kind:       "Service",
+					Name:       "test-service",
+					UID:        types.UID("non-matching-uid-2"),
+				},
+			},
+			uid:      types.UID("matching-uid"),
+			expected: true,
+		},
+		{
+			name: "multiple owner references without matching UID",
+			ownerRefs: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
+					Name:       "test-deployment",
+					UID:        types.UID("non-matching-uid-1"),
+				},
+				{
+					APIVersion: "v1",
+					Kind:       "Service",
+					Name:       "test-service",
+					UID:        types.UID("non-matching-uid-2"),
+				},
+			},
+			uid:      types.UID("expected-uid"),
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := IsOwnedByModelServing(tc.ownerRefs, tc.uid)
+			assert.Equal(t, tc.expected, result)
 		})
 	}
 }

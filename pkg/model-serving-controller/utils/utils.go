@@ -82,24 +82,18 @@ func GenerateRoleID(roleName string, idx int) string {
 	return roleName + "-" + strconv.Itoa(idx)
 }
 
-func generateEntryPodName(groupName, roleName string) string {
-	// entry-pod number starts from 0
-	// For example, EntryPodName is vllm-sample-0-prefill-1-0, represents the entry-pod in the second replica of the prefill role
-	return groupName + "-" + roleName + "-" + "0"
-}
-
 func GenerateControllerRevisionName(msName, revision string) string {
 	return msName + "-" + revision
 }
 
-func generateWorkerPodName(groupName, roleName string, podIndex int) string {
+func GeneratePodName(groupName, roleName string, podIndex int) string {
 	// worker-pod number starts from 1
 	// For example, WorkerPodName is vllm-sample-0-prefill-1-1, represents the first worker-pod in the second replica of the prefill role
 	return groupName + "-" + roleName + "-" + strconv.Itoa(podIndex)
 }
 
 func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision string) *corev1.Pod {
-	entryPodName := generateEntryPodName(groupName, GenerateRoleID(role.Name, roleIndex))
+	entryPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), 0)
 	entryPod := createBasePod(role, ms, entryPodName, groupName, revision, roleIndex)
 	entryPod.ObjectMeta.Labels[workloadv1alpha1.EntryLabelKey] = Entry
 	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
@@ -112,7 +106,7 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 }
 
 func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision string) *corev1.Pod {
-	workerPodName := generateWorkerPodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
+	workerPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
 	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleIndex)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
@@ -230,7 +224,7 @@ func newModelServingOwnerRef(ms *workloadv1alpha1.ModelServing) metav1.OwnerRefe
 }
 
 func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, ms *workloadv1alpha1.ModelServing, serviceSelector map[string]string, groupName, roleLabel string, roleIndex int) error {
-	serviceName := generateEntryPodName(groupName, GenerateRoleID(roleLabel, roleIndex))
+	serviceName := GeneratePodName(groupName, GenerateRoleID(roleLabel, roleIndex), 0)
 	headlessService := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
@@ -560,4 +554,14 @@ func GetMaxUnavailable(mi *workloadv1alpha1.ModelServing) (int, error) {
 	}
 	// Calculate maxUnavailable as absolute numbers
 	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
+}
+
+// IsOwnedByModelServing checks if the given OwnerReferences contain the specified UID
+func IsOwnedByModelServing(ownerRefs []metav1.OwnerReference, uid types.UID) bool {
+	for _, ref := range ownerRefs {
+		if ref.UID == uid {
+			return true
+		}
+	}
+	return false
 }

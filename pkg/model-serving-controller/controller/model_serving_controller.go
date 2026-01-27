@@ -40,7 +40,10 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcano "volcano.sh/apis/pkg/client/clientset/versioned"
+	volcanoinformers "volcano.sh/apis/pkg/client/informers/externalversions"
+	volcanoschedulerlister "volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
@@ -53,6 +56,8 @@ import (
 )
 
 const (
+	enqueueTimeInterval = 1 * time.Second
+
 	GroupNameKey = "GroupName"
 	RoleIDKey    = "RoleID"
 )
@@ -67,6 +72,8 @@ type ModelServingController struct {
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
 	servicesInformer      cache.SharedIndexInformer
+	podGroupLister        volcanoschedulerlister.PodGroupLister
+	podGroupInformer      cache.SharedIndexInformer
 	modelServingLister    listerv1alpha1.ModelServingLister
 	modelServingsInformer cache.SharedIndexInformer
 
@@ -95,6 +102,8 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	servicesInformer := kubeInformerFactory.Core().V1().Services()
 	modelServingInformerFactory := informersv1alpha1.NewSharedInformerFactory(modelServingClient, 0)
 	modelServingInformer := modelServingInformerFactory.Workload().V1alpha1().ModelServings()
+	podGroupInformerFactory := volcanoinformers.NewSharedInformerFactory(volcanoClient, 0)
+	podGroupInformer := podGroupInformerFactory.Scheduling().V1beta1().PodGroups()
 
 	err = podsInformer.Informer().AddIndexers(cache.Indexers{
 		GroupNameKey: utils.GroupNameIndexFunc,
@@ -121,6 +130,8 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		podsInformer:          podsInformer.Informer(),
 		servicesLister:        servicesInformer.Lister(),
 		servicesInformer:      servicesInformer.Informer(),
+		podGroupLister:        podGroupInformer.Lister(),
+		podGroupInformer:      podGroupInformer.Informer(),
 		modelServingLister:    modelServingInformer.Lister(),
 		modelServingsInformer: modelServingInformer.Informer(),
 		// nolint
@@ -174,6 +185,21 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		Handler: cache.ResourceEventHandlerFuncs{
 			DeleteFunc: func(obj interface{}) {
 				c.deleteService(obj)
+			},
+		},
+	})
+
+	_, _ = c.podGroupInformer.AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: func(obj interface{}) bool {
+			metaObj := getMetaObject(obj)
+			if metaObj == nil {
+				return false
+			}
+			return isOwnedByModelServing(metaObj)
+		},
+		Handler: cache.ResourceEventHandlerFuncs{
+			DeleteFunc: func(obj interface{}) {
+				c.deletePodGroup(obj)
 			},
 		},
 	})
@@ -320,6 +346,13 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	// delete the pod
 	if ms == nil {
 		return
+	} else {
+		// If the Pod is not owned by the ModelServing and we find the same name modelserving,
+		// we need to enqueue the ModelServing for reconcile until deleted the Pod.
+		if !utils.IsOwnedByModelServing(pod.GetOwnerReferences(), ms.GetUID()) {
+			c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+			return
+		}
 	}
 	// Remove the pod from running pods in the store
 	c.store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), servingGroupName, pod.Name)
@@ -359,6 +392,13 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 	// ms is nil means the modelserving is deleted
 	if ms == nil {
 		return
+	} else {
+		// If the service is not owned by the ModelServing and we find the same name modelserving,
+		// we need to enqueue the ModelServing for reconcile until deleted the service.
+		if !utils.IsOwnedByModelServing(svc.GetOwnerReferences(), ms.GetUID()) {
+			c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+			return
+		}
 	}
 
 	if c.handleDeletionInProgress(ms, servingGroupName, roleName, roleID) {
@@ -366,6 +406,44 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 	}
 
 	klog.V(4).Infof("Service %s/%s deleted, enqueuing ModelServing %s for reconcile", svc.GetNamespace(), svc.GetName(), ms.Name)
+	c.enqueueModelServing(ms)
+}
+
+func (c *ModelServingController) deletePodGroup(obj interface{}) {
+	pg, ok := obj.(*schedulingv1beta1.PodGroup)
+	if !ok {
+		// If the object is not a PodGroup, it msght be a tombstone object.
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			klog.Error("failed to parse podgroup type when deletePodGroup")
+			return
+		}
+		pg, ok = tombstone.Obj.(*schedulingv1beta1.PodGroup)
+		if !ok {
+			klog.Errorf("failed to parse PodGroup from tombstone %#v", tombstone.Obj)
+			return
+		}
+	}
+
+	ms, servingGroupName, _, _ := c.getModelServingAndResourceDetails(pg)
+	// ms is nil means the modelserving is deleted
+	if ms == nil {
+		return
+	} else {
+		// If the PodGroup is not owned by the ModelServing and we find the same name modelserving,
+		// we need to enqueue the ModelServing for reconcile until deleted the PodGroup.
+		if !utils.IsOwnedByModelServing(pg.GetOwnerReferences(), ms.GetUID()) {
+			c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+			return
+		}
+	}
+
+	// Is servingGroup is deleting, skip handling.
+	if c.handleDeletionInProgress(ms, servingGroupName, "", "") {
+		return
+	}
+
+	klog.V(4).Infof("podGroup %s/%s deleted, enqueuing ModelServing %s for reconcile", pg.GetNamespace(), pg.GetName(), ms.Name)
 	c.enqueueModelServing(ms)
 }
 
@@ -377,6 +455,16 @@ func (c *ModelServingController) enqueueModelServing(ms *workloadv1alpha1.ModelS
 		return
 	}
 	c.workqueue.Add(key)
+}
+
+func (c *ModelServingController) enqueueModelServingAfter(ms *workloadv1alpha1.ModelServing, duration time.Duration) {
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(ms); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.workqueue.AddAfter(key, duration)
 }
 
 func (c *ModelServingController) worker(ctx context.Context) {
@@ -506,6 +594,10 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 	if curReplicas < expectedCount {
 		// update pod groups if needed
 		for _, servingGroup := range servingGroupList {
+			if c.isPodGroupFromPreviousModelServing(ms, servingGroup.Name) {
+				c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+				return nil
+			}
 			if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, ms, servingGroup.Name); err != nil {
 				klog.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
 			}
@@ -528,6 +620,10 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 		}
 		for _, servingGroup := range servingGroupList {
 			if servingGroup.Status != datastore.ServingGroupDeleting {
+				if c.isPodGroupFromPreviousModelServing(ms, servingGroup.Name) {
+					c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+					return nil
+				}
 				if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, ms, servingGroup.Name); err != nil {
 					klog.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
 				}
@@ -560,6 +656,10 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	// Helper function to create a ServingGroup
 	createServingGroup := func(ordinal int, revision string, roles []workloadv1alpha1.Role) error {
 		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
+		if c.isPodGroupFromPreviousModelServing(ms, groupName) {
+			c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+			return nil
+		}
 		// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
 		if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, ms, groupName); err != nil {
 			return err
@@ -734,6 +834,7 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	// Create new Roles with increasing indices
 	for i := 0; i < toCreate; i++ {
 		newIndex := startingIndex + i
+
 		// Create pods for role
 		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision)
 		if err != nil {
@@ -1147,17 +1248,21 @@ func (c *ModelServingController) getModelServingByChildResource(resource metav1.
 	return ms, servingGroupName, nil
 }
 
-// shouldSkipPodHandling checks if a pod should be skipped based on revision mismatch
-func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) bool {
-	podRevision := utils.PodRevision(pod)
+// shouldSkipPodHandling checks if a resource should be skipped
+func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.ModelServing, servingGroupName string, obj metav1.Object) bool {
+	podRevision := obj.GetLabels()[workloadv1alpha1.RevisionLabelKey]
 	servingGroup := c.store.GetServingGroup(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
 	}, servingGroupName)
+	// If all three conditions are met, skip processing this pod.
+	// 1. ServingGroup exists
+	// 2. Pod revision is not equal to ServingGroup revision meeting the rollingupdate scenario
+	// Should not skip handling in this case.
 	if servingGroup != nil && servingGroup.Revision != podRevision {
 		// If the pod revision is not equal to the ServingGroup revision, we do not need to handle it.
 		klog.V(4).Infof("pod %s/%s revision %s is not equal to ServingGroup %s revision %s, skip handling",
-			pod.Namespace, pod.Name, podRevision, servingGroupName, servingGroup.Revision)
+			obj.GetNamespace(), obj.GetName(), podRevision, servingGroupName, servingGroup.Revision)
 		return true
 	}
 	return false
@@ -1202,16 +1307,18 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 		return true
 	}
 
-	// check role status
-	if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
-		// role is already in the deletion process, only checking whether the deletion is completed
-		if c.isRoleDeleted(ms, servingGroupName, roleName, roleID) {
-			// role has been deleted, so the storage needs to be updated and need to reconcile.
-			klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, servingGroupName)
-			c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
-			c.enqueueModelServing(ms)
+	if roleName != "" && roleID != "" {
+		// check role status
+		if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
+			// role is already in the deletion process, only checking whether the deletion is completed
+			if c.isRoleDeleted(ms, servingGroupName, roleName, roleID) {
+				// role has been deleted, so the storage needs to be updated and need to reconcile.
+				klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, servingGroupName)
+				c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
+				c.enqueueModelServing(ms)
+			}
+			return true
 		}
-		return true
 	}
 
 	return false
@@ -1583,6 +1690,16 @@ func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *
 					continue
 				}
 
+				for _, svc := range services {
+					// If the service is not owned by the ModelServing,
+					// means this svc is created by the modelserving with the same name has already been deleted.
+					// Should re-enqueue after enqueueTimeInterval(1 second).
+					if !utils.IsOwnedByModelServing(svc.GetOwnerReferences(), ms.UID) {
+						c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+						return nil
+					}
+				}
+
 				if len(services) == 0 && role.WorkerTemplate != nil {
 					_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 					if err := utils.CreateHeadlessService(ctx, c.kubeClientSet, ms, serviceSelector, sg.Name, role.Name, roleIndex); err != nil {
@@ -1646,9 +1763,19 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 			return fmt.Errorf("execute OnPodCreate failed for entry pod %s: %v", entryPod.Name, err)
 		}
 	}
+
 	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, entryPod, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			if c.isPodFromPreviousModelServing(ms, entryPod) {
+				// If the entry pod already exists but is outdated, enqueue the modelserving after 1 second
+				klog.V(4).Infof("Entry pod %s is outdated, enqueue to reconcile", entryPod.Name)
+				c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+				return nil
+			}
+		} else {
+			return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
+		}
 	}
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
@@ -1668,8 +1795,17 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 			}
 		}
 		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, workerPod, metav1.CreateOptions{})
-		if err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("failed to create worker pod %s: %v", workerPod.Name, err)
+		if err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				if c.isPodFromPreviousModelServing(ms, workerPod) {
+					// If the worker pod already exists but is outdated, enqueue the modelserving after 1 second
+					klog.V(4).Infof("worker pod %s is outdated, enqueue to reconcile", workerPod.Name)
+					c.enqueueModelServingAfter(ms, enqueueTimeInterval)
+					return nil
+				}
+			} else {
+				return fmt.Errorf("failed to create worker pod %s: %v", workerPod.Name, err)
+			}
 		}
 	}
 	return nil
@@ -1744,4 +1880,52 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 		c.enqueueModelServing(ms)
 	}
 	return nil
+}
+
+// isPodGroupFromPreviousModelServing checks if the PodGroup is a remnant resource from a previously same-named ModelServing
+// Returns true if the PodGroup exists but is not owned by the current ModelServing (indicating it's from a previous instance)
+// Returns false if the has an error when getting PodGroup or is owned by the current ModelServing
+func (c *ModelServingController) isPodGroupFromPreviousModelServing(ms *workloadv1alpha1.ModelServing, servingGroupName string) bool {
+	if ms == nil || servingGroupName == "" {
+		return false
+	}
+
+	// Check if the PodGroup is from previous ModelServing
+	pg, err := c.podGroupLister.PodGroups(ms.Namespace).Get(servingGroupName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		klog.Errorf("Failed to get PodGroup %s: %v", servingGroupName, err)
+		// We expect to be able to obtain the PodGroup normally or encounter a notFound error.
+		// Therefore, when an error occurs, we expect to be able to reconcile normally after resolving the error.
+		// Hence, we return true to enqueue.
+		return true
+	}
+
+	// If the PodGroup is not owned by the current ModelServing and we find the same name modelserving,
+	// we need to enqueue the ModelServing for reconcile until deleted the PodGroup.
+	return !utils.IsOwnedByModelServing(pg.GetOwnerReferences(), ms.GetUID())
+}
+
+// isPodFromPreviousModelServing checks if the Pod is a remnant resource from a previously same-named ModelServing
+// Returns true if the Pod exists but is not owned by the current ModelServing (indicating it's from a previous instance)
+// Returns false if the has an error when getting Pod or is owned by the current ModelServing
+func (c *ModelServingController) isPodFromPreviousModelServing(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) bool {
+	if ms == nil || pod == nil {
+		return false
+	}
+
+	existingPod, err := c.podsLister.Pods(pod.Namespace).Get(pod.Name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		klog.Errorf("Failed to get Pod %s: %v", pod.GetNamespace()+"/"+pod.GetName(), err)
+		// We expect to be able to obtain the PodG normally or encounter a notFound error.
+		// Therefore, when an error occurs, we expect to be able to reconcile normally after resolving the error.
+		// Hence, we return true to enqueue.
+		return true
+	}
+	return !utils.IsOwnedByModelServing(existingPod.GetOwnerReferences(), ms.GetUID())
 }
