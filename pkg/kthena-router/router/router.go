@@ -45,6 +45,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/handlers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/routing"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
@@ -78,6 +79,9 @@ type Router struct {
 
 	// KV Connector management
 	connectorFactory *connectors.Factory
+
+	// Unified routing matcher
+	routeMatcher routing.RouteMatcher
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -154,6 +158,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		metrics:          metricsInstance,
 		tokenizer:        tokenizerInstance,
 		connectorFactory: connectors.NewDefaultFactory(),
+		routeMatcher:     routing.NewUnifiedRouteMatcher(store),
 	}
 }
 
@@ -261,6 +266,120 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			metricsRecorder.Finish(strconv.Itoa(c.Writer.Status()), "scheduling")
 			return
 		}
+	}
+}
+
+// doLoadbalanceUnified uses the unified routing matcher for cleaner routing logic
+func (r *Router) doLoadbalanceUnified(c *gin.Context, modelRequest ModelRequest) {
+	modelName := modelRequest["model"].(string)
+
+	// Get gateway key from context if available
+	var gatewayKey string
+	if key, exists := c.Get(GatewayKey); exists {
+		if k, ok := key.(string); ok {
+			gatewayKey = k
+		}
+	}
+
+	// Use unified route matcher
+	routeRequest := &routing.RouteRequest{
+		ModelName:   modelName,
+		HTTPRequest: c.Request,
+		GatewayKey:  gatewayKey,
+	}
+
+	routeMatch, err := r.routeMatcher.Match(routeRequest)
+	if err != nil {
+		klog.Errorf("Route matching failed: %v", err)
+		accesslog.SetError(c, "route_matching", fmt.Sprintf("no matching route found: %v", err))
+		c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("no matching route found: %v", err))
+		return
+	}
+
+	// Get pods and port from target
+	pods, err := routeMatch.Target.GetPods()
+	if err != nil || len(pods) == 0 {
+		klog.Errorf("Failed to get pods for target %v: %v", routeMatch.Target.GetNamespacedName(), err)
+		accesslog.SetError(c, "pod_discovery", "no pods available for target")
+		c.AbortWithStatusJSON(http.StatusNotFound, "no pods available for target")
+		return
+	}
+
+	port := routeMatch.Target.GetPort()
+	if port == 0 {
+		klog.Errorf("Target %v has invalid port", routeMatch.Target.GetNamespacedName())
+		accesslog.SetError(c, "port_discovery", "invalid target port")
+		c.AbortWithStatusJSON(http.StatusBadRequest, "invalid target port")
+		return
+	}
+
+	// Handle model name override for ModelServer targets
+	modelServer := routeMatch.Target.GetModelServer()
+	if modelServer != nil {
+		if modelServer.Spec.Model != nil && !routeMatch.IsLora {
+			modelRequest["model"] = *modelServer.Spec.Model
+		}
+	}
+
+	// Parse prompt for scheduling
+	prompt, err := utils.ParsePrompt(modelRequest)
+	if err != nil {
+		accesslog.SetError(c, "prompt_parsing", "prompt not found")
+		c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
+		return
+	}
+
+	// Get metrics recorder from gin context
+	var metricsRecorder *metrics.RequestMetricsRecorder
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			metricsRecorder = rec
+		}
+	}
+
+	// Get PDGroup if available (only for ModelServer)
+	var pdGroup *v1alpha1.PDGroup
+	if modelServer != nil && modelServer.Spec.WorkloadSelector != nil {
+		pdGroup = modelServer.Spec.WorkloadSelector.PDGroup
+	}
+
+	// Create scheduling context
+	ctx := &framework.Context{
+		Model:           modelName,
+		Prompt:          prompt,
+		ModelServerName: routeMatch.Target.GetNamespacedName(),
+		PDGroup:         pdGroup,
+		MetricsRecorder: metricsRecorder,
+		RouteMatch:      routeMatch, // Add route match to context
+	}
+
+	// Schedule request
+	err = r.scheduler.Schedule(ctx, pods)
+	if err != nil {
+		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
+		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
+		return
+	}
+
+	// Set routing information in access log
+	targetName := fmt.Sprintf("%s/%s", routeMatch.Target.GetNamespacedName().Namespace, routeMatch.Target.GetNamespacedName().Name)
+	routeName := fmt.Sprintf("%s/%s", routeMatch.Route.GetNamespace(), routeMatch.Route.GetName())
+
+	// Store route name in context for upstream metrics
+	c.Set("modelRouteName", routeName)
+
+	if len(ctx.BestPods) > 0 && ctx.BestPods[0].Pod != nil {
+		selectedPod := ctx.BestPods[0].Pod.Name
+		accesslog.SetRequestRouting(c, routeName, targetName, selectedPod)
+	} else {
+		accesslog.SetRequestRouting(c, routeName, targetName, "")
+	}
+
+	// Proxy the request
+	if err := r.proxyModelEndpoint(c, c.Request, ctx, modelRequest, port); err != nil {
+		klog.Errorf("Request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
+		accesslog.SetError(c, "proxy", "request processing failed")
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
 	}
 }
 

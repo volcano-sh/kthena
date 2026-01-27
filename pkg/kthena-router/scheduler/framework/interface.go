@@ -23,6 +23,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/routing"
 )
 
 // Context stores information which maybe useful in Filter or Score plugins.
@@ -44,6 +45,11 @@ type Context struct {
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
+
+	// RouteMatch contains the matched route information from the unified routing layer
+	// This provides access to the abstraction layer for plugins that need routing info
+	// Optional: may be nil if using legacy routing paths
+	RouteMatch *routing.RouteMatch
 }
 
 type ScorePlugin interface {
