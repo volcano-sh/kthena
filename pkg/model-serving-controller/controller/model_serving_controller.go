@@ -430,10 +430,10 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
-	// only fields in roles can be modified in rolling updates.
+	// Fields in template (roles, networkTopology, gangPolicy) can trigger rolling updates.
 	// and only modifying the role.replicas field will not affect the revision.
 	copy := utils.RemoveRoleReplicasForRevision(ms)
-	revision := utils.Revision(copy.Spec.Template.Roles)
+	revision := utils.Revision(copy.Spec.Template)
 	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
 	}
@@ -639,7 +639,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 
 		// Create ControllerRevision when scaling up with a new revision
 		// This is done once before the loop since newRevision and templateData are the same for all new groups
-		templateData := ms.Spec.Template.Roles
+		templateData := ms.Spec.Template
 		_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, newRevision, templateData)
 		if err != nil {
 			klog.Warningf("Failed to create ControllerRevision for new revision %s: %v", newRevision, err)
@@ -1748,8 +1748,8 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 		// Record revision history using ControllerRevision for partition-protected servingGroups
 		if partition > 0 && ordinal < partition {
 			// Create ControllerRevision to persist the revision history
-			// Store the template roles data for this revision
-			templateData := ms.Spec.Template.Roles
+			// Store the complete template data for this revision
+			templateData := ms.Spec.Template
 			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, group.Revision, templateData)
 			if err != nil {
 				klog.Warningf("Failed to create ControllerRevision for ServingGroup %s (revision=%s): %v", servingGroupName, group.Revision, err)
