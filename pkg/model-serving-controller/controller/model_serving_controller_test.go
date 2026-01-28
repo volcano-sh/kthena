@@ -2840,7 +2840,7 @@ func TestModelServingVersionControl(t *testing.T) {
 			// Create ControllerRevision for historical revision if partition is set
 			// This simulates the scenario where a partition-protected group was deleted and its revision was recorded
 			if tt.partition != nil {
-				_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, tt.initialRevision, ms.Spec.Template.Roles)
+				_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, tt.initialRevision, ms.Spec.Template)
 				assert.NoError(t, err, "Failed to create ControllerRevision for initial revision")
 			}
 
@@ -3001,7 +3001,11 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 
 			// Create ControllerRevision with recovery template if needed
 			if tt.hasControllerRevision {
-				_, err := utils.CreateControllerRevision(ctx, kubeClient, ms, tt.currentRevision, tt.recoveryTemplateRoles)
+				// Wrap roles in ServingGroup template for storage
+				recoveryTemplate := workloadv1alpha1.ServingGroup{
+					Roles: tt.recoveryTemplateRoles,
+				}
+				_, err := utils.CreateControllerRevision(ctx, kubeClient, ms, tt.currentRevision, recoveryTemplate)
 				assert.NoError(t, err, "Failed to create ControllerRevision")
 			}
 
