@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	volcano "volcano.sh/apis/pkg/client/clientset/versioned"
@@ -1363,153 +1364,171 @@ func (c *ModelServingController) getServicesByIndex(indexName, indexValue string
 
 // UpdateModelServingStatus update replicas in modelServing status.
 func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.ModelServing, revision string) error {
-	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
-	if err != nil {
-		// If no groups exist, handle gracefully by setting revisions to the new revision
-		if errors.Is(err, datastore.ErrServingGroupNotFound) {
-			copy := ms.DeepCopy()
-			if copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision {
-				copy.Status.CurrentRevision = revision
-				copy.Status.UpdateRevision = revision
-				_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
-				return updateErr
+	// Start with the cached object
+	latestMS := ms
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Calculate status based on latestMS
+		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(latestMS))
+		if err != nil {
+			// If no groups exist, handle gracefully by setting revisions to the new revision
+			if errors.Is(err, datastore.ErrServingGroupNotFound) {
+				copy := latestMS.DeepCopy()
+				if copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision {
+					copy.Status.CurrentRevision = revision
+					copy.Status.UpdateRevision = revision
+					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+					if updateErr != nil && apierrors.IsConflict(updateErr) {
+						// Refresh latestMS for the NEXT attempt
+						if newMS, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(latestMS.Namespace).Get(context.TODO(), latestMS.Name, metav1.GetOptions{}); getErr == nil {
+							latestMS = newMS
+						}
+					}
+					return updateErr
+				}
+				return nil
 			}
-			return nil
-		}
-		return err
-	}
-
-	available, updated, current := 0, 0, 0
-	progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
-	// Track revision counts to determine the most common non-updated revision (CurrentRevision)
-	revisionCount := make(map[string]int)
-	for index := range groups {
-		if groups[index].Status == datastore.ServingGroupDeleting {
-			// Scaling -> Running or
-			// Creating -> Running
-			// No Deleting -> Running.
-			// So directly add deleting groups to progressingGroups
-			progressingGroups = append(progressingGroups, index)
-			continue
+			return err
 		}
 
-		if groups[index].Status == datastore.ServingGroupRunning {
-			available = available + 1
-		} else if ok, err := c.checkServingGroupReady(ms, groups[index].Name); ok && err == nil {
-			// some scenarios, pod events may not trigger group status updates, such as role scaling down.
-			err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groups[index].Name, datastore.ServingGroupRunning)
-			if err != nil {
-				return fmt.Errorf("failed to set servingGroup %s status: %v", groups[index].Name, err)
+		available, updated, current := 0, 0, 0
+		progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
+		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
+		revisionCount := make(map[string]int)
+		for index := range groups {
+			if groups[index].Status == datastore.ServingGroupDeleting {
+				// Scaling -> Running or
+				// Creating -> Running
+				// No Deleting -> Running.
+				// So directly add deleting groups to progressingGroups
+				progressingGroups = append(progressingGroups, index)
+				continue
 			}
-			available = available + 1
-			klog.V(2).Infof("Update servingGroup %s status to Running", groups[index].Name)
-		} else {
-			progressingGroups = append(progressingGroups, index)
-		}
 
-		if groups[index].Revision == revision {
-			updated = updated + 1
-			updatedGroups = append(updatedGroups, index)
-		} else {
-			current = current + 1
-			currentGroups = append(currentGroups, index)
-			// Count revisions for non-updated groups to find the most common one
-			revisionCount[groups[index].Revision]++
-		}
-	}
+			if groups[index].Status == datastore.ServingGroupRunning {
+				available = available + 1
+			} else if ok, err := c.checkServingGroupReady(latestMS, groups[index].Name); ok && err == nil {
+				// some scenarios, pod events may not trigger group status updates, such as role scaling down.
+				err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(latestMS), groups[index].Name, datastore.ServingGroupRunning)
+				if err != nil {
+					return fmt.Errorf("failed to set servingGroup %s status: %v", groups[index].Name, err)
+				}
+				available = available + 1
+				klog.V(2).Infof("Update servingGroup %s status to Running", groups[index].Name)
+			} else {
+				progressingGroups = append(progressingGroups, index)
+			}
 
-	copy := ms.DeepCopy()
-	shouldUpdate := utils.SetCondition(copy, progressingGroups, updatedGroups, currentGroups)
-	if copy.Status.Replicas != int32(len(groups)) || copy.Status.AvailableReplicas != int32(available) || copy.Status.UpdatedReplicas != int32(updated) || copy.Status.CurrentReplicas != int32(current) {
-		shouldUpdate = true
-		copy.Status.Replicas = int32(len(groups))
-		copy.Status.AvailableReplicas = int32(available)
-		copy.Status.UpdatedReplicas = int32(updated)
-		copy.Status.CurrentReplicas = int32(current)
-	}
-
-	// Update revision fields following StatefulSet's logic:
-	// 1. UpdateRevision is always the new revision being applied
-	// 2. CurrentRevision is read from Status.CurrentRevision if it exists and is still valid
-	// 3. If Status.CurrentRevision doesn't exist or is invalid, compute from current groups
-	// 4. When all groups are updated, CurrentRevision = UpdateRevision
-	updateRevision := revision
-	var currentRevision string
-
-	// First, try to use existing CurrentRevision from status if it's still valid
-	if copy.Status.CurrentRevision != "" {
-		// Check if CurrentRevision is still valid (exists in non-updated groups)
-		if len(revisionCount) > 0 {
-			// Check if the existing CurrentRevision is still used by some groups
-			if count, exists := revisionCount[copy.Status.CurrentRevision]; exists && count > 0 {
-				currentRevision = copy.Status.CurrentRevision
+			if groups[index].Revision == revision {
+				updated = updated + 1
+				updatedGroups = append(updatedGroups, index)
+			} else {
+				current = current + 1
+				currentGroups = append(currentGroups, index)
+				// Count revisions for non-updated groups to find the most common one
+				revisionCount[groups[index].Revision]++
 			}
 		}
-		// If all groups are updated, CurrentRevision should equal UpdateRevision
-		if updated == len(groups) {
-			currentRevision = updateRevision
-		}
-	}
 
-	// If CurrentRevision is not set (either not in status or invalid), compute it from current groups
-	if currentRevision == "" {
-		if updated == len(groups) || len(revisionCount) == 0 {
-			// All groups are updated or no groups exist
-			currentRevision = updateRevision
-		} else {
-			// Find the revision with the highest count among non-updated groups
-			maxCount := 0
-			for rev, count := range revisionCount {
-				if count > maxCount {
-					maxCount = count
-					currentRevision = rev
+		copy := latestMS.DeepCopy()
+		shouldUpdate := utils.SetCondition(copy, progressingGroups, updatedGroups, currentGroups)
+		if copy.Status.Replicas != int32(len(groups)) || copy.Status.AvailableReplicas != int32(available) || copy.Status.UpdatedReplicas != int32(updated) || copy.Status.CurrentReplicas != int32(current) {
+			shouldUpdate = true
+			copy.Status.Replicas = int32(len(groups))
+			copy.Status.AvailableReplicas = int32(available)
+			copy.Status.UpdatedReplicas = int32(updated)
+			copy.Status.CurrentReplicas = int32(current)
+		}
+
+		// Update revision fields following StatefulSet's logic:
+		// 1. UpdateRevision is always the new revision being applied
+		// 2. CurrentRevision is read from Status.CurrentRevision if it exists and is still valid
+		// 3. If Status.CurrentRevision doesn't exist or is invalid, compute from current groups
+		// 4. When all groups are updated, CurrentRevision = UpdateRevision
+		updateRevision := revision
+		var currentRevision string
+
+		// First, try to use existing CurrentRevision from status if it's still valid
+		if copy.Status.CurrentRevision != "" {
+			// Check if CurrentRevision is still valid (exists in non-updated groups)
+			if len(revisionCount) > 0 {
+				// Check if the existing CurrentRevision is still used by some groups
+				if count, exists := revisionCount[copy.Status.CurrentRevision]; exists && count > 0 {
+					currentRevision = copy.Status.CurrentRevision
 				}
 			}
-			// If no current revision found (shouldn't happen), fallback to updateRevision
-			if currentRevision == "" {
+			// If all groups are updated, CurrentRevision should equal UpdateRevision
+			if updated == len(groups) {
 				currentRevision = updateRevision
 			}
 		}
-	}
 
-	revisionUpdated := false
-	if copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != updateRevision {
-		shouldUpdate = true
-		revisionUpdated = true
-		copy.Status.CurrentRevision = currentRevision
-		copy.Status.UpdateRevision = updateRevision
-	}
-
-	if copy.Spec.RolloutStrategy == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition == nil {
-		// if not set spec.RolloutStrategy.RollingUpdateConfiguration.Partition,
-		// should set currentReplicas = updatedReplicas when rolling update is over.
-		if copy.Status.UpdatedReplicas == *copy.Spec.Replicas &&
-			copy.Status.AvailableReplicas == *copy.Spec.Replicas &&
-			copy.Status.Replicas == *copy.Spec.Replicas {
-			shouldUpdate = true
-			copy.Status.CurrentReplicas = copy.Status.UpdatedReplicas
-		}
-	}
-
-	if copy.Status.ObservedGeneration != ms.Generation {
-		shouldUpdate = true
-		copy.Status.ObservedGeneration = ms.Generation
-	}
-
-	if shouldUpdate {
-		_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
-		if err != nil {
-			return err
-		}
-		// Clean up old revisions only after roles have been updated (revision status changed)
-		if revisionUpdated {
-			if cleanupErr := utils.CleanupOldControllerRevisions(context.TODO(), c.kubeClientSet, copy); cleanupErr != nil {
-				klog.Warningf("Failed to cleanup old ControllerRevisions after updating revision status for ModelServing %s/%s: %v", copy.Namespace, copy.Name, cleanupErr)
+		// If CurrentRevision is not set (either not in status or invalid), compute it from current groups
+		if currentRevision == "" {
+			if updated == len(groups) || len(revisionCount) == 0 {
+				// All groups are updated or no groups exist
+				currentRevision = updateRevision
+			} else {
+				// Find the revision with the highest count among non-updated groups
+				maxCount := 0
+				for rev, count := range revisionCount {
+					if count > maxCount {
+						maxCount = count
+						currentRevision = rev
+					}
+				}
+				// If no current revision found (shouldn't happen), fallback to updateRevision
+				if currentRevision == "" {
+					currentRevision = updateRevision
+				}
 			}
 		}
-	}
 
-	return nil
+		revisionUpdated := false
+		if copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != updateRevision {
+			shouldUpdate = true
+			revisionUpdated = true
+			copy.Status.CurrentRevision = currentRevision
+			copy.Status.UpdateRevision = updateRevision
+		}
+
+		if copy.Spec.RolloutStrategy == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition == nil {
+			// if not set spec.RolloutStrategy.RollingUpdateConfiguration.Partition,
+			// should set currentReplicas = updatedReplicas when rolling update is over.
+			if copy.Status.UpdatedReplicas == *copy.Spec.Replicas &&
+				copy.Status.AvailableReplicas == *copy.Spec.Replicas &&
+				copy.Status.Replicas == *copy.Spec.Replicas {
+				shouldUpdate = true
+				copy.Status.CurrentReplicas = copy.Status.UpdatedReplicas
+			}
+		}
+
+		if copy.Status.ObservedGeneration != latestMS.Generation {
+			shouldUpdate = true
+			copy.Status.ObservedGeneration = latestMS.Generation
+		}
+
+		if shouldUpdate {
+			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+			if err != nil && apierrors.IsConflict(err) {
+				// Refresh latestMS for the NEXT attempt
+				if newMS, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(latestMS.Namespace).Get(context.TODO(), latestMS.Name, metav1.GetOptions{}); getErr == nil {
+					latestMS = newMS
+				}
+			}
+			if err != nil {
+				return err
+			}
+			// Clean up old revisions only after roles have been updated (revision status changed)
+			if revisionUpdated {
+				if cleanupErr := utils.CleanupOldControllerRevisions(context.TODO(), c.kubeClientSet, copy); cleanupErr != nil {
+					klog.Warningf("Failed to cleanup old ControllerRevisions after updating revision status for ModelServing %s/%s: %v", copy.Namespace, copy.Name, cleanupErr)
+				}
+			}
+		}
+
+		return nil
+	})
 }
 
 // getPartition returns the partition value from ModelServing spec, or 0 if not set.
