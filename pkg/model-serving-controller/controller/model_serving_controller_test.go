@@ -16,19 +16,25 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
@@ -4816,4 +4822,342 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	assert.True(t, exists,
 		"After fix: Failed pod should be in graceMap. "+
 			"Before fix: This would be false because updatePod returned early when initialSync=false")
+}
+
+func TestDeleteRoleRollbackOnFailure(t *testing.T) {
+	tests := []struct {
+		name                 string
+		initialRoleStatus    datastore.RoleStatus
+		podDeletionError     error
+		serviceDeletionError error
+		expectedFinalStatus  datastore.RoleStatus
+		expectEnqueueCalled  bool
+		description          string
+	}{
+		{
+			name:                 "pod_deletion_fails_with_rollback",
+			initialRoleStatus:    datastore.RoleRunning,
+			podDeletionError:     fmt.Errorf("failed to delete pods"),
+			serviceDeletionError: nil,
+			expectedFinalStatus:  datastore.RoleRunning,
+			expectEnqueueCalled:  true,
+			description:          "failed to delete pods, should rollback to original status and re-enqueue",
+		},
+		{
+			name:                 "service_deletion_fails_with_rollback",
+			initialRoleStatus:    datastore.RoleCreating,
+			podDeletionError:     nil,
+			serviceDeletionError: fmt.Errorf("failed to delete services"),
+			expectedFinalStatus:  datastore.RoleCreating,
+			expectEnqueueCalled:  true,
+			description:          "failed to delete services, should rollback to original status and re-enqueue",
+		},
+		{
+			name:                 "both_operations_success_no_rollback",
+			initialRoleStatus:    datastore.RoleRunning,
+			podDeletionError:     nil,
+			serviceDeletionError: nil,
+			expectedFinalStatus:  datastore.RoleDeleting,
+			expectEnqueueCalled:  false,
+			description:          "are deletions succeed, no rollback needed",
+		},
+		{
+			name:                 "pod_api_error_no_rollback",
+			initialRoleStatus:    datastore.RoleNotFound,
+			podDeletionError:     apierrors.NewInternalError(fmt.Errorf("internal error")),
+			serviceDeletionError: nil,
+			expectedFinalStatus:  datastore.RoleNotFound,
+			expectEnqueueCalled:  true,
+			description:          "pod API error, should re-enqueue",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+			// Create informer factories
+			kubeInformerFactory := informers.NewSharedInformerFactory(client, 0)
+			kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+
+			// Create controller
+			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake)
+			assert.NoError(t, err)
+
+			stop := make(chan struct{})
+			defer close(stop)
+
+			go controller.Run(context.Background(), 1)
+
+			// Start informers
+			kthenaInformerFactory.Start(stop)
+			kubeInformerFactory.Start(stop)
+
+			// Wait for cache sync
+			cache.WaitForCacheSync(stop,
+				controller.modelServingsInformer.HasSynced,
+				controller.podsInformer.HasSynced,
+				controller.servicesInformer.HasSynced,
+			)
+
+			if tt.podDeletionError != nil {
+				client.PrependReactor("delete-collection", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, tt.podDeletionError
+				})
+			}
+
+			if tt.serviceDeletionError != nil {
+				client.PrependReactor("delete", "services", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, tt.serviceDeletionError
+				})
+			}
+
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model-serving",
+					Namespace: "default",
+				},
+			}
+
+			groupName := "test-group"
+			roleName := "test-role"
+			roleID := "test-role-id"
+
+			nsn := utils.GetNamespaceName(ms)
+			controller.store.AddRole(nsn, groupName, roleName, roleID, "test-revision")
+			controller.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, tt.initialRoleStatus)
+
+			initialStatus := controller.store.GetRoleStatus(nsn, groupName, roleName, roleID)
+			assert.Equal(t, tt.initialRoleStatus, initialStatus)
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						workloadv1alpha1.GroupNameLabelKey: groupName,
+						workloadv1alpha1.RoleLabelKey:      roleName,
+						workloadv1alpha1.RoleIDKey:         roleID,
+					},
+				},
+			}
+
+			service := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-service",
+					Namespace: "default",
+					Labels: map[string]string{
+						workloadv1alpha1.GroupNameLabelKey: groupName,
+						workloadv1alpha1.RoleLabelKey:      roleName,
+						workloadv1alpha1.RoleIDKey:         roleID,
+					},
+				},
+			}
+
+			_, err = client.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
+			assert.NoError(t, err)
+
+			_, err = client.CoreV1().Services("default").Create(context.TODO(), service, metav1.CreateOptions{})
+			assert.NoError(t, err)
+			err = controller.servicesInformer.GetIndexer().Add(service)
+			assert.NoError(t, err)
+
+			queue := []string{}
+			patch := gomonkey.NewPatches()
+			patch.ApplyPrivateMethod(reflect.TypeOf(&ModelServingController{}), "enqueueModelServingAfter", func(ms *workloadv1alpha1.ModelServing, duration time.Duration) {
+				queue = append(queue, ms.Name)
+			})
+			defer patch.Reset()
+
+			controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID)
+
+			finalStatus := controller.store.GetRoleStatus(nsn, groupName, roleName, roleID)
+			assert.Equal(t, tt.expectedFinalStatus, finalStatus, "最终角色状态应与预期相符")
+
+			queueLen := len(queue)
+			if tt.expectEnqueueCalled {
+				assert.True(t, queueLen > 0, "should enqueue")
+			} else {
+				assert.Equal(t, 0, queueLen, "should not enqueue")
+			}
+		})
+	}
+}
+
+func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
+	tests := []struct {
+		name                  string
+		initialSgStatus       datastore.ServingGroupStatus
+		podGroupDeletionError error
+		podDeletionError      error
+		serviceDeletionError  error
+		expectedFinalStatus   datastore.ServingGroupStatus
+		expectEnqueueCalled   bool
+		description           string
+	}{
+		{
+			name:                  "pod_group_deletion_fails_with_rollback",
+			initialSgStatus:       datastore.ServingGroupRunning,
+			podGroupDeletionError: fmt.Errorf("failed to delete pod group"),
+			podDeletionError:      nil,
+			serviceDeletionError:  nil,
+			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectEnqueueCalled:   true,
+			description:           "failed to delete pod group, should rollback to original status and re-enqueue",
+		},
+		{
+			name:                  "pod_deletion_fails_with_rollback",
+			initialSgStatus:       datastore.ServingGroupCreating,
+			podGroupDeletionError: nil,
+			podDeletionError:      fmt.Errorf("failed to delete pods"),
+			serviceDeletionError:  nil,
+			expectedFinalStatus:   datastore.ServingGroupCreating,
+			expectEnqueueCalled:   true,
+			description:           "failed to delete pods, should rollback to original status and re-enqueue",
+		},
+		{
+			name:                  "service_deletion_fails_with_rollback",
+			initialSgStatus:       datastore.ServingGroupRunning,
+			podGroupDeletionError: nil,
+			podDeletionError:      nil,
+			serviceDeletionError:  fmt.Errorf("failed to delete services"),
+			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectEnqueueCalled:   true,
+			description:           "failed to delete services, should rollback to original status and re-enqueue",
+		},
+		{
+			name:                  "all_operations_success_no_rollback",
+			initialSgStatus:       datastore.ServingGroupRunning,
+			podGroupDeletionError: nil,
+			podDeletionError:      nil,
+			serviceDeletionError:  nil,
+			expectedFinalStatus:   datastore.ServingGroupDeleting,
+			expectEnqueueCalled:   false,
+			description:           "all deletions succeed, no rollback needed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+			// Create informer factories
+			kubeInformerFactory := informers.NewSharedInformerFactory(client, 0)
+			kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+
+			// Create controller
+			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake)
+			assert.NoError(t, err)
+
+			stop := make(chan struct{})
+			defer close(stop)
+
+			go controller.Run(context.Background(), 1)
+
+			// Start informers
+			kthenaInformerFactory.Start(stop)
+			kubeInformerFactory.Start(stop)
+
+			// Wait for cache sync
+			cache.WaitForCacheSync(stop,
+				controller.modelServingsInformer.HasSynced,
+				controller.podsInformer.HasSynced,
+				controller.servicesInformer.HasSynced,
+			)
+
+			// Mock PodGroup deletion behavior using gomonkey
+			var patch *gomonkey.Patches
+			if tt.podGroupDeletionError != nil {
+				patch = gomonkey.ApplyMethod(reflect.TypeOf(controller.podGroupManager), "DeletePodGroup", func(_ *podgroupmanager.Manager, ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
+					return tt.podGroupDeletionError
+				})
+			} else {
+				patch = gomonkey.ApplyMethod(reflect.TypeOf(controller.podGroupManager), "DeletePodGroup", func(_ *podgroupmanager.Manager, ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
+					return nil
+				})
+			}
+			defer patch.Reset()
+
+			if tt.podDeletionError != nil {
+				client.PrependReactor("delete-collection", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, tt.podDeletionError
+				})
+			}
+
+			if tt.serviceDeletionError != nil {
+				client.PrependReactor("delete", "services", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, tt.serviceDeletionError
+				})
+			}
+
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model-serving",
+					Namespace: "default",
+				},
+			}
+
+			sgName := "test-model-serving-0"
+
+			nsn := utils.GetNamespaceName(ms)
+			controller.store.AddServingGroup(nsn, 0, "test-revision")
+			controller.store.UpdateServingGroupStatus(nsn, sgName, tt.initialSgStatus)
+
+			initialStatus := controller.store.GetServingGroupStatus(nsn, sgName)
+			assert.Equal(t, tt.initialSgStatus, initialStatus)
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						workloadv1alpha1.GroupNameLabelKey: sgName,
+					},
+				},
+			}
+
+			service := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-service",
+					Namespace: "default",
+					Labels: map[string]string{
+						workloadv1alpha1.GroupNameLabelKey: sgName,
+					},
+				},
+			}
+
+			_, err = client.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
+			assert.NoError(t, err)
+
+			_, err = client.CoreV1().Services("default").Create(context.TODO(), service, metav1.CreateOptions{})
+			assert.NoError(t, err)
+			err = controller.servicesInformer.GetIndexer().Add(service)
+			assert.NoError(t, err)
+
+			queue := []string{}
+			patchEnqueue := gomonkey.NewPatches()
+			patchEnqueue.ApplyPrivateMethod(reflect.TypeOf(&ModelServingController{}), "enqueueModelServingAfter", func(ms *workloadv1alpha1.ModelServing, duration time.Duration) {
+				queue = append(queue, ms.Name)
+			})
+			defer patchEnqueue.Reset()
+
+			_ = controller.deleteServingGroup(context.Background(), ms, sgName)
+
+			finalStatus := controller.store.GetServingGroupStatus(nsn, sgName)
+			assert.Equal(t, tt.expectedFinalStatus, finalStatus, "final ServingGroup status should match expected")
+
+			queueLen := len(queue)
+			if tt.expectEnqueueCalled {
+				assert.True(t, queueLen > 0, "should have enqueued for reconcile")
+			} else {
+				assert.Equal(t, 0, queueLen, "should not have enqueued for reconcile")
+			}
+		})
+	}
 }
