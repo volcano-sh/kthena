@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -381,6 +382,141 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 	t.Log("ModelServing with duplicate IP hostAliases test passed successfully")
 }
 
+func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 4 replicas and maxUnavailable set to 2
+	replicas := int32(4)
+	modelServing := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rolling-update-maxunavailable",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas: &replicas,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+					MaxUnavailable: &intstr.IntOrString{
+						IntVal: 2, // maxUnavailable = 2
+					},
+				},
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: &replicas,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest", // Initial image
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
+
+	// Create the ModelServing
+	t.Log("Creating ModelServing with 4 replicas and maxUnavailable=2")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Wait for the initial ModelServing to be ready
+	t.Log("Waiting for initial ModelServing (4 replicas) to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify initial state
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(4), *initialMS.Spec.Replicas, "Initial ModelServing should have 4 replicas")
+	assert.Equal(t, int32(4), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 4 available replicas")
+
+	// Update the ModelServing to trigger a rolling update (change image)
+	updatedMS := initialMS.DeepCopy()
+	// Modify the container image to trigger a rolling update
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+
+	t.Log("Updating ModelServing to trigger rolling update with maxUnavailable=2")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for rolling update")
+
+	// Monitor the rolling update to ensure maxUnavailable constraint is respected
+	// We'll periodically check the status to ensure that at no point do more than 2 replicas become unavailable
+	t.Log("Monitoring rolling update to ensure maxUnavailable=2 constraint is respected")
+
+	// Create a goroutine to monitor status during the update
+	done := make(chan bool)
+	maxObservedUnavailable := int32(0)
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+				if err != nil {
+					t.Logf("Error getting ModelServing status: %v", err)
+					continue
+				}
+
+				// Calculate unavailable replicas: total replicas - available replicas
+				totalReplicas := currentMS.Status.Replicas
+				availableReplicas := currentMS.Status.AvailableReplicas
+				unavailableReplicas := totalReplicas - availableReplicas
+
+				if unavailableReplicas > maxObservedUnavailable {
+					maxObservedUnavailable = unavailableReplicas
+				}
+
+				t.Logf("Status - Total: %d, Available: %d, Unavailable: %d, Updated: %d, Current: %d",
+					totalReplicas, availableReplicas, unavailableReplicas,
+					currentMS.Status.UpdatedReplicas, currentMS.Status.CurrentReplicas)
+
+				// Check if maxUnavailable constraint is violated
+				if unavailableReplicas > 2 {
+					t.Errorf("maxUnavailable constraint violated! Expected <= 2, got %d unavailable replicas", unavailableReplicas)
+				}
+			}
+		}
+	}()
+
+	// Wait for the rolling update to complete
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+
+	// Stop monitoring
+	done <- true
+
+	// Final verification
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get final ModelServing")
+	assert.Equal(t, int32(4), *finalMS.Spec.Replicas, "Final ModelServing should have 4 replicas in spec")
+	assert.Equal(t, int32(4), finalMS.Status.AvailableReplicas, "Final ModelServing should have 4 available replicas after update")
+	assert.Equal(t, finalMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "nginx:alpine", "Final ModelServing should have updated image")
+
+	// Verify that maxUnavailable was never exceeded during the update
+	assert.True(t, maxObservedUnavailable <= 2, "Max unavailable replicas (%d) exceeded maxUnavailable limit (2)", maxObservedUnavailable)
+	t.Logf("Max observed unavailable replicas during update: %d", maxObservedUnavailable)
+
+	t.Log("ModelServing rolling update maxUnavailable test passed successfully")
+}
 func createBasicModelServing(name string, servingGroupReplicas, roleReplicas int32) *workload.ModelServing {
 	return &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
