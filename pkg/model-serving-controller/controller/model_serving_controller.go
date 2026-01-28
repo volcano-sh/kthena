@@ -214,7 +214,7 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 	// If network topology is removed, we need to clean up the PodGroups.
 	// Because minRoleReplicas is not allowed to be updated, so we do not need to check it here.
 	if oldms.Spec.Template.NetworkTopology != nil && curms.Spec.Template.NetworkTopology == nil {
-		if curms.Spec.Template.GangPolicy.MinRoleReplicas == nil {
+		if curms.Spec.Template.GangPolicy == nil || curms.Spec.Template.GangPolicy.MinRoleReplicas == nil {
 			if err := c.podGroupManager.CleanupPodGroups(context.TODO(), curms); err != nil {
 				klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", curms.Namespace, curms.Name, err)
 			}

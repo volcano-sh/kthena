@@ -31,6 +31,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
+	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
@@ -4341,6 +4342,169 @@ func TestManageHeadlessService(t *testing.T) {
 					assert.Contains(t, item.Labels, workloadv1alpha1.RoleLabelKey)
 					assert.Contains(t, item.Labels, workloadv1alpha1.RoleIDKey)
 				}
+			}
+		})
+	}
+}
+
+// TestUpdateModelServingNetworkTopologyRemoval tests that updateModelServing handles
+// NetworkTopology removal correctly without nil pointer dereference when GangPolicy is nil.
+// This is a regression test for the bug where accessing GangPolicy.MinRoleReplicas
+// without checking if GangPolicy is nil caused a panic.
+func TestUpdateModelServingNetworkTopologyRemoval(t *testing.T) {
+	tests := []struct {
+		name               string
+		oldGangPolicy      *workloadv1alpha1.GangPolicy
+		oldNetworkTopology *workloadv1alpha1.NetworkTopology
+		newGangPolicy      *workloadv1alpha1.GangPolicy
+		newNetworkTopology *workloadv1alpha1.NetworkTopology
+		specChanged        bool // Whether the spec changed (to trigger the update path)
+		expectEnqueue      bool // Whether we expect the ModelServing to be enqueued
+		description        string
+	}{
+		{
+			name:          "network_topology_removed_with_nil_gang_policy",
+			oldGangPolicy: nil,
+			oldNetworkTopology: &workloadv1alpha1.NetworkTopology{
+				GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
+					Mode: "LooseTopology",
+				},
+			},
+			newGangPolicy:      nil,
+			newNetworkTopology: nil,
+			specChanged:        true,
+			expectEnqueue:      true,
+			description:        "Removing NetworkTopology when GangPolicy is nil should not panic",
+		},
+		{
+			name: "network_topology_removed_with_gang_policy_nil_min_role_replicas",
+			oldGangPolicy: &workloadv1alpha1.GangPolicy{
+				MinRoleReplicas: nil,
+			},
+			oldNetworkTopology: &workloadv1alpha1.NetworkTopology{
+				GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
+					Mode: "LooseTopology",
+				},
+			},
+			newGangPolicy: &workloadv1alpha1.GangPolicy{
+				MinRoleReplicas: nil,
+			},
+			newNetworkTopology: nil,
+			specChanged:        true,
+			expectEnqueue:      true,
+			description:        "Removing NetworkTopology when GangPolicy exists but MinRoleReplicas is nil should trigger cleanup",
+		},
+		{
+			name: "network_topology_removed_with_gang_policy_and_min_role_replicas",
+			oldGangPolicy: &workloadv1alpha1.GangPolicy{
+				MinRoleReplicas: map[string]int32{"prefill": 1},
+			},
+			oldNetworkTopology: &workloadv1alpha1.NetworkTopology{
+				GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
+					Mode: "LooseTopology",
+				},
+			},
+			newGangPolicy: &workloadv1alpha1.GangPolicy{
+				MinRoleReplicas: map[string]int32{"prefill": 1},
+			},
+			newNetworkTopology: nil,
+			specChanged:        true,
+			expectEnqueue:      true,
+			description:        "Removing NetworkTopology when GangPolicy has MinRoleReplicas should not trigger cleanup",
+		},
+		{
+			name:               "network_topology_not_changed",
+			oldGangPolicy:      nil,
+			oldNetworkTopology: nil,
+			newGangPolicy:      nil,
+			newNetworkTopology: nil,
+			specChanged:        false,
+			expectEnqueue:      false,
+			description:        "No change in NetworkTopology should not trigger any action",
+		},
+		{
+			name:               "network_topology_added_with_nil_gang_policy",
+			oldGangPolicy:      nil,
+			oldNetworkTopology: nil,
+			newGangPolicy:      nil,
+			newNetworkTopology: &workloadv1alpha1.NetworkTopology{
+				GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
+					Mode: "LooseTopology",
+				},
+			},
+			specChanged:   true,
+			expectEnqueue: true,
+			description:   "Adding NetworkTopology should not trigger cleanup path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup fake clients
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+			// Create controller
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			assert.NoError(t, err)
+
+			// Create old ModelServing
+			oldMS := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-ms",
+					UID:       "test-uid",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:      ptr.To[int32](1),
+					SchedulerName: "volcano",
+					Template: workloadv1alpha1.ServingGroup{
+						GangPolicy:      tt.oldGangPolicy,
+						NetworkTopology: tt.oldNetworkTopology,
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{Name: "container", Image: "image:latest"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			// Create new ModelServing (potentially with changes)
+			newMS := oldMS.DeepCopy()
+			newMS.Spec.Template.GangPolicy = tt.newGangPolicy
+			newMS.Spec.Template.NetworkTopology = tt.newNetworkTopology
+
+			// If spec should not change, make them equal
+			if !tt.specChanged {
+				newMS = oldMS.DeepCopy()
+			}
+
+			// The main test: calling updateModelServing should not panic
+			// even when GangPolicy is nil and NetworkTopology is being removed
+			assert.NotPanics(t, func() {
+				controller.updateModelServing(oldMS, newMS)
+			}, "updateModelServing should not panic: %s", tt.description)
+
+			// Verify enqueue behavior
+			if tt.expectEnqueue && tt.specChanged {
+				// If spec changed, the ModelServing should be enqueued
+				assert.Equal(t, 1, controller.workqueue.Len(),
+					"ModelServing should be enqueued when spec changes")
+			} else if !tt.specChanged {
+				// If spec didn't change, nothing should be enqueued
+				assert.Equal(t, 0, controller.workqueue.Len(),
+					"ModelServing should not be enqueued when spec is unchanged")
 			}
 		})
 	}
