@@ -4817,3 +4817,145 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 		"After fix: Failed pod should be in graceMap. "+
 			"Before fix: This would be false because updatePod returned early when initialSync=false")
 }
+
+// TestUpdateModelServingWithNilGangPolicy tests that updateModelServing does not panic
+// when NetworkTopology is removed and GangPolicy is nil.
+func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
+	tests := []struct {
+		name  string
+		oldMS *workloadv1alpha1.ModelServing
+		newMS *workloadv1alpha1.ModelServing
+	}{
+		{
+			name: "remove NetworkTopology with nil GangPolicy should not panic",
+			oldMS: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-ms",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						NetworkTopology: &workloadv1alpha1.NetworkTopology{},
+						GangPolicy:      nil, // GangPolicy is nil
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "inference",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{Name: "model", Image: "nginx"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			newMS: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-ms",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						NetworkTopology: nil, // NetworkTopology removed
+						GangPolicy:      nil, // GangPolicy is still nil
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "inference",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{Name: "model", Image: "nginx"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "remove NetworkTopology with GangPolicy set should not panic",
+			oldMS: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-ms-2",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						NetworkTopology: &workloadv1alpha1.NetworkTopology{},
+						GangPolicy: &workloadv1alpha1.GangPolicy{
+							MinRoleReplicas: map[string]int32{"inference": 1},
+						},
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "inference",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{Name: "model", Image: "nginx"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			newMS: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-ms-2",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						NetworkTopology: nil, // NetworkTopology removed
+						GangPolicy: &workloadv1alpha1.GangPolicy{
+							MinRoleReplicas: map[string]int32{"inference": 1},
+						},
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "inference",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{Name: "model", Image: "nginx"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextClient := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			assert.NoError(t, err)
+
+			// This should not panic - before fix it would panic with nil pointer dereference
+			assert.NotPanics(t, func() {
+				controller.updateModelServing(tt.oldMS, tt.newMS)
+			}, "updateModelServing should not panic when GangPolicy is nil")
+		})
+	}
+}
