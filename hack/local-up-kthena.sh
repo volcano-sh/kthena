@@ -148,35 +148,6 @@ function check_container_runtime() {
   fi
 }
 
-# Check for GPU support (best-effort, warns but doesn't fail)
-function check_gpu_support() {
-  echo ""
-  echo "Checking GPU support (best-effort)..."
-  
-  # Check if any node has nvidia.com/gpu resource
-  local gpu_count=$(kubectl get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}' 2>/dev/null | grep -oE '[0-9]+' | awk '{sum+=$1} END {print sum}')
-  
-  if [[ -z "${gpu_count}" ]] || [[ "${gpu_count}" == "0" ]]; then
-    print_warning "No nvidia.com/gpu resources detected on any node"
-    echo "  If GPU support is needed, ensure NVIDIA drivers and device plugin are installed"
-    ((WARNINGS++))
-  else
-    print_success "GPU resources detected: ${gpu_count} GPU(s)"
-  fi
-  
-  # Check if NVIDIA device plugin DaemonSet is running
-  local nvidia_plugin_running=$(kubectl get daemonset -A -o jsonpath='{.items[?(@.metadata.name=="nvidia-device-plugin-daemonset")]}' 2>/dev/null | wc -w)
-  
-  if [[ "${nvidia_plugin_running}" == "0" ]]; then
-    print_warning "NVIDIA device plugin DaemonSet not found"
-    echo "  If GPU support is needed, install the NVIDIA device plugin:"
-    echo "  https://nvidia.github.io/k8s-device-plugin/getting-started.html"
-    ((WARNINGS++))
-  else
-    print_success "NVIDIA device plugin DaemonSet is present"
-  fi
-}
-
 # Main preflight checks function
 function check_prereqs() {
   echo "================================================"
@@ -196,11 +167,6 @@ function check_prereqs() {
   # ---- CLUSTER VALIDATION (only for existing clusters) ----
   if [[ "${INSTALL_MODE}" == "existing" ]]; then
     check_cluster_reachable
-  fi
-  
-  # ---- GPU DETECTION (best-effort, only if cluster is reachable) ----
-  if [[ "${INSTALL_MODE}" == "existing" ]]; then
-    check_gpu_support
   fi
   
   echo ""
