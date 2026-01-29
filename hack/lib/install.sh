@@ -61,7 +61,7 @@ function check-images {
 # check if kubectl installed
 function check-prerequisites {
   echo "Checking prerequisites"
-  which kubectl >/dev/null 2>&1
+  command -v kubectl >/dev/null 2>&1
   if [[ $? -ne 0 ]]; then
     echo -e "\033[31mERROR\033[0m: kubectl not installed"
     exit 1
@@ -73,7 +73,7 @@ function check-prerequisites {
 # check if kind installed
 function check-kind {
   echo "Checking kind"
-  which kind >/dev/null 2>&1
+  command -v kind >/dev/null 2>&1
   if [[ $? -ne 0 ]]; then
     echo "Installing kind ..."
     OS=${OS:-$(go env GOOS 2>/dev/null || echo "linux")}
@@ -86,7 +86,7 @@ function check-kind {
 # install helm if not installed
 function install-helm {
   echo "Checking helm"
-  which helm >/dev/null 2>&1
+  command -v helm >/dev/null 2>&1
   if [[ $? -ne 0 ]]; then
     echo "Installing helm via script"
     HELM_TEMP_DIR=$(mktemp -d)
