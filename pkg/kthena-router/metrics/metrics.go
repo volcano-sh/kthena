@@ -36,6 +36,7 @@ const (
 	LabelModelRoute  = "model_route"
 	LabelModelServer = "model_server"
 	LabelUserID      = "user_id"
+	LabelRoutingPath = "routing_path"
 
 	// Token type values
 	TokenTypeInput  = "input"
@@ -49,6 +50,10 @@ const (
 	LimitTypeInputTokens  = "input_tokens"
 	LimitTypeOutputTokens = "output_tokens"
 	LimitTypeRequests     = "requests"
+
+	// Routing path values
+	RoutingPathLegacy  = "legacy"
+	RoutingPathUnified = "unified"
 )
 
 // Metrics holds all Prometheus metrics for the kthena-router
@@ -75,6 +80,9 @@ type Metrics struct {
 	ActiveUpstreamRequests   prometheus.GaugeVec
 	FairnessQueueSize        prometheus.GaugeVec
 	FairnessQueueDuration    prometheus.HistogramVec
+
+	// Routing path metrics
+	RoutingPathRequests prometheus.CounterVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
@@ -172,6 +180,14 @@ func NewMetrics() *Metrics {
 			},
 			[]string{LabelModel, LabelUserID},
 		),
+
+		RoutingPathRequests: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_routing_path_requests_total",
+				Help: "Total number of requests processed by routing path type (legacy vs unified)",
+			},
+			[]string{LabelRoutingPath, LabelModel},
+		),
 	}
 }
 
@@ -249,6 +265,11 @@ func (m *Metrics) IncFairnessQueueSize(model, userID string) {
 // DecFairnessQueueSize decrements the fairness queue size
 func (m *Metrics) DecFairnessQueueSize(model, userID string) {
 	m.FairnessQueueSize.WithLabelValues(model, userID).Dec()
+}
+
+// RecordRoutingPath records which routing path was used for a request
+func (m *Metrics) RecordRoutingPath(routingPath, model string) {
+	m.RoutingPathRequests.WithLabelValues(routingPath, model).Inc()
 }
 
 // SetFairnessQueueSize sets the current fairness queue size
