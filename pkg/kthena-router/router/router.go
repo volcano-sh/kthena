@@ -24,7 +24,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -267,7 +266,6 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	modelName := modelRequest["model"].(string)
 
-	// Check if this is an InferencePool request from HTTPRoute
 	var pods []*datastore.PodInfo
 	var port int32
 	var modelServerName types.NamespacedName
@@ -284,71 +282,45 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 
 	var isLora bool
 	var err error
-	// Try to match ModelRoute first
+	// Try to match ModelRoute (this now handles both native ModelRoutes and translated HTTPRoutes)
 	modelServerName, isLora, modelRoute, err = r.store.MatchModelServer(modelName, c.Request, gatewayKey)
 	if err != nil {
-		accesslog.SetError(c, "model_server_matching", fmt.Sprintf("can't find corresponding model server: %v", err))
-	}
-
-	if err == nil && strings.HasPrefix(c.Request.URL.Path, "/v1/") {
-		// Regular ModelServer request
-		// step 3: Find pods and model server details
-		klog.V(4).Infof("modelServer is %v, is_lora: %v", modelServerName, isLora)
-
-		pods, modelServer, err = r.getPodsAndServer(modelServerName)
-		if err != nil || len(pods) == 0 {
-			klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
-			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find model server: %v", modelServerName))
-			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find model server: %v", modelServerName))
-			return
-		}
-
-		model := modelServer.Spec.Model
-		if model != nil && !isLora {
-			modelRequest["model"] = *model
-		}
-
-		port = modelServer.Spec.WorkloadPort.Port
-	} else if matched, inferencePoolName := r.handleHTTPRoute(c, gatewayKey); matched {
-		// If ModelRoute is not matched, try to match HTTPRoute
-
-		// Get InferencePool from store
-		inferencePoolKey := fmt.Sprintf("%s/%s", inferencePoolName.Namespace, inferencePoolName.Name)
-		inferencePool := r.store.GetInferencePool(inferencePoolKey)
-		if inferencePool == nil {
-			klog.Errorf("failed to get inference pool: %v", inferencePoolName)
-			accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
-			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
-			return
-		}
-
-		// Get pods from InferencePool
-		pods, err = r.store.GetPodsByInferencePool(inferencePoolName)
-		if err != nil || len(pods) == 0 {
-			klog.Errorf("failed to get pods for inference pool: %v, %v", inferencePoolName, err)
-			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
-			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
-			return
-		}
-
-		// Get target port from InferencePool
-		if len(inferencePool.Spec.TargetPorts) == 0 {
-			klog.Errorf("inference pool %v has no target ports", inferencePoolName)
-			accesslog.SetError(c, "port_discovery", fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
-			c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
-			return
-		}
-		// Use the first target port
-		port = int32(inferencePool.Spec.TargetPorts[0].Number)
-
-		klog.V(4).Infof("InferencePool is %v, pods count: %d, port: %d", inferencePoolName, len(pods), port)
-	} else {
-		accesslog.SetError(c, "route_not_found", "route not found")
+		klog.Errorf("failed to match model server for model %s: %v", modelName, err)
+		accesslog.SetError(c, "route_not_found", fmt.Sprintf("route not found: %v", err))
 		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
 		return
 	}
 
-	// Common scheduling logic for both ModelServer and InferencePool
+	// step 3: Find pods and model server details
+	klog.V(4).Infof("matched modelServer is %v, is_lora: %v", modelServerName, isLora)
+
+	// If this route was generated from an HTTPRoute, handle potential URL rewrites
+	if modelRoute != nil && modelRoute.Labels != nil && modelRoute.Labels["kthena.serving.volcano.sh/generated-from"] == "HTTPRoute" {
+		hrKey := fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
+		if hr := r.store.GetHTTPRoute(hrKey); hr != nil {
+			r.applyURLRewriteFromHTTPRoute(c, hr)
+		}
+	}
+
+	pods, modelServer, err = r.getPodsAndServer(modelServerName)
+	if err != nil || len(pods) == 0 {
+		klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
+		accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find model server: %v", modelServerName))
+		c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find model server: %v", modelServerName))
+		return
+	}
+
+	// If it's a regular /v1/ request, update the model name in request if needed
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+		model := modelServer.Spec.Model
+		if model != nil && !isLora {
+			modelRequest["model"] = *model
+		}
+	}
+
+	port = modelServer.Spec.WorkloadPort.Port
+
+	// Common scheduling logic
 	prompt, err := utils.ParsePrompt(modelRequest)
 	if err != nil {
 		accesslog.SetError(c, "prompt_parsing", "prompt not found")
@@ -364,7 +336,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 	}
 
-	// Get PDGroup if available (only for ModelServer)
+	// Get PDGroup if available
 	var pdGroup *v1alpha1.PDGroup
 	if modelServer != nil && modelServer.Spec.WorkloadSelector != nil {
 		pdGroup = modelServer.Spec.WorkloadSelector.PDGroup
@@ -444,124 +416,34 @@ func (r *Router) getPodsAndServer(modelServerName types.NamespacedName) ([]*data
 	return pods, modelServer, nil
 }
 
-// handleHTTPRoute handles HTTPRoute matching for non-/v1/ paths
-// Returns true if HTTPRoute was matched and request is being handled, false otherwise
-// Also returns the InferencePool NamespacedName if found
-func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName) {
-	// Find HTTPRoutes for this Gateway
-	httpRoutes := r.store.GetHTTPRoutesByGateway(gatewayKey)
-	if len(httpRoutes) == 0 {
-		return false, types.NamespacedName{}
-	}
-
-	// Match HTTPRoute by path and hostname
-	var matchedRoute *gatewayv1.HTTPRoute
-	var matchedPrefix string // Store the matched prefix for URL rewriting
-	for _, route := range httpRoutes {
-		if route == nil {
-			continue
-		}
-
-		matched := false
-		for _, rule := range route.Spec.Rules {
-			if len(rule.Matches) == 0 {
-				matched = true
-				break
-			}
-			for _, match := range rule.Matches {
-				if match.Path != nil {
-					pathType := match.Path.Type
-					pathValue := match.Path.Value
-					if pathType != nil {
-						switch *pathType {
-						case gatewayv1.PathMatchExact:
-							if c.Request.URL.Path == *pathValue {
-								matched = true
-								break
-							}
-						case gatewayv1.PathMatchPathPrefix:
-							if strings.HasPrefix(c.Request.URL.Path, *pathValue) {
-								matched = true
-								matchedPrefix = *pathValue // Store matched prefix
-								break
-							}
-						case gatewayv1.PathMatchRegularExpression:
-							if regexMatched, err := regexp.MatchString(*pathValue, c.Request.URL.Path); err == nil && regexMatched {
-								matched = true
-								break
-							} else if err != nil {
-								klog.Warningf("Invalid regex pattern '%s' in HTTPRoute %s/%s: %v", *pathValue, route.Namespace, route.Name, err)
-							}
-						}
-					}
-				} else {
-					matched = true
-				}
-				if matched {
+// applyURLRewriteFromHTTPRoute applies HTTPURLRewriteFilter from an HTTPRoute to the request
+func (r *Router) applyURLRewriteFromHTTPRoute(c *gin.Context, hr *gatewayv1.HTTPRoute) {
+	for _, rule := range hr.Spec.Rules {
+		// Simple heuristic: apply rewrites from the first rule that has them
+		// Ideally we should match the rule that was used for translation,
+		// but since we only care about filters here, we just look for any rewrite filter.
+		matchedPrefix := ""
+		for _, match := range rule.Matches {
+			if match.Path != nil && match.Path.Type != nil && *match.Path.Type == gatewayv1.PathMatchPathPrefix {
+				if strings.HasPrefix(c.Request.URL.Path, *match.Path.Value) {
+					matchedPrefix = *match.Path.Value
 					break
 				}
 			}
-			if matched {
-				matchedRoute = route
-				break
-			}
 		}
-		if matched {
-			break
-		}
-	}
 
-	if matchedRoute == nil {
-		return false, types.NamespacedName{}
-	}
-
-	// Store the matched prefix in context for URL rewriting
-	if matchedPrefix != "" {
-		c.Set("matchedPrefix", matchedPrefix)
-	}
-
-	// Find InferencePool backendRef and apply filters
-	var inferencePoolName types.NamespacedName
-	found := false
-	var matchedRule *gatewayv1.HTTPRouteRule
-	for i := range matchedRoute.Spec.Rules {
-		rule := &matchedRoute.Spec.Rules[i]
-		for _, backendRef := range rule.BackendRefs {
-			if backendRef.Group != nil && *backendRef.Group == "inference.networking.k8s.io" &&
-				backendRef.Kind != nil && *backendRef.Kind == "InferencePool" {
-				inferencePoolName.Namespace = matchedRoute.Namespace
-				if backendRef.Namespace != nil {
-					inferencePoolName.Namespace = string(*backendRef.Namespace)
+		if rule.Filters != nil {
+			for _, filter := range rule.Filters {
+				if filter.Type == gatewayv1.HTTPRouteFilterURLRewrite && filter.URLRewrite != nil {
+					r.applyURLRewrite(c, filter.URLRewrite, matchedPrefix)
 				}
-				inferencePoolName.Name = string(backendRef.Name)
-				found = true
-				matchedRule = rule
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
-
-	if !found {
-		return false, types.NamespacedName{}
-	}
-
-	// Apply HTTPURLRewriteFilter if present
-	if matchedRule != nil && matchedRule.Filters != nil {
-		for _, filter := range matchedRule.Filters {
-			if filter.Type == gatewayv1.HTTPRouteFilterURLRewrite && filter.URLRewrite != nil {
-				r.applyURLRewrite(c, filter.URLRewrite)
 			}
 		}
 	}
-
-	return true, inferencePoolName
 }
 
 // applyURLRewrite applies HTTPURLRewriteFilter to the request
-func (r *Router) applyURLRewrite(c *gin.Context, urlRewrite *gatewayv1.HTTPURLRewriteFilter) {
+func (r *Router) applyURLRewrite(c *gin.Context, urlRewrite *gatewayv1.HTTPURLRewriteFilter, matchedPrefix string) {
 	// Apply hostname rewrite
 	if urlRewrite.Hostname != nil {
 		newHostname := string(*urlRewrite.Hostname)
@@ -585,15 +467,8 @@ func (r *Router) applyURLRewrite(c *gin.Context, urlRewrite *gatewayv1.HTTPURLRe
 		case gatewayv1.PrefixMatchHTTPPathModifier:
 			// Replace the matched prefix with the specified replacement
 			if urlRewrite.Path.ReplacePrefixMatch != nil {
-				// Get the matched prefix from context
-				prefix, exists := c.Get("matchedPrefix")
-				if !exists {
-					klog.Errorf("matchedPrefix not found in context for path rewrite")
-					break
-				}
-				matchedPrefix, ok := prefix.(string)
-				if !ok || matchedPrefix == "" {
-					klog.Errorf("matchedPrefix is not a valid string in context")
+				if matchedPrefix == "" {
+					klog.Errorf("matchedPrefix not found for path rewrite")
 					break
 				}
 				// Replace the matched prefix
