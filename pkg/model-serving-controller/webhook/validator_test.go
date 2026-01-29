@@ -491,7 +491,7 @@ func TestValidateGangPolicy(t *testing.T) {
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
 								MinRoleReplicas: map[string]int32{
-									"worker": 3, // 2*1 (entry) + 3 (workers) = 5 total, min=3 is valid
+									"worker": 2, // 2 (role replicas) >= 2 (min), valid
 								},
 							},
 						},
@@ -532,7 +532,7 @@ func TestValidateGangPolicy(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid minRoleReplicas - exceeds total replicas",
+			name: "invalid minRoleReplicas - exceeds role replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -547,7 +547,7 @@ func TestValidateGangPolicy(t *testing.T) {
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
 								MinRoleReplicas: map[string]int32{
-									"worker": 10, // 2*1 (entry) + 3 (workers) = 5 total, min=10 is invalid
+									"worker": 10, // exceeds replicas 2
 								},
 							},
 						},
@@ -558,7 +558,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("gangPolicy").Child("minRoleReplicas").Key("worker"),
 					int32(10),
-					"minRoleReplicas (10) for role worker cannot exceed total replicas (5)",
+					"minRoleReplicas (10) for role worker cannot exceed replicas (2)",
 				),
 			},
 		},
@@ -764,6 +764,142 @@ func TestValidateWorkerReplicas(t *testing.T) {
 			got := validateWorkerReplicas(tt.args.ms)
 			if got != nil {
 				assert.EqualValues(t, tt.want, got)
+			} else {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestValidateRoleNames(t *testing.T) {
+	replicas := int32(3)
+	type args struct {
+		ms *workloadv1alpha1.ModelServing
+	}
+	tests := []struct {
+		name string
+		args args
+		want field.ErrorList
+	}{
+		{
+			name: "valid lowercase role name",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas, WorkerReplicas: 2},
+								{Name: "decode", Replicas: &replicas, WorkerReplicas: 2},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "invalid uppercase role name",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "Prefill", Replicas: &replicas, WorkerReplicas: 2},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("name"),
+					"Prefill",
+					"role name must be a valid DNS-1035 label (lowercase alphanumeric characters or '-', must start with a letter): a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character",
+				),
+			},
+		},
+		{
+			name: "invalid role name starting with number",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "1role", Replicas: &replicas, WorkerReplicas: 2},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("name"),
+					"1role",
+					"role name must be a valid DNS-1035 label (lowercase alphanumeric characters or '-', must start with a letter): a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character",
+				),
+			},
+		},
+		{
+			name: "invalid role name ending with hyphen",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "role-", Replicas: &replicas, WorkerReplicas: 2},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("name"),
+					"role-",
+					"role name must be a valid DNS-1035 label (lowercase alphanumeric characters or '-', must start with a letter): a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character",
+				),
+			},
+		},
+		{
+			name: "multiple roles with one invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas, WorkerReplicas: 2},
+								{Name: "Decode", Replicas: &replicas, WorkerReplicas: 2},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(1).Child("name"),
+					"Decode",
+					"role name must be a valid DNS-1035 label (lowercase alphanumeric characters or '-', must start with a letter): a DNS-1035 label must consist of lower case alphanumeric characters or '-', start with an alphabetic character, and end with an alphanumeric character",
+				),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateRoleNames(tt.args.ms)
+			if len(got) > 0 {
+				// Check that we got an error for the expected field
+				assert.Equal(t, len(tt.want), len(got), "error count mismatch")
+				if len(tt.want) > 0 && len(got) > 0 {
+					assert.Equal(t, tt.want[0].Field, got[0].Field, "field path mismatch")
+					assert.Equal(t, tt.want[0].BadValue, got[0].BadValue, "bad value mismatch")
+					// Check that error message contains the expected text
+					assert.Contains(t, got[0].Detail, "role name must be a valid DNS-1035 label", "error message should mention DNS-1035")
+				}
 			} else {
 				assert.Equal(t, tt.want, got)
 			}

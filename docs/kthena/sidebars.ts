@@ -44,7 +44,17 @@ const sidebars: SidebarsConfig = {
         description: 'A comprehensive overview of all the user guides.',
       },
       items: [
-        'user-guide/model-deployment',
+        {
+          type: 'category',
+          label: 'Model Deployment',
+          link: {
+            type: 'doc',
+            id: 'user-guide/model-deployment',
+          },
+          items: [
+            'user-guide/lws-integration',
+          ],
+        },
         'user-guide/multi-node-inference',
         'user-guide/network-topology',
         {

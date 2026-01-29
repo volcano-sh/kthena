@@ -83,6 +83,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	var allErrs field.ErrorList
 
 	allErrs = append(allErrs, validGeneratedNameLength(modelServing)...)
+	allErrs = append(allErrs, validateRoleNames(modelServing)...)
 	allErrs = append(allErrs, validateWorkerImages(modelServing)...)
 	allErrs = append(allErrs, validatorReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
@@ -115,6 +116,22 @@ func validGeneratedNameLength(ms *workloadv1alpha1.ModelServing) field.ErrorList
 		}
 	}
 
+	return allErrs
+}
+
+// validateRoleNames validates that role names conform to DNS-1035 label format.
+func validateRoleNames(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	for i, role := range ms.Spec.Template.Roles {
+		errors := apivalidation.NameIsDNS1035Label(role.Name, false)
+		if len(errors) > 0 {
+			allErrs = append(allErrs, field.Invalid(
+				field.NewPath("spec").Child("template").Child("roles").Index(i).Child("name"),
+				role.Name,
+				fmt.Sprintf("role name must be a valid DNS-1035 label (lowercase alphanumeric characters or '-', must start with a letter): %s", strings.Join(errors, "; ")),
+			))
+		}
+	}
 	return allErrs
 }
 
@@ -220,19 +237,19 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 		// Find the role to check its actual replicas
 		for _, role := range ms.Spec.Template.Roles {
 			if role.Name == roleName {
-				// Calculate total replicas for this role (entry + workers)
-				totalReplicas := int32(1) // Entry pod
+				/// Calculate total replicas for this role
+				// minRoleReplicas is compared against the number of Role replicas
+				replicas := int32(1)
 				if role.Replicas != nil {
-					totalReplicas *= *role.Replicas
+					replicas = *role.Replicas
 				}
-				totalReplicas += role.WorkerReplicas
 
 				// Validate minReplicas doesn't exceed total replicas
-				if minReplicas > totalReplicas {
+				if minReplicas > replicas {
 					allErrs = append(allErrs, field.Invalid(
 						minRoleReplicasPath.Key(roleName),
 						minReplicas,
-						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed total replicas (%d)", minReplicas, roleName, totalReplicas),
+						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed replicas (%d)", minReplicas, roleName, replicas),
 					))
 				}
 

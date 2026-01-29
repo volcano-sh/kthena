@@ -47,6 +47,8 @@ type webhookConfig struct {
 	webhookTimeout int
 	certSecretName string
 	serviceName    string
+	kubeAPIQPS     float32
+	kubeAPIBurst   int
 }
 
 func main() {
@@ -71,6 +73,8 @@ func main() {
 	pflag.IntVar(&cc.Workers, "workers", 5, "number of workers to run. Default is 5")
 	pflag.StringSliceVar(&controllers, "controllers", []string{"*"}, "A list of controllers to enable. '*' enables all controllers, 'foo' enables the controller "+
 		"named 'foo', '-foo' disables the controller named 'foo'.\nIf both '+foo' and '-foo' are set simultaneously, then controller named 'foo' will be enabled.\nAll controllers: 'modelserving', 'modelbooster', 'autoscaler'")
+	pflag.Float32Var(&cc.KubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
+	pflag.IntVar(&cc.KubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.Parse()
 
 	cc.Controllers = parseControllers(controllers)
@@ -87,6 +91,8 @@ func main() {
 		klog.Info("Received termination, signaling shutdown")
 		cancel()
 	}()
+	wc.kubeAPIQPS = cc.KubeAPIQPS
+	wc.kubeAPIBurst = cc.KubeAPIBurst
 	if enableWebhook {
 		go func() {
 			if err := setupWebhook(ctx, wc); err != nil {
@@ -116,6 +122,13 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	if err != nil {
 		klog.Fatalf("build client config: %v", err)
 		return err
+	}
+	// Set QPS and Burst if provided
+	if wc.kubeAPIQPS > 0 {
+		cfg.QPS = wc.kubeAPIQPS
+	}
+	if wc.kubeAPIBurst > 0 {
+		cfg.Burst = wc.kubeAPIBurst
 	}
 
 	kubeClient, err := kubernetes.NewForConfig(cfg)
@@ -166,7 +179,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	mux := http.NewServeMux()
 
 	modelServingValidator := modelservingwebhook.NewModelServingValidator()
-	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelServing", modelServingValidator.Handle)
+	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelserving", modelServingValidator.Handle)
 
 	modelValidator := modelboosterwebhook.NewModelValidator()
 	modelMutator := modelboosterwebhook.NewModelMutator()

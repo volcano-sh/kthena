@@ -54,6 +54,13 @@ func SetupController(ctx context.Context, cc Config) {
 	if err != nil {
 		klog.Fatalf("build client config: %v", err)
 	}
+	// Set QPS and Burst if provided
+	if cc.KubeAPIQPS > 0 {
+		config.QPS = cc.KubeAPIQPS
+	}
+	if cc.KubeAPIBurst > 0 {
+		config.Burst = cc.KubeAPIBurst
+	}
 	kubeClient := kubernetes.NewForConfigOrDie(config)
 	client := clientset.NewForConfigOrDie(config)
 	volcanoClient, err := volcanoClientSet.NewForConfig(config)

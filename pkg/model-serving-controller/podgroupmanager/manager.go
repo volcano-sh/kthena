@@ -82,7 +82,6 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 			newManager.hasSubGroupPolicy.Store(false)
 		} else {
 			klog.Errorf("failed to get PodGroup CRD: %v", err)
-			return nil
 		}
 	} else {
 		newManager.handlePodGroupCRDChange(crd, false)

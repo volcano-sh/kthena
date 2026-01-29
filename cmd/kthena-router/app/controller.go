@@ -50,10 +50,17 @@ type aggregatedController struct {
 
 var _ Controller = &aggregatedController{}
 
-func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool) Controller {
+func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int) Controller {
 	cfg, err := clientcmd.BuildConfigFromFlags("", "")
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
+	}
+	// Set QPS and Burst if provided
+	if kubeAPIQPS > 0 {
+		cfg.QPS = kubeAPIQPS
+	}
+	if kubeAPIBurst > 0 {
+		cfg.Burst = kubeAPIBurst
 	}
 
 	kubeClient, err := kubernetes.NewForConfig(cfg)

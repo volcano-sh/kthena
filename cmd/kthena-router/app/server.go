@@ -36,9 +36,11 @@ type Server struct {
 	EnableGatewayAPI                   bool
 	EnableGatewayAPIInferenceExtension bool
 	DebugPort                          int
+	KubeAPIQPS                         float32
+	KubeAPIBurst                       int
 }
 
-func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int) *Server {
+func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int) *Server {
 	return &Server{
 		store:                              nil,
 		EnableTLS:                          enableTLS,
@@ -48,6 +50,8 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		EnableGatewayAPI:                   enableGatewayAPI,
 		EnableGatewayAPIInferenceExtension: enableGatewayAPIInferenceExtension,
 		DebugPort:                          debugPort,
+		KubeAPIQPS:                         kubeAPIQPS,
+		KubeAPIBurst:                       kubeAPIBurst,
 	}
 }
 
@@ -59,7 +63,7 @@ func (s *Server) Run(ctx context.Context) {
 	// must be run before the controller, because it will register callbacks
 	r := NewRouter(store)
 	// start controller
-	s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension)
+	s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst)
 
 	// Start store's periodic update loop after controllers have synced
 	if !cache.WaitForCacheSync(ctx.Done(), s.controllers.HasSynced) {

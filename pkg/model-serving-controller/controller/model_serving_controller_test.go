@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -1891,6 +1892,154 @@ func TestScaleUpRoles(t *testing.T) {
 				// Verify total roles count
 				expectedTotal := len(tt.existingIndices) + len(tt.expectedNewIndices)
 				assert.Equal(t, expectedTotal, len(roles), "Total role count should match expected")
+			}
+		})
+	}
+}
+
+func TestManageRoleReplicas(t *testing.T) {
+	tests := []struct {
+		name             string
+		roleReplicas     int32
+		workerReplicas   int32
+		initialRoleIDs   []int
+		addEntryPod      bool
+		mismatchOwnerUID bool
+		expectedRoleSize int
+		expectedPodCount int
+		expectRequeue    bool
+	}{
+		{
+			name:             "recreate missing pods when role count matches",
+			roleReplicas:     1,
+			workerReplicas:   1,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			expectedRoleSize: 1,
+			expectedPodCount: 2,
+			expectRequeue:    false,
+		},
+		{
+			name:             "scale up when role replicas are less than expected",
+			roleReplicas:     2,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      false,
+			expectedRoleSize: 2,
+			expectedPodCount: 2,
+			expectRequeue:    false,
+		},
+		{
+			name:             "scale down when role replicas are more than expected",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0, 1},
+			addEntryPod:      false,
+			expectedRoleSize: 1,
+			expectedPodCount: 2,
+			expectRequeue:    false,
+		},
+		{
+			name:             "reenqueue when pod owner UID mismatches",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			mismatchOwnerUID: true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			expectRequeue:    true,
+		},
+	}
+
+	for idx, tt := range tests {
+		// set klog verbsity to error to reduce test output noise
+
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			assert.NoError(t, err)
+
+			roleName := "default"
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      fmt.Sprintf("test-manage-role-%d", idx),
+					UID:       types.UID(fmt.Sprintf("ms-uid-%d", idx)),
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           roleName,
+								Replicas:       ptr.To[int32](tt.roleReplicas),
+								WorkerReplicas: tt.workerReplicas,
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{
+											Name:  "entry-container",
+											Image: "test-image:latest",
+										}},
+									},
+								},
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{
+											Name:  "worker-container",
+											Image: "test-image:latest",
+										}},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+				},
+			}
+
+			groupName := utils.GenerateServingGroupName(ms.Name, 0)
+			revision := "rev-1"
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
+			for _, roleID := range tt.initialRoleIDs {
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, roleID), revision)
+			}
+
+			if tt.addEntryPod {
+				entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, 0, revision)
+				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
+					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
+				}
+				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
+				assert.NoError(t, err)
+				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
+			}
+
+			controller.manageRoleReplicas(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+
+			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
+			assert.NoError(t, err)
+			assert.Len(t, roles, tt.expectedRoleSize, "role list should match expected count")
+
+			//if tt.expectedPodCount > 0 {
+			selector := labels.SelectorFromSet(map[string]string{
+				workloadv1alpha1.GroupNameLabelKey: groupName,
+				workloadv1alpha1.RoleLabelKey:      roleName,
+			})
+			pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedPodCount, len(pods.Items), "pod count should match expected")
+			//}
+
+			if tt.expectRequeue {
+				requeued := waitForObjectInCache(t, 2*time.Second, func() bool {
+					return controller.workqueue.Len() > 0
+				})
+				assert.True(t, requeued, "model serving should be requeued for owner UID mismatch")
 			}
 		})
 	}
@@ -4195,4 +4344,476 @@ func TestManageHeadlessService(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSyncAllWithFailedPods tests that failed pods at startup are properly handled
+// after initial sync completes. This tests the fix for the bug where failed pods
+// were silently ignored during controller startup.
+func TestSyncAllWithFailedPods(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	roleName := "prefill"
+	roleID := "prefill-0"
+	revision := "hash123"
+
+	// Setup fake clients
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	// Create controller first to get access to informers
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	// Create the ModelServing resource with a UID for owner reference
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      msName,
+			UID:       "test-ms-uid-123",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Create failed pod - this simulates a pod that is already in Failed state
+	// when the controller starts (e.g., after controller restart)
+	failedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "test-pod-failed",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+				workloadv1alpha1.RevisionLabelKey:         revision,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.GroupVersion.String(),
+					Kind:       "ModelServing",
+					Name:       msName,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed, // Pod is in Failed state
+		},
+	}
+
+	// Add resources directly to informer indexers for listers to find them
+	err = controller.podsInformer.GetIndexer().Add(failedPod)
+	assert.NoError(t, err)
+	err = controller.modelServingsInformer.GetIndexer().Add(ms)
+	assert.NoError(t, err)
+
+	// Verify initialSync is false before syncAll
+	assert.False(t, controller.initialSync, "initialSync should be false before syncAll")
+
+	// Call syncAll - this should handle the failed pod properly after the fix
+	controller.syncAll()
+
+	// Verify initialSync is true after syncAll
+	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
+
+	// Verify the failed pod was added to graceMap (this happens in handleErrorPod)
+	_, existsInGraceMap := controller.graceMap.Load(types.NamespacedName{
+		Namespace: ns,
+		Name:      failedPod.Name,
+	})
+	assert.True(t, existsInGraceMap, "Failed pod should be added to graceMap after syncAll processes it")
+}
+
+// TestSyncAllWithContainerRestartedPods tests that pods with restarted containers
+// at startup are properly handled after initial sync completes.
+func TestSyncAllWithContainerRestartedPods(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	roleName := "prefill"
+	roleID := "prefill-0"
+	revision := "hash123"
+
+	// Setup fake clients
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	// Create controller first to get access to informers
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	// Create the ModelServing resource
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      msName,
+			UID:       "test-ms-uid-456",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Create pod with restarted container - this simulates a CrashLoopBackOff scenario
+	restartedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "test-pod-restarted",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+				workloadv1alpha1.RevisionLabelKey:         revision,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.GroupVersion.String(),
+					Kind:       "ModelServing",
+					Name:       msName,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:         "main",
+					RestartCount: 5, // Container has restarted multiple times
+				},
+			},
+		},
+	}
+
+	// Add resources directly to informer indexers for listers to find them
+	err = controller.podsInformer.GetIndexer().Add(restartedPod)
+	assert.NoError(t, err)
+	err = controller.modelServingsInformer.GetIndexer().Add(ms)
+	assert.NoError(t, err)
+
+	// Call syncAll
+	controller.syncAll()
+
+	// Verify the restarted container pod was added to graceMap
+	_, existsInGraceMap := controller.graceMap.Load(types.NamespacedName{
+		Namespace: ns,
+		Name:      restartedPod.Name,
+	})
+	assert.True(t, existsInGraceMap, "Pod with restarted container should be added to graceMap after syncAll")
+}
+
+// TestSyncAllWithMixedPods tests that syncAll properly handles a mix of
+// running, failed, and restarted pods at startup.
+func TestSyncAllWithMixedPods(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	roleName := "prefill"
+	revision := "hash123"
+
+	// Setup fake clients
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	// Create controller first to get access to informers
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	// Create the ModelServing resource
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      msName,
+			UID:       "test-ms-uid-789",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](3),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Create a running pod (healthy)
+	runningPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "test-pod-running",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                "prefill-0",
+				workloadv1alpha1.RevisionLabelKey:         revision,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.GroupVersion.String(),
+					Kind:       "ModelServing",
+					Name:       msName,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	// Create a failed pod
+	failedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "test-pod-failed",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                "prefill-1",
+				workloadv1alpha1.RevisionLabelKey:         revision,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.GroupVersion.String(),
+					Kind:       "ModelServing",
+					Name:       msName,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+		},
+	}
+
+	// Create a pod with restarted container
+	restartedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "test-pod-restarted",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                "prefill-2",
+				workloadv1alpha1.RevisionLabelKey:         revision,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.GroupVersion.String(),
+					Kind:       "ModelServing",
+					Name:       msName,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:         "main",
+					RestartCount: 3,
+				},
+			},
+		},
+	}
+
+	// Add resources directly to informer indexers for listers to find them
+	err = controller.podsInformer.GetIndexer().Add(runningPod)
+	assert.NoError(t, err)
+	err = controller.podsInformer.GetIndexer().Add(failedPod)
+	assert.NoError(t, err)
+	err = controller.podsInformer.GetIndexer().Add(restartedPod)
+	assert.NoError(t, err)
+	err = controller.modelServingsInformer.GetIndexer().Add(ms)
+	assert.NoError(t, err)
+
+	// Call syncAll
+	controller.syncAll()
+
+	// Verify initialSync is true
+	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
+
+	// Verify running pod is NOT in graceMap (it's healthy)
+	_, runningInGraceMap := controller.graceMap.Load(types.NamespacedName{
+		Namespace: ns,
+		Name:      runningPod.Name,
+	})
+	assert.False(t, runningInGraceMap, "Running pod should NOT be in graceMap")
+
+	// Verify failed pod IS in graceMap
+	_, failedInGraceMap := controller.graceMap.Load(types.NamespacedName{
+		Namespace: ns,
+		Name:      failedPod.Name,
+	})
+	assert.True(t, failedInGraceMap, "Failed pod should be in graceMap")
+
+	// Verify restarted pod IS in graceMap
+	_, restartedInGraceMap := controller.graceMap.Load(types.NamespacedName{
+		Namespace: ns,
+		Name:      restartedPod.Name,
+	})
+	assert.True(t, restartedInGraceMap, "Restarted pod should be in graceMap")
+
+	// Verify all pods have their serving groups tracked
+	servingGroups, err := controller.store.GetServingGroupByModelServing(types.NamespacedName{
+		Namespace: ns,
+		Name:      msName,
+	})
+	assert.NoError(t, err)
+	assert.NotEmpty(t, servingGroups, "ServingGroups should exist in store")
+}
+
+// TestSyncAllBeforeFixBehavior documents the previous buggy behavior where
+// failed pods at startup were silently ignored when initialSync was false.
+// This test verifies that the fix properly addresses this issue.
+func TestSyncAllBeforeFixBehavior(t *testing.T) {
+	// This test verifies that before the fix, the updatePod function would
+	// return early for failed pods when initialSync=false, causing them to
+	// never be processed. After the fix, syncAll defers failed pods and
+	// processes them after setting initialSync=true.
+
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	roleName := "prefill"
+	roleID := "prefill-0"
+	revision := "hash123"
+
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	// Create controller first to get access to informers
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      msName,
+			UID:       "test-ms-uid-abc",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Create a failed pod
+	failedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "test-pod-failed",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+				workloadv1alpha1.RevisionLabelKey:         revision,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.GroupVersion.String(),
+					Kind:       "ModelServing",
+					Name:       msName,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+		},
+	}
+
+	// Add resources directly to informer indexers for listers to find them
+	err = controller.podsInformer.GetIndexer().Add(failedPod)
+	assert.NoError(t, err)
+	err = controller.modelServingsInformer.GetIndexer().Add(ms)
+	assert.NoError(t, err)
+
+	// Verify before syncAll, initialSync is false
+	assert.False(t, controller.initialSync)
+
+	// The key test: Before the fix, calling addPod directly with initialSync=false
+	// for a failed pod would return early without processing.
+	// After the fix, syncAll defers these pods and processes them correctly.
+
+	// Call syncAll which should now properly handle the failed pod
+	controller.syncAll()
+
+	// After the fix, the failed pod should be in graceMap
+	// This proves the fix works - before the fix, this would be empty
+	_, exists := controller.graceMap.Load(types.NamespacedName{
+		Namespace: ns,
+		Name:      failedPod.Name,
+	})
+	assert.True(t, exists,
+		"After fix: Failed pod should be in graceMap. "+
+			"Before fix: This would be false because updatePod returned early when initialSync=false")
 }

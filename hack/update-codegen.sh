@@ -42,3 +42,5 @@ kube::codegen::gen_client \
     --output-pkg "${THIS_PKG}/client-go" \
     --boilerplate "${SCRIPT_ROOT}/hack/boilerplate.go.txt" \
     "${SCRIPT_ROOT}/pkg/apis"
+
+bash "${SCRIPT_ROOT}/hack/update-crd.sh"

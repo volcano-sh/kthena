@@ -37,6 +37,12 @@ spec:
             - --cert-secret-name={{ .Values.kthenaRouter.webhook.tls.secretName }}
             - --webhook-service-name={{ .Values.kthenaRouter.webhook.tls.serviceName }}
           {{- end }}
+          {{- if .Values.kthenaRouter.kubeAPIQPS }}
+            - --kube-api-qps={{ .Values.kthenaRouter.kubeAPIQPS }}
+          {{- end }}
+          {{- if .Values.kthenaRouter.kubeAPIBurst }}
+            - --kube-api-burst={{ .Values.kthenaRouter.kubeAPIBurst }}
+          {{- end }}
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
             - --tls-cert=/etc/router-tls/tls.crt
             - --tls-key=/etc/router-tls/tls.key

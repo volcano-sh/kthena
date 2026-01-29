@@ -51,6 +51,8 @@ func main() {
 		certSecretName                     string
 		serviceName                        string
 		debugPort                          int
+		kubeAPIQPS                         float32
+		kubeAPIBurst                       int
 	)
 
 	klog.InitFlags(nil)
@@ -67,6 +69,8 @@ func main() {
 	pflag.StringVar(&certSecretName, "cert-secret-name", "kthena-router-webhook-certs", "Name of the secret to store auto-generated webhook certificates")
 	pflag.StringVar(&serviceName, "webhook-service-name", "kthena-router-webhook", "Service name for the webhook server")
 	pflag.IntVar(&debugPort, "debug-port", 15000, "The port for the debug server (localhost only)")
+	pflag.Float32Var(&kubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
+	pflag.IntVar(&kubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	defer klog.Flush()
 	pflag.Parse()
 
@@ -102,12 +106,12 @@ func main() {
 	}()
 
 	if enableWebhook {
-		go runWebhook(ctx, webhookPort, webhookCert, webhookKey, certSecretName, serviceName)
+		go runWebhook(ctx, webhookPort, webhookCert, webhookKey, certSecretName, serviceName, kubeAPIQPS, kubeAPIBurst)
 	} else {
 		klog.Info("Webhook server is disabled")
 	}
 
-	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort).Run(ctx)
+	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.
@@ -123,10 +127,17 @@ func ensureWebhookCertificate(ctx context.Context, kubeClient kubernetes.Interfa
 
 // runWebhook starts the webhook server and manages certificate acquisition with precedence:
 // Secret -> existing cert files -> auto-generate new certs.
-func runWebhook(ctx context.Context, port int, certFile, keyFile, secretName, serviceName string) {
+func runWebhook(ctx context.Context, port int, certFile, keyFile, secretName, serviceName string, kubeAPIQPS float32, kubeAPIBurst int) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		klog.Fatalf("Failed to get kube config: %v", err)
+	}
+	// Set QPS and Burst if provided
+	if kubeAPIQPS > 0 {
+		config.QPS = kubeAPIQPS
+	}
+	if kubeAPIBurst > 0 {
+		config.Burst = kubeAPIBurst
 	}
 	kubeClient, err := kubernetes.NewForConfig(config)
 	if err != nil {

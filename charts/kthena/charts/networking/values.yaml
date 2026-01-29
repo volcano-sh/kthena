@@ -60,6 +60,12 @@ kthenaRouter:
     # inferenceExtension controls whether Gateway API Inference Extension features are enabled
     # This requires gatewayAPI.enabled to be true
     inferenceExtension: false
+  # kubeAPIQPS is the QPS (queries per second) to use while talking with kubernetes apiserver
+  # If 0 or not specified, uses default value (5)
+  kubeAPIQPS: 0
+  # kubeAPIBurst is the burst to use while talking with kubernetes apiserver
+  # If 0 or not specified, uses default value (10)
+  kubeAPIBurst: 0
 
 webhook:
   enabled: true

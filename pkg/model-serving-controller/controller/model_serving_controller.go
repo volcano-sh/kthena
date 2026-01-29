@@ -275,7 +275,6 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	}
 
 	if c.shouldSkipPodHandling(ms, servingGroupName, newPod) {
-		// Pod revision mssmatch ServingGroup, this can rarely happen
 		return
 	}
 
@@ -287,15 +286,17 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 			klog.Errorf("handle running pod failed: %v", err)
 		}
 	case utils.IsPodFailed(newPod) || utils.ContainerRestarted(newPod):
-		// handleErrorPod is not called until modelServing has been called.
-		if !c.initialSync {
-			return
-		}
-		// Failure occurs in pod and we need to wait for a grace period before making a judgment.
 		err = c.handleErrorPod(ms, servingGroupName, newPod)
 		if err != nil {
 			klog.Errorf("handle error pod failed: %v", err)
 		}
+	default:
+		// Add the group and role to the global storage, otherwise after restart,
+		// it may create unexpected group and role because of missing group or role info.
+		c.store.AddServingGroupAndRole(types.NamespacedName{
+			Namespace: ms.Namespace,
+			Name:      ms.Name,
+		}, servingGroupName, utils.PodRevision(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
 	}
 }
 
@@ -377,6 +378,16 @@ func (c *ModelServingController) enqueueModelServing(ms *workloadv1alpha1.ModelS
 		return
 	}
 	c.workqueue.Add(key)
+}
+
+func (c *ModelServingController) enqueueModelServingAfter(ms *workloadv1alpha1.ModelServing, duration time.Duration) {
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(ms); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.workqueue.AddAfter(key, duration)
 }
 
 func (c *ModelServingController) worker(ctx context.Context) {
@@ -480,6 +491,7 @@ func (c *ModelServingController) syncAll() {
 	if err != nil {
 		klog.Errorf("failed to list pods: %v", err)
 	}
+
 	for _, pod := range pods {
 		c.addPod(pod)
 	}
@@ -491,6 +503,7 @@ func (c *ModelServingController) syncAll() {
 	for _, ms := range modelServings {
 		c.addModelServing(ms)
 	}
+
 	c.initialSync = true
 }
 
@@ -502,7 +515,7 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 	expectedCount := int(*ms.Spec.Replicas)
 	curReplicas := len(servingGroupList)
 
-	// Determsne whether it is a scale-up or scale-down scenario
+	// Determine whether it is a scale-up or scale-down scenario
 	if curReplicas < expectedCount {
 		// update pod groups if needed
 		for _, servingGroup := range servingGroupList {
@@ -730,7 +743,7 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 		return
 	}
 
-	klog.V(2).Infof("Scaling up role %s in ServingGroup %s: creating %d new replicas", targetRole.Name, groupName, toCreate)
+	klog.V(2).Infof("scaling up role %s in ServingGroup %s: creating %d new replicas", targetRole.Name, groupName, toCreate)
 	// Create new Roles with increasing indices
 	for i := 0; i < toCreate; i++ {
 		newIndex := startingIndex + i
@@ -756,17 +769,43 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		return
 	}
 
+	// TODO: need to check the pod spec match the modelserving spec, if not, recreate the pod
+
 	expectedCount := int(*targetRole.Replicas)
-	if len(roleList) == expectedCount {
-		klog.V(4).Infof("The replicas of role %s in ServingGroup %s is consistent, no need to scale up or down", targetRole.Name, groupName)
-		return
+	expectedPods := 1 + int(targetRole.WorkerReplicas)
+	for _, roleObj := range roleList {
+		if roleObj.Status == datastore.RoleDeleting {
+			continue
+		}
+		roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, targetRole.Name, roleObj.Name)
+		pods, err := c.getPodsByIndex(RoleIDKey, roleIDValue)
+		if err != nil {
+			klog.Warningf("failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+			continue
+		}
+		for _, pod := range pods {
+			if !isOwnedByModelServingWithUID(pod, ms.UID) {
+				// If the pod is not owned by the ModelServing, we do not need to handle it.
+				klog.Infof("pod %s/%s maybe left from previous same named ModelServing %s/%s, reenqueue ModelServing for reconcile",
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name)
+				c.enqueueModelServingAfter(ms, 1*time.Second)
+				break
+			}
+		}
+		if len(pods) < expectedPods {
+			klog.V(2).Infof("role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
+			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
+				klog.Errorf("failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+			}
+		}
 	}
 
-	// Determsne whether it is a scale-up or scale-down scenario
+	// Determine whether it is a scale-up or scale-down scenario
 	if len(roleList) < expectedCount {
 		// Handle scale up by calling scaleUpRoles
 		c.scaleUpRoles(ctx, ms, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, newRevision)
-	} else {
+	} else if len(roleList) > expectedCount {
 		// Handle scale down by calling scaleDownRoles
 		c.scaleDownRoles(ctx, ms, groupName, targetRole, roleList, expectedCount)
 	}
@@ -1147,8 +1186,15 @@ func (c *ModelServingController) getModelServingByChildResource(resource metav1.
 	return ms, servingGroupName, nil
 }
 
-// shouldSkipPodHandling checks if a pod should be skipped based on revision mismatch
+// shouldSkipPodHandling checks if a pod should be skipped based on owner mismatch or revision mismatch
 func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) bool {
+	if !isOwnedByModelServingWithUID(pod, ms.UID) {
+		// If the pod is not owned by the ModelServing, we do not need to handle it.
+		klog.V(4).Infof("pod %s/%s maybe left from previous same named ModelServing %s/%s, skip handling",
+			pod.Namespace, pod.Name, ms.Namespace, ms.Name)
+		return true
+	}
+
 	podRevision := utils.PodRevision(pod)
 	servingGroup := c.store.GetServingGroup(types.NamespacedName{
 		Namespace: ms.Namespace,
@@ -1181,6 +1227,17 @@ func getMetaObject(obj interface{}) metav1.Object {
 func isOwnedByModelServing(metaObj metav1.Object) bool {
 	for _, ownerRef := range metaObj.GetOwnerReferences() {
 		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == "ModelServing" {
+			return true
+		}
+	}
+	return false
+}
+
+func isOwnedByModelServingWithUID(obj metav1.Object, uid types.UID) bool {
+	for _, ownerRef := range obj.GetOwnerReferences() {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() &&
+			ownerRef.Kind == "ModelServing" &&
+			ownerRef.UID == uid {
 			return true
 		}
 	}
@@ -1220,7 +1277,7 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 func (c *ModelServingController) isServingGroupDeleted(ms *workloadv1alpha1.ModelServing, servingGroupName string) bool {
 	status := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName)
 	if status != datastore.ServingGroupDeleting {
-		// It will be determsned whether all resource have been deleted only when the group status is deleting.
+		// It will be Determined whether all resource have been deleted only when the group status is deleting.
 		return false
 	}
 	// check whether the ServingGroup deletion has been completed
@@ -1240,7 +1297,7 @@ func (c *ModelServingController) isServingGroupDeleted(ms *workloadv1alpha1.Mode
 
 func (c *ModelServingController) isRoleDeleted(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {
 	if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) != datastore.RoleDeleting {
-		// It will be determsned whether all resource have been deleted only when the role status is deleting.
+		// It will be Determined whether all resource have been deleted only when the role status is deleting.
 		return false
 	}
 	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, servingGroupName, roleName, roleID)

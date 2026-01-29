@@ -32,6 +32,12 @@ spec:
             - "--controllers={{ join "," .Values.controllerManager.controllers }}"
             {{- end }}
             {{- end }}
+            {{- if .Values.controllerManager.kubeAPIQPS }}
+            - --kube-api-qps={{ .Values.controllerManager.kubeAPIQPS }}
+            {{- end }}
+            {{- if .Values.controllerManager.kubeAPIBurst }}
+            - --kube-api-burst={{ .Values.controllerManager.kubeAPIBurst }}
+            {{- end }}
           imagePullPolicy: {{ .Values.controllerManager.image.pullPolicy }}
           resources:
             {{- toYaml .Values.controllerManager.resource | nindent 12 }}

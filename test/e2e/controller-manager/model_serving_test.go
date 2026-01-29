@@ -278,6 +278,109 @@ func TestModelServingServiceRecovery(t *testing.T) {
 	t.Log("ModelServing service recovery test passed")
 }
 
+// TestModelServingWithDuplicateHostAliases verifies that ModelServing with duplicate IP hostAliases
+// can be created and pods are running successfully
+func TestModelServingWithDuplicateHostAliases(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create Kubernetes client locally
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a ModelServing with duplicate IP hostAliases
+	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1, 1)
+	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.HostAliases = []corev1.HostAlias{
+		{
+			IP:        "10.1.2.3",
+			Hostnames: []string{"test.com", "example.com"},
+		},
+		{
+			IP:        "10.1.2.3",
+			Hostnames: []string{"test.org"},
+		},
+	}
+
+	t.Log("Creating ModelServing with duplicate IP hostAliases")
+	_, err = kthenaClient.WorkloadV1alpha1().
+		ModelServings(testNamespace).
+		Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing with duplicate hostAliases")
+
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
+	// Wait until ModelServing is ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify that pods are created and running with the correct hostAliases
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	require.Eventually(t, func() bool {
+		podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+
+		// Check that we have at least one pod and it has the expected hostAliases
+		for _, pod := range podList.Items {
+			// Check if pod is running
+			if pod.Status.Phase == corev1.PodRunning {
+				// Verify that hostAliases contains entries with duplicate IPs
+				hostAliases := pod.Spec.HostAliases
+				hasDuplicateIP := false
+
+				ipCount := make(map[string]int)
+				for _, alias := range hostAliases {
+					ipCount[alias.IP]++
+					if ipCount[alias.IP] > 1 {
+						hasDuplicateIP = true
+						break
+					}
+				}
+
+				// Also check if we have the expected hostnames
+				expectedHostnames := map[string]bool{
+					"test.com":    true,
+					"example.com": true,
+					"test.org":    true,
+				}
+
+				foundHostnames := make(map[string]bool)
+				for _, alias := range hostAliases {
+					for _, hostname := range alias.Hostnames {
+						foundHostnames[hostname] = true
+					}
+				}
+
+				allExpectedFound := true
+				for expected := range expectedHostnames {
+					if !foundHostnames[expected] {
+						allExpectedFound = false
+						break
+					}
+				}
+
+				if hasDuplicateIP && allExpectedFound {
+					return true
+				}
+			}
+		}
+		return false
+	}, 2*time.Minute, 5*time.Second, "Pods were not created with duplicate IP hostAliases or did not reach running state")
+
+	t.Log("ModelServing with duplicate IP hostAliases test passed successfully")
+}
+
 func createBasicModelServing(name string, servingGroupReplicas, roleReplicas int32) *workload.ModelServing {
 	return &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{

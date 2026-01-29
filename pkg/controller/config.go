@@ -22,4 +22,6 @@ type Config struct {
 	Kubeconfig           string
 	MasterURL            string
 	Controllers          map[string]bool
+	KubeAPIQPS           float32
+	KubeAPIBurst         int
 }

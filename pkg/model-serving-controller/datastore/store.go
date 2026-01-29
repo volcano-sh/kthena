@@ -42,6 +42,8 @@ type Store interface {
 	AddServingGroup(modelServingName types.NamespacedName, idx int, revision string)
 	AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision string)
 	AddRunningPodToServingGroup(modelServingName types.NamespacedName, groupName, pod, revision, roleName, roleID string)
+	// AddServingGroupAndRole adds servingGroup and role if not exist
+	AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleName, roleID string)
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
 }
@@ -357,6 +359,44 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 	}
 
 	group.runningPods[runningPodName] = struct{}{} // runningPods map has been initialized during AddServingGroup.
+
+	// Check if roleName exists, and initialize it if not
+	if _, ok = group.roles[roleName]; !ok {
+		group.roles[roleName] = make(map[string]*Role)
+	}
+
+	if _, ok = group.roles[roleName][roleID]; !ok {
+		role := &Role{
+			Name:     roleID,
+			Status:   RoleCreating,
+			Revision: revision,
+		}
+		group.roles[roleName][roleID] = role
+	}
+}
+
+// AddServingGroupAndRole adds ServingGroup and roles if not exist
+func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleName, roleID string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if _, ok := s.servingGroup[modelServingName]; !ok {
+		// If modelServingName not exist, create a new one
+		s.servingGroup[modelServingName] = make(map[string]*ServingGroup)
+	}
+
+	group, ok := s.servingGroup[modelServingName][servingGroupName]
+	if !ok {
+		// If ServingGroupName not exist, create a new one
+		group = &ServingGroup{
+			Name:        servingGroupName,
+			runningPods: map[string]struct{}{},
+			Status:      ServingGroupCreating,
+			Revision:    revision,
+			roles:       make(map[string]map[string]*Role),
+		}
+
+		s.servingGroup[modelServingName][servingGroupName] = group
+	}
 
 	// Check if roleName exists, and initialize it if not
 	if _, ok = group.roles[roleName]; !ok {
