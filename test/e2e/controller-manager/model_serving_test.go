@@ -18,6 +18,8 @@ package controller_manager
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -458,41 +461,43 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	// We'll periodically check the status to ensure that at no point do more than 2 replicas become unavailable
 	t.Log("Monitoring rolling update to ensure maxUnavailable=2 constraint is respected")
 
-	// Create a goroutine to monitor status during the update
-	done := make(chan bool)
+	watchContext := context.Background()
 	maxObservedUnavailable := int32(0)
+	var mu sync.Mutex
+
+	watcherCtx, watcherCancel := context.WithCancel(watchContext)
+	defer watcherCancel()
 
 	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
+		watcher, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Watch(watcherCtx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("metadata.name=%s", updatedMS.Name),
+		})
+		if err != nil {
+			return
+		}
+		defer watcher.Stop()
 
 		for {
 			select {
-			case <-done:
+			case <-watcherCtx.Done():
 				return
-			case <-ticker.C:
-				currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
-				if err != nil {
-					t.Logf("Error getting ModelServing status: %v", err)
-					continue
+			case event, ok := <-watcher.ResultChan():
+				if !ok {
+					return
 				}
 
-				// Calculate unavailable replicas: total replicas - available replicas
-				totalReplicas := currentMS.Status.Replicas
-				availableReplicas := currentMS.Status.AvailableReplicas
-				unavailableReplicas := totalReplicas - availableReplicas
+				if event.Type == watch.Added || event.Type == watch.Modified {
+					if ms, ok := event.Object.(*workload.ModelServing); ok {
+						totalReplicas := ms.Status.Replicas
+						availableReplicas := ms.Status.AvailableReplicas
+						unavailableReplicas := totalReplicas - availableReplicas
 
-				if unavailableReplicas > maxObservedUnavailable {
-					maxObservedUnavailable = unavailableReplicas
-				}
-
-				t.Logf("Status - Total: %d, Available: %d, Unavailable: %d, Updated: %d, Current: %d",
-					totalReplicas, availableReplicas, unavailableReplicas,
-					currentMS.Status.UpdatedReplicas, currentMS.Status.CurrentReplicas)
-
-				// Check if maxUnavailable constraint is violated
-				if unavailableReplicas > 2 {
-					t.Errorf("maxUnavailable constraint violated! Expected <= 2, got %d unavailable replicas", unavailableReplicas)
+						mu.Lock()
+						if unavailableReplicas > maxObservedUnavailable {
+							maxObservedUnavailable = unavailableReplicas
+						}
+						mu.Unlock()
+					}
 				}
 			}
 		}
@@ -500,9 +505,6 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 
 	// Wait for the rolling update to complete
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
-
-	// Stop monitoring
-	done <- true
 
 	// Final verification
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
@@ -515,8 +517,14 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	assert.True(t, maxObservedUnavailable <= 2, "Max unavailable replicas (%d) exceeded maxUnavailable limit (2)", maxObservedUnavailable)
 	t.Logf("Max observed unavailable replicas during update: %d", maxObservedUnavailable)
 
+	watcherCancel()
+	mu.Lock()
+	t.Logf("Maximum observed unavailable replicas during test: %d", maxObservedUnavailable)
+	mu.Unlock()
+
 	t.Log("ModelServing rolling update maxUnavailable test passed successfully")
 }
+
 func createBasicModelServing(name string, servingGroupReplicas, roleReplicas int32) *workload.ModelServing {
 	return &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
