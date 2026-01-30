@@ -769,6 +769,13 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		return
 	}
 
+	// Check if the entire ServingGroup is being deleted - if so, don't recreate pods
+	sgStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName)
+	if sgStatus == datastore.ServingGroupDeleting {
+		klog.V(4).Infof("ServingGroup %s is being deleted, skipping role %s management", groupName, targetRole.Name)
+		return
+	}
+
 	// TODO: need to check the pod spec match the modelserving spec, if not, recreate the pod
 
 	expectedCount := int(*targetRole.Replicas)
