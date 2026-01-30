@@ -3972,7 +3972,7 @@ func TestCalculateRoleScore(t *testing.T) {
 // TestScaleDownRolesRunningStatusDeprioritized tests that roles with RoleRunning status
 // are deprioritized (deleted last) during scale-down operations compared to roles
 // in RoleCreating or RoleNotFound states.
-func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
+func TestScaleDownRoles(t *testing.T) {
 	tests := []struct {
 		name                   string
 		existingIndices        []int
