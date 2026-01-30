@@ -291,12 +291,12 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 			klog.Errorf("handle error pod failed: %v", err)
 		}
 	default:
-		// Add the group and role to the global storage, otherwise after restart,
-		// it may create unexpected group and role because of missing group or role info.
-		c.store.AddServingGroupAndRole(types.NamespacedName{
-			Namespace: ms.Namespace,
-			Name:      ms.Name,
-		}, servingGroupName, utils.PodRevision(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
+		if !c.initialSync {
+			c.store.AddServingGroupAndRole(types.NamespacedName{
+				Namespace: ms.Namespace,
+				Name:      ms.Name,
+			}, servingGroupName, utils.PodRevision(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
+		}
 	}
 }
 
