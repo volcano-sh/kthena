@@ -284,3 +284,58 @@ func TestPDGroupPodRemoval(t *testing.T) {
 		t.Errorf("Expected 0 decode pods after deletion, got %d", len(decodePods))
 	}
 }
+
+// TestGetPrefillPodsForDecodeGroupNilPodInfo verifies that getPrefillPodsForDecodeGroup
+// handles nil PodInfo or nil Pod gracefully without panicking.
+// This can occur when a pod is deleted mid-scheduling cycle.
+func TestGetPrefillPodsForDecodeGroupNilPodInfo(t *testing.T) {
+	tests := []struct {
+		name         string
+		podInfo      *PodInfo
+		expectResult []types.NamespacedName
+	}{
+		{
+			name:         "nil PodInfo",
+			podInfo:      nil,
+			expectResult: nil,
+		},
+		{
+			name:         "PodInfo with nil Pod",
+			podInfo:      &PodInfo{Pod: nil},
+			expectResult: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a modelServer with PDGroup configuration
+			ms := newModelServer(&aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model",
+					Namespace: "default",
+				},
+				Spec: aiv1alpha1.ModelServerSpec{
+					WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+						PDGroup: &aiv1alpha1.PDGroup{
+							GroupKey: "pd-group",
+							DecodeLabels: map[string]string{
+								"role": "decode",
+							},
+							PrefillLabels: map[string]string{
+								"role": "prefill",
+							},
+						},
+					},
+				},
+			})
+
+			// This should not panic
+			result := ms.getPrefillPodsForDecodeGroup(tc.podInfo)
+
+			if len(result) != len(tc.expectResult) {
+				t.Errorf("Expected %d results, got %d", len(tc.expectResult), len(result))
+			}
+		})
+	}
+}
+

@@ -155,6 +155,11 @@ func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.Namespa
 		return nil
 	}
 
+	// Guard against nil Pod - can occur if pod is deleted mid-scheduling cycle
+	if pod == nil || pod.Pod == nil {
+		return nil
+	}
+
 	pdGroup := m.modelServer.Spec.WorkloadSelector.PDGroup
 	pdGroupValue, hasPDGroupKey := pod.Pod.Labels[pdGroup.GroupKey]
 	if !hasPDGroupKey {
