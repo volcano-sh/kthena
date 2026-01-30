@@ -5345,7 +5345,7 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			expectEnqueueCalled:  false,
 			description:          "are deletions succeed, no rollback needed",
 		},
-			{
+		{
 			name:                 "pod_api_error_no_rollback",
 			initialRoleStatus:    datastore.RoleNotFound,
 			podDeletionError:     apierrors.NewInternalError(fmt.Errorf("internal error")),
@@ -5484,9 +5484,9 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 	revision := "hash123"
 
 	tests := []struct {
-		description        string
-		workerReplicas     int32
-		existingPods       []struct {
+		description    string
+		workerReplicas int32
+		existingPods   []struct {
 			name     string
 			isReady  bool
 			isEntry  bool
@@ -5498,9 +5498,14 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 		expectedRoleStatus datastore.RoleStatus
 	}{
 		{
-			description:        "single entry pod becomes ready - role should transition to Running",
-			workerReplicas:     0,
-			existingPods:       []struct{ name string; isReady bool; isEntry bool; workerID int }{},
+			description:    "single entry pod becomes ready - role should transition to Running",
+			workerReplicas: 0,
+			existingPods: []struct {
+				name     string
+				isReady  bool
+				isEntry  bool
+				workerID int
+			}{},
 			newPodIsEntry:      true,
 			newPodWorkerID:     0,
 			initialRoleStatus:  datastore.RoleCreating,
@@ -5509,7 +5514,12 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 		{
 			description:    "entry pod ready but workers not ready - role should stay Creating",
 			workerReplicas: 2,
-			existingPods: []struct{ name string; isReady bool; isEntry bool; workerID int }{
+			existingPods: []struct {
+				name     string
+				isReady  bool
+				isEntry  bool
+				workerID int
+			}{
 				{name: groupName + "-" + roleName + "-1", isReady: false, isEntry: false, workerID: 1},
 				{name: groupName + "-" + roleName + "-2", isReady: false, isEntry: false, workerID: 2},
 			},
@@ -5521,7 +5531,12 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 		{
 			description:    "all pods ready including new worker - role should transition to Running",
 			workerReplicas: 2,
-			existingPods: []struct{ name string; isReady bool; isEntry bool; workerID int }{
+			existingPods: []struct {
+				name     string
+				isReady  bool
+				isEntry  bool
+				workerID int
+			}{
 				{name: groupName + "-" + roleName + "-0", isReady: true, isEntry: true, workerID: 0},
 				{name: groupName + "-" + roleName + "-1", isReady: true, isEntry: false, workerID: 1},
 			},
@@ -5533,7 +5548,12 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 		{
 			description:    "last worker becomes ready - role should transition to Running",
 			workerReplicas: 1,
-			existingPods: []struct{ name string; isReady bool; isEntry bool; workerID int }{
+			existingPods: []struct {
+				name     string
+				isReady  bool
+				isEntry  bool
+				workerID int
+			}{
 				{name: groupName + "-" + roleName + "-0", isReady: true, isEntry: true, workerID: 0},
 			},
 			newPodIsEntry:      false,
@@ -5542,18 +5562,28 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			expectedRoleStatus: datastore.RoleRunning,
 		},
 		{
-			description:        "role already Running - should stay Running",
-			workerReplicas:     0,
-			existingPods:       []struct{ name string; isReady bool; isEntry bool; workerID int }{},
+			description:    "role already Running - should stay Running",
+			workerReplicas: 0,
+			existingPods: []struct {
+				name     string
+				isReady  bool
+				isEntry  bool
+				workerID int
+			}{},
 			newPodIsEntry:      true,
 			newPodWorkerID:     0,
 			initialRoleStatus:  datastore.RoleRunning,
 			expectedRoleStatus: datastore.RoleRunning,
 		},
 		{
-			description:        "role in Deleting state - should not change to Running",
-			workerReplicas:     0,
-			existingPods:       []struct{ name string; isReady bool; isEntry bool; workerID int }{},
+			description:    "role in Deleting state - should not change to Running",
+			workerReplicas: 0,
+			existingPods: []struct {
+				name     string
+				isReady  bool
+				isEntry  bool
+				workerID int
+			}{},
 			newPodIsEntry:      true,
 			newPodWorkerID:     0,
 			initialRoleStatus:  datastore.RoleDeleting,
@@ -5562,7 +5592,12 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 		{
 			description:    "one of multiple workers still not ready - role should stay Creating",
 			workerReplicas: 3,
-			existingPods: []struct{ name string; isReady bool; isEntry bool; workerID int }{
+			existingPods: []struct {
+				name     string
+				isReady  bool
+				isEntry  bool
+				workerID int
+			}{
 				{name: groupName + "-" + roleName + "-0", isReady: true, isEntry: true, workerID: 0},
 				{name: groupName + "-" + roleName + "-1", isReady: true, isEntry: false, workerID: 1},
 				{name: groupName + "-" + roleName + "-3", isReady: false, isEntry: false, workerID: 3}, // not ready
@@ -5633,7 +5668,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				servicesInformer: serviceInformer.Informer(),
 				servicesLister:   serviceInformer.Lister(),
 				store:            store,
-				workqueue:        workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+				workqueue:        workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
 			}
 
 			// Start informers
