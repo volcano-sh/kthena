@@ -338,4 +338,3 @@ func TestGetPrefillPodsForDecodeGroupNilPodInfo(t *testing.T) {
 		})
 	}
 }
-
