@@ -133,3 +133,15 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 func TestModelRouteLora(t *testing.T) {
 	TestModelRouteLoraShared(t, testCtx, testNamespace, false, "")
 }
+
+// TestMetrics tests router metrics collection.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestMetrics(t *testing.T) {
+	TestMetricsShared(t, testCtx, testNamespace, false, kthenaNamespace)
+}
+
+// TestRateLimitMetrics tests rate limiting metrics accuracy.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestRateLimitMetrics(t *testing.T) {
+	TestRateLimitMetricsShared(t, testCtx, testNamespace, false, kthenaNamespace)
+}
