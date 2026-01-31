@@ -981,6 +981,11 @@ func selectFromWeightedSlice(weights []uint32) int {
 		totalWeight += int(weight)
 	}
 
+	// Guard against divide-by-zero when all weights are zero
+	if totalWeight == 0 {
+		return 0
+	}
+
 	randomNum := rng.Intn(totalWeight)
 
 	for i, weight := range weights {
