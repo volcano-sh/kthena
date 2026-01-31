@@ -17,8 +17,6 @@ dependencies:
   - name: workload
     version: "1.0.0"
     condition: workload.enabled
-    repository: "https://ghcr.io/volcano-sh/charts/kthena"
   - name: networking
     version: "1.0.0"
     condition: networking.enabled
-    repository: "https://ghcr.io/volcano-sh/charts/kthena"
