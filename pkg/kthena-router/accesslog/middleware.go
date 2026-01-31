@@ -128,3 +128,13 @@ func MarkResponseProcessingEnd(c *gin.Context) {
 		ctx.MarkResponseProcessingEnd()
 	}
 }
+
+// SetGatewayAPIInfo sets Gateway API information in the access log context
+// gateway, httpRoute, and inferencePool should be in namespace/name format
+func SetGatewayAPIInfo(c *gin.Context, gateway, httpRoute, inferencePool string) {
+	if ctx := GetAccessLogContext(c); ctx != nil {
+		ctx.Gateway = gateway
+		ctx.HTTPRoute = httpRoute
+		ctx.InferencePool = inferencePool
+	}
+}
