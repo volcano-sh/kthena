@@ -72,7 +72,9 @@ type Role struct {
 
 	// WorkerReplicas defines the number for the worker pod of a role.
 	// Required: Need to set the number of worker-pod replicas.
-	WorkerReplicas int32 `json:"workerReplicas"`
+	// +optional
+	// +kubebuilder:default=0
+	WorkerReplicas int32 `json:"workerReplicas,omitempty"`
 
 	// WorkerTemplate defines the template for the worker pod of a role.
 	// +optional
