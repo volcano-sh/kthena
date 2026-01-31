@@ -302,7 +302,7 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 func (c *ModelServerController) enqueueModelServer(obj interface{}) {
 	var key string
 	var err error
-	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+	if key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj); err != nil {
 		utilruntime.HandleError(err)
 		return
 	}
@@ -315,7 +315,7 @@ func (c *ModelServerController) enqueueModelServer(obj interface{}) {
 func (c *ModelServerController) enqueuePod(obj interface{}) {
 	var key string
 	var err error
-	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+	if key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj); err != nil {
 		utilruntime.HandleError(err)
 		return
 	}

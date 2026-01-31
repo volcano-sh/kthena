@@ -151,7 +151,7 @@ func (c *ModelRouteController) syncHandler(key string) error {
 }
 
 func (c *ModelRouteController) enqueueModelRoute(obj interface{}) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(err)
 		return
