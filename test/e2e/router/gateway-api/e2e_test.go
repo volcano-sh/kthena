@@ -287,3 +287,9 @@ func TestDuplicateModelName(t *testing.T) {
 
 	t.Log("Test completed successfully: same modelName routes to different models via different ports")
 }
+
+// TestModelRouteWithGlobalRateLimit tests global rate limiting enforced by the Kthena Router.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestModelRouteWithGlobalRateLimit(t *testing.T) {
+	router.TestModelRouteWithGlobalRateLimitShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
