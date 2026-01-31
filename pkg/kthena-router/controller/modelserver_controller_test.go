@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
@@ -1136,4 +1137,128 @@ func setupMockBackend() *gomonkey.Patches {
 		return []string{"test-model"}, nil
 	})
 	return patch
+}
+
+// TestEnqueueModelServer tests tombstone handling in enqueueModelServer
+func TestEnqueueModelServer(t *testing.T) {
+	tests := []struct {
+		name        string
+		obj         interface{}
+		expectedKey string
+	}{
+		{
+			name: "normal ModelServer object",
+			obj: &aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-server",
+					Namespace: "default",
+				},
+			},
+			expectedKey: "default/test-server",
+		},
+		{
+			name: "tombstone with DeletedFinalStateUnknown",
+			obj: cache.DeletedFinalStateUnknown{
+				Key: "default/deleted-server",
+				Obj: &aiv1alpha1.ModelServer{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "deleted-server",
+						Namespace: "default",
+					},
+				},
+			},
+			expectedKey: "default/deleted-server",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueItem]())
+			defer queue.ShutDown()
+
+			c := &ModelServerController{
+				workqueue: queue,
+				store:     datastore.New(),
+			}
+
+			c.enqueueModelServer(tt.obj)
+
+			if queue.Len() != 1 {
+				t.Fatalf("expected 1 item in queue, got %d", queue.Len())
+			}
+
+			item, shutdown := queue.Get()
+			if shutdown {
+				t.Fatal("unexpected queue shutdown")
+			}
+			if item.Key != tt.expectedKey {
+				t.Errorf("expected key %q, got %q", tt.expectedKey, item.Key)
+			}
+			if item.ResourceType != ResourceTypeModelServer {
+				t.Errorf("expected ResourceType %q, got %q", ResourceTypeModelServer, item.ResourceType)
+			}
+		})
+	}
+}
+
+// TestEnqueuePod tests tombstone handling in enqueuePod
+func TestEnqueuePod(t *testing.T) {
+	tests := []struct {
+		name        string
+		obj         interface{}
+		expectedKey string
+	}{
+		{
+			name: "normal Pod object",
+			obj: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+				},
+			},
+			expectedKey: "default/test-pod",
+		},
+		{
+			name: "tombstone with DeletedFinalStateUnknown",
+			obj: cache.DeletedFinalStateUnknown{
+				Key: "default/deleted-pod",
+				Obj: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "deleted-pod",
+						Namespace: "default",
+					},
+				},
+			},
+			expectedKey: "default/deleted-pod",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueItem]())
+			defer queue.ShutDown()
+
+			c := &ModelServerController{
+				workqueue: queue,
+				store:     datastore.New(),
+			}
+
+			c.enqueuePod(tt.obj)
+
+			if queue.Len() != 1 {
+				t.Fatalf("expected 1 item in queue, got %d", queue.Len())
+			}
+
+			item, shutdown := queue.Get()
+			if shutdown {
+				t.Fatal("unexpected queue shutdown")
+			}
+			if item.Key != tt.expectedKey {
+				t.Errorf("expected key %q, got %q", tt.expectedKey, item.Key)
+			}
+			if item.ResourceType != ResourceTypePod {
+				t.Errorf("expected ResourceType %q, got %q", ResourceTypePod, item.ResourceType)
+			}
+		})
+	}
 }

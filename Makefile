@@ -82,7 +82,7 @@ gen-check: generate
 
 .PHONY: test
 test: generate ## Run tests. Exclude e2e, client-go.
-	go test $$(go list ./... | grep -v /e2e | grep -v /client-go) -coverprofile cover.out
+	go test $$(go list ./... | grep -v /e2e | grep -v /client-go | grep -v '/test$$') -coverprofile cover.out
 
 .PHONY: test-docs
 test-docs: ## Run documentation tests (type check and build)
@@ -98,7 +98,7 @@ test-e2e: ## Run the e2e tests. Expected an isolated environment using Kind.
 	@echo "Setting up Kind cluster for E2E tests..."
 	@./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep /test/e2e | grep -v '^$$') -v -timeout=15m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-cleanup
