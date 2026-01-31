@@ -376,3 +376,341 @@ func TestGetRoleListSortingByIndex(t *testing.T) {
 		assert.Equal(t, expectedNames[i], role.Name, "Roles should be sorted by index, not by name")
 	}
 }
+
+func TestGetServingGroup(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex: sync.RWMutex{},
+		servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+			key: {
+				"group0": &ServingGroup{
+					Name:        "group0",
+					runningPods: map[string]struct{}{"pod1": {}, "pod2": {}},
+					Revision:    "revision1",
+					Status:      ServingGroupRunning,
+					roles: map[string]map[string]*Role{
+						"prefill": {
+							"prefill-0": &Role{Name: "prefill-0", Status: RoleRunning, Revision: "rev1"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// 1. Get existing group
+	group := s.GetServingGroup(key, "group0")
+	assert.NotNil(t, group)
+	assert.Equal(t, "group0", group.Name)
+	assert.Equal(t, "revision1", group.Revision)
+	assert.Equal(t, ServingGroupRunning, group.Status)
+	assert.Len(t, group.runningPods, 2)
+
+	// 2. Get non-existing group
+	group = s.GetServingGroup(key, "nonexistent")
+	assert.Nil(t, group)
+
+	// 3. Get group from non-existing modelServing
+	nonExistKey := types.NamespacedName{Namespace: "ns2", Name: "model2"}
+	group = s.GetServingGroup(nonExistKey, "group0")
+	assert.Nil(t, group)
+}
+
+func TestGetServingGroupReturnsCopy(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex: sync.RWMutex{},
+		servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+			key: {
+				"group0": &ServingGroup{
+					Name:        "group0",
+					runningPods: map[string]struct{}{"pod1": {}},
+					Revision:    "revision1",
+					Status:      ServingGroupCreating,
+					roles: map[string]map[string]*Role{
+						"prefill": {
+							"prefill-0": &Role{Name: "prefill-0", Status: RoleCreating, Revision: "rev1"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Get a copy
+	groupCopy := s.GetServingGroup(key, "group0")
+	assert.NotNil(t, groupCopy)
+	assert.Equal(t, "revision1", groupCopy.Revision)
+	assert.Equal(t, ServingGroupCreating, groupCopy.Status)
+
+	// Modify the internal state via store methods
+	err := s.UpdateServingGroupStatus(key, "group0", ServingGroupRunning)
+	assert.NoError(t, err)
+
+	// Verify the copy is NOT affected by the modification
+	assert.Equal(t, ServingGroupCreating, groupCopy.Status, "Copy should not be affected by internal state changes")
+	assert.Equal(t, "revision1", groupCopy.Revision, "Copy revision should remain unchanged")
+
+	// Verify the internal state WAS modified
+	newCopy := s.GetServingGroup(key, "group0")
+	assert.Equal(t, ServingGroupRunning, newCopy.Status, "New copy should reflect the updated status")
+}
+
+func TestGetServingGroupCopyIsolation(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex: sync.RWMutex{},
+		servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+			key: {
+				"group0": &ServingGroup{
+					Name:        "group0",
+					runningPods: map[string]struct{}{"pod1": {}},
+					Revision:    "revision1",
+					Status:      ServingGroupCreating,
+					roles:       make(map[string]map[string]*Role),
+				},
+			},
+		},
+	}
+
+	// Get first copy
+	copy1 := s.GetServingGroup(key, "group0")
+	assert.NotNil(t, copy1)
+
+	// Modify the copy (this should NOT affect the store or other copies)
+	copy1.Status = ServingGroupDeleting
+	copy1.Revision = "modified-revision"
+	copy1.runningPods["pod2"] = struct{}{}
+
+	// Get second copy
+	copy2 := s.GetServingGroup(key, "group0")
+	assert.NotNil(t, copy2)
+
+	// Verify copy2 has original values, not modified values from copy1
+	assert.Equal(t, ServingGroupCreating, copy2.Status, "Second copy should have original status")
+	assert.Equal(t, "revision1", copy2.Revision, "Second copy should have original revision")
+	assert.Len(t, copy2.runningPods, 1, "Second copy should have original runningPods count")
+
+	// Verify the internal store state is unchanged
+	internalStatus := s.GetServingGroupStatus(key, "group0")
+	assert.Equal(t, ServingGroupCreating, internalStatus, "Internal state should be unchanged")
+}
+
+func TestGetServingGroupConcurrentReadWrite(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := New().(*store)
+	s.AddServingGroup(key, 0, "initial-revision")
+	groupName := utils.GenerateServingGroupName(key.Name, 0)
+
+	// Number of concurrent operations
+	const numReaders = 50
+	const numWriters = 20
+	const iterations = 100
+
+	var wg sync.WaitGroup
+	wg.Add(numReaders + numWriters)
+
+	// Track any panics or errors
+	errChan := make(chan error, numReaders+numWriters)
+
+	// Start readers that continuously read the group
+	for i := 0; i < numReaders; i++ {
+		go func(readerID int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					errChan <- assert.AnError
+				}
+			}()
+
+			for j := 0; j < iterations; j++ {
+				group := s.GetServingGroup(key, groupName)
+				if group != nil {
+					// Read all fields to trigger any potential race
+					_ = group.Name
+					_ = group.Revision
+					_ = group.Status
+					_ = len(group.runningPods)
+				}
+			}
+		}(i)
+	}
+
+	// Start writers that continuously modify the group
+	statuses := []ServingGroupStatus{ServingGroupCreating, ServingGroupRunning, ServingGroupScaling, ServingGroupDeleting}
+	for i := 0; i < numWriters; i++ {
+		go func(writerID int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					errChan <- assert.AnError
+				}
+			}()
+
+			for j := 0; j < iterations; j++ {
+				status := statuses[(writerID+j)%len(statuses)]
+				_ = s.UpdateServingGroupStatus(key, groupName, status)
+
+				// Also add/remove pods to test runningPods map
+				podName := "pod-" + string(rune('a'+writerID))
+				s.AddRunningPodToServingGroup(key, groupName, podName, "rev", "role", "role-0")
+				s.DeleteRunningPodFromServingGroup(key, groupName, podName)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// Check for any errors
+	for err := range errChan {
+		t.Errorf("Concurrent operation failed: %v", err)
+	}
+}
+
+func TestGetServingGroupRoleCopyIsolation(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex: sync.RWMutex{},
+		servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+			key: {
+				"group0": &ServingGroup{
+					Name:        "group0",
+					runningPods: map[string]struct{}{},
+					Revision:    "revision1",
+					Status:      ServingGroupRunning,
+					roles: map[string]map[string]*Role{
+						"prefill": {
+							"prefill-0": &Role{Name: "prefill-0", Status: RoleCreating, Revision: "rev1"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Get a copy
+	groupCopy := s.GetServingGroup(key, "group0")
+	assert.NotNil(t, groupCopy)
+
+	// Verify role is copied
+	assert.NotNil(t, groupCopy.roles)
+	assert.NotNil(t, groupCopy.roles["prefill"])
+	assert.NotNil(t, groupCopy.roles["prefill"]["prefill-0"])
+	assert.Equal(t, RoleCreating, groupCopy.roles["prefill"]["prefill-0"].Status)
+
+	// Update the role status via store
+	err := s.UpdateRoleStatus(key, "group0", "prefill", "prefill-0", RoleRunning)
+	assert.NoError(t, err)
+
+	// Verify the copy's role status is NOT affected
+	assert.Equal(t, RoleCreating, groupCopy.roles["prefill"]["prefill-0"].Status,
+		"Role status in copy should not be affected by internal state changes")
+
+	// Verify internal state WAS updated
+	newStatus := s.GetRoleStatus(key, "group0", "prefill", "prefill-0")
+	assert.Equal(t, RoleRunning, newStatus, "Internal role status should be updated")
+}
+
+func TestServingGroupCopy(t *testing.T) {
+	// Test nil case
+	var nilGroup *ServingGroup
+	assert.Nil(t, nilGroup.Copy())
+
+	// Test normal case
+	original := &ServingGroup{
+		Name:        "test-group",
+		runningPods: map[string]struct{}{"pod1": {}, "pod2": {}},
+		Revision:    "test-revision",
+		Status:      ServingGroupRunning,
+		roles: map[string]map[string]*Role{
+			"prefill": {
+				"prefill-0": &Role{Name: "prefill-0", Status: RoleRunning, Revision: "rev1"},
+				"prefill-1": &Role{Name: "prefill-1", Status: RoleCreating, Revision: "rev2"},
+			},
+			"decode": {
+				"decode-0": &Role{Name: "decode-0", Status: RoleRunning, Revision: "rev1"},
+			},
+		},
+	}
+
+	copy := original.Copy()
+
+	// Verify all fields are copied correctly
+	assert.Equal(t, original.Name, copy.Name)
+	assert.Equal(t, original.Revision, copy.Revision)
+	assert.Equal(t, original.Status, copy.Status)
+	assert.Equal(t, len(original.runningPods), len(copy.runningPods))
+	assert.Equal(t, len(original.roles), len(copy.roles))
+
+	// Verify runningPods are independent
+	copy.runningPods["pod3"] = struct{}{}
+	assert.NotEqual(t, len(original.runningPods), len(copy.runningPods),
+		"Modifying copy's runningPods should not affect original")
+
+	// Verify roles are independent
+	copy.roles["prefill"]["prefill-0"].Status = RoleDeleting
+	assert.Equal(t, RoleRunning, original.roles["prefill"]["prefill-0"].Status,
+		"Modifying copy's role should not affect original")
+
+	// Verify adding new role to copy doesn't affect original
+	copy.roles["newrole"] = map[string]*Role{"new-0": {Name: "new-0"}}
+	assert.Nil(t, original.roles["newrole"], "Adding role to copy should not affect original")
+}
+
+func TestGetServingGroupConcurrentStatusReads(t *testing.T) {
+	// This test specifically targets the data race scenario where
+	// GetServingGroup returns data while UpdateServingGroupStatus modifies it.
+	// Before the fix, this would fail with -race flag.
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := New().(*store)
+	s.AddServingGroup(key, 0, "initial-revision")
+	groupName := utils.GenerateServingGroupName(key.Name, 0)
+
+	const goroutines = 100
+	const iterations = 1000
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	// Half goroutines do reads
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				group := s.GetServingGroup(key, groupName)
+				if group != nil {
+					// Access Status and Revision - the fields that were racing before the fix
+					status := group.Status
+					revision := group.Revision
+					// Use the values to prevent compiler optimization
+					if status == "" || revision == "" {
+						// This branch should never be taken, but prevents optimization
+						t.Log("unexpected empty value")
+					}
+				}
+			}
+		}()
+	}
+
+	// Half goroutines do writes
+	statuses := []ServingGroupStatus{ServingGroupCreating, ServingGroupRunning, ServingGroupScaling}
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				status := statuses[(id+j)%len(statuses)]
+				_ = s.UpdateServingGroupStatus(key, groupName, status)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}

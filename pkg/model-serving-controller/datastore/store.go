@@ -217,7 +217,9 @@ func (s *store) GetRunningPodNumByServingGroup(modelServingName types.Namespaced
 	return len(group.runningPods), nil
 }
 
-// GetServingGroup returns the GetServingGroup
+// GetServingGroup returns a copy of the ServingGroup to prevent data races.
+// The returned copy is safe to read without synchronization, as it is isolated
+// from concurrent modifications to the store's internal state.
 func (s *store) GetServingGroup(modelServingName types.NamespacedName, groupName string) *ServingGroup {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
@@ -226,7 +228,54 @@ func (s *store) GetServingGroup(modelServingName types.NamespacedName, groupName
 		return nil
 	}
 
-	return groups[groupName]
+	group, ok := groups[groupName]
+	if !ok {
+		return nil
+	}
+
+	// Return a copy to prevent data races when the caller reads fields
+	// after the lock is released while other goroutines modify the original.
+	return group.Copy()
+}
+
+// Copy returns a shallow copy of the ServingGroup that is safe to read
+// without holding the store's lock. The copy includes the Name, Revision,
+// and Status fields. The runningPods count is preserved but the map itself
+// is copied to prevent concurrent access issues.
+func (sg *ServingGroup) Copy() *ServingGroup {
+	if sg == nil {
+		return nil
+	}
+
+	// Copy the runningPods map
+	runningPodsCopy := make(map[string]struct{}, len(sg.runningPods))
+	for k, v := range sg.runningPods {
+		runningPodsCopy[k] = v
+	}
+
+	// Copy the roles map (shallow copy of the structure)
+	rolesCopy := make(map[string]map[string]*Role, len(sg.roles))
+	for roleName, roleMap := range sg.roles {
+		roleMapCopy := make(map[string]*Role, len(roleMap))
+		for roleID, role := range roleMap {
+			// Copy the role to prevent races on role status reads
+			roleCopy := &Role{
+				Name:     role.Name,
+				Revision: role.Revision,
+				Status:   role.Status,
+			}
+			roleMapCopy[roleID] = roleCopy
+		}
+		rolesCopy[roleName] = roleMapCopy
+	}
+
+	return &ServingGroup{
+		Name:        sg.Name,
+		runningPods: runningPodsCopy,
+		Revision:    sg.Revision,
+		Status:      sg.Status,
+		roles:       rolesCopy,
+	}
 }
 
 // GetServingGroupStatus returns the status of ServingGroup
