@@ -8,8 +8,8 @@ A Helm chart for deploying Kthena
 
 | Repository | Name | Version |
 |------------|------|---------|
-| https://ghcr.io/volcano-sh/charts/kthena | networking | 1.0.0 |
-| https://ghcr.io/volcano-sh/charts/kthena | workload | 1.0.0 |
+|  | networking | 1.0.0 |
+|  | workload | 1.0.0 |
 
 ## Values
 
