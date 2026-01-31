@@ -127,9 +127,9 @@ spec:
       name: task
       labelSelector:
         modelserving.volcano.sh/name: sample
-        modelserving.volcano.sh/role: prefill
+        modelserving.volcano.sh/role: gang-example
       matchLabelKeys:
-        modelserving.volcano.sh/role-id
+        - modelserving.volcano.sh/role-id
       networkTopology:
         mode: hard 
         highestTierAllowed: 1
@@ -139,10 +139,11 @@ A `subGroupPolicy` has been added to the `podGroup` to ensure task-level gang sc
 
 - `subGroupSize`: The number of pods in a subGroup.
 - `minSubGroups`: The minimum replicas of subGroups.
-- `matchLabelKeys`: The label key used to match pods.
+- `labelSelector`: The label selector that restricts which pods in the PodGroup are eligible to be considered for this `subGroupPolicy`; only pods whose labels match this selector will participate in subgrouping.
+- `matchLabelKeys`: The label keys whose values are used to partition the pods selected by `labelSelector` into subGroups; pods that match the selector and share the same values for all listed keys belong to the same subGroup.
 - `networkTopology`: The network topology of a subGroup.
 
-This YAML specifies that the PodGroup requires six pods to be deployed together, and all six pods must be scheduled on nodes with a maximum network topology distance of 2. Among these, the six pods are divided into two subGroups of three based on the value of the `volcano.sh/task-subgroup-id` label, and each group must be strictly scheduled on nodes with a network topology distance of 1.
+This YAML specifies that the PodGroup requires six pods to be deployed together, and all six pods must be scheduled on nodes with a maximum network topology distance of 2. Among these, the six pods are divided into two subGroups of three based on the value of the `modelserving.volcano.sh/role-id` label, and each group must be strictly scheduled on nodes with a network topology distance of 1.
 
 **Note:** You can refer to [network topology](https://volcano.sh/en/docs/network_topology_aware_scheduling/) know more about network topology details.
 
@@ -174,9 +175,9 @@ spec:
     - name: network-topology
       labelSelector:
         modelserving.volcano.sh/name: sample
-        modelserving.volcano.sh/role: prefill
+        modelserving.volcano.sh/role: gang-example
       matchLabelKeys:
-        modelserving.volcano.sh/role-id
+        - modelserving.volcano.sh/role-id
       networkTopology:
         mode: hard 
         highestTierAllowed: 1
