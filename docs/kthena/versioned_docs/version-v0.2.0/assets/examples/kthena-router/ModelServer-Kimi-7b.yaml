@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: kimi-ai-7b
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: kimi-ai-7b
+  workloadPort:
+    port: 8000
+  model: "moonshotai/Kimi-AI-7B"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s
