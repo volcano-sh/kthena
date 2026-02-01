@@ -452,7 +452,6 @@ func (r *Router) applyURLRewriteFromHTTPRoute(c *gin.Context, hr *gatewayv1.HTTP
 					case gatewayv1.PathMatchRegularExpression:
 						// Regex matching not fully supported in this simplified check
 						// Assuming standard path matching for now
-						// TODO: Implement regex matching if needed
 						pathMatched = true
 					}
 				}
@@ -473,7 +472,6 @@ func (r *Router) applyURLRewriteFromHTTPRoute(c *gin.Context, hr *gatewayv1.HTTP
 						headerMatched = false
 						break
 					}
-					// TODO: Implement regex header matching
 				}
 
 				if pathMatched && headerMatched {
