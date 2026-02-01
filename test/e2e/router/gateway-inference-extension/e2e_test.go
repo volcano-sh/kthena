@@ -97,6 +97,8 @@ func TestGatewayInferenceExtension(t *testing.T) {
 	t.Log("Deploying InferencePool...")
 	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool]("examples/kthena-router/InferencePool.yaml")
 	inferencePool.Namespace = testNamespace
+	// Use a unique name to avoid conflict with the existing ModelServer
+	inferencePool.Name = "deepseek-r1-1-5b-gie"
 
 	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create InferencePool")
@@ -111,6 +113,12 @@ func TestGatewayInferenceExtension(t *testing.T) {
 	t.Log("Deploying HTTPRoute...")
 	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
 	httpRoute.Namespace = testNamespace
+
+	// Update backendRefs to point to the new InferencePool name
+	if len(httpRoute.Spec.Rules) > 0 && len(httpRoute.Spec.Rules[0].BackendRefs) > 0 {
+		backendRefName := gatewayv1.ObjectName("deepseek-r1-1-5b-gie")
+		httpRoute.Spec.Rules[0].BackendRefs[0].Name = backendRefName
+	}
 
 	// Update parentRefs to point to the kthena installation namespace
 	ktNamespace := gatewayv1.Namespace(kthenaNamespace)
