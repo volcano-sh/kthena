@@ -185,9 +185,12 @@ func (c *InferencePoolController) syncHandler(key string) error {
 	}
 
 	// Find matching pods and bind them in the store
-	selector, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
 		MatchLabels: syntheticMS.Spec.WorkloadSelector.MatchLabels,
 	})
+	if err != nil {
+		return fmt.Errorf("failed to create selector from synthetic ModelServer: %w", err)
+	}
 
 	matchingPods := sets.New[types.NamespacedName]()
 	allPods := c.store.GetAllPods()
@@ -195,7 +198,9 @@ func (c *InferencePoolController) syncHandler(key string) error {
 		if podNamespacedName.Namespace == syntheticMS.Namespace && selector.Matches(labels.Set(podInfo.Pod.Labels)) {
 			matchingPods.Insert(podNamespacedName)
 			// Ensure the pod knows it belongs to this synthetic ModelServer
-			_ = c.store.AppendModelServerToPod(podInfo.Pod, []*aiv1alpha1.ModelServer{syntheticMS})
+			if err := c.store.AppendModelServerToPod(podInfo.Pod, []*aiv1alpha1.ModelServer{syntheticMS}); err != nil {
+				klog.Errorf("failed to append model server %s to pod %s: %v", syntheticMS.Name, podNamespacedName, err)
+			}
 		}
 	}
 

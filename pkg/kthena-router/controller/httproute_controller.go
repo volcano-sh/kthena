@@ -185,16 +185,44 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	}
 
 	for _, hrRule := range httpRoute.Spec.Rules {
-		rule := &aiv1alpha1.Rule{
-			TargetModels: make([]*aiv1alpha1.TargetModel, 0, len(hrRule.BackendRefs)),
+		targetModels := make([]*aiv1alpha1.TargetModel, 0, len(hrRule.BackendRefs))
+		// Map BackendRefs to TargetModels
+		for _, backendRef := range hrRule.BackendRefs {
+			if backendRef.Kind != nil && *backendRef.Kind == "InferencePool" {
+				weight := uint32(100)
+				if backendRef.Weight != nil {
+					weight = uint32(*backendRef.Weight)
+				}
+				targetModels = append(targetModels, &aiv1alpha1.TargetModel{
+					ModelServerName: string(backendRef.Name),
+					Weight:          &weight,
+				})
+			}
+		}
+
+		if len(targetModels) == 0 {
+			continue
 		}
 
 		// Map Matches to ModelMatch
-		if len(hrRule.Matches) > 0 {
-			match := hrRule.Matches[0]
-			rule.ModelMatch = &aiv1alpha1.ModelMatch{
-				Headers: make(map[string]*aiv1alpha1.StringMatch),
+		// If no matches are specified, it matches everything (empty ModelMatch)
+		if len(hrRule.Matches) == 0 {
+			rule := &aiv1alpha1.Rule{
+				TargetModels: targetModels,
 			}
+			translatedMR.Spec.Rules = append(translatedMR.Spec.Rules, rule)
+			continue
+		}
+
+		// Create a separate rule for each match
+		for _, match := range hrRule.Matches {
+			rule := &aiv1alpha1.Rule{
+				TargetModels: targetModels,
+				ModelMatch: &aiv1alpha1.ModelMatch{
+					Headers: make(map[string]*aiv1alpha1.StringMatch),
+				},
+			}
+
 			if match.Path != nil && match.Path.Value != nil {
 				rule.ModelMatch.Uri = &aiv1alpha1.StringMatch{}
 				val := *match.Path.Value
@@ -219,23 +247,6 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 				}
 				rule.ModelMatch.Headers[string(header.Name)] = sm
 			}
-		}
-
-		// Map BackendRefs to TargetModels
-		for _, backendRef := range hrRule.BackendRefs {
-			if backendRef.Kind != nil && *backendRef.Kind == "InferencePool" {
-				weight := uint32(100)
-				if backendRef.Weight != nil {
-					weight = uint32(*backendRef.Weight)
-				}
-				rule.TargetModels = append(rule.TargetModels, &aiv1alpha1.TargetModel{
-					ModelServerName: string(backendRef.Name),
-					Weight:          &weight,
-				})
-			}
-		}
-
-		if len(rule.TargetModels) > 0 {
 			translatedMR.Spec.Rules = append(translatedMR.Spec.Rules, rule)
 		}
 	}

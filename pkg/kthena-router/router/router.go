@@ -418,25 +418,81 @@ func (r *Router) getPodsAndServer(modelServerName types.NamespacedName) ([]*data
 
 // applyURLRewriteFromHTTPRoute applies HTTPURLRewriteFilter from an HTTPRoute to the request
 func (r *Router) applyURLRewriteFromHTTPRoute(c *gin.Context, hr *gatewayv1.HTTPRoute) {
-	for _, rule := range hr.Spec.Rules {
-		// Simple heuristic: apply rewrites from the first rule that has them
-		// Ideally we should match the rule that was used for translation,
-		// but since we only care about filters here, we just look for any rewrite filter.
-		matchedPrefix := ""
-		for _, match := range rule.Matches {
-			if match.Path != nil && match.Path.Type != nil && *match.Path.Type == gatewayv1.PathMatchPathPrefix {
-				if strings.HasPrefix(c.Request.URL.Path, *match.Path.Value) {
-					matchedPrefix = *match.Path.Value
+	var matchedRule *gatewayv1.HTTPRouteRule
+	var matchedPrefix string
+
+	// Iterate over rules to find the first one that matches
+	// This should mirror the matching logic in the translator/controller
+	for i := range hr.Spec.Rules {
+		rule := &hr.Spec.Rules[i]
+		matched := false
+		// If no matches are specified, it matches everything
+		if len(rule.Matches) == 0 {
+			matched = true
+		} else {
+			for _, match := range rule.Matches {
+				// Check path match
+				pathMatched := true
+				if match.Path != nil && match.Path.Value != nil {
+					pathMatched = false
+					pathType := gatewayv1.PathMatchPathPrefix
+					if match.Path.Type != nil {
+						pathType = *match.Path.Type
+					}
+					switch pathType {
+					case gatewayv1.PathMatchExact:
+						if c.Request.URL.Path == *match.Path.Value {
+							pathMatched = true
+						}
+					case gatewayv1.PathMatchPathPrefix:
+						if strings.HasPrefix(c.Request.URL.Path, *match.Path.Value) {
+							pathMatched = true
+							matchedPrefix = *match.Path.Value
+						}
+					case gatewayv1.PathMatchRegularExpression:
+						// Regex matching not fully supported in this simplified check
+						// Assuming standard path matching for now
+						// TODO: Implement regex matching if needed
+						pathMatched = true
+					}
+				}
+
+				// Check header match
+				headerMatched := true
+				for _, header := range match.Headers {
+					val := c.Request.Header.Get(string(header.Name))
+					if val == "" {
+						headerMatched = false
+						break
+					}
+					headerType := gatewayv1.HeaderMatchExact
+					if header.Type != nil {
+						headerType = *header.Type
+					}
+					if headerType == gatewayv1.HeaderMatchExact && val != string(header.Value) {
+						headerMatched = false
+						break
+					}
+					// TODO: Implement regex header matching
+				}
+
+				if pathMatched && headerMatched {
+					matched = true
 					break
 				}
 			}
 		}
 
-		if rule.Filters != nil {
-			for _, filter := range rule.Filters {
-				if filter.Type == gatewayv1.HTTPRouteFilterURLRewrite && filter.URLRewrite != nil {
-					r.applyURLRewrite(c, filter.URLRewrite, matchedPrefix)
-				}
+		if matched {
+			matchedRule = rule
+			break
+		}
+	}
+
+	if matchedRule != nil && matchedRule.Filters != nil {
+		for _, filter := range matchedRule.Filters {
+			if filter.Type == gatewayv1.HTTPRouteFilterURLRewrite && filter.URLRewrite != nil {
+				r.applyURLRewrite(c, filter.URLRewrite, matchedPrefix)
 			}
 		}
 	}
