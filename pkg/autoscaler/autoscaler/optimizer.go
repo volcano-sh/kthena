@@ -33,6 +33,15 @@ type Optimizer struct {
 	Generations
 }
 
+// OptimizeResult holds the optimization computation results.
+// History should only be committed after successful API update.
+type OptimizeResult struct {
+	RecommendedInstances int32
+	CorrectedInstances   int32
+	ReplicasMap          map[string]int32
+	Skip                 bool
+}
+
 type OptimizerMeta struct {
 	Config        *workload.HeterogeneousTarget
 	MetricTargets map[string]float64
@@ -148,7 +157,10 @@ func (optimizer *Optimizer) NeedUpdate(policy *workload.AutoscalingPolicy, bindi
 		optimizer.Generations.BindingGeneration != binding.Generation
 }
 
-func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCounts map[string]int32) (map[string]int32, error) {
+// Optimize computes the recommended replica distribution without updating history.
+// The caller MUST call CommitOptimizeResult after successful API updates to record the scaling event.
+// This prevents phantom scale events from being recorded when API updates fail.
+func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCounts map[string]int32) (*OptimizeResult, error) {
 	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
@@ -184,9 +196,10 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {
 		klog.Warning("skip recommended instances")
-		return nil, nil
+		return &OptimizeResult{Skip: true}, nil
 	}
-	if recommendedInstances*100 >= instancesCountSum*(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
+	if autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil &&
+		recommendedInstances*100 >= instancesCountSum*(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
 		optimizer.Status.RefreshPanicMode()
 	}
 	CorrectedInstancesAlgorithm := algorithm.CorrectedInstancesAlgorithm{
@@ -197,12 +210,25 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		MaxInstances:         optimizer.Meta.MaxReplicas,
 		CurrentInstances:     instancesCountSum,
 		RecommendedInstances: recommendedInstances}
-	recommendedInstances = CorrectedInstancesAlgorithm.GetCorrectedInstances()
+	correctedInstances := CorrectedInstancesAlgorithm.GetCorrectedInstances()
 
-	klog.InfoS("autoscale controller", "recommendedInstances", recommendedInstances, "correctedInstances", recommendedInstances)
-	optimizer.Status.AppendRecommendation(recommendedInstances)
-	optimizer.Status.AppendCorrected(recommendedInstances)
+	klog.InfoS("autoscale controller", "recommendedInstances", recommendedInstances, "correctedInstances", correctedInstances)
 
-	replicasMap := optimizer.Meta.RestoreReplicasOfEachBackend(recommendedInstances)
-	return replicasMap, nil
+	replicasMap := optimizer.Meta.RestoreReplicasOfEachBackend(correctedInstances)
+	return &OptimizeResult{
+		RecommendedInstances: recommendedInstances,
+		CorrectedInstances:   correctedInstances,
+		ReplicasMap:          replicasMap,
+		Skip:                 false,
+	}, nil
+}
+
+// CommitOptimizeResult records the optimization event in history.
+// This MUST only be called after all API updates succeed to prevent phantom scale events.
+func (optimizer *Optimizer) CommitOptimizeResult(result *OptimizeResult) {
+	if result == nil || result.Skip {
+		return
+	}
+	optimizer.Status.AppendRecommendation(result.RecommendedInstances)
+	optimizer.Status.AppendCorrected(result.CorrectedInstances)
 }
