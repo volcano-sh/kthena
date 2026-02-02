@@ -307,6 +307,13 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 
 	switch {
 	case utils.IsPodRunningAndReady(newPod):
+		// Before processing the running pod, ensure the ServingGroup and Role exist in the store during initial sync
+		if !c.initialSync {
+			c.store.AddServingGroupAndRole(types.NamespacedName{
+				Namespace: ms.Namespace,
+				Name:      ms.Name,
+			}, servingGroupName, utils.ObjectRevision(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
+		}
 		// The pod is available, that is, the state is running, and the container is ready
 		err = c.handleReadyPod(ms, servingGroupName, newPod)
 		if err != nil {
@@ -1221,13 +1228,16 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 
 func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.ModelServing, servingGroupName string) (bool, error) {
 	// TODO: modify ServingGroupReady logic after rolling update functionality is implemented
-	runningPodsNum, err := c.store.GetRunningPodNumByServingGroup(utils.GetNamespaceName(ms), servingGroupName)
-	if err != nil {
-		return false, err
-	}
-	if runningPodsNum != utils.ExpectedPodNum(ms) {
-		// the number of running pods does not reach the expected number
-		return false, nil
+	for _, role := range ms.Spec.Template.Roles {
+		roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), servingGroupName, role.Name)
+		if err != nil {
+			return false, err
+		}
+		for _, r := range roleList {
+			if r.Status != datastore.RoleRunning {
+				return false, nil
+			}
+		}
 	}
 	return true, nil
 }
@@ -1552,6 +1562,9 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 				}
 				available = available + 1
 				klog.V(2).Infof("Update servingGroup %s status to Running", groups[index].Name)
+				// After Updating ServingGroup Status may targe rolling Update with maxUnaavailable,
+				// so need to enqueue ModelServing to re-check rolling update status.
+				c.enqueueModelServing(latestMS)
 			} else {
 				progressingGroups = append(progressingGroups, index)
 			}
