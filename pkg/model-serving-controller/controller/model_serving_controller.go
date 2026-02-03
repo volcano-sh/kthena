@@ -307,13 +307,6 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 
 	switch {
 	case utils.IsPodRunningAndReady(newPod):
-		// Before processing the running pod, ensure the ServingGroup and Role exist in the store during initial sync
-		if !c.initialSync {
-			c.store.AddServingGroupAndRole(types.NamespacedName{
-				Namespace: ms.Namespace,
-				Name:      ms.Name,
-			}, servingGroupName, utils.ObjectRevision(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
-		}
 		// The pod is available, that is, the state is running, and the container is ready
 		err = c.handleReadyPod(ms, servingGroupName, newPod)
 		if err != nil {
@@ -979,6 +972,16 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		// role has been deleted, so the storage needs to be updated and need to reconcile.
 		klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, groupName)
 		c.store.DeleteRole(utils.GetNamespaceName(ms), groupName, roleName, roleID)
+		groupReady, err := c.checkServingGroupReady(ms, groupName)
+		if err != nil {
+			klog.Errorf("failed to check servingGroup %s ready status: %v", groupName, err)
+		}
+		if groupReady {
+			err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupRunning)
+			if err != nil {
+				klog.Errorf("failed to set ServingGroup %s/%s status: %v", ms.Namespace+"/"+ms.Name, groupName, err)
+			}
+		}
 		c.enqueueModelServing(ms)
 	}
 }
@@ -1233,6 +1236,9 @@ func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.Mod
 		if err != nil {
 			return false, err
 		}
+		if len(roleList) != int(*role.Replicas) {
+			return false, nil
+		}
 		for _, r := range roleList {
 			if r.Status != datastore.RoleRunning {
 				return false, nil
@@ -1249,7 +1255,6 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 	if err != nil {
 		return false, fmt.Errorf("failed to get pods for role %s/%s: %v", roleName, roleID, err)
 	}
-
 	// Find the role specification to get expected pod count
 	var targetRole *workloadv1alpha1.Role
 	for i := range ms.Spec.Template.Roles {
@@ -1374,6 +1379,16 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 				// role has been deleted, so the storage needs to be updated and need to reconcile.
 				klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, servingGroupName)
 				c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
+				groupReady, err := c.checkServingGroupReady(ms, servingGroupName)
+				if err != nil {
+					klog.Errorf("failed to check servingGroup %s ready status: %v", servingGroupName, err)
+				}
+				if groupReady {
+					err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupRunning)
+					if err != nil {
+						klog.Errorf("failed to set ServingGroup %s/%s status: %v", ms.Namespace+"/"+ms.Name, servingGroupName, err)
+					}
+				}
 				c.enqueueModelServing(ms)
 			}
 			return true
@@ -1562,9 +1577,6 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 				}
 				available = available + 1
 				klog.V(2).Infof("Update servingGroup %s status to Running", groups[index].Name)
-				// After Updating ServingGroup Status may targe rolling Update with maxUnaavailable,
-				// so need to enqueue ModelServing to re-check rolling update status.
-				c.enqueueModelServing(latestMS)
 			} else {
 				progressingGroups = append(progressingGroups, index)
 			}
