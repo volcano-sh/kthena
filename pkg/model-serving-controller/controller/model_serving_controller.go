@@ -987,64 +987,99 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
 
-	// Count how many groups are currently not running(Unavailable)
-	// When len(servingGroupList) is less than Spec.replicas, it is foreseeable that this many servingGroups should be created.
-	currentUnavailableCount := max(int(*ms.Spec.Replicas)-len(servingGroupList), 0)
+	// Separate outdated groups into two categories: not-running and running
+	// We prioritize updating not-running outdated groups first
+	var notRunningOutdatedGroups []datastore.ServingGroup
+	var runningOutdatedGroups []datastore.ServingGroup
+
+	newServingGroupUnavailableCount := 0
 	for _, sg := range servingGroupList {
 		if sg.Status != datastore.ServingGroupRunning {
-			currentUnavailableCount += 1
+			if sg.Revision == revision {
+				newServingGroupUnavailableCount++
+			} else {
+				notRunningOutdatedGroups = append(notRunningOutdatedGroups, sg)
+			}
+		} else if sg.Revision != revision {
+			runningOutdatedGroups = append(runningOutdatedGroups, sg)
 		}
 	}
-	// Check if kthena have reached the maxUnavailable limit
-	if currentUnavailableCount >= maxUnavailable {
-		// Wait until some groups become available before continuing updates
-		klog.V(4).Infof("current unavailable ServingGroup count %d has reached the maxUnavailable limit %d, waiting for next reconcile", currentUnavailableCount, maxUnavailable)
+
+	// Calculate the minimum number of available ServingGroups required
+	// Refer to https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/rolling.go
+	// Check if we can scale down. We can scale down in the following 2 cases:
+	// * Some old servingGroups are unhealthy, we could safely scale down those unhealthy servingGroups
+	//   since that won't further increase unavailability.
+	// * New servingGroup has scaled up and its replicas become ready, then we can scale down old servingGroups
+	//   in a further step.
+	minAvailable := int(*ms.Spec.Replicas) - maxUnavailable
+	maxScaleDown := len(servingGroupList) - minAvailable - newServingGroupUnavailableCount
+	if maxScaleDown <= 0 {
+		klog.V(4).Infof("No ServingGroups can be updated for ModelServing %s/%s: maxScaleDown=%d",
+			ms.Namespace, ms.Name, maxScaleDown)
 		return nil
 	}
 
-	// Calculate how many more groups we can delete in this reconcile.
-	groupToDelete := maxUnavailable - currentUnavailableCount
-
-	// Determine if partition is set
 	partition := c.getPartition(ms)
 
-	// we terminate the ServingGroup with the largest ordinal that does not match the update revision.
-	// Update outdated groups respecting the maxUnavailable constraint
-	updateCount := 0
-	if partition > 0 {
-		// When partition is set, delete ServingGroups with ordinal >= partition
-		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
-			_, ordinal := utils.GetParentNameAndOrdinal(servingGroupList[i].Name)
-			if ordinal < partition {
-				// Skip partition-protected ServingGroups
-				break
-			}
+	// Delete outdated groups respecting the maxUnavailable constraint
+	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, partition, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups)
+	if err != nil {
+		return err
+	}
 
-			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
-				// target ServingGroup is not the latest version, needs to be updated
-				klog.V(2).Infof("ServingGroup %s will be terminated for update (partition=%d)", servingGroupList[i].Name, partition)
-				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
-					return err
-				}
-				updateCount += 1
-			}
-		}
-		klog.V(2).Infof("all target groups of modelServing %s have been updated (partition=%d)", ms.Name, partition)
-	} else {
-		// Original behavior: terminate the ServingGroup with the largest ordinal that does not match the update revision
-		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
-			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
-				// target ServingGroup is not the latest version, needs to be updated
-				klog.V(2).Infof("ServingGroup %s will be terminated for update", servingGroupList[i].Name)
-				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
-					return err
-				}
-				updateCount += 1
-			}
-		}
-		klog.V(2).Infof("all target groups of modelServing %s have been updated", ms.Name)
+	if updateCount > 0 {
+		klog.V(4).Infof("Deleted %d outdated ServingGroups for ModelServing %s (partition=%d)", updateCount, ms.Name, partition)
 	}
 	return nil
+}
+
+// deleteOutdatedServingGroups deletes outdated ServingGroups respecting partition and maxScaleDown constraints
+// It prioritizes deleting not-running outdated groups first, then running outdated groups
+func (c *ModelServingController) deleteOutdatedServingGroups(
+	ctx context.Context,
+	ms *workloadv1alpha1.ModelServing,
+	partition int,
+	maxScaleDown int,
+	notRunningOutdatedGroups []datastore.ServingGroup,
+	runningOutdatedGroups []datastore.ServingGroup,
+) (int, error) {
+	updateCount := 0
+
+	deleteGroups := func(groups []datastore.ServingGroup) error {
+		// Iterate from end to start to delete largest ordinals first
+		for i := len(groups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
+			sg := groups[i]
+
+			// Check partition constraint
+			if partition > 0 {
+				_, ordinal := utils.GetParentNameAndOrdinal(sg.Name)
+				if ordinal < partition {
+					// Skip partition-protected ServingGroups
+					break
+				}
+			}
+
+			klog.V(2).Infof("ServingGroup %s will be terminated for update (status=%s, partition=%d)", sg.Name, sg.Status, partition)
+			if err := c.deleteServingGroup(ctx, ms, sg.Name); err != nil {
+				return err
+			}
+			updateCount++
+		}
+		return nil
+	}
+
+	// First, process not-running outdated groups (higher priority)
+	if err := deleteGroups(notRunningOutdatedGroups); err != nil {
+		return updateCount, err
+	}
+
+	// Then, process running outdated groups (lower priority)
+	if err := deleteGroups(runningOutdatedGroups); err != nil {
+		return updateCount, err
+	}
+
+	return updateCount, nil
 }
 
 func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, newPod *corev1.Pod) error {
