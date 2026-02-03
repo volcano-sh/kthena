@@ -112,6 +112,7 @@ func TestGatewayAndHTTPRouteStatus(t *testing.T) {
 		}
 
 		for _, parent := range hr.Status.Parents {
+			t.Logf("Observed parent ControllerName: %v", parent.ControllerName)
 			if parent.ControllerName != gatewayv1.GatewayController(routercontext.ControllerName) {
 				continue
 			}

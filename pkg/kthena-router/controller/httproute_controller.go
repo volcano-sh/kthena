@@ -151,7 +151,7 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	// Check if any parentRef references a Gateway with kthena-router GatewayClass
 	shouldProcess := false
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
-		if parentRef.Kind != nil && *parentRef.Kind == "Gateway" {
+		if parentRef.Kind == nil || *parentRef.Kind == "Gateway" {
 			gatewayNamespace := httpRoute.Namespace
 			if parentRef.Namespace != nil {
 				gatewayNamespace = string(*parentRef.Namespace)
