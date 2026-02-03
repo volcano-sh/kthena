@@ -74,6 +74,10 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 	assert.NotNil(t, createdModelRoute)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
 
+	// Wait for ModelRoute to be ready
+	err = utils.WaitForModelRouteReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelRoute.Name)
+	require.NoError(t, err, "ModelRoute did not become ready in time")
+
 	// Register cleanup function to delete ModelRoute after test completes
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
@@ -106,6 +110,10 @@ func TestModelRouteMultiModelsShared(t *testing.T, testCtx *routercontext.Router
 	require.NoError(t, err, "Failed to create ModelRoute")
 	assert.NotNil(t, createdModelRoute)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	// Wait for ModelRoute to be ready
+	err = utils.WaitForModelRouteReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelRoute.Name)
+	require.NoError(t, err, "ModelRoute did not become ready in time")
 
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
@@ -195,6 +203,10 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 	assert.NotNil(t, createdModelServer)
 	t.Logf("Created ModelServer: %s/%s", createdModelServer.Namespace, createdModelServer.Name)
 
+	// Wait for ModelServer to be ready
+	err = utils.WaitForModelServerReady(t, ctx, testCtx.KubeClient, testCtx.KthenaClient, testNamespace, createdModelServer.Name)
+	require.NoError(t, err, "ModelServer did not become ready in time")
+
 	// Register cleanup function to delete ModelServer after test completes
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
@@ -216,6 +228,10 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 	require.NoError(t, err, "Failed to create ModelRoute")
 	assert.NotNil(t, createdModelRoute)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	// Wait for ModelRoute to be ready
+	err = utils.WaitForModelRouteReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelRoute.Name)
+	require.NoError(t, err, "ModelRoute did not become ready in time")
 
 	// Register cleanup function to delete ModelRoute after test completes
 	t.Cleanup(func() {
@@ -284,6 +300,12 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServerV2, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create Canary ModelServer v2")
 
+	// Wait for ModelServers to be ready
+	err = utils.WaitForModelServerReady(t, ctx, testCtx.KubeClient, testCtx.KthenaClient, testNamespace, "deepseek-r1-1-5b-v1")
+	require.NoError(t, err, "ModelServer v1 did not become ready in time")
+	err = utils.WaitForModelServerReady(t, ctx, testCtx.KubeClient, testCtx.KthenaClient, testNamespace, "deepseek-r1-1-5b-v2")
+	require.NoError(t, err, "ModelServer v2 did not become ready in time")
+
 	// Cleanup Canary resources
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
@@ -305,6 +327,10 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	require.NoError(t, err, "Failed to create ModelRoute")
 	assert.NotNil(t, createdModelRoute)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	// Wait for ModelRoute to be ready
+	err = utils.WaitForModelRouteReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelRoute.Name)
+	require.NoError(t, err, "ModelRoute did not become ready in time")
 
 	// Register cleanup function to delete ModelRoute after test completes
 	t.Cleanup(func() {
