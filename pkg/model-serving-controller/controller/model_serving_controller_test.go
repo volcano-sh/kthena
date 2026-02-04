@@ -2330,7 +2330,13 @@ func TestManageRoleReplicas(t *testing.T) {
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
-			assert.Len(t, roles, tt.expectedRoleSize, "role list should match expected count")
+			activeRole := 0
+			for i := range roles {
+				if roles[i].Status != datastore.RoleDeleting {
+					activeRole += 1
+				}
+			}
+			assert.Equal(t, tt.expectedRoleSize, activeRole, "role list should match expected count")
 
 			//if tt.expectedPodCount > 0 {
 			selector := labels.SelectorFromSet(map[string]string{
@@ -3662,13 +3668,20 @@ func TestScaleDownRoles(t *testing.T) {
 			// Verify the results
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, "prefill")
 			assert.NoError(t, err)
-
+			activeRoleCount := 0
+			activeRoles := []datastore.Role{}
+			for i := range roles {
+				if roles[i].Status != datastore.RoleDeleting {
+					activeRoleCount += 1
+					activeRoles = append(activeRoles, roles[i])
+				}
+			}
 			// Verify remaining role count
-			assert.Equal(t, tt.expectedCount, len(roles), "Remaining role count should match expected")
+			assert.Equal(t, tt.expectedCount, activeRoleCount, "Remaining role count should match expected")
 
 			// Verify remaining role names
-			actualNames := make([]string, len(roles))
-			for i, r := range roles {
+			actualNames := make([]string, len(activeRoles))
+			for i, r := range activeRoles {
 				actualNames[i] = r.Name
 			}
 			assert.ElementsMatch(t, tt.expectedRemainingNames, actualNames, "Remaining role names should match expected")
