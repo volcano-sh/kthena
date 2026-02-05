@@ -987,13 +987,15 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
 
+	partition := c.getPartition(ms)
 	// Separate outdated groups into two categories: not-running and running
 	// We prioritize updating not-running outdated groups first
 	var notRunningOutdatedGroups []datastore.ServingGroup
 	var runningOutdatedGroups []datastore.ServingGroup
+	groupsAfterPartition := servingGroupList[partition:]
 
 	newServingGroupUnavailableCount := 0
-	for _, sg := range servingGroupList {
+	for _, sg := range groupsAfterPartition {
 		if sg.Status != datastore.ServingGroupRunning {
 			if sg.Revision == revision {
 				newServingGroupUnavailableCount++
@@ -1019,8 +1021,6 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 			ms.Namespace, ms.Name, maxScaleDown)
 		return nil
 	}
-
-	partition := c.getPartition(ms)
 
 	// Delete outdated groups respecting the maxUnavailable constraint
 	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, partition, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups)
