@@ -370,7 +370,7 @@ func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing, podGr
 		// Under the binpack scaling strategy, it is unknown which role replicas will be deleted.
 		// However, if the PodGroup was deleted externally, we should still calculate requirements
 		// to recreate it with correct settings.
-		if len(roleList) > expectReplicas && podGroupExists {
+		if !m.hasSubGroupPolicy.Load() && len(roleList) > expectReplicas && podGroupExists {
 			// Only skip during active scaling if PodGroup exists.
 			// If PodGroup was deleted externally, we should proceed to recalculate and recreate it.
 			klog.V(4).Infof("Skipping PodGroup update for %s during scaling operation, roleList length: %d, expectReplicas: %d",
@@ -468,7 +468,6 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 
 		// Calculate current requirements
 		minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(ms, currentPodGroup.GetName())
-
 		updated := currentPodGroup.DeepCopy()
 		updated.Spec.MinMember = int32(minMember)
 		updated.Spec.MinResources = &minResources
