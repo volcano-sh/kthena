@@ -567,7 +567,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	time.Sleep(randomWait)
 
 	// Find and delete controller-manager pods
-	controllerNamespace := "dev" // kthena default installation namespace
+	controllerNamespace := kthenaNamespace
 	t.Logf("Finding controller-manager pods in namespace %s", controllerNamespace)
 
 	// Use label selector to find controller-manager pods
@@ -634,7 +634,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 			runningPods++
 		}
 	}
-	t.Logf("Running pods: %d out of %d", runningPods, actualPodCount)
+	assert.Equal(t, actualPodCount, runningPods, "All created pods should be in Running phase")
 
 	t.Log("ModelServing controller-manager restart test passed successfully")
 }

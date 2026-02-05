@@ -34,13 +34,15 @@ import (
 )
 
 var (
-	testNamespace string
+	testNamespace   string
+	kthenaNamespace string
 )
 
 func TestMain(m *testing.M) {
 	testNamespace = "kthena-e2e-controller-" + utils.RandomString(5)
 
 	config := framework.NewDefaultConfig()
+	kthenaNamespace = config.Namespace
 	// Controller manager tests need workload enabled
 	config.WorkloadEnabled = true
 
