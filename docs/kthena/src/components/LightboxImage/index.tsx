@@ -83,9 +83,14 @@ const LightboxImage: React.FC<LightboxImageProps> = ({
           }}
           carousel={{
             padding: '0px',
+            finite: true,
           }}
           controller={{
             closeOnBackdropClick: true,
+          }}
+          render={{
+            buttonPrev: () => null,
+            buttonNext: () => null,
           }}
         />
       )}
