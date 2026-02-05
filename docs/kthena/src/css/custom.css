@@ -115,6 +115,6 @@ code:not([class*="language-"]) {
 /* Horizontal scroll for wide tables */
 .table-wrapper {
     overflow-x: auto;
-    margin: 1rem 0;
+    margin: var(--ifm-spacing-vertical) 0;
     -webkit-overflow-scrolling: touch;
 }
