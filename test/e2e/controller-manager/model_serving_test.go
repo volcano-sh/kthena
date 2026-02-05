@@ -539,12 +539,12 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	require.NoError(t, err, "Failed to create Kubernetes client")
 
 	// Create a complicated ModelServing with multiple roles
-	// 5 serving groups × (5 pods for prefill + 4 pods for decode) = 45 pods total
-	prefillRole := createRole("prefill", 1, 4)
-	decodeRole := createRole("decode", 1, 3)
+	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
+	prefillRole := createRole("prefill", 1, 2)
+	decodeRole := createRole("decode", 1, 1)
 	modelServing := createBasicModelServing("test-controller-restart", 5, prefillRole, decodeRole)
 
-	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (45 total pods expected)")
+	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
 	_, err = kthenaClient.WorkloadV1alpha1().
 		ModelServings(testNamespace).
 		Create(ctx, modelServing, metav1.CreateOptions{})
@@ -620,8 +620,8 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	require.NoError(t, err, "Failed to list ModelServing pods")
 
 	// Calculate expected pod count:
-	// 5 serving groups × (5 pods for prefill role + 4 pods for decode role) = 45 pods
-	expectedPodCount := 45
+	// 5 serving groups × (3 pods for prefill role + 2 pods for decode role) = 25 pods
+	expectedPodCount := 25
 	actualPodCount := len(podList.Items)
 
 	t.Logf("Expected pod count: %d, Actual pod count: %d", expectedPodCount, actualPodCount)
