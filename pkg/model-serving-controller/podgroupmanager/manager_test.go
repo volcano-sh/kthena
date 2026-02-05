@@ -89,17 +89,14 @@ func TestCalculateRequirements(t *testing.T) {
 	}
 
 	t.Run("basic calculation", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		volcanofake := volcanofake.NewSimpleClientset()
-		manager := NewManager(nil, volcanofake, apiextfake, store, nil)
+		manager := NewManager(nil, volcanofake, apiextfake, nil)
 		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
-		// servingGroupName is used to find roleList.
-		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
+		minMember, minRoleMember, _ := manager.calculateRequirements(ms)
 
 		// For 2 prefill roles (each with 1 entry + 3 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+3)*2 + (1+2)*1 = 8 + 3 = 11
@@ -111,17 +108,9 @@ func TestCalculateRequirements(t *testing.T) {
 			"decode":  3, // 1 entry + 2 workers
 		}
 		assert.Equal(t, expectedRoleMembers, minRoleMember)
-		expectedTaskMembers := map[string]int32{}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
 		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, minResources := manager.calculateRequirements(ms, "test-serving-group")
-		expectedTaskMembers = map[string]int32{
-			"prefill-0": 4, // 1 entry + 3 workers
-			"prefill-1": 4, // 1 entry + 3 workers
-			"decode-0":  3, // 1 entry + 2 workers
-		}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
+		_, _, minResources := manager.calculateRequirements(ms)
 
 		// Check resources
 		// Prefill roles: 2*(1cpu+2Gi) + 2*3*(2cpu+4Gi) = 2cpu+4Gi + 12cpu+24Gi = 14cpu+28Gi
@@ -137,10 +126,9 @@ func TestCalculateRequirements(t *testing.T) {
 	})
 
 	t.Run("with MinRoleReplicas constraint", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		volcanofake := volcanofake.NewSimpleClientset()
-		manager := NewManager(nil, volcanofake, apiextfake, store, nil)
+		manager := NewManager(nil, volcanofake, apiextfake, nil)
 		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
@@ -152,9 +140,7 @@ func TestCalculateRequirements(t *testing.T) {
 		}
 		ms.Spec.Template.GangPolicy.MinRoleReplicas = minRoleReplicas
 
-		// servingGroupName is used to find roleList.
-		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
+		minMember, minRoleMember, _ := manager.calculateRequirements(ms)
 
 		// For 1 prefill role (1 entry + 3 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+3)*1 + (1+2)*1 = 4 + 3 = 7
@@ -166,16 +152,9 @@ func TestCalculateRequirements(t *testing.T) {
 			"decode":  3, // 1 entry + 2 workers
 		}
 		assert.Equal(t, expectedRoleMembers, minRoleMember)
-		expectedTaskMembers := map[string]int32{}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
 
 		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, minResources := manager.calculateRequirements(ms, "test-serving-group")
-		expectedTaskMembers = map[string]int32{
-			"prefill-0": 4, // 1 entry + 3 workers
-			"decode-0":  3, // 1 entry + 2 workers
-		}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
+		_, _, minResources := manager.calculateRequirements(ms)
 
 		// Check resources for limited roles
 		// Prefill roles: 1*(1cpu+2Gi) + 1*3*(2cpu+4Gi) = 1cpu+2Gi + 6cpu+12Gi = 7cpu+14Gi
@@ -191,18 +170,15 @@ func TestCalculateRequirements(t *testing.T) {
 	})
 
 	t.Run("nil MinRoleReplicas", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		volcanofake := volcanofake.NewSimpleClientset()
-		manager := NewManager(nil, volcanofake, apiextfake, store, nil)
+		manager := NewManager(nil, volcanofake, apiextfake, nil)
 		ms := createBasicModelServing()
 		ms.Spec.Template.GangPolicy.MinRoleReplicas = nil
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
-		// servingGroupName is used to find roleList.
-		// It will not affect the calculation of minTaskMember.
-		minMember, _, _, _ := manager.calculateRequirements(ms, "test-serving-group")
+		minMember, _, _ := manager.calculateRequirements(ms)
 
 		// Should consider all roles without constraint
 		// Same as basic calculation: 11 pods
@@ -210,31 +186,26 @@ func TestCalculateRequirements(t *testing.T) {
 	})
 
 	t.Run("empty roles", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		volcanofake := volcanofake.NewSimpleClientset()
-		manager := NewManager(nil, volcanofake, apiextfake, store, nil)
+		manager := NewManager(nil, volcanofake, apiextfake, nil)
 		ms := createBasicModelServing()
 		ms.Spec.Template.Roles = []workloadv1alpha1.Role{} // Empty roles
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
 
-		// servingGroupName is used to find roleList.
-		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, minResources := manager.calculateRequirements(ms, "test-serving-group")
+		minMember, minRoleMember, minResources := manager.calculateRequirements(ms)
 
 		// Should have no requirements
 		assert.Equal(t, 0, minMember)
 		assert.Empty(t, minRoleMember)
-		assert.Empty(t, minTaskMember)
 		assert.Empty(t, minResources)
 	})
 
 	t.Run("role with no worker template", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		volcanofake := volcanofake.NewSimpleClientset()
-		manager := NewManager(nil, volcanofake, apiextfake, store, nil)
+		manager := NewManager(nil, volcanofake, apiextfake, nil)
 		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
@@ -242,9 +213,7 @@ func TestCalculateRequirements(t *testing.T) {
 		// Modify one role to have no worker template
 		ms.Spec.Template.Roles[1].WorkerTemplate = nil
 		ms.Spec.Template.Roles[1].WorkerReplicas = 0
-		// servingGroupName is used to find roleList.
-		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
+		minMember, minRoleMember, _ := manager.calculateRequirements(ms)
 
 		// For 2 prefill roles (each with 1 entry + 3 workers) and 1 decode role (1 entry only)
 		// Total pods = (1+3)*2 + (1+0)*1 = 8 + 1 = 9
@@ -256,24 +225,12 @@ func TestCalculateRequirements(t *testing.T) {
 			"decode":  1, // 1 entry only (no workers)
 		}
 		assert.Equal(t, expectedRoleMembers, minRoleMember)
-		expectedTaskMembers := map[string]int32{}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
-
-		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, _ = manager.calculateRequirements(ms, "test-serving-group")
-		expectedTaskMembers = map[string]int32{
-			"prefill-0": 4, // 1 entry + 3 workers
-			"prefill-1": 4, // 1 entry + 3 workers
-			"decode-0":  1, // 1 entry only (no workers)
-		}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
 	})
 
 	t.Run("zero worker replicas", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		volcanofake := volcanofake.NewSimpleClientset()
-		manager := NewManager(nil, volcanofake, apiextfake, store, nil)
+		manager := NewManager(nil, volcanofake, apiextfake, nil)
 		ms := createBasicModelServing()
 		manager.hasPodGroupCRD.Store(true)
 		manager.hasSubGroupPolicy.Store(true)
@@ -281,9 +238,7 @@ func TestCalculateRequirements(t *testing.T) {
 		// Set worker replicas to zero for one role
 		ms.Spec.Template.Roles[0].WorkerReplicas = 0
 
-		// servingGroupName is used to find roleList.
-		// It will not affect the calculation of minTaskMember.
-		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(ms, "test-serving-group")
+		minMember, minRoleMember, _ := manager.calculateRequirements(ms)
 
 		// For 2 prefill roles (each with 1 entry + 0 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+0)*2 + (1+2)*1 = 2 + 3 = 5
@@ -295,25 +250,13 @@ func TestCalculateRequirements(t *testing.T) {
 			"decode":  3, // 1 entry + 2 workers
 		}
 		assert.Equal(t, expectedRoleMembers, minRoleMember)
-		expectedTaskMembers := map[string]int32{}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
-
-		manager.hasSubGroupPolicy.Store(false)
-		_, _, minTaskMember, _ = manager.calculateRequirements(ms, "test-serving-group")
-		expectedTaskMembers = map[string]int32{
-			"prefill-0": 1, // 1 entry only (no workers)
-			"prefill-1": 1, // 1 entry only (no workers)
-			"decode-0":  3, // 1 entry + 2 workers
-		}
-		assert.Equal(t, expectedTaskMembers, minTaskMember)
 	})
 }
 
 func TestAggregateResources(t *testing.T) {
 	t.Run("basic aggregation", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -349,9 +292,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("nil total resource list", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		var total corev1.ResourceList = nil
 
 		podSpec := &corev1.PodSpec{
@@ -375,9 +317,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("empty containers", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -390,9 +331,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("nil containers", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -405,9 +345,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("container with no resources", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -425,9 +364,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("container with empty resources", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -447,9 +385,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("multiple calls to aggregate resources", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{}
 
 		podSpec1 := &corev1.PodSpec{
@@ -488,9 +425,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("different resource types", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -517,9 +453,8 @@ func TestAggregateResources(t *testing.T) {
 	})
 
 	t.Run("existing resources get updated", func(t *testing.T) {
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, nil, apiextfake, store, nil)
+		manager := NewManager(nil, nil, apiextfake, nil)
 		total := corev1.ResourceList{
 			corev1.ResourceCPU: resource.MustParse("1"),
 		}
@@ -596,9 +531,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 	t.Run("successful retrieval of existing pod groups", func(t *testing.T) {
 		// Create fake volcano client with test data
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1, podGroup2, podGroup3, podGroupDifferentNamespace)
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store, nil)
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -622,9 +556,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 	t.Run("no existing pod groups", func(t *testing.T) {
 		// Create fake volcano client with only unrelated pod groups
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup3)
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store, nil)
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -637,9 +570,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 	t.Run("empty pod group list", func(t *testing.T) {
 		// Create fake volcano client with no pod groups
 		fakeVolcanoClient := volcanofake.NewSimpleClientset()
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store, nil)
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -652,9 +584,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 	t.Run("pod group with same name in different namespace", func(t *testing.T) {
 		// Create fake volcano client with pod groups
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1, podGroupDifferentNamespace)
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store, nil)
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -668,9 +599,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 
 	t.Run("nil model Serving parameter", func(t *testing.T) {
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1)
-		store := datastore.New()
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store, nil)
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
 
 		// Test with nil ModelServing - this would cause a panic in the real code
 		// but we're checking that our test handles it gracefully
@@ -1127,13 +1057,9 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 
 func TestHandlePodGroupCRDChange(t *testing.T) {
 	t.Run("CRD added - should send true to channel", func(t *testing.T) {
-		// Create a mock datastore
-		store := datastore.New()
-
 		// Create a manager with a buffered channel to capture the change
 		manager := &Manager{
 			volcanoClient: volcanofake.NewSimpleClientset(),
-			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to false
@@ -1180,13 +1106,9 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 	})
 
 	t.Run("CRD deleted - should send false to channel", func(t *testing.T) {
-		// Create a mock datastore
-		store := datastore.New()
-
 		// Create a manager with a buffered channel to capture the change
 		manager := &Manager{
 			volcanoClient: volcanofake.NewSimpleClientset(),
-			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to true
@@ -1209,13 +1131,9 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 	})
 
 	t.Run("CRD unchanged - should not send to channel", func(t *testing.T) {
-		// Create a mock datastore
-		store := datastore.New()
-
 		// Create a manager with an unbuffered channel (to detect if anything is sent)
 		manager := &Manager{
 			volcanoClient: volcanofake.NewSimpleClientset(),
-			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to true
@@ -1263,13 +1181,9 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 	})
 
 	t.Run("CRD unchanged after deletion - should not send to channel", func(t *testing.T) {
-		// Create a mock datastore
-		store := datastore.New()
-
 		// Create a manager with an unbuffered channel (to detect if anything is sent)
 		manager := &Manager{
 			volcanoClient: volcanofake.NewSimpleClientset(),
-			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to false

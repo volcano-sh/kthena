@@ -420,7 +420,7 @@ func TestIsServingGroupDeleted(t *testing.T) {
 	assert.NoError(t, err)
 
 	store := datastore.New()
-	manager := podgroupmanager.NewManager(kubeClient, volcanoClient, apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD()), store, nil)
+	manager := podgroupmanager.NewManager(kubeClient, volcanoClient, apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD()), nil)
 	if manager != nil {
 		manager.PodGroupInformer = podGroupInformer.Informer()
 		manager.PodGroupLister = podGroupInformer.Lister()

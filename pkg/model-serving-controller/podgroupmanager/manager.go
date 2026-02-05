@@ -48,6 +48,9 @@ import (
 )
 
 const (
+	// enqueueAfter is the time duration to wait to re-enqueue.
+	enqueueAfter = 1 * time.Second
+
 	podGroupCRDName = "podgroups.scheduling.volcano.sh"
 	groupNameKey    = "GroupName"
 )
@@ -56,7 +59,6 @@ const (
 type Manager struct {
 	kubeClient                   kubernetes.Interface
 	volcanoClient                volcanoclient.Interface
-	store                        datastore.Store
 	hasPodGroupCRD               atomic.Bool
 	hasSubGroupPolicy            atomic.Bool
 	podGroupInformerInitCallback func(cache.SharedIndexInformer)
@@ -70,11 +72,10 @@ type Manager struct {
 }
 
 // NewManager creates a new gang scheduling manager
-func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Interface, apiextClient apiextclient.Interface, store datastore.Store, podGroupInformerInitCallback func(cache.SharedIndexInformer)) *Manager {
+func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Interface, apiextClient apiextclient.Interface, podGroupInformerInitCallback func(cache.SharedIndexInformer)) *Manager {
 	newManager := Manager{
 		kubeClient:                   kubeClient,
 		volcanoClient:                volcanoClient,
-		store:                        store,
 		podGroupInformerInitCallback: podGroupInformerInitCallback,
 	}
 
@@ -230,7 +231,7 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 
 	podGroupLister := m.GetPodGroupLister()
 	if podGroupLister == nil {
-		return fmt.Errorf("PodGroup informer is not initialized"), 1 * time.Second
+		return fmt.Errorf("PodGroup informer is not initialized"), enqueueAfter
 	}
 	podGroup, err := podGroupLister.PodGroups(ms.Namespace).Get(pgName)
 	if err != nil {
@@ -241,7 +242,7 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 	}
 
 	if !utils.IsOwnedByModelServingWithUID(podGroup, ms.UID) {
-		return fmt.Errorf("PodGroup %s is not owned by ModelServing %s", pgName, ms.Name), 1 * time.Second
+		return fmt.Errorf("PodGroup %s is not owned by ModelServing %s", pgName, ms.Name), enqueueAfter
 	}
 
 	return m.updatePodGroupIfNeeded(ctx, podGroup, ms), 0
@@ -255,11 +256,8 @@ func (m *Manager) shouldCreatePodGroup(ms *workloadv1alpha1.ModelServing) bool {
 		return false
 	}
 
-	schedulerName := ms.Spec.SchedulerName
-	// If schedulerName is empty, Kubernetes uses the default scheduler, which doesn't support gang/network topology.
-	isVolcano := schedulerName == "volcano"
-
-	return isVolcano
+	// Check if scheduler is volcano
+	return ms.Spec.SchedulerName == "volcano"
 }
 
 // createPodGroup creates a PodGroup for group-level gang scheduling
@@ -267,9 +265,8 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 	// Calculate total pods and resources for this ServingGroup
 	// minMember: total pods across all roles
 	// minRoleMember: map of roleName to number of pods in that role
-	// minTaskMember: map of taskName to number of pods in that task
 	// minResources: aggregated resource requirements of all pods in the ServingGroup
-	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(ms, podGroupName)
+	minMember, minRoleMember, minResources := m.calculateRequirements(ms)
 
 	podGroup := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -299,8 +296,6 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 
 	if m.hasSubGroupPolicy.Load() {
 		podGroup = appendSubGroupPolicy(ms, podGroup, minRoleMember)
-	} else {
-		podGroup.Spec.MinTaskMember = minTaskMember
 	}
 
 	_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Create(ctx, podGroup, metav1.CreateOptions{})
@@ -326,10 +321,9 @@ func (m *Manager) buildOwnerReference(ms *workloadv1alpha1.ModelServing) []metav
 }
 
 // calculateRequirements calculates requirements for role-level gang scheduling
-func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing, podGroupName string) (int, map[string]int32, map[string]int32, corev1.ResourceList) {
+func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing) (int, map[string]int32, corev1.ResourceList) {
 	minMember := 0
 	minRoleMember := make(map[string]int32)
-	minTaskMember := make(map[string]int32)
 	minResources := corev1.ResourceList{}
 
 	// For role-level, only include roles up to MinRoleReplicas limit
@@ -339,71 +333,27 @@ func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing, podGr
 
 		if ms.Spec.Template.GangPolicy != nil && ms.Spec.Template.GangPolicy.MinRoleReplicas != nil {
 			if minReplicas, exists := ms.Spec.Template.GangPolicy.MinRoleReplicas[role.Name]; exists {
-				minRoleReplicas = int(minReplicas)
+				minRoleReplicas = min(int(minReplicas), minRoleReplicas)
 			}
 		}
-
-		expectReplicas := min(minRoleReplicas, roleReplicas)
-		roleList, err := m.store.GetRoleList(utils.GetNamespaceName(ms), podGroupName, role.Name)
-		if err != nil {
-			klog.V(2).Infof("Failed to get role list for role %s: %v", role.Name, err)
-		}
-
-		// Check if PodGroup exists to determine if we're handling a deletion/recreation scenario
-		podGroupExists := false
-		podGroupLister := m.GetPodGroupLister()
-		if podGroupLister == nil {
-			klog.V(4).Infof("PodGroup lister is not initialized; treating PodGroup %s as missing", podGroupName)
-		} else if _, err := podGroupLister.PodGroups(ms.Namespace).Get(podGroupName); err != nil {
-			if apierrors.IsNotFound(err) {
-				podGroupExists = false
-				klog.V(4).Infof("PodGroup %s does not exist, will create it", podGroupName)
-			} else {
-				podGroupExists = true
-				klog.Errorf("Failed to check existence of PodGroup %s: %v", podGroupName, err)
-			}
-		} else {
-			podGroupExists = true
-		}
-
-		// During scaling operations, podGroup does not affect scaling policies.
-		// Under the binpack scaling strategy, it is unknown which role replicas will be deleted.
-		// However, if the PodGroup was deleted externally, we should still calculate requirements
-		// to recreate it with correct settings.
-		if len(roleList) > expectReplicas && podGroupExists {
-			// Only skip during active scaling if PodGroup exists.
-			// If PodGroup was deleted externally, we should proceed to recalculate and recreate it.
-			klog.V(4).Infof("Skipping PodGroup update for %s during scaling operation, roleList length: %d, expectReplicas: %d",
-				podGroupName, len(roleList), expectReplicas)
-			continue
-		}
-
-		// When length(roleNames) <= expectReplicas, that is, when scaling up or updating.
-		// Provide the roleNames to be updated.
-		roleNames := calculateRequiredRoleNames(expectReplicas, roleList, role.Name)
 
 		// Only include role replicas up to the minimum required
-		podsPerTask := 1 + int(role.WorkerReplicas) // entry + workers
-		minMember = minMember + (podsPerTask * expectReplicas)
+		podsPerRole := 1 + int(role.WorkerReplicas) // entry + workers
+		minMember = minMember + (podsPerRole * minRoleReplicas)
 
 		if m.hasSubGroupPolicy.Load() {
-			minRoleMember[role.Name] = int32(podsPerTask)
-		} else {
-			// Only include role replicas up to the minimum required
-			for _, taskName := range roleNames {
-				minTaskMember[taskName.Name] = int32(podsPerTask)
-			}
+			minRoleMember[role.Name] = int32(podsPerRole)
 		}
 
 		// Aggregate resources
-		minResources = m.aggregateResources(minResources, &role.EntryTemplate.Spec, expectReplicas)
+		minResources = m.aggregateResources(minResources, &role.EntryTemplate.Spec, minRoleReplicas)
 		if role.WorkerTemplate != nil {
 			for i := 0; i < int(role.WorkerReplicas); i++ {
-				minResources = m.aggregateResources(minResources, &role.WorkerTemplate.Spec, expectReplicas)
+				minResources = m.aggregateResources(minResources, &role.WorkerTemplate.Spec, minRoleReplicas)
 			}
 		}
 	}
-	return minMember, minRoleMember, minTaskMember, minResources
+	return minMember, minRoleMember, minResources
 }
 
 // aggregateResources aggregates resource requirements from a pod spec
@@ -467,7 +417,7 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 		}
 
 		// Calculate current requirements
-		minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(ms, currentPodGroup.GetName())
+		minMember, minRoleMember, minResources := m.calculateRequirements(ms)
 
 		updated := currentPodGroup.DeepCopy()
 		updated.Spec.MinMember = int32(minMember)
@@ -476,8 +426,6 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 		// Apply network topology policy
 		if m.hasSubGroupPolicy.Load() {
 			updated = appendSubGroupPolicy(ms, updated, minRoleMember)
-		} else {
-			updated.Spec.MinTaskMember = minTaskMember
 		}
 
 		if hasPodGroupChanged(currentPodGroup, updated) {

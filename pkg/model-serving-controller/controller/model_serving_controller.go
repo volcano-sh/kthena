@@ -154,7 +154,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		})
 	}
 
-	c.podGroupManager = podgroupmanager.NewManager(kubeClientSet, volcanoClient, apiextClient, store, registerPodGroupHandler)
+	c.podGroupManager = podgroupmanager.NewManager(kubeClientSet, volcanoClient, apiextClient, registerPodGroupHandler)
 
 	klog.Info("Set the ModelServing event handler")
 	_, _ = c.modelServingsInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
