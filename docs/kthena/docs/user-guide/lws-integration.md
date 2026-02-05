@@ -29,6 +29,8 @@ When Kthena's LWS integration is enabled:
 
 ### Spec Mapping (LeaderWorkerSet -> ModelServing)
 
+<div class="table-wrapper">
+
 | LeaderWorkerSet Field | ModelServing Internal Semantics | Description |
 |-----------------------|---------------------------------|-------------|
 | `metadata.name` | `metadata.name` | Mapped to the ModelServing identifier. |
@@ -37,6 +39,8 @@ When Kthena's LWS integration is enabled:
 | `spec.leaderWorkerTemplate.workerTemplate` | `spec.template.roles.WorkerTemplate` | Parsed as Worker role definition. |
 | `spec.leaderWorkerTemplate.size` | Worker Role Replicas | Used to calculate replica count for Worker Role: `Replicas = Size - 1` (Assuming Leader is 1). |
 | `spec.startupPolicy` | Startup Policy | Maps startup order policy (e.g., `LeaderFirst`). |
+
+</div>
 
 ### Status Mapping (ModelServing -> LeaderWorkerSet)
 

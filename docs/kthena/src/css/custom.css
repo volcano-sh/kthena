@@ -111,3 +111,10 @@ code:not([class*="language-"]) {
 .markdown table {
     display: table;        /* Restore standard table behavior */
 }
+
+/* Horizontal scroll for wide tables */
+.table-wrapper {
+    overflow-x: auto;
+    margin: 1rem 0;
+    -webkit-overflow-scrolling: touch;
+}
