@@ -69,6 +69,14 @@ rules:
       - list
       - watch
   - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
+  - apiGroups:
       - coordination.k8s.io
     resources:
       - leases

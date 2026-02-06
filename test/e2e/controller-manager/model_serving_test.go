@@ -638,6 +638,77 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	t.Log("ModelServing controller-manager restart test passed successfully")
 }
 
+// TestModelServingRoleStatusEvents verifies that role status transitions are surfaced via Kubernetes Events.
+func TestModelServingRoleStatusEvents(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create Kubernetes client locally
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a simple ModelServing with a single role replica to keep the signal clean.
+	modelServing := createBasicModelServing("test-role-status-events", 1)
+
+	t.Log("Creating ModelServing for role status events test")
+	createdMS, err := kthenaClient.WorkloadV1alpha1().
+		ModelServings(testNamespace).
+		Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Ensure cleanup
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", createdMS.Namespace, createdMS.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, createdMS.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", createdMS.Namespace, createdMS.Name, err)
+		}
+	})
+
+	// Wait until ModelServing is ready so that role transitions to Running.
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, createdMS.Name)
+
+	// Refresh to get UID for precise event filtering.
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, createdMS.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
+
+	// We expect at least one Creating event and one Running event for the role.
+	var sawCreatingEvent, sawRunningEvent bool
+
+	require.Eventually(t, func() bool {
+		eventList, err := kubeClient.CoreV1().Events(testNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+
+		for _, ev := range eventList.Items {
+			if ev.InvolvedObject.Kind != "ModelServing" {
+				continue
+			}
+			if ev.InvolvedObject.UID != ms.UID {
+				continue
+			}
+
+			switch ev.Reason {
+			case "RoleCreating":
+				sawCreatingEvent = true
+			case "RoleRunning":
+				sawRunningEvent = true
+			}
+
+			if sawCreatingEvent && sawRunningEvent {
+				return true
+			}
+		}
+
+		return false
+	}, 2*time.Minute, 5*time.Second, "Did not observe both RoleCreating and RoleRunning events for ModelServing role")
+
+	t.Log("ModelServing role status events test passed successfully")
+}
+
 // createRole is a helper function to create a Role with specified replicas and workers
 func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 	return workload.Role{
