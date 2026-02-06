@@ -1,4 +1,13 @@
 {{- if .Values.controllerManager.webhook.enabled }}
+{{- $existingWebhooks := dict }}
+{{- if not (eq .Values.global.certManagementMode "manual") }}
+  {{- $obj := lookup "admissionregistration.k8s.io/v1" "ValidatingWebhookConfiguration" "" "kthena-controller-manager-validating-webhook" }}
+  {{- if $obj }}
+    {{- range $obj.webhooks }}
+      {{- $_ := set $existingWebhooks .name .clientConfig.caBundle }}
+    {{- end }}
+  {{- end }}
+{{- end }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -23,7 +32,7 @@ webhooks:
         path: "/validate/modelbooster"
         port: 443
       {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
+      caBundle: {{ get $existingWebhooks "validate-modelbooster.volcano.sh" | default "" }}
       {{- else }}
       caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
@@ -45,7 +54,7 @@ webhooks:
         path: "/validate/autoscalingpolicy"
         port: 443
       {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
+      caBundle: {{ get $existingWebhooks "validate-autoscalingpolicy.volcano.sh" | default "" }}
       {{- else }}
       caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
@@ -67,7 +76,7 @@ webhooks:
         path: "/validate/autoscalingpolicybinding"
         port: 443
       {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
+      caBundle: {{ get $existingWebhooks "validate-autoscalingpolicybinding.volcano.sh" | default "" }}
       {{- else }}
       caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
@@ -89,7 +98,7 @@ webhooks:
         path: "/validate-workload-ai-v1alpha1-modelserving"
         port: 443
       {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
+      caBundle: {{ get $existingWebhooks "validate-workload-ai-v1alpha1-modelserving.volcano.sh" | default "" }}
       {{- else }}
       caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}

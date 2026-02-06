@@ -1,4 +1,13 @@
 {{- if and .Values.kthenaRouter.enabled .Values.kthenaRouter.webhook.enabled }}
+{{- $existingWebhooks := dict }}
+{{- if not (eq .Values.global.certManagementMode "manual") }}
+  {{- $obj := lookup "admissionregistration.k8s.io/v1" "ValidatingWebhookConfiguration" "" "kthena-router-validating-webhook" }}
+  {{- if $obj }}
+    {{- range $obj.webhooks }}
+      {{- $_ := set $existingWebhooks .name .clientConfig.caBundle }}
+    {{- end }}
+  {{- end }}
+{{- end }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -23,7 +32,7 @@ webhooks:
         path: "/validate/modelroute"
         port: {{ .Values.kthenaRouter.webhook.servicePort }}
       {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
+      caBundle: {{ get $existingWebhooks "validate-modelroute.volcano.sh" | default "" }}
       {{- else }}
       caBundle: {{ required "A caBundle is required for the kthena-router validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
@@ -45,7 +54,7 @@ webhooks:
         path: "/validate/modelserver"
         port: {{ .Values.kthenaRouter.webhook.servicePort }}
       {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
+      caBundle: {{ get $existingWebhooks "validate-modelserver.volcano.sh" | default "" }}
       {{- else }}
       caBundle: {{ required "A caBundle is required for the kthena-router validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
@@ -56,4 +65,3 @@ webhooks:
         operations: [ "CREATE", "UPDATE" ]
         scope: "Namespaced"
 {{- end }}
-
