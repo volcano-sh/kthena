@@ -155,7 +155,7 @@ func (c *InferencePoolController) syncHandler(key string) error {
 }
 
 func (c *InferencePoolController) enqueueInferencePool(obj interface{}) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(err)
 		return
