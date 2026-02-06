@@ -22,9 +22,7 @@ webhooks:
         namespace: {{ .Release.Namespace }}
         path: "/mutate/modelbooster"
         port: 443
-      {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
-      {{- else }}
+      {{- if eq .Values.global.certManagementMode "manual" }}
       caBundle: {{ required "A caBundle is required for the registry mutating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
@@ -46,9 +44,7 @@ webhooks:
         namespace: {{ .Release.Namespace }}
         path: "/mutate/autoscalingpolicy"
         port: 443
-      {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
-      caBundle: ""
-      {{- else }}
+      {{- if eq .Values.global.certManagementMode "manual" }}
       caBundle: {{ required "A caBundle is required for the registry mutating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
