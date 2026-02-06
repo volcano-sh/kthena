@@ -1,0 +1,66 @@
+import LightboxImage from '@site/src/components/LightboxImage';
+import architectureAutoscaler from '../assets/diagrams/architecture-autoscaler.svg';
+import architectureAutoscalerOptimizeExample from '../assets/diagrams/architecture-autoscaler-optimize-example.svg';
+
+# Autoscaler
+
+As inference requests change in real-time, the required hardware resources also fluctuate dynamically. Kthena Autoscaler is an optional component of the Kthena system that runs in Kubernetes environments and dynamically adjusts the number of deployed serving instances based on real-time load. It maintains healthy business metrics (such as SLO indicators) while optimizing computational resource consumption.
+
+## Feature Description
+
+Kthena Autoscaler periodically collects runtime metrics from the Pods of managed serving instances. Based on user-specified monitoring metrics and their target values, it calculates the required number of serving instances and performs scaling operations according to configured scaling policies.
+
+<div style={{ textAlign: 'center' }}>
+  <LightboxImage src={architectureAutoscaler} alt="architecture-autoscaler"></LightboxImage>
+</div>
+
+Kthena Autoscaler provides two scaling granularities: **Homogeneous Instances Autoscale** and **Heterogeneous Instances Autoscale**.
+
+### Homogeneous Instances Autoscale
+
+**Homogeneous Instances Autoscale** targets scaling for a single type of inference instance. This method is similar to the behavior of [KPA](https://knative.dev/docs/serving/autoscaling/kpa-specific/), supporting both `Stable` and `Panic` modes. It scales deployments of the same type (engines deployed via the same Deployment or ModelServing CR) based on business metrics.
+
+### Heterogeneous Instances Autoscale
+
+For the same model, serving instances can be deployed in multiple configurations, including:
+- Heterogeneous resource types (GPU/NPU)
+- Different inference engines (vLLM/Sglang)
+- Various runtime parameters (e.g., TP/DP configurations)
+
+While these differently deployed serving instances provide identical inference services and expose consistent business functionality externally, they differ in hardware resource requirements and performance capabilities. The figure below illustrates a sample deployment scenario.
+
+<LightboxImage src={architectureAutoscalerOptimizeExample} alt="architecture-autoscaler-optimize-example"></LightboxImage>
+
+**Heterogeneous Instances Autoscale** functionality consists of two main components: instance prediction and instance scheduling.
+
+**Instance Prediction** follows the same logic as Homogeneous Instances Autoscale, dynamically calculating the total desired number of instances for the serving instance group in each scheduling cycle based on runtime metrics.
+
+**Instance Scheduling** dynamically adjusts the proportion of functionally identical but differently deployed serving instances to maximize hardware resource utilization. From a problem modeling perspective, this scheduling phase can be viewed as an [integer programming problem](https://en.wikipedia.org/wiki/Integer_programming), considering the significant state transitions between scheduling cycles due to model cold start overhead.
+
+Heterogeneous Instances Autoscale employs a greedy algorithm with a doubling strategy. It first calculates the available `capacity` as the sum of differences between `maxReplicas` and `minReplicas` for each instance type, representing the manageable instance capacity. During each scaling operation, it selects a portion of this capacity to scale up.
+
+Based on the multiplication principle, the `capacity` is divided into multiple chunks according to powers of `costExpansionRate`. These chunks serve as scaling batches. At the batch level, batches from different serving instances are mixed and sorted in ascending order by cost. The sorted batches are then expanded into corresponding instance combinations, resulting in a scaling sequence `seq` with length equal to the capacity.
+
+$$
+seq = sorted(\bigcup_{i=1}^{N} P^k \cdot c_i \mid k \in (0,1,\ldots,M_i) \cup (C_i - \sum_{k=0}^{M_i} P^k) \cdot c_i)
+$$
+
+Where:
+- $N$: Number of serving instance types
+- $P$: `costExpansionRate` for serving instances
+- $c_i$: Cost of the i-th type of inference instance
+- $M_i$: Number of explicit power terms for the i-th type of inference instance
+- $C_i$: Capacity of the i-th type of inference instance (maxReplicas - minReplicas)
+
+The `costExpansionRate` can be interpreted as the "cost expansion ratio for the next batch" within each inference instance type.
+
+When the prediction requires K instances, the first K instances in the `seq` order are retained. This strategy helps reuse previously launched instances during scaling operations, thereby reducing cold start overhead.
+
+
+## Constraints
+
+When using **Kthena Autoscaler**, note the following constraints:
+
+- An inference instance can only be managed by either Homogeneous Autoscale or Heterogeneous Autoscale, but not both simultaneously. In practice, this means you should not configure the same Deployment or Kthena CR with multiple autoscaling policies.
+
+- Before using Heterogeneous Autoscale, you must configure the cost for each inference instance type. It is recommended to set the cost parameter to represent the computational power of each instance. Operators can use scripts provided in the Kthena project to obtain these values.
