@@ -159,6 +159,10 @@ func TestBothAPIsConfigured(t *testing.T) {
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
 
+	// Wait for ModelRoute to be ready
+	err = utils.WaitForModelRouteReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelRoute.Name)
+	require.NoError(t, err, "ModelRoute did not become ready in time")
+
 	t.Cleanup(func() {
 		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
 			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", testNamespace, createdModelRoute.Name, err)
