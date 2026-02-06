@@ -27,10 +27,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	lwsclientset "sigs.k8s.io/lws/client-go/clientset/versioned"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
@@ -752,4 +755,145 @@ func createInvalidModelServing() *workload.ModelServing {
 			},
 		},
 	}
+}
+
+// TestLWSAPIBasic tests that kthena can process LWS API correctly by:
+// 1. Creating a simple LWS instance
+// 2. Verifying corresponding ModelServing is created with proper owner references
+// 3. Verifying pods are created automatically
+// 4. Deleting LWS and verifying all resources are cleaned up
+func TestLWSAPIBasic(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create LWS client
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	lwsClient, err := lwsclientset.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create LWS client")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a simple LWS instance
+	lwsName := "test-lws-basic"
+	replicas := int32(1)
+	size := int32(2) // 1 leader + 1 worker
+
+	lws := &lwsv1.LeaderWorkerSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      lwsName,
+			Namespace: testNamespace,
+		},
+		Spec: lwsv1.LeaderWorkerSetSpec{
+			Replicas: &replicas,
+			LeaderWorkerTemplate: lwsv1.LeaderWorkerTemplate{
+				Size: &size,
+				WorkerTemplate: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "worker",
+								Image: "nginx:latest",
+								Ports: []corev1.ContainerPort{
+									{
+										Name:          "http",
+										ContainerPort: 80,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Logf("Creating LWS instance: %s/%s", testNamespace, lwsName)
+	_, err = lwsClient.LeaderworkersetV1().LeaderWorkerSets(testNamespace).Create(ctx, lws, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create LWS instance")
+
+	// Register cleanup for LWS
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up LWS: %s/%s", testNamespace, lwsName)
+		if err := lwsClient.LeaderworkersetV1().LeaderWorkerSets(testNamespace).Delete(cleanupCtx, lwsName, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete LWS %s/%s: %v", testNamespace, lwsName, err)
+		}
+	})
+
+	// Wait for ModelServing to be created
+	t.Log("Waiting for ModelServing resource to be created")
+	var modelServing *workload.ModelServing
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, lwsName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		modelServing = ms
+		return true
+	}, 2*time.Minute, 2*time.Second, "ModelServing was not created")
+
+	// Verify owner reference
+	t.Log("Verifying ModelServing owner reference")
+	require.NotEmpty(t, modelServing.OwnerReferences, "ModelServing should have owner references")
+
+	ownerRef := modelServing.OwnerReferences[0]
+	assert.Equal(t, "LeaderWorkerSet", ownerRef.Kind, "Owner reference kind should be LeaderWorkerSet")
+	assert.Equal(t, lwsName, ownerRef.Name, "Owner reference name should match LWS name")
+	assert.NotNil(t, ownerRef.Controller, "Owner reference should have Controller field set")
+	assert.True(t, *ownerRef.Controller, "Owner reference Controller should be true")
+	assert.NotNil(t, ownerRef.BlockOwnerDeletion, "Owner reference should have BlockOwnerDeletion field set")
+	assert.True(t, *ownerRef.BlockOwnerDeletion, "Owner reference BlockOwnerDeletion should be true")
+
+	// Wait for ModelServing to be ready
+	t.Log("Waiting for ModelServing to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, lwsName)
+
+	// Verify pods are created
+	t.Log("Verifying pods are created")
+	labelSelector := "modelserving.volcano.sh/name=" + lwsName
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+
+	// Expected pods: 1 replica * (1 leader + 1 worker) = 2 pods
+	expectedPodCount := 2
+	assert.Equal(t, expectedPodCount, len(podList.Items), "Expected %d pods to be created", expectedPodCount)
+
+	// Verify all pods are running
+	runningPods := 0
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodRunning {
+			runningPods++
+		}
+	}
+	assert.Equal(t, expectedPodCount, runningPods, "All pods should be in Running phase")
+
+	// Delete the LWS instance
+	t.Logf("Deleting LWS instance: %s/%s", testNamespace, lwsName)
+	err = lwsClient.LeaderworkersetV1().LeaderWorkerSets(testNamespace).Delete(ctx, lwsName, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete LWS instance")
+
+	// Wait for ModelServing to be deleted (via owner reference cascade deletion)
+	t.Log("Waiting for ModelServing to be deleted")
+	require.Eventually(t, func() bool {
+		_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, lwsName, metav1.GetOptions{})
+		return errors.IsNotFound(err)
+	}, 2*time.Minute, 2*time.Second, "ModelServing was not deleted after LWS deletion")
+
+	// Wait for all pods to be deleted
+	t.Log("Waiting for all pods to be deleted")
+	require.Eventually(t, func() bool {
+		podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		return len(podList.Items) == 0
+	}, 2*time.Minute, 2*time.Second, "Pods were not deleted after LWS deletion")
+
+	t.Log("LWS API basic test passed successfully")
 }
