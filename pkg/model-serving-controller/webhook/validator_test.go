@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -47,7 +48,12 @@ func TestValidPodNameLength(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
+								{
+									Name:           "role1",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -66,7 +72,12 @@ func TestValidPodNameLength(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
+								{
+									Name:           "role1",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -330,8 +341,18 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(3),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{
+									Name:           "role1",
+									Replicas:       int32Ptr(2),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
+								{
+									Name:           "role2",
+									Replicas:       int32Ptr(1),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -347,8 +368,18 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32PtrNil(),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{
+									Name:           "role1",
+									Replicas:       int32Ptr(2),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
+								{
+									Name:           "role2",
+									Replicas:       int32Ptr(1),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -370,8 +401,18 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(-1),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(2), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{
+									Name:           "role1",
+									Replicas:       int32Ptr(2),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
+								{
+									Name:           "role2",
+									Replicas:       int32Ptr(1),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -393,8 +434,18 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(3),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32Ptr(-1), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{
+									Name:           "role1",
+									Replicas:       int32Ptr(-1),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
+								{
+									Name:           "role2",
+									Replicas:       int32Ptr(1),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -416,8 +467,18 @@ func TestValidatorReplicas(t *testing.T) {
 						Replicas: int32Ptr(3),
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role1", Replicas: int32PtrNil(), WorkerReplicas: 1},
-								{Name: "role2", Replicas: int32Ptr(1), WorkerReplicas: 1},
+								{
+									Name:           "role1",
+									Replicas:       int32PtrNil(),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
+								{
+									Name:           "role2",
+									Replicas:       int32Ptr(1),
+									WorkerReplicas: 1,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -487,11 +548,12 @@ func TestValidateGangPolicy(t *testing.T) {
 									Name:           "worker",
 									Replicas:       &roleReplicas,
 									WorkerReplicas: 3,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
 								MinRoleReplicas: map[string]int32{
-									"worker": 2, // 2 (role replicas) >= 2 (min), valid
+									"worker": 2,
 								},
 							},
 						},
@@ -512,6 +574,7 @@ func TestValidateGangPolicy(t *testing.T) {
 									Name:           "worker",
 									Replicas:       &roleReplicas,
 									WorkerReplicas: 3,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -543,6 +606,7 @@ func TestValidateGangPolicy(t *testing.T) {
 									Name:           "worker",
 									Replicas:       &roleReplicas,
 									WorkerReplicas: 3,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -574,6 +638,7 @@ func TestValidateGangPolicy(t *testing.T) {
 									Name:           "worker",
 									Replicas:       &roleReplicas,
 									WorkerReplicas: 3,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -605,6 +670,7 @@ func TestValidateGangPolicy(t *testing.T) {
 									Name:           "worker",
 									Replicas:       &roleReplicas,
 									WorkerReplicas: 3,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
 								},
 							},
 							GangPolicy: nil,
@@ -626,6 +692,7 @@ func TestValidateGangPolicy(t *testing.T) {
 									Name:           "worker",
 									Replicas:       &roleReplicas,
 									WorkerReplicas: 3,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
 								},
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
@@ -662,25 +729,33 @@ func TestValidateWorkerReplicas(t *testing.T) {
 		want field.ErrorList
 	}{
 		{
-			name: "valid worker replicas",
+			name: "WorkerReplicas > 0 but WorkerTemplate is nil",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
-						Replicas: &replicas,
+						Replicas: &replicas, // It Uses the variable defined at top of test
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
 									Replicas:       &roleReplicas,
-									WorkerReplicas: 3,
+									WorkerReplicas: 1,   // > 0 to trigger the check
+									WorkerTemplate: nil, // Missing template!
 								},
 							},
 						},
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+
+			want: field.ErrorList{
+				field.Required(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("workerTemplate"),
+					"workerTemplate is required when workerReplicas is greater than 0",
+				),
+			},
 		},
+
 		{
 			name: "valid zero worker replicas",
 			args: args{
@@ -739,6 +814,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 									Name:           "worker1",
 									Replicas:       &roleReplicas,
 									WorkerReplicas: 3,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
 								},
 								{
 									Name:           "worker2",
@@ -789,8 +865,18 @@ func TestValidateRoleNames(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "prefill", Replicas: &replicas, WorkerReplicas: 2},
-								{Name: "decode", Replicas: &replicas, WorkerReplicas: 2},
+								{
+									Name:           "prefill",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
+								{
+									Name:           "decode",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -806,7 +892,12 @@ func TestValidateRoleNames(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "Prefill", Replicas: &replicas, WorkerReplicas: 2},
+								{
+									Name:           "Prefill",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -828,7 +919,12 @@ func TestValidateRoleNames(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "1role", Replicas: &replicas, WorkerReplicas: 2},
+								{
+									Name:           "1role",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -850,7 +946,12 @@ func TestValidateRoleNames(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "role-", Replicas: &replicas, WorkerReplicas: 2},
+								{
+									Name:           "role-",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
@@ -872,8 +973,18 @@ func TestValidateRoleNames(t *testing.T) {
 						Replicas: &replicas,
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
-								{Name: "prefill", Replicas: &replicas, WorkerReplicas: 2},
-								{Name: "Decode", Replicas: &replicas, WorkerReplicas: 2},
+								{
+									Name:           "prefill",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
+								{
+									Name:           "Decode",
+									Replicas:       &replicas,
+									WorkerReplicas: 2,
+									WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}, // <--- FIXED TYPE
+								},
 							},
 						},
 					},
