@@ -125,6 +125,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		topNDecodePods := TopNPodInfos(scores, topN)
 		ctx.DecodePods = topNDecodePods
 		prefillPods := make([]*datastore.PodInfo, len(topNDecodePods))
+		validPairs := 0
 
 		for i, decodePod := range ctx.DecodePods {
 			// Get prefill pods for the same PD group as the decode pod (O(1) lookup)
@@ -147,8 +148,12 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				continue
 			}
 			prefillPods[i] = bestPrefillPod[0]
+			validPairs++
 		}
 		ctx.PrefillPods = prefillPods
+		if validPairs == 0 {
+			return fmt.Errorf("no valid prefill-decode pod pairs found")
+		}
 		return nil
 	}
 

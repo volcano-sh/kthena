@@ -122,18 +122,16 @@ func TestSchedulePDGroup(t *testing.T) {
 	tests := []struct {
 		name                   string
 		includePrefillPod      bool
+		wantErr                bool
 		expectedDecodePodCount int
 		expectedPrefillCount   int
 		expectPrefillNil       bool
 		expectedPrefillPodName string
 	}{
 		{
-			name:                   "empty prefill scores - graceful degradation with nil prefill pod",
-			includePrefillPod:      false,
-			expectedDecodePodCount: 1,
-			expectedPrefillCount:   1,
-			expectPrefillNil:       true,
-			expectedPrefillPodName: "",
+			name:              "empty prefill scores returns error",
+			includePrefillPod: false,
+			wantErr:           true,
 		},
 		{
 			name:                   "valid prefill pod selected - happy path",
@@ -225,8 +223,11 @@ func TestSchedulePDGroup(t *testing.T) {
 			pods, err := store.GetPodsByModelServer(modelServerName)
 			require.NoError(t, err)
 
-			// Schedule should complete without error
 			err = scheduler.Schedule(ctx, pods)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 
 			// Verify decode pod count
