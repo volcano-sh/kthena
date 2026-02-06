@@ -229,7 +229,7 @@ type PodInfo struct {
 	TPOT               float64
 	TTFT               float64
 
-	mutex sync.RWMutex // Protects concurrent access to Models and modelServer fields
+	mutex sync.RWMutex // Protects concurrent access to metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
 	models      sets.Set[string]               // running models. Including base model and lora adapters.
 	modelServer sets.Set[types.NamespacedName] // The modelservers this pod belongs to
@@ -1031,6 +1031,8 @@ func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
 }
 
 func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
+	podinfo.mutex.Lock()
+	defer podinfo.mutex.Unlock()
 	updateFuncs := map[string]func(float64){
 		utils.GPUCacheUsage: func(f float64) {
 			podinfo.GPUCacheUsage = f
@@ -1065,6 +1067,8 @@ func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
 }
 
 func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.Histogram) {
+	podinfo.mutex.Lock()
+	defer podinfo.mutex.Unlock()
 	updateFuncs := map[string]func(*dto.Histogram){
 		utils.TPOT: func(h *dto.Histogram) {
 			podinfo.TimePerOutputToken = h
@@ -1216,6 +1220,41 @@ func (p *PodInfo) GetModelServersList() []types.NamespacedName {
 // GetEngine returns the inference engine name
 func (p *PodInfo) GetEngine() string {
 	return p.engine
+}
+
+// GetGPUCacheUsage returns the GPU cache usage
+func (p *PodInfo) GetGPUCacheUsage() float64 {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.GPUCacheUsage
+}
+
+// GetRequestWaitingNum returns the number of waiting requests
+func (p *PodInfo) GetRequestWaitingNum() float64 {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.RequestWaitingNum
+}
+
+// GetRequestRunningNum returns the number of running requests
+func (p *PodInfo) GetRequestRunningNum() float64 {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.RequestRunningNum
+}
+
+// GetTPOT returns the time per output token
+func (p *PodInfo) GetTPOT() float64 {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.TPOT
+}
+
+// GetTTFT returns the time to first token
+func (p *PodInfo) GetTTFT() float64 {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.TTFT
 }
 
 // Debug interface implementations

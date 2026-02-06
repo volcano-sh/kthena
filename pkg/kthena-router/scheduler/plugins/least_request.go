@@ -61,7 +61,7 @@ func (l *LeastRequest) Name() string {
 
 func (l *LeastRequest) Filter(ctx *framework.Context, pods []*datastore.PodInfo) []*datastore.PodInfo {
 	return slices.FilterInPlace(pods, func(info *datastore.PodInfo) bool {
-		return info.RequestWaitingNum < float64(l.maxWaitingRequest)
+		return info.GetRequestWaitingNum() < float64(l.maxWaitingRequest)
 	})
 }
 
@@ -76,7 +76,7 @@ func (l *LeastRequest) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	maxScore := 0.0
 	for _, info := range pods {
 		// The weight of waiting requests is 100. It's a magic number just to sinificantly lower the score of the pod when there are waiting reqs.
-		base := info.RequestRunningNum + 100*info.RequestWaitingNum
+		base := info.GetRequestRunningNum() + 100*info.GetRequestWaitingNum()
 		baseScores[info] = base
 		if base > maxScore {
 			maxScore = base

@@ -80,12 +80,14 @@ func (l *LeastLatency) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	for _, info := range pods {
 		scoreTTFT := MaxScore
 		scoreTPOT := MaxScore
+		ttft := info.GetTTFT()
+		tpot := info.GetTPOT()
 		// Only compute normalized score if there's variance in latency values
 		if maxTTFT > minTTFT {
-			scoreTTFT = MaxScore * (maxTTFT - info.TTFT) / (maxTTFT - minTTFT)
+			scoreTTFT = MaxScore * (maxTTFT - ttft) / (maxTTFT - minTTFT)
 		}
 		if maxTPOT > minTPOT {
-			scoreTPOT = MaxScore * (maxTPOT - info.TPOT) / (maxTPOT - minTPOT)
+			scoreTPOT = MaxScore * (maxTPOT - tpot) / (maxTPOT - minTPOT)
 		}
 		scoreResults[info] = int(scoreTTFT*l.TTFTTPOTWeightFactor + scoreTPOT*(1-l.TTFTTPOTWeightFactor))
 	}
@@ -100,25 +102,27 @@ func calculateMinMaxMetrics(pods []*datastore.PodInfo) (minTTFT, maxTTFT, minTPO
 	maxTPOT = 0.0
 
 	for _, info := range pods {
+		ttft := info.GetTTFT()
+		tpot := info.GetTPOT()
 		// Skip pods with invalid values
-		if info.TTFT < 0 || info.TPOT < 0 {
+		if ttft < 0 || tpot < 0 {
 			continue
 		}
 
 		// Update TTFT min/max
-		if info.TTFT < minTTFT {
-			minTTFT = info.TTFT
+		if ttft < minTTFT {
+			minTTFT = ttft
 		}
-		if info.TTFT > maxTTFT {
-			maxTTFT = info.TTFT
+		if ttft > maxTTFT {
+			maxTTFT = ttft
 		}
 
 		// Update TPOT min/max
-		if info.TPOT < minTPOT {
-			minTPOT = info.TPOT
+		if tpot < minTPOT {
+			minTPOT = tpot
 		}
-		if info.TPOT > maxTPOT {
-			maxTPOT = info.TPOT
+		if tpot > maxTPOT {
+			maxTPOT = tpot
 		}
 	}
 
