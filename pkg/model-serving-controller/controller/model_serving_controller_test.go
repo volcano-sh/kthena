@@ -5969,3 +5969,128 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestDeleteOutdatedServingGroups(t *testing.T) {
+	tests := []struct {
+		name                     string
+		partition                int
+		maxScaleDown             int
+		notRunningOutdatedGroups []datastore.ServingGroup
+		runningOutdatedGroups    []datastore.ServingGroup
+		expectedUpdateCount      int
+	}{
+		{
+			name:                     "no groups to delete",
+			partition:                0,
+			maxScaleDown:             2,
+			notRunningOutdatedGroups: []datastore.ServingGroup{},
+			runningOutdatedGroups:    []datastore.ServingGroup{},
+			expectedUpdateCount:      0,
+		},
+		{
+			name:         "delete not running groups only",
+			partition:    0,
+			maxScaleDown: 2,
+			notRunningOutdatedGroups: []datastore.ServingGroup{
+				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"},
+				{Name: "test-group-1", Status: datastore.ServingGroupCreating, Revision: "v1"},
+			},
+			runningOutdatedGroups: []datastore.ServingGroup{},
+			expectedUpdateCount:   2,
+		},
+		{
+			name:                     "delete running groups only",
+			partition:                0,
+			maxScaleDown:             1,
+			notRunningOutdatedGroups: []datastore.ServingGroup{},
+			runningOutdatedGroups: []datastore.ServingGroup{
+				{Name: "test-group-0", Status: datastore.ServingGroupRunning, Revision: "v1"},
+				{Name: "test-group-1", Status: datastore.ServingGroupRunning, Revision: "v1"},
+			},
+			expectedUpdateCount: 1,
+		},
+		{
+			name:         "delete mixed groups with limited maxScaleDown",
+			partition:    0,
+			maxScaleDown: 2,
+			notRunningOutdatedGroups: []datastore.ServingGroup{
+				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"},
+				{Name: "test-group-1", Status: datastore.ServingGroupCreating, Revision: "v1"},
+				{Name: "test-group-2", Status: datastore.ServingGroupCreating, Revision: "v1"},
+			},
+			runningOutdatedGroups: []datastore.ServingGroup{
+				{Name: "test-group-3", Status: datastore.ServingGroupRunning, Revision: "v1"},
+			},
+			expectedUpdateCount: 2, // Limited by maxScaleDown
+		},
+		{
+			name:         "partition protects early groups",
+			partition:    2,
+			maxScaleDown: 5,
+			notRunningOutdatedGroups: []datastore.ServingGroup{
+				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 0, protected
+				{Name: "test-group-1", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 1, protected
+				{Name: "test-group-2", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 2, not protected
+				{Name: "test-group-3", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 3, not protected
+			},
+			runningOutdatedGroups: []datastore.ServingGroup{},
+			expectedUpdateCount:   2, // Only groups with ordinal >= partition are deleted
+		},
+		{
+			name:         "high partition with no deletable groups",
+			partition:    10,
+			maxScaleDown: 5,
+			notRunningOutdatedGroups: []datastore.ServingGroup{
+				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 0, protected
+				{Name: "test-group-1", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 1, protected
+			},
+			runningOutdatedGroups: []datastore.ServingGroup{},
+			expectedUpdateCount:   0, // No groups with ordinal >= partition
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			modelServingClient := kthenafake.NewSimpleClientset()
+			apiextensionsClient := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, modelServingClient, nil, apiextensionsClient)
+			assert.NoError(t, err)
+
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model-serving",
+					Namespace: "default",
+				},
+			}
+
+			controller.store = datastore.New()
+			for _, group := range append(tt.notRunningOutdatedGroups, tt.runningOutdatedGroups...) {
+				_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+				controller.store.AddServingGroup(
+					utils.GetNamespaceName(ms),
+					ordinal,
+					group.Revision,
+				)
+				controller.store.UpdateServingGroupStatus(
+					utils.GetNamespaceName(ms),
+					group.Name,
+					group.Status,
+				)
+			}
+
+			result, err := controller.deleteOutdatedServingGroups(
+				context.Background(),
+				ms,
+				tt.partition,
+				tt.maxScaleDown,
+				tt.notRunningOutdatedGroups,
+				tt.runningOutdatedGroups,
+			)
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedUpdateCount, result)
+		})
+	}
+}
