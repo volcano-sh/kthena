@@ -61,6 +61,9 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 # Install Gateway API Inference Extension CRDs
 echo "Start to install Gateway API Inference Extension CRDs"
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.2.0/manifests.yaml
+# Install LeaderWorkerSet CRDs
+echo "Start to install LeaderWorkerSet CRDs"
+kubectl create -f https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
 
 echo "E2E setup completed successfully"
 echo "Cluster: ${CLUSTER_NAME}"
