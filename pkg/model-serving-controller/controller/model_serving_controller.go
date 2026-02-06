@@ -1917,8 +1917,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	// Record revision history using ControllerRevision before deleting, especially important for partition-protected servingGroups
 	// This ensures that when a partition-protected ServingGroup is deleted (e.g., due to failure),
 	// it can be recreated with its previous revision, following StatefulSet's behavior.
-	group := c.store.GetServingGroup(utils.GetNamespaceName(ms), servingGroupName)
-	if group != nil {
+	if revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroupName); ok {
 		_, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
 		partition := c.getPartition(ms)
 		// Record revision history using ControllerRevision for partition-protected servingGroups
@@ -1926,12 +1925,12 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 			// Create ControllerRevision to persist the revision history
 			// Store the template roles data for this revision
 			templateData := ms.Spec.Template.Roles
-			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, group.Revision, templateData)
+			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, revision, templateData)
 			if err != nil {
-				klog.Warningf("Failed to create ControllerRevision for ServingGroup %s (revision=%s): %v", servingGroupName, group.Revision, err)
+				klog.Warningf("Failed to create ControllerRevision for ServingGroup %s (revision=%s): %v", servingGroupName, revision, err)
 				// Note: We don't fallback to in-memory storage as ControllerRevision is the source of truth
 			} else {
-				klog.V(2).Infof("Created ControllerRevision for partition-protected ServingGroup %s (revision=%s, partition=%d)", servingGroupName, group.Revision, partition)
+				klog.V(2).Infof("Created ControllerRevision for partition-protected ServingGroup %s (revision=%s, partition=%d)", servingGroupName, revision, partition)
 			}
 		}
 	}
