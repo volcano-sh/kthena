@@ -33,7 +33,7 @@ import (
 
 // TestModelCR creates a ModelBooster CR, waits for it to become active, and tests chat functionality.
 func TestModelCR(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a Model CR in the test namespace
 	model := createTestModel()

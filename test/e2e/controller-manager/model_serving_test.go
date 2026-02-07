@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
@@ -42,15 +41,9 @@ import (
 // TestModelServingLifecycle verifies the full lifecycle of a ModelServing resource:
 // Create -> Verify Ready -> Update (change image) -> Verify Updated -> Delete -> Verify Deleted.
 func TestModelServingLifecycle(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
-	kubeConfig, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
-
-	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
-	require.NoError(t, err, "Failed to create Kubernetes client")
-
-	// --- Phase 1: Create ---
+	// Phase 1: Create
 	modelServing := createBasicModelServing("test-lifecycle", 1)
 
 	t.Log("Phase 1: Creating ModelServing")
@@ -73,7 +66,7 @@ func TestModelServingLifecycle(t *testing.T) {
 	}
 	t.Log("Phase 1 passed: ModelServing created and ready")
 
-	// --- Phase 2: Update (change container image) ---
+	// Phase 2: Update (change container image)
 	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing for update")
 
@@ -109,7 +102,7 @@ func TestModelServingLifecycle(t *testing.T) {
 	}, 3*time.Minute, 5*time.Second, "Pod image was not updated to nginx:alpine")
 	t.Log("Phase 2 passed: ModelServing updated successfully")
 
-	// --- Phase 3: Delete ---
+	// Phase 3: Delete
 	t.Log("Phase 3: Deleting ModelServing")
 	err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(ctx, modelServing.Name, metav1.DeleteOptions{})
 	require.NoError(t, err, "Failed to delete ModelServing")
@@ -137,7 +130,7 @@ func TestModelServingLifecycle(t *testing.T) {
 
 // TestModelServingScaleUp tests the ability to scale up a ModelServing's ServingGroup
 func TestModelServingScaleUp(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 1 replica
 	modelServing := createBasicModelServing("test-scale-up", 1)
@@ -184,19 +177,13 @@ func TestModelServingScaleUp(t *testing.T) {
 
 // TestModelServingScaleDown tests the ability to scale down a ModelServing's ServingGroup.
 func TestModelServingScaleDown(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	kubeConfig, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
-
-	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 3 replicas
 	modelServing := createBasicModelServing("test-scale-down", 3)
 
 	t.Log("Creating ModelServing with 3 servingGroup replicas")
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
 
 	t.Cleanup(func() {
@@ -268,13 +255,7 @@ func TestModelServingScaleDown(t *testing.T) {
 
 // TestModelServingRoleScaleUp tests scaling up the role replicas within a ServingGroup.
 func TestModelServingRoleScaleUp(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	kubeConfig, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
-
-	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 1 servingGroup and a prefill role with 1 replica
 	initialRoleReplicas := int32(1)
@@ -301,7 +282,7 @@ func TestModelServingRoleScaleUp(t *testing.T) {
 	})
 
 	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 1 replica")
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
 
 	t.Cleanup(func() {
@@ -360,13 +341,7 @@ func TestModelServingRoleScaleUp(t *testing.T) {
 
 // TestModelServingRoleScaleDown tests scaling down the role replicas within a ServingGroup.
 func TestModelServingRoleScaleDown(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	kubeConfig, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
-
-	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 1 servingGroup and a prefill role with 3 replicas
 	initialRoleReplicas := int32(3)
@@ -393,7 +368,7 @@ func TestModelServingRoleScaleDown(t *testing.T) {
 	})
 
 	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 3 replicas")
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
 
 	t.Cleanup(func() {
@@ -463,13 +438,7 @@ func TestModelServingRoleScaleDown(t *testing.T) {
 // TestModelServingServingGroupRecreate verifies that when a pod is deleted under the
 // ServingGroupRecreate recovery policy, the entire ServingGroup is recreated.
 func TestModelServingServingGroupRecreate(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	kubeConfig, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
-
-	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with ServingGroupRecreate policy and 2 roles
 	prefillRole := createRole("prefill", 1, 0)
@@ -478,7 +447,7 @@ func TestModelServingServingGroupRecreate(t *testing.T) {
 	modelServing.Spec.RecoveryPolicy = workload.ServingGroupRecreate
 
 	t.Log("Creating ModelServing with ServingGroupRecreate policy and 2 roles (prefill + decode)")
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
 
 	t.Cleanup(func() {
@@ -540,19 +509,15 @@ func TestModelServingServingGroupRecreate(t *testing.T) {
 // TestModelServingHeadlessServiceDeleteOnServingGroupDelete verifies that when a ModelServing
 // is scaled down (servingGroups are deleted), the corresponding headless services are also cleaned up.
 func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
-	kubeConfig, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
+	// Create a ModelServing with 3 servingGroup replicas and a WorkerTemplate
+	// so that headless services are actually created by the controller.
+	workerRole := createRole("prefill", 1, 1)
+	modelServing := createBasicModelServing("test-svc-sg-delete", 3, workerRole)
 
-	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
-	require.NoError(t, err, "Failed to create Kubernetes client")
-
-	// Create a ModelServing with 3 servingGroup replicas
-	modelServing := createBasicModelServing("test-svc-sg-delete", 3)
-
-	t.Log("Creating ModelServing with 3 servingGroup replicas")
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	t.Log("Creating ModelServing with 3 servingGroup replicas and WorkerTemplate")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
 
 	t.Cleanup(func() {
@@ -584,6 +549,7 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 		}
 	}
 	t.Logf("Initial headless service count: %d", initialHeadlessCount)
+	require.Equal(t, 3, initialHeadlessCount, "Expected 3 headless services (one per servingGroup)")
 
 	// Scale down to 1 replica (removing 2 servingGroups)
 	scaleDownMS := ms.DeepCopy()
@@ -597,33 +563,30 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	// Wait for the ModelServing to be ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// Verify headless services were cleaned up proportionally
-	if initialHeadlessCount > 0 {
-		require.Eventually(t, func() bool {
-			// Re-read the ModelServing to get latest UID
-			currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-			if err != nil {
-				return false
-			}
-			services, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
-				LabelSelector: labelSelector,
-			})
-			if err != nil {
-				return false
-			}
-			headlessCount := 0
-			for _, svc := range services.Items {
-				for _, ref := range svc.OwnerReferences {
-					if ref.UID == currentMS.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
-						headlessCount++
-						break
-					}
+	// Verify headless services were cleaned up: should go from 3 to exactly 1
+	require.Eventually(t, func() bool {
+		currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		services, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		headlessCount := 0
+		for _, svc := range services.Items {
+			for _, ref := range svc.OwnerReferences {
+				if ref.UID == currentMS.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+					headlessCount++
+					break
 				}
 			}
-			t.Logf("Current headless service count: %d (expecting fewer than %d)", headlessCount, initialHeadlessCount)
-			return headlessCount < initialHeadlessCount
-		}, 2*time.Minute, 5*time.Second, "Headless services were not cleaned up after servingGroup deletion")
-	}
+		}
+		t.Logf("Current headless service count: %d (expecting 1)", headlessCount)
+		return headlessCount == 1
+	}, 2*time.Minute, 5*time.Second, "Headless services were not cleaned up after servingGroup deletion")
 
 	t.Log("ModelServing headless service cleanup on servingGroup delete test passed successfully")
 }
@@ -631,18 +594,14 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 // TestModelServingPodRecovery verifies that when a pod is deleted,
 // the corresponding role can recreate the pod successfully.
 func TestModelServingPodRecovery(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing
 	modelServing := createBasicModelServing("test-pod-recovery", 1)
 	modelServing.Spec.RecoveryPolicy = workload.RoleRecreate
 
 	t.Log("Creating ModelServing for pod recovery test")
-	_, err = kthenaClient.WorkloadV1alpha1().
+	_, err := kthenaClient.WorkloadV1alpha1().
 		ModelServings(testNamespace).
 		Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -712,17 +671,13 @@ func TestModelServingPodRecovery(t *testing.T) {
 // TestModelServingServiceRecovery verifies that when the headless Service
 // is deleted, it can be recreated successfully and ModelServing remains healthy.
 func TestModelServingServiceRecovery(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing
 	modelServing := createBasicModelServing("test-service-recovery", 1)
 
 	t.Log("Creating ModelServing for service recovery test")
-	_, err = kthenaClient.WorkloadV1alpha1().
+	_, err := kthenaClient.WorkloadV1alpha1().
 		ModelServings(testNamespace).
 		Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -817,11 +772,7 @@ func TestModelServingServiceRecovery(t *testing.T) {
 // TestModelServingWithDuplicateHostAliases verifies that ModelServing with duplicate IP hostAliases
 // can be created and pods are running successfully
 func TestModelServingWithDuplicateHostAliases(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with duplicate IP hostAliases
 	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1)
@@ -837,7 +788,7 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 	}
 
 	t.Log("Creating ModelServing with duplicate IP hostAliases")
-	_, err = kthenaClient.WorkloadV1alpha1().
+	_, err := kthenaClient.WorkloadV1alpha1().
 		ModelServings(testNamespace).
 		Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing with duplicate hostAliases")
@@ -915,7 +866,7 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 }
 
 func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 4 replicas and maxUnavailable set to 2
 	replicas := int32(4)
@@ -1057,11 +1008,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 // TestModelServingControllerManagerRestart verifies that ModelServing pod creation
 // is successful even when the controller-manager restarts during reconciliation.
 func TestModelServingControllerManagerRestart(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a complicated ModelServing with multiple roles
 	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
@@ -1070,7 +1017,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	modelServing := createBasicModelServing("test-controller-restart", 5, prefillRole, decodeRole)
 
 	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
-	_, err = kthenaClient.WorkloadV1alpha1().
+	_, err := kthenaClient.WorkloadV1alpha1().
 		ModelServings(testNamespace).
 		Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")

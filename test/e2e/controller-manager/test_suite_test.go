@@ -111,12 +111,14 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func setupControllerManagerE2ETest(t *testing.T) (context.Context, *clientset.Clientset) {
+func setupControllerManagerE2ETest(t *testing.T) (context.Context, *clientset.Clientset, *kubernetes.Clientset) {
 	t.Helper()
 	ctx := context.Background()
 	config, err := utils.GetKubeConfig()
 	require.NoError(t, err, "Failed to get kubeconfig")
 	kthenaClient, err := clientset.NewForConfig(config)
 	require.NoError(t, err, "Failed to create kthena client")
-	return ctx, kthenaClient
+	kubeClient, err := kubernetes.NewForConfig(config)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+	return ctx, kthenaClient, kubeClient
 }
