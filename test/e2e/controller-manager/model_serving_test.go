@@ -39,10 +39,100 @@ import (
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
-// TODO(user): Add E2E tests for ModelServing lifecycle (Create, Update, Delete and check if it works)
+// TestModelServingLifecycle verifies the full lifecycle of a ModelServing resource:
+// Create -> Verify Ready -> Update (change image) -> Verify Updated -> Delete -> Verify Deleted.
 func TestModelServingLifecycle(t *testing.T) {
-	// Placeholder for ModelServing lifecycle tests
-	t.Skip("ModelServing lifecycle test is not implemented yet")
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// --- Phase 1: Create ---
+	modelServing := createBasicModelServing("test-lifecycle", 1)
+
+	t.Log("Phase 1: Creating ModelServing")
+	created, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+	assert.Equal(t, modelServing.Name, created.Name)
+
+	// Wait for ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify pods are running
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.NotEmpty(t, podList.Items, "Expected at least one pod after creation")
+	for _, pod := range podList.Items {
+		assert.Equal(t, corev1.PodRunning, pod.Status.Phase, "Pod %s should be running", pod.Name)
+	}
+	t.Log("Phase 1 passed: ModelServing created and ready")
+
+	// --- Phase 2: Update (change container image) ---
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing for update")
+
+	updatedMS := currentMS.DeepCopy()
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+
+	t.Log("Phase 2: Updating ModelServing (changing image to nginx:alpine)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing")
+
+	// Wait for the update to complete and ModelServing to be ready again
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify the image was updated on pods
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil || len(pods.Items) == 0 {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if pod.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			for _, container := range pod.Spec.Containers {
+				if container.Name == "test-container" && container.Image == "nginx:alpine" {
+					return true
+				}
+			}
+		}
+		return false
+	}, 3*time.Minute, 5*time.Second, "Pod image was not updated to nginx:alpine")
+	t.Log("Phase 2 passed: ModelServing updated successfully")
+
+	// --- Phase 3: Delete ---
+	t.Log("Phase 3: Deleting ModelServing")
+	err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(ctx, modelServing.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete ModelServing")
+
+	// Verify the ModelServing is deleted
+	require.Eventually(t, func() bool {
+		_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		return err != nil // should return NotFound error
+	}, 2*time.Minute, 5*time.Second, "ModelServing was not deleted")
+
+	// Verify that associated pods are cleaned up
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		return len(pods.Items) == 0
+	}, 2*time.Minute, 5*time.Second, "Pods were not cleaned up after ModelServing deletion")
+
+	t.Log("Phase 3 passed: ModelServing deleted and pods cleaned up")
+	t.Log("ModelServing lifecycle test passed successfully")
 }
 
 // TestModelServingScaleUp tests the ability to scale up a ModelServing's ServingGroup
@@ -90,6 +180,452 @@ func TestModelServingScaleUp(t *testing.T) {
 	assert.Equal(t, int32(3), finalMS.Status.AvailableReplicas, "Final ModelServing should have 3 available replicas")
 
 	t.Log("ModelServing scale up test passed successfully")
+}
+
+// TestModelServingScaleDown tests the ability to scale down a ModelServing's ServingGroup.
+func TestModelServingScaleDown(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a basic ModelServing with 3 replicas
+	modelServing := createBasicModelServing("test-scale-down", 3)
+
+	t.Log("Creating ModelServing with 3 servingGroup replicas")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+	})
+
+	// Wait for the initial ModelServing to be ready
+	t.Log("Waiting for initial ModelServing (3 servingGroup replicas) to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify initial state - should have 3 replicas
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(3), *initialMS.Spec.Replicas, "Initial ModelServing should have 3 replicas")
+	assert.Equal(t, int32(3), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 3 available replicas")
+
+	// Verify we have the expected number of pods
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods before scale down")
+	initialPodCount := len(podList.Items)
+	t.Logf("Initial pod count: %d", initialPodCount)
+
+	// Update the ModelServing to scale down to 1 replica
+	scaleDownMS := initialMS.DeepCopy()
+	newReplicas := int32(1)
+	scaleDownMS.Spec.Replicas = &newReplicas
+
+	t.Log("Updating ModelServing to scale down to 1 replica")
+	updatedMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for scale down")
+
+	// Verify the spec was updated
+	assert.Equal(t, int32(1), *updatedMS.Spec.Replicas, "Updated ModelServing should have 1 replica in spec")
+
+	// Wait for the scaled-down ModelServing to be ready
+	t.Log("Waiting for scaled-down ModelServing (1 replica) to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+
+	// Final verification - should have 1 replica
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get final ModelServing")
+	assert.Equal(t, int32(1), *finalMS.Spec.Replicas, "Final ModelServing should have 1 replica in spec")
+	assert.Equal(t, int32(1), finalMS.Status.AvailableReplicas, "Final ModelServing should have 1 available replica")
+
+	// Verify pod count has decreased
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		runningCount := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
+				runningCount++
+			}
+		}
+		t.Logf("Current running pod count: %d (expecting 1)", runningCount)
+		return runningCount == 1
+	}, 2*time.Minute, 5*time.Second, "Pod count did not decrease to expected value after scale down")
+
+	t.Log("ModelServing scale down test passed successfully")
+}
+
+// TestModelServingRoleScaleUp tests scaling up the role replicas within a ServingGroup.
+func TestModelServingRoleScaleUp(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a ModelServing with 1 servingGroup and a prefill role with 1 replica
+	initialRoleReplicas := int32(1)
+	modelServing := createBasicModelServing("test-role-scale-up", 1, workload.Role{
+		Name:     "prefill",
+		Replicas: &initialRoleReplicas,
+		EntryTemplate: workload.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "nginx:latest",
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "http",
+								ContainerPort: 80,
+							},
+						},
+					},
+				},
+			},
+		},
+		WorkerReplicas: 0,
+	})
+
+	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 1 replica")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+	})
+
+	// Wait for ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Count initial pods
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	initialPodCount := len(podList.Items)
+	t.Logf("Initial pod count: %d", initialPodCount)
+
+	// Scale up the role replicas from 1 to 3
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing for role scale up")
+
+	updatedMS := currentMS.DeepCopy()
+	newRoleReplicas := int32(3)
+	updatedMS.Spec.Template.Roles[0].Replicas = &newRoleReplicas
+
+	t.Log("Updating ModelServing to scale up prefill role to 3 replicas")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for role scale up")
+
+	// Wait for the ModelServing to be ready with the new role replicas
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify the pod count increased
+	// With 1 servingGroup and 3 role replicas (each with 1 entry pod), we expect 3 pods
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		runningCount := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
+				runningCount++
+			}
+		}
+		t.Logf("Current running pod count after role scale up: %d (expecting 3)", runningCount)
+		return runningCount == 3
+	}, 3*time.Minute, 5*time.Second, "Pod count did not increase after role scale up")
+
+	t.Log("ModelServing role scale up test passed successfully")
+}
+
+// TestModelServingRoleScaleDown tests scaling down the role replicas within a ServingGroup.
+func TestModelServingRoleScaleDown(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a ModelServing with 1 servingGroup and a prefill role with 3 replicas
+	initialRoleReplicas := int32(3)
+	modelServing := createBasicModelServing("test-role-scale-down", 1, workload.Role{
+		Name:     "prefill",
+		Replicas: &initialRoleReplicas,
+		EntryTemplate: workload.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "nginx:latest",
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "http",
+								ContainerPort: 80,
+							},
+						},
+					},
+				},
+			},
+		},
+		WorkerReplicas: 0,
+	})
+
+	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 3 replicas")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+	})
+
+	// Wait for ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Count initial pods (expect 3: 1 servingGroup × 3 role replicas × 1 entry pod)
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		runningCount := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == corev1.PodRunning {
+				runningCount++
+			}
+		}
+		return runningCount == 3
+	}, 3*time.Minute, 5*time.Second, "Expected 3 running pods initially")
+
+	t.Log("Verified 3 running pods initially")
+
+	// Scale down the role replicas from 3 to 1
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing for role scale down")
+
+	updatedMS := currentMS.DeepCopy()
+	newRoleReplicas := int32(1)
+	updatedMS.Spec.Template.Roles[0].Replicas = &newRoleReplicas
+
+	t.Log("Updating ModelServing to scale down prefill role to 1 replica")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for role scale down")
+
+	// Wait for the ModelServing to be ready with the new role replicas
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify the pod count decreased to 1
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		runningCount := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
+				runningCount++
+			}
+		}
+		t.Logf("Current running pod count after role scale down: %d (expecting 1)", runningCount)
+		return runningCount == 1
+	}, 3*time.Minute, 5*time.Second, "Pod count did not decrease after role scale down")
+
+	t.Log("ModelServing role scale down test passed successfully")
+}
+
+// TestModelServingServingGroupRecreate verifies that when a pod is deleted under the
+// ServingGroupRecreate recovery policy, the entire ServingGroup is recreated.
+func TestModelServingServingGroupRecreate(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a ModelServing with ServingGroupRecreate policy and 2 roles
+	prefillRole := createRole("prefill", 1, 0)
+	decodeRole := createRole("decode", 1, 0)
+	modelServing := createBasicModelServing("test-sg-recreate", 1, prefillRole, decodeRole)
+	modelServing.Spec.RecoveryPolicy = workload.ServingGroupRecreate
+
+	t.Log("Creating ModelServing with ServingGroupRecreate policy and 2 roles (prefill + decode)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+	})
+
+	// Wait until ModelServing is ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Collect all pod UIDs before deletion
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.Len(t, podList.Items, 2, "Expected 2 pods (1 prefill + 1 decode)")
+
+	originalUIDs := make(map[string]bool)
+	for _, pod := range podList.Items {
+		originalUIDs[string(pod.UID)] = true
+		t.Logf("Original pod: %s (UID: %s)", pod.Name, pod.UID)
+	}
+
+	// Delete just one pod (e.g., the first one) to trigger ServingGroupRecreate
+	targetPod := podList.Items[0]
+	t.Logf("Deleting pod %s to trigger ServingGroupRecreate", targetPod.Name)
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete pod")
+
+	// Wait for ALL pods to be recreated with new UIDs (entire serving group should be recreated)
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil || len(pods.Items) < 2 {
+			return false
+		}
+
+		readyNewPods := 0
+		for _, pod := range pods.Items {
+			// Must be a new pod (not in original UIDs) and must be ready
+			if !originalUIDs[string(pod.UID)] && pod.DeletionTimestamp == nil {
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+						readyNewPods++
+						break
+					}
+				}
+			}
+		}
+		t.Logf("New ready pods: %d (expecting 2 for full ServingGroup recreate)", readyNewPods)
+		return readyNewPods >= 2
+	}, 3*time.Minute, 5*time.Second, "ServingGroup was not fully recreated after pod deletion under ServingGroupRecreate policy")
+
+	t.Log("ModelServing ServingGroupRecreate test passed successfully")
+}
+
+// TestModelServingHeadlessServiceDeleteOnServingGroupDelete verifies that when a ModelServing
+// is scaled down (servingGroups are deleted), the corresponding headless services are also cleaned up.
+func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a ModelServing with 3 servingGroup replicas
+	modelServing := createBasicModelServing("test-svc-sg-delete", 3)
+
+	t.Log("Creating ModelServing with 3 servingGroup replicas")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+	})
+
+	// Wait for ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Get the ModelServing UID
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
+
+	// Count initial headless services owned by this ModelServing
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list services")
+
+	initialHeadlessCount := 0
+	for _, svc := range serviceList.Items {
+		for _, ref := range svc.OwnerReferences {
+			if ref.UID == ms.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+				initialHeadlessCount++
+				break
+			}
+		}
+	}
+	t.Logf("Initial headless service count: %d", initialHeadlessCount)
+
+	// Scale down to 1 replica (removing 2 servingGroups)
+	scaleDownMS := ms.DeepCopy()
+	newReplicas := int32(1)
+	scaleDownMS.Spec.Replicas = &newReplicas
+
+	t.Log("Scaling down ModelServing to 1 replica to trigger servingGroup deletion")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for scale down")
+
+	// Wait for the ModelServing to be ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify headless services were cleaned up proportionally
+	if initialHeadlessCount > 0 {
+		require.Eventually(t, func() bool {
+			// Re-read the ModelServing to get latest UID
+			currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			services, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+				LabelSelector: labelSelector,
+			})
+			if err != nil {
+				return false
+			}
+			headlessCount := 0
+			for _, svc := range services.Items {
+				for _, ref := range svc.OwnerReferences {
+					if ref.UID == currentMS.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+						headlessCount++
+						break
+					}
+				}
+			}
+			t.Logf("Current headless service count: %d (expecting fewer than %d)", headlessCount, initialHeadlessCount)
+			return headlessCount < initialHeadlessCount
+		}, 2*time.Minute, 5*time.Second, "Headless services were not cleaned up after servingGroup deletion")
+	}
+
+	t.Log("ModelServing headless service cleanup on servingGroup delete test passed successfully")
 }
 
 // TestModelServingPodRecovery verifies that when a pod is deleted,
