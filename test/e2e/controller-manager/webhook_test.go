@@ -28,7 +28,7 @@ import (
 
 // TestWebhook tests that the webhooks (validation and mutation) work as expected.
 func TestWebhook(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	testCases := []struct {
 		name          string
