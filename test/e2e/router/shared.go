@@ -18,6 +18,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -33,12 +34,23 @@ import (
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/restmapper"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const (
-	defaultMetricsURL = "http://127.0.0.1:8080/metrics"
+	defaultMetricsURL      = "http://127.0.0.1:8080/metrics"
+	defaultPollingInterval = 2 * time.Second
+	defaultScalingTimeout  = 3 * time.Minute
 )
 
 func getCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
@@ -67,6 +79,31 @@ func getHistogramCount(metrics map[string]*dto.MetricFamily, metricName string, 
 	return 0
 }
 
+func isPodReady(pod corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForDeploymentReady(t *testing.T, ctx context.Context, kubeClient kubernetes.Interface, namespace, name string, replicas int32, timeout time.Duration) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(ctx, defaultPollingInterval, timeout, true, func(ctx context.Context) (bool, error) {
+		deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, nil
+		}
+		return deploy.Status.ReadyReplicas >= replicas, nil
+	})
+	require.NoError(t, err, "Deployment %q did not become ready after scaling to %d replicas within %v", name, replicas, timeout)
+}
+
 func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bool {
 	labelMap := make(map[string]string)
 	for _, lp := range metricLabels {
@@ -78,6 +115,151 @@ func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bo
 		}
 	}
 	return true
+}
+
+func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
+	t.Helper()
+	ctx := context.Background()
+
+	config, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	require.NoError(t, err, "Failed to create dynamic client")
+
+	const redisManifestPath = "examples/redis/redis-standalone.yaml"
+
+	redisObjects := utils.LoadUnstructuredYAMLFromFile(redisManifestPath)
+	require.NotEmpty(t, redisObjects, "Redis manifest is empty")
+
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(kubeClient.Discovery()))
+	type createdResourceRef struct {
+		gvr       schema.GroupVersionResource
+		namespace string
+		name      string
+	}
+	createdRefs := make([]createdResourceRef, 0, len(redisObjects))
+	var redisDeploymentName string
+
+	for _, obj := range redisObjects {
+		if obj.GetKind() == "Deployment" && redisDeploymentName == "" {
+			redisDeploymentName = obj.GetName()
+		}
+		gvk := obj.GroupVersionKind()
+		mapping, mapErr := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		require.NoError(t, mapErr, "Failed to map GVK %s", gvk.String())
+
+		resourceClient := dynamicClient.Resource(mapping.Resource)
+		namespaceToUse := obj.GetNamespace()
+		resource := func() dynamic.ResourceInterface {
+			if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+				if namespaceToUse == "" {
+					namespaceToUse = namespace
+					obj.SetNamespace(namespaceToUse)
+				}
+				return resourceClient.Namespace(namespaceToUse)
+			}
+			return resourceClient
+		}()
+
+		_, createErr := resource.Create(ctx, obj, metav1.CreateOptions{})
+		if createErr != nil {
+			require.True(t, apierrors.IsAlreadyExists(createErr), "Failed to create %s/%s: %v", gvk.Kind, obj.GetName(), createErr)
+			continue
+		}
+
+		createdRefs = append(createdRefs, createdResourceRef{
+			gvr:       mapping.Resource,
+			namespace: namespaceToUse,
+			name:      obj.GetName(),
+		})
+	}
+
+	require.NotEmpty(t, redisDeploymentName, "Redis Deployment not found in manifest")
+
+	waitForDeploymentReady(t, ctx, kubeClient, namespace, redisDeploymentName, 1, 2*time.Minute)
+	t.Log("Redis is ready")
+
+	return func() {
+		cleanupCtx := context.Background()
+		for i := len(createdRefs) - 1; i >= 0; i-- {
+			ref := createdRefs[i]
+			resourceClient := dynamicClient.Resource(ref.gvr)
+			if ref.namespace != "" {
+				_ = resourceClient.Namespace(ref.namespace).Delete(cleanupCtx, ref.name, metav1.DeleteOptions{})
+			} else {
+				_ = resourceClient.Delete(cleanupCtx, ref.name, metav1.DeleteOptions{})
+			}
+		}
+	}
+}
+
+func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namespace string, replicas int32) func() {
+	t.Helper()
+	ctx := context.Background()
+	const deploymentName = "kthena-router"
+
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get kthena-router deployment")
+
+	originalReplicas := int32(1)
+	if deployment.Spec.Replicas != nil {
+		originalReplicas = *deployment.Spec.Replicas
+	}
+	if originalReplicas != replicas {
+		t.Logf("Scaling kthena-router from %d to %d replicas", originalReplicas, replicas)
+		deployment.Spec.Replicas = &replicas
+		_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to scale kthena-router deployment")
+	}
+
+	waitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, replicas, defaultScalingTimeout)
+	t.Log("kthena-router deployment is ready")
+
+	return func() {
+		if originalReplicas == replicas {
+			return
+		}
+		restoreCtx := context.Background()
+		deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(restoreCtx, deploymentName, metav1.GetOptions{})
+		if err != nil {
+			return
+		}
+		deploy.Spec.Replicas = &originalReplicas
+		_, _ = kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{})
+	}
+}
+
+func getRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace string) []corev1.Pod {
+	t.Helper()
+	ctx := context.Background()
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, "kthena-router", metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router deployment")
+
+	labelSelector := ""
+	for key, value := range deployment.Spec.Selector.MatchLabels {
+		if labelSelector != "" {
+			labelSelector += ","
+		}
+		labelSelector += key + "=" + value
+	}
+
+	pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list router pods")
+	require.NotEmpty(t, pods.Items, "No router pods found")
+
+	readyPods := make([]corev1.Pod, 0, len(pods.Items))
+	for _, pod := range pods.Items {
+		if isPodReady(pod) {
+			readyPods = append(readyPods, pod)
+		}
+	}
+	require.NotEmpty(t, readyPods, "No ready router pods found")
+	t.Logf("Found %d ready router pods", len(readyPods))
+
+	return readyPods
 }
 
 // setupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
@@ -789,6 +971,238 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			"Expected at least one successful request before output rate limiting")
 
 		t.Logf(" Output token rate limit enforced after %d requests", successfulRequests)
+	})
+}
+
+// TestModelRouteWithGlobalRateLimitShared tests global rate limiting (Redis-backed).
+func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayApi bool, kthenaNamespace string) {
+	const (
+		inputTokenLimit = 30
+		maxRequests     = 20
+	)
+	ctx := context.Background()
+
+	redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
+	t.Cleanup(redisCleanup)
+
+	scaleCleanup := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 3)
+	t.Cleanup(scaleCleanup)
+
+	standardMessage := []utils.ChatMessage{
+		utils.NewChatMessage("user", "hello world"),
+	}
+
+	buildModelRoute := func(name, modelName, redisAddr string) *networkingv1alpha1.ModelRoute {
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithGlobalRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		modelRoute.Name = name
+		modelRoute.Spec.ModelName = modelName
+		if modelRoute.Spec.RateLimit != nil {
+			inputLimit := uint32(inputTokenLimit)
+			modelRoute.Spec.RateLimit.InputTokensPerUnit = &inputLimit
+			modelRoute.Spec.RateLimit.Unit = networkingv1alpha1.Minute
+			if modelRoute.Spec.RateLimit.Global != nil && modelRoute.Spec.RateLimit.Global.Redis != nil {
+				modelRoute.Spec.RateLimit.Global.Redis.Address = redisAddr
+			}
+		}
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		return modelRoute
+	}
+
+	t.Run("VerifyRedisConnectionConfiguration", func(t *testing.T) {
+		modelName := "deepseek-global-redis-" + utils.RandomString(5)
+		redisAddr := fmt.Sprintf("redis-server.%s.svc.cluster.local:6379", kthenaNamespace)
+		modelRoute := buildModelRoute("deepseek-global-redis", modelName, redisAddr)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		if createdModelRoute.Spec.RateLimit != nil {
+			createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
+
+		createdModelRoute, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to update ModelRoute")
+
+		var successCount int
+		for i := 0; i < maxRequests; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				successCount++
+				continue
+			}
+			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "Expected rate limit after successes")
+			break
+		}
+		assert.Greater(t, successCount, 0, "Expected at least one successful request before rate limiting")
+	})
+
+	t.Run("VerifyGlobalRateLimitSharingAcrossInstances", func(t *testing.T) {
+		modelName := "deepseek-global-sharing-" + utils.RandomString(5)
+		redisAddr := fmt.Sprintf("redis-server.%s.svc.cluster.local:6379", kthenaNamespace)
+		modelRoute := buildModelRoute("deepseek-global-sharing", modelName, redisAddr)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		pods := getRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+		require.GreaterOrEqual(t, len(pods), 3, "Need at least three router pods for global sharing test")
+
+		pf1, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[0].Name, "18080", "8080")
+		require.NoError(t, err, "Failed to port-forward to router pod 1")
+		t.Cleanup(pf1.Close)
+
+		pf2, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[1].Name, "18081", "8080")
+		require.NoError(t, err, "Failed to port-forward to router pod 2")
+		t.Cleanup(pf2.Close)
+
+		pf3, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[2].Name, "18082", "8080")
+		require.NoError(t, err, "Failed to port-forward to router pod 3")
+		t.Cleanup(pf3.Close)
+
+		urls := []string{
+			"http://127.0.0.1:18080/v1/chat/completions",
+			"http://127.0.0.1:18081/v1/chat/completions",
+			"http://127.0.0.1:18082/v1/chat/completions",
+		}
+
+		if createdModelRoute.Spec.RateLimit != nil {
+			createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
+
+		createdModelRoute, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to update ModelRoute")
+
+		successByURL := make(map[string]int)
+		for i := 0; i < maxRequests; i++ {
+			url := urls[i%len(urls)]
+			resp := utils.SendChatRequestWithRetry(t, url, createdModelRoute.Spec.ModelName, standardMessage, nil)
+			if resp.StatusCode == http.StatusOK {
+				successByURL[url]++
+				continue
+			}
+			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "Global rate limit should be enforced across instances")
+			break
+		}
+		assert.Greater(t, successByURL[urls[0]]+successByURL[urls[1]]+successByURL[urls[2]], 0, "Expected successful requests before rate limiting")
+	})
+
+	t.Run("VerifyFallbackWhenRedisUnavailable", func(t *testing.T) {
+		modelName := "deepseek-global-fallback-" + utils.RandomString(5)
+		redisAddr := "redis-server.invalid.svc.cluster.local:6379"
+		modelRoute := buildModelRoute("deepseek-global-fallback", modelName, redisAddr)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		if createdModelRoute.Spec.RateLimit != nil {
+			createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
+
+		createdModelRoute, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to update ModelRoute")
+
+		for i := 0; i < 5; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed without Redis", i+1)
+		}
+	})
+
+	t.Run("VerifyMultipleModelRoutesSharingGlobalRateLimit", func(t *testing.T) {
+		modelName := "deepseek-global-multi-" + utils.RandomString(5)
+		redisAddr := fmt.Sprintf("redis-server.%s.svc.cluster.local:6379", kthenaNamespace)
+
+		premiumRoute := buildModelRoute("deepseek-global-premium", modelName, redisAddr)
+		premium := "premium"
+		premiumRoute.Spec.Rules[0].ModelMatch = &networkingv1alpha1.ModelMatch{
+			Headers: map[string]*networkingv1alpha1.StringMatch{
+				"user-type": {Exact: &premium},
+			},
+		}
+
+		defaultRoute := buildModelRoute("deepseek-global-default", modelName, redisAddr)
+
+		createdPremium, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, premiumRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create premium ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdPremium.Name, metav1.DeleteOptions{})
+		})
+
+		createdDefault, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, defaultRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create default ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdDefault.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdPremium.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "Premium ModelRoute should be created")
+
+		if createdPremium.Spec.RateLimit != nil {
+			createdPremium.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
+		if createdDefault.Spec.RateLimit != nil {
+			createdDefault.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
+		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdPremium, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to update premium ModelRoute")
+		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdDefault, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to update default ModelRoute")
+
+		headers := map[string]string{"user-type": "premium"}
+		var premiumSuccess, defaultSuccess int
+		for i := 0; i < maxRequests; i++ {
+			var resp *utils.ChatCompletionsResponse
+			if i%2 == 0 {
+				resp = utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, modelName, standardMessage, headers)
+				if resp.StatusCode == http.StatusOK {
+					premiumSuccess++
+					continue
+				}
+			} else {
+				resp = utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, modelName, standardMessage, nil)
+				if resp.StatusCode == http.StatusOK {
+					defaultSuccess++
+					continue
+				}
+			}
+			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "Rate limit should be shared across ModelRoutes")
+			break
+		}
+		assert.Greater(t, premiumSuccess, 0, "Expected premium requests to succeed before rate limiting")
+		assert.Greater(t, defaultSuccess, 0, "Expected default requests to succeed before rate limiting")
 	})
 }
 
