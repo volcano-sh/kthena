@@ -226,12 +226,6 @@ func TestModelServingScaleDown(t *testing.T) {
 	t.Log("Waiting for scaled-down ModelServing (1 replica) to be ready")
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
 
-	// Final verification - should have 1 replica
-	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get final ModelServing")
-	assert.Equal(t, int32(1), *finalMS.Spec.Replicas, "Final ModelServing should have 1 replica in spec")
-	assert.Equal(t, int32(1), finalMS.Status.AvailableReplicas, "Final ModelServing should have 1 available replica")
-
 	// Verify pod count has decreased
 	require.Eventually(t, func() bool {
 		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
@@ -249,6 +243,16 @@ func TestModelServingScaleDown(t *testing.T) {
 		t.Logf("Current running pod count: %d (expecting 1)", runningCount)
 		return runningCount == 1
 	}, 2*time.Minute, 5*time.Second, "Pod count did not decrease to expected value after scale down")
+
+	// Final verification - wait for status to converge
+	require.Eventually(t, func() bool {
+		finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		t.Logf("AvailableReplicas: %d (expecting 1)", finalMS.Status.AvailableReplicas)
+		return *finalMS.Spec.Replicas == 1 && finalMS.Status.AvailableReplicas == 1
+	}, 2*time.Minute, 5*time.Second, "ModelServing status did not converge to 1 available replica")
 
 	t.Log("ModelServing scale down test passed successfully")
 }
@@ -673,8 +677,9 @@ func TestModelServingPodRecovery(t *testing.T) {
 func TestModelServingServiceRecovery(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
-	// Create a basic ModelServing
-	modelServing := createBasicModelServing("test-service-recovery", 1)
+	// Create a ModelServing with a WorkerTemplate so that headless services are created
+	workerRole := createRole("prefill", 1, 1)
+	modelServing := createBasicModelServing("test-service-recovery", 1, workerRole)
 
 	t.Log("Creating ModelServing for service recovery test")
 	_, err := kthenaClient.WorkloadV1alpha1().
