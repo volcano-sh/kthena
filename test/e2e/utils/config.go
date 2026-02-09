@@ -104,7 +104,6 @@ func LoadMultiResourceYAMLFromFile[T any](path string) []*T {
 // LoadUnstructuredYAMLFromFile loads a multi-resource YAML file and returns each resource as an Unstructured object.
 func LoadUnstructuredYAMLFromFile(path string) []*unstructured.Unstructured {
 	_, filename, _, _ := runtime.Caller(0)
-	// Current file is test/e2e/utils/config.go, project root is 3 levels up
 	projectRoot := filepath.Join(filepath.Dir(filename), "..", "..", "..")
 	absPath := filepath.Join(projectRoot, path)
 

@@ -977,7 +977,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 // TestModelRouteWithGlobalRateLimitShared tests global rate limiting (Redis-backed).
 func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayApi bool, kthenaNamespace string) {
 	const (
-		inputTokenLimit = 30
+		inputTokenLimit = 300
 		maxRequests     = 20
 	)
 	ctx := context.Background()
@@ -989,7 +989,7 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 	t.Cleanup(scaleCleanup)
 
 	standardMessage := []utils.ChatMessage{
-		utils.NewChatMessage("user", "hello world"),
+		utils.NewChatMessage("user", "hi"),
 	}
 
 	buildModelRoute := func(name, modelName, redisAddr string) *networkingv1alpha1.ModelRoute {
@@ -1001,6 +1001,7 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			inputLimit := uint32(inputTokenLimit)
 			modelRoute.Spec.RateLimit.InputTokensPerUnit = &inputLimit
 			modelRoute.Spec.RateLimit.Unit = networkingv1alpha1.Minute
+			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil // only test input limit; avoid output limit 429
 			if modelRoute.Spec.RateLimit.Global != nil && modelRoute.Spec.RateLimit.Global.Redis != nil {
 				modelRoute.Spec.RateLimit.Global.Redis.Address = redisAddr
 			}
@@ -1025,13 +1026,6 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
-
-		if createdModelRoute.Spec.RateLimit != nil {
-			createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-
-		createdModelRoute, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update ModelRoute")
 
 		var successCount int
 		for i := 0; i < maxRequests; i++ {
@@ -1085,13 +1079,6 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			"http://127.0.0.1:18082/v1/chat/completions",
 		}
 
-		if createdModelRoute.Spec.RateLimit != nil {
-			createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-
-		createdModelRoute, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update ModelRoute")
-
 		successByURL := make(map[string]int)
 		for i := 0; i < maxRequests; i++ {
 			url := urls[i%len(urls)]
@@ -1122,13 +1109,6 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
-
-		if createdModelRoute.Spec.RateLimit != nil {
-			createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-
-		createdModelRoute, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update ModelRoute")
 
 		for i := 0; i < 5; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
@@ -1169,17 +1149,6 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdPremium.Name, metav1.GetOptions{})
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "Premium ModelRoute should be created")
-
-		if createdPremium.Spec.RateLimit != nil {
-			createdPremium.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		if createdDefault.Spec.RateLimit != nil {
-			createdDefault.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdPremium, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update premium ModelRoute")
-		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdDefault, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update default ModelRoute")
 
 		headers := map[string]string{"user-type": "premium"}
 		var premiumSuccess, defaultSuccess int
