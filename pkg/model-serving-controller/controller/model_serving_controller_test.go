@@ -5973,7 +5973,6 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 func TestDeleteOutdatedServingGroups(t *testing.T) {
 	tests := []struct {
 		name                     string
-		partition                int
 		maxScaleDown             int
 		notRunningOutdatedGroups []datastore.ServingGroup
 		runningOutdatedGroups    []datastore.ServingGroup
@@ -5981,7 +5980,6 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 	}{
 		{
 			name:                     "no groups to delete",
-			partition:                0,
 			maxScaleDown:             2,
 			notRunningOutdatedGroups: []datastore.ServingGroup{},
 			runningOutdatedGroups:    []datastore.ServingGroup{},
@@ -5989,7 +5987,6 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 		},
 		{
 			name:         "delete not running groups only",
-			partition:    0,
 			maxScaleDown: 2,
 			notRunningOutdatedGroups: []datastore.ServingGroup{
 				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"},
@@ -6000,7 +5997,6 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 		},
 		{
 			name:                     "delete running groups only",
-			partition:                0,
 			maxScaleDown:             1,
 			notRunningOutdatedGroups: []datastore.ServingGroup{},
 			runningOutdatedGroups: []datastore.ServingGroup{
@@ -6011,7 +6007,6 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 		},
 		{
 			name:         "delete mixed groups with limited maxScaleDown",
-			partition:    0,
 			maxScaleDown: 2,
 			notRunningOutdatedGroups: []datastore.ServingGroup{
 				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"},
@@ -6022,30 +6017,6 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 				{Name: "test-group-3", Status: datastore.ServingGroupRunning, Revision: "v1"},
 			},
 			expectedUpdateCount: 2, // Limited by maxScaleDown
-		},
-		{
-			name:         "partition protects early groups",
-			partition:    2,
-			maxScaleDown: 5,
-			notRunningOutdatedGroups: []datastore.ServingGroup{
-				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 0, protected
-				{Name: "test-group-1", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 1, protected
-				{Name: "test-group-2", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 2, not protected
-				{Name: "test-group-3", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 3, not protected
-			},
-			runningOutdatedGroups: []datastore.ServingGroup{},
-			expectedUpdateCount:   2, // Only groups with ordinal >= partition are deleted
-		},
-		{
-			name:         "high partition with no deletable groups",
-			partition:    10,
-			maxScaleDown: 5,
-			notRunningOutdatedGroups: []datastore.ServingGroup{
-				{Name: "test-group-0", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 0, protected
-				{Name: "test-group-1", Status: datastore.ServingGroupCreating, Revision: "v1"}, // ordinal 1, protected
-			},
-			runningOutdatedGroups: []datastore.ServingGroup{},
-			expectedUpdateCount:   0, // No groups with ordinal >= partition
 		},
 	}
 
@@ -6083,7 +6054,6 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 			result, err := controller.deleteOutdatedServingGroups(
 				context.Background(),
 				ms,
-				tt.partition,
 				tt.maxScaleDown,
 				tt.notRunningOutdatedGroups,
 				tt.runningOutdatedGroups,

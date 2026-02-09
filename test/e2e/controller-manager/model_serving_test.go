@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
@@ -592,4 +593,148 @@ func createInvalidModelServing() *workload.ModelServing {
 			},
 		},
 	}
+}
+
+// TestModelServingRollingUpdateMaxUnavailableWithBadImage tests maxUnavailable constraint when transitioning to bad image
+func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 6 replicas and maxUnavailable set to 2
+	replicas := int32(6)
+	modelServing := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rolling-update-bad-image",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas: &replicas,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+					MaxUnavailable: &intstr.IntOrString{
+						IntVal: 2,
+					},
+				},
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Creating ModelServing with 6 replicas and maxUnavailable=2")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Log("Waiting for initial ModelServing to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify initial state
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(6), *initialMS.Spec.Replicas, "Initial ModelServing should have 6 replicas")
+	assert.Equal(t, int32(6), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 6 available replicas")
+
+	// Update to bad image
+	badImageMS := initialMS.DeepCopy()
+	badImageMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:nonexistent-image-99999"
+
+	t.Log("Updating ModelServing with bad image")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, badImageMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing with bad image")
+
+	// Monitor unavailable replicas during bad image rolling update
+	maxObservedUnavailable := int32(0)
+	var mu sync.Mutex
+	observedUnavailableHistory := []int32{}
+
+	watcherCtx, watcherCancel := context.WithCancel(context.Background())
+	defer watcherCancel()
+
+	go func() {
+		watcher, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Watch(watcherCtx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("metadata.name=%s", badImageMS.Name),
+		})
+		if err != nil {
+			return
+		}
+		defer watcher.Stop()
+
+		for {
+			select {
+			case <-watcherCtx.Done():
+				return
+			case event, ok := <-watcher.ResultChan():
+				if !ok {
+					return
+				}
+
+				if event.Type == watch.Added || event.Type == watch.Modified {
+					if ms, ok := event.Object.(*workload.ModelServing); ok {
+						totalReplicas := ms.Status.Replicas
+						availableReplicas := ms.Status.AvailableReplicas
+						unavailableReplicas := totalReplicas - availableReplicas
+
+						mu.Lock()
+						if unavailableReplicas > maxObservedUnavailable {
+							maxObservedUnavailable = unavailableReplicas
+						}
+						observedUnavailableHistory = append(observedUnavailableHistory, unavailableReplicas)
+						mu.Unlock()
+					}
+				}
+			}
+		}
+	}()
+
+	// Monitor for 60 seconds to observe the rolling update behavior with bad image
+	t.Log("Monitoring rolling update with bad image for 60 seconds")
+	time.Sleep(60 * time.Second)
+
+	// Verify that maxUnavailable constraint is ALWAYS respected
+	mu.Lock()
+	for i, unavailable := range observedUnavailableHistory {
+		if unavailable > 2 {
+			t.Errorf("At observation %d: unavailable replicas (%d) exceeded maxUnavailable (2)", i, unavailable)
+		}
+	}
+	mu.Unlock()
+
+	assert.True(t, maxObservedUnavailable <= 2, "Max unavailable replicas (%d) exceeded maxUnavailable limit (2)", maxObservedUnavailable)
+	t.Logf("Maximum observed unavailable replicas: %d", maxObservedUnavailable)
+
+	// Verify current state - should not exceed maxUnavailable
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, badImageMS.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get current ModelServing")
+	currentUnavailable := currentMS.Status.Replicas - currentMS.Status.AvailableReplicas
+	assert.True(t, currentUnavailable <= 2, "Current unavailable replicas (%d) should not exceed maxUnavailable (2)", currentUnavailable)
+
+	t.Logf("Final status - Total: %d, Available: %d, Unavailable: %d",
+		currentMS.Status.Replicas, currentMS.Status.AvailableReplicas, currentUnavailable)
+
+	watcherCancel()
+
+	t.Log("ModelServing rolling update maxUnavailable with bad image test passed successfully")
 }

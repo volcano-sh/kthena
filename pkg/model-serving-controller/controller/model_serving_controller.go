@@ -992,6 +992,10 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	// We prioritize updating not-running outdated groups first
 	var notRunningOutdatedGroups []datastore.ServingGroup
 	var runningOutdatedGroups []datastore.ServingGroup
+	if partition >= len(servingGroupList) {
+		// All servingGroups are protected by partition, so we should not update any group. Return directly.
+		return nil
+	}
 	groupsAfterPartition := servingGroupList[partition:]
 
 	newServingGroupUnavailableCount := 0
@@ -1023,7 +1027,7 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	}
 
 	// Delete outdated groups respecting the maxUnavailable constraint
-	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, partition, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups)
+	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups)
 	if err != nil {
 		return err
 	}
@@ -1039,7 +1043,6 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 func (c *ModelServingController) deleteOutdatedServingGroups(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
-	partition int,
 	maxScaleDown int,
 	notRunningOutdatedGroups []datastore.ServingGroup,
 	runningOutdatedGroups []datastore.ServingGroup,
@@ -1051,16 +1054,7 @@ func (c *ModelServingController) deleteOutdatedServingGroups(
 		for i := len(groups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
 			sg := groups[i]
 
-			// Check partition constraint
-			if partition > 0 {
-				_, ordinal := utils.GetParentNameAndOrdinal(sg.Name)
-				if ordinal < partition {
-					// Skip partition-protected ServingGroups
-					break
-				}
-			}
-
-			klog.V(2).Infof("ServingGroup %s will be terminated for update (status=%s, partition=%d)", sg.Name, sg.Status, partition)
+			klog.V(2).Infof("ServingGroup %s will be terminated for update (status=%s)", sg.Name, sg.Status)
 			if err := c.deleteServingGroup(ctx, ms, sg.Name); err != nil {
 				return err
 			}
