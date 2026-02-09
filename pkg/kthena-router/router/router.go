@@ -186,21 +186,13 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		defer func() {
 			// Decrement downstream request count when request completes
 			r.metrics.DecActiveDownstreamRequests(modelName)
-			if metricsRecorder != nil {
-				statusCode := strconv.Itoa(c.Writer.Status())
-				reason := "successful_request"
-				if r, exists := c.Get("finishReason"); exists {
-					reason = r.(string)
-				}
-				metricsRecorder.Finish(statusCode, reason)
-			}
 		}()
 
 		prompt, err := utils.ParsePrompt(modelRequest)
 		if err != nil {
 			accesslog.SetError(c, "prompt_parsing", "prompt not found")
 			c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
-			c.Set("finishReason", "prompt_parsing")
+			metricsRecorder.Finish(strconv.Itoa(http.StatusNotFound), "prompt_parsing")
 			return
 		}
 		promptStr := utils.GetPromptString(prompt)
@@ -245,7 +237,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			// Record rate limit exceeded
 			metricsRecorder.RecordRateLimitExceeded(tokenType)
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
-			c.Set("finishReason", "rate_limit")
+			metricsRecorder.Finish(strconv.Itoa(http.StatusTooManyRequests), "rate_limit")
 			return
 		}
 
@@ -266,7 +258,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// step 3.2: load balancing for Fairness scheduling enabled case
 		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName); err != nil {
 			accesslog.SetError(c, "scheduling", err.Error())
-			c.Set("finishReason", "scheduling")
+			metricsRecorder.Finish(strconv.Itoa(c.Writer.Status()), "scheduling")
 			return
 		}
 	}
@@ -371,6 +363,17 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 			metricsRecorder = rec
 		}
 	}
+
+	// Defer metrics recording to ensure it happens on all paths
+	defer func() {
+		if metricsRecorder != nil {
+			errorType := ""
+			if c.Writer.Status() >= 400 {
+				errorType = "proxy"
+			}
+			metricsRecorder.Finish(strconv.Itoa(c.Writer.Status()), errorType)
+		}
+	}()
 
 	// Get PDGroup if available (only for ModelServer)
 	var pdGroup *v1alpha1.PDGroup
@@ -785,8 +788,11 @@ func proxyRequest(
 				if parsed.Usage.CompletionTokens > 0 {
 					klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 
-					// The token usage is set by router, so remove it before sending to downstream
+					// The token usage is set by router, so skip forwarding this metadata line to downstream
 					if v, ok := c.Get(common.TokenUsageKey); ok && v.(bool) {
+						if onUsage != nil {
+							onUsage(parsed)
+						}
 						return true
 					}
 					if onUsage != nil {
