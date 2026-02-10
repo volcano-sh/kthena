@@ -841,12 +841,13 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 	utils.LoadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-B", "/models/lora-B")
 	t.Log("LoRA adapters loaded successfully")
 
-	t.Log("Waiting for Router to discover LoRA adapters on pods...")
-	time.Sleep(5 * time.Second)
-
 	messages := []utils.ChatMessage{
 		utils.NewChatMessage("user", "Hello"),
 	}
+
+	t.Log("Waiting for Router to discover LoRA adapters on pods...")
+	utils.WaitForChatModelReady(t, utils.DefaultRouterURL, "lora-A", messages, 60*time.Second)
+	utils.WaitForChatModelReady(t, utils.DefaultRouterURL, "lora-B", messages, 60*time.Second)
 
 	// Verify LoRA adapter parameter passing and support for multiple LoRA adapters
 	t.Run("VerifyLoRAAdapterParameterPassing", func(t *testing.T) {
