@@ -18,6 +18,7 @@ package utils
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 const (
@@ -193,6 +195,38 @@ func CheckChatCompletionsQuiet(t *testing.T, modelName string, messages []ChatMe
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
 	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
 	return resp
+}
+
+// WaitForChatModelReady polls until the chat model is routable (returns 200).
+// Use before assertions when the router may need time to discover new models.
+func WaitForChatModelReady(t *testing.T, url, modelName string, messages []ChatMessage, timeout time.Duration) {
+	t.Helper()
+	requestBody := ChatCompletionsRequest{Model: modelName, Messages: messages, Stream: false}
+	jsonData, err := json.Marshal(requestBody)
+	require.NoError(t, err)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err = wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return false, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Logf("WaitForChatModelReady(%s): %v, retrying...", modelName, err)
+			return false, nil
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && !containsError(string(body)) {
+			return true, nil
+		}
+		return false, nil
+	})
+	require.NoError(t, err, "Model %s did not become ready within %v", modelName, timeout)
 }
 
 // containsError checks if the response string contains error indicators
