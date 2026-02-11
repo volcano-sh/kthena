@@ -62,7 +62,7 @@ jobs:
             echo "Logs exported to /tmp/kind-logs"
             ls -la /tmp/kind-logs/ || true
           else
-            echo "No kind clusters found (cluster may have been created with different name or not yet created)."
+            echo "No kind clusters found."
           fi
       - name: Upload logs on failure
         if: failure()
