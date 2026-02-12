@@ -1147,7 +1147,7 @@ func createInvalidModelServing() *workload.ModelServing {
 
 // TestModelServingRollingUpdateMaxUnavailableWithBadImage tests maxUnavailable constraint when transitioning to bad image
 func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 6 replicas and maxUnavailable set to 2
 	replicas := int32(6)
@@ -1295,7 +1295,7 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 // 3. Verifying pods are created automatically
 // 4. Deleting LWS and verifying all resources are cleaned up
 func TestLWSAPIBasic(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create Clients
 	lwsClient, err := utils.GetLWSClient()
@@ -1408,7 +1408,7 @@ func TestLWSAPIBasic(t *testing.T) {
 	t.Log("Waiting for ModelServing to be deleted")
 	require.Eventually(t, func() bool {
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, lwsName, metav1.GetOptions{})
-		return errors.IsNotFound(err)
+		return apierrors.IsNotFound(err)
 	}, 2*time.Minute, 2*time.Second, "ModelServing was not deleted after LWS deletion")
 
 	// Wait for all pods to be deleted
