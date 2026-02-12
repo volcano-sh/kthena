@@ -1,0 +1,146 @@
+# This example demonstrates how to trigger a rolling update by modifying
+# the networkTopology policy in a ModelServing resource.
+#
+# Usage:
+# 1. Apply this YAML to create the initial deployment with tier-1 constraint
+# 2. Modify spec.template.networkTopology.groupPolicy.highestTierAllowed from 1 to 2
+# 3. Apply again - this will trigger a rolling update
+# 4. Use partition field to control canary deployments (update only a subset of replicas)
+#
+# The controller will:
+# - Detect the template change via revision hash
+# - Create a new ControllerRevision
+# - Perform rolling update respecting rolloutStrategy settings
+# - Reschedule pods with the new topology constraints
+
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: topology-rolling-update-demo
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 3  # Create 3 servingGroup instances
+
+  # Rolling update strategy with partition support
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    rollingUpdateConfiguration:
+      maxUnavailable: 1  # Update one replica at a time
+      # partition: 1     # Uncomment to protect replica-0 from updates (canary deployment)
+
+  template:
+    restartGracePeriodSeconds: 60
+
+    # Network topology configuration - changing this will trigger rolling update
+    networkTopology:
+      groupPolicy:
+        mode: hard
+        highestTierAllowed: 1  # Start with tier-1 constraint
+        # To trigger rolling update, change this to:
+        # highestTierAllowed: 2
+      rolePolicy:
+        mode: hard
+        highestTierAllowed: 1
+
+    # Prefill-Decode disaggregation pattern
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          metadata:
+            labels:
+              role: prefill-entry
+          spec:
+            containers:
+              - name: vllm-prefill
+                image: nginx  # Replace with actual vLLM image
+                ports:
+                  - containerPort: 8000
+                    name: http
+                resources:
+                  limits:
+                    cpu: "2"
+                    memory: "4Gi"
+                  requests:
+                    cpu: "2"
+                    memory: "4Gi"
+        workerReplicas: 2
+        workerTemplate:
+          metadata:
+            labels:
+              role: prefill-worker
+          spec:
+            containers:
+              - name: vllm-prefill-worker
+                image: nginx  # Replace with actual vLLM image
+                resources:
+                  limits:
+                    cpu: "1"
+                    memory: "2Gi"
+                  requests:
+                    cpu: "1"
+                    memory: "2Gi"
+
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          metadata:
+            labels:
+              role: decode-entry
+          spec:
+            containers:
+              - name: vllm-decode
+                image: nginx  # Replace with actual vLLM image
+                ports:
+                  - containerPort: 8001
+                    name: http
+                resources:
+                  limits:
+                    cpu: "2"
+                    memory: "4Gi"
+                  requests:
+                    cpu: "2"
+                    memory: "4Gi"
+        workerReplicas: 2
+        workerTemplate:
+          metadata:
+            labels:
+              role: decode-worker
+          spec:
+            containers:
+              - name: vllm-decode-worker
+                image: nginx  # Replace with actual vLLM image
+                resources:
+                  limits:
+                    cpu: "1"
+                    memory: "2Gi"
+                  requests:
+                    cpu: "1"
+                    memory: "2Gi"
+
+---
+# Example: Canary deployment with partition
+#
+# Step 1: Deploy with partition=2 (protects replicas 0-1 from updates)
+# apiVersion: workload.serving.volcano.sh/v1alpha1
+# kind: ModelServing
+# metadata:
+#   name: topology-rolling-update-demo
+#   namespace: default
+# spec:
+#   replicas: 3
+#   rolloutStrategy:
+#     type: ServingGroupRollingUpdate
+#     rollingUpdateConfiguration:
+#       maxUnavailable: 1
+#       partition: 2  # Only replica-2 will be updated
+#   template:
+#     networkTopology:
+#       groupPolicy:
+#         mode: hard
+#         highestTierAllowed: 2  # Changed from 1 to 2
+#     # ... rest of template
+#
+# This will update only replica-2, keeping replicas 0-1 on the old topology.
+# Once validated, set partition: 0 to roll out to all replicas.

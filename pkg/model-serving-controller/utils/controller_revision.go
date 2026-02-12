@@ -122,8 +122,8 @@ func GetControllerRevision(
 	return cr, nil
 }
 
-// GetRolesFromControllerRevision extracts roles template data from a ControllerRevision
-func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1alpha1.Role, error) {
+// GetTemplateFromControllerRevision extracts the full ServingGroup template from a ControllerRevision
+func GetTemplateFromControllerRevision(cr *appsv1.ControllerRevision) (*workloadv1alpha1.ServingGroup, error) {
 	if cr == nil || cr.Data.Raw == nil {
 		return nil, fmt.Errorf("ControllerRevision or its data is nil")
 	}
@@ -132,21 +132,41 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 	var wrapper map[string]json.RawMessage
 	if err := json.Unmarshal(cr.Data.Raw, &wrapper); err == nil {
 		if rawData, ok := wrapper["data"]; ok {
-			var roles []workloadv1alpha1.Role
-			if err := json.Unmarshal(rawData, &roles); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal roles from wrapped data: %v", err)
+			var template workloadv1alpha1.ServingGroup
+			if err := json.Unmarshal(rawData, &template); err != nil {
+				// Backward compatibility: try to unmarshal as roles only
+				var roles []workloadv1alpha1.Role
+				if err := json.Unmarshal(rawData, &roles); err == nil {
+					return &workloadv1alpha1.ServingGroup{Roles: roles}, nil
+				}
+				return nil, fmt.Errorf("failed to unmarshal template from wrapped data: %v", err)
 			}
-			return roles, nil
+			return &template, nil
 		}
 	}
 
 	// Fallback: try to unmarshal directly (for backward compatibility or if not wrapped)
-	var roles []workloadv1alpha1.Role
-	if err := json.Unmarshal(cr.Data.Raw, &roles); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal roles from ControllerRevision: %v", err)
+	var template workloadv1alpha1.ServingGroup
+	if err := json.Unmarshal(cr.Data.Raw, &template); err != nil {
+		// Backward compatibility: try to unmarshal as roles only
+		var roles []workloadv1alpha1.Role
+		if err := json.Unmarshal(cr.Data.Raw, &roles); err == nil {
+			return &workloadv1alpha1.ServingGroup{Roles: roles}, nil
+		}
+		return nil, fmt.Errorf("failed to unmarshal template from ControllerRevision: %v", err)
 	}
 
-	return roles, nil
+	return &template, nil
+}
+
+// GetRolesFromControllerRevision extracts roles template data from a ControllerRevision
+// Deprecated: Use GetTemplateFromControllerRevision and access .Roles instead
+func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1alpha1.Role, error) {
+	template, err := GetTemplateFromControllerRevision(cr)
+	if err != nil {
+		return nil, err
+	}
+	return template.Roles, nil
 }
 
 // CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
