@@ -51,6 +51,70 @@ spec:
         highestTierAllowed: 2
 ```
 
+### SubGroup
+
+Starting with kthena version 0.3.0, kthena utilizes `subGroupPolicy` within `podGroup` for multidimensional network topology aware scheduling.
+
+`RolePolicy` is configured within the subGroupPolicy. Following **Volcano 1.14**, podGroup introduced subGroupPolicy.
+
+```yaml
+subGroupPolicy: 
+- subGroupSize: 3
+  minSubGroups: 2
+  name: task
+  matchPolicy:
+    - labelKey: volcano.sh/task-subgroup-id
+  networkTopology:
+    mode: hard 
+    highestTierAllowed: 1
+```
+
+A `subGroupPolicy` has been added to the `podGroup` to ensure task-level gang scheduling and network topology.
+
+- `subGroupSize`: The number of pods in a subGroup.
+- `minSubGroups`: The minimum replicas of subGroups.
+- `matchPolicy`: The label key used to match pods.
+- `networkTopology`: The network topology of a subGroup.
+
+After configuring NetworkTopology, the following podGroup will be created:
+
+```yaml
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: PodGroup
+metadata:
+  name: network-topology-podgroup
+spec:
+  networkTopology:
+    mode: hard 
+    highestTierAllowed: 2
+  minResources:
+    cpu: 600m
+  subGroupPolicy: 
+  - labelSelector:
+      matchLabels:
+        modelserving.volcano.sh/name: sample
+        modelserving.volcano.sh/role: prefill
+    matchLabelKeys:
+    - modelserving.volcano.sh/role-id
+    minSubGroups: 2
+    name: prefill
+    subGroupSize: 1
+    networkTopology:
+      mode: hard
+      highestTierAllowed: 1
+```
+
+When creating a pod, ModelServing will add some labels to it. For example, `modelServing controller` creates a prefill-0 pod, this pod will add the following labels:
+
+```yaml
+modelserving.volcano.sh/group-name
+modelserving.volcano.sh/name
+modelserving.volcano.sh/role
+modelserving.volcano.sh/role-id
+```
+
+So Volcano can use the labels "modelserving.volcano.sh/role" and "modelserving.volcano.sh/role-id" to group the pods that need to be deployed.
+
 ### Prerequisites
 
 - A running Kubernetes cluster with Kthena installed.
