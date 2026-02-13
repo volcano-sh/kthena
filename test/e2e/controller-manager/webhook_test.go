@@ -17,18 +17,41 @@ limitations under the License.
 package controller_manager
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// waitForWebhookReady waits until the webhook is ready to accept connections.
+func waitForWebhookReady(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	probe := createValidModelBoosterForWebhookTest()
+	for time.Now().Before(deadline) {
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
+		if err == nil {
+			return
+		}
+		if !strings.Contains(err.Error(), "connect: connection refused") {
+			t.Fatalf("Webhook probe failed: %v", err)
+		}
+		t.Logf("Webhook not ready, retrying: %v", err)
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("Webhook did not become ready within timeout")
+}
+
 // TestWebhook tests that the webhooks (validation and mutation) work as expected.
 func TestWebhook(t *testing.T) {
 	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	waitForWebhookReady(t, ctx, kthenaClient, 2*time.Minute) // avoid flaky "connection refused" before webhook is ready
 
 	testCases := []struct {
 		name          string
