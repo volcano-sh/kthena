@@ -223,6 +223,75 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	}
 }
 
+func TestDefaultPanicThreshold_DoOptimize_NoPanic(t *testing.T) {
+	ns := "ns"
+	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-nil-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-nil-b", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
+	client := clientfake.NewSimpleClientset(msA, msB)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 10\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	paramA := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-nil-a"}, MetricEndpoint: workload.MetricEndpoint{Uri: u.Path, Port: port}}, MinReplicas: 1, MaxReplicas: 5, Cost: 10}
+	paramB := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-nil-b"}, MetricEndpoint: workload.MetricEndpoint{Uri: u.Path, Port: port}}, MinReplicas: 2, MaxReplicas: 4, Cost: 20}
+	// PanicThresholdPercent set to CRD default of 200 — per API guarantee this is never nil
+	var threshold int32 = 200
+	policy := &workload.AutoscalingPolicy{Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{MetricName: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: 1 * time.Second}, PanicThresholdPercent: &threshold}}}}}
+	binding := &workload.AutoscalingPolicyBinding{ObjectMeta: metav1.ObjectMeta{Name: "binding-nil", Namespace: ns}, Spec: workload.AutoscalingPolicyBindingSpec{PolicyRef: corev1.LocalObjectReference{Name: "ap"}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
+
+	lbsA := map[string]string{}
+	lbsB := map[string]string{}
+	pods := []*corev1.Pod{readyPod(ns, "pod-nil-a", host, lbsA), readyPod(ns, "pod-nil-b", host, lbsB)}
+	ac := &AutoscaleController{client: client, namespace: ns, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+
+	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doOptimize should not error with default PanicThresholdPercent: %v", err)
+	}
+}
+
+func TestSetPanicThreshold_DoOptimize_PanicModeWorks(t *testing.T) {
+	ns := "ns"
+	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-panic-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-panic-b", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
+	client := clientfake.NewSimpleClientset(msA, msB)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 100\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	paramA := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-panic-a"}, MetricEndpoint: workload.MetricEndpoint{Uri: u.Path, Port: port}}, MinReplicas: 1, MaxReplicas: 5, Cost: 10}
+	paramB := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-panic-b"}, MetricEndpoint: workload.MetricEndpoint{Uri: u.Path, Port: port}}, MinReplicas: 2, MaxReplicas: 4, Cost: 20}
+	// PanicThresholdPercent set to 200 — with load=100, recommended will far exceed threshold
+	var threshold int32 = 200
+	policy := &workload.AutoscalingPolicy{Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{MetricName: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: 1 * time.Second}, PanicThresholdPercent: &threshold}}}}}
+	binding := &workload.AutoscalingPolicyBinding{ObjectMeta: metav1.ObjectMeta{Name: "binding-panic", Namespace: ns}, Spec: workload.AutoscalingPolicyBindingSpec{PolicyRef: corev1.LocalObjectReference{Name: "ap"}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
+
+	lbsA := map[string]string{}
+	lbsB := map[string]string{}
+	pods := []*corev1.Pod{readyPod(ns, "pod-panic-a", host, lbsA), readyPod(ns, "pod-panic-b", host, lbsB)}
+	ac := &AutoscaleController{client: client, namespace: ns, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+
+	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doOptimize error: %v", err)
+	}
+	updates := 0
+	for _, a := range client.Fake.Actions() {
+		if a.GetVerb() == "update" && a.GetResource().Resource == "modelservings" {
+			updates++
+		}
+	}
+	if updates == 0 {
+		t.Fatalf("expected update actions when PanicThresholdPercent is set, got 0")
+	}
+}
+
 func httpHandlerWithBody(body string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) })
 }
