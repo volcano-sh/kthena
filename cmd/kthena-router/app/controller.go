@@ -117,12 +117,12 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		}
 
 		gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
-		gatewayController := controller.NewGatewayController(gatewayInformerFactory, store)
+		gatewayController := controller.NewGatewayController(gatewayClient, gatewayInformerFactory, store)
 
 		// Gateway API Inference Extension controllers are optional
 		var httpRouteController *controller.HTTPRouteController
 		if enableGatewayAPIInferenceExtension {
-			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, store)
+			httpRouteController = controller.NewHTTPRouteController(gatewayClient, gatewayInformerFactory, store)
 		}
 
 		// Start informer factory after all controllers that use it are created
@@ -143,7 +143,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 				klog.Fatalf("Error building dynamic client: %s", err.Error())
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
-			inferencePoolController := controller.NewInferencePoolController(dynamicInformerFactory, store)
+			inferencePoolController := controller.NewInferencePoolController(dynamicClient, dynamicInformerFactory, store)
 
 			dynamicInformerFactory.Start(stop)
 

@@ -174,6 +174,10 @@ func TestDuplicateModelName(t *testing.T) {
 	assert.NotNil(t, createdModelRoute1)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute1.Namespace, createdModelRoute1.Name)
 
+	// Wait for ModelRoute to be ready
+	err = utils.WaitForModelRouteReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelRoute1.Name)
+	require.NoError(t, err, "ModelRoute did not become ready in time")
+
 	// Register cleanup for ModelRoute1
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
@@ -193,6 +197,10 @@ func TestDuplicateModelName(t *testing.T) {
 	require.NoError(t, err, "Failed to create custom Gateway")
 	assert.NotNil(t, createdGateway)
 	t.Logf("Created Gateway: %s/%s", createdGateway.Namespace, createdGateway.Name)
+
+	// Wait for Gateway to be ready
+	err = utils.WaitForGatewayReady(t, ctx, testCtx.GatewayClient, kthenaNamespace, createdGateway.Name)
+	require.NoError(t, err, "Gateway did not become ready in time")
 
 	// Register cleanup for Gateway
 	t.Cleanup(func() {
@@ -272,6 +280,10 @@ func TestDuplicateModelName(t *testing.T) {
 	require.NoError(t, err, "Failed to create ModelRoute for custom Gateway")
 	assert.NotNil(t, createdModelRoute2)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute2.Namespace, createdModelRoute2.Name)
+
+	// Wait for ModelRoute to be ready
+	err = utils.WaitForModelRouteReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelRoute2.Name)
+	require.NoError(t, err, "ModelRoute did not become ready in time")
 
 	// Register cleanup for ModelRoute2
 	t.Cleanup(func() {

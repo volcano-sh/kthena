@@ -318,6 +318,19 @@ func (m *MockStore) GetAllInferencePools() []*inferencev1.InferencePool {
 	return args.Get(0).([]*inferencev1.InferencePool)
 }
 
+func (m *MockStore) SetListenerStatus(gatewayKey, listenerName string, err error) {
+	m.Called(gatewayKey, listenerName, err)
+}
+
+func (m *MockStore) GetListenerStatus(gatewayKey, listenerName string) error {
+	args := m.Called(gatewayKey, listenerName)
+	return args.Error(0)
+}
+
+func (m *MockStore) RemoveListenerStatus(gatewayKey, listenerName string) {
+	m.Called(gatewayKey, listenerName)
+}
+
 func TestListModelRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

@@ -17,13 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -34,6 +38,7 @@ import (
 )
 
 type InferencePoolController struct {
+	dynamicClient         dynamic.Interface
 	inferencePoolInformer cache.SharedIndexInformer
 	inferencePoolSynced   cache.InformerSynced
 	registration          cache.ResourceEventHandlerRegistration
@@ -44,6 +49,7 @@ type InferencePoolController struct {
 }
 
 func NewInferencePoolController(
+	dynamicClient dynamic.Interface,
 	dynamicInformerFactory dynamicinformer.DynamicSharedInformerFactory,
 	store datastore.Store,
 ) *InferencePoolController {
@@ -51,6 +57,7 @@ func NewInferencePoolController(
 	inferencePoolInformer := dynamicInformerFactory.ForResource(gvr).Informer()
 
 	controller := &InferencePoolController{
+		dynamicClient:         dynamicClient,
 		inferencePoolInformer: inferencePoolInformer,
 		inferencePoolSynced:   inferencePoolInformer.HasSynced,
 		workqueue:             workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
@@ -151,7 +158,30 @@ func (c *InferencePoolController) syncHandler(key string) error {
 		return fmt.Errorf("failed to convert unstructured to InferencePool: %w", err)
 	}
 
-	return c.store.AddOrUpdateInferencePool(inferencePool)
+	if err := c.store.AddOrUpdateInferencePool(inferencePool); err != nil {
+		return err
+	}
+
+	return c.updateInferencePoolStatus(inferencePool)
+}
+
+func (s *InferencePoolController) updateInferencePoolStatus(inferencePool *inferencev1.InferencePool) error {
+	inferencePool = inferencePool.DeepCopy()
+
+	// TODO: Implement proper InferencePool status updates according to version 1.2.0 spec.
+	// In version 1.2.0, InferencePool status is per-parent.
+	// Finding and updating individual parent status requires traversing HTTPRoutes referencing this pool.
+
+	// Convert back to unstructured to update status
+	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(inferencePool)
+	if err != nil {
+		return fmt.Errorf("failed to convert InferencePool to unstructured: %w", err)
+	}
+
+	unstructuredObj := &unstructured.Unstructured{Object: content}
+	gvr := inferencev1.SchemeGroupVersion.WithResource("inferencepools")
+	_, err = s.dynamicClient.Resource(gvr).Namespace(inferencePool.Namespace).UpdateStatus(context.Background(), unstructuredObj, metav1.UpdateOptions{})
+	return err
 }
 
 func (c *InferencePoolController) enqueueInferencePool(obj interface{}) {
