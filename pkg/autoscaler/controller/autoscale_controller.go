@@ -181,7 +181,7 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 	if target.TargetRef.Kind == "" || target.TargetRef.Kind == workload.ModelServingKind.Kind {
 		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get ModelServing %s/%s: %w", namespaceScope, targetRef.Name, err)
 		}
 		instance_copy := instance.DeepCopy()
 
@@ -202,9 +202,11 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 				}
 			}
 		}
-		if _, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{}); err == nil {
-			return nil
+		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update ModelServing %s/%s replicas to %d: %w", namespaceScope, targetRef.Name, replicas, err)
 		}
+		return nil
 	}
 	return fmt.Errorf("target ref kind %s, name: %s not supported", targetRef.Kind, targetRef.Name)
 }
@@ -279,15 +281,18 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 		replicasMap[param.Target.TargetRef.Name] = currentInstancesCount
 	}
 
-	// Get recommended replicas
-	recommendedInstances, err := optimizer.Optimize(ctx, ac.podsLister, autoscalePolicy, replicasMap)
+	// Get recommended replicas (does NOT update history yet)
+	optimizeResult, err := optimizer.Optimize(ctx, ac.podsLister, autoscalePolicy, replicasMap)
 	if err != nil {
 		klog.Errorf("failed to do optimize, err: %v", err)
 		return err
 	}
-	// Do update replicas
+	if optimizeResult == nil || optimizeResult.Skip {
+		return nil
+	}
+	// Do update replicas for all targets
 	for _, param := range optimizer.Meta.Config.Params {
-		instancesCount, exists := recommendedInstances[param.Target.TargetRef.Name]
+		instancesCount, exists := optimizeResult.ReplicasMap[param.Target.TargetRef.Name]
 		if !exists {
 			klog.Warningf("recommended instances not exists, target ref name: %s", param.Target.TargetRef.Name)
 			continue
@@ -297,6 +302,8 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 			return err
 		}
 	}
+	// Commit history ONLY after all API updates succeed to prevent phantom scale events
+	optimizer.CommitOptimizeResult(optimizeResult)
 
 	return nil
 }
@@ -316,22 +323,24 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 		klog.Errorf("failed to get current replicas, err: %v", err)
 		return err
 	}
-	// Get recommended replicas
+	// Get recommended replicas (does NOT update history yet)
 	klog.InfoS("do homogeneous scaling for target", "targetRef", target.TargetRef, "currentInstancesCount", currentInstancesCount)
-	recommendedInstances, err := scaler.Scale(ctx, ac.podsLister, autoscalePolicy, currentInstancesCount)
+	scaleResult, err := scaler.Scale(ctx, ac.podsLister, autoscalePolicy, currentInstancesCount)
 	if err != nil {
 		klog.Errorf("failed to do homogeneous scaling for target %s, err: %v", target.TargetRef.Name, err)
 		return err
 	}
-	if recommendedInstances < 0 {
+	if scaleResult == nil || scaleResult.Skip {
 		return nil
 	}
 	// Do update replicas
-	if err := ac.updateTargetReplicas(ctx, &target, recommendedInstances); err != nil {
+	if err := ac.updateTargetReplicas(ctx, &target, scaleResult.CorrectedInstances); err != nil {
 		klog.Errorf("failed to update target replicas %s, err: %v", target.TargetRef.Name, err)
 		return err
 	}
-	klog.InfoS("successfully update target replicas", "targetRef", target.TargetRef, "recommendedInstances", recommendedInstances)
+	// Commit history ONLY after successful API update to prevent phantom scale events
+	scaler.CommitScaleResult(scaleResult)
+	klog.InfoS("successfully update target replicas", "targetRef", target.TargetRef, "recommendedInstances", scaleResult.CorrectedInstances)
 	return nil
 }
 
