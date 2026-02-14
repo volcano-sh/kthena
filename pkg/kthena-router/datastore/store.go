@@ -40,6 +40,7 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/translation"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
@@ -270,6 +271,14 @@ type store struct {
 	httpRouteMutex sync.RWMutex
 	httpRoutes     map[string]*gatewayv1.HTTPRoute // key: namespace/name, value: *gatewayv1.HTTPRoute
 	gatewayRoutes  map[string]sets.Set[string]     // key: gateway key (namespace/name), value: set of HTTPRoute keys
+
+	// Translation tracking maps
+	translationMutex         sync.RWMutex
+	translatedModelServers   map[string]*translation.TranslationMetadata // key: translated ModelServer name (namespace/name)
+	translatedModelRoutes    map[string]*translation.TranslationMetadata // key: translated ModelRoute name (namespace/name)
+	pathBasedRoutes          map[string][]*aiv1alpha1.ModelRoute         // key: path pattern prefix, value: list of ModelRoutes
+	wildcardRoutes           []*aiv1alpha1.ModelRoute                    // ModelRoutes with wildcard model name for path-based matching
+
 	// New fields for callback management
 	callbacks map[string][]CallbackFunc
 
@@ -282,19 +291,23 @@ type store struct {
 
 func New() Store {
 	return &store{
-		modelServer:         sync.Map{},
-		pods:                sync.Map{},
-		routeInfo:           make(map[string]*modelRouteInfo),
-		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
-		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-		gatewayModelRoutes:  make(map[string]sets.Set[string]),
-		gateways:            make(map[string]*gatewayv1.Gateway),
-		inferencePools:      make(map[string]*inferencev1.InferencePool),
-		httpRoutes:          make(map[string]*gatewayv1.HTTPRoute),
-		gatewayRoutes:       make(map[string]sets.Set[string]),
-		callbacks:           make(map[string][]CallbackFunc),
-		initialSynced:       &atomic.Bool{},
-		requestWaitingQueue: sync.Map{},
+		modelServer:             sync.Map{},
+		pods:                    sync.Map{},
+		routeInfo:               make(map[string]*modelRouteInfo),
+		routes:                  make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:              make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes:      make(map[string]sets.Set[string]),
+		gateways:                make(map[string]*gatewayv1.Gateway),
+		inferencePools:          make(map[string]*inferencev1.InferencePool),
+		httpRoutes:              make(map[string]*gatewayv1.HTTPRoute),
+		gatewayRoutes:           make(map[string]sets.Set[string]),
+		translatedModelServers:  make(map[string]*translation.TranslationMetadata),
+		translatedModelRoutes:   make(map[string]*translation.TranslationMetadata),
+		pathBasedRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		wildcardRoutes:          make([]*aiv1alpha1.ModelRoute, 0),
+		callbacks:               make(map[string][]CallbackFunc),
+		initialSynced:           &atomic.Bool{},
+		requestWaitingQueue:     sync.Map{},
 		// Create token tracker with environment-based configuration
 		tokenTracker: createTokenTracker(),
 	}
@@ -791,11 +804,10 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 	} else {
 		// Try to find routes by lora name
 		loraRoutes, ok := s.loraRoutes[model]
-		if !ok {
-			return types.NamespacedName{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
+		if ok {
+			candidateRoutes = loraRoutes
+			isLora = true
 		}
-		candidateRoutes = loraRoutes
-		isLora = true
 	}
 
 	// Try each ModelRoute until we find one that matches
@@ -836,8 +848,86 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		return types.NamespacedName{Namespace: mr.Namespace, Name: dst.ModelServerName}, isLora, mr, nil
 	}
 
+	// Fallback to path-based routes (for translated HTTPRoute->ModelRoute)
+	if req != nil {
+		if result, mr, err := s.matchPathBasedRoute(req, gatewayKey); err == nil {
+			return result, false, mr, nil
+		}
+	}
+
 	// No matching ModelRoute found
 	return types.NamespacedName{}, false, nil, fmt.Errorf("no matching ModelRoute found for model %s", model)
+}
+
+// matchPathBasedRoute matches a request against path-based routes (translated from HTTPRoute)
+// Must be called with routeMutex held
+func (s *store) matchPathBasedRoute(req *http.Request, gatewayKey string) (types.NamespacedName, *aiv1alpha1.ModelRoute, error) {
+	s.translationMutex.RLock()
+	wildcardRoutes := s.wildcardRoutes
+	s.translationMutex.RUnlock()
+
+	if len(wildcardRoutes) == 0 {
+		return types.NamespacedName{}, nil, fmt.Errorf("no path-based routes available")
+	}
+
+	// Try each wildcard route
+	for _, mr := range wildcardRoutes {
+		// Check parentRefs if specified
+		if len(mr.Spec.ParentRefs) > 0 {
+			if gatewayKey != "" {
+				if !s.matchesSpecificGateway(mr, gatewayKey) {
+					continue
+				}
+			} else {
+				continue
+			}
+		} else {
+			if gatewayKey != "" {
+				continue
+			}
+		}
+
+		// Try to match rules by path
+		for _, rule := range mr.Spec.Rules {
+			if rule.ModelMatch == nil {
+				// No match condition means match all
+				dst, err := s.selectDestination(rule.TargetModels)
+				if err != nil {
+					continue
+				}
+				return types.NamespacedName{Namespace: mr.Namespace, Name: dst.ModelServerName}, mr, nil
+			}
+
+			// Check URI match
+			if rule.ModelMatch.Uri != nil {
+				if !matchString(rule.ModelMatch.Uri, req.URL.Path) {
+					continue
+				}
+			}
+
+			// Check header matches
+			headersMatched := true
+			for key, sm := range rule.ModelMatch.Headers {
+				reqValue := req.Header.Get(key)
+				if !matchString(sm, reqValue) {
+					headersMatched = false
+					break
+				}
+			}
+			if !headersMatched {
+				continue
+			}
+
+			// Found a match
+			dst, err := s.selectDestination(rule.TargetModels)
+			if err != nil {
+				continue
+			}
+			return types.NamespacedName{Namespace: mr.Namespace, Name: dst.ModelServerName}, mr, nil
+		}
+	}
+
+	return types.NamespacedName{}, nil, fmt.Errorf("no matching path-based route found")
 }
 
 // matchesSpecificGateway checks if the ModelRoute matches a specific gateway
@@ -1459,10 +1549,63 @@ func (s *store) AddOrUpdateInferencePool(inferencePool *inferencev1.InferencePoo
 	s.inferencePoolMutex.Unlock()
 
 	klog.V(4).Infof("Added or updated InferencePool: %s", key)
+
+	// Translate InferencePool to ModelServer
+	translatedMS := translation.TranslateInferencePoolToModelServer(inferencePool)
+	if translatedMS != nil {
+		// Store the translated ModelServer
+		msName := types.NamespacedName{
+			Namespace: translatedMS.Namespace,
+			Name:      translatedMS.Name,
+		}
+		if err := s.AddOrUpdateModelServer(translatedMS, nil); err != nil {
+			klog.Errorf("Failed to store translated ModelServer for InferencePool %s: %v", key, err)
+			return err
+		}
+
+		// Track the translation
+		s.translationMutex.Lock()
+		s.translatedModelServers[fmt.Sprintf("%s/%s", msName.Namespace, msName.Name)] = &translation.TranslationMetadata{
+			OriginKind:      translation.OriginKindInferencePool,
+			OriginName:      inferencePool.Name,
+			OriginNamespace: inferencePool.Namespace,
+		}
+		s.translationMutex.Unlock()
+
+		klog.V(4).Infof("Created translated ModelServer %s/%s for InferencePool %s", msName.Namespace, msName.Name, key)
+	}
+
 	return nil
 }
 
 func (s *store) DeleteInferencePool(key string) error {
+	// Parse namespace/name from key
+	parts := strings.Split(key, "/")
+	if len(parts) != 2 {
+		klog.Warningf("Invalid InferencePool key format: %s", key)
+		s.inferencePoolMutex.Lock()
+		delete(s.inferencePools, key)
+		s.inferencePoolMutex.Unlock()
+		return nil
+	}
+	namespace, name := parts[0], parts[1]
+
+	// Delete the translated ModelServer first
+	translatedMSName := translation.GenerateTranslatedModelServerName(namespace, name)
+	translatedMSKey := fmt.Sprintf("%s/%s", namespace, translatedMSName)
+
+	s.translationMutex.Lock()
+	delete(s.translatedModelServers, translatedMSKey)
+	s.translationMutex.Unlock()
+
+	// Delete the ModelServer
+	if err := s.DeleteModelServer(types.NamespacedName{Namespace: namespace, Name: translatedMSName}); err != nil {
+		klog.V(4).Infof("No translated ModelServer to delete for InferencePool %s: %v", key, err)
+	} else {
+		klog.V(4).Infof("Deleted translated ModelServer %s for InferencePool %s", translatedMSKey, key)
+	}
+
+	// Delete the InferencePool
 	s.inferencePoolMutex.Lock()
 	delete(s.inferencePools, key)
 	s.inferencePoolMutex.Unlock()
@@ -1553,10 +1696,126 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 	s.httpRouteMutex.Unlock()
 
 	klog.V(4).Infof("Added or updated HTTPRoute: %s", key)
+
+	// Translate HTTPRoute to ModelRoute
+	translatedMR := translation.TranslateHTTPRouteToModelRoute(httpRoute, s)
+	if translatedMR != nil {
+		// Store the translated ModelRoute
+		if err := s.AddOrUpdateModelRoute(translatedMR); err != nil {
+			klog.Errorf("Failed to store translated ModelRoute for HTTPRoute %s: %v", key, err)
+			return err
+		}
+
+		mrKey := fmt.Sprintf("%s/%s", translatedMR.Namespace, translatedMR.Name)
+
+		// Track the translation
+		s.translationMutex.Lock()
+		s.translatedModelRoutes[mrKey] = &translation.TranslationMetadata{
+			OriginKind:      translation.OriginKindHTTPRoute,
+			OriginName:      httpRoute.Name,
+			OriginNamespace: httpRoute.Namespace,
+		}
+
+		// Index by path patterns for path-based routing
+		s.indexPathBasedRoute(translatedMR)
+		s.translationMutex.Unlock()
+
+		klog.V(4).Infof("Created translated ModelRoute %s for HTTPRoute %s", mrKey, key)
+	}
+
 	return nil
 }
 
+// indexPathBasedRoute indexes a ModelRoute for path-based matching
+// Must be called with translationMutex held
+func (s *store) indexPathBasedRoute(mr *aiv1alpha1.ModelRoute) {
+	// Check if this is a wildcard model route (for path-based routing)
+	if mr.Spec.ModelName != "*" {
+		return
+	}
+
+	// Remove from existing indexes first (for updates)
+	s.removePathBasedRouteIndex(mr)
+
+	// Add to wildcard routes
+	s.wildcardRoutes = append(s.wildcardRoutes, mr)
+
+	// Index by path prefixes from rules
+	for _, rule := range mr.Spec.Rules {
+		if rule.ModelMatch != nil && rule.ModelMatch.Uri != nil {
+			if rule.ModelMatch.Uri.Prefix != nil {
+				prefix := *rule.ModelMatch.Uri.Prefix
+				s.pathBasedRoutes[prefix] = append(s.pathBasedRoutes[prefix], mr)
+			}
+		}
+	}
+}
+
+// removePathBasedRouteIndex removes a ModelRoute from path-based indexes
+// Must be called with translationMutex held
+func (s *store) removePathBasedRouteIndex(mr *aiv1alpha1.ModelRoute) {
+	mrKey := fmt.Sprintf("%s/%s", mr.Namespace, mr.Name)
+
+	// Remove from wildcard routes
+	newWildcardRoutes := make([]*aiv1alpha1.ModelRoute, 0, len(s.wildcardRoutes))
+	for _, r := range s.wildcardRoutes {
+		if fmt.Sprintf("%s/%s", r.Namespace, r.Name) != mrKey {
+			newWildcardRoutes = append(newWildcardRoutes, r)
+		}
+	}
+	s.wildcardRoutes = newWildcardRoutes
+
+	// Remove from path-based routes
+	for prefix, routes := range s.pathBasedRoutes {
+		newRoutes := make([]*aiv1alpha1.ModelRoute, 0, len(routes))
+		for _, r := range routes {
+			if fmt.Sprintf("%s/%s", r.Namespace, r.Name) != mrKey {
+				newRoutes = append(newRoutes, r)
+			}
+		}
+		if len(newRoutes) == 0 {
+			delete(s.pathBasedRoutes, prefix)
+		} else {
+			s.pathBasedRoutes[prefix] = newRoutes
+		}
+	}
+}
+
 func (s *store) DeleteHTTPRoute(key string) error {
+	// Parse namespace/name from key
+	parts := strings.Split(key, "/")
+	if len(parts) != 2 {
+		klog.Warningf("Invalid HTTPRoute key format: %s", key)
+		s.httpRouteMutex.Lock()
+		delete(s.httpRoutes, key)
+		s.httpRouteMutex.Unlock()
+		return nil
+	}
+	namespace, name := parts[0], parts[1]
+
+	// Delete the translated ModelRoute first
+	translatedMRName := translation.GenerateTranslatedModelRouteName(namespace, name)
+	translatedMRKey := fmt.Sprintf("%s/%s", namespace, translatedMRName)
+
+	// Get the translated ModelRoute before deleting to remove from path indexes
+	s.translationMutex.Lock()
+	if _, exists := s.translatedModelRoutes[translatedMRKey]; exists {
+		// Find and remove from path-based indexes
+		if mr := s.GetModelRoute(translatedMRKey); mr != nil {
+			s.removePathBasedRouteIndex(mr)
+		}
+		delete(s.translatedModelRoutes, translatedMRKey)
+	}
+	s.translationMutex.Unlock()
+
+	// Delete the ModelRoute
+	if err := s.DeleteModelRoute(translatedMRKey); err != nil {
+		klog.V(4).Infof("No translated ModelRoute to delete for HTTPRoute %s: %v", key, err)
+	} else {
+		klog.V(4).Infof("Deleted translated ModelRoute %s for HTTPRoute %s", translatedMRKey, key)
+	}
+
+	// Delete the HTTPRoute
 	s.httpRouteMutex.Lock()
 	_, exists := s.httpRoutes[key]
 	if exists {
