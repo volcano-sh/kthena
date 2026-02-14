@@ -144,3 +144,7 @@ spec:
             optional: true
         {{- end }}
       serviceAccountName: kthena-router
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

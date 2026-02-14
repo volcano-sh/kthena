@@ -94,3 +94,4 @@ global:
     # This is ONLY required when `certManagementMode` is set to "manual".<br/>
     # You can generate it with: `cat /path/to/your/ca.crt | base64 | tr -d '\n'`<br/>
     caBundle: ""
+  imagePullSecrets: []
