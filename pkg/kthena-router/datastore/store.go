@@ -256,6 +256,7 @@ type store struct {
 	routeInfo          map[string]*modelRouteInfo
 	routes             map[string][]*aiv1alpha1.ModelRoute // key: model name, value: list of ModelRoutes
 	loraRoutes         map[string][]*aiv1alpha1.ModelRoute // key: lora name, value: list of ModelRoutes
+	genericRoutes      []*aiv1alpha1.ModelRoute            // list of generic ModelRoutes (without specific model name)
 	gatewayModelRoutes map[string]sets.Set[string]         // key: gateway key (namespace/name), value: set of ModelRoute keys
 
 	// Gateway fields (using standard Gateway API)
@@ -287,6 +288,7 @@ func New() Store {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
+		genericRoutes:       make([]*aiv1alpha1.ModelRoute, 0),
 		gatewayModelRoutes:  make(map[string]sets.Set[string]),
 		gateways:            make(map[string]*gatewayv1.Gateway),
 		inferencePools:      make(map[string]*inferencev1.InferencePool),
@@ -643,6 +645,19 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		if !found {
 			s.routes[mr.Spec.ModelName] = append(routes, mr)
 		}
+	} else if len(mr.Spec.LoraAdapters) == 0 {
+		// If both ModelName and LoraAdapters are empty, treat as generic route
+		found := false
+		for i, route := range s.genericRoutes {
+			if route.Namespace == mr.Namespace && route.Name == mr.Name {
+				s.genericRoutes[i] = mr
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.genericRoutes = append(s.genericRoutes, mr)
+		}
 	}
 
 	for _, lora := range mr.Spec.LoraAdapters {
@@ -713,6 +728,18 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			} else {
 				s.routes[modelName] = newRoutes
 			}
+		} else {
+			// Check generic routes if model name is empty
+			newGenericRoutes := make([]*aiv1alpha1.ModelRoute, 0, len(s.genericRoutes))
+			for _, route := range s.genericRoutes {
+				routeKey := route.Namespace + "/" + route.Name
+				if routeKey != namespacedName {
+					newGenericRoutes = append(newGenericRoutes, route)
+				} else {
+					deletedRoute = route
+				}
+			}
+			s.genericRoutes = newGenericRoutes
 		}
 		// Remove from loraRoutes map
 		for _, lora := range info.loras {
@@ -791,11 +818,18 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 	} else {
 		// Try to find routes by lora name
 		loraRoutes, ok := s.loraRoutes[model]
-		if !ok {
-			return types.NamespacedName{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
+		if ok {
+			candidateRoutes = loraRoutes
+			isLora = true
+		} else {
+			// Try generic routes
+			if len(s.genericRoutes) > 0 {
+				candidateRoutes = s.genericRoutes
+				isLora = false
+			} else {
+				return types.NamespacedName{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
+			}
 		}
-		candidateRoutes = loraRoutes
-		isLora = true
 	}
 
 	// Try each ModelRoute until we find one that matches
@@ -1299,6 +1333,16 @@ func (s *store) GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute {
 				}
 			}
 		}
+		// If not found in loraRoutes, check genericRoutes
+		if foundRoute == nil && info.model == "" && len(info.loras) == 0 {
+			for _, route := range s.genericRoutes {
+				routeKey := route.Namespace + "/" + route.Name
+				if routeKey == key {
+					foundRoute = route
+					break
+				}
+			}
+		}
 		if foundRoute != nil {
 			result[key] = foundRoute
 		}
@@ -1366,6 +1410,16 @@ func (s *store) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute {
 				if routeKey == namespacedName {
 					return route
 				}
+			}
+		}
+	}
+
+	// Try to find from generic routes
+	if info.model == "" && len(info.loras) == 0 {
+		for _, route := range s.genericRoutes {
+			routeKey := route.Namespace + "/" + route.Name
+			if routeKey == namespacedName {
+				return route
 			}
 		}
 	}
@@ -1617,7 +1671,7 @@ func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRo
 	var result []*aiv1alpha1.ModelRoute
 	if routeSet, exists := s.gatewayModelRoutes[gatewayKey]; exists {
 		for routeKey := range routeSet {
-			// Find the ModelRoute in routes or loraRoutes
+			// Find the ModelRoute in routes or loraRoutes or genericRoutes
 			if info, ok := s.routeInfo[routeKey]; ok {
 				// Try to find from primary model routes
 				if info.model != "" {
@@ -1627,6 +1681,14 @@ func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRo
 								result = append(result, route)
 								break
 							}
+						}
+					}
+				} else if len(info.loras) == 0 {
+					// Try generic routes
+					for _, route := range s.genericRoutes {
+						if route.Namespace+"/"+route.Name == routeKey {
+							result = append(result, route)
+							break
 						}
 					}
 				}

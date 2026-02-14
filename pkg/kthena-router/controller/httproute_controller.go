@@ -22,14 +22,17 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
 
+	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
@@ -133,6 +136,7 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 
 	httpRoute, err := c.httpRouteLister.HTTPRoutes(namespace).Get(name)
 	if apierrors.IsNotFound(err) {
+		_ = c.store.DeleteModelRoute(key)
 		_ = c.store.DeleteHTTPRoute(key)
 		return nil
 	}
@@ -163,6 +167,92 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	if !shouldProcess {
 		klog.V(4).Infof("Skipping HTTPRoute %s/%s: does not reference kthena-router Gateway", namespace, name)
 		return nil
+	}
+
+	// Translate HTTPRoute to ModelRoute
+	translatedMR := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      httpRoute.Name,
+			Namespace: httpRoute.Namespace,
+			Labels: map[string]string{
+				"kthena.serving.volcano.sh/generated-from": "HTTPRoute",
+			},
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ParentRefs: httpRoute.Spec.ParentRefs,
+			Rules:      make([]*aiv1alpha1.Rule, 0, len(httpRoute.Spec.Rules)),
+		},
+	}
+
+	for _, hrRule := range httpRoute.Spec.Rules {
+		targetModels := make([]*aiv1alpha1.TargetModel, 0, len(hrRule.BackendRefs))
+		// Map BackendRefs to TargetModels
+		for _, backendRef := range hrRule.BackendRefs {
+			if backendRef.Kind != nil && *backendRef.Kind == "InferencePool" {
+				weight := uint32(100)
+				if backendRef.Weight != nil {
+					weight = uint32(*backendRef.Weight)
+				}
+				targetModels = append(targetModels, &aiv1alpha1.TargetModel{
+					ModelServerName: string(backendRef.Name),
+					Weight:          &weight,
+				})
+			}
+		}
+
+		if len(targetModels) == 0 {
+			continue
+		}
+
+		// Map Matches to ModelMatch
+		// If no matches are specified, it matches everything (empty ModelMatch)
+		if len(hrRule.Matches) == 0 {
+			rule := &aiv1alpha1.Rule{
+				TargetModels: targetModels,
+			}
+			translatedMR.Spec.Rules = append(translatedMR.Spec.Rules, rule)
+			continue
+		}
+
+		// Create a separate rule for each match
+		for _, match := range hrRule.Matches {
+			rule := &aiv1alpha1.Rule{
+				TargetModels: targetModels,
+				ModelMatch: &aiv1alpha1.ModelMatch{
+					Headers: make(map[string]*aiv1alpha1.StringMatch),
+				},
+			}
+
+			if match.Path != nil && match.Path.Value != nil {
+				rule.ModelMatch.Uri = &aiv1alpha1.StringMatch{}
+				val := *match.Path.Value
+				if match.Path.Type != nil {
+					switch *match.Path.Type {
+					case gatewayv1.PathMatchExact:
+						rule.ModelMatch.Uri.Exact = &val
+					case gatewayv1.PathMatchPathPrefix:
+						rule.ModelMatch.Uri.Prefix = &val
+					case gatewayv1.PathMatchRegularExpression:
+						rule.ModelMatch.Uri.Regex = &val
+					}
+				}
+			}
+			for _, header := range match.Headers {
+				headerVal := string(header.Value)
+				sm := &aiv1alpha1.StringMatch{}
+				if header.Type == nil || *header.Type == gatewayv1.HeaderMatchExact {
+					sm.Exact = &headerVal
+				} else if *header.Type == gatewayv1.HeaderMatchRegularExpression {
+					sm.Regex = &headerVal
+				}
+				rule.ModelMatch.Headers[string(header.Name)] = sm
+			}
+			translatedMR.Spec.Rules = append(translatedMR.Spec.Rules, rule)
+		}
+	}
+
+	if err := c.store.AddOrUpdateModelRoute(translatedMR); err != nil {
+		return err
 	}
 
 	return c.store.AddOrUpdateHTTPRoute(httpRoute)
