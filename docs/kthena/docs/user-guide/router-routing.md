@@ -11,7 +11,7 @@ Kthena Router provides sophisticated traffic routing capabilities that enable in
 
 For a detailed definition of the ModelServer and ModelRoute CRs, please refer to the [ModelRoute and ModelRoute Reference](../reference/crd/networking.serving.volcano.sh.md) pages.
 
-The router supports various routing strategies, from simple model-based forwarding to complex weighted distribution and header-based routing. This flexibility allows for advanced deployment patterns including canary releases, A/B testing, and load balancing across heterogeneous model deployments.
+The router supports various routing strategies, from simple model-based forwarding to complex weighted distribution, header-based routing, and PD-Disaggregated (Prefill/Decode) routing. This flexibility allows for advanced deployment patterns including canary releases, A/B testing, load balancing across heterogeneous model deployments, and PD-Disaggregated inference for lower latency and better resource utilization.
 
 ## Preparation
 
@@ -226,5 +226,64 @@ curl http://$ROUTER_IP/v1/completions \
     }"
 {"choices":[{"finish_reason":"length","index":0,"logprobs":null,"text":"This is simulated message from deepseek-ai/DeepSeek-R1-Distill-Qwen-7B!"}],"created":1756367891,"id":"cmpl-uqkvlQyYK7bGYrRHQ0eXlWi7","model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B","object":"text_completion","system_fingerprint":"fp_44709d6fcb","usage":{"completion_tokens":71,"prompt_tokens":1,"time":0.0,"total_tokens":72}}
 ```
+
+### 5. PD-Disaggregated Routing
+
+**Scenario**: Route inference requests to Prefill/Decode disaggregated backends, where prefill instances handle prefill and decode instances handle decode stages independently.
+
+**Traffic Processing**: When a request arrives for a PD-Disaggregated model, the router selects prefill and decode pods via `pdGroup`, proxies prefill to the prefill instance and decode to the decode instance, coordinating KV state exchange between them.
+
+**ModelServer** (with `pdGroup`):
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseek-r1-1-5b-pd-disaggregation
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: deepseek-r1-1-5b
+    pdGroup:
+      groupKey: "modelserving.volcano.sh/group-name"
+      prefillLabels:
+        modelserving.volcano.sh/rolename: "P-instance"
+      decodeLabels:
+        modelserving.volcano.sh/rolename: "D-instance"
+  workloadPort:
+    port: 8000
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s
+```
+
+**ModelRoute**:
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-r1-1-5b-pd-disaggregation
+  namespace: default
+spec:
+  modelName: "deepseek-r1-1-5b-pd-disaggregation"
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "deepseek-r1-1-5b-pd-disaggregation"
+```
+
+**Flow Description**:
+1. Request arrives for the PD-Disaggregated model
+2. Router matches the ModelRoute and resolves the target ModelServer
+3. Via `pdGroup`, router selects a prefill-pod and a decode-pod (same `groupKey` value)
+4. Prefill runs on prefill instance; decode runs on decode instance, with KV state exchanged between them (configure `kvConnector` for nixl/mooncake when needed)
+5. Response returned to client
+
+**NOTE**: Deploy [ModelServing](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServing-ds1.5b-pd-disaggragation.yaml) with PD roles first, then apply [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServer-ds1.5b-pd-disaggragation.yaml) and [ModelRoute](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRoute-ds1.5b-pd-disaggragation.yaml).
+
+---
 
 This comprehensive routing system enables flexible, scalable, and maintainable model serving infrastructure that can adapt to various deployment patterns and user requirements.
