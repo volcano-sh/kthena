@@ -419,24 +419,27 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing")
 
-	// Count initial headless services owned by this ModelServing
+	// Wait for initial headless services to be created (one per servingGroup)
 	labelSelector := modelServingLabelSelector(modelServing.Name)
-	serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	require.NoError(t, err, "Failed to list services")
-
-	initialHeadlessCount := 0
-	for _, svc := range serviceList.Items {
-		for _, ref := range svc.OwnerReferences {
-			if ref.UID == ms.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
-				initialHeadlessCount++
-				break
+	require.Eventually(t, func() bool {
+		serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		headlessCount := 0
+		for _, svc := range serviceList.Items {
+			for _, ref := range svc.OwnerReferences {
+				if ref.UID == ms.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+					headlessCount++
+					break
+				}
 			}
 		}
-	}
-	t.Logf("Initial headless service count: %d", initialHeadlessCount)
-	require.Equal(t, 3, initialHeadlessCount, "Expected 3 headless services (one per servingGroup)")
+		t.Logf("Initial headless service count: %d (expecting 3)", headlessCount)
+		return headlessCount == 3
+	}, 30*time.Second, 1*time.Second, "Expected 3 headless services (one per servingGroup)")
 
 	// Scale down to 1 replica (removing 2 servingGroups)
 	scaleDownMS := ms.DeepCopy()
@@ -1001,7 +1004,9 @@ func createAndWaitForModelServing(t *testing.T, ctx context.Context, kthenaClien
 
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
-		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("Failed to delete ModelServing %s during cleanup: %v", modelServing.Name, err)
+		}
 	})
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
