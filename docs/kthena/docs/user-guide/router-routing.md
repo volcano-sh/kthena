@@ -244,13 +244,13 @@ metadata:
 spec:
   workloadSelector:
     matchLabels:
-      modelserving.volcano.sh/name: deepseek-r1-1-5b
+      app: deepseek-r1-1-5b
     pdGroup:
       groupKey: "modelserving.volcano.sh/group-name"
       prefillLabels:
-        modelserving.volcano.sh/role: prefill
+        modelserving.volcano.sh/rolename: "P-instance"
       decodeLabels:
-        modelserving.volcano.sh/role: decode
+        modelserving.volcano.sh/rolename: "D-instance"
   workloadPort:
     port: 8000
   model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
