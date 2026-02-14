@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -111,6 +112,41 @@ func LoadMultiResourceYAMLFromFile[T any](path string) []*T {
 				break
 			}
 			panic(fmt.Sprintf("Failed to decode YAML resource %d in file: %s: %v", resourceIndex+1, absPath, err))
+		}
+
+		results = append(results, &obj)
+		resourceIndex++
+	}
+
+	return results
+}
+
+// LoadUnstructuredYAMLFromFile loads a multi-resource YAML file and returns each resource as an Unstructured object.
+func LoadUnstructuredYAMLFromFile(path string) []*unstructured.Unstructured {
+	_, filename, _, _ := runtime.Caller(0)
+	projectRoot := filepath.Join(filepath.Dir(filename), "..", "..", "..")
+	absPath := filepath.Join(projectRoot, path)
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to read YAML file from project root: %s (abs: %s): %v", path, absPath, err))
+	}
+
+	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(string(data)), 1024)
+	var results []*unstructured.Unstructured
+	resourceIndex := 0
+
+	for {
+		var obj unstructured.Unstructured
+		if err := decoder.Decode(&obj); err != nil {
+			if err == io.EOF {
+				break
+			}
+			panic(fmt.Sprintf("Failed to decode YAML resource %d in file: %s: %v", resourceIndex+1, absPath, err))
+		}
+
+		if len(obj.Object) == 0 {
+			continue
 		}
 
 		results = append(results, &obj)

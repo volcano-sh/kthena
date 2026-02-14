@@ -129,6 +129,12 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 	router.TestModelRouteWithRateLimitShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
+// TestModelRouteWithGlobalRateLimit tests global rate limiting enforced by the Kthena Router.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestModelRouteWithGlobalRateLimit(t *testing.T) {
+	router.TestModelRouteWithGlobalRateLimitShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
 // TestModelRouteLora tests ModelRoute with LoRA adapter routing.
 // This test runs the shared test function with Gateway API enabled (with ParentRefs).
 func TestModelRouteLora(t *testing.T) {
