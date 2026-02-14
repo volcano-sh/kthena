@@ -186,6 +186,9 @@ func (s *SchedulerImpl) RunFilterPlugins(pods []*datastore.PodInfo, ctx *framewo
 
 func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framework.Context) map[*datastore.PodInfo]int {
 	res := make(map[*datastore.PodInfo]int)
+	for _, pod := range pods {
+		res[pod] = 0
+	}
 	for _, scorePlugin := range s.scorePlugins {
 		// Record score plugin execution time
 		startTime := time.Now()
@@ -202,11 +205,7 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 			if k.Pod != nil {
 				klog.V(4).Infof("Pod: %s/%s, Score: %d", k.Pod.Namespace, k.Pod.Name, v)
 			}
-			if _, ok := res[k]; !ok {
-				res[k] = v * scorePlugin.weight
-			} else {
-				res[k] += v * scorePlugin.weight
-			}
+			res[k] += v * scorePlugin.weight
 		}
 	}
 
