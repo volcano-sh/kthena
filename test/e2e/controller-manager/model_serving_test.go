@@ -843,105 +843,6 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	t.Log("ModelServing rolling update maxUnavailable test passed successfully")
 }
 
-// TestModelServingControllerManagerRestart verifies that ModelServing pod creation
-// is successful even when the controller-manager restarts during reconciliation.
-func TestModelServingControllerManagerRestart(t *testing.T) {
-	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
-
-	// Create a complicated ModelServing with multiple roles
-	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
-	prefillRole := createRole("prefill", 1, 2)
-	decodeRole := createRole("decode", 1, 1)
-	modelServing := createBasicModelServing("test-controller-restart", 5, prefillRole, decodeRole)
-
-	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
-	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing")
-
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
-	})
-
-	// Wait briefly for initial reconciliation to start
-	t.Log("Waiting for initial reconciliation to start...")
-	// Wait for a random duration between 0 and 3 seconds (in 100ms increments)
-	randomWait := time.Duration(rand.New(rand.NewSource(time.Now().UnixNano())).Intn(31)*100) * time.Millisecond
-	t.Logf("Waiting for %v before restarting controller-manager", randomWait)
-	time.Sleep(randomWait)
-
-	// Find and delete controller-manager pods
-	t.Logf("Finding controller-manager pods in namespace %s", kthenaNamespace)
-
-	// Use label selector to find controller-manager pods
-	labelSelector := "app.kubernetes.io/component=kthena-controller-manager"
-	controllerPods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	require.NoError(t, err, "Failed to list controller-manager pods")
-	require.NotEmpty(t, controllerPods.Items, "No controller-manager pods found")
-
-	// Delete all controller-manager pods
-	for _, pod := range controllerPods.Items {
-		t.Logf("Deleting controller-manager pod: %s", pod.Name)
-		err := kubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-		require.NoError(t, err, "Failed to delete controller-manager pod %s", pod.Name)
-	}
-
-	// Wait for controller-manager pods to restart and become ready
-	t.Log("Waiting for controller-manager to restart...")
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		// Check that at least one controller-manager pod is running and ready
-		for _, pod := range pods.Items {
-			if pod.Status.Phase == corev1.PodRunning {
-				for _, condition := range pod.Status.Conditions {
-					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-						t.Logf("Controller-manager pod is ready: %s", pod.Name)
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}, 3*time.Minute, 5*time.Second, "Controller-manager did not restart and become ready")
-
-	// Wait for ModelServing to be ready
-	t.Log("Waiting for ModelServing to be ready after controller-manager restart...")
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-
-	// Verify all expected pods are created
-	msLabelSelector := modelServingLabelSelector(modelServing.Name)
-	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: msLabelSelector,
-	})
-	require.NoError(t, err, "Failed to list ModelServing pods")
-
-	// Calculate expected pod count:
-	// 5 serving groups × (3 pods for prefill role + 2 pods for decode role) = 25 pods
-	expectedPodCount := 25
-	actualPodCount := len(podList.Items)
-
-	t.Logf("Expected pod count: %d, Actual pod count: %d", expectedPodCount, actualPodCount)
-	assert.Equal(t, expectedPodCount, actualPodCount, "Pod count mismatch after controller-manager restart")
-
-	// Verify all pods are running
-	runningPods := 0
-	for _, pod := range podList.Items {
-		if pod.Status.Phase == corev1.PodRunning {
-			runningPods++
-		}
-	}
-	assert.Equal(t, actualPodCount, runningPods, "All created pods should be in Running phase")
-
-	t.Log("ModelServing controller-manager restart test passed successfully")
-}
-
 // TestModelServingRoleStatusEvents verifies that role status transitions are surfaced via Kubernetes Events.
 func TestModelServingRoleStatusEvents(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
@@ -1429,4 +1330,106 @@ func TestLWSAPIBasic(t *testing.T) {
 	}, 2*time.Minute, 2*time.Second, "Pods were not deleted after LWS deletion")
 
 	t.Log("LWS API basic test passed successfully")
+}
+
+// TestModelServingControllerManagerRestart verifies that ModelServing pod creation
+// is successful even when the controller-manager restarts during reconciliation.
+// NOTE: This test must remain last among ModelServing tests because it restarts the
+// controller-manager pod, which temporarily takes down the webhook. Tests that run
+// immediately after would fail with "connection refused" errors.
+func TestModelServingControllerManagerRestart(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a complicated ModelServing with multiple roles
+	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
+	prefillRole := createRole("prefill", 1, 2)
+	decodeRole := createRole("decode", 1, 1)
+	modelServing := createBasicModelServing("test-controller-restart", 5, prefillRole, decodeRole)
+
+	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+	})
+
+	// Wait briefly for initial reconciliation to start
+	t.Log("Waiting for initial reconciliation to start...")
+	// Wait for a random duration between 0 and 3 seconds (in 100ms increments)
+	randomWait := time.Duration(rand.New(rand.NewSource(time.Now().UnixNano())).Intn(31)*100) * time.Millisecond
+	t.Logf("Waiting for %v before restarting controller-manager", randomWait)
+	time.Sleep(randomWait)
+
+	// Find and delete controller-manager pods
+	t.Logf("Finding controller-manager pods in namespace %s", kthenaNamespace)
+
+	// Use label selector to find controller-manager pods
+	labelSelector := "app.kubernetes.io/component=kthena-controller-manager"
+	controllerPods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list controller-manager pods")
+	require.NotEmpty(t, controllerPods.Items, "No controller-manager pods found")
+
+	// Delete all controller-manager pods
+	for _, pod := range controllerPods.Items {
+		t.Logf("Deleting controller-manager pod: %s", pod.Name)
+		err := kubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+		require.NoError(t, err, "Failed to delete controller-manager pod %s", pod.Name)
+	}
+
+	// Wait for controller-manager pods to restart and become ready
+	t.Log("Waiting for controller-manager to restart...")
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		// Check that at least one controller-manager pod is running and ready
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == corev1.PodRunning {
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+						t.Logf("Controller-manager pod is ready: %s", pod.Name)
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}, 3*time.Minute, 5*time.Second, "Controller-manager did not restart and become ready")
+
+	// Wait for ModelServing to be ready
+	t.Log("Waiting for ModelServing to be ready after controller-manager restart...")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify all expected pods are created
+	msLabelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: msLabelSelector,
+	})
+	require.NoError(t, err, "Failed to list ModelServing pods")
+
+	// Calculate expected pod count:
+	// 5 serving groups × (3 pods for prefill role + 2 pods for decode role) = 25 pods
+	expectedPodCount := 25
+	actualPodCount := len(podList.Items)
+
+	t.Logf("Expected pod count: %d, Actual pod count: %d", expectedPodCount, actualPodCount)
+	assert.Equal(t, expectedPodCount, actualPodCount, "Pod count mismatch after controller-manager restart")
+
+	// Verify all pods are running
+	runningPods := 0
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodRunning {
+			runningPods++
+		}
+	}
+	assert.Equal(t, actualPodCount, runningPods, "All created pods should be in Running phase")
+
+	t.Log("ModelServing controller-manager restart test passed successfully")
 }
