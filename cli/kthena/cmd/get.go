@@ -217,7 +217,14 @@ func runGetTemplate(cmd *cobra.Command, args []string) error {
 	return w.Flush()
 }
 
-func getKthenaClient() (*versioned.Clientset, error) {
+// getKthenaClientFunc is a variable that can be mocked in tests
+var getKthenaClientFunc = getKthenaClientImpl
+
+func getKthenaClient() (versioned.Interface, error) {
+	return getKthenaClientFunc()
+}
+
+func getKthenaClientImpl() (versioned.Interface, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %v", err)
