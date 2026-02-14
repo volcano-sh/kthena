@@ -288,104 +288,252 @@ func TestIsServingGroupOutdatedOnIndexerError(t *testing.T) {
 }
 
 func TestCheckServingGroupReady(t *testing.T) {
-	ns := "default"
-	groupName := "test-group"
-	newHash := "hash123"
-	roleLabel := "prefill"
-	roleName := "prefill-0"
+	tests := []struct {
+		name          string
+		setupFunc     func(*testing.T, *ModelServingController, *workloadv1alpha1.ModelServing, string)
+		expectedReady bool
+		expectError   bool
+	}{
+		{
+			name: "all roles ready",
+			setupFunc: func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, groupName string) {
+				ns := ms.Namespace
+				newHash := "hash123"
+				indexer := c.podsInformer.GetIndexer()
 
-	kubeClient := kubefake.NewSimpleClientset()
-	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
-	podInformer := kubeInformerFactory.Core().V1().Pods()
-	err := podInformer.Informer().AddIndexers(cache.Indexers{
-		GroupNameKey: utils.GroupNameIndexFunc,
-		RoleIDKey:    utils.RoleIDIndexFunc,
-	})
-	assert.NoError(t, err)
-	store := datastore.New()
-	// build controller
-	controller := &ModelServingController{
-		podsInformer: podInformer.Informer(),
-		podsLister:   podInformer.Lister(),
-		store:        store,
-	}
-	stop := make(chan struct{})
-	defer close(stop)
-	kubeInformerFactory.Start(stop)
-	kubeInformerFactory.WaitForCacheSync(stop)
+				// Add pods for prefill role (2 replicas, each with 1 entry + 1 worker = 2 pods)
+				for i := 0; i < 2; i++ {
+					for j := 0; j < 2; j++ {
+						pod := &corev1.Pod{
+							ObjectMeta: metav1.ObjectMeta{
+								Namespace: ns,
+								Name:      fmt.Sprintf("prefill-entry-%d", i*2+j),
+								Labels: map[string]string{
+									workloadv1alpha1.GroupNameLabelKey: groupName,
+									workloadv1alpha1.RoleLabelKey:      "prefill",
+									workloadv1alpha1.RoleIDKey:         fmt.Sprintf("prefill-%d", i),
+								},
+							},
+							Status: corev1.PodStatus{
+								Phase: corev1.PodRunning,
+								Conditions: []corev1.PodCondition{
+									{
+										Type:   corev1.PodReady,
+										Status: corev1.ConditionTrue,
+									},
+								},
+							},
+						}
+						err := indexer.Add(pod)
+						assert.NoError(t, err)
+					}
+					c.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", fmt.Sprintf("prefill-%d", i), newHash)
+					c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", fmt.Sprintf("prefill-%d", i), datastore.RoleRunning)
+				}
 
-	// build ModelServing
-	var expectedPodNum int32 = 2
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
-			Name:      "test-ms",
+				// Add pods for decode role (2 replicas, each with 1 entry + 1 worker = 2 pods)
+				for i := 0; i < 2; i++ {
+					for j := 0; j < 2; j++ {
+						pod := &corev1.Pod{
+							ObjectMeta: metav1.ObjectMeta{
+								Namespace: ns,
+								Name:      fmt.Sprintf("decode-entry-%d", i*2+j),
+								Labels: map[string]string{
+									workloadv1alpha1.GroupNameLabelKey: groupName,
+									workloadv1alpha1.RoleLabelKey:      "decode",
+									workloadv1alpha1.RoleIDKey:         fmt.Sprintf("decode-%d", i),
+								},
+							},
+							Status: corev1.PodStatus{
+								Phase: corev1.PodRunning,
+								Conditions: []corev1.PodCondition{
+									{
+										Type:   corev1.PodReady,
+										Status: corev1.ConditionTrue,
+									},
+								},
+							},
+						}
+						err := indexer.Add(pod)
+						assert.NoError(t, err)
+					}
+					c.store.AddRole(utils.GetNamespaceName(ms), groupName, "decode", fmt.Sprintf("decode-%d", i), newHash)
+					c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "decode", fmt.Sprintf("decode-%d", i), datastore.RoleRunning)
+				}
+			},
+			expectedReady: true,
+			expectError:   false,
 		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
-				Roles: []workloadv1alpha1.Role{
-					{
-						Replicas: &expectedPodNum,
+		{
+			name: "not all roles ready",
+			setupFunc: func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, groupName string) {
+				ns := ms.Namespace
+				newHash := "hash123"
+				indexer := c.podsInformer.GetIndexer()
+
+				// Add only 1 prefill pod (incomplete)
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: ns,
+						Name:      "prefill-entry-0",
+						Labels: map[string]string{
+							workloadv1alpha1.GroupNameLabelKey: groupName,
+							workloadv1alpha1.RoleLabelKey:      "prefill",
+							workloadv1alpha1.RoleIDKey:         "prefill-0",
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{
+								Type:   corev1.PodReady,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				}
+				err := indexer.Add(pod)
+				assert.NoError(t, err)
+
+				// Add prefill role to store but not Running status
+				c.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", newHash)
+				c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", datastore.RoleCreating)
+
+				// Add decode role
+				c.store.AddRole(utils.GetNamespaceName(ms), groupName, "decode", "decode-0", newHash)
+				c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "decode", "decode-0", datastore.RoleCreating)
+			},
+			expectedReady: false,
+			expectError:   false,
+		},
+		{
+			name: "missing role",
+			setupFunc: func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, groupName string) {
+				// No roles added to store
+			},
+			expectedReady: false,
+			expectError:   true,
+		},
+		{
+			name: "role not running",
+			setupFunc: func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, groupName string) {
+				newHash := "hash123"
+				// Add role with Creating status instead of Running
+				c.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", newHash)
+				c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", datastore.RoleCreating)
+			},
+			expectedReady: false,
+			expectError:   false,
+		},
+		{
+			name: "multiple roles with mixed status",
+			setupFunc: func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, groupName string) {
+				ns := ms.Namespace
+				newHash := "hash123"
+				indexer := c.podsInformer.GetIndexer()
+
+				// Add prefill pod - Running
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: ns,
+						Name:      "prefill-entry-0",
+						Labels: map[string]string{
+							workloadv1alpha1.GroupNameLabelKey: groupName,
+							workloadv1alpha1.RoleLabelKey:      "prefill",
+							workloadv1alpha1.RoleIDKey:         "prefill-0",
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{
+								Type:   corev1.PodReady,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				}
+				err := indexer.Add(pod)
+				assert.NoError(t, err)
+
+				c.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", newHash)
+				c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", datastore.RoleRunning)
+
+				// Add decode role - Creating (not Running yet)
+				c.store.AddRole(utils.GetNamespaceName(ms), groupName, "decode", "decode-0", newHash)
+				c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "decode", "decode-0", datastore.RoleCreating)
+			},
+			expectedReady: false,
+			expectError:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "default"
+			groupName := "test-group"
+
+			kubeClient := kubefake.NewSimpleClientset()
+			kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+			podInformer := kubeInformerFactory.Core().V1().Pods()
+			err := podInformer.Informer().AddIndexers(cache.Indexers{
+				GroupNameKey: utils.GroupNameIndexFunc,
+				RoleIDKey:    utils.RoleIDIndexFunc,
+			})
+			assert.NoError(t, err)
+
+			store := datastore.New()
+			controller := &ModelServingController{
+				podsInformer: podInformer.Informer(),
+				podsLister:   podInformer.Lister(),
+				store:        store,
+			}
+
+			stop := make(chan struct{})
+			defer close(stop)
+			kubeInformerFactory.Start(stop)
+			kubeInformerFactory.WaitForCacheSync(stop)
+
+			var replica1 int32 = 2
+			var workerReplicas int32 = 1
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: ns,
+					Name:      "test-ms",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       &replica1,
+								WorkerReplicas: workerReplicas,
+							},
+							{
+								Name:           "decode",
+								Replicas:       &replica1,
+								WorkerReplicas: workerReplicas,
+							},
+						},
 					},
 				},
-			},
-		},
+			}
+
+			// Run setup function
+			tt.setupFunc(t, controller, ms, groupName)
+
+			// Execute test
+			ok, err := controller.checkServingGroupReady(ms, groupName)
+
+			// Assert
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.expectedReady, ok, "unexpected ready status for test case: %s", tt.name)
+		})
 	}
-
-	indexer := podInformer.Informer().GetIndexer()
-	// Add 2 pods with labels matching group
-	for i := 0; i < int(expectedPodNum); i++ {
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: ns,
-				Name:      fmt.Sprintf("pod-%d", i),
-				Labels: map[string]string{
-					workloadv1alpha1.GroupNameLabelKey: groupName,
-				},
-			},
-		}
-		err := indexer.Add(pod)
-		assert.NoError(t, err)
-		store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), groupName, pod.Name, newHash, roleLabel, roleName)
-	}
-
-	// Waiting for pod cache to sync
-	sync := waitForObjectInCache(t, 2*time.Second, func() bool {
-		pods, _ := controller.podsLister.Pods(ns).List(labels.SelectorFromSet(map[string]string{
-			workloadv1alpha1.GroupNameLabelKey: groupName,
-		}))
-		return len(pods) == int(expectedPodNum)
-	})
-	assert.True(t, sync, "Pods should be found in cache")
-
-	ok, err := controller.checkServingGroupReady(ms, groupName)
-	assert.NoError(t, err)
-	assert.True(t, ok)
-
-	// case2: Pod quantity mismatch
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
-			Name:      "pod-1",
-			Labels: map[string]string{
-				workloadv1alpha1.GroupNameLabelKey: groupName,
-			},
-		},
-	}
-	err = indexer.Delete(pod)
-	assert.NoError(t, err)
-	sync = waitForObjectInCache(t, 2*time.Second, func() bool {
-		pods, _ := controller.podsLister.Pods(ns).List(labels.SelectorFromSet(map[string]string{
-			workloadv1alpha1.GroupNameLabelKey: groupName,
-		}))
-		return len(pods) == int(expectedPodNum)-1
-	})
-	assert.True(t, sync, "Pods should be found in cache after deletion")
-	store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), groupName, "pod-1")
-
-	ok, err = controller.checkServingGroupReady(ms, groupName)
-	assert.NoError(t, err)
-	assert.False(t, ok)
 }
 
 func TestIsServingGroupDeleted(t *testing.T) {
@@ -2199,7 +2347,13 @@ func TestManageRoleReplicas(t *testing.T) {
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
-			assert.Len(t, roles, tt.expectedRoleSize, "role list should match expected count")
+			activeRole := 0
+			for i := range roles {
+				if roles[i].Status != datastore.RoleDeleting {
+					activeRole += 1
+				}
+			}
+			assert.Equal(t, tt.expectedRoleSize, activeRole, "role list should match expected count")
 
 			//if tt.expectedPodCount > 0 {
 			selector := labels.SelectorFromSet(map[string]string{
@@ -3531,13 +3685,20 @@ func TestScaleDownRoles(t *testing.T) {
 			// Verify the results
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, "prefill")
 			assert.NoError(t, err)
-
+			activeRoleCount := 0
+			activeRoles := []datastore.Role{}
+			for i := range roles {
+				if roles[i].Status != datastore.RoleDeleting {
+					activeRoleCount += 1
+					activeRoles = append(activeRoles, roles[i])
+				}
+			}
 			// Verify remaining role count
-			assert.Equal(t, tt.expectedCount, len(roles), "Remaining role count should match expected")
+			assert.Equal(t, tt.expectedCount, activeRoleCount, "Remaining role count should match expected")
 
 			// Verify remaining role names
-			actualNames := make([]string, len(roles))
-			for i, r := range roles {
+			actualNames := make([]string, len(activeRoles))
+			for i, r := range activeRoles {
 				actualNames[i] = r.Name
 			}
 			assert.ElementsMatch(t, tt.expectedRemainingNames, actualNames, "Remaining role names should match expected")

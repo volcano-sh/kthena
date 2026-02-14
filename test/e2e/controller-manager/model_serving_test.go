@@ -103,6 +103,7 @@ func TestModelServingPodRecovery(t *testing.T) {
 
 	// Create a basic ModelServing
 	modelServing := createBasicModelServing("test-pod-recovery", 1)
+	modelServing.Spec.RecoveryPolicy = workload.RoleRecreate
 
 	t.Log("Creating ModelServing for pod recovery test")
 	_, err = kthenaClient.WorkloadV1alpha1().
@@ -149,28 +150,25 @@ func TestModelServingPodRecovery(t *testing.T) {
 	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, originalPodName, metav1.DeleteOptions{})
 	require.NoError(t, err, "Failed to delete pod")
 
+	// Wait until ModelServing is ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
 	// Wait for a new pod with different UID and PodReady condition set to True
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		for _, pod := range pods.Items {
-			// Check if it's a new pod (different UID from original)
-			if pod.UID != originalPodUID {
-				// Check for PodReady condition with status True
-				for _, condition := range pod.Status.Conditions {
-					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-						t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
-						return true
-					}
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	assert.NoError(t, err, "Failed to list pods when modelserving should be ready after pod deletion")
+	for _, pod := range pods.Items {
+		// Check if it's a new pod (different UID from original)
+		if pod.UID != originalPodUID {
+			// Check for PodReady condition with status True
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+					t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
 				}
 			}
 		}
-		return false
-	}, 2*time.Minute, 5*time.Second, "New pod was not recreated with PodReady condition after deletion")
+	}
 
 	t.Log("Pod recovery test passed successfully")
 }

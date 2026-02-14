@@ -1007,14 +1007,6 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 			}
 		}
 	}
-
-	// Ensure that the role of an individual pod can be successfully enqueue.
-	if c.isRoleDeleted(ms, groupName, roleName, roleID) {
-		// role has been deleted, so the storage needs to be updated and need to reconcile.
-		klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, groupName)
-		c.store.DeleteRole(utils.GetNamespaceName(ms), groupName, roleName, roleID)
-		c.enqueueModelServing(ms)
-	}
 }
 
 func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
@@ -1297,13 +1289,19 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 
 func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.ModelServing, servingGroupName string) (bool, error) {
 	// TODO: modify ServingGroupReady logic after rolling update functionality is implemented
-	runningPodsNum, err := c.store.GetRunningPodNumByServingGroup(utils.GetNamespaceName(ms), servingGroupName)
-	if err != nil {
-		return false, err
-	}
-	if runningPodsNum != utils.ExpectedPodNum(ms) {
-		// the number of running pods does not reach the expected number
-		return false, nil
+	for _, role := range ms.Spec.Template.Roles {
+		roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), servingGroupName, role.Name)
+		if err != nil {
+			return false, err
+		}
+		if len(roleList) != int(*role.Replicas) {
+			return false, nil
+		}
+		for _, r := range roleList {
+			if r.Status != datastore.RoleRunning {
+				return false, nil
+			}
+		}
 	}
 	return true, nil
 }
@@ -1315,7 +1313,6 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 	if err != nil {
 		return false, fmt.Errorf("failed to get pods for role %s/%s: %v", roleName, roleID, err)
 	}
-
 	// Find the role specification to get expected pod count
 	var targetRole *workloadv1alpha1.Role
 	for i := range ms.Spec.Template.Roles {
