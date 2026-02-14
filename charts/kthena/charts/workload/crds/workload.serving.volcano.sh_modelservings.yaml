@@ -8886,6 +8886,7 @@ spec:
                           format: int32
                           type: integer
                         workerReplicas:
+                          default: 0
                           description: |-
                             WorkerReplicas defines the number for the worker pod of a role.
                             Required: Need to set the number of worker-pod replicas.
@@ -17521,7 +17522,6 @@ spec:
                       required:
                       - entryTemplate
                       - name
-                      - workerReplicas
                       type: object
                     maxItems: 4
                     minItems: 1
