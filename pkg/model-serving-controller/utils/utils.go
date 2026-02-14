@@ -107,12 +107,16 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 }
 
 func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision string) *corev1.Pod {
+	if role.WorkerTemplate == nil {
+		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s", role.Name)
+		return nil
+	}
+
 	workerPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
 	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleIndex)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
-	// Build environment variables into each container of all pod
 	envVars := createCommonEnvVars(role, entryPod, podIndex)
 	addPodEnvVars(workerPod, envVars...)
 	return workerPod

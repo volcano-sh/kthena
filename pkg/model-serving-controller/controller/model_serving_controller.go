@@ -1930,9 +1930,14 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, entryPod, true, chain, "entry"); err != nil {
 		return err
 	}
+	if role.WorkerReplicas > 0 && role.WorkerTemplate == nil {
+		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s. This should have been caught by webhook validation.", role.Name)
+		return nil
+	}
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
 		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleIndex, i, revision)
+
 		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, ms, servingGroupName, taskName)
 		if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, workerPod, false, chain, "worker"); err != nil {
 			return err

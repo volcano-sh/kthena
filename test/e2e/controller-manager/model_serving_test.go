@@ -420,6 +420,17 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 							},
 						},
 						WorkerReplicas: 0,
+						// Updated to include a dummy container to pass validation
+						WorkerTemplate: &workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "worker-dummy",
+										Image: "nginx:latest",
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -764,6 +775,17 @@ func createBasicModelServing(name string, servingGroupReplicas int32, roles ...w
 					},
 				},
 				WorkerReplicas: 0,
+				// Updated to include a dummy container to pass validation
+				WorkerTemplate: &workload.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "worker-dummy",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
 			},
 		}
 	}
@@ -807,6 +829,17 @@ func createInvalidModelServing() *workload.ModelServing {
 							},
 						},
 						WorkerReplicas: 0,
+						// Updated to include a dummy container to pass validation
+						WorkerTemplate: &workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "worker-dummy",
+										Image: "nginx:latest",
+									},
+								},
+							},
+						},
 					},
 				},
 			},
