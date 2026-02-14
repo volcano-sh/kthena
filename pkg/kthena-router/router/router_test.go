@@ -33,12 +33,14 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
@@ -424,6 +426,115 @@ func TestRouter_HandlerFunc_ScheduleFailure(t *testing.T) {
 	// 5. Assertions
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "can't schedule to target pod")
+}
+
+func TestRouter_HandlerFunc_AccessLogRoutingInfo(t *testing.T) {
+	// 1. Setup backend mock
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"response-id"}`)
+	})
+	router, store, backend := setupTestRouter(backendHandler)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendIP := backendURL.Hostname()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	// 2. Populate store
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("test-model-base"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	// Create Gateway and add to store (required for ModelRoute with parentRefs to match)
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: v1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "http",
+					Port:     80,
+					Protocol: gatewayv1.HTTPProtocolType,
+				},
+			},
+		},
+	}
+	gatewayKey := "default/test-gateway"
+	store.AddOrUpdateGateway(gateway)
+
+	// Create ModelRoute with parentRefs pointing to the Gateway
+	gatewayKind := gatewayv1.Kind("Gateway")
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model",
+			ParentRefs: []gatewayv1.ParentReference{
+				{
+					Name:  gatewayv1.ObjectName("test-gateway"),
+					Kind:  &gatewayKind,
+					Group: func() *gatewayv1.Group { g := gatewayv1.Group("gateway.networking.k8s.io"); return &g }(),
+				},
+			},
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ModelServerName: "ms-1"},
+					},
+				},
+			},
+		},
+	}
+
+	store.AddOrUpdateModelServer(modelServer, sets.New(types.NamespacedName{Name: "pod-1", Namespace: "default"}))
+	store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+
+	// 3. Create request with Gateway API info in context
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	reqBody := `{"model": "test-model", "prompt": "hello"}`
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	// Set Gateway API info in gin.Context
+	// We set GatewayKey because ModelRoute has parentRefs that match the Gateway
+	c.Set(GatewayKey, gatewayKey)
+	c.Set(HTTPRouteKey, types.NamespacedName{Namespace: "default", Name: "test-httproute"})
+	c.Set(InferencePoolKey, types.NamespacedName{Namespace: "default", Name: "test-inferencepool"})
+
+	// 4. Execute access log middleware first to create access log context
+	router.AccessLog()(c)
+
+	// 5. Execute handler
+	router.HandlerFunc()(c)
+
+	// 6. Verify request succeeded
+	assert.Equal(t, http.StatusOK, w.Code, "Request should succeed to test routing info setting")
+
+	// 7. Verify access log context has all routing information
+	accessCtx := accesslog.GetAccessLogContext(c)
+	require.NotNil(t, accessCtx, "Access log context should be set")
+
+	// Verify AI-specific routing information
+	assert.Equal(t, "test-model", accessCtx.ModelName, "ModelName should be set from request")
+	assert.Equal(t, "default/mr-1", accessCtx.ModelRoute, "ModelRoute should be set from matched ModelRoute")
+	assert.Equal(t, "default/ms-1", accessCtx.ModelServer, "ModelServer should be set from matched ModelServer")
+	assert.Equal(t, "pod-1", accessCtx.SelectedPod, "SelectedPod should be set from scheduled pod")
+	assert.Equal(t, accessCtx.RequestID, c.Request.Header.Get("x-request-id"), "RequestID should match request header")
+
+	// Verify Gateway API information
+	assert.Equal(t, gatewayKey, accessCtx.Gateway, "Gateway should be set from gin.Context GatewayKey")
+	assert.Equal(t, "default/test-httproute", accessCtx.HTTPRoute, "HTTPRoute should be set from gin.Context")
+	assert.Equal(t, "default/test-inferencepool", accessCtx.InferencePool, "InferencePool should be set from gin.Context")
 }
 
 func TestAccessLogConfigurationFromEnv(t *testing.T) {

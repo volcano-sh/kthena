@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -48,4 +49,23 @@ func GetRouterPod(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace
 	require.NotEmpty(t, pods.Items, "No router pods found")
 
 	return &pods.Items[0]
+}
+
+// FetchPodLogs returns recent logs of the specified pod.
+// This helper is primarily used by e2e tests to validate router access logs.
+func FetchPodLogs(t *testing.T, kubeClient kubernetes.Interface, namespace, podName string, tailLines int64) string {
+	t.Helper()
+
+	req := kubeClient.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		TailLines: &tailLines,
+	})
+
+	stream, err := req.Stream(context.Background())
+	require.NoError(t, err, "Failed to stream logs for pod %s/%s", namespace, podName)
+	defer stream.Close()
+
+	data, err := io.ReadAll(stream)
+	require.NoError(t, err, "Failed to read logs for pod %s/%s", namespace, podName)
+
+	return string(data)
 }
