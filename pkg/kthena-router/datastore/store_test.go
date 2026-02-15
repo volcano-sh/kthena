@@ -687,6 +687,50 @@ func TestStoreDeleteModelRoute_RequestQueueCleanup(t *testing.T) {
 	assert.False(t, exists)
 }
 
+// TestStoreDeleteModelRoute_LoraQueueCleanup verifies that when a ModelRoute with lora adapters is deleted,
+// waiting queues for both the base model and all lora names are cleaned up (ratelimit/fairness per-model resources).
+func TestStoreDeleteModelRoute_LoraQueueCleanup(t *testing.T) {
+	s := &store{
+		routeInfo:           make(map[string]*modelRouteInfo),
+		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
+		callbacks:           make(map[string][]CallbackFunc),
+		requestWaitingQueue: sync.Map{},
+	}
+
+	// Create a model route with base model and lora adapters
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "lora-cleanup-test",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName:    "base-model",
+			LoraAdapters: []string{"lora-a", "lora-b"},
+		},
+	}
+
+	err := s.AddOrUpdateModelRoute(mr)
+	assert.NoError(t, err)
+
+	// Create waiting queues for base model and loras (as used by fairness/ratelimit per-model)
+	s.requestWaitingQueue.Store("base-model", NewRequestPriorityQueue(nil))
+	s.requestWaitingQueue.Store("lora-a", NewRequestPriorityQueue(nil))
+	s.requestWaitingQueue.Store("lora-b", NewRequestPriorityQueue(nil))
+
+	// Delete the model route
+	err = s.DeleteModelRoute("default/lora-cleanup-test")
+	assert.NoError(t, err)
+
+	// Verify all related queues are deleted (base model + lora adapters)
+	_, existsBase := s.requestWaitingQueue.Load("base-model")
+	_, existsLoraA := s.requestWaitingQueue.Load("lora-a")
+	_, existsLoraB := s.requestWaitingQueue.Load("lora-b")
+	assert.False(t, existsBase, "waiting queue for base model should be cleaned up")
+	assert.False(t, existsLoraA, "waiting queue for lora-a should be cleaned up")
+	assert.False(t, existsLoraB, "waiting queue for lora-b should be cleaned up")
+}
+
 // TestStoreDeleteModelRoute_ConcurrentAccess tests thread safety of DeleteModelRoute
 func TestStoreDeleteModelRoute_ConcurrentAccess(t *testing.T) {
 	s := &store{

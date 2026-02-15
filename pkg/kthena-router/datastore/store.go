@@ -694,6 +694,8 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	info := s.routeInfo[namespacedName]
 	var modelName string
 	var deletedRoute *aiv1alpha1.ModelRoute
+	// Collect all model/lora names that may have associated queues (for cleanup after unlock)
+	var namesToCleanQueue []string
 	if info != nil {
 		modelName = info.model
 		// Remove from routes map
@@ -710,6 +712,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			}
 			if len(newRoutes) == 0 {
 				delete(s.routes, modelName)
+				namesToCleanQueue = append(namesToCleanQueue, modelName)
 			} else {
 				s.routes[modelName] = newRoutes
 			}
@@ -728,6 +731,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			}
 			if len(newLoraRoutes) == 0 {
 				delete(s.loraRoutes, lora)
+				namesToCleanQueue = append(namesToCleanQueue, lora)
 			} else {
 				s.loraRoutes[lora] = newLoraRoutes
 			}
@@ -757,13 +761,14 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 
 	delete(s.routeInfo, namespacedName)
 	s.routeMutex.Unlock()
-	if modelName != "" {
-		// Clean up associated waiting queue if exists
-		val, _ := s.requestWaitingQueue.LoadAndDelete(modelName)
+
+	// Clean up associated waiting queues for both base model and all lora adapters
+	for _, name := range namesToCleanQueue {
+		val, _ := s.requestWaitingQueue.LoadAndDelete(name)
 		if val != nil {
 			queue, _ := val.(*RequestPriorityQueue)
 			queue.Close()
-			klog.Infof("deleted waiting queue for model %s", modelName)
+			klog.Infof("deleted waiting queue for model %s", name)
 		}
 	}
 
