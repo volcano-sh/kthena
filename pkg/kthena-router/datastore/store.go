@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -641,6 +642,10 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 			}
 		}
 		if !found {
+			if len(routes) > 0 {
+				klog.Warningf("duplicate ModelRoute for model %q: %s/%s (gateway assumes model is unique, prebuilt/oldest route takes precedence)",
+					mr.Spec.ModelName, mr.Namespace, mr.Name)
+			}
 			s.routes[mr.Spec.ModelName] = append(routes, mr)
 		}
 	}
@@ -658,6 +663,10 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 			}
 		}
 		if !found {
+			if len(loraRoutes) > 0 {
+				klog.Warningf("duplicate ModelRoute for lora %q: %s/%s (gateway assumes model is unique, prebuilt/oldest route takes precedence)",
+					lora, mr.Namespace, mr.Name)
+			}
 			s.loraRoutes[lora] = append(loraRoutes, mr)
 		}
 	}
@@ -798,8 +807,19 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		isLora = true
 	}
 
-	// Try each ModelRoute until we find one that matches
-	for _, mr := range candidateRoutes {
+	// Prefer prebuilt (oldest) ModelRoute when multiple exist for same model - ensures consistent behavior
+	sorted := make([]*aiv1alpha1.ModelRoute, len(candidateRoutes))
+	copy(sorted, candidateRoutes)
+	sort.Slice(sorted, func(i, j int) bool {
+		ti, tj := sorted[i].CreationTimestamp.Time, sorted[j].CreationTimestamp.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return sorted[i].Namespace+"/"+sorted[i].Name < sorted[j].Namespace+"/"+sorted[j].Name
+	})
+
+	// Try each ModelRoute until we find one that matches (oldest first)
+	for _, mr := range sorted {
 		// Check parentRefs if specified
 		if len(mr.Spec.ParentRefs) > 0 {
 			// If gatewayKey is provided (not empty), check if ModelRoute matches the specific gateway
