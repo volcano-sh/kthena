@@ -4,6 +4,13 @@ A Helm chart for deploying Kthena
 
 ![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 1.0.0](https://img.shields.io/badge/AppVersion-1.0.0-informational?style=flat-square)
 
+## Requirements
+
+| Repository | Name | Version |
+|------------|------|---------|
+| https://ghcr.io/volcano-sh/charts/kthena | networking | 1.0.0 |
+| https://ghcr.io/volcano-sh/charts/kthena | workload | 1.0.0 |
+
 ## Values
 
 | Key | Type | Default | Description |
