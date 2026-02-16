@@ -164,7 +164,7 @@ func (c *GatewayController) syncHandler(key string) error {
 }
 
 func (c *GatewayController) enqueueGateway(obj interface{}) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(err)
 		return
