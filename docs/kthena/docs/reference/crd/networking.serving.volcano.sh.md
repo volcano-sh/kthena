@@ -366,7 +366,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the rule. |  |  |
 | `modelMatch` _[ModelMatch](#modelmatch)_ | Match conditions to be satisfied for the rule to be activated.<br />Empty `modelMatch` means matching all requests. |  |  |
-| `targetModels` _[TargetModel](#targetmodel) array_ |  |  | MaxItems: 16 <br /> |
+| `targetModels` _[TargetModel](#targetmodel) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
 
 
 #### StringMatch

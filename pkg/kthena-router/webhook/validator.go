@@ -170,6 +170,18 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		}
 	}
 
+	rulesField := specField.Child("rules")
+	for i, rule := range modelRoute.Spec.Rules {
+		if rule == nil {
+			allErrs = append(allErrs, field.Invalid(rulesField.Index(i), rule, "rule must not be nil"))
+			continue
+		}
+		ruleField := rulesField.Index(i)
+		if len(rule.TargetModels) == 0 {
+			allErrs = append(allErrs, field.Required(ruleField.Child("targetModels"), "each rule must have at least one target model"))
+		}
+	}
+
 	if len(allErrs) > 0 {
 		var messages []string
 		for _, err := range allErrs {
