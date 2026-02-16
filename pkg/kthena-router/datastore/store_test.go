@@ -1217,3 +1217,158 @@ func TestStoreMatchModelServer(t *testing.T) {
 		})
 	}
 }
+
+func TestToWeightedSlice_EmptyTargets(t *testing.T) {
+	// This test verifies the fix for the panic when TargetModels is empty.
+	// Before the fix, toWeightedSlice would panic with index out of range [0] with length 0.
+	targets := []*aiv1alpha1.TargetModel{}
+	s := &store{}
+	_, err := s.selectDestination(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no target models specified in rule")
+}
+
+func TestToWeightedSlice_SingleTarget(t *testing.T) {
+	weight := uint32(100)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &weight},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{100}, result)
+}
+
+func TestToWeightedSlice_MultipleTargets(t *testing.T) {
+	w1 := uint32(70)
+	w2 := uint32(30)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &w1},
+		{ModelServerName: "server-b", Weight: &w2},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{70, 30}, result)
+}
+
+func TestToWeightedSlice_NoWeights(t *testing.T) {
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a"},
+		{ModelServerName: "server-b"},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{1, 1}, result)
+}
+
+func TestToWeightedSlice_MixedWeights(t *testing.T) {
+	w1 := uint32(50)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &w1},
+		{ModelServerName: "server-b"}, // no weight
+	}
+	_, err := toWeightedSlice(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "weight field in targetModel must be either fully specified or not specified")
+}
+
+func TestSelectFromWeightedSlice_EmptyWeights(t *testing.T) {
+	_, err := selectFromWeightedSlice([]uint32{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no weights provided")
+}
+
+func TestSelectFromWeightedSlice_ZeroTotalWeight(t *testing.T) {
+	// This test verifies the fix for the panic when all weights are zero.
+	// Before the fix, rng.Intn(0) would panic.
+	_, err := selectFromWeightedSlice([]uint32{0, 0, 0})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "total weight is zero")
+}
+
+func TestSelectFromWeightedSlice_ValidWeights(t *testing.T) {
+	// Run multiple times to verify no panics and results are within range
+	for i := 0; i < 100; i++ {
+		idx, err := selectFromWeightedSlice([]uint32{50, 30, 20})
+		assert.NoError(t, err)
+		assert.True(t, idx >= 0 && idx < 3, "index should be in range [0, 3)")
+	}
+}
+
+func TestMatchModelServer_EmptyTargetModels_NoPanic(t *testing.T) {
+	// This is the end-to-end test for the bug: a ModelRoute with a rule
+	// that has empty TargetModels should return an error, not panic.
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+	}
+
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "broken-route",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "my-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					Name:         "catch-all",
+					TargetModels: []*aiv1alpha1.TargetModel{}, // empty — the bug trigger
+				},
+			},
+		},
+	}
+	s.AddOrUpdateModelRoute(mr)
+
+	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
+
+	// Before the fix this would panic. After the fix it returns an error.
+	assert.NotPanics(t, func() {
+		_, _, _, err := s.MatchModelServer("my-model", req, "")
+		assert.Error(t, err)
+	})
+}
+
+func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
+	// When the first rule has empty TargetModels but a second rule is valid,
+	// the request should fall through to the second rule.
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+	}
+
+	w := uint32(100)
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "route-with-fallback",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "my-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					Name: "broken-rule",
+					ModelMatch: &aiv1alpha1.ModelMatch{
+						Uri: &aiv1alpha1.StringMatch{Exact: ptr("/v1/broken")},
+					},
+					TargetModels: []*aiv1alpha1.TargetModel{}, // empty
+				},
+				{
+					Name: "valid-rule",
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ModelServerName: "good-server", Weight: &w},
+					},
+				},
+			},
+		},
+	}
+	s.AddOrUpdateModelRoute(mr)
+
+	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
+	server, _, _, err := s.MatchModelServer("my-model", req, "")
+	assert.NoError(t, err)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, server)
+}

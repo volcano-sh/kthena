@@ -255,6 +255,83 @@ func TestValidateModelRoute(t *testing.T) {
 			expectValid:    false,
 			expectedReason: "validation failed:   - spec: Required value: either modelName or loraAdapters must be specified",
 		},
+		{
+			name: "invalid model route - rule with empty targetModels",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name:         "empty-targets-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
+		},
+		{
+			name: "invalid model route - multiple rules with empty targetModels",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "valid-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "test-server"},
+							},
+						},
+						{
+							Name:         "empty-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.rules[1].targetModels: Required value: each rule must have at least one target model",
+		},
+		{
+			name: "invalid model route - combined errors: missing model name and empty targetModels",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name:         "empty-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec: Required value: either modelName or loraAdapters must be specified  - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
+		},
 	}
 
 	// Create a validator instance
