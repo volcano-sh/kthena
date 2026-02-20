@@ -383,14 +383,21 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 	var modelServerObj *modelServer
 	if value, ok := s.modelServer.Load(name); !ok {
 		modelServerObj = newModelServer(ms)
+		// New object — no concurrent access yet, safe to write without lock
+		if len(pods) != 0 {
+			modelServerObj.pods = pods
+		}
 	} else {
 		modelServerObj = value.(*modelServer)
+		// Existing object — concurrent readers may access modelServer and pods,
+		// so we must hold the lock to prevent data races.
+		modelServerObj.mutex.Lock()
 		modelServerObj.modelServer = ms
-	}
-
-	if len(pods) != 0 {
-		// do not operate s.pods here, which are done within pod handler
-		modelServerObj.pods = pods
+		if len(pods) != 0 {
+			// do not operate s.pods here, which are done within pod handler
+			modelServerObj.pods = pods
+		}
+		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
 	return nil
