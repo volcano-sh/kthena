@@ -44,6 +44,12 @@ func newModelServer(ms *aiv1alpha1.ModelServer) *modelServer {
 	}
 }
 
+func (m *modelServer) getModelServer() *aiv1alpha1.ModelServer {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	return m.modelServer
+}
+
 func (m *modelServer) getPods() []types.NamespacedName {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()

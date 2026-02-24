@@ -428,7 +428,7 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 
 func (s *store) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer {
 	if value, ok := s.modelServer.Load(name); ok {
-		return value.(*modelServer).modelServer
+		return value.(*modelServer).getModelServer()
 	}
 	return nil
 }
@@ -1324,7 +1324,7 @@ func (s *store) GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelS
 	s.modelServer.Range(func(key, value any) bool {
 		if namespacedName, ok := key.(types.NamespacedName); ok {
 			if ms, ok := value.(*modelServer); ok {
-				result[namespacedName] = ms.modelServer
+				result[namespacedName] = ms.getModelServer()
 			}
 		}
 		return true
