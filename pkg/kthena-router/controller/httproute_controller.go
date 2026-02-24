@@ -17,16 +17,20 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayclientset "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
 
@@ -34,6 +38,7 @@ import (
 )
 
 type HTTPRouteController struct {
+	gatewayClient   gatewayclientset.Interface
 	httpRouteLister gatewaylisters.HTTPRouteLister
 	httpRouteSynced cache.InformerSynced
 	registration    cache.ResourceEventHandlerRegistration
@@ -44,12 +49,14 @@ type HTTPRouteController struct {
 }
 
 func NewHTTPRouteController(
+	gatewayClient gatewayclientset.Interface,
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
 	store datastore.Store,
 ) *HTTPRouteController {
 	httpRouteInformer := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
 
 	controller := &HTTPRouteController{
+		gatewayClient:   gatewayClient,
 		httpRouteLister: httpRouteInformer.Lister(),
 		httpRouteSynced: httpRouteInformer.Informer().HasSynced,
 		workqueue:       workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
@@ -144,7 +151,7 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	// Check if any parentRef references a Gateway with kthena-router GatewayClass
 	shouldProcess := false
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
-		if parentRef.Kind != nil && *parentRef.Kind == "Gateway" {
+		if parentRef.Kind == nil || *parentRef.Kind == "Gateway" {
 			gatewayNamespace := httpRoute.Namespace
 			if parentRef.Namespace != nil {
 				gatewayNamespace = string(*parentRef.Namespace)
@@ -165,7 +172,91 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 		return nil
 	}
 
-	return c.store.AddOrUpdateHTTPRoute(httpRoute)
+	if err := c.store.AddOrUpdateHTTPRoute(httpRoute); err != nil {
+		return err
+	}
+
+	return c.updateHTTPRouteStatus(httpRoute)
+}
+
+func (c *HTTPRouteController) updateHTTPRouteStatus(httpRoute *gatewayv1.HTTPRoute) error {
+	httpRoute = httpRoute.DeepCopy()
+
+	// For each parent reference, update its status
+	for _, parentRef := range httpRoute.Spec.ParentRefs {
+		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+			continue
+		}
+
+		gatewayNamespace := httpRoute.Namespace
+		if parentRef.Namespace != nil {
+			gatewayNamespace = string(*parentRef.Namespace)
+		}
+
+		gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, string(parentRef.Name))
+		gw := c.store.GetGateway(gatewayKey)
+		if gw == nil || string(gw.Spec.GatewayClassName) != DefaultGatewayClassName {
+			continue
+		}
+
+		// Found a gateway managed by kthena-router
+		parentStatus := gatewayv1.RouteParentStatus{
+			ParentRef:      parentRef,
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(gatewayv1.RouteConditionAccepted),
+					Status:             metav1.ConditionTrue,
+					Reason:             string(gatewayv1.RouteReasonAccepted),
+					Message:            "HTTPRoute has been accepted by kthena-router",
+					LastTransitionTime: metav1.Now(),
+					ObservedGeneration: httpRoute.Generation,
+				},
+				{
+					Type:               string(gatewayv1.RouteConditionResolvedRefs),
+					Status:             metav1.ConditionTrue,
+					Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+					Message:            "All references in HTTPRoute are resolved",
+					LastTransitionTime: metav1.Now(),
+					ObservedGeneration: httpRoute.Generation,
+				},
+			},
+		}
+
+		c.setHTTPRouteParentStatus(httpRoute, parentStatus)
+	}
+
+	_, err := c.gatewayClient.GatewayV1().HTTPRoutes(httpRoute.Namespace).UpdateStatus(context.Background(), httpRoute, metav1.UpdateOptions{})
+	return err
+}
+
+func (c *HTTPRouteController) setHTTPRouteParentStatus(httpRoute *gatewayv1.HTTPRoute, newStatus gatewayv1.RouteParentStatus) {
+	for i, status := range httpRoute.Status.Parents {
+		if c.isSameParentRef(status.ParentRef, newStatus.ParentRef) {
+			httpRoute.Status.Parents[i] = newStatus
+			return
+		}
+	}
+	httpRoute.Status.Parents = append(httpRoute.Status.Parents, newStatus)
+}
+
+func (c *HTTPRouteController) isSameParentRef(a, b gatewayv1.ParentReference) bool {
+	if a.Name != b.Name {
+		return false
+	}
+	if (a.Namespace == nil) != (b.Namespace == nil) {
+		return false
+	}
+	if a.Namespace != nil && *a.Namespace != *b.Namespace {
+		return false
+	}
+	if (a.Kind == nil) != (b.Kind == nil) {
+		return false
+	}
+	if a.Kind != nil && *a.Kind != *b.Kind {
+		return false
+	}
+	return true
 }
 
 func (c *HTTPRouteController) enqueueHTTPRoute(obj interface{}) {

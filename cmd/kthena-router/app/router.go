@@ -218,6 +218,7 @@ type PortListenerInfo struct {
 	Server       *http.Server
 	ShutdownFunc context.CancelFunc
 	Listeners    []ListenerConfig
+	LastError    error
 }
 
 // ListenerManager manages Gateway listeners dynamically
@@ -409,6 +410,9 @@ func (lm *ListenerManager) removeListenerFromPort(port int32, configToRemove Lis
 	}
 	portInfo.Listeners = filtered
 	portInfo.mu.Unlock()
+
+	// Remove listener status from store to prevent memory leaks
+	lm.store.RemoveListenerStatus(configToRemove.GatewayKey, configToRemove.ListenerName)
 }
 
 // addListenerToPort adds a listener config to a port
@@ -437,7 +441,11 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		portInfo.ShutdownFunc = cancel
 
 		// Start the server
-		go func(p int32, srv *http.Server, ctx context.Context, tls bool, cert, key string) {
+		// Set status to nil to indicate a clean state (no errors detected yet)
+		// This will translate to Accepted: True and Programmed: True in the Gateway status
+		lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, nil)
+
+		go func(p int32, srv *http.Server, pi *PortListenerInfo, tls bool, cert, key string) {
 			klog.Infof("Starting Gateway listener server on port %d", p)
 			var err error
 			if tls {
@@ -450,8 +458,18 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 			}
 			if err != nil && err != http.ErrServerClosed {
 				klog.Errorf("listen failed for port %d: %v", p, err)
+
+				// Update all listeners on this port with the error
+				// pi is a pointer to the PortListenerInfo, so we can lock it directly
+				// without needing to lock the top-level ListenerManager
+				pi.mu.Lock()
+				pi.LastError = err
+				for _, l := range pi.Listeners {
+					lm.store.SetListenerStatus(l.GatewayKey, l.ListenerName, err)
+				}
+				pi.mu.Unlock()
 			}
-		}(port, server, listenerCtx, enableTLS, tlsCertFile, tlsKeyFile)
+		}(port, server, portInfo, enableTLS, tlsCertFile, tlsKeyFile)
 
 		// Start graceful shutdown goroutine
 		go func(p int32, srv *http.Server, cancel context.CancelFunc) {
@@ -467,7 +485,10 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		// Add listener to existing port
 		portInfo.mu.Lock()
 		portInfo.Listeners = append(portInfo.Listeners, config)
+		currentErr := portInfo.LastError
 		portInfo.mu.Unlock()
+
+		lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, currentErr)
 		klog.V(4).Infof("Added listener %s/%s to existing port %d", config.GatewayKey, config.ListenerName, port)
 	}
 }
