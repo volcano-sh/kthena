@@ -238,8 +238,10 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 }
 
 func extractPodNameFromIdentifier(podIdentifier string) string {
-	parts := strings.Split(podIdentifier, ".")
-	return parts[0]
+	if idx := strings.IndexByte(podIdentifier, '.'); idx >= 0 {
+		return podIdentifier[:idx]
+	}
+	return podIdentifier
 }
 
 func (t *KVCacheAware) calculatePodScores(blockHashes []uint64, blockToPods map[uint64][]string) map[string]int {
@@ -307,16 +309,16 @@ func (tbp *TokenBlockProcessor) TokensToBlockHashes(tokens []uint32, maxBlocks i
 
 // computeStandardizedHash generates a consistent hash for token sequences using SHA-256
 // Returns a 63-bit positive integer for Redis/database compatibility
-func computeStandardizedHash(tokenIds []int) uint64 {
+func computeStandardizedHash(tokenIds []uint32) uint64 {
 	if len(tokenIds) == 0 {
 		return 0
 	}
 
 	h := sha256.New()
+	var tokenBytes [4]byte
 	for _, tokenId := range tokenIds {
-		tokenBytes := make([]byte, 4)
-		binary.BigEndian.PutUint32(tokenBytes, uint32(tokenId))
-		h.Write(tokenBytes)
+		binary.BigEndian.PutUint32(tokenBytes[:], tokenId)
+		h.Write(tokenBytes[:])
 	}
 
 	hashBytes := h.Sum(nil)
@@ -329,15 +331,17 @@ func computeStandardizedHash(tokenIds []int) uint64 {
 }
 
 func (tbp *TokenBlockProcessor) chunkTokens(tokens []uint32, maxBlocks int) [][]uint32 {
-	var chunks [][]uint32
-	counter := 0
-	for i := 0; i < len(tokens) && counter < maxBlocks; i += tbp.blockSize {
+	numBlocks := (len(tokens) + tbp.blockSize - 1) / tbp.blockSize
+	if numBlocks > maxBlocks {
+		numBlocks = maxBlocks
+	}
+	chunks := make([][]uint32, 0, numBlocks)
+	for i := 0; i < len(tokens) && len(chunks) < maxBlocks; i += tbp.blockSize {
 		end := i + tbp.blockSize
 		if end > len(tokens) {
 			end = len(tokens)
 		}
 		chunks = append(chunks, tokens[i:end])
-		counter++
 	}
 	return chunks
 }
@@ -345,12 +349,7 @@ func (tbp *TokenBlockProcessor) chunkTokens(tokens []uint32, maxBlocks int) [][]
 func (tbp *TokenBlockProcessor) computeBlockHashes(chunks [][]uint32) []uint64 {
 	hashes := make([]uint64, len(chunks))
 	for i, chunk := range chunks {
-		tokenInts := make([]int, len(chunk))
-		for j, token := range chunk {
-			tokenInts[j] = int(token)
-		}
-
-		hashes[i] = computeStandardizedHash(tokenInts)
+		hashes[i] = computeStandardizedHash(chunk)
 	}
 	return hashes
 }
