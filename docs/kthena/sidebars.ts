@@ -64,6 +64,15 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: 'category',
+          label: 'workload',
+          items: [
+            'user-guide/binpack-scale-down',
+            'user-guide/gang-scheduling',
+            'user-guide/network-topology',
+          ],
+        },
+        {
+          type: 'category',
           label: 'Router',
           items: [
             'user-guide/router-routing',
