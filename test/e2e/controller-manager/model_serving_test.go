@@ -431,6 +431,15 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
 
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
 	// Wait for the initial ModelServing to be ready
 	t.Log("Waiting for initial ModelServing (4 replicas) to be ready")
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)

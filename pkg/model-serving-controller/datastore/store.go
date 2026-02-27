@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
@@ -124,19 +125,23 @@ func (s *store) GetServingGroupByModelServing(modelServingName types.NamespacedN
 
 // GetRoleList returns the list of roles and errors
 func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, roleName string) ([]Role, error) {
+	klog.V(4).Infof("GetRoleList: modelServing=%s, group=%s, role=%s", modelServingName, groupName, roleName)
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	servingGroups, ok := s.servingGroup[modelServingName]
 	if !ok {
+		klog.V(4).Infof("GetRoleList: modelServing %s not found in store", modelServingName)
 		return nil, fmt.Errorf("cannot list ServingGroup of modelServing %s", modelServingName.Name)
 	}
 	servingGroup, ok := servingGroups[groupName]
 	if !ok {
+		klog.V(4).Infof("GetRoleList: servingGroup %s not found in modelServing %s", groupName, modelServingName)
 		return nil, ErrServingGroupNotFound
 	}
 	roleMap, ok := servingGroup.roles[roleName]
 	if !ok {
 		// If the roleName does not exist, return an empty list instead of an error
+		klog.V(4).Infof("GetRoleList: roleName %s not found in group %s of modelServing %s, returning empty list", roleName, groupName, modelServingName)
 		return []Role{}, nil
 	}
 
@@ -152,6 +157,7 @@ func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, ro
 		return aIndex - bIndex
 	})
 
+	klog.V(4).Infof("GetRoleList: returning %d roles for modelServing=%s, group=%s, role=%s", len(roleSlice), modelServingName, groupName, roleName)
 	return roleSlice, nil
 }
 
@@ -297,6 +303,11 @@ func (s *store) AddServingGroup(modelServingName types.NamespacedName, idx int, 
 
 	if _, ok := s.servingGroup[modelServingName]; !ok {
 		s.servingGroup[modelServingName] = make(map[string]*ServingGroup)
+	}
+
+	if _, ok := s.servingGroup[modelServingName][newGroup.Name]; ok {
+		klog.V(4).Infof("AddServingGroup: group %s already exists in modelServing %s, skipping", newGroup.Name, modelServingName)
+		return
 	}
 	s.servingGroup[modelServingName][newGroup.Name] = newGroup
 }
