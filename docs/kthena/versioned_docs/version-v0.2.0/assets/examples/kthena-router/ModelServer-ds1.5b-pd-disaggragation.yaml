@@ -8,11 +8,11 @@ spec:
     matchLabels:
       app: deepseek-r1-1-5b
     pdGroup:
-      groupKey: "modelinfer/infergroupname"
+      groupKey: "modelserving.volcano.sh/group-name"
       prefillLabels:
-        modelinfer/rolename: "P-instance"
+        modelserving.volcano.sh/rolename: "P-instance"
       decodeLabels:
-        modelinfer/rolename: "D-instance"
+        modelserving.volcano.sh/rolename: "D-instance"
   workloadPort:
     port: 8000
   model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"

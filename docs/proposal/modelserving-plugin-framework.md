@@ -57,6 +57,27 @@ A plugin system enables:
 
 ### Proposal
 
+#### Diagram
+
+```mermaid
+flowchart LR
+  MS["ModelServing CR"]
+  subgraph Controller[ModelServing Controller]
+    PG["Pod Generator<br/>GenerateEntry/Worker"]
+    PM["Plugin Manager<br/>(run in order)"]
+  end
+  PL["Plugins<br/>BuiltIn/Webhook"]
+  POD["Pod<br/>(mutated spec)"]
+  OBS["Events / Status<br/>Annotations"]
+
+  MS -->|reconcile| PG;
+  MS -->|spec.plugins config| PM;
+  PG -->|OnPodCreate| PM;
+  PM -->|mutate Pod spec| POD;
+  POD -.->|OnPodReady| PM;
+  PM -.->|events/conditions| OBS;
+```
+
 #### API changes
 
 Add a `plugins` field to `ModelServingSpec`:

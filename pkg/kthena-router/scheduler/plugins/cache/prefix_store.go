@@ -78,12 +78,6 @@ type ModelPrefixStore struct {
 	hashCapacity int                                                    // Capacity for each pod's hash LRU
 }
 
-// MatchResult represents a matching pod and its match length
-type MatchResult struct {
-	NamespacedName types.NamespacedName
-	MatchLen       int
-}
-
 // NewModelPrefixStore creates a new ModelPrefixStore with the specified capacity and topK
 func NewModelPrefixStore(store datastore.Store, hashCapacity, topK int) *ModelPrefixStore {
 	s := &ModelPrefixStore{
@@ -144,10 +138,10 @@ func isModelHashShardEmpty(model *modelHashes) bool {
 	return true
 }
 
-// FindTopMatches finds the topK pods with the longest matching prefixes for given model and hashes
-func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []*datastore.PodInfo) []MatchResult {
-	matches := make([]MatchResult, 0, s.topK)
-
+// FindTopMatches finds the topK pods with the longest matching prefixes for given model and hashes.
+// Only pods present in the pods argument are considered as candidates.
+// It returns a map of NamespacedName to match length for the topK matching pods.
+func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []*datastore.PodInfo) map[types.NamespacedName]int {
 	s.entriesMu.RLock()
 	modelCache, exists := s.entries[model]
 	s.entriesMu.RUnlock()
@@ -156,8 +150,17 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 		return nil
 	}
 
-	// Track processed pods to avoid duplicates
-	processedPods := sets.New[types.NamespacedName]()
+	// Build a set of candidate pods from the pods argument so that only
+	// pods in the scheduling candidate pool are returned.
+	candidatePods := sets.New[types.NamespacedName]()
+	for _, pod := range pods {
+		candidatePods.Insert(types.NamespacedName{
+			Namespace: pod.Pod.Namespace,
+			Name:      pod.Pod.Name,
+		})
+	}
+
+	matches := make(map[types.NamespacedName]int, s.topK)
 
 	// Start matching from the end of hashes
 	// This works because each hash depends on the previous hash in hashPrompt
@@ -169,20 +172,17 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 		if exists {
 			// Note: we are iterating over a copy of the set, so we don't need to hold the lock.
 			for pod := range podSet {
-				// Skip if pod is not in the candidate set or already processed
-				if processedPods.Contains(pod) {
+				// Skip if pod is not in the candidate set or already matched
+				if !candidatePods.Contains(pod) {
 					continue
 				}
-				processedPods.Insert(pod)
+				if _, alreadyMatched := matches[pod]; alreadyMatched {
+					continue
+				}
 
 				// If we found a match at position i, we know all previous hashes must match
 				// because each hash depends on the previous one in hashPrompt
-				matchLen := i + 1
-
-				matches = append(matches, MatchResult{
-					NamespacedName: pod,
-					MatchLen:       matchLen,
-				})
+				matches[pod] = i + 1
 
 				// Return if we have enough matches
 				if len(matches) >= s.topK {

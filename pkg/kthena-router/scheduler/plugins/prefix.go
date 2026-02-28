@@ -138,29 +138,22 @@ func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) m
 		return nil
 	}
 
-	scoreResults := make(map[*datastore.PodInfo]int, len(pods))
 	// Store hashes in context for later use in PostSchedule
 	ctx.Hashes = hashes
 
-	// Find pods with matching prefixes
-	matches := p.store.FindTopMatches(ctx.Model, hashes, pods)
+	// Find pods with matching prefixes: returns map[NamespacedName]matchLen for topK pods.
+	matchByName := p.store.FindTopMatches(ctx.Model, hashes, pods)
 
-	podMap := make(map[types.NamespacedName]*datastore.PodInfo, len(pods))
-	for _, pod := range pods {
-		podMap[types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}] = pod
-	}
-
-	// Calculate scores based on prefix match length
+	// Single pass over pods: score = cache-hit score if found, 0 otherwise.
 	totalHashes := len(hashes)
-	for _, match := range matches {
-		// Score is the ratio of matching hashes to total hashes, scaled to 0-100
-		score := int((float64(match.MatchLen) / float64(totalHashes)) * 100)
-		pod := podMap[match.NamespacedName]
-		if pod == nil {
-			klog.Errorf("Pod %s not found in pod map, this maybe because of prefix cache state inconsistency", match.NamespacedName)
-			continue
+	scoreResults := make(map[*datastore.PodInfo]int, len(pods))
+	for _, pod := range pods {
+		nsName := types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}
+		if matchLen, ok := matchByName[nsName]; ok {
+			scoreResults[pod] = int((float64(matchLen) / float64(totalHashes)) * 100)
+		} else {
+			scoreResults[pod] = 0
 		}
-		scoreResults[pod] = score
 	}
 
 	return scoreResults

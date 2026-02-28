@@ -44,6 +44,12 @@ func newModelServer(ms *aiv1alpha1.ModelServer) *modelServer {
 	}
 }
 
+func (m *modelServer) getModelServer() *aiv1alpha1.ModelServer {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	return m.modelServer
+}
+
 func (m *modelServer) getPods() []types.NamespacedName {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
@@ -108,13 +114,14 @@ func (m *modelServer) getPDGroupName(podLabels map[string]string) string {
 
 // removePodFromPDGroups removes a pod from all PDGroup categorizations
 func (m *modelServer) removePodFromPDGroups(podName types.NamespacedName, labels map[string]string) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
 	pdGroupName := m.getPDGroupName(labels)
 	if pdGroupName == "" {
 		return
 	}
 
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
 	if pdGroup, ok := m.pdGroups[pdGroupName]; ok {
 		pdGroup.RemovePod(podName)
 		// Clean up empty PDGroupPods
@@ -150,6 +157,9 @@ func (m *modelServer) getAllPrefillPods() []types.NamespacedName {
 
 // getPrefillPodsForDecodeGroup returns prefill pods that match the same PD group as a decode pod
 func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.NamespacedName {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
 	// Check if this modelServer has PDGroup configuration
 	if m.modelServer.Spec.WorkloadSelector == nil || m.modelServer.Spec.WorkloadSelector.PDGroup == nil {
 		return nil
@@ -161,8 +171,6 @@ func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.Namespa
 		return nil
 	}
 
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
 	// Return prefill pods for the same PD group value
 	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
 		return pdGroupPods.GetPrefillPods()

@@ -39,6 +39,8 @@ import (
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
+const nginxImage = "nginx:1.28.2"
+
 // TODO(user): Add E2E tests for ModelServing lifecycle (Create, Update, Delete and check if it works)
 func TestModelServingLifecycle(t *testing.T) {
 	// Placeholder for ModelServing lifecycle tests
@@ -408,7 +410,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "nginx:latest", // Initial image
+										Image: nginxImage, // Initial image
 										Ports: []corev1.ContainerPort{
 											{
 												Name:          "http",
@@ -708,7 +710,7 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 				Containers: []corev1.Container{
 					{
 						Name:  "test-container",
-						Image: "nginx:latest",
+						Image: nginxImage,
 						Ports: []corev1.ContainerPort{
 							{
 								Name:          "http",
@@ -725,7 +727,7 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 				Containers: []corev1.Container{
 					{
 						Name:  "worker-container",
-						Image: "nginx:latest",
+						Image: nginxImage,
 						Ports: []corev1.ContainerPort{
 							{
 								Name:          "http",
@@ -752,7 +754,7 @@ func createBasicModelServing(name string, servingGroupReplicas int32, roles ...w
 						Containers: []corev1.Container{
 							{
 								Name:  "test-container",
-								Image: "nginx:latest",
+								Image: nginxImage,
 								Ports: []corev1.ContainerPort{
 									{
 										Name:          "http",
@@ -801,7 +803,7 @@ func createInvalidModelServing() *workload.ModelServing {
 								Containers: []corev1.Container{
 									{
 										Name:  "test",
-										Image: "nginx:latest",
+										Image: nginxImage,
 									},
 								},
 							},
@@ -845,7 +847,7 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "nginx:latest",
+										Image: nginxImage,
 										Ports: []corev1.ContainerPort{
 											{
 												Name:          "http",
@@ -992,7 +994,7 @@ func TestLWSAPIBasic(t *testing.T) {
 						Containers: []corev1.Container{
 							{
 								Name:            "worker",
-								Image:           "nginx:latest",
+								Image:           nginxImage,
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Ports: []corev1.ContainerPort{
 									{

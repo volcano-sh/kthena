@@ -18,6 +18,7 @@ package cache
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -149,16 +150,16 @@ func TestModelPrefixStore(t *testing.T) {
 				t.Errorf("got %d matches, want %d", len(matches), len(tt.expectedPods))
 			}
 
-			for i, match := range matches {
-				if i >= len(tt.expectedPods) {
-					break
+			for i, expectedName := range tt.expectedPods {
+				parts := strings.SplitN(expectedName, "/", 2)
+				nsName := types.NamespacedName{Namespace: parts[0], Name: parts[1]}
+				matchLen, ok := matches[nsName]
+				if !ok {
+					t.Errorf("expected pod %s not found in matches", expectedName)
+					continue
 				}
-				expectedName := tt.expectedPods[i]
-				if match.NamespacedName.String() != expectedName {
-					t.Errorf("match[%d]: got pod %s, want %s", i, match.NamespacedName.String(), expectedName)
-				}
-				if match.MatchLen != tt.expectedLens[i] {
-					t.Errorf("match[%d]: got length %d, want %d", i, match.MatchLen, tt.expectedLens[i])
+				if matchLen != tt.expectedLens[i] {
+					t.Errorf("pod %s: got matchLen %d, want %d", expectedName, matchLen, tt.expectedLens[i])
 				}
 			}
 		})
@@ -187,14 +188,16 @@ func TestModelPrefixStore(t *testing.T) {
 		// Query model-a should only return pod1
 		matches1 := store.FindTopMatches("model-a", []uint64{100, 200}, []*datastore.PodInfo{pod1, pod2})
 		assert.Equal(t, 1, len(matches1))
-		assert.Equal(t, "ns1/pod1", matches1[0].NamespacedName.String())
-		assert.Equal(t, 2, matches1[0].MatchLen)
+		assert.Equal(t, 2, matches1[types.NamespacedName{Namespace: "ns1", Name: "pod1"}])
+		_, hasPod2 := matches1[types.NamespacedName{Namespace: "ns1", Name: "pod2"}]
+		assert.False(t, hasPod2, "model-a should not match pod2")
 
 		// Query model-b should only return pod2
 		matches2 := store.FindTopMatches("model-b", []uint64{100, 200}, []*datastore.PodInfo{pod1, pod2})
 		assert.Equal(t, 1, len(matches2))
-		assert.Equal(t, "ns1/pod2", matches2[0].NamespacedName.String())
-		assert.Equal(t, 2, matches2[0].MatchLen)
+		assert.Equal(t, 2, matches2[types.NamespacedName{Namespace: "ns1", Name: "pod2"}])
+		_, hasPod1 := matches2[types.NamespacedName{Namespace: "ns1", Name: "pod1"}]
+		assert.False(t, hasPod1, "model-b should not match pod1")
 
 		// Non-existent model should return no matches
 		matches3 := store.FindTopMatches("non-existent-model", []uint64{100, 200}, []*datastore.PodInfo{pod1, pod2})
@@ -232,7 +235,8 @@ func TestModelPrefixStore(t *testing.T) {
 		assert.Equal(t, 0, len(matches1Old), "Old model-1 hashes should be evicted")
 		// New hashes for model-1 should remain
 		assert.Equal(t, 1, len(matches1New), "New model-1 hashes should remain")
-		assert.Equal(t, 2, matches1New[0].MatchLen, "Should match both new hashes")
+		podNsName := types.NamespacedName{Namespace: "test", Name: "callback-pod"}
+		assert.Equal(t, 2, matches1New[podNsName], "Should match both new hashes")
 		// Model-2 hash should remain (it wasn't evicted)
 		assert.Equal(t, 1, len(matches2), "Model-2 hash should remain")
 	})
@@ -273,6 +277,52 @@ func TestModelPrefixStore(t *testing.T) {
 		assert.Equal(t, 0, len(matches1After))
 		assert.Equal(t, 0, len(matches2After))
 		assert.Equal(t, 0, len(store.entries))
+	})
+
+	t.Run("Candidate pod filtering: non-candidate cached pods are excluded", func(t *testing.T) {
+		mockStore := datastore.New()
+		store := NewModelPrefixStore(mockStore, 10, 5)
+
+		pod1 := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}},
+		}
+		pod2 := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"}},
+		}
+
+		// Both pods are added to the cache with the same hashes.
+		store.Add("filter-model", []uint64{1, 2, 3}, pod1)
+		store.Add("filter-model", []uint64{1, 2, 3}, pod2)
+
+		// Query with only pod2 as the candidate – pod1 must NOT appear in results.
+		matches := store.FindTopMatches("filter-model", []uint64{1, 2, 3}, []*datastore.PodInfo{pod2})
+		assert.Equal(t, 1, len(matches), "only the candidate pod should be returned")
+		pod2Key := types.NamespacedName{Namespace: "ns1", Name: "pod2"}
+		assert.Equal(t, 3, matches[pod2Key])
+		_, hasPod1 := matches[types.NamespacedName{Namespace: "ns1", Name: "pod1"}]
+		assert.False(t, hasPod1)
+
+		// Query with only pod1 as the candidate – pod2 must NOT appear in results.
+		matches = store.FindTopMatches("filter-model", []uint64{1, 2, 3}, []*datastore.PodInfo{pod1})
+		assert.Equal(t, 1, len(matches), "only the candidate pod should be returned")
+		pod1Key := types.NamespacedName{Namespace: "ns1", Name: "pod1"}
+		assert.Equal(t, 3, matches[pod1Key])
+		_, hasPod2 := matches[types.NamespacedName{Namespace: "ns1", Name: "pod2"}]
+		assert.False(t, hasPod2)
+	})
+
+	t.Run("Candidate pod filtering: empty candidates list yields no results", func(t *testing.T) {
+		mockStore := datastore.New()
+		store := NewModelPrefixStore(mockStore, 10, 5)
+
+		pod := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}},
+		}
+		store.Add("filter-model", []uint64{1, 2, 3}, pod)
+
+		// Even though pod is cached, an empty candidates list must return nothing.
+		matches := store.FindTopMatches("filter-model", []uint64{1, 2, 3}, []*datastore.PodInfo{})
+		assert.Equal(t, 0, len(matches), "empty candidate list must yield no results")
 	})
 }
 
@@ -376,9 +426,9 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 		queryHashes := []uint64{1, 2, 3}
 		matches := store.FindTopMatches("concurrent-model", queryHashes, pods)
 		// Should not panic and should return valid results
-		for _, match := range matches {
-			if match.MatchLen <= 0 {
-				t.Errorf("Invalid match length: %d", match.MatchLen)
+		for _, matchLen := range matches {
+			if matchLen <= 0 {
+				t.Errorf("Invalid match length: %d", matchLen)
 			}
 		}
 	})

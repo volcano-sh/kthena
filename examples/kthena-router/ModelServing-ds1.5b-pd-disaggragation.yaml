@@ -14,8 +14,8 @@ spec:
           metadata:
             labels:
               app: deepseek-r1-1-5b
-              modelinfer/infergroupname: "group-0"
-              modelinfer/rolename: "P-instance"
+              modelserving.volcano.sh/group-name: "group-0"
+              modelserving.volcano.sh/rolename: "P-instance"
           spec:
             containers:
               - name: leader
@@ -34,8 +34,8 @@ spec:
           metadata:
             labels:
               app: deepseek-r1-1-5b
-              modelinfer/infergroupname: "group-0"
-              modelinfer/rolename: "D-instance"
+              modelserving.volcano.sh/group-name: "group-0"
+              modelserving.volcano.sh/rolename: "D-instance"
           spec:
             containers:
               - name: leader

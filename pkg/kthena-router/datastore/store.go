@@ -383,14 +383,21 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 	var modelServerObj *modelServer
 	if value, ok := s.modelServer.Load(name); !ok {
 		modelServerObj = newModelServer(ms)
+		// New object — no concurrent access yet, safe to write without lock
+		if len(pods) != 0 {
+			modelServerObj.pods = pods
+		}
 	} else {
 		modelServerObj = value.(*modelServer)
+		// Existing object — concurrent readers may access modelServer and pods,
+		// so we must hold the lock to prevent data races.
+		modelServerObj.mutex.Lock()
 		modelServerObj.modelServer = ms
-	}
-
-	if len(pods) != 0 {
-		// do not operate s.pods here, which are done within pod handler
-		modelServerObj.pods = pods
+		if len(pods) != 0 {
+			// do not operate s.pods here, which are done within pod handler
+			modelServerObj.pods = pods
+		}
+		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
 	return nil
@@ -421,7 +428,7 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 
 func (s *store) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer {
 	if value, ok := s.modelServer.Load(name); ok {
-		return value.(*modelServer).modelServer
+		return value.(*modelServer).getModelServer()
 	}
 	return nil
 }
@@ -694,6 +701,8 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	info := s.routeInfo[namespacedName]
 	var modelName string
 	var deletedRoute *aiv1alpha1.ModelRoute
+	// Collect all model/lora names that may have associated queues (for cleanup after unlock)
+	var namesToCleanQueue []string
 	if info != nil {
 		modelName = info.model
 		// Remove from routes map
@@ -710,6 +719,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			}
 			if len(newRoutes) == 0 {
 				delete(s.routes, modelName)
+				namesToCleanQueue = append(namesToCleanQueue, modelName)
 			} else {
 				s.routes[modelName] = newRoutes
 			}
@@ -728,6 +738,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			}
 			if len(newLoraRoutes) == 0 {
 				delete(s.loraRoutes, lora)
+				namesToCleanQueue = append(namesToCleanQueue, lora)
 			} else {
 				s.loraRoutes[lora] = newLoraRoutes
 			}
@@ -757,13 +768,14 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 
 	delete(s.routeInfo, namespacedName)
 	s.routeMutex.Unlock()
-	if modelName != "" {
-		// Clean up associated waiting queue if exists
-		val, _ := s.requestWaitingQueue.LoadAndDelete(modelName)
+
+	// Clean up associated waiting queues for both base model and all lora adapters
+	for _, name := range namesToCleanQueue {
+		val, _ := s.requestWaitingQueue.LoadAndDelete(name)
 		if val != nil {
 			queue, _ := val.(*RequestPriorityQueue)
 			queue.Close()
-			klog.Infof("deleted waiting queue for model %s", modelName)
+			klog.Infof("deleted waiting queue for model %s", name)
 		}
 	}
 
@@ -987,6 +999,7 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
+func selectFromWeightedSlice(weights []uint32) int {
 	totalWeight := 0
 	for _, weight := range weights {
 		totalWeight += int(weight)
@@ -997,6 +1010,7 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 	}
 
 	randomNum := rng.Intn(totalWeight)
+	randomNum := rand.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
@@ -1327,7 +1341,7 @@ func (s *store) GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelS
 	s.modelServer.Range(func(key, value any) bool {
 		if namespacedName, ok := key.(types.NamespacedName); ok {
 			if ms, ok := value.(*modelServer); ok {
-				result[namespacedName] = ms.modelServer
+				result[namespacedName] = ms.getModelServer()
 			}
 		}
 		return true
