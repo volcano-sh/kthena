@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/framework"
@@ -244,4 +246,47 @@ func TestBothAPIsConfigured(t *testing.T) {
 		utils.NewChatMessage("user", "Hello HTTPRoute"),
 	}
 	utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", messages7b)
+
+	// 5. Verify access logs contain correct AI-specific and Gateway API fields with mutual exclusivity
+	t.Log("Verifying router access logs for AI-specific and Gateway API fields...")
+	routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+
+	// Read a reasonable tail of logs to find both requests
+	var modelRouteLogLine string
+	var httpRouteLogLine string
+
+	const tailLines int64 = 2000
+	logs := utils.FetchPodLogs(t, testCtx.KubeClient, kthenaNamespace, routerPod.Name, tailLines)
+	require.NotEmpty(t, logs, "Router logs should not be empty")
+	t.Logf("==== Router logs (tail %d lines) ====\n%s\n==== End router logs ====", tailLines, logs)
+
+	for _, line := range strings.Split(logs, "\n") {
+		// Match both text format (model_route=...) and JSON format ("model_route": ...)
+		if modelRouteLogLine == "" && strings.Contains(line, "model_route") && strings.Contains(line, "model_server") {
+			modelRouteLogLine = line
+		}
+		if httpRouteLogLine == "" && strings.Contains(line, "http_route") && strings.Contains(line, "inference_pool") {
+			httpRouteLogLine = line
+		}
+	}
+
+	t.Logf("ModelRoute log line: %s", modelRouteLogLine)
+	t.Logf("HTTPRoute log line: %s", httpRouteLogLine)
+	require.NotEmpty(t, modelRouteLogLine, "Expected to find an access log line for ModelRoute/ModelServer request")
+	require.NotEmpty(t, httpRouteLogLine, "Expected to find an access log line for HTTPRoute/InferencePool request")
+
+	// Verify AI-specific fields are present (support both text and JSON formats)
+	assert.Contains(t, modelRouteLogLine, "model_name", "ModelRoute access log should contain model_name")
+	assert.Contains(t, httpRouteLogLine, "model_name", "HTTPRoute access log should contain model_name")
+
+	// Verify ModelRoute/ModelServer vs HTTPRoute/InferencePool mutual exclusivity by field presence
+	assert.Contains(t, modelRouteLogLine, "model_route", "ModelRoute log should contain model_route")
+	assert.Contains(t, modelRouteLogLine, "model_server", "ModelRoute log should contain model_server")
+	assert.NotContains(t, modelRouteLogLine, "http_route", "ModelRoute log should not contain http_route")
+	assert.NotContains(t, modelRouteLogLine, "inference_pool", "ModelRoute log should not contain inference_pool")
+
+	assert.Contains(t, httpRouteLogLine, "http_route", "HTTPRoute log should contain http_route")
+	assert.Contains(t, httpRouteLogLine, "inference_pool", "HTTPRoute log should contain inference_pool")
+	assert.NotContains(t, httpRouteLogLine, "model_route", "HTTPRoute log should not contain model_route")
+	assert.NotContains(t, httpRouteLogLine, "model_server", "HTTPRoute log should not contain model_server")
 }
