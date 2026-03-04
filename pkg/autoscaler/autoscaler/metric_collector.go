@@ -67,7 +67,6 @@ func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPo
 	}
 }
 
-
 type HistogramInfo struct {
 	PodStartTime *metav1.Time
 	HistogramMap map[string]*histogram.Snapshot
