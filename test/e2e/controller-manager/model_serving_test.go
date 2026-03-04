@@ -446,7 +446,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	// Update the ModelServing to trigger a rolling update (change image)
 	updatedMS := initialMS.DeepCopy()
 	// Modify the container image to trigger a rolling update
-	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:1.29" // Change to a different image to ensure update is triggered
 
 	t.Log("Updating ModelServing to trigger rolling update with maxUnavailable=2")
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
