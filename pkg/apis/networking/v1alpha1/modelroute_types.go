@@ -63,6 +63,7 @@ type Rule struct {
 	// Empty `modelMatch` means matching all requests.
 	// +optional
 	ModelMatch *ModelMatch `json:"modelMatch,omitempty"`
+	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
 	TargetModels []*TargetModel `json:"targetModels"`
 }

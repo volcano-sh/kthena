@@ -951,12 +951,19 @@ func matchString(sm *aiv1alpha1.StringMatch, value string) bool {
 }
 
 func (s *store) selectDestination(targets []*aiv1alpha1.TargetModel) (*aiv1alpha1.TargetModel, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no target models specified in rule")
+	}
+
 	weightedSlice, err := toWeightedSlice(targets)
 	if err != nil {
 		return nil, err
 	}
 
-	index := selectFromWeightedSlice(weightedSlice)
+	index, err := selectFromWeightedSlice(weightedSlice)
+	if err != nil {
+		return nil, err
+	}
 
 	return targets[index], nil
 }
@@ -985,22 +992,34 @@ func toWeightedSlice(targets []*aiv1alpha1.TargetModel) ([]uint32, error) {
 	return res, nil
 }
 
+func selectFromWeightedSlice(weights []uint32) (int, error) {
+	if len(weights) == 0 {
+		return 0, fmt.Errorf("no weights provided")
+	}
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
 func selectFromWeightedSlice(weights []uint32) int {
 	totalWeight := 0
 	for _, weight := range weights {
 		totalWeight += int(weight)
 	}
 
+	if totalWeight == 0 {
+		return 0, fmt.Errorf("total weight is zero")
+	}
+
+	randomNum := rng.Intn(totalWeight)
 	randomNum := rand.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
 		if randomNum < 0 {
-			return i
+			return i, nil
 		}
 	}
 
-	return 0
+	return 0, nil
 }
 
 func (s *store) updatePodMetrics(pod *PodInfo) {
