@@ -31,6 +31,14 @@ type Autoscaler struct {
 	Meta      *ScalingMeta
 }
 
+// ScaleResult holds the scaling computation results.
+// History should only be committed after successful API update.
+type ScaleResult struct {
+	RecommendedInstances int32
+	CorrectedInstances   int32
+	Skip                 bool
+}
+
 type ScalingMeta struct {
 	Config    *workload.HomogeneousTarget
 	Namespace string
@@ -64,11 +72,14 @@ func (autoscaler *Autoscaler) UpdateAutoscalePolicy(autoscalePolicy *workload.Au
 	autoscaler.Meta.Generations.AutoscalePolicyGeneration = autoscalePolicy.Generation
 }
 
-func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCount int32) (int32, error) {
+// Scale computes the recommended and corrected instance counts without updating history.
+// The caller MUST call CommitScaleResult after successful API update to record the scaling event.
+// This prevents phantom scale events from being recorded when API updates fail.
+func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCount int32) (*ScaleResult, error) {
 	unreadyInstancesCount, readyInstancesMetrics, err := autoscaler.Collector.UpdateMetrics(ctx, podLister)
 	if err != nil {
 		klog.Errorf("update metrics error: %v", err)
-		return -1, err
+		return nil, err
 	}
 	// minInstance <- AutoscaleScope, currentInstancesCount(replicas) <- workload
 	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
@@ -84,9 +95,9 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {
 		klog.InfoS("skip recommended instances")
-		return -1, nil
+		return &ScaleResult{Skip: true}, nil
 	}
-	if autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil && recommendedInstances*100 >= currentInstancesCount*(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
+	if autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil && int64(recommendedInstances)*100 >= int64(currentInstancesCount)*int64(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
 		autoscaler.Status.RefreshPanicMode()
 	}
 	CorrectedInstancesAlgorithm := algorithm.CorrectedInstancesAlgorithm{
@@ -101,7 +112,20 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 	correctedInstances := CorrectedInstancesAlgorithm.GetCorrectedInstances()
 
 	klog.InfoS("autoscale controller", "currentInstancesCount", currentInstancesCount, "recommendedInstances", recommendedInstances, "correctedInstances", correctedInstances)
-	autoscaler.Status.AppendRecommendation(recommendedInstances)
-	autoscaler.Status.AppendCorrected(correctedInstances)
-	return correctedInstances, nil
+
+	return &ScaleResult{
+		RecommendedInstances: recommendedInstances,
+		CorrectedInstances:   correctedInstances,
+		Skip:                 false,
+	}, nil
+}
+
+// CommitScaleResult records the scaling event in history.
+// This MUST only be called after a successful API update to prevent phantom scale events.
+func (autoscaler *Autoscaler) CommitScaleResult(result *ScaleResult) {
+	if result == nil || result.Skip {
+		return
+	}
+	autoscaler.Status.AppendRecommendation(result.RecommendedInstances)
+	autoscaler.Status.AppendCorrected(result.CorrectedInstances)
 }
