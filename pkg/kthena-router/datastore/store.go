@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -649,14 +650,17 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range routes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				routes[i] = mr                       // Update existing
+				routes[i] = mr // Update existing
+				sortModelRoutesInPlace(routes)
 				s.routes[mr.Spec.ModelName] = routes // Update the map
 				found = true
 				break
 			}
 		}
 		if !found {
-			s.routes[mr.Spec.ModelName] = append(routes, mr)
+			routes = append(routes, mr)
+			sortModelRoutesInPlace(routes)
+			s.routes[mr.Spec.ModelName] = routes
 		}
 	}
 
@@ -666,14 +670,17 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range loraRoutes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				loraRoutes[i] = mr              // Update existing
+				loraRoutes[i] = mr // Update existing
+				sortModelRoutesInPlace(loraRoutes)
 				s.loraRoutes[lora] = loraRoutes // Update the map
 				found = true
 				break
 			}
 		}
 		if !found {
-			s.loraRoutes[lora] = append(loraRoutes, mr)
+			loraRoutes = append(loraRoutes, mr)
+			sortModelRoutesInPlace(loraRoutes)
+			s.loraRoutes[lora] = loraRoutes
 		}
 	}
 
@@ -702,6 +709,16 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		ModelRoute: mr,
 	})
 	return nil
+}
+
+func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
+	sort.Slice(routes, func(i, j int) bool {
+		ti, tj := routes[i].CreationTimestamp.Time, routes[j].CreationTimestamp.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return routes[i].Namespace+"/"+routes[i].Name < routes[j].Namespace+"/"+routes[j].Name
+	})
 }
 
 func (s *store) DeleteModelRoute(namespacedName string) error {
@@ -818,7 +835,7 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		isLora = true
 	}
 
-	// Try each ModelRoute until we find one that matches
+	// candidateRoutes are kept sorted oldest-first by AddOrUpdateModelRoute
 	for _, mr := range candidateRoutes {
 		// Check parentRefs if specified
 		if len(mr.Spec.ParentRefs) > 0 {

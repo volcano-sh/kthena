@@ -1229,6 +1229,125 @@ func TestStoreMatchModelServer(t *testing.T) {
 			expectedError:  false,
 		},
 		{
+			name: "duplicate model route - prefer prebuilt (oldest) ModelRoute",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				// Prebuilt route (older CreationTimestamp)
+				prebuilt := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "prebuilt-route",
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{
+										ModelServerName: "prebuilt-server",
+										Weight:          ptr(uint32(100)),
+									},
+								},
+							},
+						},
+					},
+				}
+				// Newer duplicate route (newer CreationTimestamp) - should be ignored in favor of prebuilt
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "newer-route",
+						CreationTimestamp: metav1.NewTime(time.Now()),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{
+										ModelServerName: "newer-server",
+										Weight:          ptr(uint32(100)),
+									},
+								},
+							},
+						},
+					},
+				}
+				// Add newer first then prebuilt to verify sort order (CreationTimestamp) wins over add order
+				s.AddOrUpdateModelRoute(newer)
+				s.AddOrUpdateModelRoute(prebuilt)
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "prebuilt-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
+			name: "duplicate model route - newer takes over after prebuilt deleted",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				prebuilt := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "prebuilt-route",
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "prebuilt-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "newer-route",
+						CreationTimestamp: metav1.NewTime(time.Now()),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "newer-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				s.AddOrUpdateModelRoute(prebuilt)
+				s.AddOrUpdateModelRoute(newer)
+				// Delete prebuilt - newer should take over
+				s.DeleteModelRoute("default/prebuilt-route")
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "newer-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
 			name: "no matching route",
 			setupStore: func() *store {
 				return &store{

@@ -140,6 +140,12 @@ func TestModelRouteLora(t *testing.T) {
 	TestModelRouteLoraShared(t, testCtx, testNamespace, false, "")
 }
 
+// TestModelRouteDuplicatePreferOldest tests that duplicate ModelRoutes for the same model
+// are evaluated oldest-first and the first match wins; after the oldest is deleted, the newer takes over.
+func TestModelRouteDuplicatePreferOldest(t *testing.T) {
+	TestModelRouteDuplicatePreferOldestShared(t, testCtx, testNamespace, false, "")
+}
+
 // TestMetrics tests router metrics collection.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestMetrics(t *testing.T) {

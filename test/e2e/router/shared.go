@@ -1286,6 +1286,101 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 	t.Log("LoRA adapters unloaded successfully")
 }
 
+// TestModelRouteDuplicatePreferOldestShared verifies that when multiple ModelRoutes
+// exist for the same model name, the router evaluates them oldest-first (CreationTimestamp)
+// and the first matching route wins; after the oldest route is deleted, the next one takes over.
+func TestModelRouteDuplicatePreferOldestShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	ctx := context.Background()
+	const duplicateModelName = "dup-model"
+	weight100 := uint32(100)
+
+	// Create "prebuilt" route first so it gets older CreationTimestamp (oldest-first wins).
+	prebuiltRoute := &networkingv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "prebuilt-route",
+		},
+		Spec: networkingv1alpha1.ModelRouteSpec{
+			ModelName: duplicateModelName,
+			Rules: []*networkingv1alpha1.Rule{
+				{
+					Name: "default",
+					TargetModels: []*networkingv1alpha1.TargetModel{
+						{ModelServerName: routercontext.ModelServer1_5bName, Weight: &weight100},
+					},
+				},
+			},
+		},
+	}
+	setupModelRouteWithGatewayAPI(prebuiltRoute, useGatewayAPI, kthenaNamespace)
+	createdPrebuilt, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, prebuiltRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create prebuilt ModelRoute")
+	t.Logf("Created ModelRoute: %s/%s (oldest)", createdPrebuilt.Namespace, createdPrebuilt.Name)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdPrebuilt.Name, metav1.DeleteOptions{})
+	})
+
+	// Ensure second route has strictly newer CreationTimestamp (API server uses second precision).
+	time.Sleep(2 * time.Second)
+
+	// Create "newer" route second (newer CreationTimestamp).
+	newerRoute := &networkingv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "newer-route",
+		},
+		Spec: networkingv1alpha1.ModelRouteSpec{
+			ModelName: duplicateModelName,
+			Rules: []*networkingv1alpha1.Rule{
+				{
+					Name: "default",
+					TargetModels: []*networkingv1alpha1.TargetModel{
+						{ModelServerName: routercontext.ModelServer7bName, Weight: &weight100},
+					},
+				},
+			},
+		},
+	}
+	setupModelRouteWithGatewayAPI(newerRoute, useGatewayAPI, kthenaNamespace)
+	createdNewer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, newerRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create newer ModelRoute")
+	t.Logf("Created ModelRoute: %s/%s (newer)", createdNewer.Namespace, createdNewer.Name)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdNewer.Namespace, createdNewer.Name)
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdNewer.Name, metav1.DeleteOptions{})
+	})
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Hello")}
+
+	// 1) Oldest route should win: traffic goes to 1.5B backend.
+	t.Run("PreferOldestRoute", func(t *testing.T) {
+		resp := utils.CheckChatCompletions(t, duplicateModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B", "Oldest route (prebuilt) should be used; response should be from 1.5B model")
+	})
+
+	// 2) Delete oldest route; newer route should take over (7B).
+	err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(ctx, createdPrebuilt.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete prebuilt ModelRoute")
+	t.Log("Deleted prebuilt ModelRoute; expecting newer route to take over")
+
+	// Wait for router to reconcile.
+	require.Eventually(t, func() bool {
+		resp := utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, duplicateModelName, messages, nil)
+		return resp.StatusCode == 200 && strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-7B")
+	}, 2*time.Minute, 2*time.Second, "After deleting oldest route, requests should hit 7B model")
+
+	t.Run("NewerTakesOverAfterOldestDeleted", func(t *testing.T) {
+		resp := utils.CheckChatCompletions(t, duplicateModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-7B", "Newer route should take over after prebuilt is deleted")
+	})
+}
+
 // TestMetricsShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
