@@ -131,27 +131,27 @@ func TestExtractPodNameFromIdentifier_Core(t *testing.T) {
 func TestComputeStandardizedHash_Core(t *testing.T) {
 	tests := []struct {
 		name     string
-		tokenIds []int
+		tokenIds []uint32
 	}{
 		{
 			name:     "Empty token list",
-			tokenIds: []int{},
+			tokenIds: []uint32{},
 		},
 		{
 			name:     "Single token",
-			tokenIds: []int{123},
+			tokenIds: []uint32{123},
 		},
 		{
 			name:     "Multiple tokens",
-			tokenIds: []int{1, 2, 3, 4, 5},
+			tokenIds: []uint32{1, 2, 3, 4, 5},
 		},
 		{
 			name:     "Large tokens",
-			tokenIds: []int{65536, 131072, 262144},
+			tokenIds: []uint32{65536, 131072, 262144},
 		},
 		{
-			name:     "Negative tokens",
-			tokenIds: []int{-1, -100, -1000},
+			name:     "Max value tokens",
+			tokenIds: []uint32{4294967295, 4294967196, 4294966296},
 		},
 	}
 
@@ -179,7 +179,7 @@ func TestComputeStandardizedHash_Core(t *testing.T) {
 
 			// Verify different inputs produce different hashes (with high probability)
 			if len(tt.tokenIds) > 1 {
-				modifiedTokens := make([]int, len(tt.tokenIds))
+				modifiedTokens := make([]uint32, len(tt.tokenIds))
 				copy(modifiedTokens, tt.tokenIds)
 				modifiedTokens[0] = modifiedTokens[0] + 1
 
@@ -1208,45 +1208,45 @@ func TestKVCacheAware_Constants_Core(t *testing.T) {
 func TestComputeStandardizedHash_Advanced_Core(t *testing.T) {
 	tests := []struct {
 		name        string
-		tokenIds    []int
+		tokenIds    []uint32
 		expectZero  bool
 		description string
 	}{
 		{
 			name:        "Empty token sequence",
-			tokenIds:    []int{},
+			tokenIds:    []uint32{},
 			expectZero:  true,
 			description: "Should return 0 for empty input",
 		},
 		{
 			name:        "Single token",
-			tokenIds:    []int{1},
+			tokenIds:    []uint32{1},
 			expectZero:  false,
 			description: "Should generate hash for single token",
 		},
 		{
 			name:        "Multiple tokens",
-			tokenIds:    []int{1, 2, 3, 4, 5},
+			tokenIds:    []uint32{1, 2, 3, 4, 5},
 			expectZero:  false,
 			description: "Should generate hash for multiple tokens",
 		},
 		{
 			name:        "Large token values",
-			tokenIds:    []int{2147483647, 2147483646}, // Max int32 values
+			tokenIds:    []uint32{2147483647, 2147483646}, // Max int32 values
 			expectZero:  false,
 			description: "Should handle large token values",
 		},
 		{
 			name:        "Zero tokens",
-			tokenIds:    []int{0, 0, 0},
+			tokenIds:    []uint32{0, 0, 0},
 			expectZero:  false,
 			description: "Should generate hash for zero tokens",
 		},
 		{
-			name:        "Negative tokens",
-			tokenIds:    []int{-1, -2, -3},
+			name:        "Max uint32 tokens",
+			tokenIds:    []uint32{4294967295, 4294967294, 4294967293},
 			expectZero:  false,
-			description: "Should handle negative token values",
+			description: "Should handle max uint32 token values",
 		},
 	}
 
@@ -1911,7 +1911,7 @@ func TestComputeStandardizedHash_Distribution_Core(t *testing.T) {
 		{
 			name: "Different sequences produce different hashes",
 			testFunc: func(t *testing.T) {
-				sequences := [][]int{
+				sequences := [][]uint32{
 					{1, 2, 3},
 					{1, 2, 4},
 					{1, 3, 3},
@@ -1938,8 +1938,8 @@ func TestComputeStandardizedHash_Distribution_Core(t *testing.T) {
 		{
 			name: "Order matters",
 			testFunc: func(t *testing.T) {
-				seq1 := []int{1, 2, 3}
-				seq2 := []int{3, 2, 1}
+				seq1 := []uint32{1, 2, 3}
+				seq2 := []uint32{3, 2, 1}
 
 				hash1 := computeStandardizedHash(seq1)
 				hash2 := computeStandardizedHash(seq2)
@@ -1956,7 +1956,7 @@ func TestComputeStandardizedHash_Distribution_Core(t *testing.T) {
 				// Generate many different sequences and check hash distribution
 				hashes := make([]uint64, 100)
 				for i := 0; i < 100; i++ {
-					seq := []int{i, i + 1, i + 2}
+					seq := []uint32{uint32(i), uint32(i + 1), uint32(i + 2)}
 					hashes[i] = computeStandardizedHash(seq)
 				}
 
