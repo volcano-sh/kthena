@@ -282,8 +282,13 @@ func validateWorkerReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 				"workerReplicas must be a non-negative integer",
 			))
 		}
+		if role.WorkerReplicas > 0 && role.WorkerTemplate == nil {
+			allErrs = append(allErrs, field.Required(
+				field.NewPath("spec").Child("template").Child("roles").Index(i).Child("workerTemplate"),
+				"workerTemplate is required when workerReplicas is greater than 0",
+			))
+		}
 	}
-
 	return allErrs
 }
 
