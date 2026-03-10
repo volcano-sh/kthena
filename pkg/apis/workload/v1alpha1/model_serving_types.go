@@ -144,11 +144,18 @@ type RolloutStrategy struct {
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
 }
 
+// RolloutStrategyType defines the strategy to use to update replicas.
+// It must correspond to the granularity of the RecoveryPolicy.
+// `ServingGroupRollingUpdate` corresponding `ServingGroupRecreate`
+// `RoleRollingUpdate` corresponding `RoleRecreate`
 type RolloutStrategyType string
 
 const (
 	// ServingGroupRollingUpdate indicates that ServingGroup replicas will be updated one by one.
 	ServingGroupRollingUpdate RolloutStrategyType = "ServingGroupRollingUpdate"
+
+	// RoleRollingUpdate indicates that Role replicas will be updated one by one.
+	RoleRollingUpdate RolloutStrategyType = "RoleRollingUpdate"
 )
 
 // RollingUpdateConfiguration defines the parameters to be used for RollingUpdateStrategyType.
