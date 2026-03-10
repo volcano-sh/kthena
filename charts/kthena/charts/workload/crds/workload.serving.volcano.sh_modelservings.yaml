@@ -132,11 +132,12 @@ spec:
                         type: integer
                     type: object
                   type:
-                    default: ServingGroupRollingUpdate
+                    default: RoleRollingUpdate
                     description: Type defines the rollout strategy, it can only be
                       “ServingGroupRollingUpdate” for now.
                     enum:
                     - ServingGroupRollingUpdate
+                    - RoleRollingUpdate
                     type: string
                 required:
                 - type
