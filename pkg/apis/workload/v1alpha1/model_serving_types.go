@@ -135,8 +135,8 @@ const (
 type RolloutStrategy struct {
 	// Type defines the rollout strategy, it can only be “ServingGroupRollingUpdate” for now.
 	//
-	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate}
-	// +kubebuilder:default=ServingGroupRollingUpdate
+	// +kubebuilder:default=RoleRollingUpdate
+	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}
 	Type RolloutStrategyType `json:"type"`
 
 	// RollingUpdateConfiguration defines the parameters to be used when type is RollingUpdateStrategyType.
