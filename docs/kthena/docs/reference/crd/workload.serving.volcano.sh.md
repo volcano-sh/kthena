@@ -778,7 +778,10 @@ _Appears in:_
 
 _Underlying type:_ _string_
 
-
+RolloutStrategyType defines the strategy to use to update replicas.
+It must correspond to the granularity of the RecoveryPolicy.
+`ServingGroupRollingUpdate` corresponding `ServingGroupRecreate`
+`RoleRollingUpdate` corresponding `RoleRecreate`
 
 
 
@@ -788,6 +791,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `ServingGroupRollingUpdate` | ServingGroupRollingUpdate indicates that ServingGroup replicas will be updated one by one.<br /> |
+| `RoleRollingUpdate` | RoleRollingUpdate indicates that Role replicas will be updated one by one.<br /> |
 
 
 #### SelectPolicyType
