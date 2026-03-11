@@ -19,6 +19,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
@@ -89,5 +90,77 @@ func TestDeepHashObject(t *testing.T) {
 
 	if firstHash != secondHash {
 		t.Errorf("DeepHashObject should produce the same hash for the same object, got %v and %v", firstHash, secondHash)
+	}
+}
+
+func TestRemoveRoleReplicasForRoleRevision(t *testing.T) {
+	replicas1 := int32(3)
+	replicas2 := int32(5)
+
+	tests := []struct {
+		name              string
+		input             workloadv1alpha1.Role
+		expected          workloadv1alpha1.Role
+		originalUnchanged bool // 是否需要验证原始输入不被修改
+	}{
+		{
+			name: "role with non-nil replicas",
+			input: workloadv1alpha1.Role{
+				Name:           "test-role",
+				Replicas:       &replicas1,
+				WorkerReplicas: 2,
+			},
+			expected: workloadv1alpha1.Role{
+				Name:           "test-role",
+				Replicas:       nil,
+				WorkerReplicas: 2,
+			},
+			originalUnchanged: true,
+		},
+		{
+			name: "role with nil replicas",
+			input: workloadv1alpha1.Role{
+				Name:           "test-role-nil",
+				Replicas:       nil,
+				WorkerReplicas: 5,
+			},
+			expected: workloadv1alpha1.Role{
+				Name:           "test-role-nil",
+				Replicas:       nil,
+				WorkerReplicas: 5,
+			},
+			originalUnchanged: false,
+		},
+		{
+			name: "role with different replicas value",
+			input: workloadv1alpha1.Role{
+				Name:           "another-role",
+				Replicas:       &replicas2,
+				WorkerReplicas: 10,
+			},
+			expected: workloadv1alpha1.Role{
+				Name:           "another-role",
+				Replicas:       nil,
+				WorkerReplicas: 10,
+			},
+			originalUnchanged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalReplicas := tt.input.Replicas
+
+			result := RemoveRoleReplicasForRoleRevision(tt.input)
+
+			assert.Nil(t, result.Replicas, "Expected result.Replicas to be nil")
+			assert.Equal(t, tt.expected.Name, result.Name, "Name should remain the same")
+			assert.Equal(t, tt.expected.WorkerReplicas, result.WorkerReplicas, "WorkerReplicas should remain the same")
+			assert.Equal(t, tt.expected, result)
+			if tt.originalUnchanged {
+				assert.Equal(t, originalReplicas, tt.input.Replicas, "Original input should not be modified")
+				assert.NotNil(t, tt.input.Replicas, "Original input Replicas should not be nil")
+			}
+		})
 	}
 }

@@ -93,9 +93,9 @@ func GeneratePodName(groupName, roleName string, podIndex int) string {
 	return groupName + "-" + roleName + "-" + strconv.Itoa(podIndex)
 }
 
-func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision string) *corev1.Pod {
+func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision, roleRevision string) *corev1.Pod {
 	entryPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), 0)
-	entryPod := createBasePod(role, ms, entryPodName, groupName, revision, roleIndex)
+	entryPod := createBasePod(role, ms, entryPodName, groupName, revision, roleRevision, roleIndex)
 	entryPod.ObjectMeta.Labels[workloadv1alpha1.EntryLabelKey] = Entry
 	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
 	entryPod.Spec = role.EntryTemplate.Spec
@@ -106,9 +106,9 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 	return entryPod
 }
 
-func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision string) *corev1.Pod {
+func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision, roleRevision string) *corev1.Pod {
 	workerPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
-	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleIndex)
+	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleRevision, roleIndex)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
@@ -118,7 +118,7 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	return workerPod
 }
 
-func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, revision string, roleIndex int) *corev1.Pod {
+func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, revision, roleRevision string, roleIndex int) *corev1.Pod {
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -133,6 +133,7 @@ func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing
 				workloadv1alpha1.RoleLabelKey:             role.Name,
 				workloadv1alpha1.RoleIDKey:                GenerateRoleID(role.Name, roleIndex),
 				workloadv1alpha1.RevisionLabelKey:         revision,
+				workloadv1alpha1.RoleRevisionLabelKey:     roleRevision,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(ms),
@@ -306,6 +307,10 @@ func CheckPodRevision(pod *corev1.Pod, revision string) bool {
 // ObjectRevision returns the revision label of the resource.
 func ObjectRevision(obj metav1.Object) string {
 	return obj.GetLabels()[workloadv1alpha1.RevisionLabelKey]
+}
+
+func ObjectRoleRevision(obj metav1.Object) string {
+	return obj.GetLabels()[workloadv1alpha1.RoleRevisionLabelKey]
 }
 
 // GetRoleName returns the role name of the resource.
@@ -580,12 +585,12 @@ func RoleIDIndexFunc(obj interface{}) ([]string, error) {
 	return []string{compositeKey}, nil
 }
 
-func GetMaxUnavailable(mi *workloadv1alpha1.ModelServing) (int, error) {
+func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 	maxUnavailable := intstr.FromInt(1) // Default value
-	replicas := int(*mi.Spec.Replicas)
-	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
-		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable != nil {
-			maxUnavailable = *mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
+	replicas := int(*ms.Spec.Replicas)
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
+		if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable != nil {
+			maxUnavailable = *ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
 		}
 	}
 	// Calculate maxUnavailable as absolute numbers
