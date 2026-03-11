@@ -47,3 +47,11 @@ func RemoveRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv
 	}
 	return Copy
 }
+
+// RemoveRoleReplicasForRoleRevision remove role.replicas when calculating role revision hash
+// it works for RoleRollingUpdate strategy.
+func RemoveRoleReplicasForRoleRevision(role workloadv1alpha1.Role) workloadv1alpha1.Role {
+	copy := role
+	copy.Replicas = nil
+	return copy
+}

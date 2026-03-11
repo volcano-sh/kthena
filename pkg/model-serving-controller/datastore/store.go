@@ -41,10 +41,10 @@ type Store interface {
 	DeleteModelServing(modelServingName types.NamespacedName)
 	DeleteServingGroup(modelServingName types.NamespacedName, groupName string)
 	AddServingGroup(modelServingName types.NamespacedName, idx int, revision string)
-	AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision string)
-	AddRunningPodToServingGroup(modelServingName types.NamespacedName, groupName, pod, revision, roleName, roleID string)
+	AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleRevision string)
+	AddRunningPodToServingGroup(modelServingName types.NamespacedName, groupName, pod, revision, roleRevision, roleName, roleID string)
 	// AddServingGroupAndRole adds servingGroup and role if not exist
-	AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleName, roleID string)
+	AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleRevision, roleName, roleID string)
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
 }
@@ -62,13 +62,14 @@ type ServingGroup struct {
 	runningPods map[string]struct{} // Map of pod names in this ServingGroup
 	Revision    string
 	Status      ServingGroupStatus
-	roles       map[string]map[string]*Role // roleName -> roleID -> *Role, like prefill -> prefill-0 -> *Role
+	Roles       map[string]map[string]*Role // roleName -> roleID -> *Role, like prefill -> prefill-0 -> *Role
 }
 
 type Role struct {
-	Name     string
-	Revision string
-	Status   RoleStatus
+	Name         string
+	Revision     string // Revision of the ServingGroup
+	RoleRevision string // Revision of the Role, used for RoleRollingUpdate strategy
+	Status       RoleStatus
 }
 
 type ServingGroupStatus string
@@ -135,7 +136,7 @@ func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, ro
 	if !ok {
 		return nil, ErrServingGroupNotFound
 	}
-	roleMap, ok := servingGroup.roles[roleName]
+	roleMap, ok := servingGroup.Roles[roleName]
 	if !ok {
 		// If the roleName does not exist, return an empty list instead of an error
 		return []Role{}, nil
@@ -171,7 +172,7 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 		return ErrServingGroupNotFound
 	}
 
-	roleMap, ok := servingGroup.roles[roleName]
+	roleMap, ok := servingGroup.Roles[roleName]
 	if !ok {
 		return fmt.Errorf("roleName %s not found in group %s", roleName, groupName)
 	}
@@ -192,7 +193,7 @@ func (s *store) GetRoleStatus(modelServingName types.NamespacedName, groupName, 
 
 	if servingGroups, exist := s.servingGroup[modelServingName]; exist {
 		if group, ok := servingGroups[groupName]; ok {
-			if roleMap, exists := group.roles[roleName]; exists {
+			if roleMap, exists := group.Roles[roleName]; exists {
 				if role, found := roleMap[roleID]; found {
 					return role.Status
 				}
@@ -276,7 +277,7 @@ func (s *store) DeleteRole(modelServingName types.NamespacedName, groupName, rol
 		return
 	}
 
-	roleMap, ok := servingGroup.roles[roleName]
+	roleMap, ok := servingGroup.Roles[roleName]
 	if !ok {
 		return
 	}
@@ -302,12 +303,12 @@ func (s *store) AddServingGroup(modelServingName types.NamespacedName, idx int, 
 		runningPods: make(map[string]struct{}),
 		Status:      ServingGroupCreating,
 		Revision:    revision,
-		roles:       make(map[string]map[string]*Role),
+		Roles:       make(map[string]map[string]*Role),
 	}
 }
 
 // AddRole adds a new role to an ServingGroup
-func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision string) {
+func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleRevision string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -322,31 +323,32 @@ func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleNa
 			runningPods: make(map[string]struct{}),
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			roles:       make(map[string]map[string]*Role),
+			Roles:       make(map[string]map[string]*Role),
 		}
 		s.servingGroup[modelServingName][groupName] = group
 	}
 
-	if _, exists := group.roles[roleName]; !exists {
-		group.roles[roleName] = make(map[string]*Role)
+	if _, exists := group.Roles[roleName]; !exists {
+		group.Roles[roleName] = make(map[string]*Role)
 	}
 
-	if existing, exists := group.roles[roleName][roleID]; exists {
+	if existing, exists := group.Roles[roleName][roleID]; exists {
 		if existing.Revision != revision {
 			klog.Warningf("AddRole: role %s/%s already exists with revision %s, but got revision %s; skipping",
 				roleName, roleID, existing.Revision, revision)
 		}
 	} else {
-		group.roles[roleName][roleID] = &Role{
-			Name:     roleID,
-			Status:   RoleCreating,
-			Revision: revision,
+		group.Roles[roleName][roleID] = &Role{
+			Name:         roleID,
+			Status:       RoleCreating,
+			Revision:     revision,
+			RoleRevision: roleRevision,
 		}
 	}
 }
 
 // AddRunningPodToServingGroup add ServingGroup in runningPodOfServingGroup map
-func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedName, servingGroupName, runningPodName, revision, roleName, roleID string) {
+func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedName, servingGroupName, runningPodName, revision, roleRevision, roleName, roleID string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if _, ok := s.servingGroup[modelServingName]; !ok {
@@ -362,7 +364,7 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 			runningPods: map[string]struct{}{},
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			roles:       make(map[string]map[string]*Role),
+			Roles:       make(map[string]map[string]*Role),
 		}
 
 		s.servingGroup[modelServingName][servingGroupName] = group
@@ -371,22 +373,23 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 	group.runningPods[runningPodName] = struct{}{} // runningPods map has been initialized during AddServingGroup.
 
 	// Check if roleName exists, and initialize it if not
-	if _, ok = group.roles[roleName]; !ok {
-		group.roles[roleName] = make(map[string]*Role)
+	if _, ok = group.Roles[roleName]; !ok {
+		group.Roles[roleName] = make(map[string]*Role)
 	}
 
-	if _, ok = group.roles[roleName][roleID]; !ok {
+	if _, ok = group.Roles[roleName][roleID]; !ok {
 		role := &Role{
-			Name:     roleID,
-			Status:   RoleCreating,
-			Revision: revision,
+			Name:         roleID,
+			Status:       RoleCreating,
+			Revision:     revision,
+			RoleRevision: roleRevision,
 		}
-		group.roles[roleName][roleID] = role
+		group.Roles[roleName][roleID] = role
 	}
 }
 
 // AddServingGroupAndRole adds ServingGroup and roles if not exist
-func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleName, roleID string) {
+func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleRevision, roleName, roleID string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if _, ok := s.servingGroup[modelServingName]; !ok {
@@ -402,24 +405,25 @@ func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, se
 			runningPods: map[string]struct{}{},
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			roles:       make(map[string]map[string]*Role),
+			Roles:       make(map[string]map[string]*Role),
 		}
 
 		s.servingGroup[modelServingName][servingGroupName] = group
 	}
 
 	// Check if roleName exists, and initialize it if not
-	if _, ok = group.roles[roleName]; !ok {
-		group.roles[roleName] = make(map[string]*Role)
+	if _, ok = group.Roles[roleName]; !ok {
+		group.Roles[roleName] = make(map[string]*Role)
 	}
 
-	if _, ok = group.roles[roleName][roleID]; !ok {
+	if _, ok = group.Roles[roleName][roleID]; !ok {
 		role := &Role{
-			Name:     roleID,
-			Status:   RoleCreating,
-			Revision: revision,
+			Name:         roleID,
+			Status:       RoleCreating,
+			Revision:     revision,
+			RoleRevision: roleRevision,
 		}
-		group.roles[roleName][roleID] = role
+		group.Roles[roleName][roleID] = role
 	}
 }
 
