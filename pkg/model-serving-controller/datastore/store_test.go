@@ -144,7 +144,7 @@ func TestGetRoleList(t *testing.T) {
 			key: {
 				"group0": &ServingGroup{
 					Name: "group0",
-					roles: map[string]map[string]*Role{
+					Roles: map[string]map[string]*Role{
 						"prefill": {
 							"prefill-0": &Role{Name: "prefill-0", Status: RoleCreating},
 							"prefill-1": &Role{Name: "prefill-1", Status: RoleCreating},
@@ -193,7 +193,7 @@ func TestUpdateRoleStatus(t *testing.T) {
 			key: {
 				"group0": &ServingGroup{
 					Name: "group0",
-					roles: map[string]map[string]*Role{
+					Roles: map[string]map[string]*Role{
 						"prefill": {
 							"prefill-0": &Role{Name: "prefill-0", Status: RoleCreating},
 						},
@@ -206,7 +206,7 @@ func TestUpdateRoleStatus(t *testing.T) {
 	// 1. Update existing role status
 	err := s.UpdateRoleStatus(key, "group0", "prefill", "prefill-0", RoleDeleting)
 	assert.NoError(t, err)
-	role := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
+	role := s.servingGroup[key]["group0"].Roles["prefill"]["prefill-0"]
 	assert.Equal(t, RoleDeleting, role.Status)
 
 	// 2. Update non-existing modelServing
@@ -237,7 +237,7 @@ func TestDeleteRole(t *testing.T) {
 			key: {
 				"group0": &ServingGroup{
 					Name: "group0",
-					roles: map[string]map[string]*Role{
+					Roles: map[string]map[string]*Role{
 						"prefill": {
 							"prefill-0": &Role{Name: "prefill-0"},
 							"prefill-1": &Role{Name: "prefill-1"},
@@ -250,9 +250,9 @@ func TestDeleteRole(t *testing.T) {
 
 	// 1. Delete existing role
 	s.DeleteRole(key, "group0", "prefill", "prefill-0")
-	_, exists := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
+	_, exists := s.servingGroup[key]["group0"].Roles["prefill"]["prefill-0"]
 	assert.False(t, exists, "role should be deleted")
-	_, exists = s.servingGroup[key]["group0"].roles["prefill"]["prefill-1"]
+	_, exists = s.servingGroup[key]["group0"].Roles["prefill"]["prefill-1"]
 	assert.True(t, exists, "other role should still exist")
 
 	// 2. Delete non-existing role (should not panic)
@@ -278,27 +278,27 @@ func TestAddRole(t *testing.T) {
 	}
 
 	// 1. Add role to non-existing modelServing and group
-	s.AddRole(key, "group0", "prefill", "prefill-0", "revision1")
-	role, exists := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
+	s.AddRole(key, "group0", "prefill", "prefill-0", "revision1", "roleRevision1")
+	role, exists := s.servingGroup[key]["group0"].Roles["prefill"]["prefill-0"]
 	assert.True(t, exists, "role should be created")
 	assert.Equal(t, "prefill-0", role.Name)
 	assert.Equal(t, RoleCreating, role.Status)
 	assert.Equal(t, "revision1", role.Revision)
 
 	// 2. Add another role to existing group
-	s.AddRole(key, "group0", "prefill", "prefill-1", "revision2")
-	role2, exists2 := s.servingGroup[key]["group0"].roles["prefill"]["prefill-1"]
+	s.AddRole(key, "group0", "prefill", "prefill-1", "revision2", "roleRevision2")
+	role2, exists2 := s.servingGroup[key]["group0"].Roles["prefill"]["prefill-1"]
 	assert.True(t, exists2, "second role should be created")
 	assert.Equal(t, "prefill-1", role2.Name)
 
 	// 3. Add role with different roleLabel
-	s.AddRole(key, "group0", "decode", "decode-0", "revision3")
-	_, exists3 := s.servingGroup[key]["group0"].roles["decode"]["decode-0"]
+	s.AddRole(key, "group0", "decode", "decode-0", "revision3", "roleRevision3")
+	_, exists3 := s.servingGroup[key]["group0"].Roles["decode"]["decode-0"]
 	assert.True(t, exists3, "role with different label should be created")
 
 	// 4. Add existing role with different revision — should NOT overwrite
-	s.AddRole(key, "group0", "prefill", "prefill-0", "revision4")
-	role4 := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
+	s.AddRole(key, "group0", "prefill", "prefill-0", "revision4", "roleRevision4")
+	role4 := s.servingGroup[key]["group0"].Roles["prefill"]["prefill-0"]
 	assert.Equal(t, "revision1", role4.Revision, "existing role should not be overwritten")
 }
 
@@ -345,7 +345,7 @@ func TestGetRoleListSortingByIndex(t *testing.T) {
 			key: {
 				"group0": &ServingGroup{
 					Name: "group0",
-					roles: map[string]map[string]*Role{
+					Roles: map[string]map[string]*Role{
 						"prefill": {
 							"prefill-10": &Role{Name: "prefill-10", Status: RoleCreating},
 							"prefill-2":  &Role{Name: "prefill-2", Status: RoleCreating},
