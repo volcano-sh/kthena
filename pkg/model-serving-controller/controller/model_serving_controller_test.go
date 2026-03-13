@@ -6429,6 +6429,7 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 				tt.maxScaleDown,
 				tt.notRunningOutdatedGroups,
 				tt.runningOutdatedGroups,
+				"v1",
 			)
 
 			assert.NoError(t, err)

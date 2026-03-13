@@ -1110,7 +1110,7 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	}
 
 	// Delete outdated groups respecting the maxUnavailable constraint
-	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups)
+	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups, revision)
 	if err != nil {
 		return err
 	}
@@ -1129,65 +1129,48 @@ func (c *ModelServingController) deleteOutdatedServingGroups(
 	maxScaleDown int,
 	notRunningOutdatedGroups []datastore.ServingGroup,
 	runningOutdatedGroups []datastore.ServingGroup,
+	revision string,
 ) (int, error) {
 	updateCount := 0
 
-	// Since all servingGroups share identical Role configurations, it suffices to use a single sample servingGroup to identify out-of-date roles.
-	sampleGroup := datastore.ServingGroup{}
-	if len(notRunningOutdatedGroups) > 0 {
-		sampleGroup = notRunningOutdatedGroups[0]
-	} else if len(runningOutdatedGroups) > 0 {
-		sampleGroup = runningOutdatedGroups[0]
-	} else {
-		// No outdated groups to delete
-		return 0, nil
-	}
+	// Combine all outdated groups
+	// Delete in descending order by sequence number. Prioritise deletion of servingGroups in notRunning status.
+	// Therefore, servingGroups in notRunning status should be placed at the end.
+	allOutdatedGroups := append(runningOutdatedGroups, notRunningOutdatedGroups...)
 
-	outdatedRoleNames := []string{}
-	for _, role := range ms.Spec.Template.Roles {
-		copy := utils.RemoveRoleReplicasForRoleRevision(role)
-		roleRevision := utils.Revision(copy)
-
-		roles := sampleGroup.Roles[role.Name]
-		for _, v := range roles {
-			if v.RoleRevision != roleRevision {
-				outdatedRoleNames = append(outdatedRoleNames, role.Name)
-			}
-			// Since RoleRevisions with different RoleIDs are identical, a single comparison suffices.
-			break
-		}
-	}
+	// Find outdated roles in all serving groups
+	outdatedRolesMap := c.findOutdatedRolesInServingGroups(ms, allOutdatedGroups, revision)
 
 	deleteGroups := func(groups []datastore.ServingGroup) error {
 		// Iterate from end to start to delete largest ordinals first
 		for i := len(groups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
 			sg := groups[i]
-			if ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
+			if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
 				klog.V(2).Infof("ServingGroup %s will be terminated for update (status=%s)", sg.Name, sg.Status)
 				if err := c.deleteServingGroup(ctx, ms, sg.Name); err != nil {
 					return err
 				}
+				updateCount++
 			} else {
-				for i := range outdatedRoleNames {
-					outdatedRoles := sg.Roles[outdatedRoleNames[i]]
-					klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", outdatedRoleNames[i], sg.Name)
-					for roleID, role := range outdatedRoles {
-						c.DeleteRole(ctx, ms, sg.Name, role.Name, roleID)
+				// default is role rolling update, delete outdated roles in the ServingGroup for update
+				outdatedRoleNames, exists := outdatedRolesMap[sg.Name]
+				if exists && len(outdatedRoleNames) > 0 {
+					for _, roleName := range outdatedRoleNames {
+						outdatedRoles := sg.Roles[roleName]
+						klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", roleName, sg.Name)
+						for roleID, _ := range outdatedRoles {
+							c.DeleteRole(ctx, ms, sg.Name, roleName, roleID)
+						}
 					}
 				}
+				updateCount++
 			}
-			updateCount++
 		}
 		return nil
 	}
 
 	// First, process not-running outdated groups (higher priority)
-	if err := deleteGroups(notRunningOutdatedGroups); err != nil {
-		return updateCount, err
-	}
-
-	// Then, process running outdated groups (lower priority)
-	if err := deleteGroups(runningOutdatedGroups); err != nil {
+	if err := deleteGroups(allOutdatedGroups); err != nil {
 		return updateCount, err
 	}
 
@@ -2194,4 +2177,55 @@ func (c *ModelServingController) createOrUpdatePodGroupByServingGroup(ctx contex
 		return fmt.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroupName, err)
 	}
 	return nil
+}
+
+// findOutdatedRolesInServingGroups finds outdated roles in serving groups and returns a map of serving group names to outdated role names
+// If a serving group has no outdated roles, it updates the serving group's revision in the store
+func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1alpha1.ModelServing, servingGroups []datastore.ServingGroup, revision string) map[string][]string {
+	outdatedRolesMap := make(map[string][]string)
+
+	// Create a mapping of role name to expected role revision based on current spec
+	expectedRoleRevisions := make(map[string]string)
+	for _, role := range ms.Spec.Template.Roles {
+		copy := utils.RemoveRoleReplicasForRoleRevision(role)
+		roleRevision := utils.Revision(copy)
+		expectedRoleRevisions[role.Name] = roleRevision
+	}
+
+	for _, sg := range servingGroups {
+		var outdatedRoleNames []string
+
+		// Check each role in the current serving group
+		for roleName, roleRevision := range expectedRoleRevisions {
+			roles := sg.Roles[roleName]
+
+			// Check if any instance of this role type is outdated
+			hasOutdatedRole := false
+			for _, role := range roles {
+				if role.RoleRevision != roleRevision {
+					hasOutdatedRole = true
+					break
+				}
+			}
+
+			if hasOutdatedRole {
+				outdatedRoleNames = append(outdatedRoleNames, roleName)
+			}
+		}
+
+		if len(outdatedRoleNames) > 0 {
+			// There are outdated roles in this serving group
+			outdatedRolesMap[sg.Name] = outdatedRoleNames
+		} else {
+			// No outdated roles in this serving group, update its revision in the store
+			err := c.store.UpdateServingGroupRevision(utils.GetNamespaceName(ms), sg.Name, revision)
+			if err != nil {
+				klog.Errorf("failed to update ServingGroup %s revision: %v", sg.Name, err)
+			} else {
+				klog.V(2).Infof("Updated ServingGroup %s revision to latest: %s", sg.Name, revision)
+			}
+		}
+	}
+
+	return outdatedRolesMap
 }
