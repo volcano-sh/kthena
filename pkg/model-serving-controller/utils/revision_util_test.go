@@ -101,7 +101,7 @@ func TestRemoveRoleReplicasForRoleRevision(t *testing.T) {
 		name              string
 		input             workloadv1alpha1.Role
 		expected          workloadv1alpha1.Role
-		originalUnchanged bool // 是否需要验证原始输入不被修改
+		originalUnchanged bool
 	}{
 		{
 			name: "role with non-nil replicas",

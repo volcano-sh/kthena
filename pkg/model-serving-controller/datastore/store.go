@@ -63,7 +63,7 @@ type ServingGroup struct {
 	runningPods map[string]struct{} // Map of pod names in this ServingGroup
 	Revision    string
 	Status      ServingGroupStatus
-	Roles       map[string]map[string]*Role // roleName -> roleID -> *Role, like prefill -> prefill-0 -> *Role
+	roles       map[string]map[string]*Role // roleName -> roleID -> *Role, like prefill -> prefill-0 -> *Role
 }
 
 type Role struct {
@@ -137,7 +137,7 @@ func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, ro
 	if !ok {
 		return nil, ErrServingGroupNotFound
 	}
-	roleMap, ok := servingGroup.Roles[roleName]
+	roleMap, ok := servingGroup.roles[roleName]
 	if !ok {
 		// If the roleName does not exist, return an empty list instead of an error
 		return []Role{}, nil
@@ -173,7 +173,7 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 		return ErrServingGroupNotFound
 	}
 
-	roleMap, ok := servingGroup.Roles[roleName]
+	roleMap, ok := servingGroup.roles[roleName]
 	if !ok {
 		return fmt.Errorf("roleName %s not found in group %s", roleName, groupName)
 	}
@@ -194,7 +194,7 @@ func (s *store) GetRoleStatus(modelServingName types.NamespacedName, groupName, 
 
 	if servingGroups, exist := s.servingGroup[modelServingName]; exist {
 		if group, ok := servingGroups[groupName]; ok {
-			if roleMap, exists := group.Roles[roleName]; exists {
+			if roleMap, exists := group.roles[roleName]; exists {
 				if role, found := roleMap[roleID]; found {
 					return role.Status
 				}
@@ -278,7 +278,7 @@ func (s *store) DeleteRole(modelServingName types.NamespacedName, groupName, rol
 		return
 	}
 
-	roleMap, ok := servingGroup.Roles[roleName]
+	roleMap, ok := servingGroup.roles[roleName]
 	if !ok {
 		return
 	}
@@ -304,7 +304,7 @@ func (s *store) AddServingGroup(modelServingName types.NamespacedName, idx int, 
 		runningPods: make(map[string]struct{}),
 		Status:      ServingGroupCreating,
 		Revision:    revision,
-		Roles:       make(map[string]map[string]*Role),
+		roles:       make(map[string]map[string]*Role),
 	}
 }
 
@@ -324,22 +324,22 @@ func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleNa
 			runningPods: make(map[string]struct{}),
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			Roles:       make(map[string]map[string]*Role),
+			roles:       make(map[string]map[string]*Role),
 		}
 		s.servingGroup[modelServingName][groupName] = group
 	}
 
-	if _, exists := group.Roles[roleName]; !exists {
-		group.Roles[roleName] = make(map[string]*Role)
+	if _, exists := group.roles[roleName]; !exists {
+		group.roles[roleName] = make(map[string]*Role)
 	}
 
-	if existing, exists := group.Roles[roleName][roleID]; exists {
+	if existing, exists := group.roles[roleName][roleID]; exists {
 		if existing.Revision != revision {
 			klog.Warningf("AddRole: role %s/%s already exists with revision %s, but got revision %s; skipping",
 				roleName, roleID, existing.Revision, revision)
 		}
 	} else {
-		group.Roles[roleName][roleID] = &Role{
+		group.roles[roleName][roleID] = &Role{
 			Name:         roleID,
 			Status:       RoleCreating,
 			Revision:     revision,
@@ -365,7 +365,7 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 			runningPods: map[string]struct{}{},
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			Roles:       make(map[string]map[string]*Role),
+			roles:       make(map[string]map[string]*Role),
 		}
 
 		s.servingGroup[modelServingName][servingGroupName] = group
@@ -374,18 +374,18 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 	group.runningPods[runningPodName] = struct{}{} // runningPods map has been initialized during AddServingGroup.
 
 	// Check if roleName exists, and initialize it if not
-	if _, ok = group.Roles[roleName]; !ok {
-		group.Roles[roleName] = make(map[string]*Role)
+	if _, ok = group.roles[roleName]; !ok {
+		group.roles[roleName] = make(map[string]*Role)
 	}
 
-	if _, ok = group.Roles[roleName][roleID]; !ok {
+	if _, ok = group.roles[roleName][roleID]; !ok {
 		role := &Role{
 			Name:         roleID,
 			Status:       RoleCreating,
 			Revision:     revision,
 			RoleRevision: roleRevision,
 		}
-		group.Roles[roleName][roleID] = role
+		group.roles[roleName][roleID] = role
 	}
 }
 
@@ -406,25 +406,25 @@ func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, se
 			runningPods: map[string]struct{}{},
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			Roles:       make(map[string]map[string]*Role),
+			roles:       make(map[string]map[string]*Role),
 		}
 
 		s.servingGroup[modelServingName][servingGroupName] = group
 	}
 
 	// Check if roleName exists, and initialize it if not
-	if _, ok = group.Roles[roleName]; !ok {
-		group.Roles[roleName] = make(map[string]*Role)
+	if _, ok = group.roles[roleName]; !ok {
+		group.roles[roleName] = make(map[string]*Role)
 	}
 
-	if _, ok = group.Roles[roleName][roleID]; !ok {
+	if _, ok = group.roles[roleName][roleID]; !ok {
 		role := &Role{
 			Name:         roleID,
 			Status:       RoleCreating,
 			Revision:     revision,
 			RoleRevision: roleRevision,
 		}
-		group.Roles[roleName][roleID] = role
+		group.roles[roleName][roleID] = role
 	}
 }
 
