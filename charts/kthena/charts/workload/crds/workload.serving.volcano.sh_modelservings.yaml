@@ -137,8 +137,10 @@ spec:
                     type: object
                   type:
                     default: RoleRollingUpdate
-                    description: Type defines the rollout strategy, it can only be
-                      “ServingGroupRollingUpdate” for now.
+                    description: |-
+                      Type defines the rollout strategy. Supported values are
+                      "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
+                      it defaults to "RoleRollingUpdate".
                     enum:
                     - ServingGroupRollingUpdate
                     - RoleRollingUpdate

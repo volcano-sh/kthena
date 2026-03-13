@@ -1156,10 +1156,15 @@ func (c *ModelServingController) deleteOutdatedServingGroups(
 				outdatedRoleNames, exists := outdatedRolesMap[sg.Name]
 				if exists && len(outdatedRoleNames) > 0 {
 					for _, roleName := range outdatedRoleNames {
-						outdatedRoles := sg.Roles[roleName]
+						// outdatedRoles := sg.Roles[roleName]
+						outdatedRoles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleName)
+						if err != nil {
+							klog.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleName, err)
+							continue
+						}
 						klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", roleName, sg.Name)
-						for roleID, _ := range outdatedRoles {
-							c.DeleteRole(ctx, ms, sg.Name, roleName, roleID)
+						for i := range outdatedRoles {
+							c.DeleteRole(ctx, ms, sg.Name, roleName, outdatedRoles[i].Name)
 						}
 					}
 				}
@@ -2197,7 +2202,12 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 
 		// Check each role in the current serving group
 		for roleName, roleRevision := range expectedRoleRevisions {
-			roles := sg.Roles[roleName]
+			// Get a safe copy of the roles list from the store to avoid concurrent map iteration/write.
+			roles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleName)
+			if err != nil {
+				klog.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleName, err)
+				continue
+			}
 
 			// Check if any instance of this role type is outdated
 			hasOutdatedRole := false

@@ -133,7 +133,9 @@ const (
 // RolloutStrategy defines the strategy that the ModelServing controller
 // will use to perform replica updates.
 type RolloutStrategy struct {
-	// Type defines the rollout strategy, it can only be “ServingGroupRollingUpdate” for now.
+	// Type defines the rollout strategy. Supported values are
+	// "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
+	// it defaults to "RoleRollingUpdate".
 	//
 	// +kubebuilder:default=RoleRollingUpdate
 	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}
@@ -146,8 +148,8 @@ type RolloutStrategy struct {
 
 // RolloutStrategyType defines the strategy to use to update replicas.
 // It must correspond to the granularity of the RecoveryPolicy.
-// `ServingGroupRollingUpdate` corresponding `ServingGroupRecreate`
-// `RoleRollingUpdate` corresponding `RoleRecreate`
+// `ServingGroupRollingUpdate` corresponds to `ServingGroupRecreate`
+// `RoleRollingUpdate` corresponds to `RoleRecreate`
 type RolloutStrategyType string
 
 const (
