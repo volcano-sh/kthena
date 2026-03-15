@@ -31,7 +31,7 @@ func TestWebhook(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// waiting for webhook to be ready before running tests
-	WaitForWebhookReady(t, kubeClient, kthenaNamespace)
+	waitForWebhookReady(t, kubeClient, kthenaNamespace)
 
 	testCases := []struct {
 		name          string

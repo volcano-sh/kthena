@@ -123,29 +123,27 @@ func setupControllerManagerE2ETest(t *testing.T) (context.Context, *clientset.Cl
 	return ctx, kthenaClient, kubeClient
 }
 
-func WaitForWebhookReady(t *testing.T, kubeClient *kubernetes.Clientset, kthenaNamespace string) {
+func waitForWebhookReady(t *testing.T, kubeClient *kubernetes.Clientset, kthenaNamespace string) {
 	t.Helper()
-	t.Log("waiting for webhook server to be ready")
+	t.Log("Waiting for webhook server to be ready")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()
 
-	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		ep, err := kubeClient.CoreV1().Endpoints(kthenaNamespace).Get(ctx, "kthena-controller-manager-webhook", metav1.GetOptions{})
 
-		// try again
 		if err != nil {
-			t.Logf("webhook endpoint not ready yet: %v", err)
+			t.Logf("Webhook endpoint not ready yet: %v", err)
 			return false, nil
 		}
 		for _, subset := range ep.Subsets {
 			if len(subset.Addresses) > 0 {
-				return true, nil // true = we are done! webhook is ready
+				return true, nil
 			}
 		}
-		t.Log("webhook has no ready addresses yet")
+		t.Log("Webhook has no ready addresses yet")
 		return false, nil
 	})
-	// you are missing this line!
-	require.NoError(t, err, "webhook did not become ready in time increase the waiting period")
+	require.NoError(t, err, "Webhook did not become ready in time")
 }
