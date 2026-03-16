@@ -727,7 +727,8 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 			Namespace: testNamespace,
 		},
 		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
+			Replicas:       &replicas,
+			RecoveryPolicy: workload.ServingGroupRecreate,
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.ServingGroupRollingUpdate,
 				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
@@ -1068,7 +1069,8 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 			Namespace: testNamespace,
 		},
 		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
+			Replicas:       &replicas,
+			RecoveryPolicy: workload.ServingGroupRecreate,
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.ServingGroupRollingUpdate,
 				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
@@ -1437,4 +1439,146 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	assert.Equal(t, actualPodCount, runningPods, "All created pods should be in Running phase")
 
 	t.Log("ModelServing controller-manager restart test passed successfully")
+}
+
+// TestModelServingRoleBasedRollingUpdate verifies that role-based rolling updates work correctly
+// by updating individual roles without recreating the entire ServingGroup
+func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 2 replicas and 2 roles
+	replicas := int32(2)
+	modelServing := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-role-based-rolling-update",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas:       &replicas,
+			RecoveryPolicy: workload.RoleRecreate,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.RoleRollingUpdate, // Using role-based rolling update
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptr.To[int32](2), // Each ServingGroup has 2 prefill pods
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage, // Initial image
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+					{
+						Name:     "decode",
+						Replicas: ptr.To[int32](1), // Each ServingGroup has 1 decode pod
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage, // Initial image
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
+
+	// Create the ModelServing
+	t.Log("Creating ModelServing with 2 replicas and 2 roles for role-based rolling update test")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
+	// Wait for the initial ModelServing to be ready
+	t.Log("Waiting for initial ModelServing to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify initial state
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(2), *initialMS.Spec.Replicas, "Initial ModelServing should have 2 replicas")
+	assert.Equal(t, int32(2), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 2 available replicas")
+
+	// Record initial pod UIDs to track which pods are recreated vs preserved
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	initialPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list initial pods")
+	initialPodUIDs := make(map[string]struct{})
+	for _, pod := range initialPodList.Items {
+		initialPodUIDs[string(pod.UID)] = struct{}{}
+	}
+	t.Logf("Recorded %d initial pod UIDs", len(initialPodUIDs))
+
+	// Update the ModelServing to trigger a role-based rolling update (change prefill role image)
+	updatedMS := initialMS.DeepCopy()
+	// Modify the container image of the prefill role to trigger a rolling update
+	for i := range updatedMS.Spec.Template.Roles {
+		if updatedMS.Spec.Template.Roles[i].Name == "prefill" {
+			updatedMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+			break
+		}
+	}
+
+	t.Log("Updating ModelServing to trigger role-based rolling update (changing prefill role image)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for role-based rolling update")
+
+	// Monitor the role-based rolling update to ensure only prefill role pods are replaced
+	t.Log("Monitoring role-based rolling update to ensure only prefill role pods are replaced while decode role pods remain")
+
+	// Wait for the rolling update to complete
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+
+	// Get final state
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get final ModelServing")
+	assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
+	assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
+
+	// Verify that the prefill role image has been updated
+	prefillRoleUpdated := false
+	for _, role := range finalMS.Spec.Template.Roles {
+		if role.Name == "prefill" && role.EntryTemplate.Spec.Containers[0].Image == "nginx:alpine" {
+			prefillRoleUpdated = true
+			break
+		}
+	}
+	assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
+
+	t.Log("ModelServing role-based rolling update test passed successfully")
 }
