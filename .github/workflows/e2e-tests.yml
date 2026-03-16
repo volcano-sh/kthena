@@ -5,18 +5,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "pkg/**"
-      - "cmd/**"
-      - "test/**"
-      - "config/**"
-      - "charts/**"
-      - "docker/**"
-      - "hack/**"
-      - "go.mod"
-      - "go.sum"
-      - "Makefile"
-      - ".github/workflows/e2e-tests.yml"
 
 jobs:
   e2e-tests:
@@ -39,7 +27,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
       - name: Install helm
         shell: bash
         run: |

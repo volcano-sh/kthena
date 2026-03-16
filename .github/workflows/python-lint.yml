@@ -5,16 +5,9 @@ on:
     branches:
       - main
       - release
-    paths:
-      - "python/**"
-      - "**.py"
-      - "python/kthena/pyproject.toml"
   push:
     branches:
       - main
-    paths:
-      - "python/**"
-      - "python/kthena/pyproject.toml"
 
 jobs:
   python_lint:
