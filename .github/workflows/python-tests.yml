@@ -4,14 +4,9 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "python/**"
-      - "**.py"
   push:
     branches:
       - main
-    paths:
-      - "python/**"
 
 jobs:
   python_unit_test:
