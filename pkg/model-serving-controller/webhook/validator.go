@@ -155,12 +155,6 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 		if partitionValue < 0 {
 			allErrs = append(allErrs, field.Invalid(partitionPath, partitionValue, "partition must be greater than or equal to 0"))
 		}
-
-		// Check if partition is less than replicas
-		if ms.Spec.Replicas != nil && partitionValue >= *ms.Spec.Replicas {
-			allErrs = append(allErrs, field.Invalid(partitionPath, partitionValue,
-				fmt.Sprintf("partition must be less than replicas (%d)", *ms.Spec.Replicas)))
-		}
 	}
 
 	maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)

@@ -24,6 +24,7 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 )
 
 func TestValidPodNameLength(t *testing.T) {
@@ -229,7 +230,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid partition - equal to replicas",
+			name: "valid partition - equal to replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -243,19 +244,25 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 								Partition: int32Ptr(3),
 							},
 						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:     "predictor",
+									Replicas: ptr.To[int32](1),
+									EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+										Metadata: &workloadv1alpha1.Metadata{},
+									},
+									WorkerReplicas: 0,
+								},
+							},
+						},
 					},
 				},
 			},
-			want: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition"),
-					int32(3),
-					"partition must be less than replicas (3)",
-				),
-			},
+			want: nil,
 		},
 		{
-			name: "invalid partition - greater than replicas",
+			name: "valid partition - greater than replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -269,16 +276,22 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 								Partition: int32Ptr(5),
 							},
 						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:     "predictor",
+									Replicas: ptr.To[int32](1),
+									EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+										Metadata: &workloadv1alpha1.Metadata{},
+									},
+									WorkerReplicas: 0,
+								},
+							},
+						},
 					},
 				},
 			},
-			want: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition"),
-					int32(5),
-					"partition must be less than replicas (3)",
-				),
-			},
+			want: nil,
 		},
 		{
 			name: "valid partition - zero value",
