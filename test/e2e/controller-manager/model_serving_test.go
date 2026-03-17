@@ -1505,6 +1505,9 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 		},
 	}
 
+	// waiting for webhook to be ready before running tests
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
 	// Create the ModelServing
 	t.Log("Creating ModelServing with 2 replicas and 2 roles for role-based rolling update test")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
@@ -1529,18 +1532,6 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	assert.Equal(t, int32(2), *initialMS.Spec.Replicas, "Initial ModelServing should have 2 replicas")
 	assert.Equal(t, int32(2), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 2 available replicas")
 
-	// Record initial pod UIDs to track which pods are recreated vs preserved
-	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
-	initialPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	require.NoError(t, err, "Failed to list initial pods")
-	initialPodUIDs := make(map[string]struct{})
-	for _, pod := range initialPodList.Items {
-		initialPodUIDs[string(pod.UID)] = struct{}{}
-	}
-	t.Logf("Recorded %d initial pod UIDs", len(initialPodUIDs))
-
 	// Update the ModelServing to trigger a role-based rolling update (change prefill role image)
 	updatedMS := initialMS.DeepCopy()
 	// Modify the container image of the prefill role to trigger a rolling update
@@ -1551,6 +1542,16 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 		}
 	}
 
+	decodePodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=decode", modelServing.Name)
+	decodePodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: decodePodLabelSelector,
+	})
+	assert.NoError(t, err, "Failed to list decode pods before update")
+	decodePodsUID := make(map[string]string, len(decodePodList.Items))
+	for _, pod := range decodePodList.Items {
+		decodePodsUID[pod.Name] = string(pod.UID)
+	}
+
 	t.Log("Updating ModelServing to trigger role-based rolling update (changing prefill role image)")
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
 	require.NoError(t, err, "Failed to update ModelServing for role-based rolling update")
@@ -1558,24 +1559,72 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	// Monitor the role-based rolling update to ensure only prefill role pods are replaced
 	t.Log("Monitoring role-based rolling update to ensure only prefill role pods are replaced while decode role pods remain")
 
-	// Wait for the rolling update to complete
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+	// It is possible that the ‘modelServing Ready’ check completed before the change in the modelServing status,
+	// causing subsequent checks to fail. Therefore, the checks have been retried.
+	// This has improved the robustness of the end-to-end tests.
+	require.Eventually(t, func() bool {
+		// Wait for the rolling update to complete
+		utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
 
-	// Get final state
-	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get final ModelServing")
-	assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
-	assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
+		// Get final state
+		finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+		require.NoError(t, err, "Failed to get final ModelServing")
+		assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
+		assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
 
-	// Verify that the prefill role image has been updated
-	prefillRoleUpdated := false
-	for _, role := range finalMS.Spec.Template.Roles {
-		if role.Name == "prefill" && role.EntryTemplate.Spec.Containers[0].Image == "nginx:alpine" {
-			prefillRoleUpdated = true
-			break
+		// Verify that the prefill role image has been updated
+		prefillRoleUpdated := false
+		for _, role := range finalMS.Spec.Template.Roles {
+			if role.Name == "prefill" && role.EntryTemplate.Spec.Containers[0].Image == "nginx:alpine" {
+				prefillRoleUpdated = true
+				break
+			}
 		}
-	}
-	assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
+		assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
+
+		prefillPodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=prefill", modelServing.Name)
+		prefillPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: prefillPodLabelSelector,
+		})
+		if err != nil {
+			t.Logf("Failed to list prefill pods: %v", err)
+			return false
+		}
+
+		// Check if all prefill pods have the updated image
+		for _, pod := range prefillPodList.Items {
+			if pod.Spec.Containers[0].Image != "nginx:alpine" {
+				t.Logf("Prefill pod %s still has image %s, expecting nginx:alpine", pod.Name, pod.Spec.Containers[0].Image)
+				return false
+			}
+		}
+
+		// Check if all prefill pods have the updated image
+		decodePodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=decode", modelServing.Name)
+		decodePodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: decodePodLabelSelector,
+		})
+		if err != nil {
+			t.Logf("Failed to list decode pods: %v", err)
+			return false
+		}
+
+		// Check if all decode pods still have the original image
+		for _, pod := range decodePodList.Items {
+			if pod.Spec.Containers[0].Image != nginxImage {
+				t.Logf("Decode pod %s has image %s, expecting original image %s", pod.Name, pod.Spec.Containers[0].Image, nginxImage)
+				return false
+			}
+
+			uid, exist := decodePodsUID[pod.Name]
+			if !exist || string(pod.UID) != uid {
+				t.Logf("Decode pod %s has been replaced", pod.Name)
+				return false
+			}
+		}
+
+		return true
+	}, 2*time.Minute, 10*time.Second)
 
 	t.Log("ModelServing role-based rolling update test passed successfully")
 }

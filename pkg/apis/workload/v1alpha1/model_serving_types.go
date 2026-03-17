@@ -134,11 +134,11 @@ const (
 // will use to perform replica updates.
 type RolloutStrategy struct {
 	// Type defines the rollout strategy. Supported values are
-	// "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
-	// it defaults to "RoleRollingUpdate".
+	// "ServingGroup" and "Role". If not specified,
+	// it defaults to "Role".
 	//
-	// +kubebuilder:default=RoleRollingUpdate
-	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}
+	// +kubebuilder:default=Role
+	// +kubebuilder:validation:Enum={ServingGroup,Role}
 	Type RolloutStrategyType `json:"type"`
 
 	// RollingUpdateConfiguration defines the parameters to be used when type is RollingUpdateStrategyType.
@@ -148,16 +148,16 @@ type RolloutStrategy struct {
 
 // RolloutStrategyType defines the strategy to use to update replicas.
 // It must correspond to the granularity of the RecoveryPolicy.
-// `ServingGroupRollingUpdate` corresponds to `ServingGroupRecreate`
-// `RoleRollingUpdate` corresponds to `RoleRecreate`
+// `ServingGroup` corresponds to `ServingGroupRecreate`
+// `Role` corresponds to `RoleRecreate`
 type RolloutStrategyType string
 
 const (
-	// ServingGroupRollingUpdate indicates that ServingGroup replicas will be updated one by one.
-	ServingGroupRollingUpdate RolloutStrategyType = "ServingGroupRollingUpdate"
+	// `ServingGroup` indicates that ServingGroup replicas will be updated one by one.
+	ServingGroupRollingUpdate RolloutStrategyType = "ServingGroup"
 
-	// RoleRollingUpdate indicates that Role replicas will be updated one by one.
-	RoleRollingUpdate RolloutStrategyType = "RoleRollingUpdate"
+	// `Role` indicates that Role replicas will be updated one by one.
+	RoleRollingUpdate RolloutStrategyType = "Role"
 )
 
 // RollingUpdateConfiguration defines the parameters to be used for RollingUpdateStrategyType.
