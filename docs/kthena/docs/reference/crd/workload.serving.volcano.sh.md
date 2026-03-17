@@ -790,8 +790,8 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `ServingGroupRollingUpdate` | ServingGroupRollingUpdate indicates that ServingGroup replicas will be updated one by one.<br /> |
-| `RoleRollingUpdate` | RoleRollingUpdate indicates that Role replicas will be updated one by one.<br /> |
+| `ServingGroupRollingUpdate` | `ServingGroupRollingUpdate` indicates that ServingGroup replicas will be updated one by one.<br /> |
+| `RoleRollingUpdate` | `RoleRollingUpdate` indicates that Role replicas will be updated one by one.<br /> |
 
 
 #### SelectPolicyType

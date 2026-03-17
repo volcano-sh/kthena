@@ -153,10 +153,10 @@ type RolloutStrategy struct {
 type RolloutStrategyType string
 
 const (
-	// ServingGroupRollingUpdate indicates that ServingGroup replicas will be updated one by one.
+	// `ServingGroupRollingUpdate` indicates that ServingGroup replicas will be updated one by one.
 	ServingGroupRollingUpdate RolloutStrategyType = "ServingGroupRollingUpdate"
 
-	// RoleRollingUpdate indicates that Role replicas will be updated one by one.
+	// `RoleRollingUpdate` indicates that Role replicas will be updated one by one.
 	RoleRollingUpdate RolloutStrategyType = "RoleRollingUpdate"
 )
 

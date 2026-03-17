@@ -35,6 +35,7 @@ type Store interface {
 	GetRunningPodNumByServingGroup(modelServingName types.NamespacedName, groupName string) (int, error)
 	GetServingGroupStatus(modelServingName types.NamespacedName, groupName string) ServingGroupStatus
 	GetRoleList(modelServingName types.NamespacedName, groupName, roleName string) ([]Role, error)
+	GetAllRoles(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error)
 	GetRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string) RoleStatus
 	UpdateRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) error
 	DeleteRole(modelServingName types.NamespacedName, groupName, roleName, roleID string)
@@ -156,6 +157,33 @@ func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, ro
 	})
 
 	return roleSlice, nil
+}
+
+func (s *store) GetAllRoles(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	servingGroups, ok := s.servingGroup[modelServingName]
+	if !ok {
+		return nil, fmt.Errorf("cannot find modelServing %s", modelServingName.Name)
+	}
+	servingGroup, ok := servingGroups[groupName]
+	if !ok {
+		return nil, fmt.Errorf("cannot find servingGroup %s", groupName)
+	}
+
+	// Return a snapshot copy of the roles map to avoid concurrent map access issues.
+	copiedRoles := make(map[string]map[string]*Role, len(servingGroup.roles))
+	for roleName, roleMap := range servingGroup.roles {
+		if roleMap == nil {
+			continue
+		}
+		copiedInner := make(map[string]*Role, len(roleMap))
+		for roleID, role := range roleMap {
+			copiedInner[roleID] = role
+		}
+		copiedRoles[roleName] = copiedInner
+	}
+	return copiedRoles, nil
 }
 
 // UpdateRoleStatus updates the status of a specific role

@@ -1154,6 +1154,7 @@ func (c *ModelServingController) deleteOutdatedServingGroups(
 			} else {
 				// default is role rolling update, delete outdated roles in the ServingGroup for update
 				outdatedRoleNames, exists := outdatedRolesMap[sg.Name]
+				hasDeletedRoles := false
 				if exists && len(outdatedRoleNames) > 0 {
 					for _, roleName := range outdatedRoleNames {
 						// outdatedRoles := sg.Roles[roleName]
@@ -1165,10 +1166,14 @@ func (c *ModelServingController) deleteOutdatedServingGroups(
 						klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", roleName, sg.Name)
 						for i := range outdatedRoles {
 							c.DeleteRole(ctx, ms, sg.Name, roleName, outdatedRoles[i].Name)
+							hasDeletedRoles = true
 						}
 					}
 				}
-				updateCount++
+				// Only increment updateCount if we actually deleted roles
+				if hasDeletedRoles {
+					updateCount++
+				}
 			}
 		}
 		return nil
@@ -2191,10 +2196,12 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 
 	// Create a mapping of role name to expected role revision based on current spec
 	expectedRoleRevisions := make(map[string]string)
+	newRoleNames := make(map[string]bool)
 	for _, role := range ms.Spec.Template.Roles {
 		copy := utils.RemoveRoleReplicasForRoleRevision(role)
 		roleRevision := utils.Revision(copy)
 		expectedRoleRevisions[role.Name] = roleRevision
+		newRoleNames[role.Name] = true
 	}
 
 	for _, sg := range servingGroups {
@@ -2212,7 +2219,9 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 			// Check if any instance of this role type is outdated
 			hasOutdatedRole := false
 			for _, role := range roles {
-				if role.RoleRevision != roleRevision {
+				// If the role revision in the store is different from the expected revision and
+				// the role is not already being deleted, it's outdated
+				if role.RoleRevision != roleRevision && role.Status != datastore.RoleDeleting {
 					hasOutdatedRole = true
 					break
 				}
@@ -2220,6 +2229,20 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 
 			if hasOutdatedRole {
 				outdatedRoleNames = append(outdatedRoleNames, roleName)
+			}
+		}
+
+		// Additionally, check for roles that exist in the store but are not in the new spec
+		// These roles should also be considered "outdated" and need to be deleted
+		allRoles, err := c.store.GetAllRoles(utils.GetNamespaceName(ms), sg.Name)
+		if err != nil {
+			klog.Errorf("failed to get all roles for ServingGroup %s: %v", sg.Name, err)
+			continue
+		}
+		for storedRoleName := range allRoles {
+			if !newRoleNames[storedRoleName] {
+				// This role exists in the store but not in the new spec, so it's outdated
+				outdatedRoleNames = append(outdatedRoleNames, storedRoleName)
 			}
 		}
 

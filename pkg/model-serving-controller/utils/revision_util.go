@@ -39,7 +39,7 @@ func DeepHashObject(hasher hash.Hash, objectToWrite interface{}) {
 	fmt.Fprintf(hasher, "%v", dump.ForHash(objectToWrite))
 }
 
-// RemoveRoleReplicasForRevision remove role.replicas when calculating modelServing revision hash
+// RemoveRoleReplicasForRevision removes role.replicas when calculating modelServing revision hash
 func RemoveRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv1alpha1.ModelServing {
 	Copy := ms.DeepCopy()
 	for i := range Copy.Spec.Template.Roles {
@@ -48,7 +48,7 @@ func RemoveRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv
 	return Copy
 }
 
-// RemoveRoleReplicasForRoleRevision remove role.replicas when calculating role revision hash
+// RemoveRoleReplicasForRoleRevision removes role.replicas when calculating role revision hash
 // it works for RoleRollingUpdate strategy.
 func RemoveRoleReplicasForRoleRevision(role workloadv1alpha1.Role) workloadv1alpha1.Role {
 	copy := role
