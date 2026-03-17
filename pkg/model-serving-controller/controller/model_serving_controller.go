@@ -1784,6 +1784,7 @@ func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *
 					workloadv1alpha1.GroupNameLabelKey: sg.Name,
 					workloadv1alpha1.RoleLabelKey:      role.Name,
 					workloadv1alpha1.RoleIDKey:         roleObj.Name,
+					workloadv1alpha1.EntryLabelKey:     "true",
 				}
 
 				services, err := c.getServicesByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, sg.Name, role.Name, roleObj.Name))
