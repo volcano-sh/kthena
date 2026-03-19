@@ -30,4 +30,6 @@ const (
 
 	// RevisionLabelKey is the revision label for the model serving.
 	RevisionLabelKey = "modelserving.volcano.sh/revision"
+	// RoleRevisionLabelKey is the revision label for the role, used for RoleRollingUpdate strategy.
+	RoleRevisionLabelKey = "modelserving.volcano.sh/role-revision"
 )
