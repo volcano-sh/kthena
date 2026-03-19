@@ -103,7 +103,7 @@ func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbs)}
-	ac := &AutoscaleController{client: client, namespace: ns, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doScale(context.Background(), binding, policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
@@ -131,7 +131,7 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, lbs)}
-	ac := &AutoscaleController{client: client, namespace: ns, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doScale(context.Background(), binding, policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
@@ -167,7 +167,7 @@ func TestTwoBackends_then_DoOptimize_expect_UpdateActions(t *testing.T) {
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbsA), readyPod(ns, "pod-b", host, lbsB)}
-	ac := &AutoscaleController{client: client, namespace: ns, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
@@ -205,7 +205,7 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a2", host, lbsA), readyPod(ns, "pod-b2", host, lbsB)}
-	ac := &AutoscaleController{client: client, namespace: ns, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
@@ -232,3 +232,68 @@ func toInt32(s string) int32  { v, _ := strconv.Atoi(s); return int32(v) }
 
 type autoscalerAutoscaler = autoscaler.Autoscaler
 type autoscalerOptimizer = autoscaler.Optimizer
+
+func TestFormatAutoscalerMapKey_IncludesNamespaceAndTarget(t *testing.T) {
+	targetRef := &corev1.ObjectReference{Name: "same-target", Kind: workload.ModelServingKind.Kind}
+
+	// Different binding namespaces, same binding name and target → distinct keys.
+	keyA := formatAutoscalerMapKey("team-ml", "shared-binding", targetRef)
+	keyB := formatAutoscalerMapKey("team-ai", "shared-binding", targetRef)
+	if keyA == keyB {
+		t.Fatalf("expected different keys for different binding namespaces, got identical key %q", keyA)
+	}
+
+	// Same namespace and binding, different target names → distinct keys.
+	ref1 := &corev1.ObjectReference{Name: "target-1", Kind: workload.ModelServingKind.Kind}
+	ref2 := &corev1.ObjectReference{Name: "target-2", Kind: workload.ModelServingKind.Kind}
+	key1 := formatAutoscalerMapKey("ns", "binding", ref1)
+	key2 := formatAutoscalerMapKey("ns", "binding", ref2)
+	if key1 == key2 {
+		t.Fatalf("expected different keys for different target names, got identical key %q", key1)
+	}
+
+	// Same namespace and binding, different target kinds → distinct keys.
+	refKindA := &corev1.ObjectReference{Name: "target", Kind: "KindA"}
+	refKindB := &corev1.ObjectReference{Name: "target", Kind: "KindB"}
+	keyKindA := formatAutoscalerMapKey("ns", "binding", refKindA)
+	keyKindB := formatAutoscalerMapKey("ns", "binding", refKindB)
+	if keyKindA == keyKindB {
+		t.Fatalf("expected different keys for different target kinds, got identical key %q", keyKindA)
+	}
+}
+
+func TestFormatAutoscalerMapKey_TargetNamespaceDifferentiation(t *testing.T) {
+	// Same binding, same target name/kind, different explicit target namespaces → distinct keys.
+	refNsA := &corev1.ObjectReference{Name: "target", Kind: workload.ModelServingKind.Kind, Namespace: "ns-a"}
+	refNsB := &corev1.ObjectReference{Name: "target", Kind: workload.ModelServingKind.Kind, Namespace: "ns-b"}
+	keyA := formatAutoscalerMapKey("default", "binding", refNsA)
+	keyB := formatAutoscalerMapKey("default", "binding", refNsB)
+	if keyA == keyB {
+		t.Fatalf("expected different keys for different target namespaces, got identical key %q", keyA)
+	}
+
+	// Explicit target namespace matching binding namespace vs empty (defaults to binding namespace) → same key.
+	refExplicit := &corev1.ObjectReference{Name: "target", Kind: workload.ModelServingKind.Kind, Namespace: "ns"}
+	refImplicit := &corev1.ObjectReference{Name: "target", Kind: workload.ModelServingKind.Kind}
+	keyExplicit := formatAutoscalerMapKey("ns", "binding", refExplicit)
+	keyImplicit := formatAutoscalerMapKey("ns", "binding", refImplicit)
+	if keyExplicit != keyImplicit {
+		t.Fatalf("expected same key when explicit target namespace matches binding namespace, got %q vs %q", keyExplicit, keyImplicit)
+	}
+}
+
+func TestFormatAutoscalerMapKey_OptimizerIncludesNamespace(t *testing.T) {
+	// Different namespaces, same binding name, nil targetRef (optimizer) → distinct keys.
+	keyA := formatAutoscalerMapKey("team-a", "shared-binding", nil)
+	keyB := formatAutoscalerMapKey("team-b", "shared-binding", nil)
+	if keyA == keyB {
+		t.Fatalf("expected different optimizer keys for different namespaces, got identical key %q", keyA)
+	}
+
+	// Same namespace, different binding names → distinct keys.
+	key1 := formatAutoscalerMapKey("ns", "binding-1", nil)
+	key2 := formatAutoscalerMapKey("ns", "binding-2", nil)
+	if key1 == key2 {
+		t.Fatalf("expected different optimizer keys for different bindings, got identical key %q", key1)
+	}
+}

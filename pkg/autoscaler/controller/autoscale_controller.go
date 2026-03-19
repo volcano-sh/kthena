@@ -48,7 +48,6 @@ type AutoscaleController struct {
 	kubeClient kubernetes.Interface
 	// client for custom resource
 	client                             clientset.Interface
-	namespace                          string
 	autoscalingPoliciesLister          workloadLister.AutoscalingPolicyLister
 	autoscalingPoliciesInformer        cache.Controller
 	autoscalingPoliciesBindingLister   workloadLister.AutoscalingPolicyBindingLister
@@ -61,7 +60,7 @@ type AutoscaleController struct {
 	optimizerMap                       map[string]*autoscaler.Optimizer
 }
 
-func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface, namespace string) *AutoscaleController {
+func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
 	informerFactory := informersv1alpha1.NewSharedInformerFactory(client, 0)
 	modelInferInformer := informerFactory.Workload().V1alpha1().ModelServings()
 	autoscalingPoliciesInformer := informerFactory.Workload().V1alpha1().AutoscalingPolicies()
@@ -81,7 +80,6 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 	ac := &AutoscaleController{
 		kubeClient:                         kubeClient,
 		client:                             client,
-		namespace:                          namespace,
 		autoscalingPoliciesLister:          autoscalingPoliciesInformer.Lister(),
 		autoscalingPoliciesInformer:        autoscalingPoliciesInformer.Informer(),
 		autoscalingPoliciesBindingLister:   autoscalingPoliciesBindingInformer.Lister(),
@@ -126,7 +124,7 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	klog.V(4).Info("start to reconcile")
 	ctx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
-	bindingList, err := ac.client.WorkloadV1alpha1().AutoscalingPolicyBindings(ac.namespace).List(ctx, metav1.ListOptions{})
+	bindings, err := ac.autoscalingPoliciesBindingLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list autoscaling policy bindings, err: %v", err)
 		return
@@ -135,16 +133,16 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	scalerSet := sets.New[string]()
 	optimizerSet := sets.New[string]()
 
-	for _, binding := range bindingList.Items {
+	for _, binding := range bindings {
 		policyName := binding.Spec.PolicyRef.Name
 		if policyName == "" {
 			klog.Warningf("invalid autoscaling policy name, binding name: %s", binding.Name)
 			continue
 		}
 		if binding.Spec.HomogeneousTarget != nil {
-			scalerSet.Insert(formatAutoscalerMapKey(binding.Name, &binding.Spec.HomogeneousTarget.Target.TargetRef))
+			scalerSet.Insert(formatAutoscalerMapKey(binding.Namespace, binding.Name, &binding.Spec.HomogeneousTarget.Target.TargetRef))
 		} else if binding.Spec.HeterogeneousTarget != nil {
-			optimizerSet.Insert(formatAutoscalerMapKey(binding.Name, nil))
+			optimizerSet.Insert(formatAutoscalerMapKey(binding.Namespace, binding.Name, nil))
 		} else {
 			klog.Warningf("Either homogeneous or heterogeneous not set, binding name: %s", binding.Name)
 		}
@@ -162,8 +160,8 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 		}
 	}
 
-	for _, binding := range bindingList.Items {
-		err := ac.schedule(ctx, &binding)
+	for _, binding := range bindings {
+		err := ac.schedule(ctx, binding)
 		if err != nil {
 			klog.Errorf("failed to process autoscale,err: %v", err)
 			continue
@@ -171,11 +169,11 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	}
 }
 
-func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, replicas int32) error {
+func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, defaultNamespace string, replicas int32) error {
 	targetRef := target.TargetRef
 	namespaceScope := targetRef.Namespace
 	if namespaceScope == "" {
-		namespaceScope = ac.namespace
+		namespaceScope = defaultNamespace
 	}
 
 	if target.TargetRef.Kind == "" || target.TargetRef.Kind == workload.ModelServingKind.Kind {
@@ -209,11 +207,11 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 	return fmt.Errorf("target ref kind %s, name: %s not supported", targetRef.Kind, targetRef.Name)
 }
 
-func (ac *AutoscaleController) getTargetReplicas(target *workload.Target) (int32, error) {
+func (ac *AutoscaleController) getTargetReplicas(target *workload.Target, defaultNamespace string) (int32, error) {
 	targetRef := target.TargetRef
 	namespaceScope := targetRef.Namespace
 	if namespaceScope == "" {
-		namespaceScope = ac.namespace
+		namespaceScope = defaultNamespace
 	}
 
 	if targetRef.Kind == workload.ModelServingKind.Kind || targetRef.Kind == "" {
@@ -261,7 +259,7 @@ func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.A
 }
 
 func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) error {
-	key := formatAutoscalerMapKey(binding.Name, nil)
+	key := formatAutoscalerMapKey(binding.Namespace, binding.Name, nil)
 	optimizer, ok := ac.optimizerMap[key]
 	if !ok || optimizer.NeedUpdate(autoscalePolicy, binding) {
 		optimizer = autoscaler.NewOptimizer(autoscalePolicy, binding)
@@ -271,7 +269,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 	// Fetch current replicas
 	replicasMap := make(map[string]int32, len(optimizer.Meta.Config.Params))
 	for _, param := range optimizer.Meta.Config.Params {
-		currentInstancesCount, err := ac.getTargetReplicas(&param.Target)
+		currentInstancesCount, err := ac.getTargetReplicas(&param.Target, binding.Namespace)
 		if err != nil {
 			klog.Errorf("failed to get current replicas, err: %v", err)
 			return err
@@ -292,7 +290,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 			klog.Warningf("recommended instances not exists, target ref name: %s", param.Target.TargetRef.Name)
 			continue
 		}
-		if err := ac.updateTargetReplicas(ctx, &param.Target, instancesCount); err != nil {
+		if err := ac.updateTargetReplicas(ctx, &param.Target, binding.Namespace, instancesCount); err != nil {
 			klog.Errorf("failed to update target kind:%s name: %s replicas:%d, err: %v", param.Target.TargetRef.Kind, param.Target.TargetRef.Name, instancesCount, err)
 			return err
 		}
@@ -303,7 +301,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 
 func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) error {
 	target := binding.Spec.HomogeneousTarget.Target
-	key := formatAutoscalerMapKey(binding.Name, &target.TargetRef)
+	key := formatAutoscalerMapKey(binding.Namespace, binding.Name, &target.TargetRef)
 	scaler, ok := ac.scalerMap[key]
 	if !ok || scaler.NeedUpdate(autoscalePolicy, binding) {
 		scaler = autoscaler.NewAutoscaler(autoscalePolicy, binding)
@@ -311,7 +309,7 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 		klog.Infof("asp: %s or binding: %s changed, create new scaler", autoscalePolicy.Name, binding.Name)
 	}
 	// Fetch current replicas
-	currentInstancesCount, err := ac.getTargetReplicas(&target)
+	currentInstancesCount, err := ac.getTargetReplicas(&target, binding.Namespace)
 	if err != nil {
 		klog.Errorf("failed to get current replicas, err: %v", err)
 		return err
@@ -327,7 +325,7 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 		return nil
 	}
 	// Do update replicas
-	if err := ac.updateTargetReplicas(ctx, &target, recommendedInstances); err != nil {
+	if err := ac.updateTargetReplicas(ctx, &target, binding.Namespace, recommendedInstances); err != nil {
 		klog.Errorf("failed to update target replicas %s, err: %v", target.TargetRef.Name, err)
 		return err
 	}
@@ -344,12 +342,18 @@ func (ac *AutoscaleController) getAutoscalePolicy(autoscalingPolicyName string, 
 	return autoscalingPolicy, nil
 }
 
-func formatAutoscalerMapKey(bindingName string, targetRef *corev1.ObjectReference) string {
-	if targetRef == nil {
-		return bindingName
+func formatAutoscalerMapKey(bindingNamespace, bindingName string, targetRef *corev1.ObjectReference) string {
+	key := bindingNamespace + "/" + bindingName
+	if targetRef != nil {
+		targetKind := targetRef.Kind
+		if targetKind == "" {
+			targetKind = workload.ModelServingKind.Kind
+		}
+		targetNamespace := targetRef.Namespace
+		if targetNamespace == "" {
+			targetNamespace = bindingNamespace
+		}
+		key += "/" + targetNamespace + "/" + targetKind + "/" + targetRef.Name
 	}
-	if targetRef.Kind == "" {
-		targetRef.Kind = workload.ModelServingKind.Kind
-	}
-	return bindingName + "#" + targetRef.Kind + "#" + targetRef.Name
+	return key
 }
