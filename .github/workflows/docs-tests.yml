@@ -4,13 +4,9 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - 'docs/kthena/**'
   push:
     branches:
       - main
-    paths:
-      - 'docs/kthena/**'
 
 jobs:
   docs_test:
@@ -21,9 +17,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24.5.0'
-          cache: 'npm'
-          cache-dependency-path: './docs/kthena/package-lock.json'
+          node-version: "24.5.0"
+          cache: "npm"
+          cache-dependency-path: "./docs/kthena/package-lock.json"
       - name: Install dependencies
         working-directory: ./docs/kthena
         run: npm ci

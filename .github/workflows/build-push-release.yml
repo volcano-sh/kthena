@@ -7,21 +7,9 @@ on:
     tags:
       - "v*.*.*"
       - "v*.*.*-*" # Support for pre-release tags like v1.2.3-alpha
-    paths:
-      - 'charts/kthena/**'
-      - 'python/**'
-      - 'docker/**'
-      - '**.go'
-      - 'pkg/**'
-      - 'cmd/**'
-      - 'go.mod'
-      - 'go.sum'
   pull_request:
     branches:
       - main
-    paths:
-      - "docker/**"
-      - 'python/Dockerfile'
 
 jobs:
   setup:
@@ -165,7 +153,7 @@ jobs:
 
   # merge images: Create Multi-Arch Manifests
   merge_images:
-    needs: [ setup, build_images ]
+    needs: [setup, build_images]
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'pull_request' }}
     strategy:
@@ -252,7 +240,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: "1.24"
 
       - name: Build binary
         env:
@@ -286,7 +274,7 @@ jobs:
           retention-days: 1
 
   push_helm_chart:
-    needs: [ setup, merge_images ]
+    needs: [setup, merge_images]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -347,7 +335,7 @@ jobs:
             ./kthena-install.yaml
 
   create_github_release:
-    needs: [ setup, push_helm_chart, build_cli ]
+    needs: [setup, push_helm_chart, build_cli]
     if: needs.setup.outputs.is_tag == 'true'
     permissions:
       contents: write
@@ -377,7 +365,7 @@ jobs:
             - **CLI Binaries**: Pre-built binaries for Linux (amd64/arm64), macOS (amd64/arm64), and Windows (amd64)
 
             ### Documentation
-            
+
             - [Installation](https://kthena.volcano.sh/docs/getting-started/installation)
             - [Quick Start](https://kthena.volcano.sh/docs/getting-started/quick-start)
             - [Helm Chart Values](https://kthena.volcano.sh/docs/reference/helm-chart-values)
