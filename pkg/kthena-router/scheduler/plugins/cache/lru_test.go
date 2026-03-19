@@ -57,7 +57,7 @@ func TestNewLRUCache(t *testing.T) {
 	t.Run("implements Cache interface", func(t *testing.T) {
 		c, err := NewLRUCache[string, int](10, nil)
 		require.NoError(t, err)
-		// Assign to interface — compile-time check enforced at runtime.
+		// Compile-time check that LRUCache implements Cache.
 		var _ Cache[string, int] = c
 	})
 }
@@ -65,13 +65,15 @@ func TestNewLRUCache(t *testing.T) {
 // TestLRUCache_Add tests the Add method.
 func TestLRUCache_Add(t *testing.T) {
 	t.Run("add single entry", func(t *testing.T) {
-		c, _ := NewLRUCache[string, int](10, nil)
+		c, err := NewLRUCache[string, int](10, nil)
+		require.NoError(t, err)
 		c.Add("k", 1)
 		assert.Equal(t, 1, c.Len())
 	})
 
 	t.Run("add multiple distinct entries", func(t *testing.T) {
-		c, _ := NewLRUCache[string, int](10, nil)
+		c, err := NewLRUCache[string, int](10, nil)
+		require.NoError(t, err)
 		c.Add("a", 1)
 		c.Add("b", 2)
 		c.Add("c", 3)
@@ -79,7 +81,8 @@ func TestLRUCache_Add(t *testing.T) {
 	})
 
 	t.Run("add duplicate key overwrites value", func(t *testing.T) {
-		c, _ := NewLRUCache[string, int](10, nil)
+		c, err := NewLRUCache[string, int](10, nil)
+		require.NoError(t, err)
 		c.Add("k", 1)
 		c.Add("k", 99)
 		assert.Equal(t, 1, c.Len())
@@ -111,7 +114,8 @@ func TestLRUCache_Get(t *testing.T) {
 	})
 
 	t.Run("get nonexistent key returns zero value and false", func(t *testing.T) {
-		c, _ := NewLRUCache[string, int](10, nil)
+		c, err := NewLRUCache[string, int](10, nil)
+		require.NoError(t, err)
 		v, ok := c.Get("missing")
 		assert.False(t, ok)
 		assert.Equal(t, 0, v)
@@ -326,7 +330,7 @@ func TestLRUCache_Keys(t *testing.T) {
 		// Access "a" — it should move to the end (newest)
 		_, _ = c.Get("a")
 		keys := c.Keys()
-		assert.Equal(t, "a", keys[len(keys)-1])
+		assert.Equal(t, []string{"b", "c", "a"}, keys)
 	})
 
 	t.Run("keys after clear returns empty slice", func(t *testing.T) {
@@ -399,14 +403,14 @@ func TestLRUCache_EvictionCallback(t *testing.T) {
 
 // TestLRUCache_InterfaceCompliance verifies LRUCache satisfies Cache via table-driven interface calls.
 func TestLRUCache_InterfaceCompliance(t *testing.T) {
-	newCache := func() Cache[string, int] {
+	newCache := func(t *testing.T) Cache[string, int] {
 		c, err := NewLRUCache[string, int](10, nil)
 		require.NoError(t, err)
 		return c
 	}
 
 	t.Run("interface Add and Get", func(t *testing.T) {
-		c := newCache()
+		c := newCache(t)
 		c.Add("k", 7)
 		v, ok := c.Get("k")
 		assert.True(t, ok)
@@ -414,14 +418,14 @@ func TestLRUCache_InterfaceCompliance(t *testing.T) {
 	})
 
 	t.Run("interface Remove and Contains", func(t *testing.T) {
-		c := newCache()
+		c := newCache(t)
 		c.Add("k", 7)
 		c.Remove("k")
 		assert.False(t, c.Contains("k"))
 	})
 
 	t.Run("interface Len and Clear", func(t *testing.T) {
-		c := newCache()
+		c := newCache(t)
 		c.Add("a", 1)
 		c.Add("b", 2)
 		assert.Equal(t, 2, c.Len())
@@ -430,10 +434,10 @@ func TestLRUCache_InterfaceCompliance(t *testing.T) {
 	})
 
 	t.Run("interface Keys", func(t *testing.T) {
-		c := newCache()
+		c := newCache(t)
 		c.Add("x", 1)
 		c.Add("y", 2)
 		keys := c.Keys()
-		assert.ElementsMatch(t, []string{"x", "y"}, keys)
+		assert.Equal(t, []string{"x", "y"}, keys)
 	})
 }
