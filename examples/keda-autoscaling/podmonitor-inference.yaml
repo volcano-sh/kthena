@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: inference-pods
+  labels:
+    app.kubernetes.io/component: inference
+spec:
+  selector:
+    matchLabels:
+      modelserving.volcano.sh/entry: "true"
+  podMetricsEndpoints:
+    - port: http
+      targetPort: 8000
+      path: /metrics
+      interval: 15s
