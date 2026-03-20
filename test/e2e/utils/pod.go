@@ -49,3 +49,13 @@ func GetRouterPod(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace
 
 	return &pods.Items[0]
 }
+
+// ListPodsByLabel lists pods matching the given label selector in the namespace.
+func ListPodsByLabel(t *testing.T, kubeClient kubernetes.Interface, namespace, labelSelector string) []corev1.Pod {
+	t.Helper()
+	pods, err := kubeClient.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods with selector %s", labelSelector)
+	return pods.Items
+}

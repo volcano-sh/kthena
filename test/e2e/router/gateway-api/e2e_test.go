@@ -162,6 +162,12 @@ func TestRateLimitMetrics(t *testing.T) {
 	router.TestRateLimitMetricsShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
+// TestSglangMetrics verifies that the runtime can correctly scrape and parse SGLang metrics
+// from the sglang-mock deployment.
+func TestSglangMetrics(t *testing.T) {
+	router.TestSglangMetricsShared(t, testCtx, testNamespace)
+}
+
 // TestDuplicateModelName tests that the same modelName can route to different backend models
 // when accessed through different Gateways (ports). This demonstrates how Gateway API resolves
 // the global modelName conflict problem by allowing modelName isolation per Gateway.

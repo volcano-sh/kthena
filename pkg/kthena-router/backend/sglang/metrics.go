@@ -83,7 +83,7 @@ func (engine *sglangEngine) GetCountMetricsInfo(allMetrics map[string]*dto.Metri
 			continue
 		}
 		for _, metric := range metricInfo.Metric {
-			metricValue := metric.GetCounter().GetValue()
+			metricValue := metric.GetGauge().GetValue()
 			wantMetrics[mapOfMetricsName[metricName]] = metricValue
 		}
 	}
