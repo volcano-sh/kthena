@@ -157,3 +157,9 @@ func TestMetrics(t *testing.T) {
 func TestRateLimitMetrics(t *testing.T) {
 	TestRateLimitMetricsShared(t, testCtx, testNamespace, false, kthenaNamespace)
 }
+
+// TestSglangMetrics verifies that the runtime can correctly scrape and parse SGLang metrics
+// from the sglang-mock deployment.
+func TestSglangMetrics(t *testing.T) {
+	TestSglangMetricsShared(t, testCtx, testNamespace)
+}

@@ -32,6 +32,8 @@ import (
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1485,6 +1487,52 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 			return errorDelta == 1
 		}, 15*time.Second, time.Second, "Error metric did not increment")
 	})
+}
+
+// TestSglangMetricsShared verifies that the kthena runtime can correctly scrape and parse
+// SGLang metrics from the sglang-mock deployment. It uses port-forward to access pod
+func TestSglangMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string) {
+	pods := utils.ListPodsByLabel(t, testCtx.KubeClient, testNamespace, "app=sglang-mock")
+	require.NotEmpty(t, pods, "No sglang-mock pods found - ensure SetupCommonComponents deployed LLM-Mock-sglang")
+
+	// Find first running pod with PodIP
+	var targetPod *corev1.Pod
+	for i := range pods {
+		if pods[i].Status.Phase == corev1.PodRunning && pods[i].Status.PodIP != "" {
+			targetPod = &pods[i]
+			break
+		}
+	}
+	require.NotNil(t, targetPod, "No running sglang-mock pod with PodIP found")
+
+	pf, err := utils.SetupPortForwardToPod(testNamespace, targetPod.Name, "30300", "30000")
+	require.NoError(t, err, "Failed to setup port-forward to sglang-mock pod")
+	defer pf.Close()
+
+	metricsURL := "http://127.0.0.1:30300/metrics"
+	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
+	require.NoError(t, err, "Failed to fetch metrics from sglang-mock via port-forward")
+	require.NotEmpty(t, allMetrics, "No metrics returned from sglang-mock")
+
+	engine := sglang.NewSglangEngine()
+	countMetrics := engine.GetCountMetricsInfo(allMetrics)
+	assert.Contains(t, countMetrics, routerutils.GPUCacheUsage,
+		"Missing gpu_usage (sglang:token_usage) in count metrics")
+	assert.Contains(t, countMetrics, routerutils.RequestWaitingNum,
+		"Missing request_waiting_num (sglang:num_queue_reqs) in count metrics")
+
+	histogramMetrics, _ := engine.GetHistogramPodMetrics(allMetrics, nil)
+	assert.Contains(t, histogramMetrics, routerutils.TTFT,
+		"Missing TTFT (sglang:time_to_first_token_seconds) in histogram metrics")
+	assert.Contains(t, histogramMetrics, routerutils.TPOT,
+		"Missing TPOT (sglang:time_per_output_token_seconds) in histogram metrics")
+
+	t.Logf("Pod %s: gpu_usage=%.4f, request_waiting_num=%.0f, TTFT=%.6f, TPOT=%.6f",
+		targetPod.Name,
+		countMetrics[routerutils.GPUCacheUsage],
+		countMetrics[routerutils.RequestWaitingNum],
+		histogramMetrics[routerutils.TTFT],
+		histogramMetrics[routerutils.TPOT])
 }
 
 // TestRateLimitMetricsShared is a shared test function that can be used by both

@@ -36,11 +36,13 @@ import (
 )
 
 const (
-	Deployment1_5bName  = "deepseek-r1-1-5b"
-	Deployment7bName    = "deepseek-r1-7b"
-	ModelServer1_5bName = "deepseek-r1-1-5b"
-	ModelServer7bName   = "deepseek-r1-7b"
-	testDataDir         = "test/e2e/router/testdata"
+	Deployment1_5bName    = "deepseek-r1-1-5b"
+	Deployment7bName      = "deepseek-r1-7b"
+	DeploymentSglangName  = "sglang-mock"
+	ModelServer1_5bName   = "deepseek-r1-1-5b"
+	ModelServer7bName     = "deepseek-r1-7b"
+	ModelServerSglangName = "sglang-mock"
+	testDataDir           = "test/e2e/router/testdata"
 )
 
 // RouterTestContext holds the clients needed for router tests
@@ -134,6 +136,15 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 		return fmt.Errorf("failed to create DS7B Deployment: %w", err)
 	}
 
+	// Deploy SGLang Mock Deployment
+	fmt.Println("Deploying SGLang Mock Deployment...")
+	deploymentSglang := utils.LoadYAMLFromFile[appsv1.Deployment](filepath.Join(testDataDir, "LLM-Mock-sglang.yaml"))
+	deploymentSglang.Namespace = c.Namespace
+	_, err = c.KubeClient.AppsV1().Deployments(c.Namespace).Create(ctx, deploymentSglang, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create SGLang Mock Deployment: %w", err)
+	}
+
 	// Wait for deployments to be ready
 	fmt.Println("Waiting for deployments to be ready...")
 	timeoutCtx, cancel := stdcontext.WithTimeout(ctx, 5*time.Minute)
@@ -147,8 +158,13 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 		if err != nil {
 			return false, nil
 		}
+		deploySglang, err := c.KubeClient.AppsV1().Deployments(c.Namespace).Get(ctx, DeploymentSglangName, metav1.GetOptions{})
+		if err != nil {
+			return false, nil
+		}
 		return deploy1_5b.Status.ReadyReplicas == *deploy1_5b.Spec.Replicas &&
-			deploy7b.Status.ReadyReplicas == *deploy7b.Spec.Replicas, nil
+			deploy7b.Status.ReadyReplicas == *deploy7b.Spec.Replicas &&
+			deploySglang.Status.ReadyReplicas == *deploySglang.Spec.Replicas, nil
 	})
 	if err != nil {
 		return fmt.Errorf("deployments did not become ready: %w", err)
@@ -172,6 +188,15 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 		return fmt.Errorf("failed to create ModelServer DS7B: %w", err)
 	}
 
+	// Deploy ModelServer SGLang
+	fmt.Println("Deploying ModelServer SGLang...")
+	modelServerSglang := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(testDataDir, "ModelServer-sglang.yaml"))
+	modelServerSglang.Namespace = c.Namespace
+	_, err = c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Create(ctx, modelServerSglang, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create ModelServer SGLang: %w", err)
+	}
+
 	fmt.Println("Common components deployed successfully")
 	return nil
 }
@@ -192,6 +217,9 @@ func (c *RouterTestContext) CleanupCommonComponents() error {
 	if err := c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Delete(ctx, ModelServer7bName, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("failed to delete ModelServer DS7B: %w", err)
 	}
+	if err := c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Delete(ctx, ModelServerSglangName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete ModelServer SGLang: %w", err)
+	}
 
 	// Delete Deployments
 	if err := c.KubeClient.AppsV1().Deployments(c.Namespace).Delete(ctx, Deployment1_5bName, metav1.DeleteOptions{}); err != nil {
@@ -199,6 +227,9 @@ func (c *RouterTestContext) CleanupCommonComponents() error {
 	}
 	if err := c.KubeClient.AppsV1().Deployments(c.Namespace).Delete(ctx, Deployment7bName, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("failed to delete DS7B Deployment: %w", err)
+	}
+	if err := c.KubeClient.AppsV1().Deployments(c.Namespace).Delete(ctx, DeploymentSglangName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete SGLang Mock Deployment: %w", err)
 	}
 
 	fmt.Println("Common components cleanup completed")
