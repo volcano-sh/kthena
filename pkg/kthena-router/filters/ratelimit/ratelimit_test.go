@@ -37,14 +37,14 @@ func TestTokenRateLimiter_Basic(t *testing.T) {
 
 	// Should allow up to 10 tokens immediately
 	for i := 0; i < 3; i++ {
-		err := rl.RateLimit(model, prompt)
+		err := rl.RateLimit(model, prompt, "")
 		if err != nil {
 			t.Fatalf("unexpected error on allowed request: %v, %d", err, i)
 		}
 	}
 
 	// 4th request should be rate limited
-	err := rl.RateLimit(model, prompt)
+	err := rl.RateLimit(model, prompt, "")
 	if err == nil {
 		t.Fatalf("expected rate limit error, got nil")
 	}
@@ -56,7 +56,7 @@ func TestTokenRateLimiter_Basic(t *testing.T) {
 func TestTokenRateLimiter_NoLimiter(t *testing.T) {
 	rl := NewTokenRateLimiter()
 	// No limiter added, should always allow
-	err := rl.RateLimit("unknown-model", "test")
+	err := rl.RateLimit("unknown-model", "test", "")
 	if err != nil {
 		t.Fatalf("expected nil error for unknown model, got %v", err)
 	}
@@ -76,13 +76,13 @@ func TestTokenRateLimiter_ResetAfterTime(t *testing.T) {
 
 	// Use up tokens
 	for i := 0; i < 3; i++ {
-		err := rl.RateLimit(model, prompt)
+		err := rl.RateLimit(model, prompt, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	}
 	// Should be rate limited now
-	err := rl.RateLimit(model, prompt)
+	err := rl.RateLimit(model, prompt, "")
 	if err == nil {
 		t.Fatalf("expected rate limit error, got nil")
 	}
@@ -92,7 +92,7 @@ func TestTokenRateLimiter_ResetAfterTime(t *testing.T) {
 
 	// Wait for refill
 	time.Sleep(1100 * time.Millisecond)
-	err = rl.RateLimit(model, prompt)
+	err = rl.RateLimit(model, prompt, "")
 	if err != nil {
 		t.Fatalf("expected nil after refill, got %v", err)
 	}
@@ -110,12 +110,12 @@ func TestTokenRateLimiter_OutputTokenRecording(t *testing.T) {
 	})
 
 	// Record output tokens - this should not block/error
-	rl.RecordOutputTokens(model, 5)
-	rl.RecordOutputTokens(model, 3)
-	rl.RecordOutputTokens(model, 2) // Total: 10 tokens consumed
+	rl.RecordOutputTokens(model, 5, "")
+	rl.RecordOutputTokens(model, 3, "")
+	rl.RecordOutputTokens(model, 2, "") // Total: 10 tokens consumed
 
 	// Recording more tokens should still work (just consumes from the bucket)
-	rl.RecordOutputTokens(model, 1)
+	rl.RecordOutputTokens(model, 1, "")
 }
 
 func TestTokenRateLimiter_CombinedInputOutput(t *testing.T) {
@@ -133,15 +133,15 @@ func TestTokenRateLimiter_CombinedInputOutput(t *testing.T) {
 	})
 
 	// First request should be allowed
-	err := rl.RateLimit(model, prompt)
+	err := rl.RateLimit(model, prompt, "")
 	if err != nil {
 		t.Fatalf("unexpected error on first request: %v", err)
 	}
 	// Record output tokens used
-	rl.RecordOutputTokens(model, 2)
+	rl.RecordOutputTokens(model, 2, "")
 
 	// Second request should be rate limited due to input token exhaustion
-	err = rl.RateLimit(model, prompt)
+	err = rl.RateLimit(model, prompt, "")
 	if err == nil {
 		t.Fatalf("expected rate limit error after exhausting input tokens")
 	}
@@ -153,7 +153,7 @@ func TestTokenRateLimiter_CombinedInputOutput(t *testing.T) {
 func TestTokenRateLimiter_OutputNoLimiter(t *testing.T) {
 	rl := NewTokenRateLimiter()
 	// No limiter added, should not error when recording output tokens
-	rl.RecordOutputTokens("unknown-model", 100)
+	rl.RecordOutputTokens("unknown-model", 100, "")
 	// RecordOutputTokens doesn't return error, just silently does nothing
 }
 
@@ -171,12 +171,12 @@ func TestTokenRateLimiter_DeleteLimiter(t *testing.T) {
 	})
 
 	// Verify limiter exists and restricts
-	err := rl.RateLimit(model, "hello world") // ~3 tokens
+	err := rl.RateLimit(model, "hello world", "") // ~3 tokens
 	if err != nil {
 		t.Fatalf("first request should be allowed: %v", err)
 	}
 
-	err = rl.RateLimit(model, "hello world") // Should be rate limited
+	err = rl.RateLimit(model, "hello world", "") // Should be rate limited
 	if err == nil {
 		t.Fatalf("expected rate limit error")
 	}
@@ -186,14 +186,14 @@ func TestTokenRateLimiter_DeleteLimiter(t *testing.T) {
 
 	// Should now be unrestricted
 	for i := 0; i < 10; i++ {
-		err = rl.RateLimit(model, "hello world")
+		err = rl.RateLimit(model, "hello world", "")
 		if err != nil {
 			t.Fatalf("expected nil after deletion, got %v", err)
 		}
 	}
 
 	// Recording output tokens should work without error
-	rl.RecordOutputTokens(model, 100)
+	rl.RecordOutputTokens(model, 100, "")
 }
 
 func TestTokenRateLimiter_OutputRateLimit(t *testing.T) {
@@ -209,16 +209,16 @@ func TestTokenRateLimiter_OutputRateLimit(t *testing.T) {
 	})
 
 	// First request should be allowed (has 5 tokens available)
-	err := rl.RateLimit(model, prompt)
+	err := rl.RateLimit(model, prompt, "")
 	if err != nil {
 		t.Fatalf("first request should be allowed: %v", err)
 	}
 
 	// Consume most tokens
-	rl.RecordOutputTokens(model, 5)
+	rl.RecordOutputTokens(model, 5, "")
 
 	// Next request should be blocked due to insufficient output tokens
-	err = rl.RateLimit(model, prompt)
+	err = rl.RateLimit(model, prompt, "")
 	if err == nil {
 		t.Fatalf("expected output rate limit error")
 	}
@@ -241,7 +241,7 @@ func TestTokenRateLimiter_InputAndOutputErrors(t *testing.T) {
 		Unit:               unit,
 	})
 
-	err := rl.RateLimit(model+"-input", longPrompt)
+	err := rl.RateLimit(model+"-input", longPrompt, "")
 	if err == nil {
 		t.Fatalf("expected input rate limit error")
 	}
@@ -256,19 +256,19 @@ func TestTokenRateLimiter_InputAndOutputErrors(t *testing.T) {
 	})
 
 	// First make a successful request to establish the limiter
-	err = rl.RateLimit(model+"-output", "short")
+	err = rl.RateLimit(model+"-output", "short", "")
 	if err != nil {
 		t.Fatalf("first request should succeed: %v", err)
 	}
 
 	// Consume all available output tokens
-	rl.RecordOutputTokens(model+"-output", 10) // Consume all 10 tokens
+	rl.RecordOutputTokens(model+"-output", 10, "") // Consume all 10 tokens
 
 	// Wait a bit for the tokens to be recorded
 	time.Sleep(10 * time.Millisecond)
 
 	// Next request should be blocked due to insufficient output tokens (< 1 token available)
-	err = rl.RateLimit(model+"-output", "short") // Short prompt to avoid input limit
+	err = rl.RateLimit(model+"-output", "short", "") // Short prompt to avoid input limit
 	if err == nil {
 		t.Fatalf("expected output rate limit error")
 	}

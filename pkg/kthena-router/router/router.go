@@ -170,12 +170,17 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// step 2: Detection of rate limit
 		modelName := modelRequest["model"].(string)
+		userID := ""
+		if v, ok := modelRequest["userId"].(string); ok {
+			userID = v
+		}
 
 		// Set model name in access log
 		accesslog.SetModelName(c, modelName)
 
-		// Store model name in context for metrics middleware
+		// Store model name and user id in context for future use
 		c.Set("model", modelName)
+		c.Set("userId", userID)
 
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
@@ -222,7 +227,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		metricsRecorder.RecordInputTokens(inputTokens)
 
 		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
+		if err := r.loadRateLimiter.RateLimit(modelName, promptStr, userID); err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string
@@ -679,20 +684,19 @@ func (r *Router) proxyModelEndpoint(
 	// proxy to pd aggregated pod
 	if ctx.BestPods != nil {
 		decodeRequest := connectors.BuildDecodeRequest(c, req, modelRequest)
-		// build request
-		stream := isStreaming(modelRequest)
-		userID := ""
-		if v, ok := modelRequest["userId"].(string); ok {
-			userID = v
-		}
 		modelName := ctx.Model
+		userID := ""
+		if v, exists := c.Get("userId"); exists {
+			userID = v.(string)
+		}
+		stream := isStreaming(modelRequest)
 		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
 			// Record output tokens for rate limiting
 			if r.loadRateLimiter != nil {
-				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
+				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens, userID)
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {

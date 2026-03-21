@@ -64,12 +64,12 @@ func TestTokenRateLimiter_Global(t *testing.T) {
 
 	// Should allow multiple requests within limit
 	for i := 0; i < 3; i++ {
-		err := rl.RateLimit(model, prompt)
+		err := rl.RateLimit(model, prompt, "")
 		assert.NoError(t, err, "Request %d should be allowed", i)
 	}
 
 	// Should be rate limited after exceeding limit
-	err = rl.RateLimit(model, prompt)
+	err = rl.RateLimit(model, prompt, "")
 	assert.Error(t, err, "Should be rate limited after exceeding limit")
 	assert.IsType(t, &InputRateLimitExceededError{}, err)
 }
@@ -108,18 +108,18 @@ func TestTokenRateLimiter_LocalVsGlobal(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both should allow initial requests
-	err = rl.RateLimit(localModel, prompt)
+	err = rl.RateLimit(localModel, prompt, "")
 	assert.NoError(t, err)
 
-	err = rl.RateLimit(globalModel, prompt)
+	err = rl.RateLimit(globalModel, prompt, "")
 	assert.NoError(t, err)
 
 	// Use up local tokens
-	err = rl.RateLimit(localModel, prompt)
+	err = rl.RateLimit(localModel, prompt, "")
 	assert.Error(t, err, "Local model should be rate limited")
 
 	// Use up global tokens
-	err = rl.RateLimit(globalModel, prompt)
+	err = rl.RateLimit(globalModel, prompt, "")
 	assert.Error(t, err, "Global model should be rate limited")
 }
 
@@ -145,8 +145,8 @@ func TestTokenRateLimiter_OutputTokens(t *testing.T) {
 	require.NoError(t, err)
 
 	// Record output tokens (should not block since it's async)
-	rl.RecordOutputTokens(model, 25)
-	rl.RecordOutputTokens(model, 30) // Total: 55, over limit
+	rl.RecordOutputTokens(model, 25, "")
+	rl.RecordOutputTokens(model, 30, "") // Total: 55, over limit
 
 	// Give some time for async recording
 	time.Sleep(100 * time.Millisecond)
@@ -179,7 +179,7 @@ func TestTokenRateLimiter_GlobalDeleteLimiter(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify it works
-	err = rl.RateLimit(model, "test")
+	err = rl.RateLimit(model, "test", "")
 	assert.NoError(t, err)
 
 	// Delete the limiter
@@ -187,7 +187,7 @@ func TestTokenRateLimiter_GlobalDeleteLimiter(t *testing.T) {
 
 	// Should now allow unlimited requests (no limiter configured)
 	for i := 0; i < 10; i++ {
-		err = rl.RateLimit(model, "test")
+		err = rl.RateLimit(model, "test", "")
 		assert.NoError(t, err, "Request %d should be allowed after deletion", i)
 	}
 }
@@ -660,4 +660,82 @@ func TestGlobalRateLimiter_Tokens_AllModelsIsolated(t *testing.T) {
 		key := fmt.Sprintf("kthena:ratelimit:%s:input", m.name)
 		assert.True(t, mr.Exists(key), "Redis key should exist for %s", m.name)
 	}
+}
+func TestGlobalRateLimiter_UserIdentityIsolation(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	limiter := newTestGlobalRateLimiter(t, mr, "test-model", "input", 10, networkingv1alpha1.Second)
+
+	// User A consumes 10 tokens
+	allowed := limiter.AllowNWithUser(time.Now(), 10, "user-a")
+	assert.True(t, allowed)
+
+	// User A should be rate limited
+	allowed = limiter.AllowNWithUser(time.Now(), 1, "user-a")
+	assert.False(t, allowed)
+
+	// User B should still have full capacity
+	allowed = limiter.AllowNWithUser(time.Now(), 10, "user-b")
+	assert.True(t, allowed)
+}
+
+func TestGlobalRateLimiter_TokenBatching(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	// Limit 100, batch size will be 10
+	limiter := newTestGlobalRateLimiter(t, mr, "test-model", "input", 100, networkingv1alpha1.Second)
+
+	// Initial AllowN(1) should fetch a batch of 10 from Redis
+	allowed := limiter.AllowN(time.Now(), 1)
+	assert.True(t, allowed)
+
+	// Check local tokens
+	limiter.mu.Lock()
+	localTokens := limiter.localTokens[""]
+	limiter.mu.Unlock()
+	assert.Equal(t, float64(9), localTokens, "Should have 9 tokens left locally after fetching batch of 10 and consuming 1")
+
+	// Next 9 requests should NOT involve Redis (we can't easily check Redis calls here without a mock client, but we can check local token state)
+	for i := 0; i < 9; i++ {
+		allowed = limiter.AllowN(time.Now(), 1)
+		assert.True(t, allowed)
+	}
+
+	limiter.mu.Lock()
+	localTokens = limiter.localTokens[""]
+	limiter.mu.Unlock()
+	assert.Equal(t, float64(0), localTokens, "Should have 0 tokens left locally after consuming the entire batch")
+}
+
+func TestGlobalRateLimiter_RedisPassword(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	mr.RequireAuth("password123")
+
+	client := redis.NewClient(&redis.Options{
+		Addr:     mr.Addr(),
+		Password: "password123",
+	})
+	defer client.Close()
+
+	limiter := NewGlobalRateLimiter(client, "kthena:ratelimit", "test-model", "input", 100, networkingv1alpha1.Second)
+
+	// Should be able to connect and check tokens
+	tokens := limiter.Tokens()
+	assert.Equal(t, float64(100), tokens)
+
+	// Should fail with wrong password
+	clientWrong := redis.NewClient(&redis.Options{
+		Addr:     mr.Addr(),
+		Password: "wrong-password",
+	})
+	defer clientWrong.Close()
+	limiterWrong := NewGlobalRateLimiter(clientWrong, "kthena:ratelimit", "test-model", "input", 100, networkingv1alpha1.Second)
+	assert.Equal(t, float64(0), limiterWrong.Tokens(), "Should return 0 on auth failure")
 }

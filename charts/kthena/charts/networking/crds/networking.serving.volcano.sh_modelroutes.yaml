@@ -226,6 +226,9 @@ spec:
                             description: Address is the Redis server address in the
                               format "host:port".
                             type: string
+                          password:
+                            description: Password is the password for the Redis server.
+                            type: string
                         required:
                         - address
                         type: object

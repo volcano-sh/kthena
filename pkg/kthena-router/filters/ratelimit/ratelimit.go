@@ -53,8 +53,12 @@ func (e *OutputRateLimitExceededError) Error() string {
 type Limiter interface {
 	// AllowN reports whether n tokens may be consumed and consumes them if so
 	AllowN(now time.Time, n int) bool
+	// AllowNWithUser reports whether n tokens may be consumed for a specific user and consumes them if so
+	AllowNWithUser(now time.Time, n int, user string) bool
 	// Tokens returns the number of tokens currently available
 	Tokens() float64
+	// TokensWithUser returns the number of tokens currently available for a specific user
+	TokensWithUser(user string) float64
 }
 
 // TokenRateLimiter provides rate limiting functionality for both input and output tokens
@@ -83,9 +87,19 @@ func NewLocalLimiter(limit rate.Limit, burst int) *LocalLimiter {
 	}
 }
 
+// AllowNWithUser implements Limiter interface by ignoring user for local limiting
+func (l *LocalLimiter) AllowNWithUser(now time.Time, n int, _ string) bool {
+	return l.AllowN(now, n)
+}
+
 // Tokens returns the number of tokens currently available
 func (l *LocalLimiter) Tokens() float64 {
 	return l.Limiter.Tokens()
+}
+
+// TokensWithUser returns the number of tokens currently available, ignoring user
+func (l *LocalLimiter) TokensWithUser(_ string) float64 {
+	return l.Tokens()
 }
 
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
@@ -98,7 +112,7 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 }
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
-func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
+func (r *TokenRateLimiter) RateLimit(model, prompt, userID string) error {
 	// Estimate input tokens
 	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
 	if err != nil {
@@ -112,13 +126,13 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 	r.mutex.RUnlock()
 
 	// Check input token rate limit
-	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
+	if hasInputLimit && !inputLimiter.AllowNWithUser(time.Now(), tokens, userID) {
 		return &InputRateLimitExceededError{}
 	}
 
 	// Check output token rate limit - we conservatively check if there's at least 1 token available
 	// This prevents starting requests that likely won't be able to complete
-	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
+	if hasOutputLimit && outputLimiter.TokensWithUser(userID) < 1.0 {
 		return &OutputRateLimitExceededError{}
 	}
 
@@ -126,13 +140,13 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 }
 
 // RecordOutputTokens records the actual output tokens consumed after response generation
-func (r *TokenRateLimiter) RecordOutputTokens(model string, tokenCount int) {
+func (r *TokenRateLimiter) RecordOutputTokens(model string, tokenCount int, userID string) {
 	r.mutex.RLock()
 	outputLimiter, exists := r.outputLimiter[model]
 	r.mutex.RUnlock()
 
 	if exists {
-		outputLimiter.AllowN(time.Now(), tokenCount)
+		outputLimiter.AllowNWithUser(time.Now(), tokenCount, userID)
 	}
 }
 
@@ -148,7 +162,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 		// Initialize Redis client if not already done
 		if r.redisClient == nil {
 			r.redisClient = redis.NewClient(&redis.Options{
-				Addr: ratelimit.Global.Redis.Address,
+				Addr:     ratelimit.Global.Redis.Address,
+				Password: ratelimit.Global.Redis.Password,
 			})
 
 			// Test connection

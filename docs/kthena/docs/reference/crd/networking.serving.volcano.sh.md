@@ -333,6 +333,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the Redis server address in the format "host:port". |  | Required: \{\} <br /> |
+| `password` _string_ | Password is the password for the Redis server. |  |  |
 
 
 #### Retry
