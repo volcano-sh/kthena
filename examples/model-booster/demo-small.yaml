@@ -1,0 +1,33 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: demo-small
+spec:
+  backend:
+    name: "backend1"
+    type: "vLLM"
+    modelURI: "hf://Qwen/Qwen2.5-0.5B-Instruct"
+    cacheURI: "hostpath://tmp/cache"
+    minReplicas: 1
+    maxReplicas: 1
+    env:
+      - name: "HF_ENDPOINT"
+        value: "https://hf-mirror.com"
+    workers:
+      - type: "server"
+        image: "public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
+        replicas: 1
+        pods: 1
+        config:
+          served-model-name: "Qwen2.5-0.5B-Instruct"
+          max-model-len: 2048 # Reduced from 32768
+          max-num-batched-tokens: 4096 # Reduced from 65536
+          block-size: 16 # Reduced from 128
+          enable-prefix-caching: ""
+        resources:
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+          requests:
+            cpu: "0.5"
+            memory: "1Gi"
