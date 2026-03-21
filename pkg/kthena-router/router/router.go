@@ -171,16 +171,28 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// step 2: Detection of rate limit
 		modelName := modelRequest["model"].(string)
 		userID := ""
-		if v, ok := modelRequest["userId"].(string); ok {
-			userID = v
+		// Prioritize authenticated user from context (common.UserIdKey)
+		if v, exists := c.Get(common.UserIdKey); exists {
+			if id, ok := v.(string); ok {
+				userID = id
+			}
+		}
+		// Fallback to userId from request body if not authenticated
+		if userID == "" {
+			if v, ok := modelRequest["userId"].(string); ok {
+				userID = v
+			}
 		}
 
 		// Set model name in access log
 		accesslog.SetModelName(c, modelName)
 
-		// Store model name and user id in context for future use
+		// Store model name and user id in context for future use.
+		// We use common.UserIdKey to be consistent with auth middleware.
 		c.Set("model", modelName)
-		c.Set("userId", userID)
+		if userID != "" {
+			c.Set(common.UserIdKey, userID)
+		}
 
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
@@ -686,8 +698,10 @@ func (r *Router) proxyModelEndpoint(
 		decodeRequest := connectors.BuildDecodeRequest(c, req, modelRequest)
 		modelName := ctx.Model
 		userID := ""
-		if v, exists := c.Get("userId"); exists {
-			userID = v.(string)
+		if v, exists := c.Get(common.UserIdKey); exists {
+			if id, ok := v.(string); ok {
+				userID = id
+			}
 		}
 		stream := isStreaming(modelRequest)
 		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
@@ -912,6 +926,13 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 	}
 
+	userID := ""
+	if v, exists := c.Get(common.UserIdKey); exists {
+		if id, ok := v.(string); ok {
+			userID = id
+		}
+	}
+
 	// Set upstream connection info in metrics recorder
 	if metricsRecorder != nil {
 		metricsRecorder.SetUpstreamConnectionInfo(modelServerName, modelRouteName)
@@ -945,7 +966,7 @@ func (r *Router) proxyToPDDisaggregated(
 
 		// Record output tokens for rate limiting
 		if outputTokens > 0 && r.loadRateLimiter != nil {
-			r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens)
+			r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens, userID)
 		}
 
 		// Record output token metrics

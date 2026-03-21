@@ -22,7 +22,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cespare/xxhash"
 	"github.com/go-redis/redis/v8"
+	"github.com/hashicorp/golang-lru/v2"
+	"golang.org/x/sync/singleflight"
 	"k8s.io/klog/v2"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -41,8 +44,9 @@ type GlobalRateLimiter struct {
 
 	// Performance optimization: local token batching
 	mu          sync.Mutex
-	localTokens map[string]float64 // userID -> tokens
+	localTokens *lru.Cache[string, float64]
 	batchSize   int
+	sf          singleflight.Group
 }
 
 // NewGlobalRateLimiter creates a new GlobalRateLimiter instance
@@ -56,6 +60,10 @@ func NewGlobalRateLimiter(client *redis.Client, keyPrefix, modelName, tokenType 
 		batchSize = 100
 	}
 
+	// Create LRU cache for local tokens to prevent unbounded memory growth from unique user IDs.
+	// Capacity of 10000 users should be sufficient for most deployments.
+	cache, _ := lru.New[string, float64](10000)
+
 	return &GlobalRateLimiter{
 		client:      client,
 		keyPrefix:   keyPrefix,
@@ -64,7 +72,7 @@ func NewGlobalRateLimiter(client *redis.Client, keyPrefix, modelName, tokenType 
 		limit:       limit,
 		unit:        unit,
 		burst:       int(limit),
-		localTokens: make(map[string]float64),
+		localTokens: cache,
 		batchSize:   batchSize,
 	}
 }
@@ -74,18 +82,36 @@ func (g *GlobalRateLimiter) AllowN(now time.Time, n int) bool {
 	return g.AllowNWithUser(now, n, "")
 }
 
-// AllowNWithUser implements Limiter interface with user-based partitioning and token batching
+// AllowNWithUser implements Limiter interface with user-based partitioning and token batching.
+// It uses singleflight to prevent the "thundering herd" problem when the local cache is empty.
 func (g *GlobalRateLimiter) AllowNWithUser(now time.Time, n int, userID string) bool {
 	g.mu.Lock()
-	// Check if local tokens are sufficient
-	if g.localTokens[userID] >= float64(n) {
-		g.localTokens[userID] -= float64(n)
+	if tokens, ok := g.localTokens.Get(userID); ok && tokens >= float64(n) {
+		g.localTokens.Add(userID, tokens-float64(n))
 		g.mu.Unlock()
 		return true
 	}
 	g.mu.Unlock()
 
-	// If not sufficient, fetch from Redis in batches
+	// Use singleflight to ensure only one batch fetch happens concurrently for the same user
+	res, _, _ := g.sf.Do(userID, func() (interface{}, error) {
+		return g.fetchBatchFromRedis(n, userID), nil
+	})
+
+	if res.(bool) {
+		// After a successful batch fetch by another goroutine, we should check our local cache again
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if tokens, ok := g.localTokens.Get(userID); ok && tokens >= float64(n) {
+			g.localTokens.Add(userID, tokens-float64(n))
+			return true
+		}
+	}
+
+	return false
+}
+
+func (g *GlobalRateLimiter) fetchBatchFromRedis(n int, userID string) bool {
 	requestedBatch := n
 	if n < g.batchSize {
 		requestedBatch = g.batchSize
@@ -95,7 +121,13 @@ func (g *GlobalRateLimiter) AllowNWithUser(now time.Time, n int, userID string) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Lua script implemented to handle distributed token bucket with batching support
+	// Lua script implements a distributed token bucket with batching support.
+	// KEYS[1]: Redis key for the bucket
+	// ARGV[1]: requested_tokens (the batch size we want to fetch)
+	// ARGV[2]: capacity (burst limit)
+	// ARGV[3]: refill_rate (tokens per second)
+	// ARGV[4]: expire_seconds (TTL for the bucket state)
+	// ARGV[5]: min_required (the absolute minimum tokens needed for the current request)
 	luaScript := `
 		local key = KEYS[1]
 		local requested_tokens = tonumber(ARGV[1])
@@ -104,33 +136,38 @@ func (g *GlobalRateLimiter) AllowNWithUser(now time.Time, n int, userID string) 
 		local expire_seconds = tonumber(ARGV[4])
 		local min_required = tonumber(ARGV[5])
 		
+		-- Use Redis server time for consistent time-based refill across multiple router instances
 		local time_result = redis.call('time')
 		local current_time = tonumber(time_result[1]) + tonumber(time_result[2]) / 1000000
 		
+		-- Load existing state or initialize with full capacity
 		local current_tokens = tonumber(redis.call('hget', key, 'tokens')) or capacity
 		local last_update = tonumber(redis.call('hget', key, 'last_update')) or current_time
 		
+		-- Refill tokens based on elapsed time
 		local time_passed = math.max(0, current_time - last_update)
 		local tokens_to_add = time_passed * refill_rate
-		
 		current_tokens = math.min(capacity, current_tokens + tokens_to_add)
 		
+		local tokens_returned = 0
 		if current_tokens >= requested_tokens then
+			-- Case 1: Full batch available
+			tokens_returned = requested_tokens
 			current_tokens = current_tokens - requested_tokens
-			redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
-			redis.call('expire', key, expire_seconds)
-			return requested_tokens
 		elseif current_tokens >= min_required then
-			local tokens_to_return = current_tokens
+			-- Case 2: Partial batch available (but enough for the original request)
+			tokens_returned = current_tokens
 			current_tokens = 0
-			redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
-			redis.call('expire', key, expire_seconds)
-			return tokens_to_return
 		else
-			redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
-			redis.call('expire', key, expire_seconds)
-			return 0
+			-- Case 3: Not even enough for the minimum required tokens
+			tokens_returned = 0
 		end
+		
+		-- Persist state back to Redis
+		redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
+		redis.call('expire', key, expire_seconds)
+		
+		return tostring(tokens_returned)
 	`
 
 	refillRate := g.getRefillRate()
@@ -143,20 +180,20 @@ func (g *GlobalRateLimiter) AllowNWithUser(now time.Time, n int, userID string) 
 		return false
 	}
 
-	tokensFetched, ok := result.Val().(int64)
+	// Parse as string to avoid precision loss or type confusion between int/float in Redis/Lua
+	valStr, ok := result.Val().(string)
 	if !ok {
-		// Lua might return float if we use division, but here it should be int
-		if f, ok := result.Val().(float64); ok {
-			tokensFetched = int64(f)
-		} else {
-			klog.Errorf("unexpected result type from lua script: %T", result.Val())
-			return false
-		}
+		klog.Errorf("unexpected internal result type from lua script: %T", result.Val())
+		return false
 	}
 
-	if tokensFetched >= int64(n) {
+	var tokensFetched float64
+	fmt.Sscanf(valStr, "%f", &tokensFetched)
+
+	if tokensFetched >= float64(n) {
 		g.mu.Lock()
-		g.localTokens[userID] += float64(tokensFetched - int64(n))
+		current, _ := g.localTokens.Get(userID)
+		g.localTokens.Add(userID, current+tokensFetched)
 		g.mu.Unlock()
 		return true
 	}
@@ -168,7 +205,11 @@ func (g *GlobalRateLimiter) getRedisKey(userID string) string {
 	if userID == "" {
 		return fmt.Sprintf("%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType)
 	}
-	return fmt.Sprintf("%s:%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType, userID)
+	// Use xxhash to normalize userID and prevent injection/unbounded key names
+	h := xxhash.New()
+	h.Write([]byte(userID))
+	userHash := fmt.Sprintf("%x", h.Sum64())
+	return fmt.Sprintf("%s:%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType, userHash)
 }
 
 // Tokens implements Limiter interface
@@ -179,13 +220,16 @@ func (g *GlobalRateLimiter) Tokens() float64 {
 // TokensWithUser returns the estimated number of tokens currently available for a specific user
 func (g *GlobalRateLimiter) TokensWithUser(userID string) float64 {
 	g.mu.Lock()
-	local := g.localTokens[userID]
+	local, _ := g.localTokens.Get(userID)
 	g.mu.Unlock()
 
 	key := g.getRedisKey(userID)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// ARGV[1]: capacity
+	// ARGV[2]: refill_rate
+	// ARGV[3]: expire_seconds
 	luaScript := `
 		local key = KEYS[1]
 		local capacity = tonumber(ARGV[1])
@@ -203,10 +247,11 @@ func (g *GlobalRateLimiter) TokensWithUser(userID string) float64 {
 		
 		local available_tokens = math.min(capacity, current_tokens + tokens_to_add)
 		
+		-- Update state to ensure precision for subsequent calls
 		redis.call('hset', key, 'tokens', available_tokens, 'last_update', current_time)
 		redis.call('expire', key, expire_seconds)
 		
-		return available_tokens
+		return tostring(available_tokens)
 	`
 
 	refillRate := g.getRefillRate()
@@ -219,15 +264,14 @@ func (g *GlobalRateLimiter) TokensWithUser(userID string) float64 {
 		return local
 	}
 
-	tokens, ok := result.Val().(float64)
+	valStr, ok := result.Val().(string)
 	if !ok {
-		if tokensInt, ok := result.Val().(int64); ok {
-			tokens = float64(tokensInt)
-		} else {
-			klog.Errorf("unexpected result type from tokens lua script: %T", result.Val())
-			return local
-		}
+		klog.Errorf("unexpected internal result type from tokens lua script: %T", result.Val())
+		return local
 	}
+
+	var tokens float64
+	fmt.Sscanf(valStr, "%f", &tokens)
 
 	return local + tokens
 }

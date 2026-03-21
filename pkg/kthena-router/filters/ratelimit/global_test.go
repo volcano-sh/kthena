@@ -695,7 +695,7 @@ func TestGlobalRateLimiter_TokenBatching(t *testing.T) {
 
 	// Check local tokens
 	limiter.mu.Lock()
-	localTokens := limiter.localTokens[""]
+	localTokens, _ := limiter.localTokens.Get("")
 	limiter.mu.Unlock()
 	assert.Equal(t, float64(9), localTokens, "Should have 9 tokens left locally after fetching batch of 10 and consuming 1")
 
@@ -706,7 +706,7 @@ func TestGlobalRateLimiter_TokenBatching(t *testing.T) {
 	}
 
 	limiter.mu.Lock()
-	localTokens = limiter.localTokens[""]
+	localTokens, _ = limiter.localTokens.Get("")
 	limiter.mu.Unlock()
 	assert.Equal(t, float64(0), localTokens, "Should have 0 tokens left locally after consuming the entire batch")
 }

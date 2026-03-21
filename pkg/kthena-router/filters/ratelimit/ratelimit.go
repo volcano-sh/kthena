@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/time/rate"
 	"k8s.io/klog/v2"
 
@@ -76,30 +77,67 @@ type TokenRateLimiter struct {
 }
 
 // LocalLimiter wraps golang.org/x/time/rate.Limiter to implement our Limiter interface
+// with per-user isolation support using an LRU cache.
 type LocalLimiter struct {
-	*rate.Limiter
+	mu             sync.Mutex
+	limit          rate.Limit
+	burst          int
+	userLimiters   *lru.Cache[string, *rate.Limiter]
+	defaultLimiter *rate.Limiter
 }
 
 // NewLocalLimiter creates a new LocalLimiter
 func NewLocalLimiter(limit rate.Limit, burst int) *LocalLimiter {
+	cache, _ := lru.New[string, *rate.Limiter](10000)
 	return &LocalLimiter{
-		Limiter: rate.NewLimiter(limit, burst),
+		limit:          limit,
+		burst:          burst,
+		userLimiters:   cache,
+		defaultLimiter: rate.NewLimiter(limit, burst),
 	}
 }
 
-// AllowNWithUser implements Limiter interface by ignoring user for local limiting
-func (l *LocalLimiter) AllowNWithUser(now time.Time, n int, _ string) bool {
-	return l.AllowN(now, n)
+// AllowN reports whether n tokens may be consumed and consumes them if so
+func (l *LocalLimiter) AllowN(now time.Time, n int) bool {
+	return l.defaultLimiter.AllowN(now, n)
+}
+
+// AllowNWithUser implements Limiter interface with per-user isolation
+func (l *LocalLimiter) AllowNWithUser(now time.Time, n int, user string) bool {
+	if user == "" {
+		return l.AllowN(now, n)
+	}
+
+	l.mu.Lock()
+	limiter, ok := l.userLimiters.Get(user)
+	if !ok {
+		limiter = rate.NewLimiter(l.limit, l.burst)
+		l.userLimiters.Add(user, limiter)
+	}
+	l.mu.Unlock()
+
+	return limiter.AllowN(now, n)
 }
 
 // Tokens returns the number of tokens currently available
 func (l *LocalLimiter) Tokens() float64 {
-	return l.Limiter.Tokens()
+	return l.defaultLimiter.Tokens()
 }
 
-// TokensWithUser returns the number of tokens currently available, ignoring user
-func (l *LocalLimiter) TokensWithUser(_ string) float64 {
-	return l.Tokens()
+// TokensWithUser returns the number of tokens currently available for a specific user
+func (l *LocalLimiter) TokensWithUser(user string) float64 {
+	if user == "" {
+		return l.Tokens()
+	}
+
+	l.mu.Lock()
+	limiter, ok := l.userLimiters.Get(user)
+	l.mu.Unlock()
+
+	if !ok {
+		return float64(l.burst)
+	}
+	return limiter.Tokens()
 }
 
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
