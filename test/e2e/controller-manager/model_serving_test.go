@@ -1199,11 +1199,7 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 	t.Log("ModelServing rolling update maxUnavailable with bad image test passed successfully")
 }
 
-// TestLWSAPIBasic tests that kthena can process LWS API correctly by:
-// 1. Creating a simple LWS instance
-// 2. Verifying corresponding ModelServing is created with proper owner references
-// 3. Verifying pods are created automatically
-// 4. Deleting LWS and verifying all resources are cleaned up
+
 func TestLWSAPIBasic(t *testing.T) {
 	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
@@ -1336,15 +1332,6 @@ func TestLWSAPIBasic(t *testing.T) {
 	t.Log("LWS API basic test passed successfully")
 }
 
-// TestModelServingPartitionBoundaryProtection verifies the protective effect of partition
-// boundaries during rolling updates. It creates a ModelServing with partition=3, triggers
-// a template change, and then verifies:
-// - Status.CurrentRevision remains the old revision (protecting ordinals 0,1,2)
-// - Status.UpdateRevision is set to a new revision
-// - Pods with ordinal < partition carry CurrentRevision and old image
-// - Pods with ordinal >= partition carry UpdateRevision and new image
-//
-// This is the E2E counterpart of TestModelServingVersionControl from the unit tests.
 func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1495,16 +1482,7 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	t.Log("ModelServing partition boundary protection test passed successfully")
 }
 
-// TestModelServingPartitionDeletedGroupHistoricalRevision verifies that when a pod
-// (or ServingGroup) within the partition-protected range is deleted after a template
-// change, the controller rebuilds it using the historical revision (CurrentRevision),
-// NOT the new UpdateRevision.
-//
-// Scenario: partition=3, 5 replicas with updated template. Delete R-1 pod (ordinal < partition).
-// Expected: R-1 is rebuilt using CurrentRevision (old image), not UpdateRevision (new image).
-//
-// This is the E2E counterpart of the "partition=2, recreate protected group should use
-// historical revision" test case from TestModelServingVersionControl.
+
 func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1697,13 +1675,7 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	t.Log("ModelServing partition deleted group historical revision test passed successfully")
 }
 
-// TestModelServingNoPartitionRollingUpdate verifies that when no partition is set
-// (partition=nil), a rolling update behaves consistently with existing behavior:
-// all replicas are updated to the new revision and the new image.
-// After the update, CurrentRevision and UpdateRevision should converge.
-//
-// This is the E2E counterpart of the "no partition, recreated group should use
-// new revision" test case from TestModelServingVersionControl.
+
 func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 

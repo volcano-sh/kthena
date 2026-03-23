@@ -107,8 +107,7 @@ func TestGetControllerRevision(t *testing.T) {
 	assert.Equal(t, "revision-v2", cr.Labels[ControllerRevisionRevisionLabelKey])
 }
 
-// TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions tests that
-// CleanupOldControllerRevisions always preserves CurrentRevision and UpdateRevision
+
 func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *testing.T) {
 	ctx := context.Background()
 	client := kubefake.NewSimpleClientset()
