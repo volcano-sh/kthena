@@ -1915,7 +1915,7 @@ func verifyRoles(t *testing.T, controller *ModelServingController, ms *workloadv
 	}
 }
 
-
+// TestScaleUpServingGroups tests the scaleUpServingGroups function with various scenarios
 func TestScaleUpServingGroups(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -2761,7 +2761,9 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 	}
 }
 
-
+// TestScaleDownServingGroupsWithPartition tests the scaleDownServingGroups function with partition protection
+// This test verifies that when partition is set, only ServingGroups with ordinal >= partition
+// are considered for deletion, protecting partition-protected replicas.
 func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 	tests := []struct {
 		name                   string
