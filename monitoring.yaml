@@ -1,0 +1,61 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kthena-router
+  labels:
+    app.kubernetes.io/component: kthena-router
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: kthena-router
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kthena-inference
+  labels:
+    app.kubernetes.io/part-of: kthena
+spec:
+  selector:
+    matchExpressions:
+      - key: modelserving.volcano.sh/name
+        operator: Exists
+      - key: modelserving.volcano.sh/group-name
+        operator: Exists
+      - key: modelserving.volcano.sh/role
+        operator: Exists
+      - key: modelserving.volcano.sh/entry
+        operator: In
+        values:
+          - "true"
+  podMetricsEndpoints:
+    - port: ""
+      targetPort: 8000
+      path: /metrics
+      interval: 15s
+    - port: ""
+      targetPort: 30000
+      path: /metrics
+      interval: 15s
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: kthena-inference-scaler
+  labels:
+    app.kubernetes.io/part-of: kthena
+spec:
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  scaleTargetRef:
+    name: kthena-inference
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring:9090
+        query: sum(kthena_router_active_downstream_requests)
+        threshold: "5"
