@@ -1562,6 +1562,14 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	// Verify the recreated pod at ordinal 1 uses CurrentRevision (old revision) and old image
 	t.Log("Verifying recreated pod at ordinal 1 uses historical CurrentRevision")
 	waitForPodsByLabel(t, ctx, kubeClient, labelSelector, 3*time.Minute, func(pods []corev1.Pod) bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Failed to get ModelServing while verifying recreated pod: %v", err)
+			return false
+		}
+
+		foundOrdinalOne := false
+		oldPodStillPresent := false
 		for _, pod := range pods {
 			if pod.DeletionTimestamp != nil {
 				continue
@@ -1571,16 +1579,16 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			if ordinal != 1 {
 				continue
 			}
+			foundOrdinalOne = true
 
 			// Must be a new pod (different UID from original)
 			if pod.UID == originalPodUID {
-				t.Logf("Old pod %s still present, waiting for recreation", pod.Name)
-				return false
+				oldPodStillPresent = true
+				continue
 			}
 
 			if pod.Status.Phase != corev1.PodRunning {
-				t.Logf("Recreated pod %s not yet running (phase: %s)", pod.Name, pod.Status.Phase)
-				return false
+				continue
 			}
 
 			// Verify revision label matches CurrentRevision (historical, not UpdateRevision)
@@ -1590,15 +1598,15 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			t.Logf("Recreated pod %s (ordinal 1): revision=%s, image=%s", pod.Name, podRevision, containerImage)
 
 			// The recreated pod should use the historical revision
-			ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-			if err != nil {
-				t.Logf("Failed to get ModelServing while verifying recreated pod: %v", err)
-				return false
-			}
 			if podRevision == ms.Status.CurrentRevision && containerImage == nginxImage {
 				return true
 			}
-			return false
+		}
+		if !foundOrdinalOne {
+			t.Log("No non-terminating pod for ordinal 1 yet")
+		}
+		if oldPodStillPresent {
+			t.Log("Original ordinal 1 pod still present, waiting for replacement")
 		}
 		return false
 	}, "Recreated pod at ordinal 1 did not use historical CurrentRevision")
