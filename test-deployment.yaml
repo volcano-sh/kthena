@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kthena-router
+  labels:
+    app.kubernetes.io/component: kthena-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: kthena-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: kthena-router
+    spec:
+      containers:
+        - name: kthena-router
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: kthena-router-nginx-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-nginx-config
+data:
+  default.conf: |
+    server {
+        listen 8080;
+
+        location /metrics {
+            default_type text/plain;
+            return 200 '# HELP kthena_router_active_downstream_requests Number of active downstream requests\n# TYPE kthena_router_active_downstream_requests gauge\nkthena_router_active_downstream_requests 3\n# HELP kthena_router_requests_total Total requests\n# TYPE kthena_router_requests_total counter\nkthena_router_requests_total 100\n';
+        }
+
+        location / {
+            return 200 'kthena-router ok\n';
+        }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kthena-router
+  labels:
+    app.kubernetes.io/component: kthena-router
+spec:
+  selector:
+    app.kubernetes.io/component: kthena-router
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-inference-vllm
+  labels:
+    modelserving.volcano.sh/name: test-model
+    modelserving.volcano.sh/entry: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      modelserving.volcano.sh/name: test-model
+      modelserving.volcano.sh/entry: "true"
+  template:
+    metadata:
+      labels:
+        modelserving.volcano.sh/name: test-model
+        modelserving.volcano.sh/entry: "true"
+    spec:
+      containers:
+        - name: dummy-vllm
+          image: nginx:alpine
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: dummy-vllm-nginx-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dummy-vllm-nginx-config
+data:
+  default.conf: |
+    server {
+        listen 8000;
+
+        location /metrics {
+            default_type text/plain;
+            return 200 '# HELP vllm_num_requests_running Number of running requests\n# TYPE vllm_num_requests_running gauge\nvllm_num_requests_running 2\n# HELP vllm_num_requests_waiting Number of waiting requests\n# TYPE vllm_num_requests_waiting gauge\nvllm_num_requests_waiting 0\n# HELP vllm_gpu_cache_usage_perc GPU cache usage percentage\n# TYPE vllm_gpu_cache_usage_perc gauge\nvllm_gpu_cache_usage_perc 0.45\n';
+        }
+
+        location / {
+            return 200 'dummy-vllm ok\n';
+        }
+    }
