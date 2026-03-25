@@ -1199,7 +1199,11 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 	t.Log("ModelServing rolling update maxUnavailable with bad image test passed successfully")
 }
 
-
+// TestLWSAPIBasic tests that kthena can process LWS API correctly by:
+// 1. Creating a simple LWS instance
+// 2. Verifying corresponding ModelServing is created with proper owner references
+// 3. Verifying pods are created automatically
+// 4. Deleting LWS and verifying all resources are cleaned up
 func TestLWSAPIBasic(t *testing.T) {
 	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
@@ -1332,6 +1336,15 @@ func TestLWSAPIBasic(t *testing.T) {
 	t.Log("LWS API basic test passed successfully")
 }
 
+// TestModelServingPartitionBoundaryProtection verifies the protective effect of partition
+// boundaries during rolling updates. It creates a ModelServing with partition=3, triggers
+// a template change, and then verifies:
+// - Status.CurrentRevision remains the old revision (protecting ordinals 0,1,2)
+// - Status.UpdateRevision is set to a new revision
+// - Pods with ordinal < partition carry CurrentRevision and old image
+// - Pods with ordinal >= partition carry UpdateRevision and new image
+//
+// This is the E2E counterpart of TestModelServingVersionControl from the unit tests.
 func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1482,7 +1495,16 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	t.Log("ModelServing partition boundary protection test passed successfully")
 }
 
-
+// TestModelServingPartitionDeletedGroupHistoricalRevision verifies that when a pod
+// (or ServingGroup) within the partition-protected range is deleted after a template
+// change, the controller rebuilds it using the historical revision (CurrentRevision),
+// NOT the new UpdateRevision.
+//
+// Scenario: partition=3, 5 replicas with updated template. Delete R-1 pod (ordinal < partition).
+// Expected: R-1 is rebuilt using CurrentRevision (old image), not UpdateRevision (new image).
+//
+// This is the E2E counterpart of the "partition=2, recreate protected group should use
+// historical revision" test case from TestModelServingVersionControl.
 func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1546,6 +1568,18 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	require.NoError(t, err, "Failed to update ModelServing")
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify revision status is in partitioned state before deleting a protected group.
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		return ms.Status.CurrentRevision == initialCurrentRevision &&
+			ms.Status.UpdateRevision != "" &&
+			ms.Status.UpdateRevision != initialCurrentRevision &&
+			ms.Status.UpdatedReplicas == (replicas-partition)
+	}, 3*time.Minute, 5*time.Second, "ModelServing revision status did not converge to expected partitioned state")
 
 	// Verify the partitioned state is established: R-0,R-1,R-2 have old image, R-3,R-4 have new
 	labelSelector := modelServingLabelSelector(modelServing.Name)
@@ -1638,8 +1672,12 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			t.Logf("Recreated pod %s (ordinal 1): revision=%s, image=%s", pod.Name, podRevision, containerImage)
 
 			// The recreated pod should use the historical revision
-			ms, _ := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-			if ms != nil && podRevision == ms.Status.CurrentRevision && containerImage == nginxImage {
+			ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+			if err != nil {
+				t.Logf("Failed to get ModelServing while verifying recreated pod: %v", err)
+				return false
+			}
+			if podRevision == ms.Status.CurrentRevision && containerImage == nginxImage {
 				return true
 			}
 			return false
@@ -1675,7 +1713,13 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	t.Log("ModelServing partition deleted group historical revision test passed successfully")
 }
 
-
+// TestModelServingNoPartitionRollingUpdate verifies that when no partition is set
+// (partition=nil), a rolling update behaves consistently with existing behavior:
+// all replicas are updated to the new revision and the new image.
+// After the update, CurrentRevision and UpdateRevision should converge.
+//
+// This is the E2E counterpart of the "no partition, recreated group should use
+// new revision" test case from TestModelServingVersionControl.
 func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1784,6 +1828,35 @@ func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 
 	t.Logf("Final CurrentRevision: %s, UpdateRevision: %s, UpdatedReplicas: %d",
 		finalMS.Status.CurrentRevision, finalMS.Status.UpdateRevision, finalMS.Status.UpdatedReplicas)
+
+	// Verify all running pods converged to the final revision and image.
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil || len(pods.Items) == 0 {
+			return false
+		}
+
+		runningCount := 0
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			if pod.Status.Phase != corev1.PodRunning {
+				return false
+			}
+			runningCount++
+
+			containerImage := getPodContainerImage(pod, "test-container")
+			podRevision := pod.Labels["modelserving.volcano.sh/revision"]
+			if containerImage != "nginx:alpine" || podRevision != finalMS.Status.CurrentRevision {
+				return false
+			}
+		}
+
+		return runningCount == int(replicas)
+	}, 3*time.Minute, 5*time.Second, "Pods did not converge to final revision/image")
 
 	assert.Equal(t, finalMS.Status.CurrentRevision, finalMS.Status.UpdateRevision,
 		"Without partition, CurrentRevision and UpdateRevision should converge after full update")
