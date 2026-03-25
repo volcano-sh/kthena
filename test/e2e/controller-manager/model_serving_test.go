@@ -44,6 +44,8 @@ import (
 
 const nginxImage = "nginx:1.28.2"
 
+var servingGroupOrdinalRegex = regexp.MustCompile(`(.*)-([0-9]+)$`)
+
 // TestModelServingLifecycle verifies the full lifecycle of a ModelServing resource:
 // Create -> Verify Ready -> Update (change image) -> Verify Updated -> Delete -> Verify Deleted.
 func TestModelServingLifecycle(t *testing.T) {
@@ -939,6 +941,25 @@ func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kuber
 	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
 }
 
+func waitForPodsByLabel(
+	t *testing.T,
+	ctx context.Context,
+	kubeClient *kubernetes.Clientset,
+	labelSelector string,
+	timeout time.Duration,
+	verify func([]corev1.Pod) bool,
+	failureMsg string,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false
+		}
+		return verify(pods.Items)
+	}, timeout, 5*time.Second, failureMsg)
+}
+
 // createRole is a helper function to create a Role with specified replicas and workers
 func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 	return workload.Role{
@@ -1336,58 +1357,15 @@ func TestLWSAPIBasic(t *testing.T) {
 	t.Log("LWS API basic test passed successfully")
 }
 
-// TestModelServingPartitionBoundaryProtection verifies the protective effect of partition
-// boundaries during rolling updates. It creates a ModelServing with partition=3, triggers
-// a template change, and then verifies:
-// - Status.CurrentRevision remains the old revision (protecting ordinals 0,1,2)
-// - Status.UpdateRevision is set to a new revision
-// - Pods with ordinal < partition carry CurrentRevision and old image
-// - Pods with ordinal >= partition carry UpdateRevision and new image
-//
-// This is the E2E counterpart of TestModelServingVersionControl from the unit tests.
+// TestModelServingPartitionBoundaryProtection verifies that partition keeps lower ordinals
+// on the current revision while higher ordinals roll to the update revision.
 func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 5 replicas and partition=3
 	replicas := int32(5)
 	partition := int32(3)
-	roleReplicas := int32(1)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-partition-boundary",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{IntVal: 1},
-					Partition:      &partition,
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: &roleReplicas,
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage,
-										Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
+	modelServing := createRollingUpdateModelServing("test-partition-boundary", replicas, &partition)
 
 	t.Log("Creating ModelServing with 5 replicas and partition=3")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -1411,7 +1389,7 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	// Wait for the partitioned update to complete
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// === Verify Status.CurrentRevision and Status.UpdateRevision ===
+	// Verify Status.CurrentRevision and Status.UpdateRevision.
 	t.Log("Verifying Status.CurrentRevision and Status.UpdateRevision after partitioned update")
 	var finalMS *workload.ModelServing
 	require.Eventually(t, func() bool {
@@ -1441,21 +1419,14 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	assert.NotEqual(t, finalMS.Status.CurrentRevision, finalMS.Status.UpdateRevision,
 		"CurrentRevision and UpdateRevision should differ during partitioned update")
 
-	// === Verify per-ordinal revision labels and images ===
+	// Verify per-ordinal revision labels and images.
 	t.Log("Verifying per-ordinal revisions and images")
 	labelSelector := modelServingLabelSelector(modelServing.Name)
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-
+	waitForPodsByLabel(t, ctx, kubeClient, labelSelector, 3*time.Minute, func(pods []corev1.Pod) bool {
 		protectedCorrect := 0
 		updatedCorrect := 0
 
-		for _, pod := range pods.Items {
+		for _, pod := range pods {
 			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 				continue
 			}
@@ -1490,64 +1461,20 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 
 		t.Logf("Protected correct: %d/3, Updated correct: %d/2", protectedCorrect, updatedCorrect)
 		return protectedCorrect == 3 && updatedCorrect == 2
-	}, 3*time.Minute, 5*time.Second, "Per-ordinal revision/image verification failed")
+	}, "Per-ordinal revision/image verification failed")
 
 	t.Log("ModelServing partition boundary protection test passed successfully")
 }
 
-// TestModelServingPartitionDeletedGroupHistoricalRevision verifies that when a pod
-// (or ServingGroup) within the partition-protected range is deleted after a template
-// change, the controller rebuilds it using the historical revision (CurrentRevision),
-// NOT the new UpdateRevision.
-//
-// Scenario: partition=3, 5 replicas with updated template. Delete R-1 pod (ordinal < partition).
-// Expected: R-1 is rebuilt using CurrentRevision (old image), not UpdateRevision (new image).
-//
-// This is the E2E counterpart of the "partition=2, recreate protected group should use
-// historical revision" test case from TestModelServingVersionControl.
+// TestModelServingPartitionDeletedGroupHistoricalRevision verifies that deleting a
+// protected ordinal during partitioned rollout recreates it from CurrentRevision.
 func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 5 replicas and partition=3
 	replicas := int32(5)
 	partition := int32(3)
-	roleReplicas := int32(1)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-partition-historical-rev",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{IntVal: 1},
-					Partition:      &partition,
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: &roleReplicas,
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage,
-										Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
+	modelServing := createRollingUpdateModelServing("test-partition-historical-rev", replicas, &partition)
 
 	t.Log("Phase 1: Creating ModelServing with 5 replicas and partition=3")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -1583,13 +1510,9 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 
 	// Verify the partitioned state is established: R-0,R-1,R-2 have old image, R-3,R-4 have new
 	labelSelector := modelServingLabelSelector(modelServing.Name)
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			return false
-		}
+	waitForPodsByLabel(t, ctx, kubeClient, labelSelector, 3*time.Minute, func(pods []corev1.Pod) bool {
 		protectedOld, updatedNew := 0, 0
-		for _, pod := range pods.Items {
+		for _, pod := range pods {
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
@@ -1603,7 +1526,7 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			}
 		}
 		return protectedOld == 3 && updatedNew == 2
-	}, 3*time.Minute, 5*time.Second, "Failed to reach partitioned state")
+	}, "Failed to reach partitioned state")
 
 	t.Log("Phase 2 passed: Partitioned update established")
 
@@ -1638,13 +1561,8 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 
 	// Verify the recreated pod at ordinal 1 uses CurrentRevision (old revision) and old image
 	t.Log("Verifying recreated pod at ordinal 1 uses historical CurrentRevision")
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			return false
-		}
-
-		for _, pod := range pods.Items {
+	waitForPodsByLabel(t, ctx, kubeClient, labelSelector, 3*time.Minute, func(pods []corev1.Pod) bool {
+		for _, pod := range pods {
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
@@ -1683,17 +1601,13 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			return false
 		}
 		return false
-	}, 3*time.Minute, 5*time.Second, "Recreated pod at ordinal 1 did not use historical CurrentRevision")
+	}, "Recreated pod at ordinal 1 did not use historical CurrentRevision")
 
 	// Also verify the overall state is still correct: 3 protected + 2 updated
 	t.Log("Verifying overall partition state is preserved after pod recreation")
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			return false
-		}
+	waitForPodsByLabel(t, ctx, kubeClient, labelSelector, 3*time.Minute, func(pods []corev1.Pod) bool {
 		protectedOld, updatedNew := 0, 0
-		for _, pod := range pods.Items {
+		for _, pod := range pods {
 			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 				continue
 			}
@@ -1708,60 +1622,19 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 		}
 		t.Logf("Protected with old image: %d/3, Updated with new image: %d/2", protectedOld, updatedNew)
 		return protectedOld == 3 && updatedNew == 2
-	}, 3*time.Minute, 5*time.Second, "Overall partition state broken after pod recreation")
+	}, "Overall partition state broken after pod recreation")
 
 	t.Log("ModelServing partition deleted group historical revision test passed successfully")
 }
 
-// TestModelServingNoPartitionRollingUpdate verifies that when no partition is set
-// (partition=nil), a rolling update behaves consistently with existing behavior:
-// all replicas are updated to the new revision and the new image.
-// After the update, CurrentRevision and UpdateRevision should converge.
-//
-// This is the E2E counterpart of the "no partition, recreated group should use
-// new revision" test case from TestModelServingVersionControl.
+// TestModelServingNoPartitionRollingUpdate verifies default rolling-update behavior
+// when partition is nil: all replicas move to the new revision and image.
 func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 4 replicas and NO partition (default behavior)
 	replicas := int32(4)
-	roleReplicas := int32(1)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-no-partition-rolling",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{IntVal: 1},
-					// Partition is intentionally NOT set (nil)
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: &roleReplicas,
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage,
-										Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
+	modelServing := createRollingUpdateModelServing("test-no-partition-rolling", replicas, nil)
 
 	t.Log("Creating ModelServing with 4 replicas and no partition (default behavior)")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -1787,17 +1660,14 @@ func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 	// Verify ALL pods have the new image and the new revision label
 	t.Log("Verifying all pods updated to new image and revision")
 	labelSelector := modelServingLabelSelector(modelServing.Name)
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil || len(pods.Items) == 0 {
+	waitForPodsByLabel(t, ctx, kubeClient, labelSelector, 3*time.Minute, func(pods []corev1.Pod) bool {
+		if len(pods) == 0 {
 			return false
 		}
 
 		allCorrect := true
 		runningCount := 0
-		for _, pod := range pods.Items {
+		for _, pod := range pods {
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
@@ -1820,7 +1690,7 @@ func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 			}
 		}
 		return allCorrect && runningCount == 4
-	}, 3*time.Minute, 5*time.Second, "Not all pods were updated to new revision/image")
+	}, "Not all pods were updated to new revision/image")
 
 	// Verify CurrentRevision == UpdateRevision (converged after full update)
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -1830,16 +1700,13 @@ func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 		finalMS.Status.CurrentRevision, finalMS.Status.UpdateRevision, finalMS.Status.UpdatedReplicas)
 
 	// Verify all running pods converged to the final revision and image.
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil || len(pods.Items) == 0 {
+	waitForPodsByLabel(t, ctx, kubeClient, labelSelector, 3*time.Minute, func(pods []corev1.Pod) bool {
+		if len(pods) == 0 {
 			return false
 		}
 
 		runningCount := 0
-		for _, pod := range pods.Items {
+		for _, pod := range pods {
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
@@ -1856,7 +1723,7 @@ func TestModelServingNoPartitionRollingUpdate(t *testing.T) {
 		}
 
 		return runningCount == int(replicas)
-	}, 3*time.Minute, 5*time.Second, "Pods did not converge to final revision/image")
+	}, "Pods did not converge to final revision/image")
 
 	assert.Equal(t, finalMS.Status.CurrentRevision, finalMS.Status.UpdateRevision,
 		"Without partition, CurrentRevision and UpdateRevision should converge after full update")
@@ -1871,9 +1738,7 @@ func getGroupOrdinal(groupName string) (string, int) {
 	if groupName == "" {
 		return "", -1
 	}
-	// Reuse the same regex pattern as the controller
-	re := regexp.MustCompile(`(.*)-([0-9]+)$`)
-	subMatches := re.FindStringSubmatch(groupName)
+	subMatches := servingGroupOrdinalRegex.FindStringSubmatch(groupName)
 	if len(subMatches) < 3 {
 		return groupName, -1
 	}
@@ -1883,6 +1748,50 @@ func getGroupOrdinal(groupName string) (string, int) {
 		ordinal = i
 	}
 	return parent, ordinal
+}
+
+func createRollingUpdateModelServing(name string, servingGroupReplicas int32, partition *int32) *workload.ModelServing {
+	roleReplicas := int32(1)
+	rollingUpdateConfig := &workload.RollingUpdateConfiguration{
+		MaxUnavailable: &intstr.IntOrString{IntVal: 1},
+	}
+	if partition != nil {
+		rollingUpdateConfig.Partition = partition
+	}
+
+	return &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas: &servingGroupReplicas,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type:                       workload.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: rollingUpdateConfig,
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: &roleReplicas,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage,
+										Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
 }
 
 // getPodContainerImage returns the image of the named container in a pod.
