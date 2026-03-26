@@ -846,7 +846,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 
 // scaleUpRoles handles Role scaling up.
 // It creates new Roles with increasing indices starting from the current max index + 1.
-func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
+func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, effectiveRevision string) {
 	startingIndex := 0
 	if len(roleList) > 0 {
 		_, ordinal := utils.GetParentNameAndOrdinal(roleList[len(roleList)-1].Name)
@@ -870,13 +870,13 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	for i := 0; i < toCreate; i++ {
 		newIndex := startingIndex + i
 		// Create pods for role
-		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision)
+		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, effectiveRevision)
 		if err != nil {
 			klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, newIndex), groupName, err)
 		} else {
 			// Insert new Role to global storage
 			roleID := utils.GenerateRoleID(targetRole.Name, newIndex)
-			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, newRevision)
+			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, effectiveRevision)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", targetRole.Name, roleID, groupName)
 			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
@@ -888,6 +888,11 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 // It handles both scale up and scale down operations for the role
 func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) {
 	// TODO: add podGroup update after gang scheduler finished
+	effectiveRevision := newRevision
+	if revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), groupName); ok && revision != "" {
+		effectiveRevision = revision
+	}
+
 	// Get all replicas of a role from storage, for example, prefill-0, prefill-1...
 	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, targetRole.Name)
 	if err != nil {
@@ -921,7 +926,7 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		if len(pods) < expectedPods {
 			klog.V(2).Infof("manageRoleReplicas: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
-			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
+			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, effectiveRevision); err != nil {
 				klog.Errorf("manageRoleReplicas: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			}
 		}
@@ -930,7 +935,7 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 	// Determine whether it is a scale-up or scale-down scenario
 	if len(roleList) < expectedCount {
 		klog.V(2).Infof("manageRoleReplicas: scaling UP role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
-		c.scaleUpRoles(ctx, ms, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, newRevision)
+		c.scaleUpRoles(ctx, ms, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, effectiveRevision)
 	} else if len(roleList) > expectedCount {
 		klog.V(2).Infof("manageRoleReplicas: scaling DOWN role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
 		c.scaleDownRoles(ctx, ms, groupName, targetRole, roleList, expectedCount)

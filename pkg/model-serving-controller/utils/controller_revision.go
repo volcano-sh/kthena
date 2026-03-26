@@ -56,18 +56,10 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	controllerRevisionName := GenerateControllerRevisionName(ms.Name, revision)
 	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err == nil {
-		// If already exists, check if data has changed
+		// Existing revision snapshots are immutable. Keep the first payload for a
+		// given revision key to preserve deterministic rollback/recovery behavior.
 		if string(existing.Data.Raw) != string(data) {
-			existing.Data = runtime.RawExtension{
-				Raw: data,
-			}
-			existing.Revision++
-			updated, updateErr := client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
-			if updateErr != nil {
-				return nil, fmt.Errorf("failed to update ControllerRevision: %v", updateErr)
-			}
-			klog.V(4).Infof("Updated ControllerRevision %s/%s with revision %s", ms.Namespace, controllerRevisionName, revision)
-			return updated, nil
+			klog.Errorf("ControllerRevision %s/%s already exists with different payload for revision %s; preserving existing snapshot", ms.Namespace, controllerRevisionName, revision)
 		}
 		return existing, nil
 	} else if !apierrors.IsNotFound(err) {
