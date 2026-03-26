@@ -846,7 +846,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 
 // scaleUpRoles handles Role scaling up.
 // It creates new Roles with increasing indices starting from the current max index + 1.
-func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
+func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, effectiveRevision string) {
 	startingIndex := 0
 	if len(roleList) > 0 {
 		_, ordinal := utils.GetParentNameAndOrdinal(roleList[len(roleList)-1].Name)
@@ -870,13 +870,13 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	for i := 0; i < toCreate; i++ {
 		newIndex := startingIndex + i
 		// Create pods for role
-		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision)
+		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, effectiveRevision)
 		if err != nil {
 			klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, newIndex), groupName, err)
 		} else {
 			// Insert new Role to global storage
 			roleID := utils.GenerateRoleID(targetRole.Name, newIndex)
-			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, newRevision)
+			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, effectiveRevision)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", targetRole.Name, roleID, groupName)
 			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
