@@ -59,7 +59,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		// Existing revision snapshots are immutable. Keep the first payload for a
 		// given revision key to preserve deterministic rollback/recovery behavior.
 		if string(existing.Data.Raw) != string(data) {
-			klog.Warningf("ControllerRevision %s/%s already exists with different payload for revision %s; preserving existing snapshot", ms.Namespace, controllerRevisionName, revision)
+			klog.Errorf("ControllerRevision %s/%s already exists with different payload for revision %s; preserving existing snapshot", ms.Namespace, controllerRevisionName, revision)
 		}
 		return existing, nil
 	} else if !apierrors.IsNotFound(err) {
