@@ -2557,6 +2557,66 @@ func TestManageRoleReplicas(t *testing.T) {
 	}
 }
 
+func TestManageRoleReplicas_RecreateUsesServingGroupRevision(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	roleName := "default"
+	oldRevision := "revision-v1"
+	newRevision := "revision-v2"
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-manage-role-group-rev",
+			UID:       types.UID("ms-uid-group-rev"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           roleName,
+						Replicas:       ptr.To[int32](1),
+						WorkerReplicas: 0,
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "entry-container",
+									Image: "test-image:latest",
+								}},
+							},
+						},
+					},
+				},
+			},
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+		},
+	}
+
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
+	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision)
+
+	controller.manageRoleReplicas(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, newRevision)
+
+	selector := labels.SelectorFromSet(map[string]string{
+		workloadv1alpha1.GroupNameLabelKey: groupName,
+		workloadv1alpha1.RoleLabelKey:      roleName,
+	})
+	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
+	assert.NoError(t, err)
+	if assert.Len(t, pods.Items, 1) {
+		assert.Equal(t, oldRevision, pods.Items[0].Labels[workloadv1alpha1.RevisionLabelKey],
+			"recreated pod for existing serving group should keep the serving group revision")
+	}
+}
+
 // TestScaleDownServingGroups tests the scaleDownServingGroups function with various scenarios
 func TestScaleDownServingGroups(t *testing.T) {
 	tests := []struct {
