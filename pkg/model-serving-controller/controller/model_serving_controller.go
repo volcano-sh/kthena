@@ -789,10 +789,6 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
 			continue
 		}
-		effectiveRevision := newRevision
-		if servingGroup.Revision != "" {
-			effectiveRevision = servingGroup.Revision
-		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
 		isPartitionProtected := partition > 0 && index < partition
 
