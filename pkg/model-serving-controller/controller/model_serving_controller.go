@@ -787,13 +787,9 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
 			continue
 		}
-		effectiveRevision := newRevision
-		if servingGroup.Revision != "" {
-			effectiveRevision = servingGroup.Revision
-		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
 		for _, targetRole := range ms.Spec.Template.Roles {
-			c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, effectiveRevision)
+			c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, newRevision)
 		}
 	}
 	return nil
