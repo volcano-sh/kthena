@@ -56,6 +56,13 @@ func main() {
 	)
 
 	klog.InitFlags(nil)
+	// Opt into fixed stderrthreshold behavior (kubernetes/klog#212).
+	if err := flag.CommandLine.Set("legacy_stderr_threshold_behavior", "false"); err != nil {
+		klog.Fatalf("Failed to set legacy_stderr_threshold_behavior: %v", err)
+	}
+	if err := flag.CommandLine.Set("stderrthreshold", "INFO"); err != nil {
+		klog.Fatalf("Failed to set stderrthreshold: %v", err)
+	}
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.StringVar(&routerPort, "port", "8080", "Server listen port")
 	pflag.StringVar(&tlsCert, "tls-cert", "", "TLS certificate file path")
