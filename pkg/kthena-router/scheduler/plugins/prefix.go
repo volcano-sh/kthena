@@ -66,7 +66,7 @@ likely to be processed multiple times.
 Configuration Parameters:
 - BlockSizeToHash: Size of each block for hashing (default: 64 bytes)
 - MaxBlocksToMatch: Maximum number of blocks to process (default: 128), longer prompts are not processed
-- Cache capacity and top-K results are configurable (default: 1000 and 5 respectively)
+- Cache capacity and top-K results are configurable (default: 50000 and 5 respectively)
 
 */
 
@@ -106,13 +106,15 @@ type PrefixCacheArgs struct {
 // Default token block size of vLLM is 16, and a good guess of average characters per token is 4.
 // So we use 64 as the default block size.
 func NewPrefixCache(store datastore.Store, pluginArg runtime.RawExtension) *PrefixCache {
-	var prefixCacheArgs PrefixCacheArgs
-	if yaml.Unmarshal(pluginArg.Raw, &prefixCacheArgs) != nil {
-		klog.Errorf("Unmarshal PrefixCacheArgs error, setting default value")
-		prefixCacheArgs = PrefixCacheArgs{
-			64,
-			128,
-			50000,
+	prefixCacheArgs := PrefixCacheArgs{
+		BlockSizeToHash:  64,
+		MaxBlocksToMatch: 128,
+		MaxHashCacheSize: 50000,
+	}
+
+	if len(pluginArg.Raw) > 0 {
+		if err := yaml.Unmarshal(pluginArg.Raw, &prefixCacheArgs); err != nil {
+			klog.Errorf("Failed to unmarshal PrefixCacheArgs, using default values: %v", err)
 		}
 	}
 

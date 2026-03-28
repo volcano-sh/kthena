@@ -20,6 +20,7 @@ data:
           blockSizeToHash: 64
           maxBlocksToMatch: 128
           maxHashCacheSize: 50000
+          topKMatches: 5
       - name: kvcache-aware
         args:
           blockSizeToHash: 128

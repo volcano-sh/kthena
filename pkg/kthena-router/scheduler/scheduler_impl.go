@@ -73,7 +73,7 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 	pluginsArgMap := map[string]runtime.RawExtension{
 		"least-request": {Raw: []byte(`{"maxWaitingRequests": 10}`)},
 		"least-latency": {Raw: []byte(`{"TTFTTPOTWeightFactor": 0.5}`)},
-		"prefix-cache":  {Raw: []byte(`{"blockSizeToHash": 64, "maxBlocksToMatch": 128, "maxHashCacheSize": 50000}`)},
+		"prefix-cache":  {Raw: []byte(`{"blockSizeToHash": 64, "maxBlocksToMatch": 128, "maxHashCacheSize": 50000, "topKMatches": 5}`)},
 	}
 
 	var err error
