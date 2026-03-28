@@ -34,6 +34,8 @@ var (
 	TTFT              = "vllm:time_to_first_token_seconds"
 )
 
+const defaultMetricPort uint32 = 8000
+
 var (
 	CounterAndGaugeMetrics = []string{
 		GPUCacheUsage,
@@ -61,10 +63,14 @@ type vllmEngine struct {
 	MetricPort uint32
 }
 
-func NewVllmEngine() *vllmEngine {
-	// TODO: Get MetricsPort from vllm configuration
+func NewVllmEngine(metricPort ...uint32) *vllmEngine {
+	port := defaultMetricPort
+	if len(metricPort) > 0 && metricPort[0] > 0 {
+		port = metricPort[0]
+	}
+
 	return &vllmEngine{
-		MetricPort: 8000,
+		MetricPort: port,
 	}
 }
 

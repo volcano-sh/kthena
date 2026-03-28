@@ -26,6 +26,8 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
+const defaultMetricPort uint32 = 30000
+
 var (
 	GPUCacheUsage     = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
@@ -58,10 +60,14 @@ type sglangEngine struct {
 	MetricPort uint32
 }
 
-func NewSglangEngine() *sglangEngine {
-	// TODO: Get MetricsPort from sglang configuration
+func NewSglangEngine(metricPort ...uint32) *sglangEngine {
+	port := defaultMetricPort
+	if len(metricPort) > 0 && metricPort[0] > 0 {
+		port = metricPort[0]
+	}
+
 	return &sglangEngine{
-		MetricPort: 30000,
+		MetricPort: port,
 	}
 }
 
