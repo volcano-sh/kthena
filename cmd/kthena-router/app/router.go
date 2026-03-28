@@ -266,13 +266,28 @@ func (lm *ListenerManager) findBestMatchingListener(port int32, hostname string)
 	// First, try to find an exact hostname match
 	for i := range portInfo.Listeners {
 		listener := &portInfo.Listeners[i]
-		if listener.Hostname != nil && *listener.Hostname == hostname {
+		if listener.Hostname != nil && strings.EqualFold(*listener.Hostname, hostname) {
 			return listener, true
 		}
 	}
 
-	// If no exact match, try to find a listener without hostname restriction (wildcard)
-	// TODO: support wildcard hostname matching
+	// Then, try wildcard hostname matches and prefer the most specific suffix.
+	var wildcardMatch *ListenerConfig
+	longestPattern := -1
+	for i := range portInfo.Listeners {
+		listener := &portInfo.Listeners[i]
+		if listener.Hostname != nil && wildcardHostnameMatch(*listener.Hostname, hostname) {
+			if l := len(*listener.Hostname); l > longestPattern {
+				wildcardMatch = listener
+				longestPattern = l
+			}
+		}
+	}
+	if wildcardMatch != nil {
+		return wildcardMatch, true
+	}
+
+	// If no exact/wildcard match, try a listener without hostname restriction.
 	for i := range portInfo.Listeners {
 		listener := &portInfo.Listeners[i]
 		if listener.Hostname == nil {
@@ -282,6 +297,23 @@ func (lm *ListenerManager) findBestMatchingListener(port int32, hostname string)
 
 	// No match found
 	return nil, false
+}
+
+func wildcardHostnameMatch(pattern, hostname string) bool {
+	if !strings.HasPrefix(pattern, "*.") {
+		return false
+	}
+
+	patternLower := strings.ToLower(pattern)
+	hostnameLower := strings.ToLower(hostname)
+	suffix := patternLower[1:] // ".example.com"
+	if !strings.HasSuffix(hostnameLower, suffix) {
+		return false
+	}
+
+	prefix := hostnameLower[:len(hostnameLower)-len(suffix)]
+	// Gateway wildcard hostnames represent exactly one leading label.
+	return prefix != "" && !strings.Contains(prefix, ".")
 }
 
 // createPortHandler creates a gin handler for a specific port that routes to the best matching listener
