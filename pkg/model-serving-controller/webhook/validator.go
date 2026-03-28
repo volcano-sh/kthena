@@ -150,6 +150,14 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 	if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
 		partitionPath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition")
 		allErrs = append(allErrs, validateIntOrPercent(ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition, partitionPath)...)
+
+		// When partition is a percentage, replicas must be set so the percentage can be resolved.
+		if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition.Type == intstr.String && ms.Spec.Replicas == nil {
+			allErrs = append(allErrs, field.Required(
+				field.NewPath("spec").Child("replicas"),
+				"replicas must be set when partition is a percentage",
+			))
+		}
 	}
 
 	maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)

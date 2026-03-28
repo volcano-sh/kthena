@@ -359,6 +359,31 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 				),
 			},
 		},
+		{
+			name: "invalid partition - percentage with nil replicas",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: nil,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 1,
+								},
+								Partition: &intstr.IntOrString{Type: intstr.String, StrVal: "50%"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Required(
+					field.NewPath("spec").Child("replicas"),
+					"replicas must be set when partition is a percentage",
+				),
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
