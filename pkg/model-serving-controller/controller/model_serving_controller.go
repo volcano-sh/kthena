@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -1763,9 +1764,17 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 }
 
 // getPartition returns the partition value from ModelServing spec, or 0 if not set.
+// If the partition is specified as a percentage, it is calculated from the total replicas (rounded up).
 func (c *ModelServingController) getPartition(ms *workloadv1alpha1.ModelServing) int {
 	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		return int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+		partition := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition
+		replicas := int(*ms.Spec.Replicas)
+		partitionValue, err := intstr.GetScaledValueFromIntOrPercent(partition, replicas, true)
+		if err != nil {
+			klog.Errorf("failed to get partition value, err: %v", err)
+			return 0
+		}
+		return partitionValue
 	}
 	return 0
 }

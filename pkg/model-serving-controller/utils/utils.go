@@ -411,8 +411,17 @@ func SetCondition(ms *workloadv1alpha1.ModelServing, progressingGroups, updatedG
 	shouldUpdate := false
 
 	partition := 0
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil && ms.Spec.Replicas != nil {
+		replicas := int(*ms.Spec.Replicas)
+		partitionValue, err := intstr.GetScaledValueFromIntOrPercent(ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition, replicas, true)
+		if err != nil {
+			klog.ErrorS(err, "Failed to get partition from RollingUpdateConfiguration; defaulting to 0",
+				"modelServingNamespace", ms.Namespace,
+				"modelServingName", ms.Name,
+				"partition", ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition.String())
+		} else {
+			partition = partitionValue
+		}
 	}
 
 	// If progressingGroups is empty, all groups are running. In addition, we still need to check revision.

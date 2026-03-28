@@ -165,9 +165,12 @@ type RollingUpdateConfiguration struct {
 	// Partition indicates the ordinal at which the ModelServing should be partitioned
 	// for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to
 	// Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.
+	// Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).
+	// Absolute number is calculated from percentage by rounding up.
 	// The default value is 0.
+	// +kubebuilder:validation:XIntOrString
 	// +optional
-	Partition *int32 `json:"partition,omitempty"`
+	Partition *intstr.IntOrString `json:"partition,omitempty"`
 }
 
 type ModelServingConditionType string

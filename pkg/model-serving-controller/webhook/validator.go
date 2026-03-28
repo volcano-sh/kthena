@@ -149,21 +149,26 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 	// Validate partition field
 	if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
 		partitionPath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition")
-		partitionValue := *ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition
+		allErrs = append(allErrs, validateIntOrPercent(ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition, partitionPath)...)
 
-		// Check if partition is non-negative
-		if partitionValue < 0 {
-			allErrs = append(allErrs, field.Invalid(partitionPath, partitionValue, "partition must be greater than or equal to 0"))
+		// When partition is a percentage, replicas must be set so the percentage can be resolved.
+		if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition.Type == intstr.String && ms.Spec.Replicas == nil {
+			allErrs = append(allErrs, field.Required(
+				field.NewPath("spec").Child("replicas"),
+				"replicas must be set when partition is a percentage",
+			))
 		}
 	}
 
-	maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)
-	if err != nil {
-		allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "invalidate maxUnavailable"))
-	} else if maxUnavailableValue == 0 {
-		allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
-			"",
-			"maxUnavailable cannot be 0"))
+	if ms.Spec.Replicas != nil {
+		maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)
+		if err != nil {
+			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "invalidate maxUnavailable"))
+		} else if maxUnavailableValue == 0 {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
+				"",
+				"maxUnavailable cannot be 0"))
+		}
 	}
 	return allErrs
 }
@@ -283,14 +288,21 @@ func validateWorkerReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 
 func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+	if value == nil {
+		return allErrs
+	}
 	switch value.Type {
 	case intstr.String:
 		for _, msg := range validation.IsValidPercent(value.StrVal) {
 			allErrs = append(allErrs, field.Invalid(fieldPath, value, msg))
 		}
-		// Converting percentages to int values(Only the % has been removed.)
-		percent, _ := strconv.Atoi(value.StrVal[:len(value.StrVal)-1])
-		if percent < 0 || percent > 100 {
+		if len(allErrs) > 0 {
+			break
+		}
+		// Strip trailing '%' and parse; IsValidPercent already ensures the format is valid.
+		percentStr := strings.TrimSuffix(value.StrVal, "%")
+		percent, err := strconv.Atoi(percentStr)
+		if err != nil || percent < 0 || percent > 100 {
 			allErrs = append(allErrs, field.Invalid(fieldPath, value, "must be a valid percent value (0-100)"))
 		}
 	case intstr.Int:

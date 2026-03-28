@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
@@ -266,6 +267,86 @@ func TestIsServingGroupOutdated(t *testing.T) {
 			}
 			got := c.isServingGroupOutdated(group, ms.Namespace, newHash)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestGetPartition tests the getPartition helper for both integer and percentage-based partitions.
+func TestGetPartition(t *testing.T) {
+	tests := []struct {
+		name      string
+		replicas  int32
+		partition *intstr.IntOrString
+		expected  int
+	}{
+		{
+			name:      "nil partition returns 0",
+			replicas:  5,
+			partition: nil,
+			expected:  0,
+		},
+		{
+			name:      "integer partition returned as-is",
+			replicas:  5,
+			partition: ptr.To(intstr.FromInt32(3)),
+			expected:  3,
+		},
+		{
+			name:      "50% of 3 replicas rounds up to 2",
+			replicas:  3,
+			partition: ptr.To(intstr.FromString("50%")),
+			expected:  2,
+		},
+		{
+			name:      "50% of 4 replicas is exactly 2",
+			replicas:  4,
+			partition: ptr.To(intstr.FromString("50%")),
+			expected:  2,
+		},
+		{
+			name:      "1% of 10 replicas rounds up to 1",
+			replicas:  10,
+			partition: ptr.To(intstr.FromString("1%")),
+			expected:  1,
+		},
+		{
+			name:      "100% of 5 replicas is 5",
+			replicas:  5,
+			partition: ptr.To(intstr.FromString("100%")),
+			expected:  5,
+		},
+		{
+			name:      "0% of 5 replicas is 0",
+			replicas:  5,
+			partition: ptr.To(intstr.FromString("0%")),
+			expected:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+			assert.NoError(t, err)
+
+			ms := &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](tt.replicas),
+				},
+			}
+			if tt.partition != nil {
+				ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+						Partition: tt.partition,
+					},
+				}
+			}
+
+			got := controller.getPartition(ms)
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }
@@ -2767,7 +2848,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 	tests := []struct {
 		name                   string
-		partition              *int32
+		partition              *intstr.IntOrString
 		existingIndices        []int
 		expectedCount          int
 		podDeletionCosts       map[int]int // Index -> DeletionCost
@@ -2777,7 +2858,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 	}{
 		{
 			name:            "partition=3, protect replicas below partition",
-			partition:       ptr.To[int32](3),
+			partition:       ptr.To(intstr.FromInt32(3)),
 			existingIndices: []int{0, 1, 2, 3, 4},
 			expectedCount:   3,
 			podDeletionCosts: map[int]int{
@@ -2799,7 +2880,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 		},
 		{
 			name:             "partition=3, not-ready groups below partition still protected",
-			partition:        ptr.To[int32](3),
+			partition:        ptr.To(intstr.FromInt32(3)),
 			existingIndices:  []int{0, 1, 2, 3, 4},
 			expectedCount:    3,
 			podDeletionCosts: map[int]int{},
@@ -2835,7 +2916,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 		},
 		{
 			name:            "partition=5, all replicas protected",
-			partition:       ptr.To[int32](5),
+			partition:       ptr.To(intstr.FromInt32(5)),
 			existingIndices: []int{0, 1, 2, 3},
 			expectedCount:   2, // Scale down to trigger deletion of protected replicas
 			podDeletionCosts: map[int]int{
@@ -2855,7 +2936,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 		},
 		{
 			name:            "partition=3, scale down below partition - delete protected after non-protected",
-			partition:       ptr.To[int32](3),
+			partition:       ptr.To(intstr.FromInt32(3)),
 			existingIndices: []int{0, 1, 2, 3, 4},
 			expectedCount:   2, // Scale down below partition value
 			podDeletionCosts: map[int]int{
@@ -3012,11 +3093,11 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 					tt.description, actualNames, tt.expectedRemainingNames))
 
 			// Verify partition protection: protected groups should only be deleted after all non-protected groups are deleted
-			if tt.partition != nil && *tt.partition > 0 {
+			if tt.partition != nil && tt.partition.IntValue() > 0 {
 				// Count how many non-protected groups existed
 				nonProtectedCount := 0
 				for _, ordinal := range tt.existingIndices {
-					if ordinal >= int(*tt.partition) {
+					if ordinal >= tt.partition.IntValue() {
 						nonProtectedCount++
 					}
 				}
@@ -3024,14 +3105,14 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				remainingNonProtectedCount := 0
 				for _, g := range groups {
 					_, ordinal := utils.GetParentNameAndOrdinal(g.Name)
-					if ordinal >= int(*tt.partition) {
+					if ordinal >= tt.partition.IntValue() {
 						remainingNonProtectedCount++
 					}
 				}
 				// If there are remaining non-protected groups, protected groups should not be deleted
 				if remainingNonProtectedCount > 0 {
 					for _, ordinal := range tt.existingIndices {
-						if ordinal < int(*tt.partition) {
+						if ordinal < tt.partition.IntValue() {
 							groupName := utils.GenerateServingGroupName(msName, ordinal)
 							_, exists := controller.store.GetServingGroupRevision(utils.GetNamespaceName(ms), groupName)
 							assert.True(t, exists,
@@ -3051,7 +3132,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 func TestModelServingVersionControl(t *testing.T) {
 	tests := []struct {
 		name                    string
-		partition               *int32
+		partition               *intstr.IntOrString
 		initialReplicas         int32
 		initialRevision         string
 		existingGroups          []int // Ordinals of existing groups before scale up
@@ -3062,7 +3143,7 @@ func TestModelServingVersionControl(t *testing.T) {
 	}{
 		{
 			name:            "partition=2, create new group above partition should use new revision",
-			partition:       ptr.To[int32](2),
+			partition:       ptr.To(intstr.FromInt32(2)),
 			initialReplicas: 2, // R-0, R-1 (both < partition=2, protected)
 			initialRevision: "revision-v1",
 			existingGroups:  []int{0, 1}, // Existing groups
@@ -3076,7 +3157,7 @@ func TestModelServingVersionControl(t *testing.T) {
 		},
 		{
 			name:            "partition=2, recreate protected group should use historical revision",
-			partition:       ptr.To[int32](2),
+			partition:       ptr.To(intstr.FromInt32(2)),
 			initialReplicas: 3, // R-0, R-1, R-2 (R-0, R-1 < partition=2, R-2 >= partition=2)
 			initialRevision: "revision-v1",
 			existingGroups:  []int{0, 2}, // R-1 was deleted, needs to be recreated
@@ -3103,7 +3184,7 @@ func TestModelServingVersionControl(t *testing.T) {
 		},
 		{
 			name:            "partition=3, recreate multiple groups below partition",
-			partition:       ptr.To[int32](3),
+			partition:       ptr.To(intstr.FromInt32(3)),
 			initialReplicas: 5,
 			initialRevision: "revision-v1",
 			existingGroups:  []int{0, 3, 4}, // R-1 and R-2 were deleted
@@ -3324,7 +3405,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						Type: workloadv1alpha1.ServingGroupRollingUpdate,
 						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-							Partition: ptr.To[int32](tt.partition),
+							Partition: ptr.To(intstr.FromInt32(tt.partition)),
 						},
 					},
 				},

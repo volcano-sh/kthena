@@ -133,9 +133,10 @@ func TestSetCondition(t *testing.T) {
 	})
 
 	t.Run("set partition, is updating", func(t *testing.T) {
-		partition := int32(2)
+		partition := intstr.FromInt32(2)
 		ms := &workloadv1alpha1.ModelServing{
 			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: ptr.To[int32](5),
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
 						Partition: &partition,

@@ -195,7 +195,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
-								Partition: int32Ptr(1),
+								Partition: &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
 							},
 						},
 					},
@@ -215,7 +215,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
-								Partition: int32Ptr(-1),
+								Partition: &intstr.IntOrString{Type: intstr.Int, IntVal: -1},
 							},
 						},
 					},
@@ -224,8 +224,8 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: field.ErrorList{
 				field.Invalid(
 					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition"),
-					int32(-1),
-					"partition must be greater than or equal to 0",
+					int64(-1),
+					"must be a non-negative integer",
 				),
 			},
 		},
@@ -241,7 +241,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
-								Partition: int32Ptr(3),
+								Partition: &intstr.IntOrString{Type: intstr.Int, IntVal: 3},
 							},
 						},
 						Template: workloadv1alpha1.ServingGroup{
@@ -273,7 +273,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
-								Partition: int32Ptr(5),
+								Partition: &intstr.IntOrString{Type: intstr.Int, IntVal: 5},
 							},
 						},
 						Template: workloadv1alpha1.ServingGroup{
@@ -305,13 +305,84 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
-								Partition: int32Ptr(0),
+								Partition: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
 							},
 						},
 					},
 				},
 			},
 			want: field.ErrorList(nil),
+		},
+		{
+			name: "valid partition - percentage value",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 1,
+								},
+								Partition: &intstr.IntOrString{Type: intstr.String, StrVal: "50%"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "invalid partition - percentage over 100",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 1,
+								},
+								Partition: &intstr.IntOrString{Type: intstr.String, StrVal: "110%"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition"),
+					&intstr.IntOrString{Type: intstr.String, StrVal: "110%"},
+					"must be a valid percent value (0-100)",
+				),
+			},
+		},
+		{
+			name: "invalid partition - percentage with nil replicas",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: nil,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 1,
+								},
+								Partition: &intstr.IntOrString{Type: intstr.String, StrVal: "50%"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Required(
+					field.NewPath("spec").Child("replicas"),
+					"replicas must be set when partition is a percentage",
+				),
+			},
 		},
 	}
 	for _, tt := range tests {
