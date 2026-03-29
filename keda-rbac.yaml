@@ -7,12 +7,16 @@ rules:
       - workload.serving.volcano.sh
     resources:
       - modelservings
-      - modelservings/scale
-      - modelservings/status
     verbs:
       - get
       - list
       - watch
+  - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - modelservings/scale
+    verbs:
+      - get
       - update
       - patch
 ---
