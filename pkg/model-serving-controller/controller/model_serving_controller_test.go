@@ -3431,6 +3431,109 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 
 // TestUpdateModelServingStatusRevisionFields tests the CurrentRevision and UpdateRevision logic
 // following StatefulSet's behavior
+func TestUpdateModelServingStatusLabelSelector(t *testing.T) {
+	tests := []struct {
+		name           string
+		msName         string
+		existingGroups map[int]string // ordinal -> revision; nil means no groups (ErrServingGroupNotFound path)
+		revision       string
+	}{
+		{
+			name:           "no ServingGroups yet — labelSelector is set on empty status",
+			msName:         "my-llm",
+			existingGroups: nil,
+			revision:       "rev-1",
+		},
+		{
+			name:   "existing ServingGroups — labelSelector is set consistently",
+			msName: "my-llm",
+			existingGroups: map[int]string{
+				0: "rev-1",
+				1: "rev-1",
+			},
+			revision: "rev-1",
+		},
+		{
+			name:   "name with special characters — selector encodes correctly",
+			msName: "serving-gpt-4o-mini",
+			existingGroups: map[int]string{
+				0: "rev-abc",
+			},
+			revision: "rev-abc",
+		},
+	}
+
+	for idx, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextClient := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			assert.NoError(t, err)
+
+			replicas := int32(len(tt.existingGroups))
+			if tt.existingGroups == nil {
+				replicas = 1
+			}
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      tt.msName,
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:      ptr.To(replicas),
+					SchedulerName: "volcano",
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{Name: "c", Image: "img:latest"},
+										},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+				},
+			}
+
+			_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), ms, metav1.CreateOptions{})
+			assert.NoError(t, err)
+			err = controller.modelServingsInformer.GetIndexer().Add(ms)
+			assert.NoError(t, err)
+
+			// Populate store only when groups exist; nil means the "not found" path.
+			if tt.existingGroups != nil {
+				for ordinal, rev := range tt.existingGroups {
+					controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, rev)
+					groupName := utils.GenerateServingGroupName(tt.msName, ordinal)
+					controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupRunning)
+				}
+			}
+
+			err = controller.UpdateModelServingStatus(ms, tt.revision)
+			assert.NoError(t, err, "case %d: UpdateModelServingStatus should not error", idx)
+
+			updated, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), tt.msName, metav1.GetOptions{})
+			assert.NoError(t, err)
+
+			expectedSelector := labels.Set{
+				workloadv1alpha1.ModelServingNameLabelKey: tt.msName,
+			}.String()
+
+			assert.Equal(t, expectedSelector, updated.Status.LabelSelector,
+				"case %d: status.labelSelector must be %q", idx, expectedSelector)
+		})
+	}
+}
+
 func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 	tests := []struct {
 		name                    string
