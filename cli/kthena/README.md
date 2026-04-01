@@ -177,7 +177,7 @@ Example template structure:
 # Description: Your template description
 # Variables: var1, var2, var3
 ---
-apiVersion: workload.volcano.sh/v1alpha1
+apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelInfer
 metadata:
   name: {{.name}}

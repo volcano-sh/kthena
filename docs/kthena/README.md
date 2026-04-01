@@ -113,11 +113,10 @@ For advanced configuration options, refer to the [crd-ref-docs documentation](ht
 
 #### API Groups
 
-The Kthena project defines CRDs in three main API groups:
+The Kthena project defines CRDs in two main API groups:
 
-- **registry.volcano.sh**: Model registry and autoscaling policies
-- **networking.volcano.sh**: Network routing and traffic management
-- **workload.volcano.sh**: Workload management and scheduling
+- **networking.serving.volcano.sh**: Network routing and traffic management
+- **workload.serving.volcano.sh**: Workload management and scheduling
 
 ### Customizing Documentation
 

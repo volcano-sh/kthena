@@ -405,7 +405,7 @@ metadata:
   name: llama-multinode-0
   namespace: default
   ownerReferences:
-  - apiVersion: workload.volcano.sh/v1alpha1
+  - apiVersion: workload.serving.volcano.sh/v1alpha1
     controller: true
     kind: ModelServing
     name: llama-multinode
