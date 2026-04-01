@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - kthena/hack/mock-images/**
+      - hack/mock-images/**
   workflow_dispatch:
 
 jobs:
@@ -28,7 +28,7 @@ jobs:
       - name: Build and push vllm-mock
         uses: docker/build-push-action@v5
         with:
-          context: kthena/hack/mock-images/vllm-mock
+          context: hack/mock-images/vllm-mock
           push: true
           tags: ghcr.io/volcano-sh/vllm-mock:latest
 
@@ -51,6 +51,6 @@ jobs:
       - name: Build and push sglang-mock
         uses: docker/build-push-action@v5
         with:
-          context: kthena/hack/mock-images/sglang-mock
+          context: hack/mock-images/sglang-mock
           push: true
           tags: ghcr.io/volcano-sh/sglang-mock:latest

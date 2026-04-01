@@ -24,7 +24,7 @@ from simulator import Simulator, Request
 overrides = {}
 
 MODEL_NAME = os.getenv('MODEL_NAME', 'deepseek-r1-1-5b')
-DEPLOYMENT_NAME = os.getenv('MODEL_NAME', 'deepseek-r1')
+DEPLOYMENT_NAME = os.getenv('DEPLOYMENT_NAME', 'deepseek-r1')
 NAMESPACE = os.getenv('POD_NAMESPACE', 'default')
 DEFAULT_REPLICAS = int(os.getenv('DEFAULT_REPLICAS', '1'))
 SIMULATION = os.getenv('SIMULATION', 'disabled')
@@ -129,7 +129,7 @@ models = [
 ]
 
 
-# Note: this is to supress /metrics logs, gateway sends request to pods to scrape
+# Note: this is to suppress /metrics logs, gateway sends request to pods to scrape
 # the metrics and results in lots of meaningless requests that we do not want to log.
 def disable_endpoint_logs():
     """Disable logs for requests to specific endpoints."""
@@ -598,7 +598,7 @@ vllm:lora_requests_info{max_lora="1",running_lora_adapters="lora-A",waiting_lora
         {
             "name": "request_prompt_tokens",
             "type": "histogram",
-            "description": "Histogram of number of prefill tokens processed..",
+            "description": "Histogram of number of prefill tokens processed.",
             "buckets": ["1.0", "2.0", "5.0", "10.0", "20.0", "50.0",
                         "100.0", "200.0", "500.0", "1000.0", "2000.0",
                         "5000.0", "10000.0", "+Inf"]
@@ -606,7 +606,7 @@ vllm:lora_requests_info{max_lora="1",running_lora_adapters="lora-A",waiting_lora
         {
             "name": "request_generation_tokens",
             "type": "histogram",
-            "description": "Histogram of number of generation tokens processed..",
+            "description": "Histogram of number of generation tokens processed.",
             "buckets": ["1.0", "2.0", "5.0", "10.0", "20.0", "50.0",
                         "100.0", "200.0", "500.0", "1000.0", "2000.0",
                         "5000.0", "10000.0", "+Inf"]
@@ -670,7 +670,7 @@ vllm:lora_requests_info{max_lora="1",running_lora_adapters="lora-A",waiting_lora
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-    logging.getLogger("kubernetes.client.rest").setLevel(logging.ERROR)  # Suppress kubenetes logs
+    logging.getLogger("kubernetes.client.rest").setLevel(logging.ERROR)  # Suppress kubernetes logs
 
     print(f"Starting app. DEPLOYMENT_NAME: {DEPLOYMENT_NAME}, NAMESPACE: {NAMESPACE}, MODEL: {MODEL_NAME}")
 

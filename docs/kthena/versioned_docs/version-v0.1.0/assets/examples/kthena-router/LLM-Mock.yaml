@@ -2,7 +2,7 @@
 # The mock server will return a fixed response for any input.
 # You can use this mock server to test the inference router without deploying a real LLM server.
 #
-# NOTE: `ghcr.io/volcano-sh/vllm-mock:latest` is built based on `https://github.com/volcano-sh/volcano/tree/main/kthena/hack/mock-images/vllm-mock`.
+# NOTE: `ghcr.io/volcano-sh/vllm-mock:latest` is built based on `https://github.com/volcano-sh/kthena/tree/main/hack/mock-images/vllm-mock`.
 # Move the image to kthena registry once it's public.
 
 apiVersion: apps/v1
