@@ -15,14 +15,13 @@
 SGLang metrics mock server for kthena runtime verification.
 Exposes Prometheus metrics at /metrics on port 30000.
 """
-from flask import Response
 from random import randint
 import os
 
 try:
-    from flask import Flask
-except ImportError:
-    raise ImportError("flask is required. Run: pip install flask")
+    from flask import Flask, Response
+except ImportError as e:
+    raise ImportError("flask is required. Run: pip install flask") from e
 
 app = Flask(__name__)
 

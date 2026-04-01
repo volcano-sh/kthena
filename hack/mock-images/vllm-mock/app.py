@@ -13,7 +13,6 @@
 # limitations under the License.
 from flask import Flask, request, Response, jsonify
 from flask_httpauth import HTTPTokenAuth
-from functools import wraps
 from werkzeug import serving
 import random
 import re
@@ -24,12 +23,13 @@ from datetime import datetime
 from random import randint
 import os
 import json
-from typing import Optional
 
 try:
     from kubernetes import client, config
 except Exception as e:
     print(f"Failed to import kubernetes, skip: {e}")
+    client = None
+    config = None
 
 from simulator import Simulator, Request
 
@@ -47,7 +47,7 @@ modelMaps = {
     "deepseek-r1-7b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 }
 
-# Polifill the necessary arguments.
+# Polyfill the necessary arguments.
 if "--replica_config_device" not in sys.argv:
     sys.argv.append("--replica_config_device")
     sys.argv.append(SIMULATION)
@@ -87,7 +87,7 @@ logger = logging.getLogger(__name__)
 
 def read_configs(file_path):
     """
-    Reads a JSON file that store sensitive information.
+    Reads a JSON file that stores sensitive information.
     """
     try:
         with open(file_path, "r") as f:
