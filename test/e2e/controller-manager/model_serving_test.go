@@ -718,48 +718,27 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 
 	// Create a ModelServing with 4 replicas and maxUnavailable set to 2
 	replicas := int32(4)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-rolling-update-maxunavailable",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{
-						IntVal: 2, // maxUnavailable = 2
-					},
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
+	modelServing := createBasicModelServing("test-rolling-update-maxunavailable", replicas, workload.Role{
+		Name:     "prefill",
+		Replicas: &replicas,
+		EntryTemplate: workload.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
 					{
-						Name:     "prefill",
-						Replicas: &replicas,
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage, // Initial image
-										Ports: []corev1.ContainerPort{
-											{
-												Name:          "http",
-												ContainerPort: 80,
-											},
-										},
-									},
-								},
+						Name:  "test-container",
+						Image: nginxImage,
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "http",
+								ContainerPort: 80,
 							},
 						},
-						WorkerReplicas: 0,
 					},
 				},
 			},
 		},
-	}
+		WorkerReplicas: 0,
+	})
 
 	t.Log("Creating ModelServing with 4 replicas and maxUnavailable=2")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -1014,6 +993,14 @@ func createBasicModelServing(name string, servingGroupReplicas int32, roles ...w
 		},
 		Spec: workload.ModelServingSpec{
 			Replicas: &servingGroupReplicas,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+					MaxUnavailable: &intstr.IntOrString{
+						IntVal: 2, // maxUnavailable = 2
+					},
+				},
+			},
 			Template: workload.ServingGroup{
 				Roles: roles,
 			},
@@ -1059,48 +1046,27 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 
 	// Create a ModelServing with 6 replicas and maxUnavailable set to 2
 	replicas := int32(6)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-rolling-update-bad-image",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{
-						IntVal: 2,
-					},
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
+	modelServing := createBasicModelServing("test-rolling-update-bad-image", replicas, workload.Role{
+		Name:     "prefill",
+		Replicas: ptr.To[int32](1),
+		EntryTemplate: workload.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
 					{
-						Name:     "prefill",
-						Replicas: ptr.To[int32](1),
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage,
-										Ports: []corev1.ContainerPort{
-											{
-												Name:          "http",
-												ContainerPort: 80,
-											},
-										},
-									},
-								},
+						Name:  "test-container",
+						Image: nginxImage,
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          "http",
+								ContainerPort: 80,
 							},
 						},
-						WorkerReplicas: 0,
 					},
 				},
 			},
 		},
-	}
+		WorkerReplicas: 0,
+	})
 
 	t.Log("Creating ModelServing with 6 replicas and maxUnavailable=2")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
