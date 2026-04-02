@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -181,7 +182,7 @@ func parseFairnessTimeout() time.Duration {
 
 func parseEnvFloat(key string, fallback float64) float64 {
 	if s, ok := os.LookupEnv(key); ok {
-		if v, err := strconv.ParseFloat(s, 64); err == nil {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 {
 			return v
 		}
 		klog.Warningf("Invalid %s %q, using default %v", key, s, fallback)

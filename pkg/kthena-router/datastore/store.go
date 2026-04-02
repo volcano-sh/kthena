@@ -19,6 +19,7 @@ package datastore
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -342,7 +343,7 @@ func createFairnessQueueConfig() FairnessQueueConfig {
 	}
 
 	if v := os.Getenv("FAIRNESS_PRIORITY_ALPHA"); v != "" {
-		if n, err := strconv.ParseFloat(v, 64); err == nil {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && isValidFairnessWeight(n) {
 			cfg.TokenWeight = n
 		} else {
 			klog.Warningf("Invalid FAIRNESS_PRIORITY_ALPHA: %q, using default %v", v, cfg.TokenWeight)
@@ -350,7 +351,7 @@ func createFairnessQueueConfig() FairnessQueueConfig {
 	}
 
 	if v := os.Getenv("FAIRNESS_PRIORITY_BETA"); v != "" {
-		if n, err := strconv.ParseFloat(v, 64); err == nil {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && isValidFairnessWeight(n) {
 			cfg.RequestNumWeight = n
 		} else {
 			klog.Warningf("Invalid FAIRNESS_PRIORITY_BETA: %q, using default %v", v, cfg.RequestNumWeight)
@@ -358,6 +359,10 @@ func createFairnessQueueConfig() FairnessQueueConfig {
 	}
 
 	return cfg
+}
+
+func isValidFairnessWeight(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
 }
 
 func (s *store) Run(ctx context.Context) {
@@ -408,11 +413,7 @@ func (s *store) Enqueue(req *Request) error {
 				klog.Warning("store.Enqueue called before Run(); using background context for queue")
 				queueCtx = context.Background()
 			}
-			queueQPS := s.fairnessQueueConfig.MaxQPS
-			if s.fairnessQueueConfig.MaxConcurrent > 0 {
-				queueQPS = 0
-			}
-			go newQueue.Run(queueCtx, queueQPS)
+			go newQueue.Run(queueCtx, s.fairnessQueueConfig.MaxQPS)
 		}
 		queue, _ = val.(*RequestPriorityQueue)
 	}

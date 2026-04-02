@@ -34,7 +34,7 @@ type FairnessQueueConfig struct {
 	// the fairness gate for this model. When 0, falls back to MaxQPS-based rate limiting.
 	MaxConcurrent int
 
-	// MaxQPS is the upper-bound dequeue rate (retained as a safety cap).
+	// MaxQPS is the upper-bound dequeue rate used only in ticker/QPS mode.
 	MaxQPS int
 
 	// MaxPriorityRefreshRetries bounds refresh-and-reinsert loops before a heap rebuild.
@@ -318,6 +318,19 @@ func (pq *RequestPriorityQueue) rebuildHeap() {
 	heap.Init(pq)
 }
 
+func (pq *RequestPriorityQueue) requeueRequest(req *Request) {
+	if req == nil {
+		return
+	}
+	pq.mu.Lock()
+	heap.Push(pq, req)
+	pq.mu.Unlock()
+	select {
+	case pq.notifyCh <- struct{}{}:
+	default:
+	}
+}
+
 // Run starts the dequeue loop. In semaphore mode (MaxConcurrent > 0), dequeue is
 // gated by available capacity. Otherwise, it falls back to QPS-based ticker dequeue.
 func (pq *RequestPriorityQueue) Run(ctx context.Context, qps int) {
@@ -354,50 +367,47 @@ func (pq *RequestPriorityQueue) runQPSMode(ctx context.Context, qps int) {
 	}
 }
 
-// runSemaphoreMode dequeues based on available backend capacity.
+// runSemaphoreMode dequeues based on available backend capacity only.
 func (pq *RequestPriorityQueue) runSemaphoreMode(ctx context.Context) {
 	for {
-		// Acquire semaphore permit (blocks if at capacity)
+		req, err := pq.popWhenAvailable(ctx)
+		if err != nil {
+			return
+		}
+		if req == nil || req.NotifyChan == nil {
+			continue
+		}
+		if req.isCancelled() {
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
+			pq.requeueRequest(req)
 			return
 		case <-pq.stopCh:
+			pq.requeueRequest(req)
 			return
 		case pq.sem <- struct{}{}:
 			// Permit acquired
 		}
 
-		req, err := pq.popWhenAvailable(ctx)
-		if err != nil {
-			<-pq.sem // release permit
-			return
+		releaseOnce := sync.Once{}
+		trackedInflight := false
+		req.Release = func() {
+			releaseOnce.Do(func() {
+				<-pq.sem
+				if trackedInflight && pq.metrics != nil {
+					pq.metrics.DecFairnessQueueInflight(req.ModelName)
+				}
+			})
 		}
 
-		if req != nil && req.NotifyChan != nil {
-			releaseOnce := sync.Once{}
-			trackedInflight := false
-			req.Release = func() {
-				releaseOnce.Do(func() {
-					<-pq.sem
-					if trackedInflight && pq.metrics != nil {
-						pq.metrics.DecFairnessQueueInflight(req.ModelName)
-					}
-				})
-			}
-
-			if req.isCancelled() {
-				req.Release()
-				continue
-			}
-
-			if pq.metrics != nil {
-				pq.metrics.IncFairnessQueueInflight(req.ModelName)
-			}
-			trackedInflight = true
-			close(req.NotifyChan)
-		} else {
-			<-pq.sem // release permit for nil/no-notify requests
+		if pq.metrics != nil {
+			pq.metrics.IncFairnessQueueInflight(req.ModelName)
 		}
+		trackedInflight = true
+		close(req.NotifyChan)
 	}
 }
 

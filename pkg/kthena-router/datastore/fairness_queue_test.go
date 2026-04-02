@@ -829,3 +829,38 @@ func TestPriorityRefresh_UsesCompositePriority(t *testing.T) {
 		t.Fatalf("Expected b to be dequeued after composite refresh, got %s", result.ReqID)
 	}
 }
+
+func TestRun_SemaphoreMode_EmptyQueueDoesNotConsumePermit(t *testing.T) {
+	cfg := FairnessQueueConfig{
+		MaxConcurrent: 1,
+		MaxQPS:        0,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	defer pq.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go pq.Run(ctx, 0)
+	time.Sleep(50 * time.Millisecond)
+
+	notifyCh := make(chan struct{})
+	req := &Request{
+		ReqID:       "req-1",
+		UserID:      "user1",
+		ModelName:   "m1",
+		Priority:    1.0,
+		RequestTime: time.Now(),
+		NotifyChan:  notifyCh,
+	}
+	if err := pq.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	select {
+	case <-notifyCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Request should have been dequeued after queue starts empty")
+	}
+	req.Release()
+}

@@ -136,10 +136,20 @@ func (t *InMemorySlidingWindowTokenTracker) pruneExpiredBuckets(user, model stri
 
 	// Compact if we've skipped more than half the slice
 	if newStart > 0 && newStart >= len(bucketData.buckets)/2 {
+		tokenBase := 0.0
+		requestBase := 0
+		if newStart > 0 {
+			tokenBase = bucketData.buckets[newStart-1].cumSum
+			requestBase = bucketData.buckets[newStart-1].reqCumSum
+		}
 		// More memory-efficient compaction: explicit copy to avoid holding reference to old array
 		remainingCount := len(bucketData.buckets) - newStart
 		newBuckets := make([]bucketNode, remainingCount)
 		copy(newBuckets, bucketData.buckets[newStart:])
+		for i := range newBuckets {
+			newBuckets[i].cumSum -= tokenBase
+			newBuckets[i].reqCumSum -= requestBase
+		}
 		bucketData.buckets = newBuckets
 		bucketData.start = 0
 	}
