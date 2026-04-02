@@ -16,5 +16,5 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
-        query: sum(rate(process_cpu_seconds_total[1m]))
-        threshold: "0.01"
+        query: sum(kthena_router_active_downstream_requests)
+        threshold: "10"
