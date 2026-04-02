@@ -316,8 +316,7 @@ func wildcardHostnameMatch(pattern, hostname string) bool {
 	return prefix != "" && !strings.Contains(prefix, ".")
 }
 
-// createPortHandler creates a gin handler for a specific port that routes to the best matching listener
-func (lm *ListenerManager) createPortHandler(port int32) gin.HandlerFunc {
+func (lm *ListenerManager) gatewayPrepareMiddleware(port int32) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if strconv.Itoa(int(port)) == lm.server.Port {
 			// Handle management endpoints first (healthz, readyz, metrics)
@@ -326,6 +325,7 @@ func (lm *ListenerManager) createPortHandler(port int32) gin.HandlerFunc {
 				c.JSON(http.StatusOK, gin.H{
 					"message": "ok",
 				})
+				c.Abort()
 				return
 			}
 			if path == "/readyz" {
@@ -338,16 +338,17 @@ func (lm *ListenerManager) createPortHandler(port int32) gin.HandlerFunc {
 						"message": "router is not ready",
 					})
 				}
+				c.Abort()
 				return
 			}
 			if path == "/metrics" {
 				promhttp.Handler().ServeHTTP(c.Writer, c.Request)
+				c.Abort()
 				return
 			}
 		}
 
 		hostname := c.Request.Host
-		// Remove port from hostname if present
 		if idx := strings.Index(hostname, ":"); idx != -1 {
 			hostname = hostname[:idx]
 		}
@@ -357,26 +358,12 @@ func (lm *ListenerManager) createPortHandler(port int32) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{
 				"message": "No matching listener found",
 			})
+			c.Abort()
 			return
 		}
 
-		// Set gateway key in context so router can filter ModelRoutes by gateway
 		c.Set(router.GatewayKey, listenerConfig.GatewayKey)
-
-		// Apply middleware and route
-		AccessLogMiddleware(lm.router)(c)
-		if c.IsAborted() {
-			return
-		}
-
-		AuthMiddleware(lm.router)(c)
-		if c.IsAborted() {
-			return
-		}
-
-		// Route handling logic is now in router.HandlerFunc()
-		// It will handle both /v1/* paths (ModelRoute with HTTPRoute fallback) and non-/v1/* paths (HTTPRoute)
-		lm.router.HandlerFunc()(c)
+		c.Next()
 	}
 }
 
@@ -448,10 +435,14 @@ func (lm *ListenerManager) removeListenerFromPort(port int32, configToRemove Lis
 func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, enableTLS bool, tlsCertFile, tlsKeyFile string) {
 	portInfo, exists := lm.portListeners[port]
 	if !exists {
-		// Create new port listener
+		// Create new port listener — middleware order must match startDefaultServer so AccessLog's
+		// c.Next() runs Auth and HandlerFunc before the access log line is written.
 		engine := gin.New()
 		engine.Use(gin.Recovery())
-		engine.Any("/*path", lm.createPortHandler(port))
+		engine.Use(lm.gatewayPrepareMiddleware(port))
+		engine.Use(AccessLogMiddleware(lm.router))
+		engine.Use(AuthMiddleware(lm.router))
+		engine.Any("/*path", lm.router.HandlerFunc())
 
 		server := &http.Server{
 			Addr:    ":" + strconv.Itoa(int(port)),
