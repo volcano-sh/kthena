@@ -48,7 +48,7 @@ func TestModelServingLifecycle(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Phase 1: Create
-	modelServing := createBasicModelServing("test-lifecycle", 1)
+	modelServing := createBasicModelServing("test-lifecycle", 1, 0)
 
 	t.Log("Phase 1: Creating ModelServing")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -143,7 +143,7 @@ func TestModelServingScaleUp(t *testing.T) {
 	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 1 replica
-	modelServing := createBasicModelServing("test-scale-up", 1)
+	modelServing := createBasicModelServing("test-scale-up", 1, 0)
 
 	t.Log("Creating ModelServing with 1 servingGroup replica")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -182,7 +182,7 @@ func TestModelServingScaleDown(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 3 replicas
-	modelServing := createBasicModelServing("test-scale-down", 3)
+	modelServing := createBasicModelServing("test-scale-down", 3, 0)
 
 	t.Log("Creating ModelServing with 3 servingGroup replicas")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -230,27 +230,7 @@ func TestModelServingRoleScaleUp(t *testing.T) {
 
 	// Create a ModelServing with 1 servingGroup and a prefill role with 1 replica
 	initialRoleReplicas := int32(1)
-	modelServing := createBasicModelServing("test-role-scale-up", 1, workload.Role{
-		Name:     "prefill",
-		Replicas: &initialRoleReplicas,
-		EntryTemplate: workload.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "test-container",
-						Image: "nginx:latest",
-						Ports: []corev1.ContainerPort{
-							{
-								Name:          "http",
-								ContainerPort: 80,
-							},
-						},
-					},
-				},
-			},
-		},
-		WorkerReplicas: 0,
-	})
+	modelServing := createBasicModelServing("test-role-scale-up", 1, initialRoleReplicas)
 
 	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 1 replica")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -283,27 +263,7 @@ func TestModelServingRoleScaleDown(t *testing.T) {
 
 	// Create a ModelServing with 1 servingGroup and a prefill role with 3 replicas
 	initialRoleReplicas := int32(3)
-	modelServing := createBasicModelServing("test-role-scale-down", 1, workload.Role{
-		Name:     "prefill",
-		Replicas: &initialRoleReplicas,
-		EntryTemplate: workload.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "test-container",
-						Image: "nginx:latest",
-						Ports: []corev1.ContainerPort{
-							{
-								Name:          "http",
-								ContainerPort: 80,
-							},
-						},
-					},
-				},
-			},
-		},
-		WorkerReplicas: 0,
-	})
+	modelServing := createBasicModelServing("test-role-scale-down", 1, initialRoleReplicas)
 
 	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 3 replicas")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -341,7 +301,7 @@ func TestModelServingServingGroupRecreate(t *testing.T) {
 	// Create a ModelServing with ServingGroupRecreate policy and 2 roles
 	prefillRole := createRole("prefill", 1, 0)
 	decodeRole := createRole("decode", 1, 0)
-	modelServing := createBasicModelServing("test-sg-recreate", 1, prefillRole, decodeRole)
+	modelServing := createBasicModelServing("test-sg-recreate", 1, 0, prefillRole, decodeRole)
 	modelServing.Spec.RecoveryPolicy = workload.ServingGroupRecreate
 
 	t.Log("Creating ModelServing with ServingGroupRecreate policy and 2 roles (prefill + decode)")
@@ -412,7 +372,7 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	// Create a ModelServing with 3 servingGroup replicas and a WorkerTemplate
 	// so that headless services are actually created by the controller.
 	workerRole := createRole("prefill", 1, 1)
-	modelServing := createBasicModelServing("test-svc-sg-delete", 3, workerRole)
+	modelServing := createBasicModelServing("test-svc-sg-delete", 3, 0, workerRole)
 
 	t.Log("Creating ModelServing with 3 servingGroup replicas and WorkerTemplate")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -489,7 +449,7 @@ func TestModelServingPodRecovery(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing
-	modelServing := createBasicModelServing("test-pod-recovery", 1)
+	modelServing := createBasicModelServing("test-pod-recovery", 1, 0)
 	modelServing.Spec.RecoveryPolicy = workload.RoleRecreate
 
 	t.Log("Creating ModelServing for pod recovery test")
@@ -552,7 +512,7 @@ func TestModelServingServiceRecovery(t *testing.T) {
 
 	// Create a ModelServing with a WorkerTemplate so that headless services are created
 	workerRole := createRole("prefill", 1, 1)
-	modelServing := createBasicModelServing("test-service-recovery", 1, workerRole)
+	modelServing := createBasicModelServing("test-service-recovery", 1, 0, workerRole)
 
 	t.Log("Creating ModelServing for service recovery test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -638,7 +598,7 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with duplicate IP hostAliases
-	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1)
+	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1, 0)
 	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.HostAliases = []corev1.HostAlias{
 		{
 			IP:        "10.1.2.3",
@@ -718,27 +678,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 
 	// Create a ModelServing with 4 replicas and maxUnavailable set to 2
 	replicas := int32(4)
-	modelServing := createBasicModelServing("test-rolling-update-maxunavailable", replicas, workload.Role{
-		Name:     "prefill",
-		Replicas: &replicas,
-		EntryTemplate: workload.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "test-container",
-						Image: nginxImage,
-						Ports: []corev1.ContainerPort{
-							{
-								Name:          "http",
-								ContainerPort: 80,
-							},
-						},
-					},
-				},
-			},
-		},
-		WorkerReplicas: 0,
-	})
+	modelServing := createBasicModelServing("test-rolling-update-maxunavailable", replicas, replicas)
 
 	t.Log("Creating ModelServing with 4 replicas and maxUnavailable=2")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -829,7 +769,7 @@ func TestModelServingRoleStatusEvents(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a simple ModelServing with a single role replica to keep the signal clean.
-	modelServing := createBasicModelServing("test-role-status-events", 1)
+	modelServing := createBasicModelServing("test-role-status-events", 1, 0)
 
 	t.Log("Creating ModelServing for role status events test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -957,10 +897,17 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 	}
 }
 
-func createBasicModelServing(name string, servingGroupReplicas int32, roles ...workload.Role) *workload.ModelServing {
+func getworkloadRoleReplicas(workloadRoleReplicas int32) int32 {
+	if workloadRoleReplicas == 0 {
+		return int32(1)
+	}
+	return workloadRoleReplicas
+}
+
+func createBasicModelServing(name string, servingGroupReplicas, workloadRoleReplicas int32, roles ...workload.Role) *workload.ModelServing {
 	// If no roles are provided, create a default role
 	if len(roles) == 0 {
-		defaultRoleReplicas := int32(1)
+		defaultRoleReplicas := getworkloadRoleReplicas(workloadRoleReplicas)
 		roles = []workload.Role{
 			{
 				Name:     "prefill",
@@ -1046,27 +993,7 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 
 	// Create a ModelServing with 6 replicas and maxUnavailable set to 2
 	replicas := int32(6)
-	modelServing := createBasicModelServing("test-rolling-update-bad-image", replicas, workload.Role{
-		Name:     "prefill",
-		Replicas: ptr.To[int32](1),
-		EntryTemplate: workload.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "test-container",
-						Image: nginxImage,
-						Ports: []corev1.ContainerPort{
-							{
-								Name:          "http",
-								ContainerPort: 80,
-							},
-						},
-					},
-				},
-			},
-		},
-		WorkerReplicas: 0,
-	})
+	modelServing := createBasicModelServing("test-rolling-update-bad-image", replicas, 0)
 
 	t.Log("Creating ModelServing with 6 replicas and maxUnavailable=2")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
@@ -1312,7 +1239,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
 	prefillRole := createRole("prefill", 1, 2)
 	decodeRole := createRole("decode", 1, 1)
-	modelServing := createBasicModelServing("test-controller-restart", 5, prefillRole, decodeRole)
+	modelServing := createBasicModelServing("test-controller-restart", 5, 0, prefillRole, decodeRole)
 
 	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
