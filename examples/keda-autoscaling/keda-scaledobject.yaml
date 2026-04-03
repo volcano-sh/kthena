@@ -1,0 +1,31 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: modelserving-scaler
+spec:
+  scaleTargetRef:
+    apiVersion: workload.serving.volcano.sh/v1alpha1
+    kind: ModelServing
+    name: my-modelserving
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  cooldownPeriod: 120
+  pollingInterval: 15
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        # Scope to pods belonging to this specific ModelServing instance.
+        # Replace "my-modelserving" with your ModelServing metadata.name.
+        query: avg(vllm:num_requests_waiting{model_serving="my-modelserving"})
+        threshold: "5"
+        metricName: vllm_requests_waiting_avg
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        # Scope to the specific model served by this ModelServing instance.
+        # The "model" label on router metrics identifies the model name
+        # (e.g. "deepseek-ai/DeepSeek-R1"). Replace with your model name.
+        query: sum(kthena_router_active_downstream_requests{model="my-model-name"})
+        threshold: "20"
+        metricName: router_active_downstream_requests
