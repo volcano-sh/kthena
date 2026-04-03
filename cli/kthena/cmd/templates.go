@@ -24,6 +24,7 @@ import (
 )
 
 var templatesFS embed.FS
+var templatesBasePath = "helm/templates" // Can be overridden in tests
 
 type ManifestInfo struct {
 	Name        string
@@ -40,7 +41,7 @@ func InitTemplates(fs embed.FS) {
 func findTemplatePath(templateName string) (string, error) {
 	// If templateName contains a slash, it's in vendor/model format, use it directly
 	if strings.Contains(templateName, "/") {
-		templatePath := fmt.Sprintf("helm/templates/%s.yaml", templateName)
+		templatePath := fmt.Sprintf("%s/%s.yaml", templatesBasePath, templateName)
 		_, err := templatesFS.Open(templatePath)
 		if err == nil {
 			return templatePath, nil
@@ -48,14 +49,14 @@ func findTemplatePath(templateName string) (string, error) {
 	}
 
 	// Fallback: search through all vendor directories (for backward compatibility)
-	vendors, err := templatesFS.ReadDir("helm/templates")
+	vendors, err := templatesFS.ReadDir(templatesBasePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read templates directory: %v", err)
 	}
 
 	for _, vendor := range vendors {
 		if vendor.IsDir() {
-			vendorPath := fmt.Sprintf("helm/templates/%s/%s.yaml", vendor.Name(), templateName)
+			vendorPath := fmt.Sprintf("%s/%s/%s.yaml", templatesBasePath, vendor.Name(), templateName)
 			_, err := templatesFS.Open(vendorPath)
 			if err == nil {
 				return vendorPath, nil
@@ -83,7 +84,7 @@ func GetTemplateContent(templateName string) (string, error) {
 
 // ListTemplates returns a list of all available template names in vendor/model format
 func ListTemplates() ([]string, error) {
-	vendors, err := templatesFS.ReadDir("helm/templates")
+	vendors, err := templatesFS.ReadDir(templatesBasePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read templates directory: %v", err)
 	}
@@ -91,7 +92,7 @@ func ListTemplates() ([]string, error) {
 	var templates []string
 	for _, vendor := range vendors {
 		if vendor.IsDir() {
-			vendorPath := fmt.Sprintf("helm/templates/%s", vendor.Name())
+			vendorPath := fmt.Sprintf("%s/%s", templatesBasePath, vendor.Name())
 			models, err := templatesFS.ReadDir(vendorPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not read vendor directory %s: %v\n", vendorPath, err)
