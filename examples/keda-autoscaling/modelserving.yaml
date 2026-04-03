@@ -1,0 +1,29 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: test-model
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  template:
+    roles:
+      - name: entry
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: entry
+                image: nginx:alpine
+                ports:
+                  - containerPort: 8080
+      - name: worker
+        replicas: 1
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            containers:
+              - name: worker
+                image: nginx:alpine
+                ports:
+                  - containerPort: 8080
