@@ -21,10 +21,13 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
+
+const defaultMetricPort uint32 = 30000
 
 var (
 	GPUCacheUsage     = "sglang:token_usage"
@@ -58,10 +61,22 @@ type sglangEngine struct {
 	MetricPort uint32
 }
 
-func NewSglangEngine() *sglangEngine {
-	// TODO: Get MetricsPort from sglang configuration
+func NewSglangEngine(metricPort ...uint32) *sglangEngine {
+	if len(metricPort) > 1 {
+		panic("NewSglangEngine accepts at most one metricPort argument")
+	}
+
+	port := defaultMetricPort
+	if len(metricPort) == 1 {
+		if metricPort[0] > 0 && metricPort[0] <= 65535 {
+			port = metricPort[0]
+		} else if metricPort[0] != 0 {
+			klog.Warningf("Invalid sglang metric port %d, falling back to default %d", metricPort[0], defaultMetricPort)
+		}
+	}
+
 	return &sglangEngine{
-		MetricPort: 30000,
+		MetricPort: port,
 	}
 }
 

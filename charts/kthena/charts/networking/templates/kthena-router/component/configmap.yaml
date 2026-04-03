@@ -41,3 +41,8 @@ data:
               weight: 1
             - name: prefix-cache
               weight: 1
+    backend:
+      sglang:
+        metricPort: {{ .Values.kthenaRouter.backend.sglang.metricPort | default 30000 }}
+      vllm:
+        metricPort: {{ .Values.kthenaRouter.backend.vllm.metricPort | default 8000 }}

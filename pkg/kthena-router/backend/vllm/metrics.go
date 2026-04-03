@@ -21,6 +21,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
@@ -33,6 +34,8 @@ var (
 	TPOT              = "vllm:time_per_output_token_seconds"
 	TTFT              = "vllm:time_to_first_token_seconds"
 )
+
+const defaultMetricPort uint32 = 8000
 
 var (
 	CounterAndGaugeMetrics = []string{
@@ -56,15 +59,27 @@ var (
 )
 
 type vllmEngine struct {
-	// The address of vllm's query metrics is http://{model server}:MetricPort/metrics
-	// Default is 8000
+	// vLLM serves both /metrics and /v1/models on the same service port.
+	// Default is 8000.
 	MetricPort uint32
 }
 
-func NewVllmEngine() *vllmEngine {
-	// TODO: Get MetricsPort from vllm configuration
+func NewVllmEngine(metricPort ...uint32) *vllmEngine {
+	if len(metricPort) > 1 {
+		panic("NewVllmEngine expects at most one metricPort argument")
+	}
+
+	port := defaultMetricPort
+	if len(metricPort) == 1 {
+		if metricPort[0] > 0 && metricPort[0] <= 65535 {
+			port = metricPort[0]
+		} else if metricPort[0] != 0 {
+			klog.Warningf("Invalid vllm metric port %d, falling back to default %d", metricPort[0], defaultMetricPort)
+		}
+	}
+
 	return &vllmEngine{
-		MetricPort: 8000,
+		MetricPort: port,
 	}
 }
 

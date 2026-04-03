@@ -37,6 +37,7 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
@@ -113,6 +114,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	if err != nil {
 		klog.Fatalf("failed to parse router config: %v", err)
 	}
+	backend.ConfigureEngineRegistry(routerConfig.Backend.SGLang.MetricPort, routerConfig.Backend.VLLM.MetricPort)
 
 	// Initialize access logger with configuration from environment variables
 	accessLogConfig := &accesslog.AccessLoggerConfig{
