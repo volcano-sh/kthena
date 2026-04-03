@@ -1,0 +1,24 @@
+{{- if .Values.kthenaRouter.autoscaling.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: kthena-inference-scaler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-inference
+    {{- include "kthena.labels" . | nindent 4 }}
+spec:
+  cooldownPeriod: {{ .Values.kthenaRouter.autoscaling.cooldownPeriod }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Values.kthenaRouter.autoscaling.scaleTargetName }}
+  minReplicaCount: {{ .Values.kthenaRouter.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.kthenaRouter.autoscaling.maxReplicas }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.kthenaRouter.autoscaling.prometheusAddress }}
+        query: {{ .Values.kthenaRouter.autoscaling.query }}
+        threshold: {{ .Values.kthenaRouter.autoscaling.threshold | quote }}
+{{- end }}
