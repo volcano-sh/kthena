@@ -349,7 +349,7 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 			c.store.AddServingGroupAndRole(types.NamespacedName{
 				Namespace: ms.Namespace,
 				Name:      ms.Name,
-			}, servingGroupName, utils.ObjectRevision(newPod), utils.ObjectRoleRevision(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
+			}, servingGroupName, utils.ObjectRevision(newPod), utils.ObjectRoleTemplateHash(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
 		}
 	}
 }
@@ -899,13 +899,13 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	for i := 0; i < toCreate; i++ {
 		newIndex := startingIndex + i
 		// Create pods for role
-		roleRevision, err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision)
+		roleTemplateHash, err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision)
 		if err != nil {
 			klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, newIndex), groupName, err)
 		} else {
 			// Insert new Role to global storage
 			roleID := utils.GenerateRoleID(targetRole.Name, newIndex)
-			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, newRevision, roleRevision)
+			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, newRevision, roleTemplateHash)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", targetRole.Name, roleID, groupName)
 			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
@@ -1211,7 +1211,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	c.store.AddRunningPodToServingGroup(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
-	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), utils.ObjectRoleRevision(newPod), roleName, roleID)
+	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), utils.ObjectRoleTemplateHash(newPod), roleName, roleID)
 
 	// Check and update role status to Running when all pods in the role are ready
 	roleReady, err := c.checkRoleReady(ms, servingGroupName, roleName, roleID)
@@ -2002,12 +2002,12 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 	for _, role := range roles {
 		replicas := int(*role.Replicas)
 		for i := 0; i < replicas; i++ {
-			roleRevision, err := c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, i, servingGroupIndex, revision)
+			roleTemplateHash, err := c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, i, servingGroupIndex, revision)
 			if err != nil {
 				return err
 			}
 			roleID := utils.GenerateRoleID(role.Name, i)
-			c.store.AddRole(utils.GetNamespaceName(ms), servingGroupName, role.Name, roleID, revision, roleRevision)
+			c.store.AddRole(utils.GetNamespaceName(ms), servingGroupName, role.Name, roleID, revision, roleTemplateHash)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", role.Name, roleID, servingGroupName)
 			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
@@ -2025,24 +2025,24 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		return "", fmt.Errorf("build plugin chain: %w", err)
 	}
 	roleID := utils.GenerateRoleID(role.Name, roleIndex)
-	copy := utils.RemoveRoleReplicasForRoleRevision(role)
-	roleRevision := utils.Revision(copy)
+	copy := utils.RemoveRoleReplicasForRoleTemplateHash(role)
+	roleTemplateHash := utils.Revision(copy)
 
-	entryPod := utils.GenerateEntryPod(role, ms, servingGroupName, roleIndex, revision, roleRevision)
+	entryPod := utils.GenerateEntryPod(role, ms, servingGroupName, roleIndex, revision, roleTemplateHash)
 	taskName := c.podGroupManager.GenerateTaskName(role.Name, roleIndex)
 	c.podGroupManager.AnnotatePodWithPodGroup(entryPod, ms, servingGroupName, taskName)
 	if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, entryPod, true, chain, "entry"); err != nil {
-		return roleRevision, err
+		return roleTemplateHash, err
 	}
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
-		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleIndex, i, revision, roleRevision)
+		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleIndex, i, revision, roleTemplateHash)
 		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, ms, servingGroupName, taskName)
 		if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, workerPod, false, chain, "worker"); err != nil {
-			return roleRevision, err
+			return roleTemplateHash, err
 		}
 	}
-	return roleRevision, nil
+	return roleTemplateHash, nil
 }
 
 func (c *ModelServingController) createPod(
@@ -2195,12 +2195,12 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 	outdatedRolesMap := make(map[string][]string)
 
 	// Create a mapping of role name to expected role revision based on current spec
-	expectedRoleRevisions := make(map[string]string)
+	expectedroleTemplateHashs := make(map[string]string)
 	newRoleNames := make(map[string]bool)
 	for _, role := range ms.Spec.Template.Roles {
-		copy := utils.RemoveRoleReplicasForRoleRevision(role)
-		roleRevision := utils.Revision(copy)
-		expectedRoleRevisions[role.Name] = roleRevision
+		copy := utils.RemoveRoleReplicasForRoleTemplateHash(role)
+		roleTemplateHash := utils.Revision(copy)
+		expectedroleTemplateHashs[role.Name] = roleTemplateHash
 		newRoleNames[role.Name] = true
 	}
 
@@ -2208,7 +2208,7 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 		var outdatedRoleNames []string
 
 		// Check each role in the current serving group
-		for roleName, roleRevision := range expectedRoleRevisions {
+		for roleName, roleTemplateHash := range expectedroleTemplateHashs {
 			// Get a safe copy of the roles list from the store to avoid concurrent map iteration/write.
 			roles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleName)
 			if err != nil {
@@ -2221,7 +2221,7 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 			for _, role := range roles {
 				// If the role revision in the store is different from the expected revision and
 				// the role is not already being deleted, it's outdated
-				if role.RoleRevision != roleRevision && role.Status != datastore.RoleDeleting {
+				if role.RoleTemplateHash != roleTemplateHash && role.Status != datastore.RoleDeleting {
 					hasOutdatedRole = true
 					break
 				}

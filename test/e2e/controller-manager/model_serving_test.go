@@ -1553,6 +1553,8 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 		LabelSelector: decodePodLabelSelector,
 	})
 	assert.NoError(t, err, "Failed to list decode pods before update")
+
+	assert.Equalf(t, 2, len(decodePodList.Items), "There should be 2 decode pods before update")
 	decodePodsUID := make(map[string]string, len(decodePodList.Items))
 	for _, pod := range decodePodList.Items {
 		decodePodsUID[pod.Name] = string(pod.UID)

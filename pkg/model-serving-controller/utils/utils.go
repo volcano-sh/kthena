@@ -133,7 +133,7 @@ func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing
 				workloadv1alpha1.RoleLabelKey:             role.Name,
 				workloadv1alpha1.RoleIDKey:                GenerateRoleID(role.Name, roleIndex),
 				workloadv1alpha1.RevisionLabelKey:         revision,
-				workloadv1alpha1.RoleRevisionLabelKey:     roleRevision,
+				workloadv1alpha1.RoleTemplateHashLabelKey: roleRevision,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(ms),
@@ -309,8 +309,8 @@ func ObjectRevision(obj metav1.Object) string {
 	return obj.GetLabels()[workloadv1alpha1.RevisionLabelKey]
 }
 
-func ObjectRoleRevision(obj metav1.Object) string {
-	return obj.GetLabels()[workloadv1alpha1.RoleRevisionLabelKey]
+func ObjectRoleTemplateHash(obj metav1.Object) string {
+	return obj.GetLabels()[workloadv1alpha1.RoleTemplateHashLabelKey]
 }
 
 // GetRoleName returns the role name of the resource.

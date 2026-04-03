@@ -68,10 +68,10 @@ type ServingGroup struct {
 }
 
 type Role struct {
-	Name         string
-	Revision     string // Revision of the ServingGroup
-	RoleRevision string // Revision of the Role, used for RoleRollingUpdate strategy
-	Status       RoleStatus
+	Name             string
+	Revision         string // Revision of the ServingGroup
+	RoleTemplateHash string // Revision of the Role, used for RoleRollingUpdate strategy
+	Status           RoleStatus
 }
 
 type ServingGroupStatus string
@@ -337,7 +337,7 @@ func (s *store) AddServingGroup(modelServingName types.NamespacedName, idx int, 
 }
 
 // AddRole adds a new role to an ServingGroup
-func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleRevision string) {
+func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleTemplateHash string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -368,16 +368,16 @@ func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleNa
 		}
 	} else {
 		group.roles[roleName][roleID] = &Role{
-			Name:         roleID,
-			Status:       RoleCreating,
-			Revision:     revision,
-			RoleRevision: roleRevision,
+			Name:             roleID,
+			Status:           RoleCreating,
+			Revision:         revision,
+			RoleTemplateHash: roleTemplateHash,
 		}
 	}
 }
 
 // AddRunningPodToServingGroup add ServingGroup in runningPodOfServingGroup map
-func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedName, servingGroupName, runningPodName, revision, roleRevision, roleName, roleID string) {
+func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedName, servingGroupName, runningPodName, revision, roleTemplateHash, roleName, roleID string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if _, ok := s.servingGroup[modelServingName]; !ok {
@@ -408,17 +408,17 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 
 	if _, ok = group.roles[roleName][roleID]; !ok {
 		role := &Role{
-			Name:         roleID,
-			Status:       RoleCreating,
-			Revision:     revision,
-			RoleRevision: roleRevision,
+			Name:             roleID,
+			Status:           RoleCreating,
+			Revision:         revision,
+			RoleTemplateHash: roleTemplateHash,
 		}
 		group.roles[roleName][roleID] = role
 	}
 }
 
 // AddServingGroupAndRole adds ServingGroup and roles if not exist
-func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleRevision, roleName, roleID string) {
+func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleTemplateHash, roleName, roleID string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if _, ok := s.servingGroup[modelServingName]; !ok {
@@ -447,10 +447,10 @@ func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, se
 
 	if _, ok = group.roles[roleName][roleID]; !ok {
 		role := &Role{
-			Name:         roleID,
-			Status:       RoleCreating,
-			Revision:     revision,
-			RoleRevision: roleRevision,
+			Name:             roleID,
+			Status:           RoleCreating,
+			Revision:         revision,
+			RoleTemplateHash: roleTemplateHash,
 		}
 		group.roles[roleName][roleID] = role
 	}
