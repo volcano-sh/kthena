@@ -896,7 +896,7 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 	}
 }
 
-func getworkloadRoleReplicas(workloadRoleReplicas int32) int32 {
+func getWorkloadRoleReplicas(workloadRoleReplicas int32) int32 {
 	if workloadRoleReplicas == 0 {
 		return int32(1)
 	}
@@ -906,7 +906,7 @@ func getworkloadRoleReplicas(workloadRoleReplicas int32) int32 {
 func createBasicModelServing(name string, servingGroupReplicas, workloadRoleReplicas int32, roles ...workload.Role) *workload.ModelServing {
 	// If no roles are provided, create a default role
 	if len(roles) == 0 {
-		defaultRoleReplicas := getworkloadRoleReplicas(workloadRoleReplicas)
+		defaultRoleReplicas := getWorkloadRoleReplicas(workloadRoleReplicas)
 		roles = []workload.Role{
 			{
 				Name:     "prefill",
