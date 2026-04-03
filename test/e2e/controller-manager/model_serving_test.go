@@ -906,7 +906,7 @@ func getWorkloadRoleReplicas(workloadRoleReplicas int32) int32 {
 	return workloadRoleReplicas
 }
 
-func createBasicModelServing(name string, servingGroupReplicas int32, roles ...workload.Role) *workload.ModelServing {
+func createBasicModelServing(name string, servingGroupReplicas, workloadRoleReplicas int32, roles ...workload.Role) *workload.ModelServing {
 	// If no roles are provided, create a default role
 	if len(roles) == 0 {
 		defaultRoleReplicas := getWorkloadRoleReplicas(workloadRoleReplicas)
