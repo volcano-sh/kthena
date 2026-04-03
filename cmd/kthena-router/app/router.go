@@ -172,8 +172,8 @@ type listenerConfig struct {
 	// Used when gateway is nil (standalone default server).
 	setup func(*gin.Engine)
 	// When non-nil, registers Gateway listener middleware and routes; setup is ignored.
-	gateway *listenerGatewayConfig
-	startLog      string
+	gateway  *listenerGatewayConfig
+	startLog string
 	// Shutdown
 	shutdownStartLog string
 	shutdownDoneLog  string
@@ -495,12 +495,12 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		listenerCtx, cancel := context.WithCancel(lm.ctx)
 
 		server := startListener(listenerCtx, listenerConfig{
-			addr:          ":" + strconv.Itoa(int(port)),
-			enableTLS:     enableTLS,
-			tlsCertFile:   tlsCertFile,
-			tlsKeyFile:    tlsKeyFile,
-			tlsMissingMsg: fmt.Sprintf("TLS enabled but cert or key file not specified for port %d", port),
-			gateway:       &listenerGatewayConfig{lm: lm, port: port},
+			addr:             ":" + strconv.Itoa(int(port)),
+			enableTLS:        enableTLS,
+			tlsCertFile:      tlsCertFile,
+			tlsKeyFile:       tlsKeyFile,
+			tlsMissingMsg:    fmt.Sprintf("TLS enabled but cert or key file not specified for port %d", port),
+			gateway:          &listenerGatewayConfig{lm: lm, port: port},
 			startLog:         fmt.Sprintf("Starting Gateway listener server on port %d", port),
 			shutdownStartLog: fmt.Sprintf("Shutting down Gateway listener server on port %d ...", port),
 			shutdownDoneLog:  "",
