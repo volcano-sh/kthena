@@ -783,14 +783,42 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
-	for _, servingGroup := range servingGroupList {
+	partition := c.getPartition(ms)
+	for index, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
 			continue
 		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
-		for _, targetRole := range ms.Spec.Template.Roles {
-			c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, newRevision)
+		isPartitionProtected := partition > 0 && index < partition
+
+		rolesToManage := ms.Spec.Template.Roles
+		revisionToUse := newRevision
+		if isPartitionProtected {
+			if revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroup.Name); ok && revision != "" {
+				revisionToUse = revision
+			} else if ms.Status.CurrentRevision != "" {
+				revisionToUse = ms.Status.CurrentRevision
+			}
+
+			if revisionToUse != "" {
+				cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revisionToUse)
+				if err != nil {
+					klog.Warningf("manageRole: failed to get ControllerRevision %s for protected ServingGroup %s: %v", revisionToUse, servingGroup.Name, err)
+				} else if cr != nil {
+					if oldRoles, err := utils.GetRolesFromControllerRevision(cr); err != nil {
+						klog.Warningf("manageRole: failed to get roles from ControllerRevision %s for protected ServingGroup %s: %v", revisionToUse, servingGroup.Name, err)
+					} else {
+						rolesToManage = oldRoles
+					}
+				} else {
+					klog.Warningf("manageRole: ControllerRevision %s not found for protected ServingGroup %s, fallback to latest roles", revisionToUse, servingGroup.Name)
+				}
+			}
+		}
+
+		for _, targetRole := range rolesToManage {
+			c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse)
 		}
 	}
 	return nil

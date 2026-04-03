@@ -2302,6 +2302,107 @@ func TestScaleUpRoles(t *testing.T) {
 	}
 }
 
+func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerRevision(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextfake := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+	assert.NoError(t, err)
+
+	msName := "test-partition-scaleup-roles"
+	roleName := "prefill"
+	groupOrdinal := 0
+	groupName := utils.GenerateServingGroupName(msName, groupOrdinal)
+
+	oldRevision := "revision-old"
+	newRevision := "revision-new"
+
+	partition := intstr.FromInt32(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      msName,
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:      ptr.To[int32](1),
+			SchedulerName: "volcano",
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					Partition: &partition,
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](2),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "prefill-container",
+									Image: "new-image:latest",
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+		Status: workloadv1alpha1.ModelServingStatus{
+			CurrentRevision: oldRevision,
+		},
+	}
+
+	oldRoles := []workloadv1alpha1.Role{
+		{
+			Name:     roleName,
+			Replicas: ptr.To[int32](1),
+			EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "prefill-container",
+						Image: "old-image:latest",
+					}},
+				},
+			},
+		},
+	}
+
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, oldRevision, oldRoles)
+	assert.NoError(t, err)
+
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), groupOrdinal, oldRevision)
+	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision)
+
+	err = controller.manageRole(context.Background(), ms, newRevision)
+	assert.NoError(t, err)
+
+	roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
+	assert.NoError(t, err)
+	// Partition-protected ServingGroup should align to ControllerRevision replicas (1), not new spec replicas (2)
+	assert.Equal(t, 1, len(roles))
+
+	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	assert.NoError(t, err)
+
+	var createdPod *corev1.Pod
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Labels[workloadv1alpha1.RoleIDKey] == utils.GenerateRoleID(roleName, 0) && p.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry {
+			createdPod = p
+			break
+		}
+	}
+	if assert.NotNil(t, createdPod) {
+		assert.Equal(t, oldRevision, createdPod.Labels[workloadv1alpha1.RevisionLabelKey])
+		if assert.NotEmpty(t, createdPod.Spec.Containers) {
+			assert.Equal(t, "old-image:latest", createdPod.Spec.Containers[0].Image)
+		}
+	}
+}
+
 func TestManageRoleReplicas(t *testing.T) {
 	tests := []struct {
 		name             string
