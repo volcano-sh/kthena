@@ -37,6 +37,8 @@ def load_config(config_str: str = None) -> dict:
         "hf_token": os.getenv("HF_AUTH_TOKEN"),
         "hf_endpoint": os.getenv("HF_ENDPOINT"),
         "hf_revision": os.getenv("HF_REVISION"),
+        "ms_token": os.getenv("MS_TOKEN"),
+        "ms_revision": os.getenv("MS_REVISION"),
         "access_key": os.getenv("ACCESS_KEY"),
         "secret_key": os.getenv("SECRET_KEY"),
         "endpoint": os.getenv("ENDPOINT"),
@@ -59,7 +61,8 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         required=True,
         help="Model source URI or identifier. Supports multiple sources including: "
-             "Hugging Face repositories (format: '<namespace>/<repo_name>'), "
+             "Hugging Face repositories (format: '<namespace>/<repo_name>' or 'hf://<namespace>/<repo_name>'), "
+             "ModelScope (ms://<namespace>/<repo_name>), "
              "S3 buckets (s3://bucket/path), Object Storage (obs://bucket/path) and PVC storage (pvc://path)"
     )
     parser.add_argument(
@@ -82,10 +85,13 @@ def parse_arguments() -> argparse.Namespace:
              "- hf_token: Authentication token for Hugging Face\n"
              "- hf_endpoint: Custom API endpoint for Hugging Face\n"
              "- hf_revision: Specific model revision/branch to download\n"
+             "- ms_token: Authentication token for ModelScope\n"
+             "- ms_revision: Specific model revision/branch to download from ModelScope\n"
              "- access_key/secret_key: Cloud provider credentials\n"
              "- endpoint:  obs endpoint URL, for s3, not a required config but a private bucket \n"
              "Example: '{\"hf_token\": \"your_huggingface_token\", \"hf_endpoint\": \"custom_endpoint\", "
-             "\"hf_revision\": \"main\", \"access_key\": \"your_access_key\", \"secret_key\": \"your_secret_key\", "
+             "\"hf_revision\": \"main\", \"ms_token\": \"your_modelscope_token\", \"ms_revision\": \"master\", "
+             "\"access_key\": \"your_access_key\", \"secret_key\": \"your_secret_key\", "
              "\"endpoint\": \"your_endpoint_url\"}'"
     )
     args = parser.parse_args()

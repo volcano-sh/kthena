@@ -31,6 +31,8 @@ const (
 	RuntimeUrl         = "RUNTIME_URL"
 	RuntimeMetricsPath = "RUNTIME_METRICS_PATH"
 	HfEndpoint         = "HF_ENDPOINT"
+	MsToken            = "MS_TOKEN"
+	MsRevision         = "MS_REVISION"
 )
 
 // GetEnvValueOrDefault gets value of specific env, if env does not exist, return default value

@@ -102,6 +102,18 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 	if len(hfEndpointEnvVars) > 0 && hfEndpointEnvVars[0].Value != "" {
 		envVars = append(envVars, hfEndpointEnvVars[0])
 	}
+	msTokenEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsToken, []corev1.EnvVar{
+		{Name: env.MsToken},
+	})
+	if len(msTokenEnvVars) > 0 && msTokenEnvVars[0].Value != "" {
+		envVars = append(envVars, msTokenEnvVars[0])
+	}
+	msRevisionEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsRevision, []corev1.EnvVar{
+		{Name: env.MsRevision},
+	})
+	if len(msRevisionEnvVars) > 0 && msRevisionEnvVars[0].Value != "" {
+		envVars = append(envVars, msRevisionEnvVars[0])
+	}
 	initContainers := []corev1.Container{
 		{
 			Name:  model.Name + "-model-downloader",
@@ -229,6 +241,18 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	})
 	if len(hfEndpointEnvVars) > 0 && hfEndpointEnvVars[0].Value != "" {
 		envVars = append(envVars, hfEndpointEnvVars[0])
+	}
+	msTokenEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsToken, []corev1.EnvVar{
+		{Name: env.MsToken},
+	})
+	if len(msTokenEnvVars) > 0 && msTokenEnvVars[0].Value != "" {
+		envVars = append(envVars, msTokenEnvVars[0])
+	}
+	msRevisionEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsRevision, []corev1.EnvVar{
+		{Name: env.MsRevision},
+	})
+	if len(msRevisionEnvVars) > 0 && msRevisionEnvVars[0].Value != "" {
+		envVars = append(envVars, msRevisionEnvVars[0])
 	}
 	initContainers := []corev1.Container{
 		{

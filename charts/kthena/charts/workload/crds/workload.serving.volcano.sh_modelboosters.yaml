@@ -455,8 +455,8 @@ spec:
                     type: integer
                   modelURI:
                     description: ModelURI is the URI where you download the model.
-                      Support hf://, s3://, pvc://.
-                    pattern: ^(hf://|s3://|pvc://).+
+                      Support hf://, s3://, pvc://, ms://.
+                    pattern: ^(hf://|s3://|pvc://|ms://).+
                     type: string
                   name:
                     description: |-

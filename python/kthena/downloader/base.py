@@ -49,9 +49,7 @@ class ModelDownloader(ABC):
             try:
                 if self.lock_manager.try_acquire():
                     try:
-                        logger.info(
-                            f"Acquired lock successfully. Starting download to {output_dir}"
-                        )
+                        logger.info(f"Acquired lock successfully. Starting download to {output_dir}")
                         self.download(output_dir)
                         break
                     except Exception as e:
@@ -60,9 +58,7 @@ class ModelDownloader(ABC):
                     finally:
                         self.lock_manager.release()
                 else:
-                    logger.info(
-                        "Failed to acquire lock. Waiting for the lock to be released."
-                    )
+                    logger.info("Failed to acquire lock. Waiting for the lock to be released.")
                     self.stop_event.wait(timeout=5)
             except Exception as e:
                 logger.error(f"Unexpected error in download_model: {e}")
@@ -86,6 +82,15 @@ def get_downloader(source: str, config: dict, max_workers: int = 8) -> ModelDown
             from kthena.downloader.pvc import PVCDownloader
 
             return PVCDownloader(source_path=source)
+        elif source.startswith("ms://"):
+            from kthena.downloader.modelscope_downloader import ModelScopeDownloader
+
+            return ModelScopeDownloader(
+                model_uri=source.removeprefix("ms://"),
+                ms_token=config.get("ms_token"),
+                ms_revision=config.get("ms_revision"),
+                max_workers=max_workers,
+            )
         else:
             from kthena.downloader.huggingface import HuggingFaceDownloader
 

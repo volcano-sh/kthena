@@ -5,7 +5,8 @@ A universal LLM downloader tool that supports retrieving model files from multip
 ## Features
 
 - Support for multiple model sources:
-  - Hugging Face repositories (`<namespace>/<repo_name>`)
+  - Hugging Face repositories (`<namespace>/<repo_name>` or `hf://<namespace>/<repo_name>`)
+  - ModelScope (`ms://<namespace>/<repo_name>`)
   - S3 buckets (`s3://bucket/path`)
   - Object Storage (`obs://bucket/path`)
   - PVC storage (`pvc://path`)
@@ -55,6 +56,11 @@ Download a model from PVC:
 docker run --rm -v ./local-models:/output kthena-downloader:latest --source "pvc://models" --output-dir /output
 ```
 
+Download a model from ModelScope:
+```bash
+docker run --rm -v ./models:/output kthena-downloader:latest --source "ms://Qwen/Qwen2.5-7B-Instruct" --output-dir /output
+```
+
 ## Configuration
 
 Configuration can be provided through environment variables (using Docker's `-e` flag) or the `--config` parameter:
@@ -66,6 +72,8 @@ docker run --rm \
   -e HF_AUTH_TOKEN="your_huggingface_token" \
   -e HF_ENDPOINT="custom_endpoint" \
   -e HF_REVISION="main" \
+  -e MS_TOKEN="your_modelscope_token" \
+  -e MS_REVISION="master" \
   -e ACCESS_KEY="your_access_key" \
   -e SECRET_KEY="your_secret_key" \
   -e ENDPOINT="your_endpoint_url" \
@@ -82,6 +90,8 @@ docker run --rm \
   "hf_token": "your_huggingface_token",
   "hf_endpoint": "custom_endpoint",
   "hf_revision": "main",
+  "ms_token": "your_modelscope_token",
+  "ms_revision": "master",
   "access_key": "your_access_key",
   "secret_key": "your_secret_key",
   "endpoint": "your_endpoint_url"

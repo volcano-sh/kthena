@@ -55,8 +55,8 @@ type ModelBackend struct {
 	Name string `json:"name"`
 	// Type is the type of the backend.
 	Type ModelBackendType `json:"type"`
-	// ModelURI is the URI where you download the model. Support hf://, s3://, pvc://.
-	// +kubebuilder:validation:Pattern=`^(hf://|s3://|pvc://).+`
+	// ModelURI is the URI where you download the model. Support hf://, s3://, pvc://, ms://.
+	// +kubebuilder:validation:Pattern=`^(hf://|s3://|pvc://|ms://).+`
 	ModelURI string `json:"modelURI"`
 	// CacheURI is the URI where the downloaded model stored. Support hostpath://, pvc://.
 	// +kubebuilder:validation:Pattern=`^(hostpath://|pvc://).+`
