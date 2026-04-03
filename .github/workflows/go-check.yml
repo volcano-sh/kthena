@@ -4,18 +4,9 @@ on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - "**.md"
-      - "**.svg"
-      - "**.png"
-      - "docs/**"
-      - ".github/**"
   push:
     branches:
       - main
-    paths-ignore:
-      - "docs/**"
-      - ".github/**"
 
 jobs:
   build:
