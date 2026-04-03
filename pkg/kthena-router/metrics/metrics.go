@@ -75,6 +75,13 @@ type Metrics struct {
 	ActiveUpstreamRequests   prometheus.GaugeVec
 	FairnessQueueSize        prometheus.GaugeVec
 	FairnessQueueDuration    prometheus.HistogramVec
+
+	// Fairness queue detailed metrics
+	FairnessQueueCancelledTotal       prometheus.CounterVec
+	FairnessQueueDequeueTotal         prometheus.CounterVec
+	FairnessQueueInflight             prometheus.GaugeVec
+	FairnessQueuePriorityRefreshTotal prometheus.CounterVec
+	FairnessQueueHeapRebuildTotal     prometheus.CounterVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
@@ -172,6 +179,46 @@ func NewMetrics() *Metrics {
 			},
 			[]string{LabelModel, LabelUserID},
 		),
+
+		FairnessQueueCancelledTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_fairness_queue_cancelled_total",
+				Help: "Total number of requests cancelled or timed out while in fairness queue",
+			},
+			[]string{LabelModel, LabelUserID},
+		),
+
+		FairnessQueueDequeueTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_fairness_queue_dequeue_total",
+				Help: "Total number of requests successfully dequeued from fairness queue",
+			},
+			[]string{LabelModel, LabelUserID},
+		),
+
+		FairnessQueueInflight: *promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "kthena_router_fairness_queue_inflight",
+				Help: "Current number of in-flight requests gated by fairness queue semaphore",
+			},
+			[]string{LabelModel},
+		),
+
+		FairnessQueuePriorityRefreshTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_fairness_queue_priority_refresh_total",
+				Help: "Total number of dequeue-time priority refresh-and-reinsert operations",
+			},
+			[]string{LabelModel},
+		),
+
+		FairnessQueueHeapRebuildTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_fairness_queue_heap_rebuild_total",
+				Help: "Total number of full heap rebuild operations due to priority drift",
+			},
+			[]string{LabelModel},
+		),
 	}
 }
 
@@ -259,6 +306,36 @@ func (m *Metrics) SetFairnessQueueSize(model, userID string, size float64) {
 // RecordFairnessQueueDuration records the time a request spent in fairness queue
 func (m *Metrics) RecordFairnessQueueDuration(model, userID string, duration time.Duration) {
 	m.FairnessQueueDuration.WithLabelValues(model, userID).Observe(duration.Seconds())
+}
+
+// IncFairnessQueueCancelled increments the fairness queue cancelled counter
+func (m *Metrics) IncFairnessQueueCancelled(model, userID string) {
+	m.FairnessQueueCancelledTotal.WithLabelValues(model, userID).Inc()
+}
+
+// IncFairnessQueueDequeue increments the fairness queue dequeue counter
+func (m *Metrics) IncFairnessQueueDequeue(model, userID string) {
+	m.FairnessQueueDequeueTotal.WithLabelValues(model, userID).Inc()
+}
+
+// IncFairnessQueueInflight increments the fairness queue inflight gauge
+func (m *Metrics) IncFairnessQueueInflight(model string) {
+	m.FairnessQueueInflight.WithLabelValues(model).Inc()
+}
+
+// DecFairnessQueueInflight decrements the fairness queue inflight gauge
+func (m *Metrics) DecFairnessQueueInflight(model string) {
+	m.FairnessQueueInflight.WithLabelValues(model).Dec()
+}
+
+// IncFairnessQueuePriorityRefresh increments the priority refresh counter
+func (m *Metrics) IncFairnessQueuePriorityRefresh(model string) {
+	m.FairnessQueuePriorityRefreshTotal.WithLabelValues(model).Inc()
+}
+
+// IncFairnessQueueHeapRebuild increments the heap rebuild counter
+func (m *Metrics) IncFairnessQueueHeapRebuild(model string) {
+	m.FairnessQueueHeapRebuildTotal.WithLabelValues(model).Inc()
 }
 
 // RequestMetricsRecorder is a helper struct to record detailed metrics for individual requests

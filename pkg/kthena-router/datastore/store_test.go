@@ -18,8 +18,10 @@ package datastore
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,6 +42,31 @@ import (
 // ptr is a helper function to get pointer to a value
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestCreateFairnessQueueConfig_RejectsInvalidWeights(t *testing.T) {
+	t.Setenv("FAIRNESS_PRIORITY_TOKEN_WEIGHT", "NaN")
+	t.Setenv("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", strconv.FormatFloat(math.Inf(1), 'f', -1, 64))
+
+	cfg := createFairnessQueueConfig()
+	defaultCfg := DefaultFairnessQueueConfig()
+
+	if cfg.TokenWeight != defaultCfg.TokenWeight {
+		t.Fatalf("Expected default token weight %v, got %v", defaultCfg.TokenWeight, cfg.TokenWeight)
+	}
+	if cfg.RequestNumWeight != defaultCfg.RequestNumWeight {
+		t.Fatalf("Expected default request weight %v, got %v", defaultCfg.RequestNumWeight, cfg.RequestNumWeight)
+	}
+
+	t.Setenv("FAIRNESS_PRIORITY_TOKEN_WEIGHT", "-1")
+	t.Setenv("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", "-2")
+	cfg = createFairnessQueueConfig()
+	if cfg.TokenWeight != defaultCfg.TokenWeight {
+		t.Fatalf("Expected default token weight for negative alpha, got %v", cfg.TokenWeight)
+	}
+	if cfg.RequestNumWeight != defaultCfg.RequestNumWeight {
+		t.Fatalf("Expected default request weight for negative beta, got %v", cfg.RequestNumWeight)
+	}
 }
 
 func Test_updateHistogramMetrics(t *testing.T) {

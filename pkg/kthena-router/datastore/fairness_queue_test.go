@@ -385,3 +385,482 @@ func TestClose(t *testing.T) {
 		t.Error("stopCh should be closed")
 	}
 }
+
+func TestPopWhenAvailable_SkipsCancelledRequests(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+	defer pq.Close()
+
+	now := time.Now()
+
+	// Create a cancelled context for the first request
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	requests := []*Request{
+		{ReqID: "cancelled-req", UserID: "user1", Priority: 0.5, RequestTime: now, CancelCh: cancelledCtx.Done()},
+		{ReqID: "valid-req", UserID: "user2", Priority: 1.0, RequestTime: now.Add(time.Second)},
+	}
+
+	for _, req := range requests {
+		if err := pq.PushRequest(req); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	// Pop should skip cancelled request and return the valid one
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.ReqID != "valid-req" {
+		t.Errorf("Expected valid-req, got %s", result.ReqID)
+	}
+}
+
+func TestPopWhenAvailable_SkipsTimedOutRequests(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+	defer pq.Close()
+
+	now := time.Now()
+
+	// Create an already-expired context
+	expiredCtx, cancel := context.WithDeadline(context.Background(), now.Add(-time.Second))
+	defer cancel()
+
+	requests := []*Request{
+		{ReqID: "expired-req", UserID: "user1", Priority: 0.5, RequestTime: now, CancelCh: expiredCtx.Done()},
+		{ReqID: "fresh-req", UserID: "user2", Priority: 1.0, RequestTime: now.Add(time.Second)},
+	}
+
+	for _, req := range requests {
+		if err := pq.PushRequest(req); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.ReqID != "fresh-req" {
+		t.Errorf("Expected fresh-req, got %s", result.ReqID)
+	}
+}
+
+func TestClose_DrainsPendingWaiters(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+
+	// Push requests that will remain in the queue
+	for i := 0; i < 5; i++ {
+		req := &Request{
+			ReqID:       fmt.Sprintf("req-%d", i),
+			UserID:      "user1",
+			ModelName:   "model-1",
+			Priority:    float64(i),
+			RequestTime: time.Now(),
+			NotifyChan:  make(chan struct{}),
+		}
+		if err := pq.PushRequest(req); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	if pq.Len() != 5 {
+		t.Errorf("Expected 5 items before close, got %d", pq.Len())
+	}
+
+	// Close should drain the heap
+	pq.Close()
+
+	if pq.Len() != 0 {
+		t.Errorf("Expected 0 items after close, got %d", pq.Len())
+	}
+}
+
+func TestNewRequestPriorityQueueWithConfig(t *testing.T) {
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             5,
+		MaxQPS:                    50,
+		MaxPriorityRefreshRetries: 3,
+		RebuildThreshold:          32,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	if pq == nil {
+		t.Fatal("NewRequestPriorityQueueWithConfig returned nil")
+	}
+	if pq.sem == nil {
+		t.Error("Expected semaphore to be initialized with MaxConcurrent > 0")
+	}
+	if cap(pq.sem) != 5 {
+		t.Errorf("Expected sem capacity 5, got %d", cap(pq.sem))
+	}
+	if pq.config.MaxQPS != 50 {
+		t.Errorf("Expected MaxQPS 50, got %d", pq.config.MaxQPS)
+	}
+}
+
+func TestNewRequestPriorityQueueWithConfig_NoSemaphore(t *testing.T) {
+	cfg := FairnessQueueConfig{
+		MaxConcurrent: 0,
+		MaxQPS:        100,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	if pq.sem != nil {
+		t.Error("Expected nil semaphore with MaxConcurrent = 0")
+	}
+}
+
+func TestRun_SemaphoreMode(t *testing.T) {
+	cfg := FairnessQueueConfig{
+		MaxConcurrent: 2,
+		MaxQPS:        0, // no QPS cap
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	defer pq.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	requests := make([]*Request, 4)
+	notifyChs := make([]chan struct{}, 4)
+	for i := 0; i < 4; i++ {
+		notifyCh := make(chan struct{})
+		notifyChs[i] = notifyCh
+		req := &Request{
+			ReqID:       fmt.Sprintf("req-%d", i),
+			UserID:      fmt.Sprintf("user-%d", i),
+			ModelName:   "test-model",
+			Priority:    float64(i),
+			RequestTime: time.Now(),
+			NotifyChan:  notifyCh,
+		}
+		requests[i] = req
+		if err := pq.PushRequest(req); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	go pq.Run(ctx, 0)
+
+	// Wait for first 2 to be notified (semaphore capacity = 2)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-notifyChs[i]:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("Request %d was not dequeued in time", i)
+		}
+	}
+
+	// Third request should NOT be dequeued yet (sem full)
+	select {
+	case <-notifyChs[2]:
+		t.Error("Request 2 should not have been dequeued while semaphore is full")
+	case <-time.After(100 * time.Millisecond):
+		// expected
+	}
+
+	// Complete first request to release a permit
+	requests[0].Release()
+
+	// Third request should now be dequeued
+	select {
+	case <-notifyChs[2]:
+		// expected
+	case <-time.After(500 * time.Millisecond):
+		t.Error("Request 2 should have been dequeued after permit release")
+	}
+
+	// Complete remaining
+	requests[1].Release()
+	requests[2].Release()
+
+	select {
+	case <-notifyChs[3]:
+		// expected
+	case <-time.After(500 * time.Millisecond):
+		t.Error("Request 3 should have been dequeued")
+	}
+	requests[3].Release()
+}
+
+// mockTokenTracker implements TokenTracker for testing priority refresh.
+type mockTokenTracker struct {
+	mu            sync.Mutex
+	counts        map[string]float64 // key: "user|model"
+	requestCounts map[string]int
+}
+
+func newMockTokenTracker() *mockTokenTracker {
+	return &mockTokenTracker{
+		counts:        make(map[string]float64),
+		requestCounts: make(map[string]int),
+	}
+}
+
+func (m *mockTokenTracker) SetTokenCount(user, model string, count float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.counts[user+"|"+model] = count
+}
+
+func (m *mockTokenTracker) GetTokenCount(user, model string) (float64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.counts[user+"|"+model], nil
+}
+
+func (m *mockTokenTracker) SetRequestCount(user, model string, count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requestCounts[user+"|"+model] = count
+}
+
+func (m *mockTokenTracker) UpdateTokenCount(user, model string, inputTokens, outputTokens float64) error {
+	return nil
+}
+
+func (m *mockTokenTracker) GetRequestCount(user, model string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requestCounts[user+"|"+model], nil
+}
+
+func TestPriorityRefresh_ReinsertOnDrift(t *testing.T) {
+	tracker := newMockTokenTracker()
+	tracker.SetTokenCount("user-low", "model-1", 1.0)
+	tracker.SetTokenCount("user-high", "model-1", 10.0)
+
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 3,
+		RebuildThreshold:          64,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	defer pq.Close()
+
+	now := time.Now()
+	// user-low has low initial priority (should be dequeued first)
+	req1 := &Request{ReqID: "low", UserID: "user-low", ModelName: "model-1", Priority: 1.0, RequestTime: now}
+	// user-high has high initial priority
+	req2 := &Request{ReqID: "high", UserID: "user-high", ModelName: "model-1", Priority: 10.0, RequestTime: now.Add(time.Second)}
+
+	pq.PushRequest(req1)
+	pq.PushRequest(req2)
+
+	// Now drift user-low to be high priority (more tokens used)
+	tracker.SetTokenCount("user-low", "model-1", 20.0)
+	// And user-high to be low priority
+	tracker.SetTokenCount("user-high", "model-1", 2.0)
+
+	// Pop should detect the drift and reinsert user-low, returning user-high instead
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.ReqID != "high" {
+		t.Errorf("Expected 'high' (user-high now has lower token count), got %s", result.ReqID)
+	}
+
+	// Pop again should get the reinserted request
+	result2, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result2.ReqID != "low" {
+		t.Errorf("Expected 'low' on second pop, got %s", result2.ReqID)
+	}
+}
+
+func TestPriorityRefresh_HeapRebuild(t *testing.T) {
+	tracker := newMockTokenTracker()
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 1, // Will rebuild after 1 reinsert
+		RebuildThreshold:          64,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	defer pq.Close()
+
+	now := time.Now()
+	// Set initial priorities: user-a=1, user-b=5, user-c=10
+	tracker.SetTokenCount("user-a", "model-1", 1.0)
+	tracker.SetTokenCount("user-b", "model-1", 5.0)
+	tracker.SetTokenCount("user-c", "model-1", 10.0)
+
+	pq.PushRequest(&Request{ReqID: "a", UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
+	pq.PushRequest(&Request{ReqID: "b", UserID: "user-b", ModelName: "model-1", Priority: 5.0, RequestTime: now.Add(time.Second)})
+	pq.PushRequest(&Request{ReqID: "c", UserID: "user-c", ModelName: "model-1", Priority: 10.0, RequestTime: now.Add(2 * time.Second)})
+
+	// Drift user-a to highest usage
+	tracker.SetTokenCount("user-a", "model-1", 100.0)
+	// user-b stays
+	// user-c becomes lowest
+	tracker.SetTokenCount("user-c", "model-1", 0.5)
+
+	// Pop should eventually rebuild and return user-c (lowest after refresh)
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.ReqID != "c" {
+		t.Errorf("Expected 'c' (lowest after rebuild), got %s", result.ReqID)
+	}
+}
+
+func TestRelease_ReleasesPermit(t *testing.T) {
+	cfg := FairnessQueueConfig{
+		MaxConcurrent: 1,
+		MaxQPS:        0,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	defer pq.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Push 2 requests
+	notifyCh1 := make(chan struct{})
+	req1 := &Request{
+		ReqID: "req-1", UserID: "user1", ModelName: "m1",
+		Priority: 1.0, RequestTime: time.Now(),
+		NotifyChan: notifyCh1,
+	}
+	pq.PushRequest(req1)
+
+	notifyCh2 := make(chan struct{})
+	req2 := &Request{
+		ReqID: "req-2", UserID: "user2", ModelName: "m1",
+		Priority: 2.0, RequestTime: time.Now(),
+		NotifyChan: notifyCh2,
+	}
+	pq.PushRequest(req2)
+
+	go pq.Run(ctx, 0)
+
+	// First request should be dequeued
+	select {
+	case <-notifyCh1:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("First request should have been dequeued")
+	}
+
+	// Second should be blocked (sem capacity = 1)
+	select {
+	case <-notifyCh2:
+		t.Fatal("Second request should not be dequeued while first is in-flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Release first permit from the handler side
+	req1.Release()
+
+	// Second should now be dequeued
+	select {
+	case <-notifyCh2:
+		// expected
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Second request should have been dequeued after release")
+	}
+	req2.Release()
+}
+
+func TestPriorityRefresh_SkipsHeapRebuildAboveThreshold(t *testing.T) {
+	tracker := newMockTokenTracker()
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 1,
+		RebuildThreshold:          1,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	defer pq.Close()
+
+	now := time.Now()
+	tracker.SetTokenCount("user-a", "model-1", 1.0)
+	tracker.SetTokenCount("user-b", "model-1", 2.0)
+
+	pq.PushRequest(&Request{ReqID: "a", UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
+	pq.PushRequest(&Request{ReqID: "b", UserID: "user-b", ModelName: "model-1", Priority: 2.0, RequestTime: now.Add(time.Second)})
+
+	tracker.SetTokenCount("user-a", "model-1", 10.0)
+	tracker.SetTokenCount("user-b", "model-1", 1.5)
+
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.ReqID != "b" {
+		t.Fatalf("Expected b to be dequeued after refresh, got %s", result.ReqID)
+	}
+}
+
+func TestPriorityRefresh_UsesCompositePriority(t *testing.T) {
+	tracker := newMockTokenTracker()
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 2,
+		RebuildThreshold:          64,
+		TokenWeight:               1.0,
+		RequestNumWeight:          10.0,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	defer pq.Close()
+
+	now := time.Now()
+	tracker.SetTokenCount("user-a", "model-1", 1.0)
+	tracker.SetTokenCount("user-b", "model-1", 2.0)
+	tracker.SetRequestCount("user-a", "model-1", 0)
+	tracker.SetRequestCount("user-b", "model-1", 0)
+
+	pq.PushRequest(&Request{ReqID: "a", UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
+	pq.PushRequest(&Request{ReqID: "b", UserID: "user-b", ModelName: "model-1", Priority: 2.0, RequestTime: now.Add(time.Second)})
+
+	tracker.SetRequestCount("user-a", "model-1", 5)
+	tracker.SetRequestCount("user-b", "model-1", 0)
+
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.ReqID != "b" {
+		t.Fatalf("Expected b to be dequeued after composite refresh, got %s", result.ReqID)
+	}
+}
+
+func TestRun_SemaphoreMode_EmptyQueueDoesNotConsumePermit(t *testing.T) {
+	cfg := FairnessQueueConfig{
+		MaxConcurrent: 1,
+		MaxQPS:        0,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	defer pq.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go pq.Run(ctx, 0)
+	time.Sleep(50 * time.Millisecond)
+
+	notifyCh := make(chan struct{})
+	req := &Request{
+		ReqID:       "req-1",
+		UserID:      "user1",
+		ModelName:   "m1",
+		Priority:    1.0,
+		RequestTime: time.Now(),
+		NotifyChan:  notifyCh,
+	}
+	if err := pq.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	select {
+	case <-notifyCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Request should have been dequeued after queue starts empty")
+	}
+	req.Release()
+}
