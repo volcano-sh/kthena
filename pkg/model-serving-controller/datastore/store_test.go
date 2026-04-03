@@ -278,7 +278,7 @@ func TestAddRole(t *testing.T) {
 	}
 
 	// 1. Add role to non-existing modelServing and group
-	s.AddRole(key, "group0", "prefill", "prefill-0", "revision1")
+	s.AddRole(key, "group0", "prefill", "prefill-0", "revision1", "roleRevision1")
 	role, exists := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
 	assert.True(t, exists, "role should be created")
 	assert.Equal(t, "prefill-0", role.Name)
@@ -286,18 +286,18 @@ func TestAddRole(t *testing.T) {
 	assert.Equal(t, "revision1", role.Revision)
 
 	// 2. Add another role to existing group
-	s.AddRole(key, "group0", "prefill", "prefill-1", "revision2")
+	s.AddRole(key, "group0", "prefill", "prefill-1", "revision2", "roleRevision2")
 	role2, exists2 := s.servingGroup[key]["group0"].roles["prefill"]["prefill-1"]
 	assert.True(t, exists2, "second role should be created")
 	assert.Equal(t, "prefill-1", role2.Name)
 
 	// 3. Add role with different roleLabel
-	s.AddRole(key, "group0", "decode", "decode-0", "revision3")
+	s.AddRole(key, "group0", "decode", "decode-0", "revision3", "roleRevision3")
 	_, exists3 := s.servingGroup[key]["group0"].roles["decode"]["decode-0"]
 	assert.True(t, exists3, "role with different label should be created")
 
 	// 4. Add existing role with different revision — should NOT overwrite
-	s.AddRole(key, "group0", "prefill", "prefill-0", "revision4")
+	s.AddRole(key, "group0", "prefill", "prefill-0", "revision4", "roleRevision4")
 	role4 := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
 	assert.Equal(t, "revision1", role4.Revision, "existing role should not be overwritten")
 }

@@ -59,7 +59,7 @@ type ModelServingSpec struct {
 	RolloutStrategy *RolloutStrategy `json:"rolloutStrategy,omitempty"`
 
 	// RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt
-	// +kubebuilder:default=RoleRecreate
+	// +kubebuilder:default=ServingGroupRecreate
 	// +kubebuilder:validation:Enum={ServingGroupRecreate,RoleRecreate,None}
 	// +optional
 	RecoveryPolicy RecoveryPolicy `json:"recoveryPolicy,omitempty"`
@@ -133,10 +133,12 @@ const (
 // RolloutStrategy defines the strategy that the ModelServing controller
 // will use to perform replica updates.
 type RolloutStrategy struct {
-	// Type defines the rollout strategy, it can only be “ServingGroupRollingUpdate” for now.
+	// Type defines the rollout strategy. Supported values are
+	// "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
+	// it defaults to "ServingGroupRollingUpdate".
 	//
-	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate}
 	// +kubebuilder:default=ServingGroupRollingUpdate
+	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}
 	Type RolloutStrategyType `json:"type"`
 
 	// RollingUpdateConfiguration defines the parameters to be used when type is RollingUpdateStrategyType.
@@ -144,11 +146,18 @@ type RolloutStrategy struct {
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
 }
 
+// RolloutStrategyType defines the strategy to use to update replicas.
+// It must correspond to the granularity of the RecoveryPolicy.
+// `ServingGroupRollingUpdate` corresponds to `ServingGroupRecreate`
+// `RoleRollingUpdate` corresponds to `RoleRecreate`
 type RolloutStrategyType string
 
 const (
-	// ServingGroupRollingUpdate indicates that ServingGroup replicas will be updated one by one.
+	// `ServingGroupRollingUpdate` indicates that ServingGroup replicas will be updated one by one.
 	ServingGroupRollingUpdate RolloutStrategyType = "ServingGroupRollingUpdate"
+
+	// `RoleRollingUpdate` indicates that Role replicas will be updated one by one.
+	RoleRollingUpdate RolloutStrategyType = "RoleRollingUpdate"
 )
 
 // RollingUpdateConfiguration defines the parameters to be used for RollingUpdateStrategyType.

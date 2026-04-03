@@ -89,6 +89,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
+	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -365,4 +366,38 @@ func validateImageField(image string) error {
 	}
 
 	return nil
+}
+
+func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	if ms.Spec.RecoveryPolicy != "" && ms.Spec.RolloutStrategy != nil {
+		if (ms.Spec.RecoveryPolicy == workloadv1alpha1.ServingGroupRecreate && ms.Spec.RolloutStrategy.Type != workloadv1alpha1.ServingGroupRollingUpdate) ||
+			(ms.Spec.RecoveryPolicy == workloadv1alpha1.RoleRecreate && ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate) {
+			allErrs = append(allErrs, field.Invalid(
+				field.NewPath("spec").Child("rolloutStrategy").Child("type"),
+				ms.Spec.RolloutStrategy.Type,
+				fmt.Sprintf("rolloutStrategy type %s is incompatible with recoveryPolicy type %s", ms.Spec.RolloutStrategy.Type, ms.Spec.RecoveryPolicy),
+			))
+		}
+	}
+
+	if ms.Spec.RecoveryPolicy == "" && ms.Spec.RolloutStrategy != nil {
+		if ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
+			allErrs = append(allErrs, field.Invalid(
+				field.NewPath("spec").Child("rolloutStrategy").Child("type"),
+				ms.Spec.RolloutStrategy.Type,
+				fmt.Sprintf("recovery policy default is RoleRecreate, rolloutStrategy type %s requires to be set to RoleRollingUpdate", ms.Spec.RolloutStrategy.Type),
+			))
+		}
+	}
+
+	if ms.Spec.RolloutStrategy == nil && ms.Spec.RecoveryPolicy == workloadv1alpha1.ServingGroupRecreate {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec").Child("recoveryPolicy"),
+			ms.Spec.RecoveryPolicy,
+			fmt.Sprintf("RollingUpdate strategy default is 'RoleRollingUpdate', recoveryPolicy type %s requires recreate policy to be set to RoleRecreate", ms.Spec.RecoveryPolicy),
+		))
+	}
+
+	return allErrs
 }

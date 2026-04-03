@@ -136,11 +136,14 @@ spec:
                         x-kubernetes-int-or-string: true
                     type: object
                   type:
-                    default: ServingGroupRollingUpdate
-                    description: Type defines the rollout strategy, it can only be
-                      “ServingGroupRollingUpdate” for now.
+                    default: RoleRollingUpdate
+                    description: |-
+                      Type defines the rollout strategy. Supported values are
+                      "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
+                      it defaults to "RoleRollingUpdate".
                     enum:
                     - ServingGroupRollingUpdate
+                    - RoleRollingUpdate
                     type: string
                 required:
                 - type
