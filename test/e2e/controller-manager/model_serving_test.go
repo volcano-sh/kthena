@@ -1424,7 +1424,8 @@ func createPartitionedModelServing(name string, replicas, partition int32) *work
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.ServingGroupRollingUpdate,
 				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					Partition: ptr.To(intstr.FromInt32(partition)),
+					Partition:      ptr.To(intstr.FromInt32(partition)),
+					MaxUnavailable: ptr.To(intstr.FromInt(int(replicas))),
 				},
 			},
 			Template: workload.ServingGroup{
