@@ -80,7 +80,10 @@ type Router struct {
 	tokenizer       tokenizer.Tokenizer
 
 	// KV Connector management
-	connectorFactory *connectors.Factory
+	connectorFactory   *connectors.Factory
+	buildDecodeRequest func(*gin.Context, *http.Request, ModelRequest) *http.Request
+	isStreaming        func(ModelRequest) bool
+	proxyRequest       func(*gin.Context, *http.Request, string, int32, bool, func(handlers.OpenAIResponse)) error
 
 	// Fairness scheduling configuration
 	fairnessTimeout  time.Duration
@@ -88,7 +91,27 @@ type Router struct {
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 }
 
+type routerDeps struct {
+	scheduler          scheduler.Scheduler
+	buildDecodeRequest func(*gin.Context, *http.Request, ModelRequest) *http.Request
+	isStreaming        func(ModelRequest) bool
+	proxyRequest       func(*gin.Context, *http.Request, string, int32, bool, func(handlers.OpenAIResponse)) error
+}
+
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
+	routerConfig, err := conf.ParseRouterConfig(routerConfigPath)
+	if err != nil {
+		klog.Fatalf("failed to parse router config: %v", err)
+	}
+
+	return newRouterWithDeps(store, routerConfig, nil)
+}
+
+func newRouterWithDeps(store datastore.Store, routerConfig *conf.RouterConfiguration, deps *routerDeps) *Router {
+	if deps == nil {
+		deps = &routerDeps{}
+	}
+
 	// Create a unified rate limiter for all models
 	loadRateLimiter := ratelimit.NewTokenRateLimiter()
 
@@ -116,11 +139,6 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 			loadRateLimiter.DeleteLimiter(data.ModelName)
 		}
 	})
-
-	routerConfig, err := conf.ParseRouterConfig(routerConfigPath)
-	if err != nil {
-		klog.Fatalf("failed to parse router config: %v", err)
-	}
 
 	// Initialize access logger with configuration from environment variables
 	accessLogConfig := &accesslog.AccessLoggerConfig{
@@ -153,18 +171,43 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
 
+	schedulerImpl := deps.scheduler
+	if schedulerImpl == nil {
+		schedulerImpl = scheduler.NewScheduler(store, routerConfig)
+	}
+
+	buildDecodeRequest := deps.buildDecodeRequest
+	if buildDecodeRequest == nil {
+		buildDecodeRequest = func(c *gin.Context, req *http.Request, modelRequest ModelRequest) *http.Request {
+			return connectors.BuildDecodeRequest(c, req, map[string]interface{}(modelRequest))
+		}
+	}
+
+	streamingDetector := deps.isStreaming
+	if streamingDetector == nil {
+		streamingDetector = isStreaming
+	}
+
+	proxyRequestFunc := deps.proxyRequest
+	if proxyRequestFunc == nil {
+		proxyRequestFunc = proxyRequest
+	}
+
 	return &Router{
-		store:            store,
-		scheduler:        scheduler.NewScheduler(store, routerConfig),
-		authenticator:    auth.NewJWTAuthenticator(routerConfig),
-		loadRateLimiter:  loadRateLimiter,
-		accessLogger:     accessLogger,
-		metrics:          metricsInstance,
-		tokenizer:        tokenizerInstance,
-		connectorFactory: connectors.NewDefaultFactory(),
-		fairnessTimeout:  parseFairnessTimeout(),
-		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
-		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+		store:              store,
+		scheduler:          schedulerImpl,
+		authenticator:      auth.NewJWTAuthenticator(routerConfig),
+		loadRateLimiter:    loadRateLimiter,
+		accessLogger:       accessLogger,
+		metrics:            metricsInstance,
+		tokenizer:          tokenizerInstance,
+		connectorFactory:   connectors.NewDefaultFactory(),
+		buildDecodeRequest: buildDecodeRequest,
+		isStreaming:        streamingDetector,
+		proxyRequest:       proxyRequestFunc,
+		fairnessTimeout:    parseFairnessTimeout(),
+		tokenWeight:        parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
+		requestNumWeight:   parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
 }
 
@@ -683,7 +726,7 @@ func (r *Router) proxy(
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, ctx.BestPods[i].Pod.Status.PodIP, port, stream, onUsage)
+		err := r.proxyRequest(c, req, ctx.BestPods[i].Pod.Status.PodIP, port, stream, onUsage)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
@@ -693,7 +736,7 @@ func (r *Router) proxy(
 			continue
 		}
 		// record in prefix cache
-		r.scheduler.RunPostHooks(ctx, i)
+		r.runPostHooks(ctx, i)
 		return nil
 	}
 	c.AbortWithStatusJSON(http.StatusNotFound, "request to all pods failed")
@@ -720,9 +763,9 @@ func (r *Router) proxyModelEndpoint(
 
 	// proxy to pd aggregated pod
 	if ctx.BestPods != nil {
-		decodeRequest := connectors.BuildDecodeRequest(c, req, modelRequest)
+		decodeRequest := r.buildDecodeRequest(c, req, modelRequest)
 		// build request
-		stream := isStreaming(modelRequest)
+		stream := r.isStreaming(modelRequest)
 		userID := ""
 		if v, ok := modelRequest["userId"].(string); ok {
 			userID = v
@@ -992,7 +1035,7 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 
 		// Record successful operation in cache
-		r.scheduler.RunPostHooks(ctx, i)
+		r.runPostHooks(ctx, i)
 
 		klog.V(4).Infof("kv connector run successful for prefill pod %s, decode pod %s, output tokens: %d",
 			ctx.PrefillPods[i].Pod.Name, ctx.DecodePods[i].Pod.Name, outputTokens)
@@ -1002,6 +1045,13 @@ func (r *Router) proxyToPDDisaggregated(
 
 	c.AbortWithStatusJSON(http.StatusInternalServerError, "all prefill/decode attempts failed")
 	return fmt.Errorf("all prefill/decode attempts failed")
+}
+
+func (r *Router) runPostHooks(ctx *framework.Context, index int) {
+	if r.scheduler == nil {
+		return
+	}
+	r.scheduler.RunPostHooks(ctx, index)
 }
 
 // handleFairnessScheduling handles the fairness scheduling flow for requests
