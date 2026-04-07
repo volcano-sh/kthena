@@ -4,6 +4,9 @@ kind: ModelServing
 metadata:
   name: my-model
   namespace: kthena-system
+  annotations:
+    # Identifies the model for metrics-based autoscaling (must match Prometheus "model" label).
+    kthena.io/model-name: "my-model"
 spec:
   schedulerName: volcano
   replicas: 1
