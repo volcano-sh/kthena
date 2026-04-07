@@ -2020,17 +2020,17 @@ func TestScaleUpServingGroups(t *testing.T) {
 			expectNoCreation:   false,
 		},
 		{
-			name:               "scale up with gap in indices - should use increasing indices from max",
-			existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing
-			expectedCount:      4,
-			expectedNewIndices: []int{6, 7}, // Should continue from max index (5) + 1
+			name:               "scale up fills missing ordinals inside replica range",
+			existingIndices:    []int{0, 1, 2, 4},
+			expectedCount:      5,
+			expectedNewIndices: []int{3},
 			expectNoCreation:   false,
 		},
 		{
-			name:               "scale up with only high index existing",
-			existingIndices:    []int{10},
-			expectedCount:      3,
-			expectedNewIndices: []int{11, 12}, // Should continue from max index (10) + 1
+			name:               "scale up fills low ordinals when only a high index exists",
+			existingIndices:    []int{2},
+			expectedCount:      4,
+			expectedNewIndices: []int{0, 1, 3},
 			expectNoCreation:   false,
 		},
 		{
