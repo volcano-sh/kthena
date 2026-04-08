@@ -22,89 +22,83 @@ LLM inference traffic is bursty. Without autoscaling, you either overprovision G
 
 Kthena already has an autoscaler (`AutoscalingPolicy` + `AutoscalingPolicyBinding`). It scrapes metrics from pod endpoints, has panic mode, supports heterogeneous cost-optimized scaling. Works fine for pod-level signals like `kthena:num_requests_waiting`.
 
-Where it falls short:
+Where it falls short for some teams:
 
-1. **Can't talk to Prometheus.** It scrapes pods directly. Most teams already have Prometheus running -- the autoscaler can't use it.
+1. **Can't talk to Prometheus.** It scrapes pods directly. Teams that already have Prometheus running can't leverage their existing observability stack for autoscaling.
 
-2. **No per-model demand signal.** The router exposes `kthena_router_active_downstream_requests{model="..."}` which tells you how much traffic a model is getting *before* it hits backends. The built-in autoscaler doesn't use this.
+2. **No per-model demand signal from the router.** The router can expose metrics labeled by model, giving visibility into demand *before* it hits backends. The built-in autoscaler doesn't use this.
 
-3. **Extra moving parts.** Teams already running KEDA end up maintaining two autoscaling systems side by side.
+3. **Redundant tooling for KEDA users.** Teams already running KEDA for other workloads end up maintaining two autoscaling systems side by side.
 
-The goal here is to add KEDA as an optional autoscaling path. We're not touching AutoscalingPolicy.
+This proposal adds KEDA as an **optional** autoscaling path for teams that already use Prometheus and KEDA. It does not touch or replace `AutoscalingPolicy`.
 
-### Non-goals
+---
+
+## 2. Scope
+
+### What this proposal covers (Phase 1)
+
+- Fix `status.labelSelector` so HPA can target ModelServing ([#839](https://github.com/volcano-sh/kthena/pull/839))
+- Provide example manifests for KEDA ScaledObject + ServiceMonitor
+- Helm chart templates behind opt-in feature flags
+- Document how to map a model name to a ModelServing CR using annotations
+
+### What this proposal does NOT cover
 
 - Modifying or replacing `AutoscalingPolicy` / `AutoscalingPolicyBinding`
 - Building a custom metrics adapter
 - Multi-model-per-ModelServing (we assume 1:1)
 - Role-level scaling via KEDA (built-in autoscaler handles that with `subTargets.kind: Role`)
-- Auto-generating ScaledObjects (Phase 3 at earliest)
+- Auto-generating ScaledObjects from ModelServing CRs
+- Validation webhooks for autoscaler conflict detection
+
+These are deferred to Phase 2/3 (see [Future Work](#7-future-work)).
 
 ---
 
-## 2. Proposed Approach
+## 3. Design
 
 ### Architecture
 
-```
-                    ┌─────────────┐
-                    │ Prometheus   │
-                    │ (scrapes     │
-                    │  router)     │
-                    └──────┬──────┘
-                           │ PromQL query
-                    ┌──────▼──────┐
-                    │    KEDA      │
-                    │ ScaledObject │
-                    └──────┬──────┘
-                           │ creates/manages
-                    ┌──────▼──────┐
-                    │     HPA      │
-                    │ (targets     │
-                    │  scale       │
-                    │  subresource)│
-                    └──────┬──────┘
-                           │ PATCH spec.replicas
-                    ┌──────▼──────┐
-                    │ ModelServing │
-                    │  Controller  │
-                    └──────┬──────┘
-                           │ creates/deletes
-                    ┌──────▼──────┐
-                    │ ServingGroups│
-                    │  + Pods      │
-                    └─────────────┘
+```mermaid
+flowchart TD
+    P["Prometheus\n(scrapes router)"]
+    K["KEDA ScaledObject\n(PromQL trigger)"]
+    H["HPA\n(targets scale subresource)"]
+    M["ModelServing Controller"]
+    S["ServingGroups + Pods"]
+
+    P -->|PromQL query| K
+    K -->|creates / manages| H
+    H -->|"PATCH spec.replicas"| M
+    M -->|creates / deletes| S
 ```
 
-### Scale-up flow at runtime
+### Scale-up flow
 
-```
-  User traffic              Router               Prometheus           KEDA              HPA             ModelServing
-       │                      │                      │                 │                 │                    │
-       │── requests ─────────►│                      │                 │                 │                    │
-       │                      │── active_downstream  │                 │                 │                    │
-       │                      │   _requests = 12 ───►│                 │                 │                    │
-       │                      │                      │                 │                 │                    │
-       │                      │                      │◄── PromQL ──────│                 │                    │
-       │                      │                      │── returns 12 ──►│                 │                    │
-       │                      │                      │                 │                 │                    │
-       │                      │                      │                 │── update ──────►│                    │
-       │                      │                      │                 │   external      │                    │
-       │                      │                      │                 │   metric        │                    │
-       │                      │                      │                 │                 │                    │
-       │                      │                      │                 │                 │── PATCH ──────────►│
-       │                      │                      │                 │                 │   spec.replicas=3  │
-       │                      │                      │                 │                 │                    │
-       │                      │                      │                 │                 │                    │── create
-       │                      │                      │                 │                 │                    │   ServingGroups
-       │                      │                      │                 │                 │                    │   + pods
+```mermaid
+sequenceDiagram
+    participant U as User Traffic
+    participant R as Router
+    participant P as Prometheus
+    participant K as KEDA
+    participant H as HPA
+    participant M as ModelServing
+
+    U->>R: requests
+    R->>P: exposes metrics (e.g. active requests)
+    K->>P: PromQL query
+    P-->>K: returns metric value
+    K->>H: updates external metric
+    H->>M: PATCH spec.replicas
+    M->>M: creates/deletes ServingGroups + Pods
 ```
 
 ### How it works
 
-1. Prometheus scrapes the router, collects `kthena_router_active_downstream_requests{model="..."}`.
-2. KEDA ScaledObject runs a PromQL query scoped to a specific model, targeting a ModelServing CR.
-3. KEDA spins up an HPA pointing at the ModelServing scale subresource.
+1. Prometheus scrapes the router (or any instrumented component) and collects metrics labeled by model.
+2. A KEDA ScaledObject runs a PromQL query scoped to a specific model, targeting a ModelServing CR.
+3. KEDA creates an HPA pointing at the ModelServing scale subresource.
 4. HPA reads `status.replicas` + `status.labelSelector`, patches `spec.replicas` when it needs to scale.
 5. ModelServing controller sees the change, creates or deletes ServingGroups via `manageServingGroupReplicas()`.
 
@@ -128,41 +122,53 @@ One catch: the controller wasn't populating `status.labelSelector`. HPA couldn't
 
 ### Metrics
 
-Primary metric -- per-model active requests from the router:
+KEDA's Prometheus trigger accepts **any valid PromQL query**. The metric used for scaling is not prescribed -- teams choose whatever signal best reflects demand for their workload.
 
-```promql
-sum(kthena_router_active_downstream_requests{model="my-llama-model"})
+Common examples:
+
+| Signal | Example PromQL | When to use |
+|--------|---------------|-------------|
+| Active requests | `sum(metric{model="<model-name>"})` | General demand-based scaling |
+| Request rate | `sum(rate(metric{model="<model-name>"}[2m]))` | Throughput-based scaling |
+| Queue depth | `sum(queue_metric{model="<model-name>"})` | Backpressure-based scaling |
+
+The key point is that the query should be **scoped to a specific model** (via a label filter) so that scaling decisions are isolated per model.
+
+### Model-to-ModelServing mapping
+
+**How do you map a model to a ModelServing CR?**
+
+We introduce a standard annotation on the ModelServing resource:
+
+```yaml
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: <deployment-name>
+  annotations:
+    kthena.io/model-name: "<model-name>"
 ```
 
-This is a Gauge on active client-to-router requests, labeled by `model`. It tells you how much demand a model is seeing before requests even reach backends -- better signal than backend saturation for scaling decisions.
+This annotation serves as a **user-defined** declaration of which routing-level model name this ModelServing instance handles. It is not consumed by any controller in Phase 1 -- it's a convention that operators use when writing their ScaledObject's PromQL query. The `model` label in the query should match the value of this annotation.
 
-Other metrics we can use later:
+The mapping is intentionally manual. Operators know their routing topology and which model name maps to which backend.
 
-| Metric | Source | Use case |
-|--------|--------|----------|
-| `kthena_router_active_upstream_requests` | Router | In-flight requests to backends |
-| `kthena_router_fairness_queue_size` | Router | Queued requests per model/user |
-| vLLM `num_requests_waiting` | Backend pods | Backend queue depth |
+### Decoupling of model identity
 
-Combining multiple metrics (router + backend) is future work.
+The model name seen by the router (the name clients use in requests) may differ from the model name or identifier used by the backend inference engine. For example:
 
-### What we learned building the prototype
+- Router sees: `my-llama-model` (the name clients send in API calls)
+- Backend runs: `meta-llama/Llama-3-70B-Instruct` (the HuggingFace model ID)
 
-We ran the full flow on a KIND cluster before writing this. Some stuff that came up:
+The `kthena.io/model-name` annotation represents the **routing-level identity** -- the name that appears in Prometheus metrics exposed by the router. Autoscaling decisions are based on router-level demand, so the annotation should match the router's model label, not the backend's internal model name.
 
-1. **labelSelector was the blocker.** The CRD had the scale subresource defined correctly, but the controller never set `status.labelSelector`. KEDA created the HPA just fine, HPA couldn't find any pods. Took a while to figure out because the error (`selector is required`) doesn't point you to the right place. [#839](https://github.com/volcano-sh/kthena/pull/839) fixes this.
-
-2. **KEDA needed zero patches.** Point a ScaledObject at ModelServing, KEDA creates the HPA, HPA uses the scale subresource. All config, no code changes on KEDA's side.
-
-3. **Global metrics were our first attempt and they didn't work.** We started with `sum(kthena_router_active_downstream_requests)` (no model filter). Worked, but a spike on one model scaled everything. Per-model queries fixed it -- one-line change, big difference.
-
-4. **End-to-end latency is ~60s worst case.** Prometheus scrape (15s) + KEDA poll (30s) + HPA sync (15s). For LLM workloads where loading a model takes minutes anyway, this is fine.
+This is a deliberate design choice: we scale based on what the router sees (demand), not what the backend reports (capacity). Backend-level metrics can be added as supplementary triggers in the future.
 
 ---
 
-## 3. Key Design Decisions
+## 4. Key Design Decisions
 
-### 3.1 Why KEDA instead of extending AutoscalingPolicy
+### 4.1 Why KEDA instead of extending AutoscalingPolicy
 
 | | AutoscalingPolicy | KEDA + Prometheus |
 |--|-------------------|-------------------|
@@ -173,13 +179,13 @@ We ran the full flow on a KIND cluster before writing this. Some stuff that came
 | Panic mode | Yes | No |
 | Heterogeneous scaling | Yes | No |
 
-We're adding KEDA as another option, not replacing anything. Teams pick what fits their setup.
+We're adding KEDA as another option, not replacing anything. This integration is most useful for teams that already have KEDA and Prometheus in their cluster. Teams without KEDA should continue using AutoscalingPolicy.
 
-### 3.2 Why per-model metric scoping
+### 4.2 Why per-model metric scoping
 
-One ModelServing = one model (typically). Without filtering by model in the PromQL query, a spike on `model-A` would scale `model-B` too. The `model` label on router metrics makes scoping trivial -- each ScaledObject just queries for its model.
+One ModelServing = one model (typically). Without filtering by model in the PromQL query, a spike on `model-A` would scale `model-B` too. Scoping the query by model label isolates scaling decisions -- each ScaledObject queries for its model only.
 
-### 3.3 How ModelServing is targeted
+### 4.3 How ModelServing is targeted
 
 ScaledObject points at ModelServing directly:
 
@@ -187,46 +193,48 @@ ScaledObject points at ModelServing directly:
 scaleTargetRef:
   apiVersion: workload.serving.volcano.sh/v1alpha1
   kind: ModelServing
-  name: my-model-serving
+  name: <deployment-name>
 ```
 
 KEDA creates an HPA that hits the `/scale` subresource -- same as Deployments, StatefulSets. Nothing custom.
 
-### 3.4 Why labelSelector matters
+### 4.4 Why labelSelector matters
 
 HPA needs `status.labelSelector` to count pods and compute scaling ratios. If it's empty, HPA sees 0 pods and scaling goes sideways. The selector has to match all pods in the CR's ServingGroups.
 
+### 4.5 Cooldown period for LLM workloads
+
+LLM inference pods have slow startup times (model loading can take 30s to 5+ minutes). Aggressive scale-down is harmful -- removing a pod that just finished loading wastes the GPU time spent on initialization. We recommend a `cooldownPeriod` of **300 seconds** (5 minutes) as a starting point. Tune based on your model's load time.
+
 ---
 
-## 4. Alternatives Considered
+## 5. Alternatives Considered
 
-### 4.1 Using only AutoscalingPolicy CRD
+### 5.1 Using only AutoscalingPolicy CRD
 
 Has panic mode and heterogeneous scaling, which are nice. But it can't query Prometheus, can't scope by model from the router, and bolting Prometheus support onto it would just be reinventing KEDA. Keep both -- they cover different use cases.
 
-### 4.2 CPU/memory-based scaling
+### 5.2 CPU/memory-based scaling
 
 Doesn't work for LLM inference. It's GPU-bound, and GPU util is a misleading signal -- a model at 30% GPU util can be completely saturated if KV-cache is full. Request-based metrics are what you actually want.
 
-### 4.3 Global (non per-model) metrics
+### 5.3 Global (non per-model) metrics
 
-`sum(kthena_router_active_downstream_requests)` without a model filter -- simpler, but one model's spike scales everything. Wastes GPUs on models that don't need capacity.
-
-Per-model scoping is a must for multi-model setups.
+Aggregating metrics without a model filter is simpler, but one model's spike scales everything. Wastes GPUs on models that don't need capacity. Per-model scoping is a must for multi-model setups.
 
 ---
 
-## 5. Failure Modes
+## 6. Failure Modes
 
 What breaks and what happens:
 
 | Failure | What happens | What to do |
 |---------|-------------|------------|
-| **Prometheus goes down** | KEDA can't get metrics, scaling freezes at current count | Use KEDA's `fallback` config (see below) to hold at a safe replica count |
+| **Prometheus goes down** | KEDA can't get metrics, scaling freezes at current count | Use KEDA's `fallback` config to hold at a safe replica count |
 | **Router pod restarts** | Metrics gap for a scrape interval or two | Run multiple router replicas. `sum()` still works with partial data |
-| **KEDA operator dies** | HPA stops getting updates, but the existing HPA keeps running -- kube-controller-manager owns it | Run KEDA with 2+ replicas. Active scaling continues even without KEDA for a while |
-| **Both autoscalers target same CR** | They fight over `spec.replicas`, replicas oscillate | Don't do this. Phase 2 adds a webhook to prevent it |
-| **Bad PromQL query** (wrong model name) | Returns 0, may scale down to `minReplicaCount` | Check your query returns data before applying the ScaledObject |
+| **KEDA operator dies** | HPA stops getting updates, but the existing HPA keeps running -- kube-controller-manager owns it | Run KEDA with 2+ replicas |
+| **Both autoscalers target same CR** | They fight over `spec.replicas`, replicas oscillate | Don't do this. Document the constraint; Phase 2 adds a webhook to prevent it |
+| **Bad PromQL query** (wrong model name) | Returns 0, may scale down to `minReplicaCount` | Verify the query returns data before applying the ScaledObject |
 
 Most failures just freeze scaling where it is -- you don't get runaway scaling. The `fallback` config handles the Prometheus-down case:
 
@@ -238,38 +246,24 @@ fallback:
 
 ---
 
-## 6. Open Questions / Future Work
+## 7. Future Work
 
-### Model name to ModelServing CR mapping
+### Phase 2: Hardening
 
-Right now operators have to manually match the `model` label in the PromQL query to the correct ModelServing CR. Easy to mess up.
+- Validation webhook to block AutoscalingPolicy + KEDA targeting the same CR
+- Recommended thresholds based on production data
+- Multi-trigger ScaledObject examples (combining router demand + backend saturation)
 
-We should add a `kthena.io/model-name` annotation on ModelServing. Doesn't need a new controller -- just a standard place to record the mapping. We can build tooling on top of it later if auto-generating ScaledObjects makes sense.
+### Phase 3: If there's demand
 
-### Multi-metric scaling
-
-KEDA can take multiple triggers per ScaledObject (picks the highest recommendation). We could combine router demand with backend capacity:
-
-```
-trigger 1: kthena_router_active_downstream_requests{model="X"}  (demand)
-trigger 2: vllm_num_requests_waiting                              (saturation)
-```
-
-Not blocking Phase 1 on this. We need real-world threshold data before we can write good defaults for multi-trigger configs.
-
-### Scale-to-zero
-
-KEDA supports it, but LLM model loading takes 30s to 5min. For dev/staging, `minReplicaCount: 0` is fine. For production, keep it at 1 until we have model preloading or some kind of warm cache.
-
-### Conflict with existing autoscaler
-
-If AutoscalingPolicy and KEDA both target the same ModelServing, they'll fight over `spec.replicas`. For now we just document that you shouldn't do this. In Phase 2 we add a validation webhook to block it.
+- Controller that auto-generates ScaledObjects from annotated ModelServing CRs
+- Scale-to-zero support for dev/staging environments
+- Grafana dashboard for scaling decisions
+- Custom metrics adapter (if KEDA proves too heavy for some environments)
 
 ---
 
-## 7. Rollout Plan
-
-### Phase 1: Foundation (PRs already open)
+## 8. Rollout Plan (Phase 1)
 
 - [#839](https://github.com/volcano-sh/kthena/pull/839): Controller fix for `status.labelSelector`. This is the blocker -- nothing works without it.
 - [#831](https://github.com/volcano-sh/kthena/pull/831): Example manifests (ServiceMonitor, PodMonitor, ScaledObject) in `examples/keda-autoscaling/`.
@@ -279,22 +273,23 @@ Merge #839 first, then #831 and #836 in any order.
 
 After this, users can set up KEDA autoscaling with per-model Prometheus metrics. Everything is opt-in, existing setups are unaffected.
 
-### Phase 2: Hardening
-
-- `kthena.io/model-name` annotation on ModelServing
-- Validation webhook to block AutoscalingPolicy + KEDA on the same CR
-- Recommended thresholds based on production data
-- Multi-trigger ScaledObject examples
-
-### Phase 3: If there's demand
-
-- Controller that auto-generates ScaledObjects from annotated ModelServing CRs
-- Scale-to-zero for dev/staging
-- Grafana dashboard for scaling decisions
-
 ---
 
-## 8. Example Configuration
+## 9. Example Configuration
+
+### ModelServing with model annotation
+
+```yaml
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: <deployment-name>
+  annotations:
+    kthena.io/model-name: "<model-name>"
+spec:
+  replicas: 1
+  # ... rest of spec
+```
 
 ### Minimal ScaledObject
 
@@ -302,40 +297,30 @@ After this, users can set up KEDA autoscaling with per-model Prometheus metrics.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: my-model-autoscaler
+  name: <deployment-name>-autoscaler
   namespace: default
 spec:
   scaleTargetRef:
     apiVersion: workload.serving.volcano.sh/v1alpha1
     kind: ModelServing
-    name: my-model-serving
+    name: <deployment-name>
   minReplicaCount: 1
   maxReplicaCount: 10
-  cooldownPeriod: 60
+  cooldownPeriod: 300
+  fallback:
+    failureThreshold: 3
+    replicas: 2
   triggers:
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus.monitoring.svc:9090
+        serverAddress: <prometheus-url>
         query: |
-          sum(kthena_router_active_downstream_requests{model="my-llama-model"})
+          sum(your_metric{model="<model-name>"})
         threshold: "5"
         activationThreshold: "1"
 ```
 
-Scales `ModelServing/my-model-serving` via its scale subresource. Scales up when active requests per replica go above 5, stays between 1-10 replicas, cools down for 60s before scaling back.
-
-### Per-model query examples
-
-```promql
-# Active requests (how much demand right now)
-sum(kthena_router_active_downstream_requests{model="my-llama-model"})
-
-# Request rate (req/s over 2 minutes)
-sum(rate(kthena_router_requests_total{model="my-llama-model"}[2m]))
-
-# Queue depth
-sum(kthena_router_fairness_queue_size{model="my-llama-model"})
-```
+Scales `ModelServing/<deployment-name>` via its scale subresource. Scales up when the metric value per replica exceeds the threshold, stays between 1-10 replicas, and waits 300s (5 minutes) before scaling down -- important because LLM pods have slow startup times and aggressive scale-down wastes initialization work.
 
 ### Prerequisites
 
@@ -357,3 +342,17 @@ rules:
     resources: ["modelservings"]
     verbs: ["get", "list", "watch"]
 ```
+
+---
+
+## 10. What we learned building the prototype
+
+We ran the full flow on a KIND cluster before writing this. Key takeaways:
+
+1. **labelSelector was the blocker.** The CRD had the scale subresource defined correctly, but the controller never set `status.labelSelector`. KEDA created the HPA just fine, HPA couldn't find any pods. Took a while to figure out because the error (`selector is required`) doesn't point you to the right place. [#839](https://github.com/volcano-sh/kthena/pull/839) fixes this.
+
+2. **KEDA needed zero patches.** Point a ScaledObject at ModelServing, KEDA creates the HPA, HPA uses the scale subresource. All config, no code changes on KEDA's side.
+
+3. **Global metrics were our first attempt and they didn't work.** We started with an unscoped aggregation (no model filter). Worked, but a spike on one model scaled everything. Per-model queries fixed it.
+
+4. **End-to-end latency is ~60s worst case.** Prometheus scrape (15s) + KEDA poll (30s) + HPA sync (15s). For LLM workloads where loading a model takes minutes anyway, this is fine.
