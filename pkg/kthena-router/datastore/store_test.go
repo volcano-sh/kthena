@@ -1466,8 +1466,8 @@ func TestStoreMatchModelServer(t *testing.T) {
 }
 
 type fakePodRuntimeInspector struct {
-	metricsFn func(string, *corev1.Pod, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
-	modelsFn  func(string, *corev1.Pod) ([]string, error)
+	metricsFn    func(string, *corev1.Pod, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	modelsFn     func(string, *corev1.Pod) ([]string, error)
 	metricsCalls int
 	modelsCalls  int
 }
