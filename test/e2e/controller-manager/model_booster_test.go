@@ -95,7 +95,7 @@ func createTestModel() *workload.ModelBooster {
 				Workers: []workload.ModelWorker{
 					{
 						Type:      workload.ModelWorkerTypeServer,
-						Image:     "ghcr.io/huntersman/vllm-cpu-env:latest",
+						Image:     "ghcr.io/volcano-sh/vllm-mock:latest",
 						Replicas:  1,
 						Pods:      1,
 						Config:    *config,
@@ -136,7 +136,7 @@ func createInvalidModel() *workload.ModelBooster {
 				Workers: []workload.ModelWorker{
 					{
 						Type:      workload.ModelWorkerTypeServer,
-						Image:     "ghcr.io/huntersman/vllm-cpu-env:latest",
+						Image:     "ghcr.io/volcano-sh/vllm-mock:latest",
 						Replicas:  1,
 						Pods:      1,
 						Config:    *config,
