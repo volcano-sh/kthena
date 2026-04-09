@@ -1173,8 +1173,12 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 
 	previousHistogram := getPreviousHistogram(pod)
 	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(pod.engine, pod.Pod, previousHistogram)
-	updateGaugeMetricsInfo(pod, gaugeMetrics)
-	updateHistogramMetrics(pod, histogramMetrics)
+	if gaugeMetrics != nil {
+		updateGaugeMetricsInfo(pod, gaugeMetrics)
+	}
+	if histogramMetrics != nil {
+		updateHistogramMetrics(pod, histogramMetrics)
+	}
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) {
