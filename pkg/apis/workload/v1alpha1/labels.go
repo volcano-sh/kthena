@@ -32,8 +32,4 @@ const (
 	RevisionLabelKey = "modelserving.volcano.sh/revision"
 	// RoleTemplateHashLabelKey is the revision label for the role, used for RoleRollingUpdate strategy.
 	RoleTemplateHashLabelKey = "modelserving.volcano.sh/role-template-hash"
-
-	// ModelNameAnnotationKey is the annotation key on ModelServing CR that, when present,
-	// is propagated as a pod label to all pods created for that ModelServing.
-	ModelNameAnnotationKey = "kthena.io/model-name"
 )

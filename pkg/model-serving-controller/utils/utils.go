@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -124,7 +123,7 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 }
 
 func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, revision, roleTemplateHash string, roleIndex int) *corev1.Pod {
-	pod := &corev1.Pod{
+	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
 			APIVersion: "v1",
@@ -145,20 +144,6 @@ func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing
 			},
 		},
 	}
-
-	// Propagate model-name annotation from ModelServing CR to pod label.
-	// Role template labels (applied later via addPodLabelAndAnnotation) take precedence
-	// if they set the same key.
-	if modelName, ok := ms.Annotations[workloadv1alpha1.ModelNameAnnotationKey]; ok && modelName != "" {
-		if errs := validation.IsValidLabelValue(modelName); len(errs) > 0 {
-			klog.V(4).Infof("Skipping label propagation for %s/%s: annotation value %q is not a valid label value: %v",
-				ms.Namespace, ms.Name, modelName, errs)
-		} else if _, exists := pod.Labels[workloadv1alpha1.ModelNameAnnotationKey]; !exists {
-			pod.Labels[workloadv1alpha1.ModelNameAnnotationKey] = modelName
-		}
-	}
-
-	return pod
 }
 
 func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metadata) {
