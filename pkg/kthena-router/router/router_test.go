@@ -19,7 +19,6 @@ package router
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -40,12 +39,8 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/handlers"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
 func TestMain(m *testing.M) {
@@ -57,130 +52,21 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-type fakeScheduler struct {
-	runPostHooks func(ctx *framework.Context, index int)
-}
-
-func (f *fakeScheduler) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
-	return nil
-}
-
-func (f *fakeScheduler) RunPostHooks(ctx *framework.Context, index int) {
-	if f.runPostHooks != nil {
-		f.runPostHooks(ctx, index)
-	}
-}
-
-func mustLoadTestRouterConfig(t *testing.T) *conf.RouterConfiguration {
-	t.Helper()
-
-	routerConfig, err := conf.ParseRouterConfig("../scheduler/testdata/configmap.yaml")
-	if err != nil {
-		t.Fatalf("failed to parse router config: %v", err)
-	}
-
-	return routerConfig
-}
-
-func newTestRouterWithDeps(t *testing.T, store datastore.Store, deps *routerDeps) *Router {
-	t.Helper()
-	return newRouterWithDeps(store, mustLoadTestRouterConfig(t), deps)
-}
-
-func buildPodInfo(name string, ip string) *datastore.PodInfo {
-	pod := &corev1.Pod{
-		ObjectMeta: v1.ObjectMeta{
-			Name: name,
-		},
-		Status: corev1.PodStatus{
-			PodIP: ip,
-		},
-	}
-
-	return &datastore.PodInfo{
-		Pod: pod,
-	}
-}
-
-func TestProxyModelEndpoint(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	modelReq := ModelRequest{"model": "test"}
-
-	tests := []struct {
-		name              string
-		ctx               *framework.Context
-		proxyErr          error
-		wantErr           error
-		wantPostHookCalls int
-	}{
-		{
-			name: "BestPods are set, aggregated mode success",
-			ctx: &framework.Context{
-				Model:    "test",
-				Prompt:   common.ChatMessage{Text: "test"},
-				BestPods: []*datastore.PodInfo{buildPodInfo("decode1", "1.1.1.1")},
-			},
-			wantErr:           nil,
-			wantPostHookCalls: 1,
-		},
-		{
-			name: "BestPods proxy returns error",
-			ctx: &framework.Context{
-				Model:    "test",
-				Prompt:   common.ChatMessage{Text: "test"},
-				BestPods: []*datastore.PodInfo{buildPodInfo("decode1", "1.1.1.1")},
-			},
-			proxyErr:          errors.New("proxy error"),
-			wantErr:           errors.New("request to all pods failed"),
-			wantPostHookCalls: 0,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c, _ := gin.CreateTestContext(httptest.NewRecorder())
-			req, _ := http.NewRequest("POST", "/", nil)
-			postHookCalls := 0
-			r := newTestRouterWithDeps(t, datastore.New(), &routerDeps{
-				scheduler: &fakeScheduler{
-					runPostHooks: func(ctx *framework.Context, index int) {
-						postHookCalls++
-					},
-				},
-				buildDecodeRequest: func(_ *gin.Context, req *http.Request, _ ModelRequest) *http.Request {
-					return req
-				},
-				isStreaming: func(modelRequest ModelRequest) bool {
-					return false
-				},
-				proxyRequest: func(_ *gin.Context, _ *http.Request, _ string, _ int32, _ bool, _ func(handlers.OpenAIResponse)) error {
-					return tt.proxyErr
-				},
-			})
-			err := r.proxyModelEndpoint(c, req, tt.ctx, modelReq, int32(8080))
-			if tt.wantErr != nil {
-				assert.Error(t, err)
-				assert.Equal(t, tt.wantErr.Error(), err.Error())
-			} else {
-				assert.NoError(t, err)
-			}
-			assert.Equal(t, tt.wantPostHookCalls, postHookCalls)
-		})
-	}
-}
-
 // setupTestRouter initializes a router and its dependencies for testing.
+// It uses a mock HTTP server as the backend, following the community's recommendation
+// to avoid hacky dependency injection.
 func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datastore.Store, *httptest.Server) {
 	gin.SetMode(gin.TestMode)
 
 	backend := httptest.NewServer(backendHandler)
 	store := datastore.New()
-	router := newTestRouterWithDeps(t, store, nil)
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
 
 	return router, store, backend
 }
 
 func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
-	// 1. Setup backend mock
+	// 1. Setup backend mock server
 	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
 		body, _ := io.ReadAll(r.Body)
@@ -246,7 +132,7 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 }
 
 func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
-	// 1. Setup backend mock
+	// 1. Setup backend mock server
 	prefillReqs := 0
 	decodeReqs := 0
 	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

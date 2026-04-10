@@ -66,12 +66,25 @@ const (
 	RoleIDKey    = "RoleID"
 )
 
+// PodGroupManager is the interface for managing PodGroups.
+// This interface allows for dependency injection in tests.
+type PodGroupManager interface {
+	CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration)
+	DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error
+	CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) error
+	HasPodGroupCRD() bool
+	GetPodGroupInformer() cache.SharedIndexInformer
+	Run(parentCtx context.Context) error
+	GenerateTaskName(roleName string, roleIndex int) string
+	AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing, groupName, taskName string)
+}
+
 type ModelServingController struct {
 	kubeClientSet      kubernetes.Interface
 	modelServingClient clientset.Interface
 
 	syncHandler           func(ctx context.Context, msKey string) error
-	podGroupManager       *podgroupmanager.Manager
+	podGroupManager       PodGroupManager
 	podsLister            listerv1.PodLister
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
@@ -86,6 +99,14 @@ type ModelServingController struct {
 	initialSync     bool     // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
+
+	// Test hooks - these are used for testing to avoid gomonkey
+	enqueueModelServingFunc               func(ms *workloadv1alpha1.ModelServing)
+	enqueueModelServingAfterFunc          func(ms *workloadv1alpha1.ModelServing, duration time.Duration)
+	getModelServingAndResourceDetailsFunc func(resource metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string)
+	shouldSkipHandlingFunc                func(ms *workloadv1alpha1.ModelServing, groupName string, resource metav1.Object) bool
+	handleDeletionInProgressFunc          func(ms *workloadv1alpha1.ModelServing, groupName string, roleName string, roleID string) bool
+	deleteRoleFunc                        func(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string)
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
@@ -472,6 +493,11 @@ func (c *ModelServingController) deletePodGroup(obj interface{}) {
 }
 
 func (c *ModelServingController) enqueueModelServing(ms *workloadv1alpha1.ModelServing) {
+	// Use injected function if available (for testing)
+	if c.enqueueModelServingFunc != nil {
+		c.enqueueModelServingFunc(ms)
+		return
+	}
 	var key string
 	var err error
 	if key, err = cache.MetaNamespaceKeyFunc(ms); err != nil {
@@ -482,6 +508,11 @@ func (c *ModelServingController) enqueueModelServing(ms *workloadv1alpha1.ModelS
 }
 
 func (c *ModelServingController) enqueueModelServingAfter(ms *workloadv1alpha1.ModelServing, duration time.Duration) {
+	// Use injected function if available (for testing)
+	if c.enqueueModelServingAfterFunc != nil {
+		c.enqueueModelServingAfterFunc(ms, duration)
+		return
+	}
 	var key string
 	var err error
 	if key, err = cache.MetaNamespaceKeyFunc(ms); err != nil {
@@ -982,6 +1013,10 @@ func (c *ModelServingController) emitRoleStatusEvent(
 }
 
 func (c *ModelServingController) getModelServingAndResourceDetails(resource metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
+	// Use injected function if available (for testing)
+	if c.getModelServingAndResourceDetailsFunc != nil {
+		return c.getModelServingAndResourceDetailsFunc(resource)
+	}
 	ms, servingGroupName, err := c.getModelServingByChildResource(resource)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -998,6 +1033,11 @@ func (c *ModelServingController) getModelServingAndResourceDetails(resource meta
 }
 
 func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) {
+	if c.deleteRoleFunc != nil {
+		c.deleteRoleFunc(ctx, ms, groupName, roleName, roleID)
+		return
+	}
+
 	selector := labels.SelectorFromSet(map[string]string{
 		workloadv1alpha1.GroupNameLabelKey: groupName,
 		workloadv1alpha1.RoleLabelKey:      roleName,
@@ -1490,6 +1530,10 @@ func (c *ModelServingController) getModelServingByChildResource(resource metav1.
 
 // shouldSkipHandling checks if a pod should be skipped based on owner mismatch or revision mismatch
 func (c *ModelServingController) shouldSkipHandling(ms *workloadv1alpha1.ModelServing, servingGroupName string, obj metav1.Object) bool {
+	// Use injected function if available (for testing)
+	if c.shouldSkipHandlingFunc != nil {
+		return c.shouldSkipHandlingFunc(ms, servingGroupName, obj)
+	}
 	if !utils.IsOwnedByModelServingWithUID(obj, ms.UID) {
 		// If the pod is not owned by the ModelServing, we do not need to handle it.
 		klog.V(4).Infof("object %s/%s maybe left from previous same named ModelServing %s/%s, skip handling",
@@ -1526,6 +1570,10 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 // handleDeletionInProgress checks and handles deletion states for ServingGroup or Role.
 // Returns true if the resource deletion is already in progress and the caller should stop further handling.
 func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {
+	// Use injected function if available (for testing)
+	if c.handleDeletionInProgressFunc != nil {
+		return c.handleDeletionInProgressFunc(ms, servingGroupName, roleName, roleID)
+	}
 	// check ServingGroup status
 	if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting {
 		// ServingGroup is already in the deletion process, only checking whether the deletion is completed
