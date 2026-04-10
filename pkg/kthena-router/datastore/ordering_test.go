@@ -20,7 +20,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agiledragon/gomonkey/v2"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/util/sets"
@@ -29,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -59,28 +57,24 @@ func createTestModelServer(namespace, name string, engine aiv1alpha1.InferenceEn
 	}
 }
 
-// Helper function to setup mock for backend calls
-func setupMockBackend() *gomonkey.Patches {
-	patch := gomonkey.NewPatches()
-	patch.ApplyFunc(backend.GetPodMetrics, func(backend string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-		return map[string]float64{
-			utils.GPUCacheUsage:     0.5,
-			utils.RequestWaitingNum: 10,
-			utils.RequestRunningNum: 5,
-		}, map[string]*dto.Histogram{}
-	})
-	patch.ApplyFunc(backend.GetPodModels, func(backend string, pod *corev1.Pod) ([]string, error) {
-		return []string{"test-model"}, nil
-	})
-	return patch
+func newStoreWithMockBackend() *store {
+	return New(WithPodRuntimeInspector(&fakePodRuntimeInspector{
+		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			return map[string]float64{
+				utils.GPUCacheUsage:     0.5,
+				utils.RequestWaitingNum: 10,
+				utils.RequestRunningNum: 5,
+			}, nil
+		},
+		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+			return []string{"test-model"}, nil
+		},
+	})).(*store)
 }
 
 // Test Case 1: ModelServer added first, then Pod
 func TestStore_AddModelServerFirst_ThenPod(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	// Step 1: Add ModelServer first
 	ms := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
@@ -117,10 +111,7 @@ func TestStore_AddModelServerFirst_ThenPod(t *testing.T) {
 // Test Case 2: Pod added first, then ModelServer
 // Note: Current implementation expects ModelServer to exist before Pod
 func TestStore_AddPodFirst_ThenModelServer(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	pod := createTestPod("default", "pod1")
@@ -155,10 +146,7 @@ func TestStore_AddPodFirst_ThenModelServer(t *testing.T) {
 
 // Test Case 3: Multiple Pods added with ModelServer
 func TestStore_MultiplePods_ThenModelServer(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	pod1 := createTestPod("default", "pod1")
@@ -198,10 +186,7 @@ func TestStore_MultiplePods_ThenModelServer(t *testing.T) {
 
 // Test Case 4: ModelServer with multiple Pods added together
 func TestStore_ModelServerWithMultiplePods_AddedTogether(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	pod1 := createTestPod("default", "pod1")
@@ -233,10 +218,7 @@ func TestStore_ModelServerWithMultiplePods_AddedTogether(t *testing.T) {
 
 // Test Case 5: Pod belongs to multiple ModelServers
 func TestStore_PodBelongsToMultipleModelServers(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms1 := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	ms2 := createTestModelServer("default", "model2", aiv1alpha1.VLLM)
@@ -272,10 +254,7 @@ func TestStore_PodBelongsToMultipleModelServers(t *testing.T) {
 
 // Test Case 6: Pod with multiple ModelServers
 func TestStore_PodWithMultipleModelServers_ThenAddModelServers(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms1 := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	ms2 := createTestModelServer("default", "model2", aiv1alpha1.VLLM)
@@ -318,10 +297,7 @@ func TestStore_PodWithMultipleModelServers_ThenAddModelServers(t *testing.T) {
 
 // Test Case 7: Update operations - changing Pod's ModelServer associations
 func TestStore_UpdatePodModelServerAssociations(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms1 := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	ms2 := createTestModelServer("default", "model2", aiv1alpha1.VLLM)
@@ -364,10 +340,7 @@ func TestStore_UpdatePodModelServerAssociations(t *testing.T) {
 
 // Test Case 8: Interleaved operations
 func TestStore_InterleavedOperations(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms1 := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	ms2 := createTestModelServer("default", "model2", aiv1alpha1.VLLM)
@@ -422,10 +395,7 @@ func TestStore_InterleavedOperations(t *testing.T) {
 
 // Test Case 9: Deletion scenarios
 func TestStore_DeletionScenarios(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	ms1 := createTestModelServer("default", "model1", aiv1alpha1.VLLM)
 	ms2 := createTestModelServer("default", "model2", aiv1alpha1.VLLM)
@@ -515,10 +485,7 @@ func TestStore_EdgeCases(t *testing.T) {
 
 // Test Case 11: random operations (simulated)
 func TestStore_RandomOperations(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
-	s := New().(*store)
+	s := newStoreWithMockBackend()
 
 	// Simulate rapid add/update operations that might happen concurrently
 	ms := createTestModelServer("default", "model1", aiv1alpha1.VLLM)

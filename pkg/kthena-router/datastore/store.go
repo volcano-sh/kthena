@@ -132,6 +132,32 @@ type EventData struct {
 // CallbackFunc is the type of function that can be registered as a callback
 type CallbackFunc func(data EventData)
 
+// PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
+type PodRuntimeInspector interface {
+	GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	GetPodModels(engine string, pod *corev1.Pod) ([]string, error)
+}
+
+type realPodRuntimeInspector struct{}
+
+func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	return backend.GetPodMetrics(engine, pod, previousHistogram)
+}
+
+func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
+	return backend.GetPodModels(engine, pod)
+}
+
+type Option func(*store)
+
+func WithPodRuntimeInspector(inspector PodRuntimeInspector) Option {
+	return func(s *store) {
+		if inspector != nil {
+			s.podRuntimeInspector = inspector
+		}
+	}
+}
+
 // Store is an interface for storing and retrieving data
 type Store interface {
 	// Add modelServer which are selected by modelServer.Spec.WorkloadSelector
@@ -282,12 +308,13 @@ type store struct {
 	// model -> RequestPriorityQueue
 	requestWaitingQueue sync.Map
 	tokenTracker        TokenTracker
+	podRuntimeInspector PodRuntimeInspector
 	rootCtx             context.Context // Lifecycle context for queue goroutines, set by Run()
 	fairnessQueueConfig FairnessQueueConfig
 }
 
-func New() Store {
-	return &store{
+func New(opts ...Option) Store {
+	s := &store{
 		modelServer:         sync.Map{},
 		pods:                sync.Map{},
 		routeInfo:           make(map[string]*modelRouteInfo),
@@ -303,8 +330,22 @@ func New() Store {
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
 		tokenTracker:        createTokenTracker(),
+		podRuntimeInspector: realPodRuntimeInspector{},
 		fairnessQueueConfig: createFairnessQueueConfig(),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
+}
+
+func (s *store) getPodRuntimeInspector() PodRuntimeInspector {
+	if s.podRuntimeInspector == nil {
+		return realPodRuntimeInspector{}
+	}
+	return s.podRuntimeInspector
 }
 
 // createFairnessQueueConfig reads fairness queue configuration from environment variables.
@@ -1131,9 +1172,13 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 	}
 
 	previousHistogram := getPreviousHistogram(pod)
-	gaugeMetrics, histogramMetrics := backend.GetPodMetrics(pod.engine, pod.Pod, previousHistogram)
-	updateGaugeMetricsInfo(pod, gaugeMetrics)
-	updateHistogramMetrics(pod, histogramMetrics)
+	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(pod.engine, pod.Pod, previousHistogram)
+	if gaugeMetrics != nil {
+		updateGaugeMetricsInfo(pod, gaugeMetrics)
+	}
+	if histogramMetrics != nil {
+		updateHistogramMetrics(pod, histogramMetrics)
+	}
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) {
@@ -1142,7 +1187,7 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 		return
 	}
 
-	models, err := backend.GetPodModels(podInfo.engine, podInfo.Pod)
+	models, err := s.getPodRuntimeInspector().GetPodModels(podInfo.engine, podInfo.Pod)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s", podInfo.Pod.GetNamespace(), podInfo.Pod.GetName())
 	}

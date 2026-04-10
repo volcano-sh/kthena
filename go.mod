@@ -3,7 +3,6 @@ module github.com/volcano-sh/kthena
 go 1.24.0
 
 require (
-	github.com/agiledragon/gomonkey/v2 v2.13.0
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/cespare/xxhash v1.1.0
 	github.com/gammazero/deque v1.0.0
