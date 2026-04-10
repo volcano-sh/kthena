@@ -749,16 +749,20 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		}
 	}
 
-	// Create new ServingGroups with increasing indices starting from the current max index + 1
-	toCreate := expectedCount - len(existingOrdinals)
-	klog.V(4).Infof("scaleUpServingGroups: toCreate=%d (expectedCount=%d, existingOrdinals=%d), startingIndex=%d, modelServing=%s",
-		toCreate, expectedCount, len(existingOrdinals), maxOrdinal+1, utils.GetNamespaceName(ms))
+	// Create missing ServingGroups for ordinals in [partition, expectedCount) using the new revision.
+	// Use dense ordinals [0,expectedCount) instead of appending from maxOrdinal+1 so that a gap
+	// left by rolling update (e.g. ordinals 0,1,2,4 after deleting 3) is filled at 3 instead of
+	// incorrectly creating maxOrdinal+1 (which would exceed replica bounds).
+	missingNewRevision := 0
+	for o := partition; o < expectedCount; o++ {
+		if !existingOrdinals[o] {
+			missingNewRevision++
+		}
+	}
+	klog.V(4).Infof("scaleUpServingGroups: missing ordinals in [%d,%d) with newRevision=%d, modelServing=%s",
+		partition, expectedCount, missingNewRevision, utils.GetNamespaceName(ms))
 
-	if toCreate > 0 {
-		startingIndex := maxOrdinal + 1
-
-		// Create ControllerRevision when scaling up with a new revision
-		// This is done once before the loop since newRevision and templateData are the same for all new groups
+	if missingNewRevision > 0 {
 		templateData := ms.Spec.Template.Roles
 		klog.V(4).Infof("scaleUpServingGroups: creating ControllerRevision for newRevision=%s, modelServing=%s", newRevision, utils.GetNamespaceName(ms))
 		_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, newRevision, templateData)
@@ -766,13 +770,16 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 			klog.Warningf("Failed to create ControllerRevision for new revision %s: %v", newRevision, err)
 		}
 
-		// Create new ServingGroups with increasing indices
-		for i := startingIndex; i < startingIndex+toCreate; i++ {
-			klog.V(4).Infof("scaleUpServingGroups: creating new ServingGroup at ordinal=%d with newRevision=%s for modelServing=%s", i, newRevision, utils.GetNamespaceName(ms))
-			// For newly created ServingGroups (ordinal >= partition), always use current template
-			if err := createServingGroup(i, newRevision, ms.Spec.Template.Roles); err != nil {
+		for ordinal := partition; ordinal < expectedCount; ordinal++ {
+			if existingOrdinals[ordinal] {
+				continue
+			}
+			klog.V(4).Infof("scaleUpServingGroups: creating new ServingGroup at ordinal=%d with newRevision=%s for modelServing=%s",
+				ordinal, newRevision, utils.GetNamespaceName(ms))
+			if err := createServingGroup(ordinal, newRevision, ms.Spec.Template.Roles); err != nil {
 				return err
 			}
+			existingOrdinals[ordinal] = true
 		}
 	}
 
@@ -786,13 +793,13 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
 	partition := c.getPartition(ms)
-	for index, servingGroup := range servingGroupList {
+	for _, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
 			continue
 		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
-		isPartitionProtected := partition > 0 && index < partition
+		isPartitionProtected := partition > 0 && servingGroupOrdinal < partition
 
 		rolesToManage := ms.Spec.Template.Roles
 		revisionToUse := newRevision
@@ -1078,11 +1085,18 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	// We prioritize updating not-running outdated groups first
 	var notRunningOutdatedGroups []datastore.ServingGroup
 	var runningOutdatedGroups []datastore.ServingGroup
-	if partition >= len(servingGroupList) {
-		// All servingGroups are protected by partition, so we should not update any group. Return directly.
+	// Select groups with ordinal >= partition (do not use slice index: a gap in ordinals
+	// would shift indices vs ordinals and skip updates for some replicas).
+	var groupsAfterPartition []datastore.ServingGroup
+	for _, sg := range servingGroupList {
+		_, ord := utils.GetParentNameAndOrdinal(sg.Name)
+		if ord >= partition {
+			groupsAfterPartition = append(groupsAfterPartition, sg)
+		}
+	}
+	if len(groupsAfterPartition) == 0 {
 		return nil
 	}
-	groupsAfterPartition := servingGroupList[partition:]
 
 	newServingGroupUnavailableCount := 0
 	for _, sg := range groupsAfterPartition {
