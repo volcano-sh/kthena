@@ -1,0 +1,86 @@
+# This example shows how to configure ModelServing for autoscaling with KEDA.
+#
+# How it works:
+#   1. KEDA polls a Prometheus metric (e.g. active request count per model).
+#   2. When the metric exceeds the threshold, KEDA scales up the ModelServing
+#      replicas (ServingGroups) via the scale subresource.
+#   3. When traffic drops, KEDA scales back down after the cooldown period.
+#
+# The Prometheus metric "kthena_router_active_downstream_requests" is emitted
+# by the kthena-router with a "model" label matching the served model name.
+# This is a router-level metric — it is NOT derived from pod labels.
+#
+# User-defined pod labels (set in entryTemplate/workerTemplate metadata) are
+# useful for additional identification, monitoring, or custom metric queries.
+# They are automatically propagated to pods by the controller.
+#
+# Prerequisites:
+#   - KEDA installed in the cluster (https://keda.sh)
+#   - Prometheus scraping the kthena-router metrics endpoint (:8080/metrics)
+#   - The metric "kthena_router_active_downstream_requests" available
+
+---
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: <modelserving-name>       # e.g. "deepseek-r1"
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1                     # number of ServingGroups (KEDA scales this field)
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: prefill
+        replicas: 2
+        entryTemplate:
+          metadata:
+            labels:
+              # User-defined labels — choose any key/value for your needs.
+              # These are propagated to pods and can be used for monitoring,
+              # selection, or custom Prometheus queries.
+              model-name: "<model-name>"    # e.g. "deepseek-r1"
+          spec:
+            containers:
+              - name: leader
+                image: nginx      # replace with your model serving image
+                ports:
+                  - containerPort: 8080
+      - name: decode
+        replicas: 2
+        entryTemplate:
+          metadata:
+            labels:
+              model-name: "<model-name>"    # same label across roles
+          spec:
+            containers:
+              - name: leader
+                image: nginx      # replace with your model serving image
+                ports:
+                  - containerPort: 8080
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: <modelserving-name>-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: workload.serving.volcano.sh/v1alpha1
+    kind: ModelServing
+    name: <modelserving-name>     # must match the ModelServing name above
+  pollingInterval: 15             # how often KEDA checks the metric (seconds)
+  cooldownPeriod: 120             # wait time before scaling down after metric drops
+  minReplicaCount: 1              # minimum ServingGroup replicas
+  maxReplicaCount: 10             # maximum ServingGroup replicas
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: <prometheus-url>   # e.g. "http://prometheus.monitoring.svc:9090"
+        metricName: kthena_router_active_downstream_requests
+        # The "model" label below is the router's metric label — it corresponds
+        # to the served model name in the kthena-router configuration, NOT a pod label.
+        query: |
+          sum(kthena_router_active_downstream_requests{model="<model-name>"})
+        threshold: "100"          # scale up when active requests exceed this value
