@@ -181,6 +181,17 @@ func (l *accessLoggerImpl) formatText(entry *AccessLogEntry) (string, error) {
 		fmt.Fprintf(&line, " request_id=%s", entry.RequestID)
 	}
 
+	// Add Gateway API / Inference Extension fields (if present)
+	if entry.Gateway != "" {
+		fmt.Fprintf(&line, " gateway=%s", entry.Gateway)
+	}
+	if entry.HTTPRoute != "" {
+		fmt.Fprintf(&line, " http_route=%s", entry.HTTPRoute)
+	}
+	if entry.InferencePool != "" {
+		fmt.Fprintf(&line, " inference_pool=%s", entry.InferencePool)
+	}
+
 	// Add token information
 	if entry.InputTokens > 0 || entry.OutputTokens > 0 {
 		fmt.Fprintf(&line, " tokens=%d/%d", entry.InputTokens, entry.OutputTokens)
