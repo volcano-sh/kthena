@@ -16,12 +16,10 @@ package controller
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"sort"
 	"testing"
 	"time"
 
-	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
@@ -56,9 +54,72 @@ type resourceSpec struct {
 	labels map[string]string
 }
 
+// fakePodGroupManager is a test double for PodGroupManager
+type fakePodGroupManager struct {
+	createOrUpdateFunc func(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration)
+	deleteFunc         func(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error
+	cleanupFunc        func(ctx context.Context, ms *workloadv1alpha1.ModelServing) error
+	hasCRD             bool
+}
+
+func (f *fakePodGroupManager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration) {
+	if f.createOrUpdateFunc != nil {
+		return f.createOrUpdateFunc(ctx, ms, pgName)
+	}
+	return nil, 0
+}
+
+func (f *fakePodGroupManager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
+	if f.deleteFunc != nil {
+		return f.deleteFunc(ctx, ms, servingGroupName)
+	}
+	return nil
+}
+
+func (f *fakePodGroupManager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	if f.cleanupFunc != nil {
+		return f.cleanupFunc(ctx, ms)
+	}
+	return nil
+}
+
+func (f *fakePodGroupManager) HasPodGroupCRD() bool {
+	return f.hasCRD
+}
+
+func (f *fakePodGroupManager) GetPodGroupInformer() cache.SharedIndexInformer {
+	return nil
+}
+
+func (f *fakePodGroupManager) Run(parentCtx context.Context) error {
+	return nil
+}
+
+func (f *fakePodGroupManager) GenerateTaskName(roleName string, roleIndex int) string {
+	return fmt.Sprintf("%s-%d", roleName, roleIndex)
+}
+
+func (f *fakePodGroupManager) AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing, groupName, taskName string) {
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations["scheduling.volcano.sh/task-name"] = taskName
+}
+
 func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
+	called := false
+	var delay time.Duration
+
 	controller := &ModelServingController{
-		podGroupManager: &podgroupmanager.Manager{},
+		podGroupManager: &fakePodGroupManager{
+			createOrUpdateFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
+				return fmt.Errorf("retry"), 2 * time.Second
+			},
+		},
+		enqueueModelServingAfterFunc: func(_ *workloadv1alpha1.ModelServing, duration time.Duration) {
+			called = true
+			delay = duration
+		},
 	}
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
@@ -66,18 +127,6 @@ func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
 			Namespace: "default",
 		},
 	}
-
-	called := false
-	var delay time.Duration
-	patches := gomonkey.NewPatches()
-	patches.ApplyMethod(reflect.TypeOf(controller.podGroupManager), "CreateOrUpdatePodGroup", func(_ *podgroupmanager.Manager, _ context.Context, _ *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
-		return fmt.Errorf("retry"), 2 * time.Second
-	})
-	patches.ApplyPrivateMethod(reflect.TypeOf(controller), "enqueueModelServingAfter", func(_ *ModelServingController, _ *workloadv1alpha1.ModelServing, duration time.Duration) {
-		called = true
-		delay = duration
-	})
-	defer patches.Reset()
 
 	err := controller.createOrUpdatePodGroupByServingGroup(context.Background(), ms, "ms-0")
 	assert.NoError(t, err)
@@ -137,11 +186,9 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 	}
 
 	called := false
-	patches := gomonkey.NewPatches()
-	patches.ApplyPrivateMethod(reflect.TypeOf(controller), "enqueueModelServingAfter", func(_ *ModelServingController, _ *workloadv1alpha1.ModelServing, _ time.Duration) {
+	controller.enqueueModelServingAfterFunc = func(_ *workloadv1alpha1.ModelServing, _ time.Duration) {
 		called = true
-	})
-	defer patches.Reset()
+	}
 
 	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
 	assert.NoError(t, err)
@@ -169,20 +216,18 @@ func TestDeletePodGroupEnqueues(t *testing.T) {
 	}
 
 	called := false
-	patches := gomonkey.NewPatches()
-	patches.ApplyPrivateMethod(reflect.TypeOf(controller), "getModelServingAndResourceDetails", func(_ *ModelServingController, _ metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
+	controller.getModelServingAndResourceDetailsFunc = func(_ metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
 		return ms, "ms-0", "", ""
-	})
-	patches.ApplyPrivateMethod(reflect.TypeOf(controller), "shouldSkipHandling", func(_ *ModelServingController, _ *workloadv1alpha1.ModelServing, _ string, _ metav1.Object) bool {
+	}
+	controller.shouldSkipHandlingFunc = func(_ *workloadv1alpha1.ModelServing, _ string, _ metav1.Object) bool {
 		return false
-	})
-	patches.ApplyPrivateMethod(reflect.TypeOf(controller), "handleDeletionInProgress", func(_ *ModelServingController, _ *workloadv1alpha1.ModelServing, _ string, _ string, _ string) bool {
+	}
+	controller.handleDeletionInProgressFunc = func(_ *workloadv1alpha1.ModelServing, _ string, _ string, _ string) bool {
 		return false
-	})
-	patches.ApplyPrivateMethod(reflect.TypeOf(controller), "enqueueModelServing", func(_ *ModelServingController, _ *workloadv1alpha1.ModelServing) {
+	}
+	controller.enqueueModelServingFunc = func(_ *workloadv1alpha1.ModelServing) {
 		called = true
-	})
-	defer patches.Reset()
+	}
 
 	controller.deletePodGroup(podGroup)
 	assert.True(t, called)
@@ -4468,11 +4513,9 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 
 			// Track which roles are deleted (targeted for deletion)
 			var deletedRoleIDs []string
-			patch := gomonkey.NewPatches()
-			patch.ApplyMethod(reflect.TypeOf(controller), "DeleteRole", func(_ *ModelServingController, ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) {
+			controller.deleteRoleFunc = func(_ context.Context, _ *workloadv1alpha1.ModelServing, _, _, roleID string) {
 				deletedRoleIDs = append(deletedRoleIDs, roleID)
-			})
-			defer patch.Reset()
+			}
 
 			// Target role (using first role's spec)
 			targetRole := workloadv1alpha1.Role{
@@ -5814,11 +5857,9 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			assert.NoError(t, err)
 
 			queue := []string{}
-			patch := gomonkey.NewPatches()
-			patch.ApplyPrivateMethod(reflect.TypeOf(&ModelServingController{}), "enqueueModelServing", func(ms *workloadv1alpha1.ModelServing, duration time.Duration) {
+			controller.enqueueModelServingFunc = func(ms *workloadv1alpha1.ModelServing) {
 				queue = append(queue, ms.Name)
-			})
-			defer patch.Reset()
+			}
 
 			controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID)
 
@@ -6246,18 +6287,12 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 				controller.servicesInformer.HasSynced,
 			)
 
-			// Mock PodGroup deletion behavior using gomonkey
-			var patch *gomonkey.Patches
-			if tt.podGroupDeletionError != nil {
-				patch = gomonkey.ApplyMethod(reflect.TypeOf(controller.podGroupManager), "DeletePodGroup", func(_ *podgroupmanager.Manager, ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
+			// Mock PodGroup deletion behavior using fakePodGroupManager
+			controller.podGroupManager = &fakePodGroupManager{
+				deleteFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) error {
 					return tt.podGroupDeletionError
-				})
-			} else {
-				patch = gomonkey.ApplyMethod(reflect.TypeOf(controller.podGroupManager), "DeletePodGroup", func(_ *podgroupmanager.Manager, ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
-					return nil
-				})
+				},
 			}
-			defer patch.Reset()
 
 			if tt.podDeletionError != nil {
 				client.PrependReactor("delete-collection", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -6316,11 +6351,9 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			assert.NoError(t, err)
 
 			queue := []string{}
-			patchEnqueue := gomonkey.NewPatches()
-			patchEnqueue.ApplyPrivateMethod(reflect.TypeOf(&ModelServingController{}), "enqueueModelServing", func(ms *workloadv1alpha1.ModelServing, duration time.Duration) {
+			controller.enqueueModelServingFunc = func(ms *workloadv1alpha1.ModelServing) {
 				queue = append(queue, ms.Name)
-			})
-			defer patchEnqueue.Reset()
+			}
 
 			_ = controller.deleteServingGroup(context.Background(), ms, sgName)
 
