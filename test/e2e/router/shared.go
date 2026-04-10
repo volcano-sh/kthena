@@ -320,7 +320,23 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 	messages := []utils.ChatMessage{
 		utils.NewChatMessage("user", "Hello"),
 	}
-	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+
+	// When Gateway API is enabled, ensure access log includes the Gateway key.
+	if useGatewayAPI && kthenaNamespace != "" && resp.StatusCode == 200 {
+		routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+		expectedGateway := fmt.Sprintf("%s/%s", kthenaNamespace, "default")
+		utils.WaitForPodLogsContain(
+			t,
+			testCtx.KubeClient,
+			kthenaNamespace,
+			routerPod.Name,
+			90*time.Second,
+			[]string{" gateway=" + expectedGateway},
+			90*time.Second,
+			2*time.Second,
+		)
+	}
 }
 
 // TestModelRouteMultiModelsShared is a shared test function that can be used by both

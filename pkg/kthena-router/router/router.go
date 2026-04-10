@@ -331,6 +331,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 			gatewayKey = k
 		}
 	}
+	if gatewayKey != "" {
+		accesslog.SetGatewayAPIInfo(c, gatewayKey, "", "")
+	}
 
 	var isLora bool
 	var err error
@@ -565,6 +568,10 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 		return false, types.NamespacedName{}
 	}
 
+	// Record Gateway API match into access log (gatewayKey is already "namespace/name").
+	httpRouteKey := fmt.Sprintf("%s/%s", matchedRoute.Namespace, matchedRoute.Name)
+	accesslog.SetGatewayAPIInfo(c, gatewayKey, httpRouteKey, "")
+
 	// Store the matched prefix in context for URL rewriting
 	if matchedPrefix != "" {
 		c.Set("matchedPrefix", matchedPrefix)
@@ -597,6 +604,10 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	if !found {
 		return false, types.NamespacedName{}
 	}
+
+	// Record InferencePool match into access log.
+	inferencePoolKey := fmt.Sprintf("%s/%s", inferencePoolName.Namespace, inferencePoolName.Name)
+	accesslog.SetGatewayAPIInfo(c, "", "", inferencePoolKey)
 
 	// Apply HTTPURLRewriteFilter if present
 	if matchedRule != nil && matchedRule.Filters != nil {

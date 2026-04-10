@@ -141,6 +141,27 @@ func TestGatewayInferenceExtension(t *testing.T) {
 	}
 
 	utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", messages)
+
+	// 4. Verify access log contains Gateway API + HTTPRoute + InferencePool info
+	routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+	expectedGateway := fmt.Sprintf("%s/%s", kthenaNamespace, "default")
+	expectedHTTPRoute := fmt.Sprintf("%s/%s", testNamespace, "llm-route")
+	expectedInferencePool := fmt.Sprintf("%s/%s", testNamespace, "deepseek-r1-1-5b")
+
+	utils.WaitForPodLogsContain(
+		t,
+		testCtx.KubeClient,
+		kthenaNamespace,
+		routerPod.Name,
+		90*time.Second,
+		[]string{
+			" gateway=" + expectedGateway,
+			" http_route=" + expectedHTTPRoute,
+			" inference_pool=" + expectedInferencePool,
+		},
+		90*time.Second,
+		2*time.Second,
+	)
 }
 
 // TestBothAPIsConfigured tests both ModelRoute/ModelServer and HTTPRoute/InferencePool APIs configured together.
