@@ -1,0 +1,34 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keda-modelserving-scaling
+rules:
+  - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - modelservings
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - modelservings/scale
+    verbs:
+      - get
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keda-modelserving-scaling
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keda-modelserving-scaling
+subjects:
+  - kind: ServiceAccount
+    name: keda-operator
+    namespace: keda

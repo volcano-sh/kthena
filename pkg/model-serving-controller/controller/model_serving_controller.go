@@ -1699,9 +1699,14 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 			// If no groups exist, handle gracefully by setting revisions to the new revision
 			if errors.Is(err, datastore.ErrServingGroupNotFound) {
 				copy := latestMS.DeepCopy()
-				if copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision {
+				selector := labels.Set{
+					workloadv1alpha1.ModelServingNameLabelKey: latestMS.Name,
+				}.String()
+				needsUpdate := copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision || copy.Status.LabelSelector != selector
+				if needsUpdate {
 					copy.Status.CurrentRevision = revision
 					copy.Status.UpdateRevision = revision
+					copy.Status.LabelSelector = selector
 					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
 					return updateErr
 				}
@@ -1825,6 +1830,18 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 		if copy.Status.ObservedGeneration != latestMS.Generation {
 			shouldUpdate = true
 			copy.Status.ObservedGeneration = latestMS.Generation
+		}
+
+		// Set labelSelector so the scale subresource can report it to HPA.
+		// Without this, HPA fails with "selector is required" because it cannot
+		// determine which pods belong to this ModelServing.
+		// The selector matches the label applied to all pods by createBasePod().
+		selector := labels.Set{
+			workloadv1alpha1.ModelServingNameLabelKey: latestMS.Name,
+		}.String()
+		if copy.Status.LabelSelector != selector {
+			shouldUpdate = true
+			copy.Status.LabelSelector = selector
 		}
 
 		if shouldUpdate {
