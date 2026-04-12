@@ -209,15 +209,16 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	minRoleReplicasPath := field.NewPath("spec").Child("template").Child("gangPolicy").Child("minRoleReplicas")
 
 	// Create a map of role names for quick lookup
-	roleNames := make(map[string]bool)
-	for _, role := range ms.Spec.Template.Roles {
-		roleNames[role.Name] = true
+	roleNames := make(map[string]workloadv1alpha1.Role)
+	for _, roleElement := range ms.Spec.Template.Roles {
+		roleNames[roleElement.Name] = roleElement
 	}
 
 	// Validate each minRoleReplicas entry
 	for roleName, minReplicas := range minRoleReplicas {
 		// Check if the role exists
-		if !roleNames[roleName] {
+		role, ok := roleMap[roleName]
+		if !ok {
 			allErrs = append(allErrs, field.Invalid(
 				minRoleReplicasPath.Key(roleName),
 				roleName,
@@ -227,34 +228,29 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 		}
 
 		// Find the role to check its actual replicas
-		for _, role := range ms.Spec.Template.Roles {
-			if role.Name == roleName {
-				/// Calculate total replicas for this role
-				// minRoleReplicas is compared against the number of Role replicas
-				replicas := int32(1)
-				if role.Replicas != nil {
-					replicas = *role.Replicas
-				}
+		// Calculate total replicas for this role
+		// minRoleReplicas is compared against the number of Role replicas
+		replicas := int32(1)
+		if role.Replicas != nil {
+			replicas = *role.Replicas
+		}
 
-				// Validate minReplicas doesn't exceed total replicas
-				if minReplicas > replicas {
-					allErrs = append(allErrs, field.Invalid(
-						minRoleReplicasPath.Key(roleName),
-						minReplicas,
-						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed replicas (%d)", minReplicas, roleName, replicas),
-					))
-				}
+		// Validate minReplicas doesn't exceed total replicas
+		if minReplicas > replicas {
+			allErrs = append(allErrs, field.Invalid(
+				minRoleReplicasPath.Key(roleName),
+				minReplicas,
+				fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed replicas (%d)", minReplicas, roleName, replicas),
+			))
+		}
 
-				// Validate minReplicas is non-negative
-				if minReplicas < 0 {
-					allErrs = append(allErrs, field.Invalid(
-						minRoleReplicasPath.Key(roleName),
-						minReplicas,
-						fmt.Sprintf("minRoleReplicas for role %s must be non-negative", roleName),
-					))
-				}
-				break
-			}
+		// Validate minReplicas is non-negative
+		if minReplicas < 0 {
+			allErrs = append(allErrs, field.Invalid(
+				minRoleReplicasPath.Key(roleName),
+				minReplicas,
+				fmt.Sprintf("minRoleReplicas for role %s must be non-negative", roleName),
+			))
 		}
 	}
 
