@@ -217,7 +217,7 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	// Validate each minRoleReplicas entry
 	for roleName, minReplicas := range minRoleReplicas {
 		// Check if the role exists
-		roleElement, ok := roleMap[roleName]; 
+		roleElement, ok := roleMap[roleName]
 		if !ok {
 			allErrs = append(allErrs, field.Invalid(
 				minRoleReplicasPath.Key(roleName),
