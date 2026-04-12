@@ -209,7 +209,7 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	minRoleReplicasPath := field.NewPath("spec").Child("template").Child("gangPolicy").Child("minRoleReplicas")
 
 	// Create a map of role names for quick lookup
-	roleMap := make(map[string]*workloadv1alpha1.Role)
+	roleMap := make(map[string]workloadv1alpha1.Role)
 	for _, role := range ms.Spec.Template.Roles {
 		roleMap[role.Name] = role
 	}
