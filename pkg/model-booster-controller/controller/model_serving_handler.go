@@ -43,14 +43,15 @@ func (mc *ModelBoosterController) createOrUpdateModelServing(ctx context.Context
 
 	oldModelServing, err := mc.modelServingLister.ModelServings(modelServing.Namespace).Get(modelServing.Name)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			klog.V(4).Infof("Create ModelServing %s", modelServing.Name)
-			if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Create(ctx, modelServing, metav1.CreateOptions{}); err != nil {
-				klog.Errorf("failed to create ModelServing %s: %v", klog.KObj(modelServing), err)
-				return err
-			}
-		} else {
+		// check if not found error directly return
+		if !apierrors.IsNotFound(err) {
 			klog.Errorf("failed to get ModelServing %s: %v", klog.KObj(modelServing), err)
+			return err
+		}
+		// resource not found need create
+		klog.V(4).Infof("Create ModelServing %s", modelServing.Name)
+		if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Create(ctx, modelServing, metav1.CreateOptions{}); err != nil {
+			klog.Errorf("failed to create ModelServing %s: %v", klog.KObj(modelServing), err)
 			return err
 		}
 	} else {
@@ -68,12 +69,13 @@ func (mc *ModelBoosterController) createOrUpdateModelServing(ctx context.Context
 
 	// Delete old ModelServings that are not the current one
 	for _, existingModelServing := range existingModelServings {
-		if existingModelServing.Name != modelServing.Name {
-			if err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Delete(ctx, existingModelServing.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-				return err
-			}
-			klog.V(4).Infof("Delete ModelServing %s", existingModelServing.Name)
+		if existingModelServing.Name == modelServing.Name {
+			continue
 		}
+		if err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Delete(ctx, existingModelServing.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		klog.V(4).Infof("Delete ModelServing %s", existingModelServing.Name)
 	}
 	return nil
 }
