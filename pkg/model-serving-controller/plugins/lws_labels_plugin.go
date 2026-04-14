@@ -110,4 +110,3 @@ func deriveWorkerIndex(isEntry bool, podName string) (int, error) {
 	}
 	return n, nil
 }
-
