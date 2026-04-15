@@ -18,6 +18,7 @@ package connectors
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,19 +142,33 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 		metricsRecorder.IncActiveUpstreamRequests()
 	}
 
+	// prefillCtx is cancelled if decode fails, which aborts the prefill HTTP
+	// request immediately instead of letting it hang waiting for a bootstrap
+	// connection from a decode receiver that is already gone.
+	prefillCtx, cancelPrefill := context.WithCancel(c.Request.Context())
+	defer cancelPrefill()
+
 	type prefillOutcome struct{ err error }
 	prefillCh := make(chan prefillOutcome, 1)
 
 	go func() {
-		prefillCh <- prefillOutcome{err: s.prefill(s.prefillRequest, prefillAddr)}
+		prefillCh <- prefillOutcome{
+			err: s.prefill(s.prefillRequest.WithContext(prefillCtx), prefillAddr),
+		}
 	}()
 
 	// Run decode in the current goroutine so that streaming writes reach the
 	// gin.Context from the request-handling goroutine.
 	result, decodeErr := s.decode(c, s.decodeRequest, decodeAddr)
 
+	if decodeErr != nil {
+		// Decode failed: cancel the prefill context so the prefill goroutine is
+		// unblocked rather than hanging until a server-side timeout fires.
+		cancelPrefill()
+	}
+
 	// Wait for the prefill goroutine to finish before returning.
-	po := <-prefillCh
+	prefillResult := <-prefillCh
 
 	if metricsRecorder != nil {
 		decodeStatus := "200"
@@ -164,16 +179,16 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 		metricsRecorder.DecActiveUpstreamRequests()
 
 		prefillStatus := "200"
-		if po.err != nil {
+		if prefillResult.err != nil {
 			prefillStatus = "500"
 		}
 		metricsRecorder.FinishPrefillPhase(prefillStatus)
 		metricsRecorder.DecActiveUpstreamRequests()
 	}
 
-	if po.err != nil {
-		klog.Errorf("sglang prefill error (bootstrap_room=%d): %v", s.bootstrapRoom, po.err)
-		return http.StatusInternalServerError, po.err
+	if prefillResult.err != nil {
+		klog.Errorf("sglang prefill error (bootstrap_room=%d): %v", s.bootstrapRoom, prefillResult.err)
+		return http.StatusInternalServerError, prefillResult.err
 	}
 
 	return result, decodeErr
