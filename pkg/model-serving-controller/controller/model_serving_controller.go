@@ -1003,6 +1003,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		workloadv1alpha1.RoleLabelKey:      roleName,
 		workloadv1alpha1.RoleIDKey:         roleID,
 	})
+
 	// If the role is already in the deletion process, no further processing will be done.
 	roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID)
 	if roleStatus == datastore.RoleDeleting {
@@ -1014,6 +1015,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
 		return
 	}
+
 	// Emit event for role entering Deleting state.
 	message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Deleting", roleName, roleID, groupName)
 	c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleDeleting", message)
@@ -1059,6 +1061,15 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 				return
 			}
 		}
+	}
+
+	// We need to ensure that a pod’s role can enqueue after it has been deleted.
+	if c.isRoleDeleted(ms, groupName, roleName, roleID) {
+		klog.V(2).Infof("Role %s of ServingGroup %s has been deleted", roleID, groupName)
+		c.store.DeleteRole(utils.GetNamespaceName(ms), groupName, roleName, roleID)
+		// this is needed when a pod is deleted accidentally, and the Role is deleted completely
+		// and the controller has no chance to supplement it.
+		c.enqueueModelServing(ms)
 	}
 }
 
