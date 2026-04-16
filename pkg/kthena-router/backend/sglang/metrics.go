@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/vllm"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -33,7 +34,7 @@ var (
 	GPUCacheUsage     = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
 	RequestRunningNum = "sglang:num_running_reqs"
-	TPOT              = "sglang:time_per_output_token_seconds"
+	TPOT              = "sglang:inter_token_latency_seconds"
 	TTFT              = "sglang:time_to_first_token_seconds"
 )
 
@@ -58,13 +59,9 @@ var (
 	}
 )
 
-type Model struct {
-	ID string `json:"id"`
-}
+type Model = vllm.Model
 
-type ModelList struct {
-	Data []Model `json:"data"`
-}
+type ModelList = vllm.ModelList
 
 type sglangEngine struct {
 	// The address of sglang's query metrics is http://{model server}:MetricPort/metrics

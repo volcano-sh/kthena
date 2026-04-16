@@ -1031,7 +1031,8 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 
 	models, err := backend.GetPodModels(podInfo.engine, podInfo.Pod)
 	if err != nil {
-		klog.V(4).Infof("failed to get models of pod %s/%s", podInfo.Pod.GetNamespace(), podInfo.Pod.GetName())
+		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podInfo.Pod.GetNamespace(), podInfo.Pod.GetName(), err)
+		return
 	}
 
 	podInfo.UpdateModels(models)
