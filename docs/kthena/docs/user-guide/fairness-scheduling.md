@@ -71,14 +71,13 @@ The queue also supports the following runtime protections:
 The simplest way to enable fairness scheduling is through the Helm values used by the Kthena Router chart.
 
 ```yaml
-kthena:
-  networking:
-    kthenaRouter:
-      fairness:
-        enabled: true
-        windowSize: "1h"
-        inputTokenWeight: 1.0
-        outputTokenWeight: 2.0
+networking:
+  kthenaRouter:
+    fairness:
+      enabled: true
+      windowSize: "1h"
+      inputTokenWeight: 1.0
+      outputTokenWeight: 2.0
 ```
 
 Apply the change with Helm:
