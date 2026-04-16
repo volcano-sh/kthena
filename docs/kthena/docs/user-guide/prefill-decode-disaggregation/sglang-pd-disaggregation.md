@@ -1,4 +1,4 @@
-# SGLang Prefill-Decode Disaggregation
+# SGLang Prefill-Decode Disaggregation (GPU)
 
 This page describes how to deploy prefill-decode disaggregated inference using [SGLang](https://github.com/sgl-project/sglang) with Kthena on a GPU cluster.
 
