@@ -4,16 +4,6 @@
 **Authors:** @david_laid
 **Date:** 2026-04-02
 
-### Related PRs
-
-| PR | Description |
-|----|-------------|
-| [#831](https://github.com/volcano-sh/kthena/pull/831) | Initial prototype -- example manifests (ServiceMonitor, PodMonitor, ScaledObject) |
-| [#836](https://github.com/volcano-sh/kthena/pull/836) | Helm integration -- templates + `values.yaml` for monitoring and autoscaling |
-| [#839](https://github.com/volcano-sh/kthena/pull/839) | Controller fix -- populates `status.labelSelector` so HPA can actually find pods |
-
-All three reference [#799](https://github.com/volcano-sh/kthena/issues/799). We've validated the full flow end-to-end before writing this up.
-
 ---
 
 ## 1. Problem
