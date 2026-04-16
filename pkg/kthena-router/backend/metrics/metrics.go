@@ -19,15 +19,24 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 )
 
+var httpClient = &http.Client{
+	Timeout: 5 * time.Second,
+}
+
+func HTTPClient() *http.Client {
+	return httpClient
+}
+
 // This function refer to aibrix(https://github.com/vllm-project/aibrix/blob/main/pkg/metrics/utils.go)
 func ParseMetricsURL(url string) (map[string]*dto.MetricFamily, error) {
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to fetch metrics from %s: %v", url, err)
 	}

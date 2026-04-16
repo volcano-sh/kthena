@@ -34,7 +34,7 @@ var (
 	GPUCacheUsage     = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
 	RequestRunningNum = "sglang:num_running_reqs"
-	TPOT              = "sglang:inter_token_latency_seconds"
+	TPOT              = "sglang:time_per_output_token_seconds"
 	TTFT              = "sglang:time_to_first_token_seconds"
 )
 
@@ -129,7 +129,7 @@ func (engine *sglangEngine) GetHistogramPodMetrics(allMetrics map[string]*dto.Me
 // GetPodModels retrieves the list of models from a pod running the sglang engine.
 func (engine *sglangEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
 	url := fmt.Sprintf("http://%s:%d/v1/models", pod.Status.PodIP, engine.MetricPort)
-	resp, err := http.Get(url)
+	resp, err := metrics.HTTPClient().Get(url)
 	if err != nil {
 		return nil, err
 	}
