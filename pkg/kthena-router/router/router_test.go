@@ -19,7 +19,6 @@ package router
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -30,154 +29,44 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/agiledragon/gomonkey/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
 	klog.InitFlags(nil)
-	// Set klog verbosity level to 4
 	flag.Set("v", "4")
-	flag.Parse() // Parse flags to apply the klog level
-	routerConfig, _ := conf.ParseRouterConfig("../scheduler/testdata/configmap.yaml")
-	patch1 := gomonkey.ApplyFunc(conf.ParseRouterConfig, func(configMapPath string) (*conf.RouterConfiguration, error) {
-		return routerConfig, nil
-	})
-	defer patch1.Reset()
-
-	pluginsWeight, plugins, pluginConfig, _ := conf.LoadSchedulerConfig(&routerConfig.Scheduler)
-	patch2 := gomonkey.ApplyFunc(conf.LoadSchedulerConfig, func() (map[string]int, []string, map[string]runtime.RawExtension, error) {
-		return pluginsWeight, plugins, pluginConfig, nil
-	})
-	defer patch2.Reset()
-
-	// Run the tests
+	flag.Parse()
 	exitCode := m.Run()
-	// Exit with the appropriate code
 	os.Exit(exitCode)
 }
 
-func buildPodInfo(name string, ip string) *datastore.PodInfo {
-	pod := &corev1.Pod{
-		ObjectMeta: v1.ObjectMeta{
-			Name: name,
-		},
-		Status: corev1.PodStatus{
-			PodIP: ip,
-		},
-	}
-
-	return &datastore.PodInfo{
-		Pod: pod,
-	}
-}
-
-func TestProxyModelEndpoint(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	req, _ := http.NewRequest("POST", "/", nil)
-	modelReq := ModelRequest{"model": "test"}
-	r := NewRouter(datastore.New(), "testdata/comfigmap.yaml")
-	hookPatch := gomonkey.ApplyMethod(r.scheduler, "RunPostHooks", func(s scheduler.Scheduler, ctx *framework.Context, index int) {})
-	defer hookPatch.Reset()
-
-	tests := []struct {
-		name       string
-		ctx        *framework.Context
-		proxyPatch func() *gomonkey.Patches
-		wantErr    error
-	}{
-		{
-			name: "BestPods are set, aggregated mode success",
-			ctx: &framework.Context{
-				Model:    "test",
-				Prompt:   common.ChatMessage{Text: "test"},
-				BestPods: []*datastore.PodInfo{buildPodInfo("decode1", "1.1.1.1")},
-			},
-			proxyPatch: func() *gomonkey.Patches {
-				patches := gomonkey.ApplyFunc(connectors.BuildDecodeRequest, func(c *gin.Context, req *http.Request, modelRequest ModelRequest) *http.Request {
-					return req
-				})
-				patches.ApplyFunc(isStreaming, func(modelRequest ModelRequest) bool {
-					return false
-				})
-				patches.ApplyFunc(proxyRequest, func(c *gin.Context, req *http.Request, podIP string, port int32, stream bool) error {
-					return nil
-				})
-				return patches
-			},
-			wantErr: nil,
-		},
-		{
-			name: "BestPods proxy returns error",
-			ctx: &framework.Context{
-				Model:    "test",
-				Prompt:   common.ChatMessage{Text: "test"},
-				BestPods: []*datastore.PodInfo{buildPodInfo("decode1", "1.1.1.1")},
-			},
-			proxyPatch: func() *gomonkey.Patches {
-				patches := gomonkey.ApplyFunc(connectors.BuildDecodeRequest, func(c *gin.Context, req *http.Request, modelRequest ModelRequest) *http.Request {
-					return req
-				})
-				patches.ApplyFunc(isStreaming, func(modelRequest ModelRequest) bool {
-					return false
-				})
-				patches.ApplyFunc(proxyRequest, func(c *gin.Context, req *http.Request, podIP string, port int32, stream bool) error {
-					return errors.New("proxy error")
-				})
-				return patches
-			},
-			wantErr: errors.New("request to all pods failed"),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var patch *gomonkey.Patches
-			if tt.proxyPatch != nil {
-				patch = tt.proxyPatch()
-				defer patch.Reset()
-			}
-			err := r.proxyModelEndpoint(c, req, tt.ctx, modelReq, int32(8080))
-			if tt.wantErr != nil {
-				assert.Error(t, err)
-				assert.Equal(t, tt.wantErr.Error(), err.Error())
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
 // setupTestRouter initializes a router and its dependencies for testing.
-func setupTestRouter(backendHandler http.Handler) (*Router, datastore.Store, *httptest.Server) {
+// It uses a mock HTTP server as the backend, following the community's recommendation
+// to avoid hacky dependency injection.
+func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datastore.Store, *httptest.Server) {
 	gin.SetMode(gin.TestMode)
 
 	backend := httptest.NewServer(backendHandler)
 	store := datastore.New()
-	router := NewRouter(store, "")
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
 
 	return router, store, backend
 }
 
 func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
-	// 1. Setup backend mock
+	// 1. Setup backend mock server
 	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
 		body, _ := io.ReadAll(r.Body)
@@ -187,7 +76,7 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `{"id":"response-id"}`)
 	})
-	router, store, backend := setupTestRouter(backendHandler)
+	router, store, backend := setupTestRouter(t, backendHandler)
 	defer backend.Close()
 
 	backendURL, _ := url.Parse(backend.URL)
@@ -243,7 +132,7 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 }
 
 func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
-	// 1. Setup backend mock
+	// 1. Setup backend mock server
 	prefillReqs := 0
 	decodeReqs := 0
 	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +156,7 @@ func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
 			fmt.Fprint(w, `data: {"id":"decode-resp"}`)
 		}
 	})
-	router, store, backend := setupTestRouter(backendHandler)
+	router, store, backend := setupTestRouter(t, backendHandler)
 	defer backend.Close()
 
 	backendURL, _ := url.Parse(backend.URL)
@@ -348,7 +237,7 @@ func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
 }
 
 func TestRouter_HandlerFunc_ModelNotFound(t *testing.T) {
-	router, _, backend := setupTestRouter(nil)
+	router, _, backend := setupTestRouter(t, nil)
 	defer backend.Close()
 
 	w := httptest.NewRecorder()
@@ -369,7 +258,7 @@ func TestRouter_HandlerFunc_ScheduleFailure(t *testing.T) {
 		// This should not be called
 		t.Error("backend should not be called on schedule failure")
 	})
-	router, store, backend := setupTestRouter(backendHandler)
+	router, store, backend := setupTestRouter(t, backendHandler)
 	defer backend.Close()
 
 	backendURL, _ := url.Parse(backend.URL)

@@ -27,11 +27,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agiledragon/gomonkey/v2"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
@@ -193,6 +191,26 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 	s := &store{
 		pods:        sync.Map{},
 		modelServer: sync.Map{},
+		podRuntimeInspector: &fakePodRuntimeInspector{
+			metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+				return map[string]float64{
+						utils.GPUCacheUsage:     0.8,
+						utils.RequestWaitingNum: 15,
+						utils.RequestRunningNum: 10,
+						utils.TPOT:              120,
+						utils.TTFT:              210,
+					}, map[string]*dto.Histogram{
+						utils.TPOT: {
+							SampleSum:   &sum2,
+							SampleCount: &count2,
+						},
+						utils.TTFT: {
+							SampleSum:   &sum2,
+							SampleCount: &count2,
+						},
+					}
+			},
+		},
 	}
 
 	podName := types.NamespacedName{
@@ -208,27 +226,6 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 	s.modelServer.Store(modelServerName, &modelServer{
 		pods: sets.New[types.NamespacedName](podName),
 	})
-
-	patch := gomonkey.NewPatches()
-	patch.ApplyFunc(backend.GetPodMetrics, func(backend string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-		return map[string]float64{
-				utils.GPUCacheUsage:     0.8,
-				utils.RequestWaitingNum: 15,
-				utils.RequestRunningNum: 10,
-				utils.TPOT:              120,
-				utils.TTFT:              210,
-			}, map[string]*dto.Histogram{
-				utils.TPOT: {
-					SampleSum:   &sum2,
-					SampleCount: &count2,
-				},
-				utils.TTFT: {
-					SampleSum:   &sum2,
-					SampleCount: &count2,
-				},
-			}
-	})
-	defer patch.Reset()
 
 	s.updatePodMetrics(&podinfo)
 
@@ -1468,8 +1465,34 @@ func TestStoreMatchModelServer(t *testing.T) {
 	}
 }
 
-func newStore() *store {
-	return New().(*store)
+type fakePodRuntimeInspector struct {
+	metricsFn    func(string, *corev1.Pod, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	modelsFn     func(string, *corev1.Pod) ([]string, error)
+	metricsCalls int
+	modelsCalls  int
+}
+
+func (f *fakePodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	f.metricsCalls++
+	if f.metricsFn == nil {
+		return nil, nil
+	}
+	return f.metricsFn(engine, pod, previousHistogram)
+}
+
+func (f *fakePodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
+	f.modelsCalls++
+	if f.modelsFn == nil {
+		return nil, nil
+	}
+	return f.modelsFn(engine, pod)
+}
+
+func newStore(inspector ...PodRuntimeInspector) *store {
+	if len(inspector) == 0 || inspector[0] == nil {
+		return New().(*store)
+	}
+	return New(WithPodRuntimeInspector(inspector[0])).(*store)
 }
 
 func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
@@ -1579,37 +1602,26 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newStore()
+			inspector := &fakePodRuntimeInspector{
+				metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+					return tc.initialMetrics, tc.initialHist
+				},
+				modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+					return tc.initialModels, nil
+				},
+			}
+			s := newStore(inspector)
 
 			ms := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
 			s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
 
-			// Patch backend calls for the initial add
-			patch := gomonkey.NewPatches()
-			patch.ApplyFunc(backend.GetPodMetrics, func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-				return tc.initialMetrics, tc.initialHist
-			})
-			patch.ApplyFunc(backend.GetPodModels, func(_ string, _ *corev1.Pod) ([]string, error) {
-				return tc.initialModels, nil
-			})
-
 			pod := createTestPod("default", "pod1")
 			err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
 			assert.NoError(t, err)
-
-			patch.Reset()
-
-			// Backend should NOT be called during an update. If it is, fail loudly.
-			patch2 := gomonkey.NewPatches()
-			patch2.ApplyFunc(backend.GetPodMetrics, func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-				t.Fatal("backend.GetPodMetrics must not be called on pod update")
-				return nil, nil
-			})
-			patch2.ApplyFunc(backend.GetPodModels, func(_ string, _ *corev1.Pod) ([]string, error) {
-				t.Fatal("backend.GetPodModels must not be called on pod update")
-				return nil, nil
-			})
-			defer patch2.Reset()
+			assert.Equal(t, 1, inspector.metricsCalls, "backend metrics should be fetched on initial pod add")
+			assert.Equal(t, 1, inspector.modelsCalls, "backend models should be fetched on initial pod add")
+			inspector.metricsCalls = 0
+			inspector.modelsCalls = 0
 
 			// Simulate a pod update (e.g. label change)
 			updatedPod := pod.DeepCopy()
@@ -1619,6 +1631,8 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 
 			err = s.AddOrUpdatePod(updatedPod, []*aiv1alpha1.ModelServer{ms})
 			assert.NoError(t, err)
+			assert.Equal(t, 0, inspector.metricsCalls, "backend.GetPodMetrics must not be called on pod update")
+			assert.Equal(t, 0, inspector.modelsCalls, "backend.GetPodModels must not be called on pod update")
 
 			podInfo := s.GetPodInfo(utils.GetNamespaceName(updatedPod))
 			assert.NotNil(t, podInfo)
@@ -1652,34 +1666,28 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 }
 
 func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
-	s := newStore()
+	inspector := &fakePodRuntimeInspector{
+		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			return map[string]float64{
+				utils.GPUCacheUsage:     0.3,
+				utils.RequestRunningNum: 2,
+			}, map[string]*dto.Histogram{}
+		},
+		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+			return []string{"base-model"}, nil
+		},
+	}
+	s := newStore(inspector)
 
 	ms := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
 	s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
-
-	metricsCalled := false
-	modelsCalled := false
-
-	patch := gomonkey.NewPatches()
-	patch.ApplyFunc(backend.GetPodMetrics, func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-		metricsCalled = true
-		return map[string]float64{
-			utils.GPUCacheUsage:     0.3,
-			utils.RequestRunningNum: 2,
-		}, map[string]*dto.Histogram{}
-	})
-	patch.ApplyFunc(backend.GetPodModels, func(_ string, _ *corev1.Pod) ([]string, error) {
-		modelsCalled = true
-		return []string{"base-model"}, nil
-	})
-	defer patch.Reset()
 
 	pod := createTestPod("default", "fresh-pod")
 	err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
 	assert.NoError(t, err)
 
-	assert.True(t, metricsCalled, "backend.GetPodMetrics must be called for new pods")
-	assert.True(t, modelsCalled, "backend.GetPodModels must be called for new pods")
+	assert.Equal(t, 1, inspector.metricsCalls, "backend.GetPodMetrics must be called for new pods")
+	assert.Equal(t, 1, inspector.modelsCalls, "backend.GetPodModels must be called for new pods")
 
 	podInfo := s.GetPodInfo(utils.GetNamespaceName(pod))
 	assert.InDelta(t, 0.3, podInfo.GetGPUCacheUsage(), 1e-9)
@@ -1687,48 +1695,40 @@ func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
 }
 
 func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {
-	s := newStore()
+	inspector := &fakePodRuntimeInspector{
+		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			return map[string]float64{
+				utils.GPUCacheUsage:     0.6,
+				utils.RequestWaitingNum: 5,
+				utils.RequestRunningNum: 10,
+				utils.TPOT:              0.04,
+				utils.TTFT:              0.2,
+			}, map[string]*dto.Histogram{}
+		},
+		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+			return []string{"model-a"}, nil
+		},
+	}
+	s := newStore(inspector)
 
 	ms1 := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
 	ms2 := createTestModelServer("default", "ms2", aiv1alpha1.VLLM)
 	s.AddOrUpdateModelServer(ms1, sets.New[types.NamespacedName]())
 	s.AddOrUpdateModelServer(ms2, sets.New[types.NamespacedName]())
 
-	patch := gomonkey.NewPatches()
-	patch.ApplyFunc(backend.GetPodMetrics, func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-		return map[string]float64{
-			utils.GPUCacheUsage:     0.6,
-			utils.RequestWaitingNum: 5,
-			utils.RequestRunningNum: 10,
-			utils.TPOT:              0.04,
-			utils.TTFT:              0.2,
-		}, map[string]*dto.Histogram{}
-	})
-	patch.ApplyFunc(backend.GetPodModels, func(_ string, _ *corev1.Pod) ([]string, error) {
-		return []string{"model-a"}, nil
-	})
-
 	pod := createTestPod("default", "pod1")
 	err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms1})
 	assert.NoError(t, err)
-
-	patch.Reset()
-
-	// Block backend calls during the reassignment update
-	patch2 := gomonkey.NewPatches()
-	patch2.ApplyFunc(backend.GetPodMetrics, func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-		t.Fatal("backend.GetPodMetrics must not be called on pod update")
-		return nil, nil
-	})
-	patch2.ApplyFunc(backend.GetPodModels, func(_ string, _ *corev1.Pod) ([]string, error) {
-		t.Fatal("backend.GetPodModels must not be called on pod update")
-		return nil, nil
-	})
-	defer patch2.Reset()
+	assert.Equal(t, 1, inspector.metricsCalls, "backend metrics should be fetched on initial pod add")
+	assert.Equal(t, 1, inspector.modelsCalls, "backend models should be fetched on initial pod add")
+	inspector.metricsCalls = 0
+	inspector.modelsCalls = 0
 
 	// Move pod from ms1 to ms2
 	err = s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms2})
 	assert.NoError(t, err)
+	assert.Equal(t, 0, inspector.metricsCalls, "backend.GetPodMetrics must not be called on pod update")
+	assert.Equal(t, 0, inspector.modelsCalls, "backend.GetPodModels must not be called on pod update")
 
 	podInfo := s.GetPodInfo(utils.GetNamespaceName(pod))
 	assert.InDelta(t, 0.6, podInfo.GetGPUCacheUsage(), 1e-9,

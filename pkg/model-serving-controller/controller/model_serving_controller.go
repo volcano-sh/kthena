@@ -66,12 +66,25 @@ const (
 	RoleIDKey    = "RoleID"
 )
 
+// PodGroupManager is the interface for managing PodGroups.
+// This interface allows for dependency injection in tests.
+type PodGroupManager interface {
+	CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration)
+	DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error
+	CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) error
+	HasPodGroupCRD() bool
+	GetPodGroupInformer() cache.SharedIndexInformer
+	Run(parentCtx context.Context) error
+	GenerateTaskName(roleName string, roleIndex int) string
+	AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing, groupName, taskName string)
+}
+
 type ModelServingController struct {
 	kubeClientSet      kubernetes.Interface
 	modelServingClient clientset.Interface
 
 	syncHandler           func(ctx context.Context, msKey string) error
-	podGroupManager       *podgroupmanager.Manager
+	podGroupManager       PodGroupManager
 	podsLister            listerv1.PodLister
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
