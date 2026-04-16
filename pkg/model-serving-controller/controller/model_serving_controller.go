@@ -1063,12 +1063,14 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		}
 	}
 
-	// We need to ensure that a pod’s role can enqueue after it has been deleted.
+	// Once the role's pods and services are fully deleted, remove the role from the store.
+	// Note: This measure is taken to prevent the Role’s resources from being deleted before the current function execution has completed,
+	// which would prevent them from being queued for re-coordination.
 	if c.isRoleDeleted(ms, groupName, roleName, roleID) {
 		klog.V(2).Infof("Role %s of ServingGroup %s has been deleted", roleID, groupName)
 		c.store.DeleteRole(utils.GetNamespaceName(ms), groupName, roleName, roleID)
-		// this is needed when a pod is deleted accidentally, and the Role is deleted completely
-		// and the controller has no chance to supplement it.
+		// Re-enqueue the ModelServing for reconciliation after the role has been deleted
+		// so the controller can recreate any missing resources if needed.
 		c.enqueueModelServing(ms)
 	}
 }
