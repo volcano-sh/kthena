@@ -28,6 +28,16 @@ import (
 type RouterConfiguration struct {
 	Scheduler SchedulerConfiguration `yaml:"scheduler"`
 	Auth      AuthenticationConfig   `yaml:"auth"`
+	Backend   BackendConfiguration   `yaml:"backend"`
+}
+
+type BackendConfiguration struct {
+	SGLang EngineConfiguration `yaml:"sglang"`
+	VLLM   EngineConfiguration `yaml:"vllm"`
+}
+
+type EngineConfiguration struct {
+	MetricPort uint32 `yaml:"metricPort"`
 }
 
 type SchedulerConfiguration struct {

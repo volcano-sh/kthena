@@ -81,6 +81,13 @@ networking:
       # -- Enable Gateway API Inference Extension features.<br/>
       # Requires `gatewayAPI.enabled` to be true.
       inferenceExtension: false
+    backend:
+      sglang:
+        # -- Metrics port exposed by SGLang model servers.
+        metricPort: 30000
+      vllm:
+        # -- Metrics port exposed by vLLM model servers.
+        metricPort: 8000
 
 global:
   # -- Certificate Management Mode.<br/>
