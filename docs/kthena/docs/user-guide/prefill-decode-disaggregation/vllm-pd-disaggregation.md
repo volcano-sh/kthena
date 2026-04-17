@@ -6,7 +6,7 @@ This page describes how to deploy prefill-decode disaggregated inference using [
 
 - Kubernetes cluster with Kthena installed
 - NVIDIA GPU-enabled nodes with the appropriate device plugin configured
-- Access to the vLLM container image (`ghcr.io/yaozengzeng/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2`)
+- Access to the vLLM container image (`ghcr.io/volcano-sh/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2`)
 - The target model (e.g. `Qwen/Qwen3-0.6B`) accessible from the cluster (the deployment uses a downloader init container to pull the model)
 
 ## Deployment
