@@ -30,6 +30,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       is_tag: ${{ steps.version.outputs.is_tag }}
       prerelease: ${{ steps.is_prerelease.outputs.prerelease }}
+      owner_lc: ${{ steps.owner.outputs.owner_lc }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -57,6 +58,11 @@ jobs:
           else
             echo "prerelease=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Normalize Repository Owner
+        id: owner
+        run: |
+          echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
 
   build_images:
     needs: setup
@@ -128,7 +134,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+          images: ghcr.io/${{ needs.setup.outputs.owner_lc }}/${{ matrix.service }}
           tags: |
             type=raw,value=${{ needs.setup.outputs.version }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
@@ -145,7 +151,7 @@ jobs:
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/${{ matrix.service }},push-by-digest=${{ github.event_name != 'pull_request' }},name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=ghcr.io/${{ needs.setup.outputs.owner_lc }}/${{ matrix.service }},push-by-digest=${{ github.event_name != 'pull_request' }},name-canonical=true,push=${{ github.event_name != 'pull_request' }}
 
       - name: Export digest
         if: ${{ github.event_name != 'pull_request' }}
@@ -197,7 +203,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+          images: ghcr.io/${{ needs.setup.outputs.owner_lc }}/${{ matrix.service }}
           tags: |
             type=raw,value=${{ needs.setup.outputs.version }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
@@ -208,11 +214,11 @@ jobs:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-          $(printf 'ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}@sha256:%s ' *)
+          $(printf 'ghcr.io/${{ needs.setup.outputs.owner_lc }}/${{ matrix.service }}@sha256:%s ' *)
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:${{ needs.setup.outputs.version }}
+          docker buildx imagetools inspect ghcr.io/${{ needs.setup.outputs.owner_lc }}/${{ matrix.service }}:${{ needs.setup.outputs.version }}
 
   build_cli:
     needs: setup
@@ -327,10 +333,9 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           VERSION: ${{ needs.setup.outputs.version }}
-          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_OWNER: ${{ needs.setup.outputs.owner_lc }}
         run: |
-          LOWER_REPO_OWNER=$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
-          helm push kthena.tgz oci://ghcr.io/$LOWER_REPO_OWNER/charts
+          helm push kthena.tgz oci://ghcr.io/$REPO_OWNER/charts
 
       - name: Prepare Helm Release Artifacts
         if: needs.setup.outputs.is_tag == 'true'
