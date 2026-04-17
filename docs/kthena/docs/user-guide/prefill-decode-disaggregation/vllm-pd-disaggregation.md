@@ -53,7 +53,7 @@ spec:
                     mountPath: /models
             containers:
               - name: prefill
-                image: ghcr.io/yaozengzeng/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
+                image: ghcr.io/volcano-sh/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
                 command: ["sh", "-c"]
                 args:
                   - |
@@ -63,12 +63,10 @@ spec:
                     --uvicorn-log-level warning \
                     --model /models/Qwen3-0.6B \
                     --served-model-name Qwen/Qwen3-0.6B \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
                 env:
                   - name: PYTHONHASHSEED
                     value: "1047"
-                  - name: VLLM_SERVER_DEV_MODE
-                    value: "1"
                   - name: VLLM_NIXL_SIDE_CHANNEL_HOST
                     value: "0.0.0.0"
                   - name: VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -85,8 +83,6 @@ spec:
                     value: "0"
                   - name: NCCL_IB_GID_INDEX
                     value: "7"
-                  - name: NCCL_DEBUG
-                    value: "INFO"
                   - name: UCX_TLS
                     value: ^gga
                 volumeMounts:
@@ -142,7 +138,7 @@ spec:
                     mountPath: /models
             containers:
               - name: decode
-                image: ghcr.io/yaozengzeng/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
+                image: ghcr.io/volcano-sh/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
                 command: ["sh", "-c"]
                 args:
                   - |
@@ -152,12 +148,10 @@ spec:
                     --uvicorn-log-level warning \
                     --model /models/Qwen3-0.6B \
                     --served-model-name Qwen/Qwen3-0.6B \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
                 env:
                   - name: PYTHONHASHSEED
                     value: "1047"
-                  - name: VLLM_SERVER_DEV_MODE
-                    value: "1"
                   - name: VLLM_NIXL_SIDE_CHANNEL_HOST
                     value: "0.0.0.0"
                   - name: VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -174,8 +168,6 @@ spec:
                     value: "0"
                   - name: NCCL_IB_GID_INDEX
                     value: "7"
-                  - name: NCCL_DEBUG
-                    value: "INFO"
                   - name: UCX_TLS
                     value: ^gga
                 volumeMounts:
