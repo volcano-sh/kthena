@@ -799,13 +799,13 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
 	partition := c.getPartition(ms)
-	for _, servingGroup := range servingGroupList {
+	for index, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
 			continue
 		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
-		isPartitionProtected := partition > 0 && servingGroupOrdinal >= 0 && servingGroupOrdinal < partition
+		isPartitionProtected := partition > 0 && index < partition
 
 		rolesToManage := ms.Spec.Template.Roles
 		revisionToUse := newRevision
