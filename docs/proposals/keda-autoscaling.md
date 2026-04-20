@@ -31,7 +31,7 @@ This proposal adds KEDA as an **optional** autoscaling path for teams that alrea
 - Fix `status.labelSelector` so HPA can target ModelServing ([#839](https://github.com/volcano-sh/kthena/pull/839))
 - Provide example manifests for KEDA ScaledObject + ServiceMonitor
 - Helm chart templates behind opt-in feature flags
-- Document how to map a model name to a ModelServing CR using annotations
+- Document two Prometheus scraping strategies: router-level and backend-level
 
 ### What this proposal does NOT cover
 
@@ -110,49 +110,55 @@ So HPA/KEDA talk to it the same way they'd talk to a Deployment:
 
 One catch: the controller wasn't populating `status.labelSelector`. HPA couldn't find pods, scaling broke silently with a `selector is required` error. Fixed in [#839](https://github.com/volcano-sh/kthena/pull/839).
 
-### Metrics
+### Two scaling approaches
 
-KEDA's Prometheus trigger accepts **any valid PromQL query**. The metric used for scaling is not prescribed -- teams choose whatever signal best reflects demand for their workload.
+KEDA's Prometheus trigger accepts **any valid PromQL query**, so the metric used for scaling is not prescribed. In practice there are two places to source metrics from, and each fits a different operational setup. No new API, label, or annotation is introduced -- users just write the ScaledObject spec.
 
-Common examples:
+#### Approach A: Router-level metrics
 
-| Signal | Example PromQL | When to use |
-|--------|---------------|-------------|
-| Active requests | `sum(metric{model="<model-name>"})` | General demand-based scaling |
-| Request rate | `sum(rate(metric{model="<model-name>"}[2m]))` | Throughput-based scaling |
-| Queue depth | `sum(queue_metric{model="<model-name>"})` | Backpressure-based scaling |
-
-The key point is that the query should be **scoped to a specific model** (via a label filter) so that scaling decisions are isolated per model.
-
-### Model-to-ModelServing mapping
-
-**How do you map a model to a ModelServing CR?**
-
-We introduce a standard annotation on the ModelServing resource:
+Scrape metrics from the Kthena router and filter by the model label the router exposes.
 
 ```yaml
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ModelServing
-metadata:
-  name: <deployment-name>
-  annotations:
-    kthena.io/model-name: "<model-name>"
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: <prometheus-url>
+      query: |
+        sum(router_active_requests{model="<router-model-name>"})
+      threshold: "5"
 ```
 
-This annotation serves as a **user-defined** declaration of which routing-level model name this ModelServing instance handles. It is not consumed by any controller in Phase 1 -- it's a convention that operators use when writing their ScaledObject's PromQL query. The `model` label in the query should match the value of this annotation.
+**When to use:** you want to react to demand *before* it reaches the backend (queue depth, in-flight requests at the router), and the person writing the ScaledObject knows which model name the router is exposing (i.e. the value configured in `ModelRoute`).
 
-The mapping is intentionally manual. Operators know their routing topology and which model name maps to which backend.
+**Caveats:** the model name on the router (what clients send in API requests) may differ from the backend identifier. The PromQL filter has to match the router's label, which the operator reads from the `ModelRoute` config. If `ModelRoute` and `ModelServing` are operated by different personas, coordinate on the label value or use Approach B.
 
-### Decoupling of model identity
+#### Approach B: Backend-level metrics
 
-The model name seen by the router (the name clients use in requests) may differ from the model name or identifier used by the backend inference engine. For example:
+Scrape metrics directly from the inference engine pods and filter by pod/namespace selectors that identify the ModelServing.
 
-- Router sees: `my-llama-model` (the name clients send in API calls)
-- Backend runs: `meta-llama/Llama-3-70B-Instruct` (the HuggingFace model ID)
+```yaml
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: <prometheus-url>
+      query: |
+        sum(vllm_num_requests_running{namespace="<ns>", pod=~"<modelserving-name>-.*"})
+      threshold: "5"
+```
 
-The `kthena.io/model-name` annotation represents the **routing-level identity** -- the name that appears in Prometheus metrics exposed by the router. Autoscaling decisions are based on router-level demand, so the annotation should match the router's model label, not the backend's internal model name.
+**When to use:** the persona writing the ScaledObject owns the `ModelServing` but not the router, or the router's model label is not known up front. Pod and namespace selectors are owned by the same team, so no cross-team coordination is needed.
 
-This is a deliberate design choice: we scale based on what the router sees (demand), not what the backend reports (capacity). Backend-level metrics can be added as supplementary triggers in the future.
+**Caveats:** you only observe load that has already reached the backend, so scale-up reacts slightly later than with router-level signals.
+
+#### Choosing between them
+
+Both approaches work out of the box; neither requires changes on the Kthena side. Pick based on:
+
+- Which team owns the ScaledObject (router operator vs. backend operator)
+- Whether queued-but-not-yet-served demand matters for your SLO
+- Whether a stable router-level model label is known when the ScaledObject is authored
+
+Teams can also combine the two using KEDA's multi-trigger support.
 
 ---
 
@@ -246,7 +252,7 @@ fallback:
 
 ### Phase 3: If there's demand
 
-- Controller that auto-generates ScaledObjects from annotated ModelServing CRs
+- Controller that auto-generates ScaledObjects from ModelServing CRs
 - Scale-to-zero support for dev/staging environments
 - Grafana dashboard for scaling decisions
 - Custom metrics adapter (if KEDA proves too heavy for some environments)
@@ -267,21 +273,9 @@ After this, users can set up KEDA autoscaling with per-model Prometheus metrics.
 
 ## 9. Example Configuration
 
-### ModelServing with model annotation
+No annotation or label on the `ModelServing` is required. Users author the ScaledObject directly and point it at an existing `ModelServing`.
 
-```yaml
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ModelServing
-metadata:
-  name: <deployment-name>
-  annotations:
-    kthena.io/model-name: "<model-name>"
-spec:
-  replicas: 1
-  # ... rest of spec
-```
-
-### Minimal ScaledObject
+### ScaledObject (router-level metrics)
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -305,12 +299,27 @@ spec:
       metadata:
         serverAddress: <prometheus-url>
         query: |
-          sum(your_metric{model="<model-name>"})
+          sum(router_active_requests{model="<router-model-name>"})
         threshold: "5"
         activationThreshold: "1"
 ```
 
-Scales `ModelServing/<deployment-name>` via its scale subresource. Scales up when the metric value per replica exceeds the threshold, stays between 1-10 replicas, and waits 300s (5 minutes) before scaling down -- important because LLM pods have slow startup times and aggressive scale-down wastes initialization work.
+### ScaledObject (backend-level metrics)
+
+Same shape, different trigger query -- filter by pod/namespace instead of router model label:
+
+```yaml
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: <prometheus-url>
+        query: |
+          sum(vllm_num_requests_running{namespace="<ns>", pod=~"<deployment-name>-.*"})
+        threshold: "5"
+        activationThreshold: "1"
+```
+
+Both scale `ModelServing/<deployment-name>` via its scale subresource. The `cooldownPeriod` of 300s matters because LLM pods have slow startup times and aggressive scale-down wastes initialization work.
 
 ### Prerequisites
 
