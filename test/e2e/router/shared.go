@@ -482,6 +482,24 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }
 
+// subsetCanaryBackendCountsFromRouterLogs counts canary traffic to each mock pool using
+// router access logs (selected_pod). Chat response bodies no longer differ when both
+// backends use the same HuggingFace model id without -v1/-v2 suffixes.
+func subsetCanaryBackendCountsFromRouterLogs(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, since *metav1.Time) (v1, v2 int) {
+	t.Helper()
+	routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
+	opts := &corev1.PodLogOptions{}
+	if since != nil {
+		opts.SinceTime = since
+	}
+	logs, err := kube.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
+	require.NoError(t, err)
+	s := string(logs)
+	// Pod names are deployment-prefixed: deepseek-r1-1-5b-v1-<rs>-<suffix>
+	return strings.Count(s, "selected_pod=deepseek-r1-1-5b-v1-"),
+		strings.Count(s, "selected_pod=deepseek-r1-1-5b-v2-")
+}
+
 // TestModelRouteSubsetShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
@@ -573,29 +591,25 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		// Use more requests to reduce randomness impact
 		const totalRequests = 500
 		const sumTolerance = 0.01 // Allow ±1% deviation for floating-point rounding errors
-		v1Count := 0
-		v2Count := 0
+		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
 
 		for i := 0; i < totalRequests; i++ {
 			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
-
-			if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v1") {
-				v1Count++
-			} else if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v2") {
-				v2Count++
-			}
 		}
 
-		// Verify weight distribution statistics across multiple requests
-		// 1. Verify statistics completeness: all requests are accounted for
-		totalCounted := v1Count + v2Count
-		assert.Equal(t, totalRequests, totalCounted, "All requests should be accounted for in statistics")
+		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
+		totalFromLogs := v1Count + v2Count
+		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
+			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
+		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
+		require.Greater(t, v2Count, 0, "canary v2 should receive some traffic")
 
-		// 2. Calculate and verify distribution ratios
-		v1Ratio := float64(v1Count) / float64(totalRequests)
-		v2Ratio := float64(v2Count) / float64(totalRequests)
+		// Verify weight distribution statistics across multiple requests
+		// 1. Ratios from access logs (retries may add extra lines; use log totals for proportions)
+		v1Ratio := float64(v1Count) / float64(totalFromLogs)
+		v2Ratio := float64(v2Count) / float64(totalFromLogs)
 		expectedV1Ratio := 0.70
 		expectedV2Ratio := 0.30
 		maxDeviation := 0.05 // Allow ±5% deviation for randomness
@@ -606,16 +620,16 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		assert.LessOrEqual(t, v1Ratio, expectedV1Ratio+maxDeviation,
 			"deepseek-r1-1-5b ratio should be at most %.1f%% (expected %.1f%%)", (expectedV1Ratio+maxDeviation)*100, expectedV1Ratio*100)
 		assert.GreaterOrEqual(t, v2Ratio, expectedV2Ratio-maxDeviation,
-			"deepseek-r1-7b ratio should be at least %.1f%% (expected %.1f%%)", (expectedV2Ratio-maxDeviation)*100, expectedV2Ratio*100)
+			"deepseek-r1-1-5b-v2 ratio should be at least %.1f%% (expected %.1f%%)", (expectedV2Ratio-maxDeviation)*100, expectedV2Ratio*100)
 		assert.LessOrEqual(t, v2Ratio, expectedV2Ratio+maxDeviation,
-			"deepseek-r1-7b ratio should be at most %.1f%% (expected %.1f%%)", (expectedV2Ratio+maxDeviation)*100, expectedV2Ratio*100)
+			"deepseek-r1-1-5b-v2 ratio should be at most %.1f%% (expected %.1f%%)", (expectedV2Ratio+maxDeviation)*100, expectedV2Ratio*100)
 
 		// 4. Verify statistics sum to 100% (with tolerance for floating-point rounding)
 		assert.InDelta(t, 1.0, v1Ratio+v2Ratio, sumTolerance, "Distribution ratios should sum to approximately 100%")
 
 		// Log statistics for debugging
 		t.Logf("Weight distribution statistics verified:")
-		t.Logf("  Total requests: %d, Counted: %d", totalRequests, totalCounted)
+		t.Logf("  Total requests: %d, log lines (v1+v2): %d", totalRequests, totalFromLogs)
 		t.Logf("  deepseek-r1-1-5b-v1: %d requests (%.1f%%, expected %.1f%%)", v1Count, v1Ratio*100, expectedV1Ratio*100)
 		t.Logf("  deepseek-r1-1-5b-v2: %d requests (%.1f%%, expected %.1f%%)", v2Count, v2Ratio*100, expectedV2Ratio*100)
 	})
@@ -640,34 +654,31 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		require.Eventually(t, func() bool {
 			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 			return resp.StatusCode == 200 && resp.Body != "" &&
-				(strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v1") || strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v2"))
+				strings.Contains(resp.Body, `"choices"`) &&
+				strings.Contains(resp.Body, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
 		}, 1*time.Minute, 2*time.Second, "ModelRoute update should propagate and requests should route successfully")
 
 		// Verify requests still work and verify the normalized weight distribution (50:30 = 5/8:3/8)
 		// Send multiple requests to verify weight distribution statistics
 		const totalRequests = 500
-		v1Count := 0
-		v2Count := 0
+		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
 
 		for i := 0; i < totalRequests; i++ {
 			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
-
-			if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v1") {
-				v1Count++
-			} else if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v2") {
-				v2Count++
-			}
 		}
 
-		// Verify weight distribution statistics
-		totalCounted := v1Count + v2Count
-		assert.Equal(t, totalRequests, totalCounted, "All requests should be accounted for in statistics")
+		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
+		totalFromLogs := v1Count + v2Count
+		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
+			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
+		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
+		require.Greater(t, v2Count, 0, "canary v2 should receive some traffic")
 
 		// Calculate and verify distribution ratios (50:30 should normalize to 5/8:3/8 = 62.5%:37.5%)
-		v1Ratio := float64(v1Count) / float64(totalRequests)
-		v2Ratio := float64(v2Count) / float64(totalRequests)
+		v1Ratio := float64(v1Count) / float64(totalFromLogs)
+		v2Ratio := float64(v2Count) / float64(totalFromLogs)
 		expectedV1Ratio := 0.625 // 5/8 = 62.5%
 		expectedV2Ratio := 0.375 // 3/8 = 37.5%
 		maxDeviation := 0.05     // Allow ±5% deviation for randomness
@@ -687,7 +698,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 		// Log statistics for debugging
 		t.Logf("Normalized weight distribution verified (50:30 -> 5/8:3/8):")
-		t.Logf("  Total requests: %d, Counted: %d", totalRequests, totalCounted)
+		t.Logf("  Total requests: %d, log lines (v1+v2): %d", totalRequests, totalFromLogs)
 		t.Logf("  deepseek-r1-1-5b-v1: %d requests (%.1f%%, expected %.1f%%)", v1Count, v1Ratio*100, expectedV1Ratio*100)
 		t.Logf("  deepseek-r1-1-5b-v2: %d requests (%.1f%%, expected %.1f%%)", v2Count, v2Ratio*100, expectedV2Ratio*100)
 
@@ -1235,13 +1246,13 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 	podName := podList.Items[0].Name
 	t.Logf("Using pod %s for LoRA adapter loading", podName)
 
-	pf, err := utils.SetupPortForwardToPod(testNamespace, podName, "9000", "8000")
+	pf, err := utils.SetupPortForwardToPod(testNamespace, podName, "9002", "8002")
 	require.NoError(t, err, "Failed to setup port-forward to LLM-Mock pod")
 	defer pf.Close()
 
 	t.Log("Loading LoRA adapters on backend...")
-	utils.LoadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-A", "/models/lora-A")
-	utils.LoadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-B", "/models/lora-B")
+	utils.LoadLoRAAdapter(t, "http://127.0.0.1:9002", "lora-A", "/models/lora-A")
+	utils.LoadLoRAAdapter(t, "http://127.0.0.1:9002", "lora-B", "/models/lora-B")
 	t.Log("LoRA adapters loaded successfully")
 
 	messages := []utils.ChatMessage{
@@ -1299,8 +1310,8 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 
 	// Unload LoRA adapters after test is complete
 	t.Log("Unloading LoRA adapters after test...")
-	utils.UnloadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-A")
-	utils.UnloadLoRAAdapter(t, "http://127.0.0.1:9000", "lora-B")
+	utils.UnloadLoRAAdapter(t, "http://127.0.0.1:9002", "lora-A")
+	utils.UnloadLoRAAdapter(t, "http://127.0.0.1:9002", "lora-B")
 	t.Log("LoRA adapters unloaded successfully")
 }
 

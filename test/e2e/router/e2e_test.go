@@ -119,7 +119,7 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 // TestModelRouteSubset tests ModelRoute with subset routing.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteSubset(t *testing.T) {
-	TestModelRouteSubsetShared(t, testCtx, testNamespace, false, "")
+	TestModelRouteSubsetShared(t, testCtx, testNamespace, false, kthenaNamespace)
 }
 
 // TestModelRouteWithRateLimit tests local rate limiting enforced by the Kthena Router.
