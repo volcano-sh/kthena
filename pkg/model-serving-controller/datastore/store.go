@@ -49,6 +49,8 @@ type Store interface {
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
 	UpdateServingGroupRevision(modelServingName types.NamespacedName, groupName string, revision string) error
+	// DumpCache returns a JSON dump of the current store cache representation, which is useful for debugging and monitoring purposes. The structure of the JSON will be a map of modelServing names to their ServingGroups, and each ServingGroup will include its roles and running pods.
+	DumpCache() []byte
 }
 
 type store struct {
@@ -503,3 +505,4 @@ func (s *store) UpdateServingGroupRevision(modelServingName types.NamespacedName
 	}
 	return nil
 }
+

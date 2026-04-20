@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -120,6 +122,25 @@ func SetupController(ctx context.Context, cc Config) {
 		if ac != nil {
 			go ac.Run(ctx)
 			klog.Info("Autoscaler controller started")
+		}
+
+		if cc.DebugPort > 0 {
+			go func() {
+				debugMux := http.ServeMux{}
+				if msc != nil {
+					msc.RegisterDebugHandlers(&debugMux)
+				}
+				debugAddr := fmt.Sprintf(":%d", cc.DebugPort)
+				klog.Infof("Starting debug server on %s", debugAddr)
+				server := &http.Server{Addr: debugAddr, Handler: &debugMux}
+				go func() {
+					<-ctx.Done()
+					_ = server.Close()
+				}()
+				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					klog.Errorf("Debug server failed: %v", err)
+				}
+			}()
 		}
 	}
 
