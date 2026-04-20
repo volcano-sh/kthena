@@ -18,8 +18,6 @@ package datastore
 
 import (
 	"encoding/json"
-
-	"k8s.io/klog/v2"
 )
 
 // ExportedRole is a DTO used exclusively for JSON serialization of the cache state.
@@ -34,19 +32,19 @@ type ExportedRole struct {
 // ExportedServingGroup is a DTO used exclusively for JSON serialization of the cache state.
 // It maps the internal non-exported fields (like runningPods and roles) to JSON serializable formats.
 type ExportedServingGroup struct {
-	Name        string                             `json:"name"`
-	RunningPods []string                           `json:"runningPods"`
-	Revision    string                             `json:"revision"`
-	Status      ServingGroupStatus                 `json:"status"`
-	Roles       map[string]map[string]ExportedRole `json:"roles"`
+	Name        string             `json:"name"`
+	RunningPods []string           `json:"runningPods"`
+	Revision    string             `json:"revision"`
+	Status      ServingGroupStatus `json:"status"`
+	// Roles maps role name -> role ID -> ExportedRole
+	Roles map[string]map[string]ExportedRole `json:"roles"`
 }
 
 // DumpCache returns a JSON dump of the current store cache representation
-func (s *store) DumpCache() []byte {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-
+func (s *store) DumpCache() ([]byte, error) {
 	exportedCache := make(map[string]map[string]ExportedServingGroup)
+
+	s.mutex.RLock()
 	for msName, groups := range s.servingGroup {
 		msKey := msName.String()
 		exportedCache[msKey] = make(map[string]ExportedServingGroup)
@@ -75,11 +73,11 @@ func (s *store) DumpCache() []byte {
 			exportedCache[msKey][groupName] = expGroup
 		}
 	}
+	s.mutex.RUnlock()
 
 	data, err := json.Marshal(exportedCache)
 	if err != nil {
-		klog.Errorf("failed to marshal cache: %v", err)
-		return nil
+		return nil, err
 	}
-	return data
+	return data, nil
 }
