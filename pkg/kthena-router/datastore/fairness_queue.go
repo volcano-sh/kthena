@@ -89,14 +89,16 @@ func CalculateFairnessPriority(source FairnessPrioritySource, userID, modelName 
 
 // Request represents a request item in the priority queue
 type Request struct {
-	ReqID       string
-	UserID      string  // User ID for fairness scheduling
-	ModelName   string  // Target model for per-model fair queuing
-	Priority    float64 // Priority (lower value means higher priority)
-	RequestTime time.Time
-	NotifyChan  chan struct{}
-	CancelCh    <-chan struct{} // Request-scoped cancellation signal
-	Release     func()          // Set by the queue when a permit is acquired
+	ReqID     string
+	UserID    string  // User ID for fairness scheduling
+	ModelName string  // Target model for per-model fair queuing
+	Priority  float64 // Priority (lower value means higher priority)
+	// PriorityOffset stores enqueue-time request cost so refresh keeps request-size sensitivity.
+	PriorityOffset float64
+	RequestTime    time.Time
+	NotifyChan     chan struct{}
+	CancelCh       <-chan struct{} // Request-scoped cancellation signal
+	Release        func()          // Set by the queue when a permit is acquired
 }
 
 // RequestPriorityQueue implements the heap.Interface
@@ -229,6 +231,7 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 					pq.config.RequestNumWeight,
 				)
 				if err == nil && newPri != req.Priority {
+					newPri += req.PriorityOffset
 					req.Priority = newPri
 					// Check if this request should still be dequeued
 					if len(pq.heap) > 0 && newPri > pq.heap[0].Priority {
@@ -312,7 +315,7 @@ func (pq *RequestPriorityQueue) rebuildHeap() {
 			pq.config.TokenWeight,
 			pq.config.RequestNumWeight,
 		); err == nil {
-			req.Priority = newPri
+			req.Priority = newPri + req.PriorityOffset
 		}
 	}
 	heap.Init(pq)
