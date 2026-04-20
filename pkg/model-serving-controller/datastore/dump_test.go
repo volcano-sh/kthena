@@ -38,13 +38,16 @@ func TestStore_DumpCache(t *testing.T) {
 	s.AddRole(msName, groupName, roleName, roleID, revision, roleTemplateHash)
 	s.AddRunningPodToServingGroup(msName, groupName, podName, revision, roleTemplateHash, roleName, roleID)
 
-	data := s.DumpCache()
+	data, err := s.DumpCache()
+	if err != nil {
+		t.Fatalf("DumpCache returned error: %v", err)
+	}
 	if data == nil {
 		t.Fatalf("DumpCache returned nil")
 	}
 
 	var cache map[string]map[string]ExportedServingGroup
-	err := json.Unmarshal(data, &cache)
+	err = json.Unmarshal(data, &cache)
 	if err != nil {
 		t.Fatalf("Failed to unmarshal cache data: %v", err)
 	}

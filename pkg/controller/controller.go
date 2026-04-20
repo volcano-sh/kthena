@@ -128,14 +128,23 @@ func SetupController(ctx context.Context, cc Config) {
 			go func() {
 				debugMux := http.ServeMux{}
 				if msc != nil {
-					msc.RegisterDebugHandlers(&debugMux)
+					msc.RegisterModelServingDebugEndpoints(&debugMux)
 				}
 				debugAddr := fmt.Sprintf(":%d", cc.DebugPort)
 				klog.Infof("Starting debug server on %s", debugAddr)
-				server := &http.Server{Addr: debugAddr, Handler: &debugMux}
+				server := &http.Server{
+					Addr:              debugAddr,
+					Handler:           &debugMux,
+					ReadHeaderTimeout: 5 * time.Second,
+					ReadTimeout:       10 * time.Second,
+					WriteTimeout:      10 * time.Second,
+					IdleTimeout:       30 * time.Second,
+				}
 				go func() {
 					<-ctx.Done()
-					_ = server.Close()
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = server.Shutdown(shutdownCtx)
 				}()
 				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					klog.Errorf("Debug server failed: %v", err)
