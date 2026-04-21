@@ -27,9 +27,12 @@ import (
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
+	volcanoschedulerlister "volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -1204,5 +1207,173 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 		assert.False(t, manager.hasPodGroupCRD.Load(), "hasPodGroupCRD should remain false")
 
 		// Channel notification is no longer used; we only validate state change.
+	})
+}
+
+// TestExtractQueueName verifies the extractQueueName helper directly.
+func TestExtractQueueName(t *testing.T) {
+	t.Run("nil ModelServing returns empty string", func(t *testing.T) {
+		assert.Equal(t, "", extractQueueName(nil))
+	})
+
+	t.Run("no annotation returns empty string", func(t *testing.T) {
+		ms := &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		}
+		assert.Equal(t, "", extractQueueName(ms))
+	})
+
+	t.Run("annotation present returns queue name", func(t *testing.T) {
+		ms := &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test",
+				Namespace: "default",
+				Annotations: map[string]string{
+					schedulingv1beta1.QueueNameAnnotationKey: "my-queue",
+				},
+			},
+		}
+		assert.Equal(t, "my-queue", extractQueueName(ms))
+	})
+}
+
+// newMinimalMS builds a ModelServing with one role and no resource requests.
+// If queueName is non-empty the scheduling.volcano.sh/queue-name annotation is set.
+func newMinimalMS(queueName string) *workloadv1alpha1.ModelServing {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("uid-1"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			SchedulerName: "volcano",
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "role0",
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "c", Image: "img"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if queueName != "" {
+		ms.Annotations = map[string]string{
+			schedulingv1beta1.QueueNameAnnotationKey: queueName,
+		}
+	}
+	return ms
+}
+
+// TestCreatePodGroupQueueBehavior verifies that createPodGroup sets Spec.Queue
+// from the ModelServing queue-name annotation.
+func TestCreatePodGroupQueueBehavior(t *testing.T) {
+	newManager := func() (*Manager, *volcanofake.Clientset) {
+		fakeVolcano := volcanofake.NewSimpleClientset()
+		fakeApiext := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		mgr := NewManager(nil, fakeVolcano, fakeApiext, nil)
+		mgr.hasPodGroupCRD.Store(true)
+		mgr.hasSubGroupPolicy.Store(false)
+		return mgr, fakeVolcano
+	}
+
+	t.Run("annotation present sets Spec.Queue", func(t *testing.T) {
+		mgr, fakeVolcano := newManager()
+		ms := newMinimalMS("high-priority-queue")
+
+		err := mgr.createPodGroup(context.Background(), ms, "test-pg")
+		assert.NoError(t, err)
+
+		pg, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
+			context.Background(), "test-pg", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "high-priority-queue", pg.Spec.Queue)
+	})
+
+	t.Run("no annotation leaves Spec.Queue empty", func(t *testing.T) {
+		mgr, fakeVolcano := newManager()
+		ms := newMinimalMS("") // no queue annotation
+
+		err := mgr.createPodGroup(context.Background(), ms, "test-pg")
+		assert.NoError(t, err)
+
+		pg, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
+			context.Background(), "test-pg", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "", pg.Spec.Queue)
+	})
+}
+
+// TestUpdatePodGroupQueueBehavior verifies that updatePodGroupIfNeeded syncs
+// Spec.Queue from the ModelServing queue-name annotation.
+func TestUpdatePodGroupQueueBehavior(t *testing.T) {
+	// buildExistingPG returns a PodGroup that already exists with a given queue.
+	buildExistingPG := func(queue string) *schedulingv1beta1.PodGroup {
+		return &schedulingv1beta1.PodGroup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pg",
+				Namespace: "default",
+			},
+			Spec: schedulingv1beta1.PodGroupSpec{
+				MinMember: 1,
+				Queue:     queue,
+			},
+		}
+	}
+
+	// setupManager creates a Manager with the given PodGroup pre-loaded in both
+	// the fake volcano client (for Create/Update calls) and the in-memory lister
+	// (for Get calls inside updatePodGroupIfNeeded).
+	setupManager := func(existingPG *schedulingv1beta1.PodGroup) (*Manager, *volcanofake.Clientset) {
+		fakeVolcano := volcanofake.NewSimpleClientset(existingPG)
+		fakeApiext := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		mgr := NewManager(nil, fakeVolcano, fakeApiext, nil)
+		mgr.hasPodGroupCRD.Store(true)
+		mgr.hasSubGroupPolicy.Store(false)
+
+		indexer := cache.NewIndexer(
+			cache.MetaNamespaceKeyFunc,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		)
+		err := indexer.Add(existingPG)
+		assert.NoError(t, err)
+		mgr.PodGroupLister = volcanoschedulerlister.NewPodGroupLister(indexer)
+		return mgr, fakeVolcano
+	}
+
+	t.Run("annotation changes updates Spec.Queue", func(t *testing.T) {
+		pg := buildExistingPG("old-queue")
+		mgr, fakeVolcano := setupManager(pg)
+		ms := newMinimalMS("new-queue")
+
+		err := mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
+		assert.NoError(t, err)
+
+		updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
+			context.Background(), "test-pg", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "new-queue", updated.Spec.Queue)
+	})
+
+	t.Run("annotation removed clears Spec.Queue", func(t *testing.T) {
+		pg := buildExistingPG("some-queue")
+		mgr, fakeVolcano := setupManager(pg)
+		ms := newMinimalMS("") // annotation removed
+
+		err := mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
+		assert.NoError(t, err)
+
+		updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
+			context.Background(), "test-pg", metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, "", updated.Spec.Queue)
 	})
 }

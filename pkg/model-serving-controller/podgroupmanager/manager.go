@@ -260,6 +260,16 @@ func (m *Manager) shouldCreatePodGroup(ms *workloadv1alpha1.ModelServing) bool {
 	return ms.Spec.SchedulerName == "volcano"
 }
 
+// extractQueueName extracts the volcano queue name from the ModelServing's own annotations.
+// Returns the queue name if the annotation scheduling.volcano.sh/queue-name is set, otherwise returns an empty string.
+func extractQueueName(ms *workloadv1alpha1.ModelServing) string {
+	if ms == nil {
+		return ""
+	}
+
+	return ms.Annotations[schedulingv1beta1.QueueNameAnnotationKey]
+}
+
 // createPodGroup creates a PodGroup for group-level gang scheduling
 func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, podGroupName string) error {
 	// Calculate total pods and resources for this ServingGroup
@@ -285,6 +295,11 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 			MinMember:    int32(minMember),
 			MinResources: &minResources,
 		},
+	}
+
+	// Inherit queue name from ModelServing annotations if configured.
+	if queue := extractQueueName(ms); queue != "" {
+		podGroup.Spec.Queue = queue
 	}
 
 	if ms.Spec.Template.NetworkTopology != nil {
@@ -422,6 +437,10 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 		updated := currentPodGroup.DeepCopy()
 		updated.Spec.MinMember = int32(minMember)
 		updated.Spec.MinResources = &minResources
+
+		// Sync queue name from ModelServing annotations if configured.
+		// When the queue annotation is removed (or set to empty) queue field is set to empty string.
+		updated.Spec.Queue = extractQueueName(ms)
 
 		// Apply network topology policy
 		if m.hasSubGroupPolicy.Load() {
@@ -571,7 +590,8 @@ func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
 	return current.Spec.MinMember != updated.Spec.MinMember ||
 		!reflect.DeepEqual(current.Spec.MinResources, updated.Spec.MinResources) ||
 		!reflect.DeepEqual(current.Spec.NetworkTopology, updated.Spec.NetworkTopology) ||
-		!reflect.DeepEqual(current.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy)
+		!reflect.DeepEqual(current.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy) ||
+		current.Spec.Queue != updated.Spec.Queue
 }
 
 func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {
