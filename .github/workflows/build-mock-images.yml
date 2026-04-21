@@ -1,0 +1,56 @@
+name: Build and Push Mock Images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - hack/mock-images/**
+  workflow_dispatch:
+
+jobs:
+  build-vllm-mock:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push vllm-mock
+        uses: docker/build-push-action@v5
+        with:
+          context: hack/mock-images/vllm-mock
+          push: true
+          tags: ghcr.io/volcano-sh/vllm-mock:latest
+
+  build-sglang-mock:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push sglang-mock
+        uses: docker/build-push-action@v5
+        with:
+          context: hack/mock-images/sglang-mock
+          push: true
+          tags: ghcr.io/volcano-sh/sglang-mock:latest

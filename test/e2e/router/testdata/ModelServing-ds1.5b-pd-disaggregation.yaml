@@ -19,7 +19,7 @@ spec:
           spec:
             containers:
               - name: leader
-                image: ghcr.io/yaozengzeng/vllm-mock:latest
+                image: ghcr.io/volcano-sh/vllm-mock:latest
                 imagePullPolicy: IfNotPresent
                 env:
                   # specify the model name to mock
@@ -39,7 +39,7 @@ spec:
           spec:
             containers:
               - name: leader
-                image: ghcr.io/yaozengzeng/vllm-mock:latest
+                image: ghcr.io/volcano-sh/vllm-mock:latest
                 imagePullPolicy: IfNotPresent
                 env:
                   # specify the model name to mock
