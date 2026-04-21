@@ -22,6 +22,8 @@ Where it falls short for some teams:
 
 This proposal adds KEDA as an **optional** autoscaling path for teams that already use Prometheus and KEDA. It does not touch or replace `AutoscalingPolicy`.
 
+**Scope boundary:** KEDA and Prometheus are external dependencies, not part of Kthena core. Kthena does not install, bundle, or reconcile `ScaledObject` resources -- users own their ScaledObjects the same way they own any other KEDA-managed workload. Tested against KEDA `v2.13+` (earlier versions have CRD differences in the `ScaledObject` spec).
+
 ---
 
 ## 2. Scope
@@ -160,11 +162,33 @@ Both approaches work out of the box; neither requires changes on the Kthena side
 
 Teams can also combine the two using KEDA's multi-trigger support.
 
+#### Metrics reference (not prescribed)
+
+The PromQL query is user-defined -- Kthena does not prescribe or validate which metric is used for scaling. For convenience, the following metrics are already exported by Kthena components and make reasonable starting points:
+
+| Source | Metric | Notes |
+|--------|--------|-------|
+| Router | `router_active_requests{model=...}` | In-flight requests at the router, pre-backend |
+| Router | `router_queue_depth{model=...}` | Queued requests awaiting a backend |
+| Backend (vLLM) | `vllm_num_requests_running` | Requests currently being decoded |
+| Backend (vLLM) | `vllm_num_requests_waiting` | Backend-side queue depth |
+
+Users with custom inference runtimes bring their own metrics -- any PromQL expression that returns a scalar works. This list is documentation, not API surface; the authoritative names are whatever the components actually export at the time of scraping.
+
 ---
 
 ## 4. Key Design Decisions
 
-### 4.1 Why KEDA instead of extending AutoscalingPolicy
+### 4.1 Coexistence with AutoscalingPolicy
+
+**Rule: one scaler per ModelServing.** A ModelServing must be controlled by either `AutoscalingPolicy` or a KEDA `ScaledObject`, never both. KEDA creates an HPA under the hood, and two independent controllers writing `spec.replicas` will fight -- replicas oscillate, metrics race, GPU time is wasted on churn.
+
+- **Phase 1 (this proposal):** documented constraint. Operators are expected not to bind both to the same target. The failure mode is visible (flapping replicas) rather than silent.
+- **Phase 2:** validation webhook that rejects an `AutoscalingPolicyBinding` whose target already has a `ScaledObject` pointing at it, and vice versa. This is the real enforcement -- see [Future Work](#7-future-work).
+- **Switching scalers:** remove the existing resource (`AutoscalingPolicyBinding` or `ScaledObject`) before creating the other. KEDA leaves its managed HPA in place for a few seconds after ScaledObject deletion; wait for it to be garbage-collected before binding an `AutoscalingPolicy`.
+- **Scale-to-zero:** only supported via the KEDA path (`minReplicaCount: 0` + `activationThreshold`). `AutoscalingPolicy` does not scale to zero. Teams that need scale-to-zero for dev/staging must use KEDA.
+
+### 4.2 Why KEDA instead of extending AutoscalingPolicy
 
 | | AutoscalingPolicy | KEDA + Prometheus |
 |--|-------------------|-------------------|
@@ -177,11 +201,11 @@ Teams can also combine the two using KEDA's multi-trigger support.
 
 We're adding KEDA as another option, not replacing anything. This integration is most useful for teams that already have KEDA and Prometheus in their cluster. Teams without KEDA should continue using AutoscalingPolicy.
 
-### 4.2 Why per-model metric scoping
+### 4.3 Why per-model metric scoping
 
 One ModelServing = one model (typically). Without filtering by model in the PromQL query, a spike on `model-A` would scale `model-B` too. Scoping the query by model label isolates scaling decisions -- each ScaledObject queries for its model only.
 
-### 4.3 How ModelServing is targeted
+### 4.4 How ModelServing is targeted
 
 ScaledObject points at ModelServing directly:
 
@@ -194,11 +218,11 @@ scaleTargetRef:
 
 KEDA creates an HPA that hits the `/scale` subresource -- same as Deployments, StatefulSets. Nothing custom.
 
-### 4.4 Why labelSelector matters
+### 4.5 Why labelSelector matters
 
 HPA needs `status.labelSelector` to count pods and compute scaling ratios. If it's empty, HPA sees 0 pods and scaling goes sideways. The selector has to match all pods in the CR's ServingGroups.
 
-### 4.5 Cooldown period for LLM workloads
+### 4.6 Cooldown period for LLM workloads
 
 LLM inference pods have slow startup times (model loading can take 30s to 5+ minutes). Aggressive scale-down is harmful -- removing a pod that just finished loading wastes the GPU time spent on initialization. We recommend a `cooldownPeriod` of **300 seconds** (5 minutes) as a starting point. Tune based on your model's load time.
 
@@ -229,7 +253,7 @@ What breaks and what happens:
 | **Prometheus goes down** | KEDA can't get metrics, scaling freezes at current count | Use KEDA's `fallback` config to hold at a safe replica count |
 | **Router pod restarts** | Metrics gap for a scrape interval or two | Run multiple router replicas. `sum()` still works with partial data |
 | **KEDA operator dies** | HPA stops getting updates, but the existing HPA keeps running -- kube-controller-manager owns it | Run KEDA with 2+ replicas |
-| **Both autoscalers target same CR** | They fight over `spec.replicas`, replicas oscillate | Don't do this. Document the constraint; Phase 2 adds a webhook to prevent it |
+| **Both autoscalers target same CR** | They fight over `spec.replicas`, replicas oscillate visibly | Documented constraint in Phase 1 (see §4.1). Phase 2 adds a webhook that rejects the second binding |
 | **Bad PromQL query** (wrong model name) | Returns 0, may scale down to `minReplicaCount` | Verify the query returns data before applying the ScaledObject |
 
 Most failures just freeze scaling where it is -- you don't get runaway scaling. The `fallback` config handles the Prometheus-down case:
