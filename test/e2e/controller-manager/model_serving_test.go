@@ -357,11 +357,8 @@ func TestModelServingServingGroupRecreate(t *testing.T) {
 
 			// Must be a new pod (not in original UIDs) and must be ready
 			if !isOriginal && isNonTerminating {
-				for _, condition := range pod.Status.Conditions {
-					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-						readyNewPods++
-						break
-					}
+				if utils.IsPodReady(pod) {
+					readyNewPods++
 				}
 			}
 		}
@@ -504,11 +501,8 @@ func TestModelServingPodRecovery(t *testing.T) {
 	for _, pod := range pods.Items {
 		// Check if it's a new pod (different UID from original)
 		if pod.UID != originalPodUID {
-			// Check for PodReady condition with status True
-			for _, condition := range pod.Status.Conditions {
-				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-					t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
-				}
+			if utils.IsPodReady(pod) {
+				t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
 			}
 		}
 	}
@@ -1200,11 +1194,8 @@ func TestLWSAPIBasic(t *testing.T) {
 	// Verify all pods are running and ready
 	readyPods := 0
 	for _, pod := range podList.Items {
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-				readyPods++
-				break
-			}
+		if utils.IsPodReady(pod) {
+			readyPods++
 		}
 	}
 	assert.Equal(t, expectedPodCount, readyPods, "All pods should be in a Ready state")
@@ -1675,13 +1666,9 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 		}
 		// Check that at least one controller-manager pod is running and ready
 		for _, pod := range pods.Items {
-			if pod.Status.Phase == corev1.PodRunning {
-				for _, condition := range pod.Status.Conditions {
-					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-						t.Logf("Controller-manager pod is ready: %s", pod.Name)
-						return true
-					}
-				}
+			if utils.IsPodReady(pod) {
+				t.Logf("Controller-manager pod is ready: %s", pod.Name)
+				return true
 			}
 		}
 		return false

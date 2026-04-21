@@ -41,8 +41,6 @@ var (
 	kthenaNamespace string
 )
 
-const testDataDir = "test/e2e/router/testdata"
-
 func TestMain(m *testing.M) {
 	testNamespace = "kthena-e2e-gie-" + utils.RandomString(5)
 
@@ -100,7 +98,7 @@ func TestGatewayInferenceExtension(t *testing.T) {
 
 	// 1. Deploy InferencePool
 	t.Log("Deploying InferencePool...")
-	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(testDataDir, "InferencePool.yaml"))
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(routercontext.TestDataDir, "InferencePool.yaml"))
 	inferencePool.Namespace = testNamespace
 
 	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
@@ -114,7 +112,7 @@ func TestGatewayInferenceExtension(t *testing.T) {
 
 	// 2. Deploy HTTPRoute
 	t.Log("Deploying HTTPRoute...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(testDataDir, "HTTPRoute.yaml"))
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
 	httpRoute.Namespace = testNamespace
 
 	// Update parentRefs to point to the kthena installation namespace
@@ -171,7 +169,7 @@ func TestBothAPIsConfigured(t *testing.T) {
 
 	// 1. Deploy ModelRoute and ModelServer for ModelRoute/ModelServer API
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRoute-binding-gateway.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRoute-binding-gateway.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Update parentRefs to point to the kthena installation namespace
@@ -229,7 +227,7 @@ func TestBothAPIsConfigured(t *testing.T) {
 
 	// 3. Deploy HTTPRoute pointing to the 7b InferencePool
 	t.Log("Deploying HTTPRoute...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(testDataDir, "HTTPRoute.yaml"))
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
 	httpRoute.Namespace = testNamespace
 	httpRoute.Name = "llm-route-7b"
 
@@ -281,7 +279,7 @@ func TestHTTPRouteNotSkippedAfterRouterRestart(t *testing.T) {
 
 	// 1. Deploy InferencePool
 	t.Log("Deploying InferencePool...")
-	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(testDataDir, "InferencePool.yaml"))
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(routercontext.TestDataDir, "InferencePool.yaml"))
 	inferencePool.Namespace = testNamespace
 
 	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
@@ -293,7 +291,7 @@ func TestHTTPRouteNotSkippedAfterRouterRestart(t *testing.T) {
 
 	// 2. Create HTTPRoute volcano-router-gateway (parentRef to default Gateway, which listens on port 80)
 	t.Log("Creating HTTPRoute volcano-router-gateway...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(testDataDir, "HTTPRoute.yaml"))
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
 	httpRoute.Name, httpRoute.Namespace = httpRouteName, testNamespace
 	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
 		{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("default"), Namespace: &ktNamespace},
@@ -357,7 +355,7 @@ func TestGatewayCreatedLaterThanHTTPRoute(t *testing.T) {
 
 	// 1. Create HTTPRoute first (parentRef to Gateway that does not exist yet)
 	t.Log("Creating HTTPRoute before Gateway...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(testDataDir, "HTTPRoute.yaml"))
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
 	httpRoute.Name, httpRoute.Namespace = httpRouteName, testNamespace
 	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
 		{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName(gatewayName), Namespace: &ktNamespace},
@@ -372,7 +370,7 @@ func TestGatewayCreatedLaterThanHTTPRoute(t *testing.T) {
 
 	// 2. Deploy InferencePool
 	t.Log("Deploying InferencePool...")
-	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(testDataDir, "InferencePool.yaml"))
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(routercontext.TestDataDir, "InferencePool.yaml"))
 	inferencePool.Namespace = testNamespace
 
 	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
