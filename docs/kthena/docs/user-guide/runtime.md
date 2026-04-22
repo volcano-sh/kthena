@@ -1,12 +1,13 @@
 # Runtime
 
-Kthena Runtime is a lightweight sidecar service designed to standardize Prometheus metrics from inference engines, provides LoRA adapter download/load/unload capabilities, and supports model downloading.
+Kthena Runtime is a lightweight sidecar service designed to standardize Prometheus metrics from inference engines, provides LoRA adapter download/load/unload capabilities, supports model downloading, and publishes KV cache events to Redis for the `kvcache-aware` router plugin.
 
 ## Overview
 
 - Metrics standardization: fetch native metrics from the engine's /metrics endpoint, rename them to unified Kthena metrics according to rules.
 - LoRA lifecycle management: simple HTTP APIs to download+load and unload LoRA adapters for dynamic enable/disable.
 - Model downloading: supports downloading models from S3/OBS/PVC/HuggingFace to a local path.
+- KV cache event ingestion: for vLLM engines, subscribes to the ZMQ `kv-events` stream and writes standardized token block hashes into Redis, enabling the router's [`kvcache-aware`](kvcache-aware.md) score plugin.
 
 Notes:
 

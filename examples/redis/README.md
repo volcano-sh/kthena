@@ -5,8 +5,41 @@ This directory contains Redis deployment configuration for Kthena.
 ## When to Deploy Redis
 
 Redis is required when using the following Kthena features:
-- **KV Cache Aware Plugin** - For caching key-value pairs to improve performance
+- **KV Cache Aware Plugin** - For token-block based KV cache matching across pods via Redis. The Kthena Runtime sidecar writes token block hashes into Redis, and the router's `kvcache-aware` score plugin queries Redis to route requests to pods that already have matching cached blocks.
 - **Global Rate Limit** - To share and synchronize the token counts across all router pods
+
+## Enabling KV Cache Aware Plugin with Redis
+
+After deploying Redis, you need to enable the `kvcache-aware` plugin in the router's scheduler configuration. Create or update the router ConfigMap:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-config
+  namespace: <namespace>
+data:
+  routerConfiguration: |-
+    scheduler:
+      pluginConfig:
+      - name: kvcache-aware
+        args:
+          blockSizeToHash: 128
+          maxBlocksToMatch: 128
+      plugins:
+        Score:
+          enabled:
+            - name: least-request
+              weight: 1
+            - name: kvcache-aware
+              weight: 1
+```
+
+The `kvcache-aware` plugin also requires:
+1. **Kthena Runtime sidecar** deployed alongside each vLLM pod (automatically set up by ModelBooster, or manually via ModelServing).
+2. **Redis environment variables** (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`) available to both the runtime sidecar and the router pods.
+
+For the full end-to-end setup guide, see the [KV Cache Aware Plugin user guide](../../docs/kthena/docs/user-guide/kvcache-aware.md).
 
 ## Quick Start
 

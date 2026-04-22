@@ -35,6 +35,8 @@ data:
           enabled:
             - name: least-request
               weight: 1
+            - name: kvcache-aware
+              weight: 1
             - name: gpu-usage
               weight: 1
             - name: least-latency
