@@ -162,7 +162,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		}
 
 		instancesCountSum += currentInstancesCounts[param.Target.TargetRef.Name]
-		currentUnreadyInstancesCount, currentReadyInstancesMetrics, err := collector.UpdateMetrics(ctx, podLister)
+		currentUnreadyInstancesCount, currentReadyInstancesMetrics, _, err := collector.UpdateMetrics(ctx, podLister)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
 			continue
