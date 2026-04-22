@@ -126,7 +126,7 @@ triggers:
     metadata:
       serverAddress: <prometheus-url>
       query: |
-        sum(router_active_requests{model="<router-model-name>"})
+        sum(kthena_router_active_downstream_requests{model="<router-model-name>"})
       threshold: "5"
 ```
 
@@ -144,7 +144,7 @@ triggers:
     metadata:
       serverAddress: <prometheus-url>
       query: |
-        sum(vllm_num_requests_running{namespace="<ns>", pod=~"<modelserving-name>-.*"})
+        sum(vllm:num_requests_running{namespace="<ns>", pod=~"<modelserving-name>-.*"})
       threshold: "5"
 ```
 
@@ -168,10 +168,11 @@ The PromQL query is user-defined -- Kthena does not prescribe or validate which 
 
 | Source | Metric | Notes |
 |--------|--------|-------|
-| Router | `router_active_requests{model=...}` | In-flight requests at the router, pre-backend |
-| Router | `router_queue_depth{model=...}` | Queued requests awaiting a backend |
-| Backend (vLLM) | `vllm_num_requests_running` | Requests currently being decoded |
-| Backend (vLLM) | `vllm_num_requests_waiting` | Backend-side queue depth |
+| Router | `kthena_router_active_downstream_requests{model=...}` | In-flight client→router requests, labeled by model. Good "pre-backend" demand signal. |
+| Router | `kthena_router_active_upstream_requests{model_server=..., model_route=...}` | In-flight router→backend requests. Labeled by `model_server` / `model_route` (not `model`); useful when you want to scope by a specific backend or route rather than the client-facing model name. |
+| Router | `kthena_router_fairness_queue_size{model=..., user_id=...}` | Per-user fairness queue depth at the router. Aggregate over `user_id` for total queued demand per model (e.g. `sum by (model) (kthena_router_fairness_queue_size{model="..."})`). |
+| Backend (vLLM) | `vllm:num_requests_running` | Requests currently being decoded |
+| Backend (vLLM) | `vllm:num_requests_waiting` | Backend-side queue depth |
 
 Users with custom inference runtimes bring their own metrics -- any PromQL expression that returns a scalar works. This list is documentation, not API surface; the authoritative names are whatever the components actually export at the time of scraping.
 
@@ -185,7 +186,7 @@ Users with custom inference runtimes bring their own metrics -- any PromQL expre
 
 - **Phase 1 (this proposal):** documented constraint. Operators are expected not to bind both to the same target. The failure mode is visible (flapping replicas) rather than silent.
 - **Phase 2:** validation webhook that rejects an `AutoscalingPolicyBinding` whose target already has a `ScaledObject` pointing at it, and vice versa. This is the real enforcement -- see [Future Work](#7-future-work).
-- **Switching scalers:** remove the existing resource (`AutoscalingPolicyBinding` or `ScaledObject`) before creating the other. KEDA leaves its managed HPA in place for a few seconds after ScaledObject deletion; wait for it to be garbage-collected before binding an `AutoscalingPolicy`.
+- **Switching scalers:** remove the existing resource (`AutoscalingPolicyBinding` or `ScaledObject`) before creating the other. KEDA's managed HPA is cleaned up by Kubernetes garbage collection via owner references; confirm the HPA is gone (`kubectl get hpa`) before binding an `AutoscalingPolicy`.
 - **Scale-to-zero:** only supported via the KEDA path (`minReplicaCount: 0` + `activationThreshold`). `AutoscalingPolicy` does not scale to zero. Teams that need scale-to-zero for dev/staging must use KEDA.
 
 ### 4.2 Why KEDA instead of extending AutoscalingPolicy
@@ -222,9 +223,13 @@ KEDA creates an HPA that hits the `/scale` subresource -- same as Deployments, S
 
 HPA needs `status.labelSelector` to count pods and compute scaling ratios. If it's empty, HPA sees 0 pods and scaling goes sideways. The selector has to match all pods in the CR's ServingGroups.
 
-### 4.6 Cooldown period for LLM workloads
+### 4.6 Stabilizing scale-down for LLM workloads
 
-LLM inference pods have slow startup times (model loading can take 30s to 5+ minutes). Aggressive scale-down is harmful -- removing a pod that just finished loading wastes the GPU time spent on initialization. We recommend a `cooldownPeriod` of **300 seconds** (5 minutes) as a starting point. Tune based on your model's load time.
+LLM inference pods have slow startup times (model loading can take 30s to 5+ minutes). Aggressive scale-down is harmful -- removing a pod that just finished loading wastes the GPU time spent on initialization.
+
+The right knob for this is the HPA's `behavior.scaleDown.stabilizationWindowSeconds`, which delays scale-down until the metric has been low for a sustained window. KEDA exposes HPA `behavior` via `advanced.horizontalPodAutoscalerConfig.behavior` on the `ScaledObject`. We recommend a stabilization window of **300 seconds** (5 minutes) as a starting point; tune based on your model's load time.
+
+Note: KEDA's top-level `cooldownPeriod` is **not** the knob to use here. It only applies when `minReplicaCount: 0` (scale-to-zero) and controls how long KEDA waits before scaling from 1 to 0 once the metric is inactive. It does **not** dampen normal scale-down between `minReplicaCount` and `maxReplicaCount`.
 
 ---
 
@@ -277,7 +282,7 @@ fallback:
 ### Phase 3: If there's demand
 
 - Controller that auto-generates ScaledObjects from ModelServing CRs
-- Scale-to-zero support for dev/staging environments
+- Documented scale-to-zero recipe (`minReplicaCount: 0` + `activationThreshold`) with guidance on cold-start tradeoffs
 - Grafana dashboard for scaling decisions
 - Custom metrics adapter (if KEDA proves too heavy for some environments)
 
@@ -314,18 +319,23 @@ spec:
     name: <deployment-name>
   minReplicaCount: 1
   maxReplicaCount: 10
-  cooldownPeriod: 300
   fallback:
     failureThreshold: 3
     replicas: 2
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # Require the metric to stay low for 5 minutes before removing a pod.
+          # Protects against churn given LLM pods' slow startup.
+          stabilizationWindowSeconds: 300
   triggers:
     - type: prometheus
       metadata:
         serverAddress: <prometheus-url>
         query: |
-          sum(router_active_requests{model="<router-model-name>"})
+          sum(kthena_router_active_downstream_requests{model="<router-model-name>"})
         threshold: "5"
-        activationThreshold: "1"
 ```
 
 ### ScaledObject (backend-level metrics)
@@ -338,16 +348,17 @@ Same shape, different trigger query -- filter by pod/namespace instead of router
       metadata:
         serverAddress: <prometheus-url>
         query: |
-          sum(vllm_num_requests_running{namespace="<ns>", pod=~"<deployment-name>-.*"})
+          sum(vllm:num_requests_running{namespace="<ns>", pod=~"<deployment-name>-.*"})
         threshold: "5"
-        activationThreshold: "1"
 ```
 
-Both scale `ModelServing/<deployment-name>` via its scale subresource. The `cooldownPeriod` of 300s matters because LLM pods have slow startup times and aggressive scale-down wastes initialization work.
+Both scale `ModelServing/<deployment-name>` via its scale subresource. The `scaleDown.stabilizationWindowSeconds: 300` shown above matters because LLM pods have slow startup times and aggressive scale-down wastes initialization work.
+
+**Note on `activationThreshold`:** we intentionally omit it. `activationThreshold` only governs the 0→1 transition, so it has no effect when `minReplicaCount: 1`. Set it only if you also set `minReplicaCount: 0` (scale-to-zero), in which case it is the metric value that must be exceeded before KEDA scales from 0 to 1.
 
 ### Prerequisites
 
-1. Prometheus scraping the Kthena router (ServiceMonitor or scrape config)
+1. Prometheus scraping the metric source for your chosen approach: the Kthena router (Approach A) and/or the inference-engine pods (Approach B), via ServiceMonitor / PodMonitor or scrape config
 2. KEDA installed in the cluster
 3. ModelServing controller populating `status.labelSelector` ([#839](https://github.com/volcano-sh/kthena/pull/839))
 4. RBAC for KEDA to hit the ModelServing scale subresource:
@@ -364,7 +375,27 @@ rules:
   - apiGroups: ["workload.serving.volcano.sh"]
     resources: ["modelservings"]
     verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keda-modelserving-scaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keda-modelserving-scaler
+subjects:
+  # The KEDA operator service account. Its name and namespace depend on how
+  # KEDA was installed -- adjust to match your deployment:
+  #   - Helm chart default:  keda-operator / keda
+  #   - OLM / OperatorHub:   keda-operator / openshift-keda (or similar)
+  # Confirm with: kubectl -n <keda-ns> get sa
+  - kind: ServiceAccount
+    name: keda-operator
+    namespace: keda
 ```
+
+The binding's `subjects[0].name` and `namespace` must point at the service account KEDA actually runs under in your cluster; the values above are the Helm-chart defaults and should be verified, not copied blindly.
 
 ---
 
