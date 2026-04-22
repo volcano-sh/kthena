@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/yaozengzeng/vllm-mock:latest
+          image: ghcr.io/faust-benchou/dynamo-mocker-vllm:latest
           imagePullPolicy: IfNotPresent
           env:
             # specify the model name to mock
