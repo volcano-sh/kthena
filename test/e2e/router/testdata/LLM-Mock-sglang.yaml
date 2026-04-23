@@ -17,13 +17,13 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/faust-benchou/sglang-mock:latest
+          image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 30000
           env:
             - name: MODEL_NAME
-              value: "meta-llama/Llama-3.1-8B-Instruct"
+              value: "Qwen/Qwen3-8B"
           command:
             - python3
             - sglang_app.py
