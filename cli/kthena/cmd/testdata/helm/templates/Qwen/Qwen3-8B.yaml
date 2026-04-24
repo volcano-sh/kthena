@@ -1,0 +1,34 @@
+# Description: Template for Qwen3 8b model deployment with vLLM backend
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  annotations:
+    api.kubernetes.io/name: {{ .Values.annotationName | default "example" | quote }}
+  name: {{ .Values.name | default "qwen3-8b" | quote }}
+  {{- if .Values.namespace }}
+  namespace: {{ .Values.namespace | quote }}
+  {{- end }}
+spec:
+  name: {{ .Values.modelName | default .Values.name | default "qwen3-8b" | quote }}
+  owner: {{ .Values.owner | default "example" | quote }}
+  backend:
+    name: {{ .Values.backendName | default "qwen3-8b-vllm" | quote }}
+    type: {{ .Values.backendType | default "vLLM" | quote }}
+    modelURI: {{ .Values.modelURI | default "hf://Qwen/Qwen3-8B" | quote }}
+    cacheURI: {{ .Values.cacheURI | default "hostpath://mnt/cache" | quote }}
+    minReplicas: {{ .Values.minReplicas | default 1 }}
+    maxReplicas: {{ .Values.maxReplicas | default 3 }}
+    workers:
+      - type: {{ .Values.workerType | default "server" | quote }}
+        image: {{ .Values.workerImage | default "vllm/vllm-openai:latest" | quote }}
+        replicas: {{ .Values.workerReplicas | default 1 }}
+        pods: {{ .Values.workerPods | default 1 }}
+        config:
+          served-model-name: {{ .Values.modelName | default .Values.name | default "qwen3-8b" | quote }}
+          tensor-parallel-size: {{ .Values.tensorParallelSize | default 2 }}
+          enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.gpuLimit | default "2" | quote }}
+          requests:
+            nvidia.com/gpu: {{ .Values.gpuRequest | default "2" | quote }}
