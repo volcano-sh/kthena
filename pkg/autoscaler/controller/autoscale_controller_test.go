@@ -150,7 +150,7 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	}
 }
 
-func TestTwoBackends_then_DoOptimize_expect_UpdateActions(t *testing.T) {
+func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	ns := "ns"
 	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
 	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-b", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
@@ -449,12 +449,13 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 				if err := json.Unmarshal([]byte(patchBody), &ops); err != nil {
 					t.Fatalf("failed to parse JSON Patch: %v", err)
 				}
-				if len(ops) != 1 {
+				fmt.Printf("ops: %v\n", ops)
+				if len(ops) != 2 {
 					t.Fatalf("expected exactly 1 JSON Patch operation, got %d", len(ops))
 				}
-				op := ops[0]
-				if op["op"] != "replace" {
-					t.Errorf("expected op=replace, got %v", op["op"])
+				op := ops[1]
+				if op["op"] != "add" {
+					t.Errorf("expected op=add, got %v", op["op"])
 				}
 				path, _ := op["path"].(string)
 				if !strings.HasSuffix(path, "/replicas") {
@@ -523,18 +524,31 @@ func TestPatchRoleReplicasPreservesOtherRoles(t *testing.T) {
 		t.Fatalf("updateTargetReplicas error: %v", err)
 	}
 
-	// Verify the patch only targets role index 0 (prefill)
+	// Verify exactly one patch was issued, and that it only targets role index 0 (prefill).
+	var patchBody string
+	patchCount := 0
+	updateCount := 0
 	for _, action := range fakeClient.Actions() {
 		if pa, ok := action.(k8stesting.PatchAction); ok {
-			patchBody := string(pa.GetPatch())
-			// Must target roles/0 (prefill), not roles/1 (decode)
-			if !strings.Contains(patchBody, "/spec/template/roles/0/replicas") {
-				t.Errorf("expected patch to target roles/0, got: %s", patchBody)
-			}
-			if strings.Contains(patchBody, "/spec/template/roles/1") {
-				t.Errorf("patch should not touch roles/1 (decode), got: %s", patchBody)
-			}
+			patchCount++
+			patchBody = string(pa.GetPatch())
 		}
+		if _, ok := action.(k8stesting.UpdateAction); ok {
+			updateCount++
+		}
+	}
+	if patchCount != 1 {
+		t.Fatalf("expected exactly one patch action, got %d actions: %#v", patchCount, fakeClient.Actions())
+	}
+	if updateCount != 0 {
+		t.Fatalf("expected no update actions, got %d actions: %#v", updateCount, fakeClient.Actions())
+	}
+	// Must target roles/0 (prefill), not roles/1 (decode)
+	if !strings.Contains(patchBody, "/spec/template/roles/0/replicas") {
+		t.Errorf("expected patch to target roles/0, got: %s", patchBody)
+	}
+	if strings.Contains(patchBody, "/spec/template/roles/1") {
+		t.Errorf("patch should not touch roles/1 (decode), got: %s", patchBody)
 	}
 }
 

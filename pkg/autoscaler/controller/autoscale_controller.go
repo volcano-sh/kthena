@@ -211,8 +211,8 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 			return fmt.Errorf("role %s not found in ModelServing %s", target.SubTarget.Name, targetRef.Name)
 		}
 		patchBytes := []byte(fmt.Sprintf(
-			`[{"op":"replace","path":"/spec/template/roles/%d/replicas","value":%d}]`,
-			roleIndex, replicas))
+			`[{"op":"test","path":"/spec/template/roles/%d/name","value":"%s"},{"op":"add","path":"/spec/template/roles/%d/replicas","value":%d}]`,
+			roleIndex, target.SubTarget.Name, roleIndex, replicas))
 		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Patch(
 			ctx, targetRef.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
 		return err
