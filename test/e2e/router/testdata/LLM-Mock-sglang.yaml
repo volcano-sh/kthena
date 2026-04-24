@@ -24,6 +24,3 @@ spec:
           env:
             - name: MODEL_NAME
               value: "Qwen/Qwen3-8B"
-          command:
-            - python3
-            - sglang_app.py
