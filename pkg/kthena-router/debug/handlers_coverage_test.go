@@ -34,8 +34,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
-// ── ListModelRoutes ───────────────────────────────────────────────────────────
-
 func TestListModelRoutes_SkipsInvalidKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -61,8 +59,6 @@ func TestListModelRoutes_SkipsInvalidKey(t *testing.T) {
 
 	mockStore.AssertExpectations(t)
 }
-
-// ── GetModelRoute ─────────────────────────────────────────────────────────────
 
 func TestGetModelRoute_NotFound(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -111,8 +107,6 @@ func TestGetModelRoute_MissingParams(t *testing.T) {
 	assert.Equal(t, "namespace and name parameters are required", response["error"])
 }
 
-// ── ListModelServers ──────────────────────────────────────────────────────────
-
 func TestListModelServers(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -159,8 +153,6 @@ func TestListModelServers(t *testing.T) {
 
 	mockStore.AssertExpectations(t)
 }
-
-// ── GetModelServer ────────────────────────────────────────────────────────────
 
 func TestGetModelServer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -248,8 +240,6 @@ func TestGetModelServer_MissingParams(t *testing.T) {
 	assert.Equal(t, "namespace and name parameters are required", response["error"])
 }
 
-// ── ListPods ──────────────────────────────────────────────────────────────────
-
 func TestListPods(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -291,8 +281,6 @@ func TestListPods(t *testing.T) {
 
 	mockStore.AssertExpectations(t)
 }
-
-// ── GetPod ────────────────────────────────────────────────────────────────────
 
 func TestGetPod(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -392,8 +380,6 @@ func TestGetPod_MissingParams(t *testing.T) {
 	assert.Equal(t, "namespace and name parameters are required", response["error"])
 }
 
-// ── ListGateways ──────────────────────────────────────────────────────────────
-
 func TestListGateways(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -424,8 +410,6 @@ func TestListGateways(t *testing.T) {
 
 	mockStore.AssertExpectations(t)
 }
-
-// ── GetGateway ────────────────────────────────────────────────────────────────
 
 func TestGetGateway(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -505,8 +489,6 @@ func TestGetGateway_MissingParams(t *testing.T) {
 	assert.Equal(t, "namespace and name parameters are required", response["error"])
 }
 
-// ── ListHTTPRoutes ────────────────────────────────────────────────────────────
-
 func TestListHTTPRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -566,8 +548,6 @@ func TestListHTTPRoutes_SkipsNilEntries(t *testing.T) {
 
 	mockStore.AssertExpectations(t)
 }
-
-// ── GetHTTPRoute ──────────────────────────────────────────────────────────────
 
 func TestGetHTTPRoute(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -647,8 +627,6 @@ func TestGetHTTPRoute_MissingParams(t *testing.T) {
 	assert.Equal(t, "namespace and name parameters are required", response["error"])
 }
 
-// ── ListInferencePools ────────────────────────────────────────────────────────
-
 func TestListInferencePools(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -709,82 +687,80 @@ func TestListInferencePools_SkipsNilEntries(t *testing.T) {
 	mockStore.AssertExpectations(t)
 }
 
-// ── GetInferencePool ──────────────────────────────────────────────────────────
-
 func TestGetInferencePool(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	mockStore := &MockStore{}
-	handler := NewDebugHandler(mockStore)
-
-	ip := &inferencev1.InferencePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-pool", Namespace: "default"},
+	testcases := []struct {
+		name           string
+		params         gin.Params
+		storeSetup     func(m *MockStore)
+		expectedStatus int
+		checkResponse  func(t *testing.T, body []byte)
+	}{
+		{
+			name: "found",
+			params: gin.Params{
+				{Key: "namespace", Value: "default"},
+				{Key: "name", Value: "my-pool"},
+			},
+			storeSetup: func(m *MockStore) {
+				m.On("GetInferencePool", "default/my-pool").Return(&inferencev1.InferencePool{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-pool", Namespace: "default"},
+				})
+			},
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, body []byte) {
+				var response InferencePoolResponse
+				assert.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "my-pool", response.Name)
+				assert.Equal(t, "default", response.Namespace)
+			},
+		},
+		{
+			name: "not found",
+			params: gin.Params{
+				{Key: "namespace", Value: "default"},
+				{Key: "name", Value: "missing"},
+			},
+			storeSetup: func(m *MockStore) {
+				m.On("GetInferencePool", "default/missing").Return(nil)
+			},
+			expectedStatus: http.StatusNotFound,
+			checkResponse: func(t *testing.T, body []byte) {
+				var response map[string]string
+				assert.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "InferencePool not found", response["error"])
+			},
+		},
+		{
+			name:           "missing params",
+			params:         gin.Params{},
+			storeSetup:     func(m *MockStore) {},
+			expectedStatus: http.StatusBadRequest,
+			checkResponse: func(t *testing.T, body []byte) {
+				var response map[string]string
+				assert.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "namespace and name parameters are required", response["error"])
+			},
+		},
 	}
 
-	mockStore.On("GetInferencePool", "default/my-pool").Return(ip)
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockStore := &MockStore{}
+			handler := NewDebugHandler(mockStore)
+			tc.storeSetup(mockStore)
 
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request, _ = http.NewRequest("GET", "/debug/config_dump/namespaces/default/inferencepools/my-pool", nil)
-	c.Params = gin.Params{
-		{Key: "namespace", Value: "default"},
-		{Key: "name", Value: "my-pool"},
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request, _ = http.NewRequest("GET", "/debug/config_dump/namespaces/default/inferencepools/my-pool", nil)
+			c.Params = tc.params
+
+			handler.GetInferencePool(c)
+
+			assert.Equal(t, tc.expectedStatus, w.Code)
+			tc.checkResponse(t, w.Body.Bytes())
+			mockStore.AssertExpectations(t)
+		})
 	}
-
-	handler.GetInferencePool(c)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	var response InferencePoolResponse
-	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
-	assert.Equal(t, "my-pool", response.Name)
-	assert.Equal(t, "default", response.Namespace)
-
-	mockStore.AssertExpectations(t)
-}
-
-func TestGetInferencePool_NotFound(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	mockStore := &MockStore{}
-	handler := NewDebugHandler(mockStore)
-
-	mockStore.On("GetInferencePool", "default/missing").Return(nil)
-
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request, _ = http.NewRequest("GET", "/debug/config_dump/namespaces/default/inferencepools/missing", nil)
-	c.Params = gin.Params{
-		{Key: "namespace", Value: "default"},
-		{Key: "name", Value: "missing"},
-	}
-
-	handler.GetInferencePool(c)
-
-	assert.Equal(t, http.StatusNotFound, w.Code)
-
-	var response map[string]string
-	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
-	assert.Equal(t, "InferencePool not found", response["error"])
-
-	mockStore.AssertExpectations(t)
-}
-
-func TestGetInferencePool_MissingParams(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	mockStore := &MockStore{}
-	handler := NewDebugHandler(mockStore)
-
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request, _ = http.NewRequest("GET", "/debug/config_dump/namespaces//inferencepools/", nil)
-
-	handler.GetInferencePool(c)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-
-	var response map[string]string
-	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
-	assert.Equal(t, "namespace and name parameters are required", response["error"])
 }
