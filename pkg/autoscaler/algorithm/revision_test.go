@@ -78,7 +78,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 	testcases := []TestCase{
 		// ── stable mode – no scaling needed ──────────────────────────────────
 		{
-			name: "whenStableAndRecommendedEqualsCurrentInstances_thenReturnCurrent",
+			name: "when stable and recommended equals current instances then return current",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -95,7 +95,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 			// SelectPolicyOr picks min(abs, rel) → less-restrictive of the two
 			// constraints; with no history pastSample=current=10, abs=9, rel=6,
 			// constraint=6; corrected=max(5,6)=6→min(6,10)=6.
-			name: "whenStableScaleDown_andSelectPolicyOr_thenLessRestrictiveConstraintApplied",
+			name: "when stable scale down and select policy Or then less restrictive constraint applied",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -110,7 +110,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// SelectPolicyAnd picks max(abs, rel) → more-restrictive of the two
 			// constraints; same inputs: abs=9, rel=6, constraint=9; corrected=9.
-			name: "whenStableScaleDown_andSelectPolicyAnd_thenMoreRestrictiveConstraintApplied",
+			name: "when stable scale down and select policy And then more restrictive constraint applied",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -125,7 +125,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// Unknown SelectPolicy falls through to constraint=math.MinInt32, so
 			// no lower bound is enforced and the raw recommendation is used.
-			name: "whenStableScaleDown_andUnknownSelectPolicy_thenNoConstraintApplied",
+			name: "when stable scale down and unknown select policy then no constraint applied",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -142,7 +142,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 			// recommendation before other constraints are applied.
 			// MaxRec=9 → corrected=max(5,9)=9; pastSample=10,abs=8,rel=8,Or→8;
 			// corrected=max(9,8)=9→min(9,10)=9.
-			name: "whenStableScaleDown_andMaxRecommendationHistoryIsHigher_thenBetterRecommendationPreferred",
+			name: "when stable scale down and max recommendation history is higher then better recommendation preferred",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic: false,
 				History: func() *History {
@@ -163,7 +163,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 			// which tightens the scale-down constraint.
 			// MaxCorrected=12 → pastSample=12, abs=9, rel=9, Or→9;
 			// corrected=max(3,9)=9→min(9,10)=9.
-			name: "whenStableScaleDown_andMaxCorrectedHistoryIsLarger_thenConstraintTightens",
+			name: "when stable scale down and max corrected history is larger then constraint tightens",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic: false,
 				History: func() *History {
@@ -183,7 +183,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// SelectPolicyOr picks max(abs, rel); with pastSample=current=5,
 			// abs=8, rel=10, constraint=10; corrected=min(20,10)=10→max(10,5)=10.
-			name: "whenStableScaleUp_andSelectPolicyOr_thenLessRestrictiveConstraintApplied",
+			name: "when stable scale up and select policy Or then less restrictive constraint applied",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -198,7 +198,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// SelectPolicyAnd picks min(abs, rel); abs=8, rel=10, constraint=8;
 			// corrected=min(20,8)=8→max(8,5)=8.
-			name: "whenStableScaleUp_andSelectPolicyAnd_thenMoreRestrictiveConstraintApplied",
+			name: "when stable scale up and select policy And then more restrictive constraint applied",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -213,7 +213,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// Unknown SelectPolicy falls through to constraint=math.MaxInt32, so
 			// the full recommendation is returned unconstrained.
-			name: "whenStableScaleUp_andUnknownSelectPolicy_thenNoConstraintApplied",
+			name: "when stable scale up and unknown select policy then no constraint applied",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -229,7 +229,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 			// MinRecommendation=12 pulls corrected down before the rate constraint:
 			// corrected=min(20,12)=12; then rate limit with pastSample=5,Or→10;
 			// corrected=min(12,10)=10→max(10,5)=10.
-			name: "whenStableScaleUp_andMinRecommendationHistoryIsLower_thenBetterRecommendationPreferred",
+			name: "when stable scale up and min recommendation history is lower then better recommendation preferred",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic: false,
 				History: func() *History {
@@ -250,7 +250,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 			// which tightens the scale-up rate limit.
 			// MinCorrected=6 → pastSample=min(6,10)=6; abs=8, rel=9, Or→9;
 			// corrected=min(50,9)=9→max(9,10)=10.
-			name: "whenStableScaleUp_andMinCorrectedHistoryIsSmaller_thenConstraintTightens",
+			name: "when stable scale up and min corrected history is smaller then constraint tightens",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic: false,
 				History: func() *History {
@@ -271,7 +271,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 			// At 1000% the relative constraint is far above recommended, so the
 			// full recommendation is returned.
 			// pastSample=5, relConst=5+50=55; corrected=min(15,55)=15→max(15,5)=15.
-			name: "whenPanicAndPanicPercentIs1000_thenConstraintDoesNotLimitGrowth",
+			name: "when panic and panic percent is 1000 then constraint does not limit growth",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              true,
 				History:              emptyHistory(),
@@ -286,7 +286,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// At 100% the relative constraint equals current*2, limiting growth.
 			// pastSample=5, relConst=5+5=10; corrected=min(15,10)=10→max(10,5)=10.
-			name: "whenPanicAndPanicPercentIsSmall_thenScaleUpRateIsLimited",
+			name: "when panic and panic percent is small then scale up rate is limited",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              true,
 				History:              emptyHistory(),
@@ -303,7 +303,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 			// tightening the panic constraint further.
 			// MinCorrected=6 → pastSample=min(6,10)=6; relConst=6+6=12;
 			// corrected=min(30,12)=12→max(12,10)=12.
-			name: "whenPanicAndMinCorrectedHistoryIsSmaller_thenConstraintTightens",
+			name: "when panic and min corrected history is smaller then constraint tightens",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic: true,
 				History: func() *History {
@@ -322,7 +322,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// Panic mode never scales down: corrected is always at least current.
 			// pastSample=10, relConst=110; corrected=min(3,110)=3→max(3,10)=10.
-			name: "whenPanicAndRecommendedIsBelowCurrent_thenCorrectedIsAtLeastCurrent",
+			name: "when panic and recommended is below current then corrected is at least current",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              true,
 				History:              emptyHistory(),
@@ -338,7 +338,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// When the corrected value falls below MinInstances it is raised to MinInstances.
 			// stable equal path: corrected=5; min(max(5,8),20)=8.
-			name: "whenCorrectedIsBelowMinInstances_thenReturnMinInstances",
+			name: "when corrected is below min instances then return min instances",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
@@ -353,7 +353,7 @@ func TestGetCorrectedInstances(t *testing.T) {
 		{
 			// When the corrected value exceeds MaxInstances it is clamped to MaxInstances.
 			// stable equal path: corrected=15; min(max(15,1),10)=10.
-			name: "whenCorrectedIsAboveMaxInstances_thenReturnMaxInstances",
+			name: "when corrected is above max instances then return max instances",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              false,
 				History:              emptyHistory(),
