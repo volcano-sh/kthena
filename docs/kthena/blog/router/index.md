@@ -180,13 +180,14 @@ Modern inference engines like vLLM and SGLang implement prefix caching, where co
 
 #### 4.1.2 KV Cache Aware Scheduling
 
-The KV Cache Aware plugin monitors the KV cache utilization of each pod and routes requests to pods with available cache capacity. This prevents cache thrashing and improves overall throughput.
+The KV Cache Aware plugin (`kvcache-aware`) routes requests to pods that are most likely to have matching KV cache entries, using token-block based matching with Redis-based distributed coordination. This maximizes cache hits and reduces redundant prefill computation.
 
 **How it works**:
-- The Metrics Fetcher continuously polls `/metrics` endpoints on inference engine pods
-- Extracts KV cache usage percentages (e.g., from vLLM's `vllm:kv_cache_usage_perc` metric)
-- Scores pods based on available cache capacity
-- Routes new requests to pods with sufficient free cache space
+- The Kthena Runtime sidecar subscribes to vLLM ZMQ kv-events and writes token block hashes into Redis
+- The router tokenizes incoming prompts, divides them into fixed-size blocks, and hashes each block
+- Redis is queried to find which pods have cached each token block
+- Pods are scored based on consecutive block matches from the beginning of the prompt
+- Requires Redis and the Kthena Runtime sidecar deployed alongside vLLM pods
 
 #### 4.1.3 LoRA Affinity Scheduling
 
