@@ -84,6 +84,13 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {
 		klog.InfoS("skip recommended instances")
+		// When metric data is unavailable (e.g. pods not ready), the
+		// stabilization window has no historical data to prevent an
+		// immediate scale-down once pods become ready. Record the current
+		// instance count so that the window can protect against premature
+		// scale-down on the next reconciliation.
+		autoscaler.Status.AppendRecommendation(currentInstancesCount)
+		autoscaler.Status.AppendCorrected(currentInstancesCount)
 		return -1, nil
 	}
 	if autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil && recommendedInstances*100 >= currentInstancesCount*(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
