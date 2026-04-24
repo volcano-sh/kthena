@@ -1448,6 +1448,10 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 			"status_code": "200",
 		}
 
+		// Warmup: ensure the route is ready before capturing baseline.
+		// This prevents retry-induced extra requests from affecting the metric delta.
+		utils.CheckChatCompletions(t, modelName, messages)
+
 		// Capture baseline metrics
 		baselineMetrics, err := backendmetrics.ParseMetricsURL(defaultMetricsURL)
 		require.NoError(t, err, "Failed to fetch baseline metrics")

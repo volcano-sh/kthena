@@ -186,7 +186,6 @@ func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName s
 	// Assert successful response
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
-	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
 
 	return resp
 }
@@ -197,7 +196,6 @@ func CheckChatCompletionsQuiet(t *testing.T, modelName string, messages []ChatMe
 	resp := SendChatRequestWithRetryQuiet(t, DefaultRouterURL, modelName, messages, nil)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
-	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
 	return resp
 }
 
@@ -238,10 +236,13 @@ func WaitForChatModelReady(t *testing.T, url, modelName string, messages []ChatM
 	require.NoError(t, err, "Model %s did not become ready within %v", modelName, timeout)
 }
 
-// containsError checks if the response string contains error indicators
+// containsError checks if the response is an actual error (404, etc.) by looking
+// for the presence of both "error" and "message" fields in the response body.
+// This avoids false positives from mock LLM responses that randomly generate
+// the word "error" in their content.
 func containsError(response string) bool {
 	responseLower := strings.ToLower(response)
-	return strings.Contains(responseLower, "error")
+	return strings.Contains(responseLower, `"error"`) && strings.Contains(responseLower, `"message"`)
 }
 
 // min returns the minimum of two time.Duration values
