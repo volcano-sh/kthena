@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -41,14 +42,20 @@ import (
 )
 
 type MetricCollector struct {
-	PastHistograms  *datastructure.SnapshotSlidingWindow[map[string]HistogramInfo]
-	Target          *v1alpha1.Target
-	Scope           Scope
-	WatchMetricList sets.String
-	MetricTargets   map[string]float64
+	PastHistograms        *datastructure.SnapshotSlidingWindow[map[string]HistogramInfo]
+	Target                *v1alpha1.Target
+	Scope                 Scope
+	WatchMetricList       sets.String
+	MetricTargets         map[string]float64
+	// RouterMetricsEndpoint is the optional endpoint of the router's metrics endpoint for scale-from-zero
+	// Format: http://<router-service-name>.<namespace>.svc.cluster.local:<port>/metrics
+	RouterMetricsEndpoint string
 }
 
 func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPolicyBinding, metricTargets map[string]float64) *MetricCollector {
+	// Get router metrics endpoint from environment variable if set
+	routerMetricsEndpoint := os.Getenv("ROUTER_METRICS_ENDPOINT")
+
 	return &MetricCollector{
 		PastHistograms: datastructure.NewSnapshotSlidingWindow[map[string]HistogramInfo](util.SecondToTimestamp(util.SloQuantileSlidingWindowSeconds), util.SecondToTimestamp(util.SloQuantileDataKeepSeconds)),
 		Target:         target,
@@ -56,8 +63,9 @@ func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPo
 			Namespace:      binding.Namespace,
 			OwnedBindingId: binding.UID,
 		},
-		MetricTargets:   metricTargets,
-		WatchMetricList: util.ExtractKeysToSet(metricTargets),
+		MetricTargets:         metricTargets,
+		WatchMetricList:       util.ExtractKeysToSet(metricTargets),
+		RouterMetricsEndpoint: routerMetricsEndpoint,
 	}
 }
 
@@ -95,36 +103,51 @@ func GetMetricTargets(autoscalePolicy *v1alpha1.AutoscalingPolicy) algorithm.Met
 	return metricTargets
 }
 
-func (collector *MetricCollector) UpdateMetrics(ctx context.Context, podLister listerv1.PodLister) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, err error) {
+func (collector *MetricCollector) UpdateMetrics(ctx context.Context, podLister listerv1.PodLister) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, externalMetrics algorithm.Metrics, err error) {
 	// Get pod list which will be invoked api to get metrics
 	unreadyInstancesCount = int32(0)
+	readyInstancesMetric = make(algorithm.Metrics)
+	externalMetrics = make(algorithm.Metrics)
+
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target)
 	if err != nil {
 		klog.Errorf("list watched pod error: %v in namespace: %s, labels: %v", err, collector.Scope.Namespace, collector.Target.MetricEndpoint)
 		return
 	}
-	if len(pods) == 0 {
-		klog.Errorf("pod list is null")
-		return
+
+	if len(pods) > 0 {
+		currentHistograms := make(map[string]HistogramInfo)
+		instanceInfo := collector.fetchMetricsFromPods(ctx, pods, &currentHistograms)
+		klog.V(10).InfoS("finish to processInstance", "instanceInfo.isFailed", instanceInfo.IsFailed)
+		klog.V(10).InfoS("finish to processInstance", "instanceInfo.isReady", instanceInfo.IsReady)
+		klog.V(10).InfoS("finish to processInstance", "instanceInfo.metricsMap", instanceInfo.MetricsMap)
+		if instanceInfo.IsFailed {
+			klog.Warningf("some pod of %s are failed in namespace: %s.", collector.Scope, collector.Scope.Namespace)
+			return
+		}
+
+		if !instanceInfo.IsReady {
+			unreadyInstancesCount++
+			klog.Warningf("some pod of %s are not ready in namespace: %s.", collector.Scope, collector.Scope.Namespace)
+			return
+		}
+		readyInstancesMetric = instanceInfo.MetricsMap
+		collector.PastHistograms.Append(currentHistograms)
+	} else {
+		klog.V(4).Infof("no pods available for metric collection, will use external metrics if available")
+		// Try to fetch external pending request metrics from router if endpoint is configured
+		if collector.RouterMetricsEndpoint != "" {
+			routerMetrics, err := collector.fetchMetricsFromRouter(ctx)
+			if err == nil {
+				for k, v := range routerMetrics {
+					externalMetrics[k] = v
+				}
+			} else {
+				klog.Warningf("failed to fetch metrics from router endpoint %s: %v", collector.RouterMetricsEndpoint, err)
+			}
+		}
 	}
 
-	currentHistograms := make(map[string]HistogramInfo)
-	instanceInfo := collector.fetchMetricsFromPods(ctx, pods, &currentHistograms)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isFailed", instanceInfo.IsFailed)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isReady", instanceInfo.IsReady)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.metricsMap", instanceInfo.MetricsMap)
-	if instanceInfo.IsFailed {
-		klog.Warningf("some pod of %s are failed in namespace: %s.", collector.Scope, collector.Scope.Namespace)
-		return
-	}
-
-	if !instanceInfo.IsReady {
-		unreadyInstancesCount++
-		klog.Warningf("some pod of %s are not ready in namespace: %s.", collector.Scope, collector.Scope.Namespace)
-		return
-	}
-	readyInstancesMetric = instanceInfo.MetricsMap
-	collector.PastHistograms.Append(currentHistograms)
 	return
 }
 
@@ -246,4 +269,67 @@ func addMetric(instanceMetricMap algorithm.Metrics, metricName string, metricVal
 	} else {
 		instanceMetricMap[metricName] = metricValue
 	}
+}
+
+// fetchMetricsFromRouter fetches pending request metrics from the router's metrics endpoint
+func (collector *MetricCollector) fetchMetricsFromRouter(ctx context.Context) (algorithm.Metrics, error) {
+	metrics := make(algorithm.Metrics)
+
+	// Create HTTP request to router metrics endpoint
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, collector.RouterMetricsEndpoint, nil)
+	if err != nil {
+		return metrics, err
+	}
+
+	// Send request with timeout
+	client := &http.Client{
+		Timeout: util.AutoscaleCtxTimeoutSeconds * time.Second,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return metrics, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return metrics, fmt.Errorf("router metrics endpoint returned non-2xx status: %d", resp.StatusCode)
+	}
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return metrics, err
+	}
+
+	// Parse Prometheus metrics
+	decoder := expfmt.NewDecoder(strings.NewReader(string(body)), expfmt.NewFormat(expfmt.TypeTextPlain))
+	modelName := collector.Target.TargetRef.Name
+
+	for {
+		mf := &io_prometheus_client.MetricFamily{}
+		err := decoder.Decode(mf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			klog.Warningf("error decoding router metric: %v", err)
+			continue
+		}
+
+		// We only care about the fairness queue size metric for scale-from-zero
+		if mf.GetName() == "kthena_router_fairness_queue_size" {
+			for _, metric := range mf.GetMetric() {
+				// Check if this metric is for the current model
+				for _, label := range metric.GetLabel() {
+					if label.GetName() == "model" && label.GetValue() == modelName {
+						// Add the queue size as pending request metric
+						addMetric(metrics, "pending_requests", metric.GetGauge().GetValue())
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return metrics, nil
 }

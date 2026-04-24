@@ -90,6 +90,14 @@ func getDesiredInstancesForSingleExternalMetric(
 	metric float64,
 ) int32 {
 	desired := metric / target
+	// Handle scale from zero case
+	if currentCount == 0 {
+		// If there are any pending requests, scale up to at least 1
+		if desired >= 1 {
+			return getCeilDesiredInstances(desired)
+		}
+		return 0
+	}
 	ratio := desired / float64(currentCount)
 	if math.Abs(ratio-1.0) <= tolerance {
 		return currentCount
