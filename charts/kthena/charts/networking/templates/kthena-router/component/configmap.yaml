@@ -21,10 +21,6 @@ data:
           maxBlocksToMatch: 128
           maxHashCacheSize: 50000
           topKMatches: 5
-      - name: kvcache-aware
-        args:
-          blockSizeToHash: 128
-          maxBlocksToMatch: 128
       plugins:
         Filter:
           enabled:
@@ -34,8 +30,6 @@ data:
         Score:
           enabled:
             - name: least-request
-              weight: 1
-            - name: kvcache-aware
               weight: 1
             - name: gpu-usage
               weight: 1

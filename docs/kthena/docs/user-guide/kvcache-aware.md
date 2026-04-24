@@ -16,7 +16,7 @@ Pods with more consecutive matching blocks score higher and are preferred for ro
 
 ## Prerequisites
 
-- **Redis**: A Redis instance accessible by both the router and the runtime sidecars. Deploy Redis using the provided example in `examples/redis/`.
+- **Redis**: A Redis instance accessible by both the router and the runtime sidecars. Deploy Redis using the provided [redis-standalone.yaml](../assets/examples/redis/redis-standalone.yaml) example.
 - **Kthena Runtime sidecar**: Must be deployed alongside each vLLM pod. The sidecar listens to vLLM's ZMQ `kv-events` stream and writes token block hashes into Redis.
 - **vLLM v1 with KV event support**: The vLLM engine must be running with `VLLM_USE_V1=1` and expose the ZMQ kv-events topic.
 - **Multi-pod inference deployment**: The plugin is meaningful only when multiple pods serve the same model.
@@ -24,25 +24,38 @@ Pods with more consecutive matching blocks score higher and are preferred for ro
 ## Architecture
 
 ```
-┌──────────────────────┐
-│    Client Request     │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐      ┌────────────┐
-│    Kthena Router     │─────▶│   Redis    │
-│  (kvcache-aware      │◀─────│            │
-│   score plugin)      │      └────────────┘
-└──────────┬───────────┘            ▲
-           │                        │ write block hashes
-           ▼                        │
-┌─────────────────┐   ┌─────────────────┐
-│   vLLM Pod A    │   │   vLLM Pod B    │
-│  ┌───────────┐  │   │  ┌───────────┐  │
-│  │  Runtime   │  │   │  │  Runtime   │  │
-│  │  sidecar   │──┘   │  │  sidecar   │──┘
-│  └───────────┘  │   │  └───────────┘  │
-└─────────────────┘   └─────────────────┘
+                        ┌────────────────┐
+                        │ Client Request │
+                        └───────┬────────┘
+                                │
+                                ▼
+                  ┌──────────────────────────┐
+                  │      Kthena Router       │
+                  │  (kvcache-aware plugin)  │
+                  └─────┬──────────────┬─────┘
+                        │              │
+              route to  │              │ query block hashes
+             best pod   │              │
+                        │    ┌─────────▼─────────┐
+                        │    │      Redis        │
+                        │    └─────────▲─────────┘
+                        │              │
+                        │              │ write block hashes
+           ┌────────────┴──────────────┴────────────┐
+           │                                        │
+           ▼                                        ▼
+┌─────────────────────┐              ┌─────────────────────┐
+│     vLLM Pod A      │              │     vLLM Pod B      │
+│                     │              │                     │
+│  ┌───────────────┐  │              │  ┌───────────────┐  │
+│  │Runtime sidecar│──┘              │  │Runtime sidecar│──┘
+│  │(ZMQ listener) │                 │  │(ZMQ listener) │
+│  └───────────────┘  │              │  └───────────────┘  │
+│  ┌───────────────┐  │              │  ┌───────────────┐  │
+│  │  vLLM Engine  │  │              │  │  vLLM Engine  │  │
+│  │  (KV Cache)   │  │              │  │  (KV Cache)   │  │
+│  └───────────────┘  │              │  └───────────────┘  │
+└─────────────────────┘              └─────────────────────┘
 ```
 
 - The **Runtime sidecar** subscribes to vLLM ZMQ kv-events (`VLLM_BLOCK_STORED`, `VLLM_BLOCK_REMOVED`, `VLLM_ALL_BLOCKS_CLEARED`) and writes standardized token block hashes into Redis.
@@ -52,11 +65,13 @@ Pods with more consecutive matching blocks score higher and are preferred for ro
 
 ### Step 1: Deploy Redis
 
+Deploy Redis in the `kthena-system` namespace (where the Kthena Router runs):
+
 ```bash
-kubectl apply -f examples/redis/redis-standalone.yaml -n <namespace>
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/redis/redis-standalone.yaml -n kthena-system
 ```
 
-This creates a `redis-config` ConfigMap and `redis-secret` Secret that the runtime sidecar and router will reference.
+This creates a `redis-config` ConfigMap, `redis-secret` Secret, and a `redis-server` Service in the `kthena-system` namespace. The router (in the same namespace) will reference these directly, while the runtime sidecars in other namespaces can reach Redis via its cross-namespace DNS name: `redis-server.kthena-system.svc.cluster.local`.
 
 ### Step 2: Deploy vLLM pods with the Kthena Runtime sidecar
 
@@ -95,63 +110,154 @@ spec:
             nvidia.com/gpu: "1"
 ```
 
-**Option B: Using ModelServing (manual)**
+**Option B: Using ModelServing**
 
-Add the runtime sidecar container to your pod spec. Ensure the Redis environment variables are included:
+A complete ModelServing example with KV cache awareness is provided at [gpu-kvcache-aware.yaml](../assets/examples/model-serving/gpu-kvcache-aware.yaml). This example deploys a vLLM server with the Kthena Runtime sidecar pre-configured for Redis-based KV cache coordination.
+
+> **Note:** This example assumes Redis is deployed in the `kthena-system` namespace (Step 1). The runtime sidecar connects to Redis via `redis-server.kthena-system.svc.cluster.local`.
+
+Apply it directly:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/model-serving/gpu-kvcache-aware.yaml
+```
+
+The key parts of this example:
+
+- The **vLLM server** container enables KV cache events with `--kv-events-config '{"enable_kv_cache_events":true,"topic":"kv-events"}'` and sets `VLLM_USE_V1=1`.
+- The **Runtime sidecar** container connects to Redis at `redis-server.kthena-system.svc.cluster.local:6379` and listens to vLLM's ZMQ kv-events stream.
+
+Below is the full manifest for reference:
 
 ```yaml
-- name: runtime
-  image: kthena/runtime:latest
-  args:
-    - --port
-    - "8900"
-    - --engine
-    - vllm
-    - --engine-base-url
-    - http://localhost:8000
-    - --engine-metrics-path
-    - /metrics
-    - --pod
-    - $(POD_NAME).$(NAMESPACE)
-    - --model
-    - <your-model-name>
-  env:
-    - name: POD_NAME
-      valueFrom:
-        fieldRef:
-          fieldPath: metadata.name
-    - name: NAMESPACE
-      valueFrom:
-        fieldRef:
-          fieldPath: metadata.namespace
-    - name: VLLM_USE_V1
-      value: "1"
-    - name: REDIS_HOST
-      valueFrom:
-        configMapKeyRef:
-          key: REDIS_HOST
-          name: redis-config
-          optional: true
-    - name: REDIS_PORT
-      valueFrom:
-        configMapKeyRef:
-          key: REDIS_PORT
-          name: redis-config
-          optional: true
-    - name: REDIS_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          key: REDIS_PASSWORD
-          name: redis-secret
-          optional: true
-  ports:
-    - containerPort: 8900
-  readinessProbe:
-    httpGet:
-      path: /health
-      port: 8900
-    initialDelaySeconds: 5
-    periodSeconds: 10
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: vllm-qwen-06b
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: server
+        replicas: 1
+        entryTemplate:
+          spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: IfNotPresent
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - Qwen/Qwen3-0.6B
+                  - --output-dir
+                  - /models/Qwen3-0.6B/
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+            containers:
+              - name: server
+                image: vllm/vllm-openai:latest
+                command: [ "sh", "-c" ]
+                args:
+                  - |
+                    python3 -m vllm.entrypoints.openai.api_server \
+                    --host "0.0.0.0" \
+                    --port "8000" \
+                    --uvicorn-log-level warning \
+                    --model /models/Qwen3-0.6B \
+                    --served-model-name Qwen/Qwen3-0.6B \
+                    --kv-events-config '{"enable_kv_cache_events":true,"topic":"kv-events"}'
+                env:
+                  - name: VLLM_USE_V1
+                    value: "1"
+                  - name: VLLM_WORKER_MULTIPROC_METHOD
+                    value: spawn
+                  - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                    value: "0"
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  - name: NCCL_IB_GID_INDEX
+                    value: "7"
+                  - name: NCCL_DEBUG
+                    value: "INFO"
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                readinessProbe:
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+                livenessProbe:
+                  initialDelaySeconds: 900
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+              - name: runtime
+                image: ghcr.io/yaozengzeng/runtime:latest
+                imagePullPolicy: Always
+                args:
+                  - --port
+                  - "8900"
+                  - --engine
+                  - vllm
+                  - --engine-base-url
+                  - http://localhost:8000
+                  - --engine-metrics-path
+                  - /metrics
+                  - --pod
+                  - $(POD_NAME).$(NAMESPACE)
+                  - --model
+                  - Qwen/Qwen3-0.6B
+                env:
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: VLLM_USE_V1
+                    value: "1"
+                  - name: REDIS_HOST
+                    value: "redis-server.kthena-system.svc.cluster.local"
+                  - name: REDIS_PORT
+                    value: "6379"
+                ports:
+                  - containerPort: 8900
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8900
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+            volumes:
+              - name: models
+                emptyDir: {}
+              - name: shared-mem
+                emptyDir:
+                  sizeLimit: 256Mi
+                  medium: Memory
+        workerReplicas: 0
 ```
 
 ### Step 3: Configure the Router
@@ -194,9 +300,9 @@ data:
 | `blockSizeToHash`  | 128     | Number of tokens per block. Must match the vLLM block size for optimal matching. |
 | `maxBlocksToMatch` | 128     | Maximum number of blocks to process per request. Limits Redis queries.           |
 
-**Helm values example:**
+**Helm values:**
 
-If deploying via Helm, the default chart template already includes `kvcache-aware` in the `pluginConfig` and `Score.enabled` sections. Verify it is enabled in your `values.yaml` override.
+The `kvcache-aware` plugin is **not** enabled in the Helm chart by default. To enable it, override the router ConfigMap in your `values.yaml` to include `kvcache-aware` in both `pluginConfig` and `Score.enabled` sections as shown above.
 
 ### Step 4: Restart the Router
 
@@ -237,7 +343,7 @@ After some inference requests have been processed, the runtime sidecar writes to
 
 ```bash
 # Port-forward to Redis
-kubectl port-forward svc/redis-server 6379:6379 -n <namespace>
+kubectl port-forward svc/redis-server 6379:6379 -n kthena-system
 
 # In another terminal, scan for block keys
 redis-cli KEYS "matrix:kv:block:*"
