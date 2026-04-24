@@ -1650,6 +1650,7 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 		}, 15*time.Second, time.Second, "Rate limit metrics did not match expected values")
 	})
 }
+
 // TestRouterConfigUpdateShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
