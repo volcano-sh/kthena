@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 	"sync"
@@ -2446,4 +2447,28 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 	}
 
 	return outdatedRolesMap
+}
+
+// handleModelServingDatastoreCacheDump handles requests to dump the ServingGroup and role in dataStore cache.
+func (c *ModelServingController) handleModelServingDatastoreCacheDump(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	data, err := c.store.DumpCache()
+	if err != nil {
+		klog.Errorf("failed to dump model serving datastore cache: %v", err)
+		http.Error(w, "Failed to dump datastore cache", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write(data); err != nil {
+		klog.Errorf("failed to write cache dump response: %v", err)
+	}
+}
+
+// RegisterModelServingDebugEndpoints registers debug endpoints for the ModelServingController
+func (c *ModelServingController) RegisterModelServingDebugEndpoints(mux *http.ServeMux) {
+	mux.HandleFunc("/debug/modelserving/cache", c.handleModelServingDatastoreCacheDump)
 }
