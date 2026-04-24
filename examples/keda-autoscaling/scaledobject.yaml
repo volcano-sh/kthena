@@ -1,0 +1,24 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: modelserving-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: workload.serving.volcano.sh/v1alpha1
+    kind: ModelServing
+    name: test-model
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        # Filter by the `model` label so the signal is not polluted by
+        # unrelated traffic on the same router. The value must match the
+        # model name the router sees on inbound requests (i.e. the `model`
+        # field in OpenAI-style payloads routed by a ModelRoute).
+        query: sum(kthena_router_active_downstream_requests{model="test"})
+        threshold: "10"
