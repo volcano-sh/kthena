@@ -120,6 +120,37 @@ func TestSessionAffinityTTLExpiry(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestSessionAffinityConfigParsesMaxEntries(t *testing.T) {
+	cfg := ParseSessionAffinityArgs(runtime.RawExtension{Raw: []byte("maxEntries: 3")})
+	assert.Equal(t, 3, cfg.MaxEntries)
+
+	defaultCfg := ParseSessionAffinityArgs(runtime.RawExtension{Raw: []byte("maxEntries: -1")})
+	assert.Equal(t, defaultSessionAffinityMaxEntries, defaultCfg.MaxEntries)
+}
+
+func TestSessionAffinityStoreEvictsLeastRecentlyUsed(t *testing.T) {
+	store := newAffinityStore(30*time.Minute, 2)
+	store.set("default/ms-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-1"})
+	store.set("default/ms-1", "session-2", types.NamespacedName{Namespace: "default", Name: "pod-2"})
+
+	_, ok := store.get("default/ms-1", "session-1")
+	require.True(t, ok)
+
+	store.set("default/ms-1", "session-3", types.NamespacedName{Namespace: "default", Name: "pod-3"})
+
+	_, ok = store.get("default/ms-1", "session-2")
+	assert.False(t, ok)
+
+	binding, ok := store.get("default/ms-1", "session-1")
+	require.True(t, ok)
+	assert.Equal(t, "pod-1", binding.Name)
+
+	binding, ok = store.get("default/ms-1", "session-3")
+	require.True(t, ok)
+	assert.Equal(t, "pod-3", binding.Name)
+	assert.Len(t, store.bindings, 2)
+}
+
 func createSessionTestPodInfo(name string) *datastore.PodInfo {
 	return &datastore.PodInfo{
 		Pod: &corev1.Pod{

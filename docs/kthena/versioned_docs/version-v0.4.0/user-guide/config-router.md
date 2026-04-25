@@ -19,7 +19,7 @@ Plugin Configuration (PluginConfig):
 |least-request| maxWaitingRequests                                      |Sets the maximum number of waiting requests|
 |least-latency| TTFTTPOTWeightFactor                                    |Sets the weight factor for TTFT and TPOT|
 |prefix-cache| blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize |Configures prefix cache parameters|
-|session-affinity| headerName<br />ttl |Pins a session to a pod within the already selected backend using an in-memory TTL store|
+|session-affinity| headerName<br />ttl<br />maxEntries |Pins a session to a pod within the already selected backend using a bounded in-memory TTL/LRU store|
 
 Filter Plugins (Filter):
 
@@ -99,7 +99,7 @@ data:
             weight: 10
 ```
 
-`session-affinity` is pod-level only in v1. It does not make weighted `ModelRoute` destination selection sticky. The router reads the session key from the configured header, which defaults to `X-Session-ID`.
+`session-affinity` is pod-level only in v1. It does not make weighted `ModelRoute` destination selection sticky. The router reads the session key from the configured header, which defaults to `X-Session-ID`. The in-memory store is bounded with LRU eviction, and `maxEntries` defaults to `50000`.
 
 ### Session Affinity Example
 
@@ -117,6 +117,7 @@ data:
         args:
           headerName: X-Session-ID
           ttl: 30m
+          maxEntries: 50000
       - name: least-request
         args:
           maxWaitingRequests: 10
@@ -159,6 +160,7 @@ data:
         args:
           headerName: X-Session-ID
           ttl: 30m
+          maxEntries: 50000
       plugins:
         Filter:
           enabled:
