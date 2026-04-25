@@ -1,0 +1,135 @@
+/*
+Copyright The Volcano Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package plugins
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+)
+
+func TestSessionAffinityScoreNoSessionKeyIsNoOp(t *testing.T) {
+	plugin := NewSessionAffinity(runtime.RawExtension{})
+	pods := []*datastore.PodInfo{
+		createSessionTestPodInfo("pod-1"),
+		createSessionTestPodInfo("pod-2"),
+	}
+
+	scores := plugin.Score(&framework.Context{
+		AffinityScopeKey: "default/ms-1",
+	}, pods)
+
+	require.Len(t, scores, 2)
+	for _, score := range scores {
+		assert.Equal(t, 0, score)
+	}
+}
+
+func TestSessionAffinityScoreExistingBindingWins(t *testing.T) {
+	plugin := NewSessionAffinity(runtime.RawExtension{})
+	pod1 := createSessionTestPodInfo("pod-1")
+	pod2 := createSessionTestPodInfo("pod-2")
+
+	plugin.store.set("default/ms-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-2"})
+
+	scores := plugin.Score(&framework.Context{
+		SessionKey:       "session-1",
+		AffinityScopeKey: "default/ms-1",
+	}, []*datastore.PodInfo{pod1, pod2})
+
+	assert.Equal(t, 0, scores[pod1])
+	assert.Equal(t, maxPluginScore, scores[pod2])
+}
+
+func TestSessionAffinityScoreDropsStaleBinding(t *testing.T) {
+	plugin := NewSessionAffinity(runtime.RawExtension{})
+	pods := []*datastore.PodInfo{
+		createSessionTestPodInfo("pod-1"),
+		createSessionTestPodInfo("pod-2"),
+	}
+
+	plugin.store.set("default/ms-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-3"})
+
+	scores := plugin.Score(&framework.Context{
+		SessionKey:       "session-1",
+		AffinityScopeKey: "default/ms-1",
+	}, pods)
+
+	for _, score := range scores {
+		assert.Equal(t, 0, score)
+	}
+	_, ok := plugin.store.get("default/ms-1", "session-1")
+	assert.False(t, ok)
+}
+
+func TestSessionAffinityPostScheduleStoresBinding(t *testing.T) {
+	plugin := NewSessionAffinity(runtime.RawExtension{})
+	selectedPod := createSessionTestPodInfo("pod-1")
+
+	plugin.PostSchedule(&framework.Context{
+		SessionKey:       "session-1",
+		AffinityScopeKey: "default/ms-1",
+		BestPods:         []*datastore.PodInfo{selectedPod},
+	}, 0)
+
+	binding, ok := plugin.store.get("default/ms-1", "session-1")
+	require.True(t, ok)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-1"}, binding)
+}
+
+func TestSessionAffinityTTLExpiry(t *testing.T) {
+	plugin := NewSessionAffinity(runtime.RawExtension{Raw: []byte("ttl: 1s")})
+	now := time.Now()
+	plugin.store.now = func() time.Time { return now }
+	plugin.store.set("default/ms-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-1"})
+
+	now = now.Add(2 * time.Second)
+
+	scores := plugin.Score(&framework.Context{
+		SessionKey:       "session-1",
+		AffinityScopeKey: "default/ms-1",
+	}, []*datastore.PodInfo{createSessionTestPodInfo("pod-1")})
+
+	for _, score := range scores {
+		assert.Equal(t, 0, score)
+	}
+	_, ok := plugin.store.get("default/ms-1", "session-1")
+	assert.False(t, ok)
+}
+
+func createSessionTestPodInfo(name string) *datastore.PodInfo {
+	return &datastore.PodInfo{
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+			},
+			Status: corev1.PodStatus{
+				PodIP: "10.0.0.1",
+			},
+		},
+	}
+}

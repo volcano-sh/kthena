@@ -28,7 +28,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
@@ -87,14 +86,12 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		}
 	}
 
-	prefixCache := plugins.NewPrefixCache(store, pluginsArgMap[plugins.PrefixCachePluginName])
+	scorePlugins, postScheduleHooks := getScorePlugins(registry, store, scorePluginMap, pluginsArgMap)
 	return &SchedulerImpl{
-		store:         store,
-		filterPlugins: getFilterPlugins(registry, filterPluginMap, pluginsArgMap),
-		scorePlugins:  getScorePlugins(registry, prefixCache, scorePluginMap, pluginsArgMap),
-		postScheduleHooks: []framework.PostScheduleHook{
-			prefixCache,
-		},
+		store:             store,
+		filterPlugins:     getFilterPlugins(registry, filterPluginMap, pluginsArgMap),
+		scorePlugins:      scorePlugins,
+		postScheduleHooks: postScheduleHooks,
 	}
 }
 

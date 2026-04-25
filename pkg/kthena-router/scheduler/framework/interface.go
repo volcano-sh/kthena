@@ -32,6 +32,9 @@ type Context struct {
 
 	Hashes []uint64
 
+	SessionKey       string
+	AffinityScopeKey string
+
 	// ModelServer information for efficient PDGroup scheduling
 	ModelServerName types.NamespacedName
 	PDGroup         *aiv1alpha1.PDGroup
