@@ -21,15 +21,12 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/yaozengzeng/vllm-mock:latest
+          image: ghcr.io/faust-benchou/dynamo-mocker-vllm:latest
           imagePullPolicy: IfNotPresent
           env:
             # specify the model name to mock
             - name: MODEL_NAME
-              value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-v1"
-          command:
-            - python3
-            - app.py
+              value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -49,12 +46,9 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/yaozengzeng/vllm-mock:latest
+          image: ghcr.io/faust-benchou/dynamo-mocker-vllm:latest
           imagePullPolicy: IfNotPresent
           env:
             # specify the model name to mock
             - name: MODEL_NAME
-              value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-v2"
-          command:
-            - python3
-            - app.py
+              value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"

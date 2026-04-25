@@ -1725,9 +1725,21 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 			// If no groups exist, handle gracefully by setting revisions to the new revision
 			if errors.Is(err, datastore.ErrServingGroupNotFound) {
 				copy := latestMS.DeepCopy()
-				if copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision {
+				selectorSet := labels.Set{
+					workloadv1alpha1.ModelServingNameLabelKey: latestMS.Name,
+					workloadv1alpha1.EntryLabelKey:            utils.Entry,
+				}
+				if len(latestMS.Spec.Template.Roles) > 0 {
+					roleName := latestMS.Spec.Template.Roles[0].Name
+					selectorSet[workloadv1alpha1.RoleLabelKey] = roleName
+					selectorSet[workloadv1alpha1.RoleIDKey] = utils.GenerateRoleID(roleName, 0)
+				}
+				selector := selectorSet.String()
+				needsUpdate := copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision || copy.Status.LabelSelector != selector
+				if needsUpdate {
 					copy.Status.CurrentRevision = revision
 					copy.Status.UpdateRevision = revision
+					copy.Status.LabelSelector = selector
 					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
 					return updateErr
 				}
@@ -1851,6 +1863,27 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 		if copy.Status.ObservedGeneration != latestMS.Generation {
 			shouldUpdate = true
 			copy.Status.ObservedGeneration = latestMS.Generation
+		}
+
+		// Set labelSelector so the scale subresource can report it to HPA.
+		// spec.replicas counts ServingGroups, not pods, so the selector must
+		// match exactly one pod per group — otherwise HPA/KEDA sees a pod count
+		// that is a multiple of the group count and scales incorrectly.
+		// Pin to the entry pod of the 0th instance of the first role: there is
+		// exactly one such pod per group, regardless of role.Replicas.
+		selectorSet := labels.Set{
+			workloadv1alpha1.ModelServingNameLabelKey: latestMS.Name,
+			workloadv1alpha1.EntryLabelKey:            utils.Entry,
+		}
+		if len(latestMS.Spec.Template.Roles) > 0 {
+			roleName := latestMS.Spec.Template.Roles[0].Name
+			selectorSet[workloadv1alpha1.RoleLabelKey] = roleName
+			selectorSet[workloadv1alpha1.RoleIDKey] = utils.GenerateRoleID(roleName, 0)
+		}
+		selector := selectorSet.String()
+		if copy.Status.LabelSelector != selector {
+			shouldUpdate = true
+			copy.Status.LabelSelector = selector
 		}
 
 		if shouldUpdate {

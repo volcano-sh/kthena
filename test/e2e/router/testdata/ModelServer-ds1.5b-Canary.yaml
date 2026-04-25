@@ -10,7 +10,7 @@ spec:
       version: v1
   workloadPort:
     port: 8000
-  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-v1"
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
   inferenceEngine: "vLLM"
   trafficPolicy:
     timeout: 10s
@@ -29,7 +29,7 @@ spec:
       version: v2
   workloadPort:
     port: 8000
-  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-v2"
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
   inferenceEngine: "vLLM"
   trafficPolicy:
     timeout: 10s

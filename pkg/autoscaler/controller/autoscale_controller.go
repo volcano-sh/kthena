@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -176,34 +177,47 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 		namespaceScope = defaultNamespace
 	}
 
-	if target.TargetRef.Kind == "" || target.TargetRef.Kind == workload.ModelServingKind.Kind {
-		instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name)
-		if err != nil {
-			return err
-		}
-		instance_copy := instance.DeepCopy()
+	if target.TargetRef.Kind != "" && target.TargetRef.Kind != workload.ModelServingKind.Kind {
+		return fmt.Errorf("target ref kind %s, name: %s not supported", targetRef.Kind, targetRef.Name)
+	}
 
-		if target.SubTarget == nil {
-			if instance_copy.Spec.Replicas != nil && *instance_copy.Spec.Replicas == replicas {
-				return nil
-			}
-			instance_copy.Spec.Replicas = &replicas
-		} else if target.SubTarget.Kind == util.ModelServingRoleKind && target.SubTarget.Name != "" {
-			for idx := range instance_copy.Spec.Template.Roles {
-				role := &instance_copy.Spec.Template.Roles[idx]
-				if role.Name == target.SubTarget.Name {
-					if role.Replicas != nil && *role.Replicas == replicas {
-						return nil
-					}
-					role.Replicas = &replicas
-					break
-				}
-			}
-		}
-		if _, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Update(ctx, instance_copy, metav1.UpdateOptions{}); err == nil {
+	instance, err := ac.modelServingLister.ModelServings(namespaceScope).Get(targetRef.Name)
+	if err != nil {
+		return err
+	}
+
+	if target.SubTarget == nil {
+		if instance.Spec.Replicas != nil && *instance.Spec.Replicas == replicas {
 			return nil
 		}
+		patchBytes := []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas))
+		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Patch(
+			ctx, targetRef.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+		return err
 	}
+
+	if target.SubTarget.Kind == util.ModelServingRoleKind && target.SubTarget.Name != "" {
+		roleIndex := -1
+		for idx, role := range instance.Spec.Template.Roles {
+			if role.Name == target.SubTarget.Name {
+				if role.Replicas != nil && *role.Replicas == replicas {
+					return nil
+				}
+				roleIndex = idx
+				break
+			}
+		}
+		if roleIndex < 0 {
+			return fmt.Errorf("role %s not found in ModelServing %s", target.SubTarget.Name, targetRef.Name)
+		}
+		patchBytes := []byte(fmt.Sprintf(
+			`[{"op":"test","path":"/spec/template/roles/%d/name","value":"%s"},{"op":"add","path":"/spec/template/roles/%d/replicas","value":%d}]`,
+			roleIndex, target.SubTarget.Name, roleIndex, replicas))
+		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Patch(
+			ctx, targetRef.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
+		return err
+	}
+
 	return fmt.Errorf("target ref kind %s, name: %s not supported", targetRef.Kind, targetRef.Name)
 }
 

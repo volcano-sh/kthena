@@ -18,11 +18,14 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,11 +33,13 @@ import (
 	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	corev1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -145,7 +150,7 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	}
 }
 
-func TestTwoBackends_then_DoOptimize_expect_UpdateActions(t *testing.T) {
+func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	ns := "ns"
 	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
 	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-b", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
@@ -174,7 +179,7 @@ func TestTwoBackends_then_DoOptimize_expect_UpdateActions(t *testing.T) {
 	}
 	updates := 0
 	for _, a := range client.Fake.Actions() {
-		if a.GetVerb() == "update" && a.GetResource().Resource == "modelservings" {
+		if (a.GetVerb() == "update" || a.GetVerb() == "patch") && a.GetResource().Resource == "modelservings" {
 			updates++
 		}
 	}
@@ -295,5 +300,501 @@ func TestFormatAutoscalerMapKey_OptimizerIncludesNamespace(t *testing.T) {
 	key2 := formatAutoscalerMapKey("ns", "binding-2", nil)
 	if key1 == key2 {
 		t.Fatalf("expected different optimizer keys for different bindings, got identical key %q", key1)
+	}
+}
+
+// TestPatchReplicasDoesNotTouchResourceLimits verifies that updateTargetReplicas
+// using Patch only sends the replicas field and never includes resources.limits
+// in the patch body. This prevents the Quantity normalization issue ("0.2" → "200m")
+// that caused unintended rolling updates.
+func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
+	ns := "default"
+
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
+		Spec: workload.ModelServingSpec{
+			Replicas: ptrInt32(1),
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptrInt32(1),
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "model",
+										Image: "model:latest",
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("0.2"),
+												corev1.ResourceMemory: resource.MustParse("1Gi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					{
+						Name:     "decode",
+						Replicas: ptrInt32(2),
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "model",
+										Image: "model:latest",
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU: resource.MustParse("0.5"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name            string
+		target          workload.Target
+		newReplicas     int32
+		expectPatchVerb bool
+	}{
+		{
+			name: "patch spec.replicas (MergePatch)",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
+			},
+			newReplicas:     3,
+			expectPatchVerb: true,
+		},
+		{
+			name: "patch role prefill replicas (JSONPatch)",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
+				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
+			},
+			newReplicas:     5,
+			expectPatchVerb: true,
+		},
+		{
+			name: "patch role decode replicas (JSONPatch)",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
+				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "decode"},
+			},
+			newReplicas:     4,
+			expectPatchVerb: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := clientfake.NewSimpleClientset(ms.DeepCopy())
+			msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms.DeepCopy()))
+
+			ac := &AutoscaleController{
+				client:             fakeClient,
+				modelServingLister: msLister,
+				scalerMap:          map[string]*autoscalerAutoscaler{},
+				optimizerMap:       map[string]*autoscalerOptimizer{},
+			}
+
+			err := ac.updateTargetReplicas(context.Background(), &tt.target, ns, tt.newReplicas)
+			if err != nil {
+				t.Fatalf("updateTargetReplicas error: %v", err)
+			}
+
+			// Find the patch action
+			var patchAction k8stesting.PatchAction
+			for _, action := range fakeClient.Actions() {
+				if action.GetVerb() == "patch" {
+					pa, ok := action.(k8stesting.PatchAction)
+					if ok {
+						patchAction = pa
+						break
+					}
+				}
+			}
+
+			if tt.expectPatchVerb && patchAction == nil {
+				t.Fatal("expected a patch action but found none")
+			}
+
+			patchBody := string(patchAction.GetPatch())
+			t.Logf("Patch body: %s", patchBody)
+
+			// The patch body must NOT contain any resource-related fields
+			forbiddenFields := []string{"cpu", "memory", "resources", "limits", "requests", "image", "containers", "entryTemplate"}
+			for _, field := range forbiddenFields {
+				if strings.Contains(patchBody, field) {
+					t.Errorf("patch body contains forbidden field %q — this would cause Quantity normalization issues.\nPatch: %s", field, patchBody)
+				}
+			}
+
+			// The patch body MUST contain the replicas value
+			if !strings.Contains(patchBody, fmt.Sprintf("%d", tt.newReplicas)) {
+				t.Errorf("patch body does not contain the expected replicas value %d.\nPatch: %s", tt.newReplicas, patchBody)
+			}
+
+			// For role-level patches, verify it's a valid JSON Patch targeting only replicas
+			if tt.target.SubTarget != nil {
+				var ops []map[string]interface{}
+				if err := json.Unmarshal([]byte(patchBody), &ops); err != nil {
+					t.Fatalf("failed to parse JSON Patch: %v", err)
+				}
+				fmt.Printf("ops: %v\n", ops)
+				if len(ops) != 2 {
+					t.Fatalf("expected exactly 1 JSON Patch operation, got %d", len(ops))
+				}
+				op := ops[1]
+				if op["op"] != "add" {
+					t.Errorf("expected op=add, got %v", op["op"])
+				}
+				path, _ := op["path"].(string)
+				if !strings.HasSuffix(path, "/replicas") {
+					t.Errorf("expected path ending with /replicas, got %q", path)
+				}
+				if !strings.HasPrefix(path, "/spec/template/roles/") {
+					t.Errorf("expected path starting with /spec/template/roles/, got %q", path)
+				}
+			}
+		})
+	}
+}
+
+// TestPatchRoleReplicasPreservesOtherRoles verifies that patching one role's replicas
+// does not affect other roles in the ModelServing spec.
+func TestPatchRoleReplicasPreservesOtherRoles(t *testing.T) {
+	ns := "default"
+
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
+		Spec: workload.ModelServingSpec{
+			Replicas: ptrInt32(1),
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptrInt32(2),
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "model", Image: "model:latest"}},
+							},
+						},
+					},
+					{
+						Name:     "decode",
+						Replicas: ptrInt32(3),
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "model", Image: "model:latest"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := clientfake.NewSimpleClientset(ms.DeepCopy())
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms.DeepCopy()))
+
+	ac := &AutoscaleController{
+		client:             fakeClient,
+		modelServingLister: msLister,
+		scalerMap:          map[string]*autoscalerAutoscaler{},
+		optimizerMap:       map[string]*autoscalerOptimizer{},
+	}
+
+	// Patch only the "prefill" role replicas
+	target := workload.Target{
+		TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
+		SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
+	}
+
+	err := ac.updateTargetReplicas(context.Background(), &target, ns, 10)
+	if err != nil {
+		t.Fatalf("updateTargetReplicas error: %v", err)
+	}
+
+	// Verify exactly one patch was issued, and that it only targets role index 0 (prefill).
+	var patchBody string
+	patchCount := 0
+	updateCount := 0
+	for _, action := range fakeClient.Actions() {
+		if pa, ok := action.(k8stesting.PatchAction); ok {
+			patchCount++
+			patchBody = string(pa.GetPatch())
+		}
+		if _, ok := action.(k8stesting.UpdateAction); ok {
+			updateCount++
+		}
+	}
+	if patchCount != 1 {
+		t.Fatalf("expected exactly one patch action, got %d actions: %#v", patchCount, fakeClient.Actions())
+	}
+	if updateCount != 0 {
+		t.Fatalf("expected no update actions, got %d actions: %#v", updateCount, fakeClient.Actions())
+	}
+	// Must target roles/0 (prefill), not roles/1 (decode)
+	if !strings.Contains(patchBody, "/spec/template/roles/0/replicas") {
+		t.Errorf("expected patch to target roles/0, got: %s", patchBody)
+	}
+	if strings.Contains(patchBody, "/spec/template/roles/1") {
+		t.Errorf("patch should not touch roles/1 (decode), got: %s", patchBody)
+	}
+}
+
+// TestPatchSkipsWhenReplicasUnchanged verifies that no patch is issued if the
+// target replicas already match the desired value.
+func TestPatchSkipsWhenReplicasUnchanged(t *testing.T) {
+	ns := "default"
+
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
+		Spec: workload.ModelServingSpec{
+			Replicas: ptrInt32(3),
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptrInt32(5),
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "model", Image: "model:latest"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		target   workload.Target
+		replicas int32
+	}{
+		{
+			name: "spec.replicas unchanged",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
+			},
+			replicas: 3,
+		},
+		{
+			name: "role.replicas unchanged",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
+				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
+			},
+			replicas: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := clientfake.NewSimpleClientset(ms.DeepCopy())
+			msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms.DeepCopy()))
+
+			ac := &AutoscaleController{
+				client:             fakeClient,
+				modelServingLister: msLister,
+				scalerMap:          map[string]*autoscalerAutoscaler{},
+				optimizerMap:       map[string]*autoscalerOptimizer{},
+			}
+
+			err := ac.updateTargetReplicas(context.Background(), &tt.target, ns, tt.replicas)
+			if err != nil {
+				t.Fatalf("updateTargetReplicas error: %v", err)
+			}
+
+			for _, action := range fakeClient.Actions() {
+				if action.GetVerb() == "patch" {
+					t.Fatalf("expected no patch when replicas unchanged, but got patch action")
+				}
+			}
+		})
+	}
+}
+
+// TestPatchDoesNotMutateResourcesInFakeClient verifies the full round-trip:
+// create a ModelServing with cpu "0.2" → patch replicas via updateTargetReplicas
+// → Get the object back from the fake client → resources.limits must be unchanged.
+//
+// This proves that the Patch approach does not cause Quantity normalization ("0.2" → "200m")
+// unlike the old Update() approach which serialized the entire DeepCopy'd object.
+func TestPatchDoesNotMutateResourcesInFakeClient(t *testing.T) {
+	ns := "default"
+
+	// Use JSON unmarshal to simulate how the API server stores "0.2" —
+	// this preserves the original string representation in the Quantity.
+	msJSON := `{
+		"apiVersion": "workload.volcano.sh/v1alpha1",
+		"kind": "ModelServing",
+		"metadata": {"name": "test-ms", "namespace": "default"},
+		"spec": {
+			"replicas": 1,
+			"template": {
+				"roles": [{
+					"name": "prefill",
+					"replicas": 2,
+					"entryTemplate": {
+						"spec": {
+							"containers": [{
+								"name": "model",
+								"image": "model:v1",
+								"resources": {
+									"limits": {"cpu": "0.2", "memory": "1Gi"},
+									"requests": {"cpu": "0.1", "memory": "512Mi"}
+								}
+							}]
+						}
+					}
+				}, {
+					"name": "decode",
+					"replicas": 3,
+					"entryTemplate": {
+						"spec": {
+							"containers": [{
+								"name": "model",
+								"image": "model:v1",
+								"resources": {
+									"limits": {"cpu": "0.5", "memory": "2Gi"}
+								}
+							}]
+						}
+					}
+				}]
+			}
+		}
+	}`
+
+	var ms workload.ModelServing
+	if err := json.Unmarshal([]byte(msJSON), &ms); err != nil {
+		t.Fatalf("failed to unmarshal test ModelServing: %v", err)
+	}
+
+	// Record original resource values (before any patch)
+	origPrefillCPU := ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	origPrefillMem := ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+	origDecodeCPU := ms.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	origDecodeMem := ms.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+	origImage := ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image
+
+	tests := []struct {
+		name        string
+		target      workload.Target
+		newReplicas int32
+	}{
+		{
+			name: "patch spec.replicas does not mutate resources",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms",
+				},
+			},
+			newReplicas: 5,
+		},
+		{
+			name: "patch prefill role replicas does not mutate resources",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms",
+				},
+				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
+			},
+			newReplicas: 10,
+		},
+		{
+			name: "patch decode role replicas does not mutate resources",
+			target: workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms",
+				},
+				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "decode"},
+			},
+			newReplicas: 8,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Fresh fake client for each subtest with the original object
+			fakeClient := clientfake.NewSimpleClientset(ms.DeepCopy())
+			msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms.DeepCopy()))
+
+			ac := &AutoscaleController{
+				client:             fakeClient,
+				modelServingLister: msLister,
+				scalerMap:          map[string]*autoscalerAutoscaler{},
+				optimizerMap:       map[string]*autoscalerOptimizer{},
+			}
+
+			// Perform the patch
+			err := ac.updateTargetReplicas(context.Background(), &tt.target, ns, tt.newReplicas)
+			if err != nil {
+				t.Fatalf("updateTargetReplicas error: %v", err)
+			}
+
+			// Get the object back from the fake client store
+			updated, err := fakeClient.WorkloadV1alpha1().ModelServings(ns).Get(
+				context.Background(), "test-ms", metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("failed to get updated ModelServing: %v", err)
+			}
+
+			// Verify replicas was actually changed
+			if tt.target.SubTarget == nil {
+				if updated.Spec.Replicas == nil || *updated.Spec.Replicas != tt.newReplicas {
+					t.Errorf("expected spec.replicas=%d, got %v", tt.newReplicas, updated.Spec.Replicas)
+				}
+			} else {
+				for _, role := range updated.Spec.Template.Roles {
+					if role.Name == tt.target.SubTarget.Name {
+						if role.Replicas == nil || *role.Replicas != tt.newReplicas {
+							t.Errorf("expected role %s replicas=%d, got %v",
+								tt.target.SubTarget.Name, tt.newReplicas, role.Replicas)
+						}
+					}
+				}
+			}
+
+			// Verify resources.limits are UNCHANGED for all roles
+			gotPrefillCPU := updated.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+			gotPrefillMem := updated.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+			gotDecodeCPU := updated.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+			gotDecodeMem := updated.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+
+			if origPrefillCPU.Cmp(gotPrefillCPU) != 0 {
+				t.Errorf("prefill CPU limit changed: %s → %s", origPrefillCPU.String(), gotPrefillCPU.String())
+			}
+			if origPrefillMem.Cmp(gotPrefillMem) != 0 {
+				t.Errorf("prefill memory limit changed: %s → %s", origPrefillMem.String(), gotPrefillMem.String())
+			}
+			if origDecodeCPU.Cmp(gotDecodeCPU) != 0 {
+				t.Errorf("decode CPU limit changed: %s → %s", origDecodeCPU.String(), gotDecodeCPU.String())
+			}
+			if origDecodeMem.Cmp(gotDecodeMem) != 0 {
+				t.Errorf("decode memory limit changed: %s → %s", origDecodeMem.String(), gotDecodeMem.String())
+			}
+
+			// Verify image is unchanged
+			gotImage := updated.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image
+			if gotImage != origImage {
+				t.Errorf("image changed: %s → %s", origImage, gotImage)
+			}
+
+			t.Logf("After patch: prefill CPU=%s, mem=%s | decode CPU=%s, mem=%s | image=%s",
+				gotPrefillCPU.String(), gotPrefillMem.String(),
+				gotDecodeCPU.String(), gotDecodeMem.String(), gotImage)
+		})
 	}
 }
