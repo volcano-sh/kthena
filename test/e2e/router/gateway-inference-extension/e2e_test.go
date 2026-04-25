@@ -313,7 +313,7 @@ func TestHTTPRouteNotSkippedAfterRouterRestart(t *testing.T) {
 
 	// Wait for all terminating pods to be fully gone before setting up port-forward.
 	// A pod in "Terminating" state still has Phase=Running, so findPodForService
-	// can connect to a dying container whose ports are already closed.	
+	// can connect to a dying container whose ports are already closed.
 	routerDeploy, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, "kthena-router", metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get router deployment")
 	routerPodSelector := metav1.FormatLabelSelector(routerDeploy.Spec.Selector)
