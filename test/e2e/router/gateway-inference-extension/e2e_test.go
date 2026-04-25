@@ -311,8 +311,31 @@ func TestHTTPRouteNotSkippedAfterRouterRestart(t *testing.T) {
 	require.NoError(t, exec.Command("kubectl", "rollout", "restart", "deployment/kthena-router", "-n", kthenaNamespace).Run())
 	require.NoError(t, exec.Command("kubectl", "rollout", "status", "deployment/kthena-router", "-n", kthenaNamespace, "--timeout=120s").Run())
 
-	// Wait for old pod to fully terminate before port-forward
-	time.Sleep(5 * time.Second)
+	// Wait for all terminating pods to be fully gone before setting up port-forward.
+	// A pod in "Terminating" state still has Phase=Running, so findPodForService
+	// can connect to a dying container whose ports are already closed.
+	routerDeploy, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, "kthena-router", metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router deployment")
+	routerPodSelector := metav1.FormatLabelSelector(routerDeploy.Spec.Selector)
+	require.Eventually(t, func() bool {
+		pods, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: routerPodSelector,
+		})
+		if err != nil {
+			return false
+		}
+		// Defensive: rollout status already confirmed new pods are Ready,
+		// so empty list indicates a transient API hiccup, not expected state.
+		if len(pods.Items) == 0 {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Minute, 2*time.Second, "Terminating router pods should be fully removed")
 
 	// 4. Re-establish port-forward (original breaks when pod restarts)
 	pf, err := utils.SetupPortForward(kthenaNamespace, "kthena-router", "9080", "80")
