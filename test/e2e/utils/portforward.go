@@ -262,7 +262,7 @@ func findPodForService(clientset *kubernetes.Clientset, namespace, serviceName s
 
 	// Find the first running pod and resolve the targetPort
 	for _, pod := range pods.Items {
-		if pod.Status.Phase == v1.PodRunning {
+		if pod.Status.Phase == v1.PodRunning && pod.DeletionTimestamp == nil {
 			// Resolve the container port from targetPort
 			containerPort, err := resolveContainerPort(&pod, targetPort)
 			if err != nil {

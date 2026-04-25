@@ -321,7 +321,13 @@ func TestHTTPRouteNotSkippedAfterRouterRestart(t *testing.T) {
 		pods, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: routerPodSelector,
 		})
-		if err != nil || len(pods.Items) == 0 {
+		if err != nil {
+		
+			return false
+		}
+		// Defensive: rollout status already confirmed new pods are Ready,
+		// so empty list indicates a transient API hiccup, not expected state.
+		if len(pods.Items) == 0 {
 			return false
 		}
 		for _, pod := range pods.Items {
