@@ -18,6 +18,7 @@ package debug
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -150,6 +151,132 @@ func TestListModelServers(t *testing.T) {
 	assert.Equal(t, []string{"default/pod-a"}, servers[0].AssociatedPods)
 	assert.Equal(t, []string{"default/decode-1"}, servers[0].DecodePods)
 	assert.Equal(t, []string{"default/prefill-1"}, servers[0].PrefillPods)
+
+	mockStore.AssertExpectations(t)
+}
+
+func TestListModelServers_GetPodsByModelServerError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mockStore := &MockStore{}
+	handler := NewDebugHandler(mockStore)
+
+	msKey := types.NamespacedName{Namespace: "default", Name: "llama2-server"}
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama2-server", Namespace: "default"},
+	}
+	decodePods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "decode-1", Namespace: "default"}}},
+	}
+	prefillPods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "prefill-1", Namespace: "default"}}},
+	}
+
+	mockStore.On("GetAllModelServers").Return(map[types.NamespacedName]*aiv1alpha1.ModelServer{msKey: modelServer})
+	mockStore.On("GetPodsByModelServer", msKey).Return(nil, errors.New("pods unavailable"))
+	mockStore.On("GetDecodePods", msKey).Return(decodePods, nil)
+	mockStore.On("GetPrefillPods", msKey).Return(prefillPods, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("GET", "/debug/config_dump/modelservers", nil)
+
+	handler.ListModelServers(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string][]ModelServerResponse
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+
+	servers := response["modelservers"]
+	assert.Len(t, servers, 1)
+	assert.Nil(t, servers[0].AssociatedPods)
+	assert.Equal(t, []string{"default/decode-1"}, servers[0].DecodePods)
+	assert.Equal(t, []string{"default/prefill-1"}, servers[0].PrefillPods)
+
+	mockStore.AssertExpectations(t)
+}
+
+func TestListModelServers_GetDecodePodsError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mockStore := &MockStore{}
+	handler := NewDebugHandler(mockStore)
+
+	msKey := types.NamespacedName{Namespace: "default", Name: "llama2-server"}
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama2-server", Namespace: "default"},
+	}
+	associatedPods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default"}}},
+	}
+	prefillPods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "prefill-1", Namespace: "default"}}},
+	}
+
+	mockStore.On("GetAllModelServers").Return(map[types.NamespacedName]*aiv1alpha1.ModelServer{msKey: modelServer})
+	mockStore.On("GetPodsByModelServer", msKey).Return(associatedPods, nil)
+	mockStore.On("GetDecodePods", msKey).Return(nil, errors.New("decode pods unavailable"))
+	mockStore.On("GetPrefillPods", msKey).Return(prefillPods, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("GET", "/debug/config_dump/modelservers", nil)
+
+	handler.ListModelServers(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string][]ModelServerResponse
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+
+	servers := response["modelservers"]
+	assert.Len(t, servers, 1)
+	assert.Equal(t, []string{"default/pod-a"}, servers[0].AssociatedPods)
+	assert.Nil(t, servers[0].DecodePods)
+	assert.Equal(t, []string{"default/prefill-1"}, servers[0].PrefillPods)
+
+	mockStore.AssertExpectations(t)
+}
+
+func TestListModelServers_GetPrefillPodsError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mockStore := &MockStore{}
+	handler := NewDebugHandler(mockStore)
+
+	msKey := types.NamespacedName{Namespace: "default", Name: "llama2-server"}
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama2-server", Namespace: "default"},
+	}
+	associatedPods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default"}}},
+	}
+	decodePods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "decode-1", Namespace: "default"}}},
+	}
+
+	mockStore.On("GetAllModelServers").Return(map[types.NamespacedName]*aiv1alpha1.ModelServer{msKey: modelServer})
+	mockStore.On("GetPodsByModelServer", msKey).Return(associatedPods, nil)
+	mockStore.On("GetDecodePods", msKey).Return(decodePods, nil)
+	mockStore.On("GetPrefillPods", msKey).Return(nil, errors.New("prefill pods unavailable"))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("GET", "/debug/config_dump/modelservers", nil)
+
+	handler.ListModelServers(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string][]ModelServerResponse
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+
+	servers := response["modelservers"]
+	assert.Len(t, servers, 1)
+	assert.Equal(t, []string{"default/pod-a"}, servers[0].AssociatedPods)
+	assert.Equal(t, []string{"default/decode-1"}, servers[0].DecodePods)
+	assert.Nil(t, servers[0].PrefillPods)
 
 	mockStore.AssertExpectations(t)
 }
