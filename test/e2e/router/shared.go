@@ -1701,13 +1701,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	// Derive the pod label selector and expected replicas from the router deployment.
 	routerDeploy, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routerDeploymentName, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get router deployment")
-	var routerPodSelector string
-	for k, v := range routerDeploy.Spec.Selector.MatchLabels {
-		if routerPodSelector != "" {
-			routerPodSelector += ","
-		}
-		routerPodSelector += k + "=" + v
-	}
+	routerPodSelector := metav1.FormatLabelSelector(routerDeploy.Spec.Selector)
 	expectedReplicas := int32(1)
 	if routerDeploy.Spec.Replicas != nil {
 		expectedReplicas = *routerDeploy.Spec.Replicas
