@@ -36,7 +36,7 @@ func emptyHistory() *History {
 	return &History{
 		MaxRecommendation:     datastructure.NewMaximumRecordSlidingWindow[int32](neverExpireMs),
 		MinRecommendation:     datastructure.NewMinimumRecordSlidingWindow[int32](neverExpireMs),
-		MaxCorrected:          datastructure.NewMaximumLineChartSlidingWindow[int32](neverExpireMs),
+		MaxCorrected:          datastructure.NewMinimumLineChartSlidingWindow[int32](neverExpireMs),
 		MinCorrectedForStable: datastructure.NewMinimumLineChartSlidingWindow[int32](neverExpireMs),
 		MinCorrectedForPanic:  datastructure.NewMinimumLineChartSlidingWindow[int32](neverExpireMs),
 	}
