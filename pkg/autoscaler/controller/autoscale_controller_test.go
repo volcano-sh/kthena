@@ -449,9 +449,8 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 				if err := json.Unmarshal([]byte(patchBody), &ops); err != nil {
 					t.Fatalf("failed to parse JSON Patch: %v", err)
 				}
-				fmt.Printf("ops: %v\n", ops)
 				if len(ops) != 2 {
-					t.Fatalf("expected exactly 1 JSON Patch operation, got %d", len(ops))
+					t.Fatalf("expected exactly 2 JSON Patch operations, got %d", len(ops))
 				}
 				op := ops[1]
 				if op["op"] != "add" {
