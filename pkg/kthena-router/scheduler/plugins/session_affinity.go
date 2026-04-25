@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"container/list"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ const SessionAffinityPluginName = "session-affinity"
 const (
 	defaultSessionAffinityHeaderName = "X-Session-ID"
 	defaultSessionAffinityTTL        = 30 * time.Minute
+	defaultSessionAffinityMaxEntries = 50000
 	maxPluginScore                   = 100
 )
 
@@ -45,11 +47,13 @@ var (
 type SessionAffinityArgs struct {
 	HeaderName string `yaml:"headerName,omitempty"`
 	TTL        string `yaml:"ttl,omitempty"`
+	MaxEntries int    `yaml:"maxEntries,omitempty"`
 }
 
 type sessionAffinityConfig struct {
 	HeaderName string
 	TTL        time.Duration
+	MaxEntries int
 }
 
 type affinityBinding struct {
@@ -57,11 +61,18 @@ type affinityBinding struct {
 	expiresAt time.Time
 }
 
+type affinityEntry struct {
+	key     string
+	binding affinityBinding
+}
+
 type affinityStore struct {
-	mu       sync.Mutex
-	ttl      time.Duration
-	now      func() time.Time
-	bindings map[string]affinityBinding
+	mu         sync.Mutex
+	ttl        time.Duration
+	maxEntries int
+	now        func() time.Time
+	bindings   map[string]*list.Element
+	order      *list.List
 }
 
 type SessionAffinity struct {
@@ -75,7 +86,7 @@ func NewSessionAffinity(pluginArg runtime.RawExtension) *SessionAffinity {
 	return &SessionAffinity{
 		name:       SessionAffinityPluginName,
 		headerName: cfg.HeaderName,
-		store:      newAffinityStore(cfg.TTL),
+		store:      newAffinityStore(cfg.TTL, cfg.MaxEntries),
 	}
 }
 
@@ -83,6 +94,7 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 	args := SessionAffinityArgs{
 		HeaderName: defaultSessionAffinityHeaderName,
 		TTL:        defaultSessionAffinityTTL.String(),
+		MaxEntries: defaultSessionAffinityMaxEntries,
 	}
 
 	if len(pluginArg.Raw) > 0 {
@@ -91,6 +103,7 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 			args = SessionAffinityArgs{
 				HeaderName: defaultSessionAffinityHeaderName,
 				TTL:        defaultSessionAffinityTTL.String(),
+				MaxEntries: defaultSessionAffinityMaxEntries,
 			}
 		}
 	}
@@ -98,6 +111,7 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 	cfg := sessionAffinityConfig{
 		HeaderName: defaultSessionAffinityHeaderName,
 		TTL:        defaultSessionAffinityTTL,
+		MaxEntries: defaultSessionAffinityMaxEntries,
 	}
 	if args.HeaderName != "" {
 		cfg.HeaderName = args.HeaderName
@@ -109,6 +123,11 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 		} else {
 			cfg.TTL = ttl
 		}
+	}
+	if args.MaxEntries > 0 {
+		cfg.MaxEntries = args.MaxEntries
+	} else if args.MaxEntries < 0 {
+		klog.Errorf("Invalid session-affinity maxEntries %d, using default %d", args.MaxEntries, defaultSessionAffinityMaxEntries)
 	}
 
 	return cfg
@@ -199,11 +218,16 @@ func getScoreAffinityScopeKey(ctx *framework.Context) string {
 	return ctx.AffinityScopeKey + "/prefill"
 }
 
-func newAffinityStore(ttl time.Duration) *affinityStore {
+func newAffinityStore(ttl time.Duration, maxEntries int) *affinityStore {
+	if maxEntries <= 0 {
+		maxEntries = defaultSessionAffinityMaxEntries
+	}
 	return &affinityStore{
-		ttl:      ttl,
-		now:      time.Now,
-		bindings: make(map[string]affinityBinding),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		now:        time.Now,
+		bindings:   make(map[string]*list.Element),
+		order:      list.New(),
 	}
 }
 
@@ -212,31 +236,80 @@ func (s *affinityStore) get(scopeKey, sessionKey string) (types.NamespacedName, 
 	defer s.mu.Unlock()
 
 	key := affinityBindingKey(scopeKey, sessionKey)
-	binding, ok := s.bindings[key]
+	elem, ok := s.bindings[key]
 	if !ok {
 		return types.NamespacedName{}, false
 	}
-	if !binding.expiresAt.After(s.now()) {
-		delete(s.bindings, key)
+	entry := elem.Value.(*affinityEntry)
+	if !entry.binding.expiresAt.After(s.now()) {
+		s.removeElementLocked(elem)
 		return types.NamespacedName{}, false
 	}
-	return binding.pod, true
+	s.order.MoveToFront(elem)
+	return entry.binding.pod, true
 }
 
 func (s *affinityStore) set(scopeKey, sessionKey string, pod types.NamespacedName) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.bindings[affinityBindingKey(scopeKey, sessionKey)] = affinityBinding{
+	now := s.now()
+	s.evictExpiredLocked(now)
+
+	key := affinityBindingKey(scopeKey, sessionKey)
+	binding := affinityBinding{
 		pod:       pod,
-		expiresAt: s.now().Add(s.ttl),
+		expiresAt: now.Add(s.ttl),
 	}
+	if elem, ok := s.bindings[key]; ok {
+		elem.Value.(*affinityEntry).binding = binding
+		s.order.MoveToFront(elem)
+		return
+	}
+
+	elem := s.order.PushFront(&affinityEntry{
+		key:     key,
+		binding: binding,
+	})
+	s.bindings[key] = elem
+	s.evictOverflowLocked()
 }
 
 func (s *affinityStore) delete(scopeKey, sessionKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.bindings, affinityBindingKey(scopeKey, sessionKey))
+
+	key := affinityBindingKey(scopeKey, sessionKey)
+	if elem, ok := s.bindings[key]; ok {
+		s.removeElementLocked(elem)
+	}
+}
+
+func (s *affinityStore) evictExpiredLocked(now time.Time) {
+	for elem := s.order.Back(); elem != nil; {
+		prev := elem.Prev()
+		entry := elem.Value.(*affinityEntry)
+		if !entry.binding.expiresAt.After(now) {
+			s.removeElementLocked(elem)
+		}
+		elem = prev
+	}
+}
+
+func (s *affinityStore) evictOverflowLocked() {
+	for len(s.bindings) > s.maxEntries {
+		elem := s.order.Back()
+		if elem == nil {
+			return
+		}
+		s.removeElementLocked(elem)
+	}
+}
+
+func (s *affinityStore) removeElementLocked(elem *list.Element) {
+	entry := elem.Value.(*affinityEntry)
+	delete(s.bindings, entry.key)
+	s.order.Remove(elem)
 }
 
 func affinityBindingKey(scopeKey, sessionKey string) string {
