@@ -320,3 +320,10 @@ func TestDuplicateModelName(t *testing.T) {
 
 	t.Log("Test completed successfully: same modelName routes to different models via different ports")
 }
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestRouterConfigUpdate(t *testing.T) {
+	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}

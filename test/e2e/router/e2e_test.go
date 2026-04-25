@@ -163,3 +163,10 @@ func TestRateLimitMetrics(t *testing.T) {
 func TestSglangMetrics(t *testing.T) {
 	TestSglangMetricsShared(t, testCtx, testNamespace)
 }
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestRouterConfigUpdate(t *testing.T) {
+	TestRouterConfigUpdateShared(t, testCtx, testNamespace, false, kthenaNamespace)
+}
