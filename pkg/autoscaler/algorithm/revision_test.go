@@ -369,9 +369,8 @@ func TestGetCorrectedInstances(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert := assert.New(t)
 			corrected := tc.args.GetCorrectedInstances()
-			assert.Equal(tc.expectedCorrected, corrected)
+			assert.Equal(t, tc.expectedCorrected, corrected)
 		})
 	}
 }
