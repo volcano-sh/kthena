@@ -49,30 +49,16 @@ func TestDownloaderImage(t *testing.T) {
 }
 
 func TestSetDownloaderImage(t *testing.T) {
-	testCases := []struct {
-		name          string
-		imageToSet    string
-		expectedImage string
-	}{
-		{
-			name:          "set custom image is reflected by getter",
-			imageToSet:    "registry/downloader:latest",
-			expectedImage: "registry/downloader:latest",
-		},
-		{
-			name:          "set empty image falls back to default",
-			imageToSet:    "",
-			expectedImage: DefaultDownloaderImage,
-		},
-	}
+	t.Run("set custom image is reflected by getter", func(t *testing.T) {
+		p := &ParseConfig{}
+		p.SetDownloaderImage("registry/downloader:latest")
+		assert.Equal(t, "registry/downloader:latest", p.DownloaderImage())
+	})
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := &ParseConfig{}
-			p.SetDownloaderImage(tc.imageToSet)
-			assert.Equal(t, tc.expectedImage, p.DownloaderImage())
-		})
-	}
+	t.Run("getter returns default when stored image is empty", func(t *testing.T) {
+		p := &ParseConfig{}
+		assert.Equal(t, DefaultDownloaderImage, p.DownloaderImage())
+	})
 }
 
 func TestRuntimeImage(t *testing.T) {
@@ -102,28 +88,14 @@ func TestRuntimeImage(t *testing.T) {
 }
 
 func TestSetRuntimeImage(t *testing.T) {
-	testCases := []struct {
-		name          string
-		imageToSet    string
-		expectedImage string
-	}{
-		{
-			name:          "set custom image is reflected by getter",
-			imageToSet:    "registry/runtime:latest",
-			expectedImage: "registry/runtime:latest",
-		},
-		{
-			name:          "set empty image falls back to default",
-			imageToSet:    "",
-			expectedImage: DefaultRuntimeImage,
-		},
-	}
+	t.Run("set custom image is reflected by getter", func(t *testing.T) {
+		p := &ParseConfig{}
+		p.SetRuntimeImage("registry/runtime:latest")
+		assert.Equal(t, "registry/runtime:latest", p.RuntimeImage())
+	})
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := &ParseConfig{}
-			p.SetRuntimeImage(tc.imageToSet)
-			assert.Equal(t, tc.expectedImage, p.RuntimeImage())
-		})
-	}
+	t.Run("getter returns default when stored image is empty", func(t *testing.T) {
+		p := &ParseConfig{}
+		assert.Equal(t, DefaultRuntimeImage, p.RuntimeImage())
+	})
 }
