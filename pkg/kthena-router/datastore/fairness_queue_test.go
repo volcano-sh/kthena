@@ -830,6 +830,120 @@ func TestPriorityRefresh_UsesCompositePriority(t *testing.T) {
 	}
 }
 
+func TestPriorityRefresh_PreservesPriorityOffset(t *testing.T) {
+	tracker := newMockTokenTracker()
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 1,
+		RebuildThreshold:          64,
+		TokenWeight:               1.0,
+		RequestNumWeight:          0.0,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	defer pq.Close()
+
+	now := time.Now()
+	tracker.SetTokenCount("user-a", "model-1", 1.0)
+
+	req := &Request{
+		ReqID:          "a",
+		UserID:         "user-a",
+		ModelName:      "model-1",
+		Priority:       11.0,
+		PriorityOffset: 10.0,
+		RequestTime:    now,
+		NotifyChan:     make(chan struct{}),
+	}
+	pq.PushRequest(req)
+
+	// Drift historical usage; refreshed priority should be historical + offset.
+	tracker.SetTokenCount("user-a", "model-1", 5.0)
+
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.Priority != 15.0 {
+		t.Fatalf("Expected refreshed priority 15.0 with offset preserved, got %v", result.Priority)
+	}
+}
+
+func TestPriorityRefresh_DoesNotReinsertWhenFinalPriorityIsUnchanged(t *testing.T) {
+	tracker := newMockTokenTracker()
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 1,
+		RebuildThreshold:          64,
+		TokenWeight:               1.0,
+		RequestNumWeight:          0.0,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	defer pq.Close()
+
+	now := time.Now()
+	tracker.SetTokenCount("user-a", "model-1", 5.0)
+
+	req := &Request{
+		ReqID:          "a",
+		UserID:         "user-a",
+		ModelName:      "model-1",
+		Priority:       15.0,
+		PriorityOffset: 10.0,
+		RequestTime:    now,
+		NotifyChan:     make(chan struct{}),
+	}
+	pq.PushRequest(req)
+
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.Priority != 15.0 {
+		t.Fatalf("Expected unchanged final priority 15.0, got %v", result.Priority)
+	}
+	if len(pq.heap) != 0 {
+		t.Fatalf("Expected queue to be empty after pop, got %d items", len(pq.heap))
+	}
+}
+
+func TestRebuildHeap_PreservesPriorityOffset(t *testing.T) {
+	tracker := newMockTokenTracker()
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 1,
+		RebuildThreshold:          64,
+		TokenWeight:               1.0,
+		RequestNumWeight:          0.0,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	defer pq.Close()
+
+	now := time.Now()
+	tracker.SetTokenCount("user-a", "model-1", 3.0)
+	tracker.SetTokenCount("user-b", "model-1", 4.0)
+
+	pq.PushRequest(&Request{ReqID: "a", UserID: "user-a", ModelName: "model-1", Priority: 13.0, PriorityOffset: 10.0, RequestTime: now})
+	pq.PushRequest(&Request{ReqID: "b", UserID: "user-b", ModelName: "model-1", Priority: 24.0, PriorityOffset: 20.0, RequestTime: now.Add(time.Second)})
+
+	pq.mu.Lock()
+	pq.rebuildHeap()
+	pq.mu.Unlock()
+
+	result, err := pq.popWhenAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+	if result.ReqID != "a" {
+		t.Fatalf("Expected request a to remain lower priority (3+10), got %s", result.ReqID)
+	}
+	if result.Priority != 13.0 {
+		t.Fatalf("Expected rebuilt priority 13.0 for request a, got %v", result.Priority)
+	}
+}
+
 func TestRun_SemaphoreMode_EmptyQueueDoesNotConsumePermit(t *testing.T) {
 	cfg := FairnessQueueConfig{
 		MaxConcurrent: 1,
