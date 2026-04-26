@@ -14,7 +14,7 @@ Kthena Autoscaler periodically collects runtime metrics from the Pods of managed
   <LightboxImage src={architectureAutoscaler} alt="architecture-autoscaler"></LightboxImage>
 </div>
 
-Kthena Autoscaler provides two scaling granularities: **Homogeneous Instances Autoscale** and **Heterogeneous Instances Autoscale**.
+Kthena Autoscaler provides three scaling granularities: **Homogeneous Instances Autoscale**, **Heterogeneous Instances Autoscale**, and **PD Disaggregation Autoscale**.
 
 ### Homogeneous Instances Autoscale
 
@@ -55,6 +55,53 @@ Where:
 The `costExpansionRate` can be interpreted as the "cost expansion ratio for the next batch" within each inference instance type.
 
 When the prediction requires K instances, the first K instances in the `seq` order are retained. This strategy helps reuse previously launched instances during scaling operations, thereby reducing cold start overhead.
+
+### PD Disaggregation Autoscale
+
+When a model is deployed with dedicated prefill and decode roles, **PD Disaggregation Autoscale** scales both roles in one control loop.
+
+This mode first aggregates metrics from both roles into one combined signal and computes a total desired replica count. Then it splits total replicas into prefill/decode replicas based on `prefillDecodeRatio`.
+
+If `prefillDecodeRatio` is configured (for example `1:2`), role replicas are split using:
+
+$$
+N_{prefill} = \lceil N_{total} \cdot \frac{P}{P + D} \rceil, \quad N_{decode} = N_{total} - N_{prefill}
+$$
+
+Each role is then clamped by its own bounds:
+
+- prefill: `[prefillRole.minReplicas, prefillRole.maxReplicas]`
+- decode: `[decodeRole.minReplicas, decodeRole.maxReplicas]`
+
+If clamping on one role creates residual capacity, autoscaler reassigns remaining replicas to the other role (within bounds) to preserve the total capacity target.
+
+`prefillDecodeRatio` can be updated at runtime. The new ratio is applied in the next reconcile cycle without changing autoscaling policy definitions.
+
+Example binding snippet:
+
+```yaml
+spec:
+  policyRef:
+    name: llama3-autoscaling-policy
+  pdDisaggregatedTarget:
+    modelServingRef:
+      name: llama3-serving
+    prefillRole:
+      roleName: prefill
+      minReplicas: 1
+      maxReplicas: 8
+      metricEndpoint:
+        uri: /metrics
+        port: 8100
+    decodeRole:
+      roleName: decode
+      minReplicas: 2
+      maxReplicas: 16
+      metricEndpoint:
+        uri: /metrics
+        port: 8100
+    prefillDecodeRatio: "1:2"
+```
 
 
 ## Constraints

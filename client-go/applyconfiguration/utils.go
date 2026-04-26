@@ -80,6 +80,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyBindingApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyBindingSpec"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyBindingSpecApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyBindingStatus"):
+		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyBindingStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyMetric"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyMetricApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyPanicPolicy"):
@@ -120,6 +122,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.ModelWorkerApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("NetworkTopology"):
 		return &applyconfigurationworkloadv1alpha1.NetworkTopologyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("PDDisaggregatedTarget"):
+		return &applyconfigurationworkloadv1alpha1.PDDisaggregatedTargetApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("PDRoleTarget"):
+		return &applyconfigurationworkloadv1alpha1.PDRoleTargetApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("PDScalingStatus"):
+		return &applyconfigurationworkloadv1alpha1.PDScalingStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PluginScope"):
 		return &applyconfigurationworkloadv1alpha1.PluginScopeApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PluginSpec"):

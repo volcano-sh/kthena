@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
@@ -119,11 +120,21 @@ func (v *AutoscalingBindingValidator) validateAutoscalingPolicyExistence(ctx con
 
 func validateOptimizeAndScalingPolicyExistence(asp_binding *workloadv1alpha1.AutoscalingPolicyBinding) field.ErrorList {
 	var allErrs field.ErrorList
-	if asp_binding.Spec.HeterogeneousTarget == nil && asp_binding.Spec.HomogeneousTarget == nil {
-		allErrs = append(allErrs, field.Required(field.NewPath("spec").Child("homogeneousTarget"), "spec.homogeneousTarget should be set if spec.heterogeneousTarget does not exist"))
+	targetModes := 0
+	if asp_binding.Spec.HeterogeneousTarget != nil {
+		targetModes++
 	}
-	if asp_binding.Spec.HeterogeneousTarget != nil && asp_binding.Spec.HomogeneousTarget != nil {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec").Child("homogeneousTarget"), "both spec.heterogeneousTarget and spec.homogeneousTarget can not be set at the same time"))
+	if asp_binding.Spec.HomogeneousTarget != nil {
+		targetModes++
+	}
+	if asp_binding.Spec.PDDisaggregatedTarget != nil {
+		targetModes++
+	}
+	if targetModes == 0 {
+		allErrs = append(allErrs, field.Required(field.NewPath("spec"), "exactly one of spec.homogeneousTarget, spec.heterogeneousTarget or spec.pdDisaggregatedTarget must be set"))
+	}
+	if targetModes > 1 {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "only one of spec.homogeneousTarget, spec.heterogeneousTarget or spec.pdDisaggregatedTarget can be set"))
 	}
 	return allErrs
 }
@@ -161,5 +172,50 @@ func validateBindingTargetKind(asp_binding *workloadv1alpha1.AutoscalingPolicyBi
 		}
 	}
 
+	if asp_binding.Spec.PDDisaggregatedTarget != nil {
+		pdTarget := asp_binding.Spec.PDDisaggregatedTarget
+		if pdTarget.ModelServingRef.Name == "" {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("pdDisaggregatedTarget").Child("modelServingRef").Child("name"), pdTarget.ModelServingRef.Name, "pdDisaggregatedTarget.modelServingRef.name must be set, but got empty"))
+		}
+
+		if pdTarget.PrefillRole.RoleName == "" {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("pdDisaggregatedTarget").Child("prefillRole").Child("roleName"), pdTarget.PrefillRole.RoleName, "pdDisaggregatedTarget.prefillRole.roleName must be set, but got empty"))
+		}
+		if pdTarget.DecodeRole.RoleName == "" {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("pdDisaggregatedTarget").Child("decodeRole").Child("roleName"), pdTarget.DecodeRole.RoleName, "pdDisaggregatedTarget.decodeRole.roleName must be set, but got empty"))
+		}
+		if pdTarget.PrefillRole.RoleName != "" && pdTarget.PrefillRole.RoleName == pdTarget.DecodeRole.RoleName {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("pdDisaggregatedTarget"), pdTarget.PrefillRole.RoleName, "pdDisaggregatedTarget prefillRole.roleName and decodeRole.roleName must be different"))
+		}
+
+		if pdTarget.PrefillRole.MinReplicas > pdTarget.PrefillRole.MaxReplicas {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("pdDisaggregatedTarget").Child("prefillRole"), pdTarget.PrefillRole, "pdDisaggregatedTarget.prefillRole.minReplicas must be <= maxReplicas"))
+		}
+		if pdTarget.DecodeRole.MinReplicas > pdTarget.DecodeRole.MaxReplicas {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("pdDisaggregatedTarget").Child("decodeRole"), pdTarget.DecodeRole, "pdDisaggregatedTarget.decodeRole.minReplicas must be <= maxReplicas"))
+		}
+
+		if ratioErr := validatePDRatio(pdTarget.PrefillDecodeRatio); ratioErr != nil {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("pdDisaggregatedTarget").Child("prefillDecodeRatio"), pdTarget.PrefillDecodeRatio, ratioErr.Error()))
+		}
+	}
+
 	return allErrs
+}
+
+func validatePDRatio(ratio string) error {
+	if strings.TrimSpace(ratio) == "" {
+		return nil
+	}
+	parts := strings.Split(ratio, ":")
+	if len(parts) != 2 {
+		return fmt.Errorf("prefillDecodeRatio must follow P:D format")
+	}
+	for _, p := range parts {
+		parsed, err := strconv.ParseInt(p, 10, 32)
+		if err != nil || parsed <= 0 {
+			return fmt.Errorf("prefillDecodeRatio must contain positive integers")
+		}
+	}
+	return nil
 }
