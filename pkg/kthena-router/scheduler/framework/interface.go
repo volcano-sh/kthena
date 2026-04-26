@@ -32,6 +32,9 @@ type Context struct {
 
 	Hashes []uint64
 
+	SessionKey       string
+	AffinityScopeKey string
+
 	// ModelServer information for efficient PDGroup scheduling
 	ModelServerName types.NamespacedName
 	PDGroup         *aiv1alpha1.PDGroup
@@ -51,6 +54,12 @@ type ScorePlugin interface {
 	// Score is a method that is used to rank pods that have passed the filter plugins.
 	// Note each plugin should generate score for a pod within [0, 100]
 	Score(ctx *Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int
+}
+
+// HardPinProvider allows a score plugin to request deterministic pod selection
+// before weighted score aggregation.
+type HardPinProvider interface {
+	HardPin(ctx *Context, pods []*datastore.PodInfo) (*datastore.PodInfo, bool)
 }
 
 type FilterPlugin interface {

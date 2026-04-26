@@ -1,0 +1,367 @@
+/*
+Copyright The Volcano Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package plugins
+
+import (
+	"container/list"
+	"crypto/sha256"
+	"encoding/hex"
+	"sync"
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/yaml"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+)
+
+const SessionAffinityPluginName = "session-affinity"
+
+const (
+	defaultSessionAffinityHeaderName = "X-Session-ID"
+	defaultSessionAffinityTTL        = 30 * time.Minute
+	defaultSessionAffinityMaxEntries = 50000
+	maxPluginScore                   = 100
+	sessionAffinityPinModeSoft       = "soft"
+	sessionAffinityPinModeHard       = "hard"
+)
+
+var (
+	_ framework.ScorePlugin      = &SessionAffinity{}
+	_ framework.PostScheduleHook = &SessionAffinity{}
+)
+
+type SessionAffinityArgs struct {
+	HeaderName string `yaml:"headerName,omitempty"`
+	TTL        string `yaml:"ttl,omitempty"`
+	MaxEntries int    `yaml:"maxEntries,omitempty"`
+	PinMode    string `yaml:"pinMode,omitempty"`
+}
+
+type sessionAffinityConfig struct {
+	HeaderName string
+	TTL        time.Duration
+	MaxEntries int
+	PinMode    string
+}
+
+type affinityBinding struct {
+	pod       types.NamespacedName
+	expiresAt time.Time
+}
+
+type affinityEntry struct {
+	key     string
+	binding affinityBinding
+}
+
+type affinityStore struct {
+	mu         sync.Mutex
+	ttl        time.Duration
+	maxEntries int
+	now        func() time.Time
+	bindings   map[string]*list.Element
+	order      *list.List
+}
+
+type SessionAffinity struct {
+	name       string
+	headerName string
+	pinMode    string
+	store      *affinityStore
+}
+
+func NewSessionAffinity(pluginArg runtime.RawExtension) *SessionAffinity {
+	cfg := ParseSessionAffinityArgs(pluginArg)
+	return &SessionAffinity{
+		name:       SessionAffinityPluginName,
+		headerName: cfg.HeaderName,
+		pinMode:    cfg.PinMode,
+		store:      newAffinityStore(cfg.TTL, cfg.MaxEntries),
+	}
+}
+
+func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityConfig {
+	args := SessionAffinityArgs{
+		HeaderName: defaultSessionAffinityHeaderName,
+		TTL:        defaultSessionAffinityTTL.String(),
+		MaxEntries: defaultSessionAffinityMaxEntries,
+		PinMode:    sessionAffinityPinModeSoft,
+	}
+
+	if len(pluginArg.Raw) > 0 {
+		if err := yaml.Unmarshal(pluginArg.Raw, &args); err != nil {
+			klog.Errorf("Failed to unmarshal SessionAffinityArgs, using default values: %v", err)
+			args = SessionAffinityArgs{
+				HeaderName: defaultSessionAffinityHeaderName,
+				TTL:        defaultSessionAffinityTTL.String(),
+				MaxEntries: defaultSessionAffinityMaxEntries,
+				PinMode:    sessionAffinityPinModeSoft,
+			}
+		}
+	}
+
+	cfg := sessionAffinityConfig{
+		HeaderName: defaultSessionAffinityHeaderName,
+		TTL:        defaultSessionAffinityTTL,
+		MaxEntries: defaultSessionAffinityMaxEntries,
+		PinMode:    sessionAffinityPinModeSoft,
+	}
+	if args.HeaderName != "" {
+		cfg.HeaderName = args.HeaderName
+	}
+	if args.TTL != "" {
+		ttl, err := time.ParseDuration(args.TTL)
+		if err != nil || ttl <= 0 {
+			klog.Errorf("Invalid session-affinity ttl %q, using default %s", args.TTL, defaultSessionAffinityTTL)
+		} else {
+			cfg.TTL = ttl
+		}
+	}
+	if args.MaxEntries > 0 {
+		cfg.MaxEntries = args.MaxEntries
+	} else if args.MaxEntries < 0 {
+		klog.Errorf("Invalid session-affinity maxEntries %d, using default %d", args.MaxEntries, defaultSessionAffinityMaxEntries)
+	}
+	if args.PinMode != "" {
+		switch args.PinMode {
+		case sessionAffinityPinModeSoft, sessionAffinityPinModeHard:
+			cfg.PinMode = args.PinMode
+		default:
+			klog.Errorf("Invalid session-affinity pinMode %q, using default %q", args.PinMode, sessionAffinityPinModeSoft)
+		}
+	}
+
+	return cfg
+}
+
+func (s *SessionAffinity) HeaderName() string {
+	return s.headerName
+}
+
+func (s *SessionAffinity) Name() string {
+	return s.name
+}
+
+func (s *SessionAffinity) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
+	scores := make(map[*datastore.PodInfo]int, len(pods))
+	for _, pod := range pods {
+		scores[pod] = 0
+	}
+
+	if ctx == nil || ctx.SessionKey == "" || ctx.AffinityScopeKey == "" || len(pods) == 0 {
+		return scores
+	}
+	if s.pinMode == sessionAffinityPinModeHard {
+		// Hard pin is applied by the scheduler before weighted score aggregation.
+		_, _ = s.lookupBoundPod(ctx, pods)
+		return scores
+	}
+
+	pinnedPod, ok := s.lookupBoundPod(ctx, pods)
+	if !ok {
+		return scores
+	}
+	scores[pinnedPod] = maxPluginScore
+	return scores
+}
+
+func (s *SessionAffinity) HardPin(ctx *framework.Context, pods []*datastore.PodInfo) (*datastore.PodInfo, bool) {
+	if s.pinMode != sessionAffinityPinModeHard {
+		return nil, false
+	}
+	return s.lookupBoundPod(ctx, pods)
+}
+
+func (s *SessionAffinity) lookupBoundPod(ctx *framework.Context, pods []*datastore.PodInfo) (*datastore.PodInfo, bool) {
+	if ctx == nil || ctx.SessionKey == "" || ctx.AffinityScopeKey == "" || len(pods) == 0 {
+		return nil, false
+	}
+
+	scopeKey := getScoreAffinityScopeKey(ctx)
+	if scopeKey == "" {
+		return nil, false
+	}
+
+	binding, ok := s.store.get(scopeKey, ctx.SessionKey)
+	if !ok {
+		return nil, false
+	}
+
+	for _, pod := range pods {
+		if pod.Pod == nil {
+			continue
+		}
+		if pod.Pod.Namespace == binding.Namespace && pod.Pod.Name == binding.Name {
+			return pod, true
+		}
+	}
+
+	s.store.delete(scopeKey, ctx.SessionKey)
+	return nil, false
+}
+
+func (s *SessionAffinity) PostSchedule(ctx *framework.Context, index int) {
+	if ctx == nil || ctx.SessionKey == "" || ctx.AffinityScopeKey == "" {
+		return
+	}
+
+	if ctx.BestPods != nil {
+		if index >= 0 && index < len(ctx.BestPods) {
+			s.bindPod(ctx.AffinityScopeKey, ctx.SessionKey, ctx.BestPods[index])
+		}
+		return
+	}
+
+	if index >= 0 && index < len(ctx.DecodePods) {
+		s.bindPod(ctx.AffinityScopeKey+"/decode", ctx.SessionKey, ctx.DecodePods[index])
+	}
+	if index >= 0 && index < len(ctx.PrefillPods) {
+		s.bindPod(ctx.AffinityScopeKey+"/prefill", ctx.SessionKey, ctx.PrefillPods[index])
+	}
+}
+
+func (s *SessionAffinity) bindPod(scopeKey string, sessionKey string, pod *datastore.PodInfo) {
+	if scopeKey == "" || pod == nil || pod.Pod == nil {
+		return
+	}
+	s.store.set(scopeKey, sessionKey, types.NamespacedName{
+		Namespace: pod.Pod.Namespace,
+		Name:      pod.Pod.Name,
+	})
+}
+
+func getScoreAffinityScopeKey(ctx *framework.Context) string {
+	if ctx == nil || ctx.AffinityScopeKey == "" {
+		return ""
+	}
+	if ctx.PDGroup == nil {
+		return ctx.AffinityScopeKey
+	}
+	// DecodePods is empty while selecting decode pods; once decode is selected,
+	// subsequent scheduling selects prefill pods.
+	if len(ctx.DecodePods) == 0 {
+		return ctx.AffinityScopeKey + "/decode"
+	}
+	return ctx.AffinityScopeKey + "/prefill"
+}
+
+func newAffinityStore(ttl time.Duration, maxEntries int) *affinityStore {
+	if maxEntries <= 0 {
+		maxEntries = defaultSessionAffinityMaxEntries
+	}
+	return &affinityStore{
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		now:        time.Now,
+		bindings:   make(map[string]*list.Element),
+		order:      list.New(),
+	}
+}
+
+func (s *affinityStore) get(scopeKey, sessionKey string) (types.NamespacedName, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := affinityBindingKey(scopeKey, sessionKey)
+	elem, ok := s.bindings[key]
+	if !ok {
+		return types.NamespacedName{}, false
+	}
+	entry := elem.Value.(*affinityEntry)
+	if !entry.binding.expiresAt.After(s.now()) {
+		s.removeElementLocked(elem)
+		return types.NamespacedName{}, false
+	}
+	s.order.MoveToFront(elem)
+	return entry.binding.pod, true
+}
+
+func (s *affinityStore) set(scopeKey, sessionKey string, pod types.NamespacedName) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	s.evictExpiredLocked(now)
+
+	key := affinityBindingKey(scopeKey, sessionKey)
+	binding := affinityBinding{
+		pod:       pod,
+		expiresAt: now.Add(s.ttl),
+	}
+	if elem, ok := s.bindings[key]; ok {
+		elem.Value.(*affinityEntry).binding = binding
+		s.order.MoveToFront(elem)
+		return
+	}
+
+	elem := s.order.PushFront(&affinityEntry{
+		key:     key,
+		binding: binding,
+	})
+	s.bindings[key] = elem
+	s.evictOverflowLocked()
+}
+
+func (s *affinityStore) delete(scopeKey, sessionKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := affinityBindingKey(scopeKey, sessionKey)
+	if elem, ok := s.bindings[key]; ok {
+		s.removeElementLocked(elem)
+	}
+}
+
+func (s *affinityStore) evictExpiredLocked(now time.Time) {
+	for elem := s.order.Back(); elem != nil; {
+		prev := elem.Prev()
+		entry := elem.Value.(*affinityEntry)
+		if !entry.binding.expiresAt.After(now) {
+			s.removeElementLocked(elem)
+		}
+		elem = prev
+	}
+}
+
+func (s *affinityStore) evictOverflowLocked() {
+	for len(s.bindings) > s.maxEntries {
+		elem := s.order.Back()
+		if elem == nil {
+			return
+		}
+		s.removeElementLocked(elem)
+	}
+}
+
+func (s *affinityStore) removeElementLocked(elem *list.Element) {
+	entry := elem.Value.(*affinityEntry)
+	delete(s.bindings, entry.key)
+	s.order.Remove(elem)
+}
+
+func affinityBindingKey(scopeKey, sessionKey string) string {
+	return scopeKey + "\x00" + hashSessionKey(sessionKey)
+}
+
+func hashSessionKey(sessionKey string) string {
+	sum := sha256.Sum256([]byte(sessionKey))
+	return hex.EncodeToString(sum[:])
+}

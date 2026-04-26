@@ -34,6 +34,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -50,6 +51,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
@@ -86,6 +88,8 @@ type Router struct {
 	fairnessTimeout  time.Duration
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
+
+	sessionAffinityHeaderName string
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -154,17 +158,18 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	}
 
 	return &Router{
-		store:            store,
-		scheduler:        scheduler.NewScheduler(store, routerConfig),
-		authenticator:    auth.NewJWTAuthenticator(routerConfig),
-		loadRateLimiter:  loadRateLimiter,
-		accessLogger:     accessLogger,
-		metrics:          metricsInstance,
-		tokenizer:        tokenizerInstance,
-		connectorFactory: connectors.NewDefaultFactory(),
-		fairnessTimeout:  parseFairnessTimeout(),
-		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
-		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+		store:                     store,
+		scheduler:                 scheduler.NewScheduler(store, routerConfig),
+		authenticator:             auth.NewJWTAuthenticator(routerConfig),
+		loadRateLimiter:           loadRateLimiter,
+		accessLogger:              accessLogger,
+		metrics:                   metricsInstance,
+		tokenizer:                 tokenizerInstance,
+		connectorFactory:          connectors.NewDefaultFactory(),
+		fairnessTimeout:           parseFairnessTimeout(),
+		tokenWeight:               parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
+		requestNumWeight:          parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+		sessionAffinityHeaderName: getSessionAffinityHeaderName(routerConfig),
 	}
 }
 
@@ -188,6 +193,19 @@ func parseEnvFloat(key string, fallback float64) float64 {
 		klog.Warningf("Invalid %s %q, using default %v", key, s, fallback)
 	}
 	return fallback
+}
+
+func getSessionAffinityHeaderName(routerConfig *conf.RouterConfiguration) string {
+	if routerConfig == nil {
+		return plugins.ParseSessionAffinityArgs(runtime.RawExtension{}).HeaderName
+	}
+	for _, pluginConfig := range routerConfig.Scheduler.PluginConfig {
+		if pluginConfig.Name != plugins.SessionAffinityPluginName {
+			continue
+		}
+		return plugins.ParseSessionAffinityArgs(pluginConfig.Args).HeaderName
+	}
+	return plugins.ParseSessionAffinityArgs(runtime.RawExtension{}).HeaderName
 }
 
 func (r *Router) calculateRequestPriority(userID, modelName string) float64 {
@@ -323,6 +341,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	var modelServerName types.NamespacedName
 	var modelRoute *v1alpha1.ModelRoute
 	var modelServer *v1alpha1.ModelServer
+	var affinityScopeKey string
 
 	// Get gateway key from context if available (set by Gateway listener)
 	var gatewayKey string
@@ -362,6 +381,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
+		affinityScopeKey = "modelserver/" + modelServerName.String()
 	} else if matched, inferencePoolName := r.handleHTTPRoute(c, gatewayKey); matched {
 		// If ModelRoute is not matched, try to match HTTPRoute
 
@@ -393,6 +413,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 		// Use the first target port
 		port = int32(inferencePool.Spec.TargetPorts[0].Number)
+		affinityScopeKey = "inferencepool/" + inferencePoolName.String()
 
 		klog.V(4).Infof("InferencePool is %v, pods count: %d, port: %d", inferencePoolName, len(pods), port)
 	} else {
@@ -424,11 +445,13 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 
 	ctx := &framework.Context{
-		Model:           modelName,
-		Prompt:          prompt,
-		ModelServerName: modelServerName,
-		PDGroup:         pdGroup,
-		MetricsRecorder: metricsRecorder,
+		Model:            modelName,
+		Prompt:           prompt,
+		SessionKey:       r.getSessionKey(c.Request),
+		AffinityScopeKey: affinityScopeKey,
+		ModelServerName:  modelServerName,
+		PDGroup:          pdGroup,
+		MetricsRecorder:  metricsRecorder,
 	}
 
 	err = r.scheduler.Schedule(ctx, pods)
@@ -461,6 +484,13 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		accesslog.SetError(c, "proxy", "request processing failed")
 		c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
 	}
+}
+
+func (r *Router) getSessionKey(req *http.Request) string {
+	if req == nil || r.sessionAffinityHeaderName == "" {
+		return ""
+	}
+	return strings.TrimSpace(req.Header.Get(r.sessionAffinityHeaderName))
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {

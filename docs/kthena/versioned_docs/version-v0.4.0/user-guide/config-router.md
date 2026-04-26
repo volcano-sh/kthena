@@ -19,6 +19,7 @@ Plugin Configuration (PluginConfig):
 |least-request| maxWaitingRequests                                      |Sets the maximum number of waiting requests|
 |least-latency| TTFTTPOTWeightFactor                                    |Sets the weight factor for TTFT and TPOT|
 |prefix-cache| blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize |Configures prefix cache parameters|
+|session-affinity| headerName<br />ttl<br />maxEntries<br />pinMode |Pins a session to a pod within the already selected backend using a bounded in-memory TTL/LRU store|
 
 Filter Plugins (Filter):
 
@@ -94,6 +95,60 @@ data:
             weight: 1
           - name: prefix-cache
             weight: 1
+          - name: session-affinity
+            weight: 10
+```
+
+`session-affinity` is pod-level only in v1. It does not make weighted `ModelRoute` destination selection sticky. The router reads the session key from the configured header, which defaults to `X-Session-ID`. The in-memory store is bounded with LRU eviction, and `maxEntries` defaults to `50000`.
+
+`pinMode` controls precedence when a valid sticky binding exists:
+
+- `soft` (default): plugin contributes score; higher-weight plugins can still override.
+- `hard`: scheduler pins directly to the bound pod before weighted score aggregation.
+
+Maintainer review notes reflected in current behavior:
+
+- Pin semantics are explicit through `pinMode`: `soft` is score-based (can be overridden by higher-weighted plugins), while `hard` enforces deterministic pinning before weighted score aggregation.
+- Affinity scope is backend-kind aware (`modelserver/<ns>/<name>` vs `inferencepool/<ns>/<name>`) to avoid cross-kind collisions.
+- Session-key material is derived with SHA-256 for stable key behavior and to avoid storing raw session identifiers in internal affinity keys.
+- For deterministic sticky behavior in tests, keep scheduler weights/setup controlled so other plugins do not dominate `session-affinity`.
+
+Beyond v1 (planned follow-up, not yet available in this release):
+
+- Per-route multi-source extraction (`Header`, `Query`, `Cookie`, `JWTClaim`).
+- Redis-backed shared stickiness across router replicas.
+
+### Session Affinity Example
+
+```yaml showLineNumbers
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-config
+  namespace: default
+data:
+  routerConfiguration: |-
+    scheduler:
+      pluginConfig:
+      - name: session-affinity
+        args:
+          headerName: X-Session-ID
+          ttl: 30m
+          maxEntries: 50000
+          pinMode: soft
+      - name: least-request
+        args:
+          maxWaitingRequests: 10
+      plugins:
+        Filter:
+          enabled:
+            - least-request
+        Score:
+          enabled:
+            - name: session-affinity
+              weight: 10
+            - name: least-request
+              weight: 1
 ```
 
 If you want to use Authentication feature of router. Here is an example:
@@ -119,6 +174,11 @@ data:
           blockSizeToHash: 64
           maxBlocksToMatch: 128
           maxHashCacheSize: 50000
+      - name: session-affinity
+        args:
+          headerName: X-Session-ID
+          ttl: 30m
+          maxEntries: 50000
       plugins:
         Filter:
           enabled:
@@ -135,6 +195,8 @@ data:
               weight: 1
             - name: prefix-cache
               weight: 1
+            - name: session-affinity
+              weight: 10
     auth:
       issuer: "testing@secure.istio.io"
       audiences: ["kthena.io"]
