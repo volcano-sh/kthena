@@ -19,7 +19,7 @@ Plugin Configuration (PluginConfig):
 |least-request| maxWaitingRequests                                      |Sets the maximum number of waiting requests|
 |least-latency| TTFTTPOTWeightFactor                                    |Sets the weight factor for TTFT and TPOT|
 |prefix-cache| blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize |Configures prefix cache parameters|
-|session-affinity| headerName<br />ttl<br />maxEntries |Pins a session to a pod within the already selected backend using a bounded in-memory TTL/LRU store|
+|session-affinity| headerName<br />ttl<br />maxEntries<br />pinMode |Pins a session to a pod within the already selected backend using a bounded in-memory TTL/LRU store|
 
 Filter Plugins (Filter):
 
@@ -101,6 +101,24 @@ data:
 
 `session-affinity` is pod-level only in v1. It does not make weighted `ModelRoute` destination selection sticky. The router reads the session key from the configured header, which defaults to `X-Session-ID`. The in-memory store is bounded with LRU eviction, and `maxEntries` defaults to `50000`.
 
+`pinMode` controls precedence when a valid sticky binding exists:
+
+- `soft` (default): plugin contributes score; higher-weight plugins can still override.
+- `hard`: scheduler pins directly to the bound pod before weighted score aggregation.
+
+Maintainer review notes reflected in current behavior:
+
+- Pin semantics are **soft** in v1 because this is a score plugin. Existing bindings can still be overridden by higher-weighted plugins.
+- Affinity scope is backend-kind aware (`modelserver/<ns>/<name>` vs `inferencepool/<ns>/<name>`) to avoid cross-kind collisions.
+- Session-key material is derived with SHA-256 for stable key behavior and to avoid storing raw session identifiers in internal affinity keys.
+- For deterministic sticky behavior in tests, keep scheduler weights/setup controlled so other plugins do not dominate `session-affinity`.
+
+Beyond v1 (planned follow-up, not yet available in this release):
+
+- Per-route multi-source extraction (`Header`, `Query`, `Cookie`, `JWTClaim`).
+- Redis-backed shared stickiness across router replicas.
+- Optional hard pin mode and explicit precedence semantics.
+
 ### Session Affinity Example
 
 ```yaml showLineNumbers
@@ -118,6 +136,7 @@ data:
           headerName: X-Session-ID
           ttl: 30m
           maxEntries: 50000
+          pinMode: soft
       - name: least-request
         args:
           maxWaitingRequests: 10

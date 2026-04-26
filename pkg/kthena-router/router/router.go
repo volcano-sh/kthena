@@ -381,7 +381,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
-		affinityScopeKey = modelServerName.String()
+		affinityScopeKey = "modelserver/" + modelServerName.String()
 	} else if matched, inferencePoolName := r.handleHTTPRoute(c, gatewayKey); matched {
 		// If ModelRoute is not matched, try to match HTTPRoute
 
@@ -413,7 +413,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 		// Use the first target port
 		port = int32(inferencePool.Spec.TargetPorts[0].Number)
-		affinityScopeKey = inferencePoolName.String()
+		affinityScopeKey = "inferencepool/" + inferencePoolName.String()
 
 		klog.V(4).Infof("InferencePool is %v, pods count: %d, port: %d", inferencePoolName, len(pods), port)
 	} else {

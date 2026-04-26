@@ -18,6 +18,8 @@ package plugins
 
 import (
 	"container/list"
+	"crypto/sha256"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -37,6 +39,8 @@ const (
 	defaultSessionAffinityTTL        = 30 * time.Minute
 	defaultSessionAffinityMaxEntries = 50000
 	maxPluginScore                   = 100
+	sessionAffinityPinModeSoft       = "soft"
+	sessionAffinityPinModeHard       = "hard"
 )
 
 var (
@@ -48,12 +52,14 @@ type SessionAffinityArgs struct {
 	HeaderName string `yaml:"headerName,omitempty"`
 	TTL        string `yaml:"ttl,omitempty"`
 	MaxEntries int    `yaml:"maxEntries,omitempty"`
+	PinMode    string `yaml:"pinMode,omitempty"`
 }
 
 type sessionAffinityConfig struct {
 	HeaderName string
 	TTL        time.Duration
 	MaxEntries int
+	PinMode    string
 }
 
 type affinityBinding struct {
@@ -78,6 +84,7 @@ type affinityStore struct {
 type SessionAffinity struct {
 	name       string
 	headerName string
+	pinMode    string
 	store      *affinityStore
 }
 
@@ -86,6 +93,7 @@ func NewSessionAffinity(pluginArg runtime.RawExtension) *SessionAffinity {
 	return &SessionAffinity{
 		name:       SessionAffinityPluginName,
 		headerName: cfg.HeaderName,
+		pinMode:    cfg.PinMode,
 		store:      newAffinityStore(cfg.TTL, cfg.MaxEntries),
 	}
 }
@@ -95,6 +103,7 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 		HeaderName: defaultSessionAffinityHeaderName,
 		TTL:        defaultSessionAffinityTTL.String(),
 		MaxEntries: defaultSessionAffinityMaxEntries,
+		PinMode:    sessionAffinityPinModeSoft,
 	}
 
 	if len(pluginArg.Raw) > 0 {
@@ -104,6 +113,7 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 				HeaderName: defaultSessionAffinityHeaderName,
 				TTL:        defaultSessionAffinityTTL.String(),
 				MaxEntries: defaultSessionAffinityMaxEntries,
+				PinMode:    sessionAffinityPinModeSoft,
 			}
 		}
 	}
@@ -112,6 +122,7 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 		HeaderName: defaultSessionAffinityHeaderName,
 		TTL:        defaultSessionAffinityTTL,
 		MaxEntries: defaultSessionAffinityMaxEntries,
+		PinMode:    sessionAffinityPinModeSoft,
 	}
 	if args.HeaderName != "" {
 		cfg.HeaderName = args.HeaderName
@@ -128,6 +139,14 @@ func ParseSessionAffinityArgs(pluginArg runtime.RawExtension) sessionAffinityCon
 		cfg.MaxEntries = args.MaxEntries
 	} else if args.MaxEntries < 0 {
 		klog.Errorf("Invalid session-affinity maxEntries %d, using default %d", args.MaxEntries, defaultSessionAffinityMaxEntries)
+	}
+	if args.PinMode != "" {
+		switch args.PinMode {
+		case sessionAffinityPinModeSoft, sessionAffinityPinModeHard:
+			cfg.PinMode = args.PinMode
+		default:
+			klog.Errorf("Invalid session-affinity pinMode %q, using default %q", args.PinMode, sessionAffinityPinModeSoft)
+		}
 	}
 
 	return cfg
@@ -150,15 +169,40 @@ func (s *SessionAffinity) Score(ctx *framework.Context, pods []*datastore.PodInf
 	if ctx == nil || ctx.SessionKey == "" || ctx.AffinityScopeKey == "" || len(pods) == 0 {
 		return scores
 	}
+	if s.pinMode == sessionAffinityPinModeHard {
+		// Hard pin is applied by the scheduler before weighted score aggregation.
+		_, _ = s.lookupBoundPod(ctx, pods)
+		return scores
+	}
+
+	pinnedPod, ok := s.lookupBoundPod(ctx, pods)
+	if !ok {
+		return scores
+	}
+	scores[pinnedPod] = maxPluginScore
+	return scores
+}
+
+func (s *SessionAffinity) HardPin(ctx *framework.Context, pods []*datastore.PodInfo) (*datastore.PodInfo, bool) {
+	if s.pinMode != sessionAffinityPinModeHard {
+		return nil, false
+	}
+	return s.lookupBoundPod(ctx, pods)
+}
+
+func (s *SessionAffinity) lookupBoundPod(ctx *framework.Context, pods []*datastore.PodInfo) (*datastore.PodInfo, bool) {
+	if ctx == nil || ctx.SessionKey == "" || ctx.AffinityScopeKey == "" || len(pods) == 0 {
+		return nil, false
+	}
 
 	scopeKey := getScoreAffinityScopeKey(ctx)
 	if scopeKey == "" {
-		return scores
+		return nil, false
 	}
 
 	binding, ok := s.store.get(scopeKey, ctx.SessionKey)
 	if !ok {
-		return scores
+		return nil, false
 	}
 
 	for _, pod := range pods {
@@ -166,13 +210,12 @@ func (s *SessionAffinity) Score(ctx *framework.Context, pods []*datastore.PodInf
 			continue
 		}
 		if pod.Pod.Namespace == binding.Namespace && pod.Pod.Name == binding.Name {
-			scores[pod] = maxPluginScore
-			return scores
+			return pod, true
 		}
 	}
 
 	s.store.delete(scopeKey, ctx.SessionKey)
-	return scores
+	return nil, false
 }
 
 func (s *SessionAffinity) PostSchedule(ctx *framework.Context, index int) {
@@ -212,6 +255,8 @@ func getScoreAffinityScopeKey(ctx *framework.Context) string {
 	if ctx.PDGroup == nil {
 		return ctx.AffinityScopeKey
 	}
+	// DecodePods is empty while selecting decode pods; once decode is selected,
+	// subsequent scheduling selects prefill pods.
 	if len(ctx.DecodePods) == 0 {
 		return ctx.AffinityScopeKey + "/decode"
 	}
@@ -313,5 +358,10 @@ func (s *affinityStore) removeElementLocked(elem *list.Element) {
 }
 
 func affinityBindingKey(scopeKey, sessionKey string) string {
-	return scopeKey + "\x00" + sessionKey
+	return scopeKey + "\x00" + hashSessionKey(sessionKey)
+}
+
+func hashSessionKey(sessionKey string) string {
+	sum := sha256.Sum256([]byte(sessionKey))
+	return hex.EncodeToString(sum[:])
 }

@@ -116,10 +116,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			return fmt.Errorf("no decode pod found")
 		}
 
-		klog.V(4).Info("Running score plugins for decode pod")
-		scores := s.RunScorePlugins(decodePods, ctx)
-
-		topNDecodePods := TopNPodInfos(scores, topN)
+		var topNDecodePods []*datastore.PodInfo
+		if pinnedPod, ok := s.findHardPinnedPod(ctx, decodePods); ok {
+			topNDecodePods = []*datastore.PodInfo{pinnedPod}
+		} else {
+			klog.V(4).Info("Running score plugins for decode pod")
+			scores := s.RunScorePlugins(decodePods, ctx)
+			topNDecodePods = TopNPodInfos(scores, topN)
+		}
 		ctx.DecodePods = topNDecodePods
 		prefillPods := make([]*datastore.PodInfo, len(topNDecodePods))
 		validPairs := 0
@@ -136,9 +140,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				continue
 			}
 
-			klog.V(4).Info("Running score plugins for prefill pod")
-			scores = s.RunScorePlugins(selectedPods, ctx)
-			bestPrefillPod := TopNPodInfos(scores, 1)
+			var bestPrefillPod []*datastore.PodInfo
+			if pinnedPod, ok := s.findHardPinnedPod(ctx, selectedPods); ok {
+				bestPrefillPod = []*datastore.PodInfo{pinnedPod}
+			} else {
+				klog.V(4).Info("Running score plugins for prefill pod")
+				scores := s.RunScorePlugins(selectedPods, ctx)
+				bestPrefillPod = TopNPodInfos(scores, 1)
+			}
 			if len(bestPrefillPod) == 0 {
 				klog.V(4).InfoS("no valid prefill pods after scoring, skipping",
 					"decode instance", klog.KObj(decodePod.Pod))
@@ -153,12 +162,32 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		}
 		return nil
 	}
+	if pinnedPod, ok := s.findHardPinnedPod(ctx, pods); ok {
+		ctx.BestPods = []*datastore.PodInfo{pinnedPod}
+		return nil
+	}
 
 	klog.V(4).Info("Running score plugins for PD aggregated pod")
 	scores := s.RunScorePlugins(pods, ctx)
 	ctx.BestPods = TopNPodInfos(scores, topN)
 
 	return nil
+}
+
+func (s *SchedulerImpl) findHardPinnedPod(ctx *framework.Context, pods []*datastore.PodInfo) (*datastore.PodInfo, bool) {
+	if len(pods) == 0 {
+		return nil, false
+	}
+	for _, scorePlugin := range s.scorePlugins {
+		hardPinPlugin, ok := scorePlugin.plugin.(framework.HardPinProvider)
+		if !ok {
+			continue
+		}
+		if pod, pinned := hardPinPlugin.HardPin(ctx, pods); pinned {
+			return pod, true
+		}
+	}
+	return nil, false
 }
 
 func (s *SchedulerImpl) RunFilterPlugins(pods []*datastore.PodInfo, ctx *framework.Context) ([]*datastore.PodInfo, error) {

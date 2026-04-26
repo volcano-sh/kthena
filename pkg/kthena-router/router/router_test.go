@@ -529,7 +529,7 @@ func TestRouterDoLoadbalancePopulatesSessionAffinityContextForModelServer(t *tes
 
 	require.NotNil(t, capture.ctx)
 	assert.Equal(t, "session-1", capture.ctx.SessionKey)
-	assert.Equal(t, "default/ms-1", capture.ctx.AffinityScopeKey)
+	assert.Equal(t, "modelserver/default/ms-1", capture.ctx.AffinityScopeKey)
 }
 
 func TestRouterDoLoadbalancePopulatesSessionAffinityContextForInferencePool(t *testing.T) {
@@ -605,12 +605,13 @@ func TestRouterDoLoadbalancePopulatesSessionAffinityContextForInferencePool(t *t
 	c.Set(GatewayKey, "default/gw-1")
 	c.Request, _ = http.NewRequest("POST", "/infer", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
 	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Session-ID", "session-1")
 
 	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
 
 	require.NotNil(t, capture.ctx)
-	assert.Empty(t, capture.ctx.SessionKey)
-	assert.Equal(t, "default/ip-1", capture.ctx.AffinityScopeKey)
+	assert.Equal(t, "session-1", capture.ctx.SessionKey)
+	assert.Equal(t, "inferencepool/default/ip-1", capture.ctx.AffinityScopeKey)
 }
 
 type capturingScheduler struct {
