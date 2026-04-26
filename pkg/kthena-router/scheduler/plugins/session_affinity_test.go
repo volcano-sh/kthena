@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -128,6 +129,37 @@ func TestSessionAffinityConfigParsesMaxEntries(t *testing.T) {
 	assert.Equal(t, defaultSessionAffinityMaxEntries, defaultCfg.MaxEntries)
 }
 
+func TestSessionAffinityConfigParsesPinMode(t *testing.T) {
+	cfg := ParseSessionAffinityArgs(runtime.RawExtension{Raw: []byte("pinMode: hard")})
+	assert.Equal(t, sessionAffinityPinModeHard, cfg.PinMode)
+
+	defaultCfg := ParseSessionAffinityArgs(runtime.RawExtension{Raw: []byte("pinMode: invalid")})
+	assert.Equal(t, sessionAffinityPinModeSoft, defaultCfg.PinMode)
+}
+
+func TestSessionAffinityHardPin(t *testing.T) {
+	plugin := NewSessionAffinity(runtime.RawExtension{Raw: []byte("pinMode: hard")})
+	pod1 := createSessionTestPodInfo("pod-1")
+	pod2 := createSessionTestPodInfo("pod-2")
+
+	plugin.store.set("default/ms-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-2"})
+
+	pinnedPod, ok := plugin.HardPin(&framework.Context{
+		SessionKey:       "session-1",
+		AffinityScopeKey: "default/ms-1",
+	}, []*datastore.PodInfo{pod1, pod2})
+
+	require.True(t, ok)
+	assert.Equal(t, pod2, pinnedPod)
+
+	scores := plugin.Score(&framework.Context{
+		SessionKey:       "session-1",
+		AffinityScopeKey: "default/ms-1",
+	}, []*datastore.PodInfo{pod1, pod2})
+	assert.Equal(t, 0, scores[pod1])
+	assert.Equal(t, 0, scores[pod2])
+}
+
 func TestSessionAffinityStoreEvictsLeastRecentlyUsed(t *testing.T) {
 	store := newAffinityStore(30*time.Minute, 2)
 	store.set("default/ms-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-1"})
@@ -149,6 +181,20 @@ func TestSessionAffinityStoreEvictsLeastRecentlyUsed(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "pod-3", binding.Name)
 	assert.Len(t, store.bindings, 2)
+}
+
+func TestAffinityBindingKeyUsesSHA256Hash(t *testing.T) {
+	key1 := affinityBindingKey("scope-a", "session-1")
+	key2 := affinityBindingKey("scope-a", "session-1")
+	key3 := affinityBindingKey("scope-a", "session-2")
+
+	assert.Equal(t, key1, key2)
+	assert.NotEqual(t, key1, key3)
+	assert.NotContains(t, key1, "session-1")
+
+	parts := strings.Split(key1, "\x00")
+	require.Len(t, parts, 2)
+	assert.Len(t, parts[1], 64)
 }
 
 func createSessionTestPodInfo(name string) *datastore.PodInfo {

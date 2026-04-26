@@ -30,6 +30,54 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 )
 
+type fixedScorePlugin struct {
+	name      string
+	scoreByID map[string]int
+}
+
+func (f *fixedScorePlugin) Name() string { return f.name }
+
+func (f *fixedScorePlugin) Score(_ *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
+	scores := make(map[*datastore.PodInfo]int, len(pods))
+	for _, pod := range pods {
+		score := 0
+		if pod != nil && pod.Pod != nil {
+			score = f.scoreByID[pod.Pod.Name]
+		}
+		scores[pod] = score
+	}
+	return scores
+}
+
+type fixedHardPinPlugin struct {
+	name      string
+	pinPod    string
+	scoreByID map[string]int
+}
+
+func (f *fixedHardPinPlugin) Name() string { return f.name }
+
+func (f *fixedHardPinPlugin) Score(_ *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
+	scores := make(map[*datastore.PodInfo]int, len(pods))
+	for _, pod := range pods {
+		score := 0
+		if pod != nil && pod.Pod != nil {
+			score = f.scoreByID[pod.Pod.Name]
+		}
+		scores[pod] = score
+	}
+	return scores
+}
+
+func (f *fixedHardPinPlugin) HardPin(_ *framework.Context, pods []*datastore.PodInfo) (*datastore.PodInfo, bool) {
+	for _, pod := range pods {
+		if pod != nil && pod.Pod != nil && pod.Pod.Name == f.pinPod {
+			return pod, true
+		}
+	}
+	return nil, false
+}
+
 // TestTopNPodInfos tests the TopNPodInfos function
 func TestTopNPodInfos(t *testing.T) {
 	tests := []struct {
@@ -299,6 +347,39 @@ func TestRunScorePluginsEdgeCases(t *testing.T) {
 			assert.Equal(t, 0, len(result))
 		})
 	}
+}
+
+func TestScheduleHardPinOverridesWeightedScores(t *testing.T) {
+	store := datastore.New()
+	pod1 := createTestPodInfo("pod1")
+	pod2 := createTestPodInfo("pod2")
+
+	scheduler := &SchedulerImpl{
+		store: store,
+		scorePlugins: []*scorePlugin{
+			{
+				plugin: &fixedHardPinPlugin{
+					name:      "session-affinity",
+					pinPod:    "pod1",
+					scoreByID: map[string]int{"pod1": 0, "pod2": 0},
+				},
+				weight: 1,
+			},
+			{
+				plugin: &fixedScorePlugin{
+					name:      "other-plugin",
+					scoreByID: map[string]int{"pod1": 0, "pod2": 100},
+				},
+				weight: 100,
+			},
+		},
+	}
+
+	ctx := &framework.Context{ModelServerName: types.NamespacedName{Namespace: "default", Name: "ms"}}
+	err := scheduler.Schedule(ctx, []*datastore.PodInfo{pod1, pod2})
+	require.NoError(t, err)
+	require.Len(t, ctx.BestPods, 1)
+	assert.Equal(t, "pod1", ctx.BestPods[0].Pod.Name)
 }
 
 // Helper function to create test PodInfo
