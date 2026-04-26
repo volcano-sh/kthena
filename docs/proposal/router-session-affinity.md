@@ -94,8 +94,8 @@ As a maintainer of the scheduler framework, I want new post-schedule plugins to 
 - `hard` mode pins selection to the bound pod before weighted score aggregation.
 - In multi-router deployments, bindings are local to each router instance in this phase.
 - A session binding is refreshed only after a successful upstream path reaches post-schedule hooks.
-- For prefill/decode disaggregation, affinity remains backend-local; the implementation may persist successful decode and prefill choices independently under the backend scope.
-- Because this is a score plugin, operators should assign it a sufficiently high weight when they want an existing binding to dominate other scoring plugins.
+- For prefill/decode disaggregation, affinity remains backend-local and persists successful decode/prefill choices independently under `.../decode` and `.../prefill` scope suffixes.
+- In `soft` mode, operators should assign `session-affinity` a sufficiently high weight when they want an existing binding to dominate other scoring plugins.
 - Relative to the broader direction discussed in PR #873, v1 intentionally narrows scope: no per-route `sources` list, no `JWTClaim` extraction, and no Redis-backed shared stickiness in this phase.
 
 #### Risks and Mitigations

@@ -108,7 +108,7 @@ data:
 
 Maintainer review notes reflected in current behavior:
 
-- Pin semantics are **soft** in v1 because this is a score plugin. Existing bindings can still be overridden by higher-weighted plugins.
+- Pin semantics are explicit through `pinMode`: `soft` is score-based (can be overridden by higher-weighted plugins), while `hard` enforces deterministic pinning before weighted score aggregation.
 - Affinity scope is backend-kind aware (`modelserver/<ns>/<name>` vs `inferencepool/<ns>/<name>`) to avoid cross-kind collisions.
 - Session-key material is derived with SHA-256 for stable key behavior and to avoid storing raw session identifiers in internal affinity keys.
 - For deterministic sticky behavior in tests, keep scheduler weights/setup controlled so other plugins do not dominate `session-affinity`.
@@ -117,7 +117,6 @@ Beyond v1 (planned follow-up, not yet available in this release):
 
 - Per-route multi-source extraction (`Header`, `Query`, `Cookie`, `JWTClaim`).
 - Redis-backed shared stickiness across router replicas.
-- Optional hard pin mode and explicit precedence semantics.
 
 ### Session Affinity Example
 
