@@ -120,6 +120,10 @@ FAIRNESS_INPUT_TOKEN_WEIGHT
 FAIRNESS_OUTPUT_TOKEN_WEIGHT
 ```
 
+When these variables are unset, the enqueue-time calculation should default
+both input and output token weights to `1.0`. This avoids introducing a silent
+asymmetric default for output tokens in router-side priority calculation.
+
 It also preserves the existing historical fairness configuration for enqueue,
 refresh, and rebuild:
 

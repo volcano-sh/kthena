@@ -166,7 +166,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		connectorFactory:         connectors.NewDefaultFactory(),
 		fairnessTimeout:          parseFairnessTimeout(),
 		inputTokenWeight:         parseEnvFloat("FAIRNESS_INPUT_TOKEN_WEIGHT", 1.0),
-		outputTokenWeight:        parseEnvFloat("FAIRNESS_OUTPUT_TOKEN_WEIGHT", 2.0),
+		outputTokenWeight:        parseEnvFloat("FAIRNESS_OUTPUT_TOKEN_WEIGHT", 1.0),
 		priorityTokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		priorityRequestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
