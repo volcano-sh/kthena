@@ -318,7 +318,12 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 	key := formatAutoscalerMapKey(binding.Namespace, binding.Name, &target.TargetRef)
 	scaler, ok := ac.scalerMap[key]
 	if !ok || scaler.NeedUpdate(autoscalePolicy, binding) {
-		scaler = autoscaler.NewAutoscaler(autoscalePolicy, binding)
+		currentInstancesCount, err := ac.getTargetReplicas(&target, binding.Namespace)
+		if err != nil {
+			klog.Errorf("failed to get current replicas, err: %v", err)
+			return err
+		}
+		scaler = autoscaler.NewAutoscaler(autoscalePolicy, binding, currentInstancesCount)
 		ac.scalerMap[key] = scaler
 		klog.Infof("asp: %s or binding: %s changed, create new scaler", autoscalePolicy.Name, binding.Name)
 	}

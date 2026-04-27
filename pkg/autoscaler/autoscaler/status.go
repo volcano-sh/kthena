@@ -85,3 +85,8 @@ func (s *Status) RefreshPanicMode() {
 func (s *Status) IsPanicMode() bool {
 	return s.PanicModeHoldMilliseconds > 0 && util.GetCurrentTimestamp() <= s.PanicModeEndsAt
 }
+
+func (s *Status) InitializeWithCurrentReplicas(currentInstances int32) {
+	s.History.MaxRecommendation.Append(currentInstances)
+	s.History.MinRecommendation.Append(currentInstances)
+}
