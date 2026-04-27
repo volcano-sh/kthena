@@ -1460,10 +1460,10 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 		// Send requests
 		for range 3 {
 			resp := utils.SendChatRequest(t, modelName, messages)
-			assert.Equal(t, 200, resp.StatusCode)
-			_, err := io.Copy(io.Discard, resp.Body)
-			require.NoError(t, err, "Failed to read response body")
+			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, resp.Body.Close(), "Failed to close response body")
+			require.NoError(t, err, "Failed to read response body")
+			require.Equal(t, 200, resp.StatusCode, "Request failed with body: %s", string(body))
 		}
 
 		// Verify metrics incremented by exactly numRequests
