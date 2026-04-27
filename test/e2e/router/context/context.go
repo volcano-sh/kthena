@@ -209,12 +209,14 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 func (c *RouterTestContext) waitForRouterValidatingWebhook(ctx stdcontext.Context) error {
 	fmt.Println("Waiting for kthena-router validating webhook to accept requests...")
 
+	probeTemplate := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(testDataDir, "ModelServer-ds1.5b.yaml"))
+	probeTemplate.Namespace = c.Namespace
+
 	waitCtx, cancel := stdcontext.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	err := wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx stdcontext.Context) (bool, error) {
-		probe := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(testDataDir, "ModelServer-ds1.5b.yaml"))
-		probe.Namespace = c.Namespace
+		probe := probeTemplate.DeepCopy()
 		probe.Name = "webhook-ready-probe-" + utils.RandomString(5)
 
 		_, err := c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
