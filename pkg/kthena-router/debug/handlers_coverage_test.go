@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -294,11 +295,17 @@ func TestGetModelServer(t *testing.T) {
 	pods := []*datastore.PodInfo{
 		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "default"}}},
 	}
+	decodePods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "decode-1", Namespace: "default"}}},
+	}
+	prefillPods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "prefill-1", Namespace: "default"}}},
+	}
 
 	mockStore.On("GetModelServer", msKey).Return(modelServer)
 	mockStore.On("GetPodsByModelServer", msKey).Return(pods, nil)
-	mockStore.On("GetDecodePods", msKey).Return([]*datastore.PodInfo{}, nil)
-	mockStore.On("GetPrefillPods", msKey).Return([]*datastore.PodInfo{}, nil)
+	mockStore.On("GetDecodePods", msKey).Return(decodePods, nil)
+	mockStore.On("GetPrefillPods", msKey).Return(prefillPods, nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -317,6 +324,8 @@ func TestGetModelServer(t *testing.T) {
 	assert.Equal(t, "llama2-server", response.Name)
 	assert.Equal(t, "default", response.Namespace)
 	assert.Equal(t, []string{"default/pod-1"}, response.AssociatedPods)
+	assert.Equal(t, []string{"default/decode-1"}, response.DecodePods)
+	assert.Equal(t, []string{"default/prefill-1"}, response.PrefillPods)
 
 	mockStore.AssertExpectations(t)
 }
@@ -416,6 +425,7 @@ func TestGetPod(t *testing.T) {
 	handler := NewDebugHandler(mockStore)
 
 	podKey := types.NamespacedName{Namespace: "default", Name: "pod-1"}
+	startTime := metav1.NewTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
 	podInfo := &datastore.PodInfo{
 		Pod: &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -425,13 +435,17 @@ func TestGetPod(t *testing.T) {
 			},
 			Spec: corev1.PodSpec{NodeName: "node-1"},
 			Status: corev1.PodStatus{
-				PodIP: "10.0.0.42",
-				Phase: corev1.PodRunning,
+				PodIP:     "10.0.0.42",
+				Phase:     corev1.PodRunning,
+				StartTime: &startTime,
 			},
 		},
 		GPUCacheUsage:     0.5,
 		RequestRunningNum: 1,
 	}
+	// Attach a model server so convertPodInfoToResponse exercises the
+	// GetModelServersList loop body (otherwise modelServers is nil).
+	podInfo.AddModelServer(types.NamespacedName{Namespace: "default", Name: "llama2-server"})
 
 	mockStore.On("GetPodInfo", podKey).Return(podInfo)
 
@@ -456,7 +470,9 @@ func TestGetPod(t *testing.T) {
 	assert.Equal(t, "node-1", response.PodInfo.NodeName)
 	assert.Equal(t, "Running", response.PodInfo.Phase)
 	assert.Equal(t, map[string]string{"app": "llm"}, response.PodInfo.Labels)
+	assert.Equal(t, "2026-01-02T03:04:05Z", response.PodInfo.StartTime)
 	assert.Equal(t, 0.5, response.Metrics.GPUCacheUsage)
+	assert.Equal(t, []string{"default/llama2-server"}, response.ModelServers)
 
 	mockStore.AssertExpectations(t)
 }
