@@ -177,14 +177,14 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
 	}
-	updates := 0
+	patches := 0
 	for _, a := range client.Fake.Actions() {
-		if (a.GetVerb() == "update" || a.GetVerb() == "patch") && a.GetResource().Resource == "modelservings" {
-			updates++
+		if a.GetVerb() == "patch" && a.GetResource().Resource == "modelservings" {
+			patches++
 		}
 	}
-	if updates == 0 {
-		t.Fatalf("expected update actions > 0, got 0")
+	if patches == 0 {
+		t.Fatalf("expected patch actions > 0, got 0")
 	}
 }
 
@@ -225,6 +225,70 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	}
 	if *updatedA.Spec.Replicas != 5 || *updatedB.Spec.Replicas != 4 {
 		t.Fatalf("expected distribution ms-a2=5 ms-b2=4, got a=%d b=%d", *updatedA.Spec.Replicas, *updatedB.Spec.Replicas)
+	}
+}
+
+func TestUpdateTargetReplicasForRoleUsesPatch(t *testing.T) {
+	ns := "ns"
+	replicas := int32(1)
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "ms-role", Namespace: ns},
+		Spec: workload.ModelServingSpec{
+			Replicas: ptrInt32(1),
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: &replicas,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name: "entry",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU: resource.MustParse("0.2"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	client := clientfake.NewSimpleClientset(ms)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+	ac := &AutoscaleController{client: client, modelServingLister: msLister}
+
+	target := &workload.Target{
+		TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-role"},
+		SubTarget: &workload.SubTarget{
+			Kind: util.ModelServingRoleKind,
+			Name: "prefill",
+		},
+	}
+	if err := ac.updateTargetReplicas(context.Background(), target, ns, 3); err != nil {
+		t.Fatalf("updateTargetReplicas error: %v", err)
+	}
+
+	updates := 0
+	var patch []byte
+	for _, action := range client.Fake.Actions() {
+		if action.GetVerb() == "update" && action.GetResource().Resource == "modelservings" {
+			updates++
+		}
+		if patchAction, ok := action.(k8stesting.PatchAction); ok && action.GetResource().Resource == "modelservings" {
+			patch = patchAction.GetPatch()
+		}
+	}
+	if updates != 0 {
+		t.Fatalf("expected no full modelserving update actions, got %d", updates)
+	}
+	if string(patch) != `[{"op":"test","path":"/spec/template/roles/0/name","value":"prefill"},{"op":"replace","path":"/spec/template/roles/0/replicas","value":3}]` {
+		t.Fatalf("unexpected patch: %s", string(patch))
 	}
 }
 
@@ -453,8 +517,8 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 					t.Fatalf("expected exactly 2 JSON Patch operations, got %d", len(ops))
 				}
 				op := ops[1]
-				if op["op"] != "add" {
-					t.Errorf("expected op=add, got %v", op["op"])
+				if op["op"] != "replace" {
+					t.Errorf("expected op=replace, got %v", op["op"])
 				}
 				path, _ := op["path"].(string)
 				if !strings.HasSuffix(path, "/replicas") {

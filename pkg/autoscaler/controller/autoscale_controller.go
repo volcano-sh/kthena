@@ -198,10 +198,14 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 
 	if target.SubTarget.Kind == util.ModelServingRoleKind && target.SubTarget.Name != "" {
 		roleIndex := -1
+		patchOp := "replace"
 		for idx, role := range instance.Spec.Template.Roles {
 			if role.Name == target.SubTarget.Name {
 				if role.Replicas != nil && *role.Replicas == replicas {
 					return nil
+				}
+				if role.Replicas == nil {
+					patchOp = "add"
 				}
 				roleIndex = idx
 				break
@@ -211,8 +215,8 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 			return fmt.Errorf("role %s not found in ModelServing %s", target.SubTarget.Name, targetRef.Name)
 		}
 		patchBytes := []byte(fmt.Sprintf(
-			`[{"op":"test","path":"/spec/template/roles/%d/name","value":"%s"},{"op":"add","path":"/spec/template/roles/%d/replicas","value":%d}]`,
-			roleIndex, target.SubTarget.Name, roleIndex, replicas))
+			`[{"op":"test","path":"/spec/template/roles/%d/name","value":"%s"},{"op":"%s","path":"/spec/template/roles/%d/replicas","value":%d}]`,
+			roleIndex, target.SubTarget.Name, patchOp, roleIndex, replicas))
 		_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Patch(
 			ctx, targetRef.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
 		return err
