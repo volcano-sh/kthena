@@ -62,8 +62,8 @@ const (
 //
 // data: [DONE]
 //
-// Note that vLLM returns two entries in one response.
-// We need to strip the `data:` prefix and the following `data: [DONE]` from the message to fetch response data.
+// Note that vLLM returns usage data in a `data:` entry.
+// We strip the `data:` prefix from usage entries and skip `data: [DONE]` markers.
 //
 // If include_usage is not included in the request, `data: [DONE]` is returned separately, which
 // indicates end of streaming.
