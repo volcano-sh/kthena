@@ -20,6 +20,7 @@ import (
 	stdcontext "context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
@@ -170,6 +171,10 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 		return fmt.Errorf("deployments did not become ready: %w", err)
 	}
 
+	if err := c.waitForRouterValidatingWebhook(ctx); err != nil {
+		return err
+	}
+
 	// Deploy ModelServer DS1.5B
 	fmt.Println("Deploying ModelServer DS1.5B...")
 	modelServer1_5b := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(testDataDir, "ModelServer-ds1.5b.yaml"))
@@ -198,6 +203,41 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 	}
 
 	fmt.Println("Common components deployed successfully")
+	return nil
+}
+
+func (c *RouterTestContext) waitForRouterValidatingWebhook(ctx stdcontext.Context) error {
+	fmt.Println("Waiting for kthena-router validating webhook to accept requests...")
+
+	probeTemplate := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(testDataDir, "ModelServer-ds1.5b.yaml"))
+	probeTemplate.Namespace = c.Namespace
+
+	waitCtx, cancel := stdcontext.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	err := wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx stdcontext.Context) (bool, error) {
+		probe := probeTemplate.DeepCopy()
+		probe.Name = "webhook-ready-probe-" + utils.RandomString(5)
+
+		_, err := c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
+		if err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "failed calling webhook") ||
+				strings.Contains(errStr, "connect: connection refused") ||
+				strings.Contains(errStr, "i/o timeout") ||
+				strings.Contains(errStr, "context deadline exceeded") {
+				fmt.Printf("Router validating webhook not ready yet, retrying: %v\n", err)
+				return false, nil
+			}
+			return false, err
+		}
+
+		fmt.Println("Router validating webhook is ready")
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("kthena-router validating webhook did not become ready in time: %w", err)
+	}
 	return nil
 }
 
