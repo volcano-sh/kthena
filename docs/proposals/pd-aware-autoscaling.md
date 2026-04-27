@@ -132,6 +132,8 @@ The optimizer pipeline gains one step (3); the others are unchanged:
 
 The blended allocator is a **convex combination** of two signals followed by **clamping into the preferred band**, then to per-target min/max. Inputs are computed once per cycle.
 
+**Reading the formula in plain language.** For each role we compute two views of how many replicas it should get. `costShare` is the split today's optimizer would pick from cost alone — the "business as usual" answer. `pressureShare` is the split implied by live load signals (queue depth, TTFT, KV-cache) — the "where the pain is right now" answer. We blend them with `alpha`: `alpha = 0` ignores pressure (today's behavior), `alpha = 1` follows pressure entirely, `0.5` weighs them equally. The blended share can land outside the user's preferred band, so step 4 clamps it back in and renormalizes; step 5 then enforces the hard per-target `minReplicas` / `maxReplicas`. Clamping is what keeps the result a *preference* rather than a free-running optimization.
+
 For each role `r`:
 
 ```
@@ -154,7 +156,7 @@ share[r]    = clamped[r] / sum(clamped[*])
 replicas[r] = clamp(round(share[r] * N), target[r].minReplicas, target[r].maxReplicas)
 ```
 
-If step 5's per-target clamping forces the realized split outside the band, `bandSatisfied` is reported as `false` with `reason=Clamped`. When `coordination` is off, `alpha = 0` and bands are absent — the formula collapses to `replicas[r] = costAllocator(...)[r]`, byte-identical to today.
+If renormalization in step 4 pushes any share back outside its band (possible when the post-clip sum ≠ 1 and the bands are tight), the band cannot be jointly satisfied this cycle: keep the renormalized values and report `bandSatisfied=false` with `reason=Infeasible`. If step 5's per-target clamping forces the realized split outside the band, `bandSatisfied` is reported as `false` with `reason=Clamped`. When `coordination` is off, `alpha = 0` and bands are absent — the formula collapses to `replicas[r] = costAllocator(...)[r]`, byte-identical to today.
 
 ### Phase 1 pressure signals
 
@@ -162,7 +164,11 @@ A concrete, fixed formula for v1:
 
 - **Prefill pressure:** `0.5 * norm(queueDepth) + 0.5 * norm(TTFT)`
 - **Decode pressure:** `0.5 * norm(queueDepth) + 0.5 * norm(kvCacheUtilization)`
-- **Fallback:** if a secondary signal (TTFT or KV-cache) is unavailable for the runtime, pressure falls back to `norm(queueDepth)` alone (weight 1.0).
+- **Fallback:** if a secondary signal (TTFT or KV-cache) is unavailable for the runtime, pressure falls back to `norm(queueDepth)` alone (weight 1.0). If any role's pressure is unavailable (collector error, distinct from a zero reading), `pressureShare` is skipped this cycle and `rawShare = costShare` for all roles; `reason=PressureUnavailable` is reported.
+
+**Why KV-cache for decode.** Decode replicas hold one KV-cache entry per in-flight request for as long as the request is generating tokens. The cache is finite GPU memory, so as more concurrent decode requests pile up, utilization climbs; once it nears full, the engine must evict, queue, or reject new requests. High KV-cache utilization is therefore a direct, early indicator that *this* decode replica is running out of room and another one would help — unlike GPU utilization, which can remain high even when the cache is the binding constraint.
+
+**Why `min(x, 1)` (saturation).** Raw signals like queue depth or TTFT have no natural upper bound — a queue of 200 and a queue of 2000 are both "very bad," but a linear ratio would make the second look 10× worse and dominate the blend. Clamping each normalized signal at 1.0 says "past this threshold, pressure is maxed out; further increases don't change the allocation decision." This keeps one runaway metric from drowning out the others and keeps `pressureShare` well-behaved.
 
 Making the pressure function pluggable is deferred to Phase 2.
 
@@ -174,7 +180,7 @@ Defaults live in controller config (not the API) so operators can tune without a
 |---|---|---|
 | `alpha` (pressure influence in the blend) | **0.5** | Equal weight to cost-based allocation and observed pressure. High enough to react to imbalance, low enough to avoid thrash. |
 | `beta` (intra-role weight between primary and secondary signals) | **0.5** | Queue depth and the role-specific signal (TTFT or KV-cache) contribute equally. |
-| `queueDepth` normalization | `min(queueDepth / 32, 1.0)` | Saturates at a backlog of 32 requests per replica — empirically the point where added latency dominates. |
+| `queueDepth` normalization | `min(queueDepth / 32, 1.0)` | `queueDepth` is the per-replica average (target backlog ÷ ready replicas) at the optimizer tick. Saturates at a backlog of 32 requests per replica — empirically the point where added latency dominates. |
 | `TTFT` normalization | `min(ttft_ms / 2000, 1.0)` | Saturates at 2 s TTFT, the typical user-perceived ceiling. |
 | `kvCacheUtilization` normalization | identity (already 0–1) | Provider metric is already a ratio. |
 | Coordination cycle | one optimizer tick (existing cadence) | No new control loop. |
@@ -185,7 +191,7 @@ These are starting points, not policy. Phase 2 tunes them against representative
 
 - **No breaking changes.** Existing bindings without `coordination` behave identically.
 - **Per-target `minReplicas` / `maxReplicas`** always win over the preferred band. When they force a drift, status reflects it (see below).
-- **Panic mode** suspends coordination (`alpha` effectively 0) for the duration of the panic (Phase 1 decision; revisit in Phase 2).
+- **Panic mode.** If any sub-target enters panic mode, coordination is suspended for the whole binding for that cycle (`alpha = 0`, no band clamp); `reason=PanicMode` is reported. Per-role partial suspend is a Phase 2 question.
 - **Stabilization windows** are unaffected — coordination runs after the scalar recommendation, not instead of it.
 - **Metric collectors** are reused; no new scrape path.
 
@@ -196,9 +202,9 @@ When `mode: Preferred`, the binding status reports:
 ```yaml
 status:
   coordination:
-    realizedShares:
-      prefill: 27                       # actual percent this cycle
-      decode: 73
+    realizedShares:                     # actual percent of replicas per role this cycle,
+      prefill: 27                       # after all clamping. Compare to preferredRatio:
+      decode: 73                        # equal → band held; different → min/max or panic forced drift.
     pressure:
       prefill: 0.42                     # normalized 0.0–1.0
       decode: 0.71
@@ -208,6 +214,8 @@ status:
     - type: CoordinationBandSatisfied
       status: "True"                    # "False" with reason=Clamped / PanicMode
 ```
+
+`realizedShares` is the *outcome*, not the *intent*: it is the percent split that was actually written to the targets after the blended allocator, the band clamp, the per-target `minReplicas` / `maxReplicas` clamp, and any panic-mode override. When the workload sits comfortably inside the preferred band, `realizedShares` will track inside `preferredRatio`. It can deviate when (a) a per-target min/max forces more or fewer replicas than the band wants, (b) panic mode is active and coordination is suspended, or (c) integer rounding at small replica counts nudges the split by a percentage point. `bandSatisfied=false` with a `reason` is how the status surfaces these deviations.
 
 The same values are emitted as Prometheus metrics in Phase 2.
 
