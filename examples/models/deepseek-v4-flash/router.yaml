@@ -1,0 +1,39 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-v4
+  namespace: default
+spec:
+  modelName: "deepseek_v4"
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "deepseekv4-pd"
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseekv4-pd
+  namespace: default
+spec:
+  inferenceEngine: vLLM
+  model: "deepseek_v4"
+  workloadPort:
+    port: 7100
+    protocol: http
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: deepseekv4-pd
+    pdGroup:
+      groupKey: "modelserving.volcano.sh/group-name"
+      prefillLabels:
+        modelserving.volcano.sh/role: prefill
+      decodeLabels:
+        modelserving.volcano.sh/role: decode
+  trafficPolicy:
+    timeout: "300s"
+    retry:
+      attempts: 3
+      retryInterval: "150ms"
+  kvConnector:
+    type: mooncake
