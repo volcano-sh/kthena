@@ -84,12 +84,56 @@ func TestValidPodNameLength(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList{
+					want: field.ErrorList{
 				field.Invalid(
 					field.NewPath("metadata").Child("name"),
 					"this-is-a-very-long-name-that-exceeds-the-allowed-length-for-generated-name",
 					"invalid name: must be no more than 63 characters"),
 			},
+		},
+		{
+			name: "ms replicas is nil",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					ObjectMeta: v1.ObjectMeta{
+						Name: "nil-replicas",
+					},
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: nil,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:     "role1",
+									Replicas: &replicas,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "role replicas is nil",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					ObjectMeta: v1.ObjectMeta{
+						Name: "nil-role-replicas",
+					},
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:     "role1",
+									Replicas: nil,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
 		},
 	}
 	for _, tt := range tests {
