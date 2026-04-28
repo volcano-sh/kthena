@@ -1,0 +1,207 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseekv4-pd
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+    - name: prefill
+      replicas: 1
+      workerReplicas: 0
+      entryTemplate:
+        spec:
+          hostNetwork: true
+          containers:
+          - name: prefill
+            image: quay.io/ascend/vllm-ascend:v0.13.0rc3-a3
+            command:
+              - /bin/bash
+            args:
+              - '-c'
+              - cd /workspace && ./prefill.sh
+            env:
+            - name: ROLE
+              value: "prefill"
+            - name: GROUP_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['modelserving.volcano.sh/group-name']
+            - name: ROLE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['modelserving.volcano.sh/role-id']
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: MODEL_LOCATION
+              value: /models/DeepSeek-V4-Flash-w8a8-mtp
+            - name: TP_SIZE
+              value: "8"
+            - name: DP_SIZE
+              value: "2"
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 7100
+                scheme: HTTP
+              initialDelaySeconds: 60
+              periodSeconds: 10
+              timeoutSeconds: 2
+              failureThreshold: 3
+            resources:
+              limits:
+                cpu: '188'
+                huawei.com/ascend-1980: '16'
+                memory: 1800Gi
+              requests:
+                cpu: '64'
+                huawei.com/ascend-1980: '16'
+                memory: 700Gi
+            ports:
+            - containerPort: 7100
+              name: server
+            volumeMounts:
+            - name: model
+              mountPath: /models
+            - name: dshm
+              mountPath: /dev/shm
+            - name: hccn-conf
+              mountPath: /etc/hccn.conf
+            - name: hccn-tool
+              mountPath: /usr/local/Ascend/driver/tools/hccn_tool
+            - name: ascend-install-info
+              mountPath: /etc/ascend_install.info
+            - name: config
+              mountPath: /workspace/prefill.sh
+              subPath: prefill.sh
+          volumes:
+          - name: model
+            hostPath:
+              path: /models
+              type: Directory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: hccn-conf
+            hostPath:
+              path: /etc/hccn.conf
+          - name: hccn-tool
+            hostPath:
+              path: /usr/local/Ascend/driver/tools/hccn_tool
+          - name: ascend-install-info
+            hostPath:
+              path: /etc/ascend_install.info
+          - name: config
+            configMap:
+              name: deepseekv4-pd-cm
+              defaultMode: 0777
+    - name: decode
+      replicas: 1
+      workerReplicas: 0
+      entryTemplate:
+        spec:
+          hostNetwork: true
+          containers:
+          - name: decode
+            image: quay.io/ascend/vllm-ascend:v0.13.0rc3-a3
+            command:
+              - /bin/bash
+            args:
+              - '-c'
+              - cd /workspace && ./decode.sh
+            env:
+            - name: ROLE
+              value: "decode"
+            - name: ENGINE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: GROUP_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['modelserving.volcano.sh/group-name']
+            - name: ROLE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['modelserving.volcano.sh/role-id']
+            - name: MODEL_LOCATION
+              value: /models/DeepSeek-V4-Flash-w8a8-mtp
+            - name: TP_SIZE
+              value: "2"
+            - name: DP_SIZE
+              value: "8"
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 7100
+                scheme: HTTP
+              initialDelaySeconds: 60
+              periodSeconds: 10
+              timeoutSeconds: 2
+              failureThreshold: 3
+            ports:
+            - containerPort: 7100
+              name: server
+            resources:
+              limits:
+                cpu: '188'
+                huawei.com/ascend-1980: '16'
+                memory: 1800Gi
+              requests:
+                cpu: '64'
+                huawei.com/ascend-1980: '16'
+                memory: 700Gi
+            volumeMounts:
+            - name: model
+              mountPath: /models
+            - name: dshm
+              mountPath: /dev/shm
+            - name: hccn-conf
+              mountPath: /etc/hccn.conf
+            - name: hccn-tool
+              mountPath: /usr/local/Ascend/driver/tools/hccn_tool
+            - name: ascend-install-info
+              mountPath: /etc/ascend_install.info
+            - name: config
+              mountPath: /workspace/decode.sh
+              subPath: decode.sh
+          volumes:
+          - name: model
+            hostPath:
+              path: /models
+              type: Directory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: hccn-conf
+            hostPath:
+              path: /etc/hccn.conf
+          - name: hccn-tool
+            hostPath:
+              path: /usr/local/Ascend/driver/tools/hccn_tool
+          - name: ascend-install-info
+            hostPath:
+              path: /etc/ascend_install.info
+          - name: config
+            configMap:
+              name: deepseekv4-pd-cm
+              defaultMode: 0777
+            
