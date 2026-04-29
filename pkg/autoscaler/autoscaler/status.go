@@ -27,6 +27,9 @@ type Status struct {
 	PanicModeEndsAt           int64
 	PanicModeHoldMilliseconds int64
 	History                   *algorithm.History
+	// IdleStartTime is the timestamp (ms) when metrics became idle while instances > 0.
+	// Reset to 0 when traffic resumes.
+	IdleStartTime int64
 }
 
 func NewStatus(behavior *v1alpha1.AutoscalingPolicyBehavior) *Status {

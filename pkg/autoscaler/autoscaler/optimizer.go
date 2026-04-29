@@ -22,6 +22,7 @@ import (
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -198,6 +199,22 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		CurrentInstances:     instancesCountSum,
 		RecommendedInstances: recommendedInstances}
 	recommendedInstances = CorrectedInstancesAlgorithm.GetCorrectedInstances()
+
+	if cooldownMs := getCooldownPeriod(autoscalePolicy); optimizer.Meta.MinReplicas == 0 && cooldownMs > 0 && instancesCountSum > 0 && recommendedInstances == 0 {
+		if optimizer.Status.IdleStartTime == 0 {
+			optimizer.Status.IdleStartTime = util.GetCurrentTimestamp()
+		}
+		if elapsed := util.GetCurrentTimestamp() - optimizer.Status.IdleStartTime; elapsed < cooldownMs {
+			klog.InfoS("cooldown active, keeping current instances", "elapsedMs", elapsed, "cooldownMs", cooldownMs)
+			recommendedInstances = instancesCountSum
+		} else {
+			// Cooldown expired, reset so a fresh cooldown starts if the workload
+			// is scaled back up (e.g., scale-from-zero) and goes idle again.
+			optimizer.Status.IdleStartTime = 0
+		}
+	} else {
+		optimizer.Status.IdleStartTime = 0
+	}
 
 	klog.InfoS("autoscale controller", "recommendedInstances", recommendedInstances, "correctedInstances", recommendedInstances)
 	optimizer.Status.AppendRecommendation(recommendedInstances)

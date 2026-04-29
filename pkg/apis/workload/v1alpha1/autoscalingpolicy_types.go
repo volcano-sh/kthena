@@ -55,6 +55,9 @@ type AutoscalingPolicyBehavior struct {
 	// ScaleDown defines the policy configuration for scaling down (decreasing replicas).
 	// +optional
 	ScaleDown AutoscalingPolicyStablePolicy `json:"scaleDown"`
+	// CooldownPeriod delays scaling to zero after metrics become idle. Only active when minReplicas is 0.
+	// +optional
+	CooldownPeriod *metav1.Duration `json:"cooldownPeriod,omitempty"`
 }
 
 // AutoscalingPolicyScaleUpPolicy defines the scaling up policy configuration.
