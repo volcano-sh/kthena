@@ -86,7 +86,27 @@ In Go/OpenAPI terms, **`sessionSticky` is a pointer to `SessionStickySpec`** (JS
 | `sessionAffinitySeconds` | TTL for the binding; optional, default **10800**; minimum **1** when set. |
 | `sources` | Ordered list (max **16**) of **`SessionKeySource`**: **`type`** (`Header`, `Query`, `Cookie`, `JWTClaim`) and **`name`** (header name, query key, cookie name, or claim name). **Required and non-empty when `sessionSticky` is non-nil** (enforced by validation). |
 
-```
+Root spec: **`SessionSticky`** is a sibling of **`Rules`** / **`RateLimit`** on **`ModelRouteSpec`**.
+
+```go
+// ModelRouteSpec (excerpt) — session affinity is configured on the root spec.
+type ModelRouteSpec struct {
+	ModelName     string                      `json:"modelName,omitempty"`
+	LoraAdapters  []string                    `json:"loraAdapters,omitempty"`
+	ParentRefs    []gatewayv1.ParentReference `json:"parentRefs,omitempty"`
+	Rules         []*Rule                     `json:"rules"`
+	RateLimit     *RateLimit                  `json:"rateLimit,omitempty"`
+	SessionSticky *SessionSticky              `json:"sessionSticky,omitempty"`
+}
+
+// SessionSticky — only per-route extraction + TTL; store backend is not here.
+type SessionSticky struct {
+	SessionAffinitySeconds *int32              `json:"sessionAffinitySeconds,omitempty"`
+	Sources                []SessionKeySource  `json:"sources,omitempty"`
+}
+
+type SessionKeySourceType string
+
 const (
 	SessionKeySourceHeader   SessionKeySourceType = "Header"
 	SessionKeySourceQuery    SessionKeySourceType = "Query"
@@ -99,11 +119,27 @@ type SessionKeySource struct {
 	// Type of extraction.
 	// +kubebuilder:validation:Required
 	Type SessionKeySourceType `json:"type"`
-	// Name is the HTTP header name, query parameter name, cookie name, or JWT claim name.
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
+	Name string               `json:"name"`
 }
 ```
+
+**Router: session key extraction** — iterate **`Sources` in order**; first non-empty value wins.
+
+```go
+func ExtractSessionKey(c *gin.Context, spec *networkingv1alpha1.SessionSticky, authenticator *auth.JWTAuthenticator) string {
+	if spec == nil || len(spec.Sources) == 0 {
+		return ""
+	}
+	for _, src := range spec.Sources {
+		if v := extractOne(c, src, authenticator); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+```
+
+**`extractOne`** : resolves **one** `SessionKeySource` by **`Type`**—header, query, cookie, or JWT claim via **`authenticator`**—using **`Name`**, trimmed or **empty** if missing. **`ExtractSessionKey`** only walks **`Sources`** and returns the **first** non-empty value.
 
 **Router process configuration (not `ModelRoute`)** — choose mapping backend and optional Redis, e.g. flags such as:
 
@@ -112,9 +148,10 @@ type SessionKeySource struct {
 | Sticky **store** | **Memory** (default) vs **Redis**; must be the same for all router replicas in a given deployment (cluster ops concern). |
 | **Redis** | When Redis is selected: **`address`** (or equivalent) as `host:port`, TLS/password if needed — same as other router-side shared dependencies. **Validation** on router start: e.g. fail fast if Redis mode and address missing/unreachable. |
 
-#### Validation  
-   **Webhook (`ModelRoute`)**: when **`spec.sessionSticky` is non-nil**, **`sources` must be non-empty**; **`sessionAffinitySeconds`**, if set, must be **≥ 1**.  
-   **Router binary**: enforces any **store / Redis** flags at process start (separate from CRD admission).
+#### Validation
+
+- **Webhook (`ModelRoute`)**: when **`spec.sessionSticky` is non-nil**, **`sources` must be non-empty**; **`sessionAffinitySeconds`**, if set, must be **≥ 1** (no validation of store backend on the CRD).
+- **Router binary**: validates **Memory vs Redis** and **Redis address** (and connectivity) from **process flags / config** at startup.
 
 #### Observability
 
@@ -133,15 +170,15 @@ It should be noted that the relevant scoring plugins need to be disabled for the
 
 | ID | Scenario | Expected outcome |
 |----|----------|------------------|
-| E2E-SS-01 | **Basic stickiness**: `sessionSticky` **set**; repeated requests with the same configured header session key. | All requests reach the **same** Pod. |
+| E2E-SS-01 | **Basic stickiness**: **non-null** `spec.sessionSticky` with header source; repeated requests with the same session header. | All requests reach the **same** Pod. |
 | E2E-SS-02 | **Isolation**: two different session keys; then reuse the first key. | Each key stays on its own Pod; returning to the first key does **not** adopt the second key’s binding. |
-| E2E-SS-03 | **No key**: `sessionSticky` **set**; requests omit the configured header. | No sticky error; over many requests, at least **two** distinct backend Pods (spread like plain LB). |
+| E2E-SS-03 | **No key**: **non-null** `sessionSticky`; requests omit the configured header. | No sticky error; over many requests, at least **two** distinct backend Pods (spread like plain LB). |
 | E2E-SS-04 | **`sessionSticky` absent** (or `null`): same session header on every request (as if a client always sent a sticky key). | At least **two** distinct backend Pods observed over many requests (header does not pin; no sticky config). |
 | E2E-SS-05 | **Query** source only. | Same query value → same Pod. |
 | E2E-SS-06 | **Cookie** source. | Same cookie → same Pod. |
 | E2E-SS-07 | **TTL**: short `sessionAffinitySeconds`; requests before and after expiry. | Within TTL, session stays on one Pod; after expiry, behavior allows **re-binding** (test allows same Pod by chance but asserts the TTL path). |
 | E2E-SS-08 | **Failover**: delete the Pod currently selected for a sticky session; retry with the same session key. | Request succeeds; selected Pod is **no longer** the deleted one (new healthy backend). |
-| E2E-SS-09 | **Deployment**: two router replicas, **router** started with **Redis** sticky store + shared address; `ModelRoute` has sticky **sources** / TTL only. | Same session key → **same** Pod regardless of which replica handles the request. |
+| E2E-SS-09 | **Multi-replica + Redis store**: two router replicas; **router** flags enable **Redis** sticky store with shared address; **`ModelRoute` has no store fields**—only **`sources`** / **`sessionAffinitySeconds`**. | Same session key → **same** Pod regardless of which replica handles the request. |
 | E2E-SS-10 | **Admission**: **`sessionSticky` non-null** (object present) with **empty** `sources`. | Create **rejected** (`Invalid` or `BadRequest`). |
 | E2E-SS-11 | **Precedence**: header and query both present; list order picks header before query. | The **first** matching source in `sources` wins (header value used). |
 
