@@ -1,0 +1,128 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: vllm-qwen-06b
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: server
+        replicas: 1
+        entryTemplate:
+          spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: IfNotPresent
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - Qwen/Qwen3-0.6B
+                  - --output-dir
+                  - /models/Qwen3-0.6B/
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+            containers:
+              - name: server
+                image: vllm/vllm-openai:latest
+                command: [ "sh", "-c" ]
+                args:
+                  - |
+                    python3 -m vllm.entrypoints.openai.api_server \
+                    --host "0.0.0.0" \
+                    --port "8000" \
+                    --uvicorn-log-level warning \
+                    --model /models/Qwen3-0.6B \
+                    --served-model-name Qwen/Qwen3-0.6B \
+                    --kv-events-config '{"enable_kv_cache_events":true,"topic":"kv-events"}'
+                env:
+                  - name: VLLM_USE_V1
+                    value: "1"
+                  - name: VLLM_WORKER_MULTIPROC_METHOD
+                    value: spawn
+                  - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                    value: "0"
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  - name: NCCL_IB_GID_INDEX
+                    value: "7"
+                  - name: NCCL_DEBUG
+                    value: "INFO"
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                readinessProbe:
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+                livenessProbe:
+                  initialDelaySeconds: 900
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
+              - name: runtime
+                image: ghcr.io/yaozengzeng/runtime:latest
+                imagePullPolicy: Always
+                args:
+                  - --port
+                  - "8900"
+                  - --engine
+                  - vllm
+                  - --engine-base-url
+                  - http://localhost:8000
+                  - --engine-metrics-path
+                  - /metrics
+                  - --pod
+                  - $(POD_NAME).$(NAMESPACE)
+                  - --model
+                  - Qwen/Qwen3-0.6B
+                env:
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: VLLM_USE_V1
+                    value: "1"
+                  - name: REDIS_HOST
+                    value: "redis-server.kthena-system.svc.cluster.local"
+                  - name: REDIS_PORT
+                    value: "6379"
+                ports:
+                  - containerPort: 8900
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8900
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+            volumes:
+              - name: models
+                emptyDir: {}
+              - name: shared-mem
+                emptyDir:
+                  sizeLimit: 256Mi
+                  medium: Memory
+        workerReplicas: 0
