@@ -44,20 +44,25 @@ spec:
                 command: ${ENGINE_PREFILL_COMMAND}
                 imagePullPolicy: IfNotPresent
                 resources: ${ENGINE_PREFILL_RESOURCES}
-                readinessProbe:
+                startupProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
                   initialDelaySeconds: 5
                   periodSeconds: 5
-                  failureThreshold: 3
+                  failureThreshold: 60
+                readinessProbe:
                   httpGet:
                     path: /health
                     port: 8000
-                livenessProbe:
-                  initialDelaySeconds: 180
                   periodSeconds: 5
                   failureThreshold: 3
+                livenessProbe:
                   httpGet:
                     path: /health
                     port: 8000
+                  periodSeconds: 5
+                  failureThreshold: 3
                 volumeMounts: ${VOLUME_MOUNTS}
             volumes: ${VOLUMES}
         workerReplicas: 0
@@ -98,20 +103,25 @@ spec:
                 command: ${ENGINE_DECODE_COMMAND}
                 imagePullPolicy: IfNotPresent
                 resources: ${ENGINE_DECODE_RESOURCES}
-                readinessProbe:
+                startupProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
                   initialDelaySeconds: 5
                   periodSeconds: 5
-                  failureThreshold: 3
+                  failureThreshold: 60
+                readinessProbe:
                   httpGet:
                     path: /health
                     port: 8000
-                livenessProbe:
-                  initialDelaySeconds: 180
                   periodSeconds: 5
                   failureThreshold: 3
+                livenessProbe:
                   httpGet:
                     path: /health
                     port: 8000
+                  periodSeconds: 5
+                  failureThreshold: 3
                 volumeMounts: ${VOLUME_MOUNTS}
             volumes: ${VOLUMES}
         workerReplicas: 0
