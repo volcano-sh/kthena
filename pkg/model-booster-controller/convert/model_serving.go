@@ -135,12 +135,12 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 	var decodeCommand []string
 	for _, worker := range backend.Workers {
 		if worker.Type == workload.ModelWorkerTypePrefill {
-			preFillCommand, err = buildCommands(&worker.Config, modelDownloadPath, workersMap)
+			preFillCommand, err = buildCommands(backend, &worker.Config, modelDownloadPath, workersMap)
 			if err != nil {
 				return nil, err
 			}
 		} else if worker.Type == workload.ModelWorkerTypeDecode {
-			decodeCommand, err = buildCommands(&worker.Config, modelDownloadPath, workersMap)
+			decodeCommand, err = buildCommands(backend, &worker.Config, modelDownloadPath, workersMap)
 			if err != nil {
 				return nil, err
 			}
@@ -223,7 +223,7 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	}
 	modelDownloadPath := GetCachePath(backend.CacheURI) + GetMountPath(backend.ModelURI)
 	// only one worker in such circumstance so get the first worker's config as commands
-	commands, err := buildCommands(&backend.Workers[0].Config, modelDownloadPath, workersMap)
+	commands, err := buildCommands(backend, &backend.Workers[0].Config, modelDownloadPath, workersMap)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +344,7 @@ func mapWorkers(workers []workload.ModelWorker) map[workload.ModelWorkerType]*wo
 }
 
 // buildCommands constructs the command list for the backend.
-func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
+func buildCommands(backend *workload.ModelBackend, workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 	workersMap map[workload.ModelWorkerType]*workload.ModelWorker) ([]string, error) {
 	commands := []string{"python3", "-m", "vllm.entrypoints.openai.api_server", "--model", modelDownloadPath}
 	args, err := utils.ConvertVLLMArgsFromJson(workerConfig)
@@ -357,7 +357,7 @@ func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 	// vllm image does not have mooncake-transfer-engine or nixl installed by default
 	// so we need to install them if GPU is requested
 	kvConnector := getKvConnectorFromConfig(workerConfig)
-	if hasGPU(workersMap) {
+	if hasGPU(workersMap) && !env.GetEnvValueOrDefault[bool](backend, env.SkipEngineDependencyInstall, false) {
 		if kvConnector == "MooncakeConnector" {
 			commands = []string{"bash", "-c", "pip install mooncake-transfer-engine && " + strings.Join(commands, " ")}
 		} else if kvConnector == "NixlConnector" {

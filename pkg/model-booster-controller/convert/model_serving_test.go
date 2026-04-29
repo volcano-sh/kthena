@@ -17,6 +17,7 @@ limitations under the License.
 package convert
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -139,6 +140,35 @@ func TestCreateModelServingResources(t *testing.T) {
 				t.Errorf("ModelServing mismatch (-expected +actual):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-mooncake.yaml")
+	model.Spec.Backend.Env = append(model.Spec.Backend.Env, corev1.EnvVar{
+		Name:  "KTHENA_SKIP_ENGINE_DEPENDENCY_INSTALL",
+		Value: "true",
+	})
+	for i := range model.Spec.Backend.Workers {
+		model.Spec.Backend.Workers[i].Config.Raw = []byte(strings.ReplaceAll(
+			string(model.Spec.Backend.Workers[i].Config.Raw),
+			"MooncakeConnector",
+			"NixlConnector",
+		))
+	}
+
+	serving, err := BuildModelServing(model)
+	assert.NoError(t, err)
+
+	for _, role := range serving.Spec.Template.Roles {
+		for _, container := range role.EntryTemplate.Spec.Containers {
+			if container.Name != "vllm" {
+				continue
+			}
+			command := strings.Join(container.Command, " ")
+			assert.NotContains(t, command, "pip install", "role %s should not install engine dependencies at startup", role.Name)
+			assert.NotContains(t, command, "nixl &&", "role %s should use the prebuilt engine image dependencies", role.Name)
+		}
 	}
 }
 
