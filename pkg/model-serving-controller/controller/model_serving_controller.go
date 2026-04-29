@@ -548,22 +548,28 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// and only modifying the role.replicas field will not affect the revision.
 	copy := utils.RemoveRoleReplicasForRevision(ms)
 	revision := utils.Revision(copy.Spec.Template.Roles)
-	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
-		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
+
+	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
+	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
+		return fmt.Errorf("cannot sync ServingGroup replicas: %v", err)
 	}
 
-	if err := c.manageRole(ctx, ms, revision); err != nil {
-		return fmt.Errorf("cannot manage role replicas: %v", err)
+	// 2. Sync the roles and their replicas within each ServingGroup, handling partitioned scaling and revisions.
+	if err := c.syncRoleWithinServingGroups(ctx, ms, revision); err != nil {
+		return fmt.Errorf("cannot sync role replicas: %v", err)
 	}
 
-	if err := c.manageServingGroupRollingUpdate(ctx, ms, revision); err != nil {
+	// 3. Manage the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
+	if err := c.manageRollingUpdate(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup rollingUpdate: %v", err)
 	}
 
-	if err := c.manageHeadlessService(ctx, ms); err != nil {
-		return fmt.Errorf("cannot manage ModelServing: %v", err)
+	// 4. Create and update Headless Services for internal networking between entry and worker pods.
+	if err := c.syncHeadlessServices(ctx, ms); err != nil {
+		return fmt.Errorf("cannot sync headless services: %v", err)
 	}
 
+	// 5. Calculate and update the overall condition and replica status fields of the ModelServing.
 	if err := c.UpdateModelServingStatus(ms, revision); err != nil {
 		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
 	}
@@ -623,7 +629,14 @@ func (c *ModelServingController) syncAll() {
 	c.initialSync = true
 }
 
-func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
+// syncServingGroupReplicas scales up or down whole ServingGroups to meet the top-level
+// `Spec.Replicas` count of the ModelServing resource.
+// Main processing steps:
+// 1. Retrieve the list of active ServingGroups for the current ModelServing from the data store.
+// 2. Compare the current count of ServingGroups with the expected replicas.
+// 3. If scaling up: sequentially initialize needed group states, create PodGroups, and scale up groups.
+// 4. If scaling down: sort the groups by priority/deletion-cost and delete the excess groups.
+func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get servingGroup of modelServing: %s from map: %v", ms.GetName(), err)
@@ -793,7 +806,16 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	return nil
 }
 
-func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
+// syncRoleWithinServingGroups coordinates role replicas within each active ServingGroup,
+// deciding to use either the older revision if bound by the partition rules, or adopting
+// the new revision otherwise. It traverses every Role to align actual pods to expected status.
+//
+// Main processing steps:
+// 1. Iterate over all existing ServingGroups and skip those already marked as "Deleting".
+// 2. Identify if the current ServingGroup falls under the rollout Partition protection.
+// 3. Fallback to an older revision (ControllerRevision) if the group is protected by the partition.
+// 4. Update memory caches and use `manageRoleReplicas` to add/remove out-of-sync Pods and Services for each role.
+func (c *ModelServingController) syncRoleWithinServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
@@ -1088,7 +1110,17 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	}
 }
 
-func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
+// manageRollingUpdate resolves the lifecycle aspect of an update, checking outdated sets,
+// enforcing strict Unavailable quota constraints, and actively evicting ServingGroups
+// or respective Role workloads falling outside the current partition to enforce the rollback/rollforward.
+//
+// Main processing steps:
+//  1. Calculate the maximum allowed unavailable ServingGroups (maxUnavailable).
+//  2. Identify the boundary for the currently active rollout partition.
+//  3. Filter outdated groups (mismatched revision) that are allowed to be updated.
+//  4. Check the current unavailability capacity. If capacity exists, safely evict allowed outdated
+//     ServingGroups (or outdated Roles inside them) triggering rebuild loops later.
+func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
 	maxUnavailable, err := utils.GetMaxUnavailable(ms)
 	if err != nil {
 		return fmt.Errorf("failed to calculate maxUnavailable: %v", err)
@@ -2015,7 +2047,15 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 	return nil
 }
 
-func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+// syncHeadlessServices manages headless services bridging communication across components
+// like assigning specific intra-domain entries targeting each underlying WorkerTemplate in Role instances.
+//
+// Main processing steps:
+// 1. Iterate over every active ServingGroup in the data store.
+// 2. Iterate over the internal Roles for those groups.
+// 3. For any role carrying a `workerTemplate`, check the index for existing `Services`.
+// 4. In case the service is missing or deleted, construct and create the Headless Service
+func (c *ModelServingController) syncHeadlessServices(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
 	servingGroups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get servingGroups: %v", err)

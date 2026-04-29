@@ -2510,7 +2510,7 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 	controller.store.AddServingGroup(utils.GetNamespaceName(ms), groupOrdinal, oldRevision)
 	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision, "roleTemplateHash")
 
-	err = controller.manageRole(context.Background(), ms, newRevision)
+	err = controller.syncRoleWithinServingGroups(context.Background(), ms, newRevision)
 	assert.NoError(t, err)
 
 	roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
@@ -5290,7 +5290,7 @@ func TestManageHeadlessService(t *testing.T) {
 			}
 
 			// Call the function being tested
-			err = controller.manageHeadlessService(context.TODO(), tt.modelServing)
+			err = controller.syncHeadlessServices(context.TODO(), tt.modelServing)
 			assert.NoError(t, err)
 
 			// Verify the expected number of services exist
