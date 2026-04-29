@@ -44,6 +44,12 @@ Kubernetes Service `sessionAffinity: ClientIP` only keys on **source IP** and do
 
 ### Proposal
 
+#### User stories
+
+**Story 1** — An operator sets **`spec.sessionSticky`** (non-null) on a `ModelRoute` with a header source `X-Session-ID`. Requests with the same header value hit the same ModelServer Pod until TTL expires or that Pod leaves the endpoint set.
+
+**Story 2** — An operator runs **multiple infer-gateway replicas** and starts each router with **Redis** enabled (address via **router** config/flags, not on `ModelRoute`); the same session key then sticks to the same Pod regardless of which replica handles the request.
+
 #### Architecture
 
 1. **Session key extraction**  
@@ -63,12 +69,6 @@ Kubernetes Service `sessionAffinity: ClientIP` only keys on **source IP** and do
    - If the mapped Pod is **not** in the filtered set: **Delete** the mapping (when applicable), **log**, then run normal scheduling and **Set** a new mapping for the chosen Pod.  
    - `sessionSticky` **nil/omitted**, **empty** session key after extraction, or **PD disaggregation**: existing scheduling only.
 
-#### User stories
-
-**Story 1** — An operator sets **`spec.sessionSticky`** (non-null) on a `ModelRoute` with a header source `X-Session-ID`. Requests with the same header value hit the same ModelServer Pod until TTL expires or that Pod leaves the endpoint set.
-
-**Story 2** — An operator runs **multiple infer-gateway replicas** and starts each router with **Redis** enabled (address via **router** config/flags, not on `ModelRoute`); the same session key then sticks to the same Pod regardless of which replica handles the request.
-
 #### Notes / constraints
 
 
@@ -77,21 +77,7 @@ Kubernetes Service `sessionAffinity: ClientIP` only keys on **source IP** and do
 
 ### Design details
 
-#### Components
-
-1. **Extraction**  
-   Implemented in the router’s load-balancing path for the resolved `ModelRoute`, once headers, URI, cookies, and (for JWT) the shared authenticator are available.
-
-2. **Mapping store**  
-   Interface: **Get**, **Set**, **Delete**. Implementations: in-memory map with per-entry expiry; Redis string keys with TTL. The active implementation and **Redis connection settings** are chosen at **router startup** (CLI flags, env, or static config), not in `ModelRoute`.
-
-3. **Scheduling integration**  
-   The scheduler framework carries an optional **sticky Pod name**. If set and that Pod remains in the filtered set, aggregated scheduling **prefers** that Pod; otherwise the hint is cleared and normal scoring applies.
-
-4. **Failover**  
-   Structured logs when a mapped Pod is no longer valid; mapping removed before re-selection.
-
-5. **`ModelRoute` API (`spec.sessionSticky` — **optional/pointer**)
+#### `ModelRoute` API
 
 In Go/OpenAPI terms, **`sessionSticky` is a pointer to `SessionStickySpec`** (JSON **`omitempty` / YAML absence or `null`**). **Nil/omitted** = session sticky off; **non-nil** = on for that route. No `enabled` boolean: presence encodes the switch.
 
@@ -126,7 +112,7 @@ type SessionKeySource struct {
 | Sticky **store** | **Memory** (default) vs **Redis**; must be the same for all router replicas in a given deployment (cluster ops concern). |
 | **Redis** | When Redis is selected: **`address`** (or equivalent) as `host:port`, TLS/password if needed — same as other router-side shared dependencies. **Validation** on router start: e.g. fail fast if Redis mode and address missing/unreachable. |
 
-6. **Validation**  
+#### Validation  
    **Webhook (`ModelRoute`)**: when **`spec.sessionSticky` is non-nil**, **`sources` must be non-empty**; **`sessionAffinitySeconds`**, if set, must be **≥ 1**.  
    **Router binary**: enforces any **store / Redis** flags at process start (separate from CRD admission).
 
