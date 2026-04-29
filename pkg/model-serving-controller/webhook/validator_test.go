@@ -60,7 +60,7 @@ func TestValidPodNameLength(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "name length exceeds limit",
@@ -91,15 +91,55 @@ func TestValidPodNameLength(t *testing.T) {
 					"invalid name: must be no more than 63 characters"),
 			},
 		},
+		{
+			name: "ms replicas is nil",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					ObjectMeta: v1.ObjectMeta{
+						Name: "nil-replicas",
+					},
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: nil,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:     "role1",
+									Replicas: &replicas,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "role replicas is nil",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					ObjectMeta: v1.ObjectMeta{
+						Name: "nil-role-replicas",
+					},
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:     "role1",
+									Replicas: nil,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := validGeneratedNameLength(tt.args.ms)
-			if got != nil {
-				assert.EqualValues(t, tt.want[0], got[0])
-			} else {
-				assert.Equal(t, tt.want, got)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -131,7 +171,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "invalid maxUnavailable format",
@@ -212,7 +252,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "invalid partition - negative value",
@@ -322,7 +362,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "valid partition - percentage value",
@@ -342,7 +382,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "invalid partition - percentage over 100",
@@ -417,7 +457,7 @@ func TestValidatorReplicas(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "replicas is nil",
@@ -619,7 +659,7 @@ func TestValidateGangPolicy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "invalid minRoleReplicas - role not exist",
@@ -737,7 +777,7 @@ func TestValidateGangPolicy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "nil minRoleReplicas",
@@ -761,7 +801,7 @@ func TestValidateGangPolicy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 	}
 	for _, tt := range tests {
@@ -833,7 +873,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "invalid negative worker replicas",
@@ -941,7 +981,7 @@ func TestValidateRoleNames(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "invalid uppercase role name",
@@ -1105,7 +1145,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "serving group recovery policy with role rollout strategy - invalid",
@@ -1157,7 +1197,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "recovery policy RoleRecreate with compatible rollout strategy Role - valid",
@@ -1180,7 +1220,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "recovery policy RoleRecreate with rollout strategy ServingGroup - valid",
@@ -1203,7 +1243,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 		{
 			name: "serving group recovery policy without rollout strategy - valid (default rollout is ServingGroupRollingUpdate)",
@@ -1223,7 +1263,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: nil,
 		},
 	}
 
