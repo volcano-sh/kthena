@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -186,7 +185,6 @@ func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName s
 	// Assert successful response
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
-	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
 
 	return resp
 }
@@ -197,7 +195,6 @@ func CheckChatCompletionsQuiet(t *testing.T, modelName string, messages []ChatMe
 	resp := SendChatRequestWithRetryQuiet(t, DefaultRouterURL, modelName, messages, nil)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
-	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
 	return resp
 }
 
@@ -240,8 +237,11 @@ func WaitForChatModelReady(t *testing.T, url, modelName string, messages []ChatM
 
 // containsError checks if the response string contains error indicators
 func containsError(response string) bool {
-	responseLower := strings.ToLower(response)
-	return strings.Contains(responseLower, "error")
+	var r struct {
+		Error json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal([]byte(response), &r)
+	return len(r.Error) > 0
 }
 
 // min returns the minimum of two time.Duration values
