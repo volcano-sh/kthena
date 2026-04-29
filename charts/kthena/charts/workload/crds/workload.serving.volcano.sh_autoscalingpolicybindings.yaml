@@ -235,7 +235,7 @@ spec:
                       to maintain.
                     format: int32
                     maximum: 1000000
-                    minimum: 0
+                    minimum: 1
                     type: integer
                   target:
                     description: Target defines the object to be monitored and scaled.
