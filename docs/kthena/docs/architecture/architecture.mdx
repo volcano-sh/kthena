@@ -65,13 +65,13 @@ Each request traverses six stages in order:
 | **1. Authentication & Authorization** | Validates identity and permissions before any work is done. |
 | **2. Rate Limiting** | Enforces per-model and per-tenant throughput limits — token-based, not just request-based — to prevent monopolization. |
 | **3. Fairness Scheduling** | Per-model fair queuing ensures one model's traffic spike cannot starve others sharing the same fleet. |
-| **4. Scheduling** | The core intelligence layer. A pluggable scheduler runs **filter → score → select** on candidate pods (details below). |
-| **5. Load Balancing** | Final routing to backend instances based on real-time health and capacity signals. |
+| **4. Scheduling** | The core intelligence layer. A pluggable scheduler runs **filter → score → select** and selects a set of candidate pods (details below). |
+| **5. Load Balancing** | Final routing to candidate backend instances with retry policy supported. |
 | **6. Proxy** | Dispatches the request to the selected inference pod and streams the response back. |
 
 ### Pluggable Scheduler
 
-The scheduler at Stage 4 is the heart of Kthena's intelligent routing. It mirrors the Kubernetes scheduler's filter/score pattern but operates at the *request* level, running in microseconds rather than milliseconds.
+The scheduler at Stage 5 is the heart of Kthena's intelligent routing. It mirrors the Kubernetes scheduler's filter/score pattern but operates at the *request* level, running in microseconds rather than milliseconds.
 
 **Filter Plugins** (eliminate ineligible pods):
 
@@ -84,10 +84,11 @@ The scheduler at Stage 4 is the heart of Kthena's intelligent routing. It mirror
 
 | Plugin | Optimizes For |
 |---|---|
+| **Least Requests** | Prefers pods with the fewest active in-flight requests to minimize queuing delay. |
 | **Least Latency** | Minimizes TTFT (Time-to-First-Token) and TPOT (Time-Per-Output-Token) based on recent observations. |
-| **KV Cache Aware** | Favors pods with available KV-cache capacity — critical for memory-constrained deployments. |
+| **KV Cache Aware** | Favors pods with most available KV-cache hit to maximize cache utilization and reduce recomputation overhead. |
 | **Prefix Cache** | Matches the request's prompt prefix against cached prefixes across pods to maximize cache hits. |
-| **GPU Cache** | Considers GPU memory utilization to avoid pods nearing OOM. |
+| **GPU Cache** | Considers GPU memory utilization to avoid requests preemption. |
 
 **PD-Aware Scheduling:** When the request targets a disaggregated PD group, the scheduler first scores decode pods, then pairs each with a compatible prefill pod in the same group — ensuring KV-cache locality and minimal data transfer.
 
@@ -125,13 +126,13 @@ Each replica deployment may include:
 |---|---|
 | **Entry Pod** | Provides ingress endpoints for role-specific requests. |
 | **Worker Pod(s)** | Execute model inference computations (tensor-parallel across workers for large models). |
-| **Downloader** | Universal model/artifact fetcher — supports Hugging Face, S3/OBS, and PVC sources with concurrent downloads and file-based locking. |
-| **Runtime Agent** | Sidecar that proxies and standardizes engine metrics (vLLM / SGLang), exposes LoRA adapter lifecycle APIs (download / load / unload), and provides a model download endpoint. |
+| **Downloader** | Universal model/artifact fetcher — supports HuggingFace, ModelScope, S3/OBS, and PVC sources with concurrent downloads and file-based locking. |
+| **Runtime Agent** | Sidecar that proxies and standardizes engine metrics (vLLM / SGLang), exposes LoRA adapter lifecycle APIs (download / load / unload), handles KV cache events for PD disaggregation, and provides a model download endpoint. |
 | **LLM Engine** | The actual inference backend — **vLLM**, **SGLang**, or other supported engines. |
 
 ### KV Cache Transfer
 
-In PD mode, KV cache state must flow from prefill pods to decode pods. Kthena supports three connector backends:
+In Prefill-Decode Disaggregation mode, KV cache state must flow from prefill pods to decode pods. Kthena supports three connector backends:
 
 | Connector | Trade-off |
 |---|---|

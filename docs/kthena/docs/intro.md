@@ -7,7 +7,7 @@ sidebar_position: 1
 **Kthena** is a Kubernetes-native AI serving platform that turns a cluster into a production-grade inference cloud. Instead of stitching together load balancers, autoscalers, and model servers by hand, you declare *what* you want — models, traffic rules, scaling targets — and Kthena's control plane reconciles the rest.
 
 > **Declarative CRDs. Any engine. Every scale.**
-> Deploy with a single `ModelBooster` for a one-stop experience, or compose fine-grained primitives — `ModelRoute`, `ModelServer`, `ModelServing`, `AutoScalingPolicy`, and `AutoScalingPolicyBinding` — for full control. From a single-GPU prototype to a multi-node, prefill/decode disaggregated fleet.
+> Deploy with a single `ModelBooster` for a one-stop experience, or compose fine-grained primitives — `ModelRoute`, `ModelServer`, `ModelServing`, `AutoScalingPolicy`, and `AutoScalingPolicyBinding` — for full control. From a single-GPU/NPU prototype to a multi-node, prefill/decode disaggregated fleet.
 
 ---
 
@@ -16,7 +16,7 @@ sidebar_position: 1
 | Challenge | Kthena's Answer |
 |---|---|
 | Managing multiple inference engines | Unified CRD layer that abstracts vLLM, SGLang, Triton, and TorchServe behind a consistent API |
-| Balancing latency vs. throughput | Request-level scheduler with pluggable scoring — KV-cache, prefix-cache, LoRA affinity, least-latency |
+| Balancing latency vs. throughput | Request-level scheduler with pluggable scoring — KV-cache awareness, prefix-cache matching, LoRA affinity, least-request, least-latency |
 | Scaling large models cost-effectively | Prefill/Decode disaggregation with independent scaling ratios and cost-aware autoscaling |
 | Safe model updates in production | Rolling upgrades with partition control, canary releases, and automated failover |
 
@@ -55,4 +55,5 @@ Kthena's autoscaler goes beyond simple metric thresholds — it factors in cost,
 
 - **Prometheus Metrics** — Built-in metrics for router latency (TTFT / TPOT), queue depth, cache hit rates, and per-model throughput.
 - **Request Tracking** — End-to-end request tracing across the authentication → scheduling → proxy pipeline.
+- **Access Log** — Structured access logging for every request, including model, latency, token counts, and upstream pod.
 - **Health Checks** — Continuous liveness, readiness, and engine-specific health probes for every inference pod.
