@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
@@ -102,14 +104,21 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 		t.Fatal("httproute cache sync timeout")
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait until all 3 HTTPRoutes are visible in the lister (watch events from fake
+	// client can lag behind WaitForCacheSync on a loaded runner).
+	require.Eventually(t, func() bool {
+		routes, _ := httpRouteInformer.Lister().List(labels.Everything())
+		return len(routes) == 3
+	}, 5*time.Second, 10*time.Millisecond, "expected 3 HTTPRoutes in lister")
+
+	// Drain any events that were enqueued during the cache-warm-up phase.
 	for ctrl.workqueue.Len() > 0 {
 		obj, _ := ctrl.workqueue.Get()
 		ctrl.workqueue.Done(obj)
 	}
 
+	// enqueueHTTPRoutesForGateway is synchronous; no sleep needed after the call.
 	ctrl.enqueueHTTPRoutesForGateway(gw)
-	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, 2, ctrl.workqueue.Len(), "route-1 and route-3 reference gateway-1, route-2 does not")
 }
 
@@ -147,18 +156,24 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	if !cache.WaitForCacheSync(stop, gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced) {
+	httpRouteInformer2 := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
+	if !cache.WaitForCacheSync(stop, httpRouteInformer2.Informer().HasSynced) {
 		t.Fatal("cache sync timeout")
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait until the HTTPRoute is visible in the lister before asserting.
+	require.Eventually(t, func() bool {
+		routes, _ := httpRouteInformer2.Lister().List(labels.Everything())
+		return len(routes) == 1
+	}, 5*time.Second, 10*time.Millisecond, "expected 1 HTTPRoute in lister")
+
 	for ctrl.workqueue.Len() > 0 {
 		obj, _ := ctrl.workqueue.Get()
 		ctrl.workqueue.Done(obj)
 	}
 
+	// enqueueHTTPRoutesForGateway is synchronous; no sleep needed after the call.
 	ctrl.enqueueHTTPRoutesForGateway(gw)
-	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, 0, ctrl.workqueue.Len(), "no HTTPRoutes reference gateway-1")
 }
 

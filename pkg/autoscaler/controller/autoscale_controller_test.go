@@ -237,6 +237,113 @@ func toInt32(s string) int32  { v, _ := strconv.Atoi(s); return int32(v) }
 
 type autoscalerAutoscaler = autoscaler.Autoscaler
 type autoscalerOptimizer = autoscaler.Optimizer
+type autoscalerPDDisaggregatedAutoscaler = autoscaler.PDDisaggregatedAutoscaler
+
+func TestPDDisaggregatedHighLoad_then_DoScale_expect_RoleReplicasAndStatus(t *testing.T) {
+	ns := "ns"
+	prefillRole := "prefill"
+	decodeRole := "decode"
+
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "ms-pd", Namespace: ns},
+		Spec: workload.ModelServingSpec{
+			Template: workload.ServingGroup{Roles: []workload.Role{
+				{Name: prefillRole, Replicas: ptrInt32(1)},
+				{Name: decodeRole, Replicas: ptrInt32(2)},
+			}},
+		},
+	}
+	binding := &workload.AutoscalingPolicyBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "binding-pd", Namespace: ns},
+		Spec: workload.AutoscalingPolicyBindingSpec{
+			PolicyRef: corev1.LocalObjectReference{Name: "ap"},
+			PDDisaggregatedTarget: &workload.PDDisaggregatedTarget{
+				ModelServingRef:    corev1.LocalObjectReference{Name: ms.Name},
+				PrefillRole:        workload.PDRoleTarget{RoleName: prefillRole, MinReplicas: 1, MaxReplicas: 8},
+				DecodeRole:         workload.PDRoleTarget{RoleName: decodeRole, MinReplicas: 2, MaxReplicas: 16},
+				PrefillDecodeRatio: "1:2",
+			},
+		},
+	}
+	policy := &workload.AutoscalingPolicy{
+		Spec: workload.AutoscalingPolicySpec{
+			TolerancePercent: 0,
+			Metrics:          []workload.AutoscalingPolicyMetric{{MetricName: "load", TargetValue: resource.MustParse("1")}},
+			Behavior: workload.AutoscalingPolicyBehavior{
+				ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{
+					StablePolicy: workload.AutoscalingPolicyStablePolicy{Instances: ptrInt32(100), Percent: ptrInt32(100), SelectPolicy: workload.SelectPolicyOr, Period: &metav1.Duration{Duration: time.Second}},
+					PanicPolicy:  workload.AutoscalingPolicyPanicPolicy{Percent: ptrInt32(100), PanicThresholdPercent: ptrInt32(200), Period: metav1.Duration{Duration: time.Second}},
+				},
+				ScaleDown: workload.AutoscalingPolicyStablePolicy{Instances: ptrInt32(100), Percent: ptrInt32(100), SelectPolicy: workload.SelectPolicyOr, Period: &metav1.Duration{Duration: time.Second}},
+			},
+		},
+	}
+
+	client := clientfake.NewSimpleClientset(ms.DeepCopy(), binding.DeepCopy())
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms.DeepCopy()))
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 9\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	lbsPrefill := map[string]string{
+		workload.ModelServingNameLabelKey: ms.Name,
+		workload.EntryLabelKey:            util.Entry,
+		workload.RoleLabelKey:             prefillRole,
+	}
+	lbsDecode := map[string]string{
+		workload.ModelServingNameLabelKey: ms.Name,
+		workload.EntryLabelKey:            util.Entry,
+		workload.RoleLabelKey:             decodeRole,
+	}
+	pods := []*corev1.Pod{readyPod(ns, "pod-prefill", host, lbsPrefill), readyPod(ns, "pod-decode", host, lbsDecode)}
+
+	binding.Spec.PDDisaggregatedTarget.PrefillRole.MetricEndpoint = workload.MetricEndpoint{Uri: u.Path, Port: port}
+	binding.Spec.PDDisaggregatedTarget.DecodeRole.MetricEndpoint = workload.MetricEndpoint{Uri: u.Path, Port: port}
+
+	ac := &AutoscaleController{
+		client:                   client,
+		modelServingLister:       msLister,
+		podsLister:               fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
+		scalerMap:                map[string]*autoscalerAutoscaler{},
+		optimizerMap:             map[string]*autoscalerOptimizer{},
+		pdDisaggregatedScalerMap: map[string]*autoscalerPDDisaggregatedAutoscaler{},
+	}
+
+	if err := ac.doPDDisaggregatedScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doPDDisaggregatedScale error: %v", err)
+	}
+
+	updated, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-pd", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated modelserving error: %v", err)
+	}
+	var gotPrefill, gotDecode int32
+	for _, role := range updated.Spec.Template.Roles {
+		if role.Name == prefillRole && role.Replicas != nil {
+			gotPrefill = *role.Replicas
+		}
+		if role.Name == decodeRole && role.Replicas != nil {
+			gotDecode = *role.Replicas
+		}
+	}
+	if gotPrefill != 8 || gotDecode != 16 {
+		t.Fatalf("expected prefill=8 decode=16, got prefill=%d decode=%d", gotPrefill, gotDecode)
+	}
+
+	updatedBinding, err := client.WorkloadV1alpha1().AutoscalingPolicyBindings(ns).Get(context.Background(), binding.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated binding error: %v", err)
+	}
+	if updatedBinding.Status.PDScalingStatus == nil {
+		t.Fatal("expected pdScalingStatus to be updated")
+	}
+	if updatedBinding.Status.PDScalingStatus.EffectiveRatio != "8:16" {
+		t.Fatalf("expected effective ratio 8:16, got %s", updatedBinding.Status.PDScalingStatus.EffectiveRatio)
+	}
+}
 
 func TestFormatAutoscalerMapKey_IncludesNamespaceAndTarget(t *testing.T) {
 	targetRef := &corev1.ObjectReference{Name: "same-target", Kind: workload.ModelServingKind.Kind}

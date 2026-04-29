@@ -109,6 +109,7 @@ _Appears in:_
 | `policyRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | PolicyRef references the AutoscalingPolicy that defines the scaling rules and metrics. |  |  |
 | `heterogeneousTarget` _[HeterogeneousTarget](#heterogeneoustarget)_ | HeterogeneousTarget enables optimization-based scaling across multiple ModelServing deployments with different hardware capabilities.<br />This approach dynamically adjusts replica distribution across heterogeneous resources (e.g., H100/A100 GPUs) based on overall computing requirements. |  |  |
 | `homogeneousTarget` _[HomogeneousTarget](#homogeneoustarget)_ | HomogeneousTarget enables traditional metric-based scaling for a single ModelServing deployment.<br />This approach adjusts replica count based on monitoring metrics and their target values. |  |  |
+| `pdDisaggregatedTarget` _[PDDisaggregatedTarget](#pddisaggregatedtarget)_ | PDDisaggregatedTarget enables coordinated autoscaling for prefill/decode disaggregated roles. |  |  |
 
 
 #### AutoscalingPolicyBindingStatus
@@ -122,6 +123,9 @@ AutoscalingPolicyBindingStatus defines the observed state of AutoscalingPolicyBi
 _Appears in:_
 - [AutoscalingPolicyBinding](#autoscalingpolicybinding)
 
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pdScalingStatus` _[PDScalingStatus](#pdscalingstatus)_ | PDScalingStatus reflects the last reconciled state for PD disaggregated autoscaling. |  |  |
 
 
 #### AutoscalingPolicyList
@@ -341,6 +345,7 @@ MetricEndpoint defines the endpoint configuration for scraping metrics from pods
 
 
 _Appears in:_
+- [PDRoleTarget](#pdroletarget)
 - [Target](#target)
 
 | Field | Description | Default | Validation |
@@ -609,6 +614,62 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `groupPolicy` _[NetworkTopologySpec](#networktopologyspec)_ | GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`. |  |  |
 | `rolePolicy` _[NetworkTopologySpec](#networktopologyspec)_ | RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`. |  |  |
+
+
+#### PDDisaggregatedTarget
+
+
+
+PDDisaggregatedTarget defines coordinated scaling config for prefill/decode roles in one ModelServing.
+
+
+
+_Appears in:_
+- [AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelServingRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | ModelServingRef references the parent ModelServing resource. |  |  |
+| `prefillRole` _[PDRoleTarget](#pdroletarget)_ | PrefillRole defines the target and replica bounds for prefill. |  |  |
+| `decodeRole` _[PDRoleTarget](#pdroletarget)_ | DecodeRole defines the target and replica bounds for decode. |  |  |
+| `prefillDecodeRatio` _string_ | PrefillDecodeRatio defines desired replica ratio in format "P:D" (for example "1:2"). |  | Pattern: `^[1-9][0-9]*:[1-9][0-9]*$` <br /> |
+
+
+#### PDRoleTarget
+
+
+
+PDRoleTarget defines role-level target and bounds used by PD disaggregated autoscaling.
+
+
+
+_Appears in:_
+- [PDDisaggregatedTarget](#pddisaggregatedtarget)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `roleName` _string_ | RoleName is the role name in ModelServing template (for example: prefill/decode). |  |  |
+| `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint defines endpoint for scraping metrics from role pods. |  |  |
+| `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas to maintain for this role. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
+| `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas allowed for this role. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
+
+
+#### PDScalingStatus
+
+
+
+PDScalingStatus captures per-role scaling outcome for PD disaggregated mode.
+
+
+
+_Appears in:_
+- [AutoscalingPolicyBindingStatus](#autoscalingpolicybindingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `prefillReplicas` _integer_ |  |  |  |
+| `decodeReplicas` _integer_ |  |  |  |
+| `effectiveRatio` _string_ |  |  |  |
 
 
 #### PluginScope

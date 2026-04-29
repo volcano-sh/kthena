@@ -22,7 +22,7 @@ import (
 )
 
 // AutoscalingPolicyBindingSpec defines the desired state of AutoscalingPolicyBinding.
-// +kubebuilder:validation:XValidation:rule="has(self.heterogeneousTarget) != has(self.homogeneousTarget)",message="Either heterogeneousTarget or homogeneousTarget must be set, but not both."
+// +kubebuilder:validation:XValidation:rule="(has(self.heterogeneousTarget) ? 1 : 0) + (has(self.homogeneousTarget) ? 1 : 0) + (has(self.pdDisaggregatedTarget) ? 1 : 0) == 1",message="Exactly one of heterogeneousTarget, homogeneousTarget or pdDisaggregatedTarget must be set."
 type AutoscalingPolicyBindingSpec struct {
 	// PolicyRef references the AutoscalingPolicy that defines the scaling rules and metrics.
 	PolicyRef corev1.LocalObjectReference `json:"policyRef"`
@@ -36,6 +36,10 @@ type AutoscalingPolicyBindingSpec struct {
 	// This approach adjusts replica count based on monitoring metrics and their target values.
 	// +optional
 	HomogeneousTarget *HomogeneousTarget `json:"homogeneousTarget,omitempty"`
+
+	// PDDisaggregatedTarget enables coordinated autoscaling for prefill/decode disaggregated roles.
+	// +optional
+	PDDisaggregatedTarget *PDDisaggregatedTarget `json:"pdDisaggregatedTarget,omitempty"`
 }
 
 // AutoscalingTargetType defines the type of target for autoscaling operations.
@@ -82,6 +86,37 @@ type HeterogeneousTarget struct {
 	// +kubebuilder:default=200
 	// +optional
 	CostExpansionRatePercent int32 `json:"costExpansionRatePercent,omitempty"`
+}
+
+// PDDisaggregatedTarget defines coordinated scaling config for prefill/decode roles in one ModelServing.
+type PDDisaggregatedTarget struct {
+	// ModelServingRef references the parent ModelServing resource.
+	ModelServingRef corev1.LocalObjectReference `json:"modelServingRef"`
+	// PrefillRole defines the target and replica bounds for prefill.
+	PrefillRole PDRoleTarget `json:"prefillRole"`
+	// DecodeRole defines the target and replica bounds for decode.
+	DecodeRole PDRoleTarget `json:"decodeRole"`
+	// PrefillDecodeRatio defines desired replica ratio in format "P:D" (for example "1:2").
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[1-9][0-9]*:[1-9][0-9]*$`
+	PrefillDecodeRatio string `json:"prefillDecodeRatio,omitempty"`
+}
+
+// PDRoleTarget defines role-level target and bounds used by PD disaggregated autoscaling.
+type PDRoleTarget struct {
+	// RoleName is the role name in ModelServing template (for example: prefill/decode).
+	RoleName string `json:"roleName"`
+	// MetricEndpoint defines endpoint for scraping metrics from role pods.
+	// +optional
+	MetricEndpoint MetricEndpoint `json:"metricEndpoint,omitempty"`
+	// MinReplicas defines the minimum number of replicas to maintain for this role.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000
+	MinReplicas int32 `json:"minReplicas"`
+	// MaxReplicas defines the maximum number of replicas allowed for this role.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000000
+	MaxReplicas int32 `json:"maxReplicas"`
 }
 
 // Target defines a ModelServing deployment that can be monitored and scaled.
@@ -139,7 +174,18 @@ type AutoscalingPolicyBinding struct {
 
 // AutoscalingPolicyBindingStatus defines the observed state of AutoscalingPolicyBinding.
 type AutoscalingPolicyBindingStatus struct {
-	// Placeholder for future status fields
+	// PDScalingStatus reflects the last reconciled state for PD disaggregated autoscaling.
+	// +optional
+	PDScalingStatus *PDScalingStatus `json:"pdScalingStatus,omitempty"`
+}
+
+// PDScalingStatus captures per-role scaling outcome for PD disaggregated mode.
+type PDScalingStatus struct {
+	PrefillReplicas int32  `json:"prefillReplicas"`
+	DecodeReplicas  int32  `json:"decodeReplicas"`
+	EffectiveRatio  string `json:"effectiveRatio"`
+	// +optional
+	LastScaleTime *metav1.Time `json:"lastScaleTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
