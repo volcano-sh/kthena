@@ -32,18 +32,22 @@ type Autoscaler struct {
 }
 
 type ScalingMeta struct {
-	Config    *workload.HomogeneousTarget
-	Namespace string
+	Config           *workload.HomogeneousTarget
+	Namespace        string
+	CurrentInstances int32
 	Generations
 }
 
-func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) *Autoscaler {
+func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding, currentInstancesCount int32) *Autoscaler {
+	status := NewStatus(&autoscalePolicy.Spec.Behavior)
+	status.InitializeWithCurrentReplicas(currentInstancesCount)
 	return &Autoscaler{
-		Status:    NewStatus(&autoscalePolicy.Spec.Behavior),
+		Status:    status,
 		Collector: NewMetricCollector(&binding.Spec.HomogeneousTarget.Target, binding, GetMetricTargets(autoscalePolicy)),
 		Meta: &ScalingMeta{
-			Config:    binding.Spec.HomogeneousTarget,
-			Namespace: binding.Namespace,
+			Config:           binding.Spec.HomogeneousTarget,
+			Namespace:        binding.Namespace,
+			CurrentInstances: currentInstancesCount,
 			Generations: Generations{
 				AutoscalePolicyGeneration: autoscalePolicy.Generation,
 				BindingGeneration:         binding.Generation,
@@ -88,6 +92,10 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 	}
 	if autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil && recommendedInstances*100 >= currentInstancesCount*(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
 		autoscaler.Status.RefreshPanicMode()
+	}
+	if currentInstancesCount != autoscaler.Meta.CurrentInstances {
+		autoscaler.Status.InitializeWithCurrentReplicas(currentInstancesCount)
+		autoscaler.Meta.CurrentInstances = currentInstancesCount
 	}
 	CorrectedInstancesAlgorithm := algorithm.CorrectedInstancesAlgorithm{
 		IsPanic:              autoscaler.Status.IsPanicMode(),
