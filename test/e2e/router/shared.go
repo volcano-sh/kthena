@@ -1448,6 +1448,8 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 			"status_code": "200",
 		}
 
+		utils.WaitForChatModelReady(t, utils.DefaultRouterURL, modelName, messages, 60*time.Second)
+
 		// Capture baseline metrics
 		baselineMetrics, err := backendmetrics.ParseMetricsURL(defaultMetricsURL)
 		require.NoError(t, err, "Failed to fetch baseline metrics")
@@ -1457,8 +1459,11 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 
 		// Send requests
 		for range 3 {
-			resp := utils.CheckChatCompletions(t, modelName, messages)
-			assert.Equal(t, 200, resp.StatusCode)
+			resp := utils.SendChatRequest(t, modelName, messages)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, resp.Body.Close(), "Failed to close response body")
+			require.NoError(t, err, "Failed to read response body")
+			require.Equal(t, 200, resp.StatusCode, "Request failed with body: %s", string(body))
 		}
 
 		// Verify metrics incremented by exactly numRequests
