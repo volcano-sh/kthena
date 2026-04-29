@@ -19,6 +19,7 @@ package router
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -31,16 +32,22 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
 func TestMain(m *testing.M) {
@@ -462,3 +469,160 @@ func parseBool(str string) (bool, error) {
 	}
 	return false, &strconv.NumError{Func: "ParseBool", Num: str, Err: strconv.ErrSyntax}
 }
+
+func TestGetSessionAffinityHeaderName(t *testing.T) {
+	assert.Equal(t, "X-Session-ID", getSessionAffinityHeaderName(nil))
+
+	routerConfig := &conf.RouterConfiguration{
+		Scheduler: conf.SchedulerConfiguration{
+			PluginConfig: []conf.PluginConfig{{
+				Name: "session-affinity",
+				Args: runtime.RawExtension{Raw: []byte(`{"headerName":"X-Custom-Session"}`)},
+			}},
+		},
+	}
+
+	assert.Equal(t, "X-Custom-Session", getSessionAffinityHeaderName(routerConfig))
+}
+
+func TestRouterDoLoadbalancePopulatesSessionAffinityContextForModelServer(t *testing.T) {
+	store := datastore.New()
+	capture := &capturingScheduler{err: errors.New("stop after capture")}
+	router := &Router{
+		store:                     store,
+		scheduler:                 capture,
+		sessionAffinityHeaderName: "X-Session-ID",
+	}
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: 8080},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model",
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-1"}},
+			}},
+		},
+	}
+
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, sets.New(types.NamespacedName{Name: "pod-1", Namespace: "default"})))
+	require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Session-ID", "session-1")
+
+	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
+
+	require.NotNil(t, capture.ctx)
+	assert.Equal(t, "session-1", capture.ctx.SessionKey)
+	assert.Equal(t, "modelserver/default/ms-1", capture.ctx.AffinityScopeKey)
+}
+
+func TestRouterDoLoadbalancePopulatesSessionAffinityContextForInferencePool(t *testing.T) {
+	store := datastore.New()
+	capture := &capturingScheduler{err: errors.New("stop after capture")}
+	router := &Router{
+		store:                     store,
+		scheduler:                 capture,
+		sessionAffinityHeaderName: "X-Session-ID",
+	}
+
+	require.NoError(t, store.AddOrUpdateGateway(&gatewayv1.Gateway{
+		ObjectMeta: v1.ObjectMeta{Name: "gw-1", Namespace: "default"},
+	}))
+	require.NoError(t, store.AddOrUpdateInferencePool(&inferencev1.InferencePool{
+		ObjectMeta: v1.ObjectMeta{Name: "ip-1", Namespace: "default"},
+		Spec: inferencev1.InferencePoolSpec{
+			TargetPorts: []inferencev1.Port{{Number: 8080}},
+			Selector: inferencev1.LabelSelector{
+				MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+					"app": "pool",
+				},
+			},
+		},
+	}))
+
+	pathPrefix := gatewayv1.PathMatchPathPrefix
+	pathValue := "/infer"
+	gatewayKind := gatewayv1.Kind("Gateway")
+	gatewayGroup := gatewayv1.Group(gatewayv1.GroupName)
+	inferencePoolKind := gatewayv1.Kind("InferencePool")
+	inferencePoolGroup := gatewayv1.Group("inference.networking.k8s.io")
+	require.NoError(t, store.AddOrUpdateHTTPRoute(&gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "route-1", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name:  gatewayv1.ObjectName("gw-1"),
+					Kind:  &gatewayKind,
+					Group: &gatewayGroup,
+				}},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  &pathPrefix,
+						Value: &pathValue,
+					},
+				}},
+				BackendRefs: []gatewayv1.HTTPBackendRef{{
+					BackendRef: gatewayv1.BackendRef{
+						BackendObjectReference: gatewayv1.BackendObjectReference{
+							Name:  gatewayv1.ObjectName("ip-1"),
+							Kind:  &inferencePoolKind,
+							Group: &inferencePoolGroup,
+						},
+					},
+				}},
+			}},
+		},
+	}))
+	require.NoError(t, store.AddOrUpdatePod(&corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "pod-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "pool"},
+		},
+		Status: corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+	}, nil))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(GatewayKey, "default/gw-1")
+	c.Request, _ = http.NewRequest("POST", "/infer", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Session-ID", "session-1")
+
+	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
+
+	require.NotNil(t, capture.ctx)
+	assert.Equal(t, "session-1", capture.ctx.SessionKey)
+	assert.Equal(t, "inferencepool/default/ip-1", capture.ctx.AffinityScopeKey)
+}
+
+type capturingScheduler struct {
+	ctx *framework.Context
+	err error
+}
+
+func (c *capturingScheduler) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
+	cloned := *ctx
+	c.ctx = &cloned
+	return c.err
+}
+
+func (c *capturingScheduler) RunPostHooks(ctx *framework.Context, index int) {}

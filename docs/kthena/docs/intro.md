@@ -13,7 +13,7 @@ Kthena enables you to deploy, manage, and scale AI models in Kubernetes environm
 ### **Multi-Backend Inference Engine**
 -   **Engine Support**: Native support for vLLM, SGLang, Triton, TorchServe inference engines with consistent Kubernetes-native APIs
 -   **Serving Patterns**: Support for both standard and disaggregated serving patterns across heterogeneous hardware accelerators
--   **Advanced Load Balancing**: Pluggable scheduling algorithms including least request, least latency, random, LoRA affinity, prefix-cache, KV-cache and PD Groups aware routing
+-   **Advanced Load Balancing**: Pluggable scheduling algorithms including least request, least latency, random, session-affinity, LoRA affinity, prefix-cache, KV-cache and PD Groups aware routing
 -   **Traffic Management**: Supports canary releases, weighted traffic distribution, token-based rate limiting, and automated failover policies
 -   **LoRA Adapter Management**: Dynamic LoRA adapter routing and management without service interruption
 -   **Rolling Updates**: Zero-downtime model updates with configurable rollout strategies
