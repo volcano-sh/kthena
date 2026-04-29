@@ -42,7 +42,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -51,10 +50,8 @@ import (
 )
 
 const (
-	defaultMetricsURL      = "http://127.0.0.1:8080/metrics"
-	defaultPollingInterval = 2 * time.Second
-	defaultScalingTimeout  = 3 * time.Minute
-	testDataDir            = "test/e2e/router/testdata"
+	defaultMetricsURL     = "http://127.0.0.1:8080/metrics"
+	defaultScalingTimeout = 3 * time.Minute
 )
 
 func getCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
@@ -83,31 +80,6 @@ func getHistogramCount(metrics map[string]*dto.MetricFamily, metricName string, 
 	return 0
 }
 
-func isPodReady(pod corev1.Pod) bool {
-	if pod.Status.Phase != corev1.PodRunning {
-		return false
-	}
-
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
-func waitForDeploymentReady(t *testing.T, ctx context.Context, kubeClient kubernetes.Interface, namespace, name string, replicas int32, timeout time.Duration) {
-	t.Helper()
-	err := wait.PollUntilContextTimeout(ctx, defaultPollingInterval, timeout, true, func(ctx context.Context) (bool, error) {
-		deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return false, nil
-		}
-		return deploy.Status.ReadyReplicas >= replicas, nil
-	})
-	require.NoError(t, err, "Deployment %q did not become ready after scaling to %d replicas within %v", name, replicas, timeout)
-}
-
 func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bool {
 	labelMap := make(map[string]string)
 	for _, lp := range metricLabels {
@@ -131,7 +103,7 @@ func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string
 	dynamicClient, err := dynamic.NewForConfig(config)
 	require.NoError(t, err, "Failed to create dynamic client")
 
-	redisManifestPath := filepath.Join(testDataDir, "redis-standalone.yaml")
+	redisManifestPath := filepath.Join(routercontext.TestDataDir, "redis-standalone.yaml")
 
 	redisObjects := utils.LoadUnstructuredYAMLFromFile(redisManifestPath)
 	require.NotEmpty(t, redisObjects, "Redis manifest is empty")
@@ -181,7 +153,7 @@ func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string
 
 	require.NotEmpty(t, redisDeploymentName, "Redis Deployment not found in manifest")
 
-	waitForDeploymentReady(t, ctx, kubeClient, namespace, redisDeploymentName, 1, 2*time.Minute)
+	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, redisDeploymentName, 1, 2*time.Minute)
 	t.Log("Redis is ready")
 
 	return func() {
@@ -217,7 +189,7 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 		require.NoError(t, err, "Failed to scale kthena-router deployment")
 	}
 
-	waitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, replicas, defaultScalingTimeout)
+	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, replicas, defaultScalingTimeout)
 	t.Log("kthena-router deployment is ready")
 
 	return func() {
@@ -232,38 +204,6 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 		deploy.Spec.Replicas = &originalReplicas
 		_, _ = kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{})
 	}
-}
-
-func getRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace string) []corev1.Pod {
-	t.Helper()
-	ctx := context.Background()
-	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, "kthena-router", metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get router deployment")
-
-	labelSelector := ""
-	for key, value := range deployment.Spec.Selector.MatchLabels {
-		if labelSelector != "" {
-			labelSelector += ","
-		}
-		labelSelector += key + "=" + value
-	}
-
-	pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	require.NoError(t, err, "Failed to list router pods")
-	require.NotEmpty(t, pods.Items, "No router pods found")
-
-	readyPods := make([]corev1.Pod, 0, len(pods.Items))
-	for _, pod := range pods.Items {
-		if isPodReady(pod) {
-			readyPods = append(readyPods, pod)
-		}
-	}
-	require.NotEmpty(t, readyPods, "No ready router pods found")
-	t.Logf("Found %d ready router pods", len(readyPods))
-
-	return readyPods
 }
 
 // setupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
@@ -296,7 +236,7 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteSimple.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -345,7 +285,7 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 func TestModelRouteMultiModelsShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
 	ctx := context.Background()
 
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteMultiModels.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteMultiModels.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -416,7 +356,7 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 
 	// Deploy ModelServing
 	t.Log("Deploying ModelServing for PD disaggregation...")
-	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing](filepath.Join(testDataDir, "ModelServing-ds1.5b-pd-disaggregation.yaml"))
+	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing](filepath.Join(routercontext.TestDataDir, "ModelServing-ds1.5b-pd-disaggregation.yaml"))
 	modelServing.Namespace = testNamespace
 	createdModelServing, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -437,7 +377,7 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 
 	// Deploy ModelServer
 	t.Log("Deploying ModelServer for PD disaggregation...")
-	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(testDataDir, "ModelServer-ds1.5b-pd-disaggregation.yaml"))
+	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-pd-disaggregation.yaml"))
 	modelServer.Namespace = testNamespace
 	createdModelServer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServer")
@@ -455,7 +395,7 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute for PD disaggregation...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRoute-ds1.5b-pd-disaggregation.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRoute-ds1.5b-pd-disaggregation.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -510,7 +450,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	t.Log("Deploying Canary ModelServers and LLM-Mock deployments...")
 
 	// Deploy Canary LLM-Mock deployments from YAML file
-	canaryDeployments := utils.LoadMultiResourceYAMLFromFile[appsv1.Deployment](filepath.Join(testDataDir, "LLM-Mock-ds1.5b-Canary.yaml"))
+	canaryDeployments := utils.LoadMultiResourceYAMLFromFile[appsv1.Deployment](filepath.Join(routercontext.TestDataDir, "LLM-Mock-ds1.5b-Canary.yaml"))
 	require.Len(t, canaryDeployments, 2, "Canary YAML should contain 2 deployments")
 
 	deploymentV1 := canaryDeployments[0]
@@ -524,21 +464,11 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	require.NoError(t, err, "Failed to create Canary deployment v2")
 
 	// Wait for deployments to be ready
-	require.Eventually(t, func() bool {
-		deployV1, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, "deepseek-r1-1-5b-v1", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		deployV2, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, "deepseek-r1-1-5b-v2", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		return deployV1.Status.ReadyReplicas == *deployV1.Spec.Replicas &&
-			deployV2.Status.ReadyReplicas == *deployV2.Spec.Replicas
-	}, 5*time.Minute, 5*time.Second, "Canary deployments should be ready")
+	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, testNamespace, "deepseek-r1-1-5b-v1", 1, 2*time.Minute)
+	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, testNamespace, "deepseek-r1-1-5b-v2", 1, 2*time.Minute)
 
 	// Deploy Canary ModelServers from YAML file
-	canaryModelServers := utils.LoadMultiResourceYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(testDataDir, "ModelServer-ds1.5b-Canary.yaml"))
+	canaryModelServers := utils.LoadMultiResourceYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-Canary.yaml"))
 	require.Len(t, canaryModelServers, 2, "Canary YAML should contain 2 ModelServers")
 
 	modelServerV1 := canaryModelServers[0]
@@ -562,7 +492,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	})
 
 	// Create ModelRoute with Canary ModelServer names
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteSubset.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSubset.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -733,7 +663,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 1: Verifying input token rate limit")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithRateLimit.yaml"))
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
 		if modelRoute.Spec.RateLimit != nil {
@@ -795,7 +725,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitWindowAccuracy", func(t *testing.T) {
 		t.Log("Test 2: Verifying rate limit window accuracy...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithRateLimit.yaml"))
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
 		if modelRoute.Spec.RateLimit != nil {
@@ -864,7 +794,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitResetMechanism", func(t *testing.T) {
 		t.Log("Test 3: Verifying rate limit reset mechanism...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithRateLimit.yaml"))
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
 		if modelRoute.Spec.RateLimit != nil {
@@ -934,7 +864,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithRateLimit.yaml"))
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
@@ -1024,7 +954,7 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 	}
 
 	buildModelRoute := func(name, modelName, redisAddr string) *networkingv1alpha1.ModelRoute {
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithGlobalRateLimit.yaml"))
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithGlobalRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		modelRoute.Name = name
 		modelRoute.Spec.ModelName = modelName
@@ -1089,7 +1019,7 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		pods := getRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+		pods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
 		require.GreaterOrEqual(t, len(pods), 3, "Need at least three router pods for global sharing test")
 
 		pf1, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[0].Name, "18080", "8080")
@@ -1214,7 +1144,7 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 
 	// Deploy ModelRoute with LoRA adapters
 	t.Log("Deploying ModelRoute with LoRA adapters...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteLora.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteLora.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -1418,7 +1348,7 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteSimple.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
@@ -1570,7 +1500,7 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 	// Deploy ModelRoute with rate limiting
 	t.Log("Deploying ModelRoute with rate limiting...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithRateLimit.yaml"))
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
