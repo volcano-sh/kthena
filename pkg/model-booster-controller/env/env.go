@@ -33,6 +33,8 @@ const (
 	HfEndpoint         = "HF_ENDPOINT"
 	MsToken            = "MS_TOKEN"
 	MsRevision         = "MS_REVISION"
+	// SkipEngineDependencyInstall disables startup-time pip install for engine connector dependencies.
+	SkipEngineDependencyInstall = "KTHENA_SKIP_ENGINE_DEPENDENCY_INSTALL"
 )
 
 // GetEnvValueOrDefault gets value of specific env, if env does not exist, return default value
