@@ -79,7 +79,7 @@ Kubernetes Service `sessionAffinity: ClientIP` only keys on **source IP** and do
 
 #### `ModelRoute` API
 
-In Go/OpenAPI terms, **`sessionSticky` is a pointer to `SessionStickySpec`** (JSON **`omitempty` / YAML absence or `null`**). **Nil/omitted** = session sticky off; **non-nil** = on for that route. No `enabled` boolean: presence encodes the switch.
+In Go/OpenAPI terms, **`sessionSticky` is a pointer to `SessionSticky`** (JSON **`omitempty` / YAML absence or `null`**). **Nil/omitted** = session sticky off; **non-nil** = on for that route. No `enabled` boolean: presence encodes the switch.
 
 | Field | Purpose |
 |-------|---------|
