@@ -289,6 +289,26 @@ func TestGetCorrectedInstances(t *testing.T) {
 			expectedCorrected: 5,
 		},
 		{
+			// Without the `pastSample > 0` guard, a zero past sample would make
+			// the relative constraint 0 and clamp corrected to 0 — leaving the
+			// system stuck at zero replicas during a scale-up.
+			name: "when panic and past sample is zero then guard skips constraint and recommended is used",
+			args: CorrectedInstancesAlgorithm{
+				IsPanic: true,
+				History: func() *History {
+					h := emptyHistory()
+					h.MinCorrectedForPanic.Append(0)
+					return h
+				}(),
+				Behavior:             makeBehavior(2, 20, v1alpha1.SelectPolicyOr, 2, 100, v1alpha1.SelectPolicyOr, 100),
+				MinInstances:         0,
+				MaxInstances:         100,
+				CurrentInstances:     0,
+				RecommendedInstances: 5,
+			},
+			expectedCorrected: 5,
+		},
+		{
 			name: "when panic and recommended is below current then corrected is at least current",
 			args: CorrectedInstancesAlgorithm{
 				IsPanic:              true,
