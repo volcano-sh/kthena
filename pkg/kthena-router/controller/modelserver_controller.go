@@ -39,6 +39,7 @@ import (
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/networking/v1alpha1"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scalefromzero"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -70,12 +71,14 @@ type ModelServerController struct {
 	workqueue   workqueue.TypedRateLimitingInterface[QueueItem]
 	initialSync *atomic.Bool
 	store       datastore.Store
+	sfzManager  *scalefromzero.Manager
 }
 
 func NewModelServerController(
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
+	sfzManager *scalefromzero.Manager,
 ) *ModelServerController {
 	modelServerInformer := kthenaInformerFactory.Networking().V1alpha1().ModelServers()
 	podInformer := kubeInformerFactory.Core().V1().Pods()
@@ -88,6 +91,7 @@ func NewModelServerController(
 		workqueue:         workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueItem]()),
 		initialSync:       &atomic.Bool{},
 		store:             store,
+		sfzManager:        sfzManager,
 	}
 
 	// Register ModelServer event handlers
@@ -185,6 +189,9 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 	ms, err := c.modelServerLister.ModelServers(namespace).Get(name)
 	if errors.IsNotFound(err) {
 		_ = c.store.DeleteModelServer(types.NamespacedName{Namespace: namespace, Name: name})
+		if c.sfzManager != nil {
+			c.sfzManager.DeleteModelServerMapping(namespace, name)
+		}
 		return nil
 	}
 	if err != nil {
@@ -243,6 +250,42 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 
 		if err := c.store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
 			klog.Warningf("failed to add new pod %s/%s to data store: %v", pod.Namespace, pod.Name, err)
+		}
+	}
+
+	if c.sfzManager != nil {
+		modelServingName := ""
+		if ms.Spec.WorkloadSelector != nil && ms.Spec.WorkloadSelector.MatchLabels != nil {
+			modelServingName = ms.Spec.WorkloadSelector.MatchLabels["modelserving.volcano.sh/name"]
+		}
+
+		for _, pod := range podList {
+			if !isPodReady(pod) {
+				continue
+			}
+			if name, ok := pod.Labels["modelserving.volcano.sh/name"]; ok {
+				modelServingName = name
+				break
+			}
+		}
+
+		if modelServingName != "" {
+			c.sfzManager.SetModelServerMapping(namespace, name, modelServingName)
+		}
+
+		if len(podList) > 0 {
+			readyPods := make([]*datastore.PodInfo, 0, len(podList))
+			for _, pod := range podList {
+				if isPodReady(pod) {
+					podInfo := c.store.GetPodInfo(utils.GetNamespaceName(pod))
+					if podInfo != nil {
+						readyPods = append(readyPods, podInfo)
+					}
+				}
+			}
+			if len(readyPods) > 0 {
+				c.sfzManager.OnPodsAvailable(namespace, name, readyPods, ms)
+			}
 		}
 	}
 

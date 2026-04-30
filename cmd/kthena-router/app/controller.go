@@ -40,6 +40,7 @@ import (
 	kthenaInformers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/controller"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scalefromzero"
 )
 
 type Controller interface {
@@ -52,7 +53,7 @@ type aggregatedController struct {
 
 var _ Controller = &aggregatedController{}
 
-func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int) Controller {
+func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int) (Controller, *scalefromzero.Manager) {
 	cfg, err := clientcmd.BuildConfigFromFlags("", "")
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
@@ -78,13 +79,17 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := kthenaInformers.NewSharedInformerFactory(kthenaClient, 0)
 
+	bindingInformer := kthenaInformerFactory.Workload().V1alpha1().AutoscalingPolicyBindings()
+	sfzManager := scalefromzero.NewManager(kthenaClient, bindingInformer.Lister())
+
 	modelRouteController := controller.NewModelRouteController(kthenaInformerFactory, store)
-	modelServerController := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+	modelServerController := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store, sfzManager)
 
 	cacheSyncs := []cache.InformerSynced{
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().HasSynced,
 		kubeInformerFactory.Core().V1().Pods().Informer().HasSynced,
+		bindingInformer.Informer().HasSynced,
 	}
 
 	var gatewayInformerFactory gatewayinformers.SharedInformerFactory
@@ -138,6 +143,8 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		klog.Fatalf("Failed to sync informer caches")
 	}
 
+	sfzManager.RefreshBindingCache()
+
 	controllers := []Controller{modelRouteController, modelServerController}
 
 	go func() {
@@ -180,7 +187,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 
 	return &aggregatedController{
 		controllers: controllers,
-	}
+	}, sfzManager
 }
 
 func (c *aggregatedController) HasSynced() bool {

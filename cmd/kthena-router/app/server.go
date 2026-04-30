@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scalefromzero"
 )
 
 type Server struct {
@@ -63,7 +64,12 @@ func (s *Server) Run(ctx context.Context) {
 	// must be run before the controller, because it will register callbacks
 	r := NewRouter(store)
 	// start controller
-	s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst)
+	var sfzManager *scalefromzero.Manager
+	s.controllers, sfzManager = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst)
+
+	if sfzManager != nil {
+		r.SetScaleFromZeroManager(sfzManager)
+	}
 
 	// Start store's periodic update loop after controllers have synced
 	if !cache.WaitForCacheSync(ctx.Done(), s.controllers.HasSynced) {
