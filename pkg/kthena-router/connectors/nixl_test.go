@@ -17,9 +17,12 @@ limitations under the License.
 package connectors
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -373,4 +376,89 @@ func TestNIXLConnectorProxy(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestNIXLConnectorRetryBodyNotDrained checks that calling Proxy() twice on the
+// same connector instance (as proxyToPDDisaggregated does during retries) sends
+// a non-empty body to the prefill backend on both attempts.
+func TestNIXLConnectorRetryBodyNotDrained(t *testing.T) {
+	var callCount int32
+	var bodyLengths [2]int64
+
+	// prefill server records body size for each call and returns valid kv_transfer_params
+	prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := atomic.AddInt32(&callCount, 1) - 1
+		body, _ := io.ReadAll(r.Body)
+		if idx < 2 {
+			bodyLengths[idx] = int64(len(body))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"kv_transfer_params": nil})
+	}))
+	defer prefillServer.Close()
+
+	connector := NewNIXLConnector()
+
+	reqBody := map[string]interface{}{
+		"model":      "test-model",
+		"max_tokens": 100,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hello"},
+		},
+	}
+
+	makeCtx := func() *gin.Context {
+		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
+		return c
+	}
+
+	prefillAddr := prefillServer.Listener.Addr().String()
+	decodeAddr := "127.0.0.1:1" // nothing listening here; decode will fail
+
+	// First call — simulates retry iteration 0
+	connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr)
+	// Second call — simulates retry iteration 1 on the same connector instance
+	connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr)
+
+	if bodyLengths[0] == 0 {
+		t.Error("first Proxy call sent empty body to prefill backend")
+	}
+	if bodyLengths[1] == 0 {
+		t.Error("second Proxy call sent empty body to prefill backend — request body was drained and reused")
+	}
+}
+
+// TestNIXLConnectorReqBodyNotMutated checks that Proxy() does not mutate the
+// caller's reqBody map. proxyToPDDisaggregated passes the same modelRequest
+// across all retry iterations, so mutations would bleed between retries.
+func TestNIXLConnectorReqBodyNotMutated(t *testing.T) {
+	connector := NewNIXLConnector()
+
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+
+	reqBody := map[string]interface{}{
+		"model":      "test-model",
+		"max_tokens": 100,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hello"},
+		},
+	}
+
+	// snapshot keys present before
+	keysBefore := make(map[string]struct{})
+	for k := range reqBody {
+		keysBefore[k] = struct{}{}
+	}
+
+	connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2")
+
+	for k := range reqBody {
+		if _, existed := keysBefore[k]; !existed {
+			t.Errorf("Proxy() mutated caller reqBody by adding key %q", k)
+		}
+	}
 }
