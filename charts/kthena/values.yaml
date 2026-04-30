@@ -81,6 +81,34 @@ networking:
       # -- Enable Gateway API Inference Extension features.<br/>
       # Requires `gatewayAPI.enabled` to be true.
       inferenceExtension: false
+    metrics:
+      serviceMonitor:
+        # -- Enable ServiceMonitor for kthena-router (requires Prometheus Operator).
+        enabled: false
+        # -- Scrape interval for the ServiceMonitor.
+        interval: 15s
+      podMonitor:
+        # -- Enable PodMonitor for inference pods (requires Prometheus Operator).
+        enabled: false
+        # -- Scrape interval for the PodMonitor.
+        interval: 15s
+    autoscaling:
+      # -- Enable KEDA ScaledObject for inference autoscaling (requires KEDA).
+      enabled: false
+      # -- Name of the Deployment to scale.
+      scaleTargetName: ""
+      # -- Prometheus server URL for KEDA to query.
+      prometheusAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+      # -- PromQL query for scaling decisions.
+      query: sum(kthena_router_active_downstream_requests)
+      # -- Per-pod metric threshold that triggers scaling.
+      threshold: 5
+      # -- Seconds to wait before scaling down.
+      cooldownPeriod: 30
+      # -- Minimum inference replicas.
+      minReplicas: 1
+      # -- Maximum inference replicas.
+      maxReplicas: 10
 
 global:
   # -- Certificate Management Mode.<br/>
