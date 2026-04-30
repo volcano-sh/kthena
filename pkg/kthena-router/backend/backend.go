@@ -18,6 +18,7 @@ package backend
 
 import (
 	"fmt"
+	"sync"
 
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
@@ -34,9 +35,24 @@ type MetricsProvider interface {
 	GetHistogramPodMetrics(allMetrics map[string]*dto.MetricFamily, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
 }
 
-var engineRegistry = map[string]MetricsProvider{
-	"SGLang": sglang.NewSglangEngine(),
-	"vLLM":   vllm.NewVllmEngine(),
+var (
+	engineRegistryMu sync.RWMutex
+	engineRegistries = buildEngineRegistries(0, 0)
+)
+
+func buildEngineRegistries(sglangMetricPort, vllmMetricPort uint32) map[string]MetricsProvider {
+	return map[string]MetricsProvider{
+		"SGLang": sglang.NewSglangEngine(sglangMetricPort),
+		"vLLM":   vllm.NewVllmEngine(vllmMetricPort),
+	}
+}
+
+// ConfigureEngineRegistry rebuilds engine providers with configured ports.
+// Zero-valued or invalid ports are handled by each engine constructor fallback logic.
+func ConfigureEngineRegistry(sglangMetricPort, vllmMetricPort uint32) {
+	engineRegistryMu.Lock()
+	defer engineRegistryMu.Unlock()
+	engineRegistries = buildEngineRegistries(sglangMetricPort, vllmMetricPort)
 }
 
 func GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
@@ -65,7 +81,9 @@ func GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]
 }
 
 func GetMetricsProvider(engine string) (MetricsProvider, error) {
-	if provider, exists := engineRegistry[engine]; exists {
+	engineRegistryMu.RLock()
+	defer engineRegistryMu.RUnlock()
+	if provider, exists := engineRegistries[engine]; exists {
 		return provider, nil
 	}
 	return nil, fmt.Errorf("unsupported engine: %s", engine)
