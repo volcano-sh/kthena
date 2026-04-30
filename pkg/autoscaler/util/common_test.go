@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -29,9 +30,8 @@ func TestGetCurrentTimestamp(t *testing.T) {
 	got := GetCurrentTimestamp()
 	after := time.Now().UnixMilli()
 
-	if got < before || got > after {
-		t.Errorf("GetCurrentTimestamp() = %d, want in range [%d, %d]", got, before, after)
-	}
+	assert.GreaterOrEqual(t, got, before)
+	assert.LessOrEqual(t, got, after)
 }
 
 func TestSecondToTimestamp(t *testing.T) {
@@ -40,34 +40,15 @@ func TestSecondToTimestamp(t *testing.T) {
 		seconds int64
 		wantMs  int64
 	}{
-		{
-			name:    "zero seconds",
-			seconds: 0,
-			wantMs:  0,
-		},
-		{
-			name:    "one second",
-			seconds: 1,
-			wantMs:  1000,
-		},
-		{
-			name:    "one minute",
-			seconds: 60,
-			wantMs:  60000,
-		},
-		{
-			name:    "negative seconds",
-			seconds: -5,
-			wantMs:  -5000,
-		},
+		{"zero seconds", 0, 0},
+		{"one second", 1, 1000},
+		{"one minute", 60, 60000},
+		{"negative seconds", -5, -5000},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := SecondToTimestamp(tt.seconds)
-			if got != tt.wantMs {
-				t.Errorf("SecondToTimestamp(%d) = %d, want %d", tt.seconds, got, tt.wantMs)
-			}
+			assert.Equal(t, tt.wantMs, SecondToTimestamp(tt.seconds))
 		})
 	}
 }
@@ -78,49 +59,18 @@ func TestIsRequestSuccess(t *testing.T) {
 		statusCode int
 		want       bool
 	}{
-		{
-			name:       "200 OK",
-			statusCode: 200,
-			want:       true,
-		},
-		{
-			name:       "204 No Content",
-			statusCode: 204,
-			want:       true,
-		},
-		{
-			name:       "299 upper boundary of 2xx",
-			statusCode: 299,
-			want:       true,
-		},
-		{
-			name:       "199 just below 2xx",
-			statusCode: 199,
-			want:       false,
-		},
-		{
-			name:       "300 Redirect",
-			statusCode: 300,
-			want:       false,
-		},
-		{
-			name:       "404 Not Found",
-			statusCode: 404,
-			want:       false,
-		},
-		{
-			name:       "500 Internal Server Error",
-			statusCode: 500,
-			want:       false,
-		},
+		{"200 OK", 200, true},
+		{"204 No Content", 204, true},
+		{"299 upper boundary of 2xx", 299, true},
+		{"199 just below 2xx", 199, false},
+		{"300 Redirect", 300, false},
+		{"404 Not Found", 404, false},
+		{"500 Internal Server Error", 500, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsRequestSuccess(tt.statusCode)
-			if got != tt.want {
-				t.Errorf("IsRequestSuccess(%d) = %v, want %v", tt.statusCode, got, tt.want)
-			}
+			assert.Equal(t, tt.want, IsRequestSuccess(tt.statusCode))
 		})
 	}
 }
@@ -135,9 +85,7 @@ func TestIsPodFailed(t *testing.T) {
 	}{
 		{
 			name: "pod with failed phase",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{Phase: corev1.PodFailed},
-			},
+			pod:  &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
 			want: true,
 		},
 		{
@@ -158,93 +106,59 @@ func TestIsPodFailed(t *testing.T) {
 		},
 		{
 			name: "running pod without deletion timestamp",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{Phase: corev1.PodRunning},
-			},
+			pod:  &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}},
 			want: false,
 		},
 		{
 			name: "pending pod",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{Phase: corev1.PodPending},
-			},
+			pod:  &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
 			want: false,
 		},
 		{
 			name: "succeeded pod",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
-			},
+			pod:  &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 			want: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsPodFailed(tt.pod)
-			if got != tt.want {
-				t.Errorf("IsPodFailed() = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, IsPodFailed(tt.pod))
 		})
 	}
 }
 
 func TestExtractKeysToSet(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    map[string]int
-		wantKeys []string
+		name  string
+		input map[string]int
+		want  map[string]struct{}
 	}{
 		{
-			name:     "empty map returns empty set",
-			input:    map[string]int{},
-			wantKeys: []string{},
+			name:  "empty map returns empty set",
+			input: map[string]int{},
+			want:  map[string]struct{}{},
 		},
 		{
-			name:     "single entry",
-			input:    map[string]int{"a": 1},
-			wantKeys: []string{"a"},
+			name:  "single entry",
+			input: map[string]int{"a": 1},
+			want:  map[string]struct{}{"a": {}},
 		},
 		{
-			name:     "multiple entries - all keys present",
-			input:    map[string]int{"x": 10, "y": 20, "z": 30},
-			wantKeys: []string{"x", "y", "z"},
+			name:  "multiple entries",
+			input: map[string]int{"x": 10, "y": 20, "z": 30},
+			want:  map[string]struct{}{"x": {}, "y": {}, "z": {}},
 		},
 		{
-			name:     "values are ignored - only keys matter",
-			input:    map[string]int{"k": 0, "m": -1},
-			wantKeys: []string{"k", "m"},
+			name:  "values are ignored",
+			input: map[string]int{"k": 0, "m": -1},
+			want:  map[string]struct{}{"k": {}, "m": {}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractKeysToSet(tt.input)
-
-			if len(got) != len(tt.wantKeys) {
-				t.Errorf("ExtractKeysToSet() len = %d, want %d", len(got), len(tt.wantKeys))
-				return
-			}
-
-			for _, key := range tt.wantKeys {
-				if _, ok := got[key]; !ok {
-					t.Errorf("ExtractKeysToSet() missing key %q in result", key)
-				}
-			}
-
-			// Verify no extra keys were added
-			for key := range got {
-				found := false
-				for _, wantKey := range tt.wantKeys {
-					if key == wantKey {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("ExtractKeysToSet() unexpected key %q in result", key)
-				}
-			}
+			assert.Equal(t, tt.want, ExtractKeysToSet(tt.input))
 		})
 	}
 }

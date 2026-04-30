@@ -49,16 +49,9 @@ func TestDownloaderImage(t *testing.T) {
 }
 
 func TestSetDownloaderImage(t *testing.T) {
-	t.Run("set custom image is reflected by getter", func(t *testing.T) {
-		p := &ParseConfig{}
-		p.SetDownloaderImage("registry/downloader:latest")
-		assert.Equal(t, "registry/downloader:latest", p.DownloaderImage())
-	})
-
-	t.Run("getter returns default when stored image is empty", func(t *testing.T) {
-		p := &ParseConfig{}
-		assert.Equal(t, DefaultDownloaderImage, p.DownloaderImage())
-	})
+	p := &ParseConfig{}
+	p.SetDownloaderImage("registry/downloader:latest")
+	assert.Equal(t, "registry/downloader:latest", p.DownloaderImage())
 }
 
 func TestRuntimeImage(t *testing.T) {
@@ -88,14 +81,7 @@ func TestRuntimeImage(t *testing.T) {
 }
 
 func TestSetRuntimeImage(t *testing.T) {
-	t.Run("set custom image is reflected by getter", func(t *testing.T) {
-		p := &ParseConfig{}
-		p.SetRuntimeImage("registry/runtime:latest")
-		assert.Equal(t, "registry/runtime:latest", p.RuntimeImage())
-	})
-
-	t.Run("getter returns default when stored image is empty", func(t *testing.T) {
-		p := &ParseConfig{}
-		assert.Equal(t, DefaultRuntimeImage, p.RuntimeImage())
-	})
+	p := &ParseConfig{}
+	p.SetRuntimeImage("registry/runtime:latest")
+	assert.Equal(t, "registry/runtime:latest", p.RuntimeImage())
 }
