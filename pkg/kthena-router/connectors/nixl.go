@@ -61,13 +61,9 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	req := c.Request
-	if n.prefillRequest == nil {
-		prefillBody := cloneReqBody(reqBody)
-		n.prefillRequest = n.buildPrefillRequest(req, prefillBody)
-	}
-	if n.decodeRequestBody == nil {
-		n.decodeRequestBody = addTokenUsage(c, reqBody)
-	}
+	prefillBody := cloneReqBody(reqBody)
+	n.prefillRequest = n.buildPrefillRequest(req, prefillBody)
+	n.decodeRequestBody = addTokenUsage(c, reqBody)
 
 	// Start prefill phase metrics and increment upstream request
 	if metricsRecorder != nil {
