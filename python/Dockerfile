@@ -1,5 +1,4 @@
 FROM python:3.12-slim AS downloader
-
 RUN apt-get update && \
     apt-get install -y curl unzip rsync && \
     apt-get clean && \
@@ -52,4 +51,4 @@ COPY kthena/runtime/ ./kthena/runtime/
 RUN pip install --no-cache-dir -r kthena/runtime/requirements.txt
 ENV PYTHONPATH="/app"
 # Default to runtime, but can override with command
-ENTRYPOINT ["python","kthena/runtime/app.py"]
+ENTRYPOINT ["python", "kthena/runtime/app.py"]
