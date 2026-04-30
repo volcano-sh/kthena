@@ -27,7 +27,7 @@ import (
 // neverExpireMs must stay well below MaxInt64/2 because LineChartSlidingWindow
 // internally computes maxDriftingMilliseconds = 2 * freshMilliseconds; overflow
 // would cause drifting values to expire immediately.
-const neverExpireMs = int64(1e15)
+const neverExpireMs = int64(1e15) // ~31,700 years in milliseconds
 
 func int32Ptr(v int32) *int32 { return &v }
 
@@ -274,6 +274,19 @@ func TestGetCorrectedInstances(t *testing.T) {
 				RecommendedInstances: 30,
 			},
 			expectedCorrected: 12,
+		},
+		{
+			name: "when panic and current instances is zero then percentage floor does not block scale up",
+			args: CorrectedInstancesAlgorithm{
+				IsPanic:              true,
+				History:              emptyHistory(),
+				Behavior:             makeBehavior(2, 20, v1alpha1.SelectPolicyOr, 2, 100, v1alpha1.SelectPolicyOr, 100),
+				MinInstances:         0,
+				MaxInstances:         100,
+				CurrentInstances:     0,
+				RecommendedInstances: 5,
+			},
+			expectedCorrected: 5,
 		},
 		{
 			name: "when panic and recommended is below current then corrected is at least current",
