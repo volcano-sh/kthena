@@ -1993,6 +1993,20 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	})
 }
 
+// assertPodDeleted asserts that a pod delete action was recorded by the fake client after startActions.
+func assertPodDeleted(t *testing.T, kubeClient *kubefake.Clientset, startActions int, podName string, msg string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, action := range kubeClient.Actions()[startActions:] {
+			deleteAction, ok := action.(kubetesting.DeleteAction)
+			if ok && action.Matches("delete", "pods") && deleteAction.GetName() == podName {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, msg)
+}
+
 // waitForObjectInCache waits for a specific object to appear in the cache
 func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() bool) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -5407,15 +5421,7 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	// Verify initialSync is true after syncAll
 	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
 
-	require.Eventually(t, func() bool {
-		for _, action := range kubeClient.Actions()[startActions:] {
-			deleteAction, ok := action.(kubetesting.DeleteAction)
-			if ok && action.Matches("delete", "pods") && deleteAction.GetName() == failedPod.Name {
-				return true
-			}
-		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond, "Failed pod should be deleted after syncAll processes it")
+	assertPodDeleted(t, kubeClient, startActions, failedPod.Name, "Failed pod should be deleted after syncAll processes it")
 }
 
 // TestSyncAllWithContainerRestartedPods tests that pods with restarted containers
@@ -5508,15 +5514,7 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 	// Call syncAll
 	controller.syncAll()
 
-	require.Eventually(t, func() bool {
-		for _, action := range kubeClient.Actions()[startActions:] {
-			deleteAction, ok := action.(kubetesting.DeleteAction)
-			if ok && action.Matches("delete", "pods") && deleteAction.GetName() == restartedPod.Name {
-				return true
-			}
-		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond, "Pod with restarted container should be deleted after syncAll")
+	assertPodDeleted(t, kubeClient, startActions, restartedPod.Name, "Pod with restarted container should be deleted after syncAll")
 }
 
 // TestSyncAllWithMixedPods tests that syncAll properly handles a mix of
@@ -5800,15 +5798,7 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	// Call syncAll which should now properly handle the failed pod
 	controller.syncAll()
 
-	require.Eventually(t, func() bool {
-		for _, action := range kubeClient.Actions()[startActions:] {
-			deleteAction, ok := action.(kubetesting.DeleteAction)
-			if ok && action.Matches("delete", "pods") && deleteAction.GetName() == failedPod.Name {
-				return true
-			}
-		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond,
+	assertPodDeleted(t, kubeClient, startActions, failedPod.Name,
 		"After fix: Failed pod should be deleted. "+
 			"Before fix: This would be false because updatePod returned early when initialSync=false")
 }

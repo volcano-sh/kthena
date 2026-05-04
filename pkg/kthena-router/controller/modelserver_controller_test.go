@@ -105,7 +105,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			t.Fatal("Failed to sync caches within timeout")
 		}
 
-		require.NoError(t, modelServerIndexer.Update(ms.DeepCopy()))
+		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
 		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver")
 		require.NoError(t, err)
 
@@ -146,7 +146,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, modelServerIndexer.Update(ms.DeepCopy()))
+		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
 		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
 		require.NoError(t, err)
 
@@ -207,7 +207,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, modelServerIndexer.Update(ms.DeepCopy()))
+		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
 		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
 		require.NoError(t, err)
 
