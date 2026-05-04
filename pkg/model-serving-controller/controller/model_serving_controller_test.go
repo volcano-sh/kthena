@@ -1993,6 +1993,20 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	})
 }
 
+// assertPodDeleted asserts that a pod delete action was recorded by the fake client after startActions.
+func assertPodDeleted(t *testing.T, kubeClient *kubefake.Clientset, startActions int, podName string, msg string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, action := range kubeClient.Actions()[startActions:] {
+			deleteAction, ok := action.(kubetesting.DeleteAction)
+			if ok && action.Matches("delete", "pods") && deleteAction.GetName() == podName {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, msg)
+}
+
 // waitForObjectInCache waits for a specific object to appear in the cache
 func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() bool) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -5394,6 +5408,10 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
 	assert.NoError(t, err)
 
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), failedPod.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
+	startActions := len(kubeClient.Actions())
+
 	// Verify initialSync is false before syncAll
 	assert.False(t, controller.initialSync, "initialSync should be false before syncAll")
 
@@ -5403,12 +5421,7 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	// Verify initialSync is true after syncAll
 	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
 
-	// Verify the failed pod was added to graceMap (this happens in handleErrorPod)
-	_, existsInGraceMap := controller.graceMap.Load(types.NamespacedName{
-		Namespace: ns,
-		Name:      failedPod.Name,
-	})
-	assert.True(t, existsInGraceMap, "Failed pod should be added to graceMap after syncAll processes it")
+	assertPodDeleted(t, kubeClient, startActions, failedPod.Name, "Failed pod should be deleted after syncAll processes it")
 }
 
 // TestSyncAllWithContainerRestartedPods tests that pods with restarted containers
@@ -5494,15 +5507,14 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
 	assert.NoError(t, err)
 
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), restartedPod.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
+	startActions := len(kubeClient.Actions())
+
 	// Call syncAll
 	controller.syncAll()
 
-	// Verify the restarted container pod was added to graceMap
-	_, existsInGraceMap := controller.graceMap.Load(types.NamespacedName{
-		Namespace: ns,
-		Name:      restartedPod.Name,
-	})
-	assert.True(t, existsInGraceMap, "Pod with restarted container should be added to graceMap after syncAll")
+	assertPodDeleted(t, kubeClient, startActions, restartedPod.Name, "Pod with restarted container should be deleted after syncAll")
 }
 
 // TestSyncAllWithMixedPods tests that syncAll properly handles a mix of
@@ -5649,6 +5661,14 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
 	assert.NoError(t, err)
 
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), runningPod.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), failedPod.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), restartedPod.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
+	startActions := len(kubeClient.Actions())
+
 	// Call syncAll
 	controller.syncAll()
 
@@ -5662,19 +5682,17 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	})
 	assert.False(t, runningInGraceMap, "Running pod should NOT be in graceMap")
 
-	// Verify failed pod IS in graceMap
-	_, failedInGraceMap := controller.graceMap.Load(types.NamespacedName{
-		Namespace: ns,
-		Name:      failedPod.Name,
-	})
-	assert.True(t, failedInGraceMap, "Failed pod should be in graceMap")
-
-	// Verify restarted pod IS in graceMap
-	_, restartedInGraceMap := controller.graceMap.Load(types.NamespacedName{
-		Namespace: ns,
-		Name:      restartedPod.Name,
-	})
-	assert.True(t, restartedInGraceMap, "Restarted pod should be in graceMap")
+	require.Eventually(t, func() bool {
+		deletedPods := map[string]bool{}
+		for _, action := range kubeClient.Actions()[startActions:] {
+			deleteAction, ok := action.(kubetesting.DeleteAction)
+			if !ok || !action.Matches("delete", "pods") {
+				continue
+			}
+			deletedPods[deleteAction.GetName()] = true
+		}
+		return deletedPods[failedPod.Name] && deletedPods[restartedPod.Name] && !deletedPods[runningPod.Name]
+	}, 2*time.Second, 10*time.Millisecond, "Failed and restarted pods should be deleted while the running pod remains")
 
 	// Verify all pods have their serving groups tracked
 	servingGroups, err := controller.store.GetServingGroupByModelServing(types.NamespacedName{
@@ -5766,6 +5784,10 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
 	assert.NoError(t, err)
 
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), failedPod.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
+	startActions := len(kubeClient.Actions())
+
 	// Verify before syncAll, initialSync is false
 	assert.False(t, controller.initialSync)
 
@@ -5776,14 +5798,8 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	// Call syncAll which should now properly handle the failed pod
 	controller.syncAll()
 
-	// After the fix, the failed pod should be in graceMap
-	// This proves the fix works - before the fix, this would be empty
-	_, exists := controller.graceMap.Load(types.NamespacedName{
-		Namespace: ns,
-		Name:      failedPod.Name,
-	})
-	assert.True(t, exists,
-		"After fix: Failed pod should be in graceMap. "+
+	assertPodDeleted(t, kubeClient, startActions, failedPod.Name,
+		"After fix: Failed pod should be deleted. "+
 			"Before fix: This would be false because updatePod returned early when initialSync=false")
 }
 
