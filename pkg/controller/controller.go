@@ -130,7 +130,8 @@ func SetupController(ctx context.Context, cc Config) {
 				if msc != nil {
 					msc.RegisterModelServingDebugEndpoints(&debugMux)
 				}
-				debugAddr := fmt.Sprintf(":%d", cc.DebugPort)
+				// Ensure the debug server is only accessible locally for security reasons
+				debugAddr := fmt.Sprintf("localhost:%d", cc.DebugPort)
 				klog.Infof("Starting debug server on %s", debugAddr)
 				server := &http.Server{
 					Addr:              debugAddr,
