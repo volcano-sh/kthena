@@ -193,7 +193,7 @@ func (collector *MetricCollector) processPrometheusString(metricStr string, past
 		}
 		if err != nil {
 			klog.Errorf("error decoding metric: %v", err)
-			continue
+			break
 		}
 		if len(mf.Metric) < 1 {
 			klog.Errorf("metric is invalid")
