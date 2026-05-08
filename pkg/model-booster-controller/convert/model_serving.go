@@ -69,6 +69,12 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 	if err != nil {
 		return nil, err
 	}
+	if backend.DisableGangScheduling {
+		serving.Spec.Template.GangPolicy = nil
+		if serving.Spec.SchedulerName == "volcano" {
+			serving.Spec.SchedulerName = ""
+		}
+	}
 	return serving, nil
 }
 

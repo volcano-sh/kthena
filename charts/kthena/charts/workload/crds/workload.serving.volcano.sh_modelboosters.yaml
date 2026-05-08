@@ -216,6 +216,13 @@ spec:
                       Support hostpath://, pvc://.
                     pattern: ^(hostpath://|pvc://).+
                     type: string
+                  disableGangScheduling:
+                    description: |-
+                      DisableGangScheduling disables gang scheduling for the generated ModelServing.
+                      When set to true, the gangPolicy will not be included in the ServingGroup template.
+                      If the schedulerName is "volcano", it will be cleared to ensure gang scheduling is disabled.
+                      Default is false (gangPolicy is enabled).
+                    type: boolean
                   env:
                     description: |-
                       List of environment variables to set in the container.
