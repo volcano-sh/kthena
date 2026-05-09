@@ -232,6 +232,21 @@ func TestBuildCacheVolume(t *testing.T) {
 			},
 		},
 		{
+			name: "PVC URI with extra slashes",
+			input: &workload.ModelBackend{
+				Name:     "test-backend",
+				CacheURI: "pvc:///test-pvc",
+			},
+			expected: &corev1.Volume{
+				Name: "test-backend-weights",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "test-pvc",
+					},
+				},
+			},
+		},
+		{
 			name: "HostPath URI",
 			input: &workload.ModelBackend{
 				Name:     "test-backend",
