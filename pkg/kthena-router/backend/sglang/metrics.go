@@ -48,7 +48,7 @@ var (
 	}
 
 	mapOfMetricsName = map[string]string{
-		GPUCacheUsage:     utils.GPUCacheUsage,
+		GPUCacheUsage:     utils.KVCacheCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
 		RequestRunningNum: utils.RequestRunningNum,
 		TPOT:              utils.TPOT,

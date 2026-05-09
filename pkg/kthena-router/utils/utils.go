@@ -28,7 +28,7 @@ import (
 )
 
 var (
-	GPUCacheUsage     = "gpu_usage"
+	KVCacheCacheUsage = "gpu_usage"
 	RequestWaitingNum = "request_waiting_num"
 	RequestRunningNum = "request_running_num"
 	TPOT              = "TPOT"

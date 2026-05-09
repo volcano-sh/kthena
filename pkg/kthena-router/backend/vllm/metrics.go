@@ -30,7 +30,7 @@ var (
 	KVCacheUsage      = "vllm:kv_cache_usage_perc"
 	RequestWaitingNum = "vllm:num_requests_waiting"
 	RequestRunningNum = "vllm:num_requests_running"
-	TPOT              = "vllm:inter_token_latency_seconds"
+	ITL               = "vllm:inter_token_latency_seconds"
 	TTFT              = "vllm:time_to_first_token_seconds"
 )
 
@@ -42,15 +42,15 @@ var (
 	}
 
 	HistogramMetrics = []string{
-		TPOT,
+		ITL,
 		TTFT,
 	}
 
 	mapOfMetricsName = map[string]string{
-		KVCacheUsage:      utils.GPUCacheUsage,
+		KVCacheUsage:      utils.KVCacheCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
 		RequestRunningNum: utils.RequestRunningNum,
-		TPOT:              utils.TPOT,
+		ITL:               utils.TPOT,
 		TTFT:              utils.TTFT,
 	}
 )
