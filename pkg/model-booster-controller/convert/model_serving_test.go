@@ -226,7 +226,7 @@ func TestBuildCacheVolume(t *testing.T) {
 				Name: "test-backend-weights",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "/test-pvc",
+						ClaimName: "test-pvc",
 					},
 				},
 			},

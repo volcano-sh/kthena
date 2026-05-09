@@ -432,7 +432,7 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: GetCachePath(backend.CacheURI),
+					ClaimName: strings.TrimPrefix(backend.CacheURI, CacheURIPrefixPVC),
 				},
 			},
 		}, nil
