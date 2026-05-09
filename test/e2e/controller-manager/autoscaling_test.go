@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Repo-relative path for LoadYAMLFromFile (see test/e2e/utils/config.go).
 const autoscaleTestDataRel = "test/e2e/controller-manager/testdata"
 
 // TestAutoscalingPolicyLifecycle uses fixed AutoscalingPolicy targets in testdata/ (no metrics scrape).
@@ -59,10 +58,9 @@ func TestAutoscalingPolicyLifecycle(t *testing.T) {
 
 	utils.WaitForModelServingSpecReplicas(t, ctx, kthenaClient, testNamespace, ms.Name, 1, 8*time.Minute)
 
-	policyScaleUp := utils.LoadYAMLFromFile[workload.AutoscalingPolicy](filepath.Join(autoscaleTestDataRel, "autoscaling-policy-e2e-sglang-policy-lifecycle-scaleup.yaml"))
 	updatedPol, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Get(ctx, policy.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	updatedPol.Spec.Metrics[0].TargetValue = policyScaleUp.Spec.Metrics[0].TargetValue
+	updatedPol.Spec.Metrics[0].TargetValue = resource.MustParse("100m")
 	_, err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Update(ctx, updatedPol, metav1.UpdateOptions{})
 	require.NoError(t, err, "update AutoscalingPolicy for scale-up")
 
@@ -109,10 +107,9 @@ func TestAutoscalingPolicyBindingLifecycle(t *testing.T) {
 		return apierrors.IsNotFound(err)
 	}, 2*time.Minute, 3*time.Second, "first binding should be deleted")
 
-	policyScaleUp := utils.LoadYAMLFromFile[workload.AutoscalingPolicy](filepath.Join(autoscaleTestDataRel, "autoscaling-policy-e2e-sglang-binding-lifecycle-scaleup.yaml"))
 	updatedPol, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Get(ctx, policy.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	updatedPol.Spec.Metrics[0].TargetValue = policyScaleUp.Spec.Metrics[0].TargetValue
+	updatedPol.Spec.Metrics[0].TargetValue = resource.MustParse("100m")
 	_, err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Update(ctx, updatedPol, metav1.UpdateOptions{})
 	require.NoError(t, err, "update AutoscalingPolicy for scale-up")
 
