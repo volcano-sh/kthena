@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/framework"
+	"github.com/volcano-sh/kthena/test/e2e/router"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -409,6 +410,12 @@ func TestGatewayCreatedLaterThanHTTPRoute(t *testing.T) {
 
 	t.Log("Verifying HTTPRoute is processed after Gateway creation...")
 	utils.CheckChatCompletionsWithURL(t, "http://127.0.0.1:9081/v1/chat/completions", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", []utils.ChatMessage{utils.NewChatMessage("user", "Hello late gateway")})
+}
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+func TestRouterConfigUpdate(t *testing.T) {
+	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
 func ptr[T any](v T) *T { return &v }
