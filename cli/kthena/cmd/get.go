@@ -29,6 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
+
+	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
 var (
@@ -243,6 +245,44 @@ func resolveGetNamespace() string {
 	return "default"
 }
 
+// getModelServingStatus derives a human-readable status from ModelServing conditions.
+func getModelServingStatus(conditions []metav1.Condition) string {
+	for _, c := range conditions {
+		if c.Type == string(workload.ModelServingAvailable) && c.Status == metav1.ConditionTrue {
+			return "Available"
+		}
+	}
+	for _, c := range conditions {
+		if c.Type == string(workload.ModelServingProgressing) && c.Status == metav1.ConditionTrue {
+			return "Progressing"
+		}
+		if c.Type == string(workload.ModelServingUpdateInProgress) && c.Status == metav1.ConditionTrue {
+			return "Updating"
+		}
+	}
+	return "Unknown"
+}
+
+// getModelBoosterStatus derives a human-readable status from ModelBooster conditions.
+func getModelBoosterStatus(conditions []metav1.Condition) string {
+	for _, c := range conditions {
+		if c.Type == string(workload.ModelStatusConditionTypeFailed) && c.Status == metav1.ConditionTrue {
+			return "Failed"
+		}
+	}
+	for _, c := range conditions {
+		if c.Type == string(workload.ModelStatusConditionTypeActive) && c.Status == metav1.ConditionTrue {
+			return "Active"
+		}
+	}
+	for _, c := range conditions {
+		if c.Type == string(workload.ModelStatusConditionTypeInitialized) && c.Status == metav1.ConditionTrue {
+			return "Initialized"
+		}
+	}
+	return "Unknown"
+}
+
 func runGetModelBoosters(cmd *cobra.Command, args []string) error {
 	client, err := getKthenaClient()
 	if err != nil {
@@ -287,19 +327,20 @@ func runGetModelBoosters(cmd *cobra.Command, args []string) error {
 	// Print header
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	if getAllNamespaces {
-		fmt.Fprintln(w, "NAMESPACE\tNAME\tAGE")
+		fmt.Fprintln(w, "NAMESPACE\tNAME\tSTATUS\tAGE")
 	} else {
-		fmt.Fprintln(w, "NAME\tAGE")
+		fmt.Fprintln(w, "NAME\tSTATUS\tAGE")
 	}
 
 	// Print matching Models
 	for _, model := range models.Items {
 		if nameFilter == "" || strings.Contains(strings.ToLower(model.Name), strings.ToLower(nameFilter)) {
 			age := time.Since(model.CreationTimestamp.Time).Truncate(time.Second)
+			status := getModelBoosterStatus(model.Status.Conditions)
 			if getAllNamespaces {
-				fmt.Fprintf(w, "%s\t%s\t%s\n", model.Namespace, model.Name, age)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", model.Namespace, model.Name, status, age)
 			} else {
-				fmt.Fprintf(w, "%s\t%s\n", model.Name, age)
+				fmt.Fprintf(w, "%s\t%s\t%s\n", model.Name, status, age)
 			}
 		}
 	}
@@ -341,13 +382,14 @@ func runGetModelServings(cmd *cobra.Command, args []string) error {
 	// Print ModelServings
 	for _, ms := range modelServingList.Items {
 		age := time.Since(ms.CreationTimestamp.Time).Truncate(time.Second)
+		ready := fmt.Sprintf("%d/%d", ms.Status.AvailableReplicas, ms.Status.Replicas)
+		status := getModelServingStatus(ms.Status.Conditions)
 		if getAllNamespaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", ms.Namespace, ms.Name, age)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ms.Namespace, ms.Name, ready, status, age)
 		} else {
-			fmt.Fprintf(w, "%s\t%s\n", ms.Name, age)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", ms.Name, ready, status, age)
 		}
 	}
-
 	return w.Flush()
 }
 
