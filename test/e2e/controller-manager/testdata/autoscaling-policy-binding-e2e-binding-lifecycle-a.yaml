@@ -1,0 +1,17 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: autoscale-binding-lifecycle-a
+spec:
+  policyRef:
+    name: autoscale-binding-lifecycle-pol
+  homogeneousTarget:
+    minReplicas: 1
+    maxReplicas: 5
+    target:
+      targetRef:
+        kind: ModelServing
+        name: autoscale-binding-lifecycle-ms
+      metricEndpoint:
+        port: 30000
+        uri: /metrics

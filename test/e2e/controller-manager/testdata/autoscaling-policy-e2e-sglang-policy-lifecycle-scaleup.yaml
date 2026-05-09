@@ -1,0 +1,31 @@
+# Same AutoscalingPolicy as autoscaling-policy-e2e-sglang-policy-lifecycle.yaml but with a low
+# targetValue to drive scale-up after replicas have been reduced (see model-serving fixture comment).
+
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicy
+metadata:
+  name: autoscale-policy-lifecycle-pol
+spec:
+  tolerancePercent: 50
+  metrics:
+    - metricName: sglang:token_usage
+      targetValue: "100m"
+  behavior:
+    scaleDown:
+      period: 5s
+      stabilizationWindow: 0s
+      instances: 10
+      percent: 100
+      selectPolicy: Or
+    scaleUp:
+      stablePolicy:
+        period: 5s
+        stabilizationWindow: 0s
+        instances: 10
+        percent: 100
+        selectPolicy: Or
+      panicPolicy:
+        period: 1s
+        percent: 1000
+        panicThresholdPercent: 200
+        panicModeHold: 0s

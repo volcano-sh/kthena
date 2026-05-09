@@ -1,0 +1,31 @@
+# AutoscalingPolicy for binding lifecycle e2e. Large targetValue drives scale-down first.
+# Scale-up target lives in autoscaling-policy-e2e-sglang-binding-lifecycle-scaleup.yaml.
+
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicy
+metadata:
+  name: autoscale-binding-lifecycle-pol
+spec:
+  tolerancePercent: 50
+  metrics:
+    - metricName: sglang:token_usage
+      targetValue: "1000000000000000"
+  behavior:
+    scaleDown:
+      period: 5s
+      stabilizationWindow: 0s
+      instances: 10
+      percent: 100
+      selectPolicy: Or
+    scaleUp:
+      stablePolicy:
+        period: 5s
+        stabilizationWindow: 0s
+        instances: 10
+        percent: 100
+        selectPolicy: Or
+      panicPolicy:
+        period: 1s
+        percent: 1000
+        panicThresholdPercent: 200
+        panicModeHold: 0s
