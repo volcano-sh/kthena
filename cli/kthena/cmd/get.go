@@ -253,11 +253,13 @@ func getModelServingStatus(conditions []metav1.Condition) string {
 		}
 	}
 	for _, c := range conditions {
-		if c.Type == string(workload.ModelServingProgressing) && c.Status == metav1.ConditionTrue {
-			return "Progressing"
-		}
 		if c.Type == string(workload.ModelServingUpdateInProgress) && c.Status == metav1.ConditionTrue {
 			return "Updating"
+		}
+	}
+	for _, c := range conditions {
+		if c.Type == string(workload.ModelServingProgressing) && c.Status == metav1.ConditionTrue {
+			return "Progressing"
 		}
 	}
 	return "Unknown"
@@ -374,9 +376,9 @@ func runGetModelServings(cmd *cobra.Command, args []string) error {
 	// Print header
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	if getAllNamespaces {
-		fmt.Fprintln(w, "NAMESPACE\tNAME\tAGE")
+		fmt.Fprintln(w, "NAMESPACE\tNAME\tREADY\tSTATUS\tAGE")
 	} else {
-		fmt.Fprintln(w, "NAME\tAGE")
+		fmt.Fprintln(w, "NAME\tREADY\tSTATUS\tAGE")
 	}
 
 	// Print ModelServings
