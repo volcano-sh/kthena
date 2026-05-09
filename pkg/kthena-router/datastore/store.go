@@ -48,7 +48,7 @@ import (
 
 var (
 	metricsName = []string{
-		utils.KVCacheCacheUsage,
+		utils.KVCacheUsage,
 		utils.RequestWaitingNum,
 		utils.RequestRunningNum,
 		utils.TPOT,
@@ -1211,7 +1211,7 @@ func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
 	podinfo.mutex.Lock()
 	defer podinfo.mutex.Unlock()
 	updateFuncs := map[string]func(float64){
-		utils.KVCacheCacheUsage: func(f float64) {
+		utils.KVCacheUsage: func(f float64) {
 			podinfo.GPUCacheUsage = f
 		},
 		utils.RequestWaitingNum: func(f float64) {

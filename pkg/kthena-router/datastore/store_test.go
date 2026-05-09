@@ -194,7 +194,7 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 		podRuntimeInspector: &fakePodRuntimeInspector{
 			metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 				return map[string]float64{
-						utils.KVCacheCacheUsage: 0.8,
+						utils.KVCacheUsage:      0.8,
 						utils.RequestWaitingNum: 15,
 						utils.RequestRunningNum: 10,
 						utils.TPOT:              120,
@@ -1520,7 +1520,7 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 		{
 			name: "pod label update preserves all gauge metrics",
 			initialMetrics: map[string]float64{
-				utils.KVCacheCacheUsage: 0.75,
+				utils.KVCacheUsage:      0.75,
 				utils.RequestWaitingNum: 8,
 				utils.RequestRunningNum: 12,
 				utils.TPOT:              0.03,
@@ -1540,7 +1540,7 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 		{
 			name: "pod update preserves histogram metrics",
 			initialMetrics: map[string]float64{
-				utils.KVCacheCacheUsage: 0.5,
+				utils.KVCacheUsage:      0.5,
 				utils.RequestWaitingNum: 3,
 				utils.RequestRunningNum: 7,
 				utils.TPOT:              0.02,
@@ -1563,7 +1563,7 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 		{
 			name: "pod update with zero initial metrics preserves zeros",
 			initialMetrics: map[string]float64{
-				utils.KVCacheCacheUsage: 0,
+				utils.KVCacheUsage:      0,
 				utils.RequestWaitingNum: 0,
 				utils.RequestRunningNum: 0,
 			},
@@ -1581,7 +1581,7 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 		{
 			name: "pod update with high load preserves high metrics",
 			initialMetrics: map[string]float64{
-				utils.KVCacheCacheUsage: 0.99,
+				utils.KVCacheUsage:      0.99,
 				utils.RequestWaitingNum: 50,
 				utils.RequestRunningNum: 100,
 				utils.TPOT:              0.08,
@@ -1669,7 +1669,7 @@ func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
 	inspector := &fakePodRuntimeInspector{
 		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 			return map[string]float64{
-				utils.KVCacheCacheUsage: 0.3,
+				utils.KVCacheUsage:      0.3,
 				utils.RequestRunningNum: 2,
 			}, map[string]*dto.Histogram{}
 		},
@@ -1698,7 +1698,7 @@ func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {
 	inspector := &fakePodRuntimeInspector{
 		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 			return map[string]float64{
-				utils.KVCacheCacheUsage: 0.6,
+				utils.KVCacheUsage:      0.6,
 				utils.RequestWaitingNum: 5,
 				utils.RequestRunningNum: 10,
 				utils.TPOT:              0.04,

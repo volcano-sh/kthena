@@ -47,7 +47,7 @@ var (
 	}
 
 	mapOfMetricsName = map[string]string{
-		KVCacheUsage:      utils.KVCacheCacheUsage,
+		KVCacheUsage:      utils.KVCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
 		RequestRunningNum: utils.RequestRunningNum,
 		ITL:               utils.TPOT,

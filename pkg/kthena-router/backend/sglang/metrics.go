@@ -28,7 +28,7 @@ import (
 )
 
 var (
-	GPUCacheUsage     = "sglang:token_usage"
+	KVCacheUsage      = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
 	RequestRunningNum = "sglang:num_running_reqs"
 	TPOT              = "sglang:time_per_output_token_seconds"
@@ -37,7 +37,7 @@ var (
 
 var (
 	CounterAndGaugeMetrics = []string{
-		GPUCacheUsage,
+		KVCacheUsage,
 		RequestWaitingNum,
 		RequestRunningNum,
 	}
@@ -48,7 +48,7 @@ var (
 	}
 
 	mapOfMetricsName = map[string]string{
-		GPUCacheUsage:     utils.KVCacheCacheUsage,
+		KVCacheUsage:      utils.KVCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
 		RequestRunningNum: utils.RequestRunningNum,
 		TPOT:              utils.TPOT,

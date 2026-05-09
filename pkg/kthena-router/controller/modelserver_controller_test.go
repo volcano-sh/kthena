@@ -43,7 +43,7 @@ type fakePodRuntimeInspector struct{}
 
 func (fakePodRuntimeInspector) GetPodMetrics(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 	return map[string]float64{
-		utils.KVCacheCacheUsage: 0.5,
+		utils.KVCacheUsage:      0.5,
 		utils.RequestWaitingNum: 10,
 		utils.RequestRunningNum: 5,
 	}, nil
