@@ -19,7 +19,7 @@ package plugins
 import (
 	"math"
 
-	"github.com/stretchr/testify/assert/yaml"
+	"sigs.k8s.io/yaml"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 

@@ -17,7 +17,7 @@ limitations under the License.
 package plugins
 
 import (
-	"github.com/stretchr/testify/assert/yaml"
+	"sigs.k8s.io/yaml"
 	"istio.io/istio/pkg/slices"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"

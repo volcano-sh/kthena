@@ -107,7 +107,7 @@ spec:
             periodSeconds: 5
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: {{ .Values.kthenaRouter.port }}
               {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
               scheme: HTTPS
