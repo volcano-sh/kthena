@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
@@ -1679,14 +1681,6 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 			}
 			return d.Status.ReadyReplicas >= expectedReplicas, nil
 		})
-
-		// Re-establish port-forward on the default port for subsequent tests.
-		pf, err := utils.SetupPortForward(kthenaNamespace, routerDeploymentName, "8080", "80")
-		if err != nil {
-			t.Logf("Warning: Failed to re-establish port-forward: %v", err)
-			return
-		}
-		_ = pf
 	})
 
 	// Update the ConfigMap with a new scheduler configuration:
@@ -1706,6 +1700,9 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
         - name: least-request
           weight: 1`
 
+	// Re-fetch the ConfigMap to get the latest ResourceVersion and avoid optimistic concurrency conflicts.
+	cm, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(ctx, configMapName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to re-fetch router ConfigMap")
 	t.Log("Updating router ConfigMap with new scheduler configuration...")
 	cm.Data[routerConfigKey] = updatedConfig
 	_, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, cm, metav1.UpdateOptions{})
@@ -1745,9 +1742,13 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	waitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, defaultScalingTimeout)
 	t.Log("Router deployment is ready after restart")
 
-	// Set up port-forward to the restarted router on a different local port
-	// to avoid conflicts with the framework port-forward on 8080.
-	const restartedRouterPort = "8081"
+	// Set up port-forward to the restarted router on a dynamically selected local port
+	// to avoid conflicts with the framework port-forward on 8080 and other parallel tests.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "Failed to find an available port")
+	restartedRouterPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	listener.Close()
+
 	pf, err := utils.SetupPortForward(kthenaNamespace, routerDeploymentName, restartedRouterPort, "80")
 	require.NoError(t, err, "Failed to setup port-forward to restarted router")
 	defer pf.Close()
@@ -1764,14 +1765,14 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	// Verify the updated config took effect by checking scheduler plugin metrics.
 	// After restart, only the configured score plugins should appear in metrics.
 	t.Run("VerifyPluginMetricsAfterConfigUpdate", func(t *testing.T) {
-		// With the updated config, only "least-request" should be active as a score plugin.
+		// With the updated config, only least-request should be active as a score plugin.
 		require.Eventually(t, func() bool {
 			metricsData, err := backendmetrics.ParseMetricsURL(restartedMetricsURL)
 			if err != nil {
 				return false
 			}
 			activeCount := getHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
-				"plugin": "least-request",
+				"plugin": plugins.LeastRequestPluginName,
 				"type":   "score",
 			})
 			return activeCount > 0
@@ -1781,7 +1782,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 		require.NoError(t, err, "Failed to fetch metrics after config update")
 
 		// Removed plugins should not appear in fresh metrics after restart.
-		for _, removedPlugin := range []string{"prefix-cache", "gpu-usage", "least-latency"} {
+		for _, removedPlugin := range []string{plugins.PrefixCachePluginName, plugins.GPUCacheUsagePluginName, plugins.LeastLatencyPluginName} {
 			count := getHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
 				"plugin": removedPlugin,
 				"type":   "score",
