@@ -168,7 +168,7 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 
 func validatorReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
-	if ms.Spec.Replicas == nil || *ms.Spec.Replicas <= 0 {
+	if ms.Spec.Replicas == nil || *ms.Spec.Replicas < 0 {
 		allErrs = append(allErrs, field.Invalid(
 			field.NewPath("spec").Child("replicas"),
 			ms.Spec.Replicas,
@@ -186,7 +186,7 @@ func validatorReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	}
 
 	for i, role := range ms.Spec.Template.Roles {
-		if role.Replicas == nil || *role.Replicas <= 0 {
+		if role.Replicas == nil || *role.Replicas < 0 {
 			allErrs = append(allErrs, field.Invalid(
 				field.NewPath("spec").Child("template").Child("roles").Index(i).Child("replicas"),
 				role.Replicas,
