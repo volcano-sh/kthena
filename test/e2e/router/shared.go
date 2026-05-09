@@ -1626,7 +1626,18 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 
 	// Verify routing works with the initial (default) config.
 	t.Run("VerifyInitialConfig", func(t *testing.T) {
-		resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err, "Failed to find an available port")
+		initialRouterPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+		listener.Close()
+
+		pf, err := utils.SetupPortForward(kthenaNamespace, routerDeploymentName, initialRouterPort, "80")
+		require.NoError(t, err, "Failed to setup initial port-forward")
+		defer pf.Close()
+
+		initialRouterURL := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", initialRouterPort)
+
+		resp := utils.CheckChatCompletionsWithURL(t, initialRouterURL, modelRoute.Spec.ModelName, messages)
 		assert.Equal(t, 200, resp.StatusCode, "Routing should work with initial config")
 	})
 
