@@ -1599,7 +1599,8 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteSimple.yaml"))
+
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -1674,13 +1675,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 		}
 
 		// Wait for the router to become ready with the restored config.
-		_ = wait.PollUntilContextTimeout(cleanupCtx, defaultPollingInterval, defaultScalingTimeout, true, func(ctx context.Context) (bool, error) {
-			d, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routerDeploymentName, metav1.GetOptions{})
-			if err != nil {
-				return false, nil
-			}
-			return d.Status.ReadyReplicas >= expectedReplicas, nil
-		})
+		_ = utils.WaitForDeploymentReadyE(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout)
 	})
 
 	// Update the ConfigMap with a new scheduler configuration:
@@ -1709,7 +1704,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	require.NoError(t, err, "Failed to update router ConfigMap")
 
 	// Record pre-restart pod names to confirm they get replaced.
-	preRestartPods := getRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+	preRestartPods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
 	preRestartPodNames := make(map[string]bool, len(preRestartPods))
 	for _, pod := range preRestartPods {
 		preRestartPodNames[pod.Name] = true
@@ -1736,10 +1731,10 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 			}
 		}
 		return len(pods.Items) > 0
-	}, defaultScalingTimeout, defaultPollingInterval, "Pre-restart pods should be replaced")
+	}, defaultScalingTimeout, 2*time.Second, "Pre-restart pods should be replaced")
 
 	// Wait for the deployment to be ready with the new pods.
-	waitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, defaultScalingTimeout)
+	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, defaultScalingTimeout)
 	t.Log("Router deployment is ready after restart")
 
 	// Set up port-forward to the restarted router on a dynamically selected local port
@@ -1765,7 +1760,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	// Verify the updated config took effect by checking scheduler plugin metrics.
 	// After restart, only the configured score plugins should appear in metrics.
 	t.Run("VerifyPluginMetricsAfterConfigUpdate", func(t *testing.T) {
-		// With the updated config, only least-request should be active as a score plugin.
+		// With the updated config, only "least-request" should be active as a score plugin.
 		require.Eventually(t, func() bool {
 			metricsData, err := backendmetrics.ParseMetricsURL(restartedMetricsURL)
 			if err != nil {
