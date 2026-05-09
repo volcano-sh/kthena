@@ -324,6 +324,12 @@ func (m *MockStore) GetModelNames() []string {
 	return args.Get(0).([]string)
 }
 
+func (m *MockStore) SyncOnFlightCounts() {}
+
+func (m *MockStore) IncrPodOnFlightRequests(podName types.NamespacedName) {}
+
+func (m *MockStore) DecrPodOnFlightRequests(podName types.NamespacedName) {}
+
 func newTestContext(params gin.Params) (*gin.Context, *httptest.ResponseRecorder) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

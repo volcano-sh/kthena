@@ -44,6 +44,10 @@ type SchedulerImpl struct {
 	scorePlugins  []*scorePlugin
 
 	postScheduleHooks []framework.PostScheduleHook
+
+	// syncOnFlight is true when the least-request plugin is enabled.
+	// In that case Schedule() syncs on-flight counts from Redis before scoring.
+	syncOnFlight bool
 }
 
 type scorePlugin struct {
@@ -87,6 +91,22 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		}
 	}
 
+	leastRequestEnabled := false
+	for _, name := range filterPluginMap {
+		if name == plugins.LeastRequestPluginName {
+			leastRequestEnabled = true
+			break
+		}
+	}
+	if !leastRequestEnabled {
+		for name := range scorePluginMap {
+			if name == plugins.LeastRequestPluginName {
+				leastRequestEnabled = true
+				break
+			}
+		}
+	}
+
 	prefixCache := plugins.NewPrefixCache(store, pluginsArgMap[plugins.PrefixCachePluginName])
 	return &SchedulerImpl{
 		store:         store,
@@ -95,10 +115,17 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		postScheduleHooks: []framework.PostScheduleHook{
 			prefixCache,
 		},
+		syncOnFlight: leastRequestEnabled,
 	}
 }
 
 func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
+	// Sync on-flight counts from Redis before scoring when least-request is active,
+	// so cross-router traffic is reflected in pod scores. Rate-limited internally.
+	if s.syncOnFlight {
+		s.store.SyncOnFlightCounts()
+	}
+
 	// first filter out invalid pods that wonot be selected to loadbalance to.
 	pods, err := s.RunFilterPlugins(pods, ctx)
 	if err != nil {

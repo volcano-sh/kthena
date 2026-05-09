@@ -712,15 +712,24 @@ func (r *Router) proxy(
 
 	for i := 0; i < len(ctx.BestPods); i++ {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		pod := ctx.BestPods[i]
+		podName := types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}
+
+		// Track this request as in-flight to the chosen pod. This is instant and
+		// feeds the scheduler immediately, avoiding the ~1 s engine-metrics lag.
+		r.store.IncrPodOnFlightRequests(podName)
 
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, ctx.BestPods[i].Pod.Status.PodIP, port, stream, onUsage)
+		err := proxyRequest(c, req, pod.Pod.Status.PodIP, port, stream, onUsage)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
+
+		// Request is complete (success or failure) — decrement on-flight counter.
+		r.store.DecrPodOnFlightRequests(podName)
 
 		if err != nil {
 			klog.Errorf(" pod request error: %v", err)
@@ -1043,8 +1052,19 @@ func (r *Router) proxyToPDDisaggregated(
 
 		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 
+		// Build on-flight hooks so the connector can update the per-pod counters
+		// at the precise point each phase starts and ends.
+		prefillPodName := types.NamespacedName{Namespace: ctx.PrefillPods[i].Pod.Namespace, Name: ctx.PrefillPods[i].Pod.Name}
+		decodePodName := types.NamespacedName{Namespace: ctx.DecodePods[i].Pod.Namespace, Name: ctx.DecodePods[i].Pod.Name}
+		hooks := &connectors.OnFlightHooks{
+			IncrPrefill: func() { r.store.IncrPodOnFlightRequests(prefillPodName) },
+			DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillPodName) },
+			IncrDecode:  func() { r.store.IncrPodOnFlightRequests(decodePodName) },
+			DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodePodName) },
+		}
+
 		// Execute the PD disaggregated proxy operation
-		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr)
+		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, hooks)
 
 		if err != nil {
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",

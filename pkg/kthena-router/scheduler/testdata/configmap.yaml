@@ -1,17 +1,17 @@
 scheduler:
   pluginConfig:
-  - name: least-request
-    args:
-      maxWaitingRequests: 10
-  - name: least-latency
-    args:
-      TTFTTPOTWeightFactor: 0.5
-  - name: prefix-cache
-    args:
-      blockSizeToHash: 64
-      maxBlocksToMatch: 128
-      maxHashCacheSize: 50000
-      topKMatches: 5
+    - name: least-request
+      args:
+        maxWaitingRequests: 10
+    - name: least-latency
+      args:
+        TTFTTPOTWeightFactor: 0.5
+    - name: prefix-cache
+      args:
+        blockSizeToHash: 64
+        maxBlocksToMatch: 128
+        maxHashCacheSize: 50000
+        topKMatches: 5
   plugins:
     Filter:
       enabled:

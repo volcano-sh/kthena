@@ -18,11 +18,13 @@ package app
 
 import (
 	"context"
+	"os"
 
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
 type Server struct {
@@ -56,8 +58,21 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 }
 
 func (s *Server) Run(ctx context.Context) {
+	// Build store options. When REDIS_HOST is set, use a Redis-backed on-flight
+	// counter so that multiple router replicas share a globally consistent view
+	// of in-flight request counts, enabling better cross-router scheduling.
+	var storeOpts []datastore.Option
+	if os.Getenv("REDIS_HOST") != "" {
+		if redisClient := utils.TryGetRedisClient(); redisClient != nil {
+			klog.Infof("Redis on-flight counter enabled: cross-router in-flight tracking active")
+			storeOpts = append(storeOpts, datastore.WithRedisOnFlightCounter(datastore.NewRedisOnFlightCounter(redisClient)))
+		} else {
+			klog.Warningf("REDIS_HOST is set but Redis connection failed; falling back to local on-flight counter")
+		}
+	}
+
 	// create store
-	store := datastore.New()
+	store := datastore.New(storeOpts...)
 	s.store = store
 
 	// must be run before the controller, because it will register callbacks
