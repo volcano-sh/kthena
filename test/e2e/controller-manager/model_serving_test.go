@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -859,6 +858,24 @@ func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kuber
 		t.Logf("Running pod count: %d (expecting %d)", runningCount, expected)
 		return runningCount == expected
 	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
+}
+
+// patchPodDeletionCost sets corev1.PodDeletionCost with retries to tolerate concurrent Pod updates (resourceVersion conflicts).
+func patchPodDeletionCost(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, podName, cost string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		cur, err := kubeClient.CoreV1().Pods(testNamespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		upd := cur.DeepCopy()
+		if upd.Annotations == nil {
+			upd.Annotations = make(map[string]string)
+		}
+		upd.Annotations[corev1.PodDeletionCost] = cost
+		_, err = kubeClient.CoreV1().Pods(testNamespace).Update(ctx, upd, metav1.UpdateOptions{})
+		return err == nil
+	}, 90*time.Second, time.Second, "set PodDeletionCost on pod %s", podName)
 }
 
 // createRole is a helper function to create a Role with specified replicas and workers
@@ -2064,6 +2081,7 @@ func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 	modelServing := createBasicModelServing("test-binpack-sg-scaledown", 4, 0)
 	t.Log("Creating ModelServing with 4 servingGroup replicas for bin pack scale down test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get initial ModelServing")
@@ -2090,14 +2108,7 @@ func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 			maxOrdinal = ordinal
 		}
 
-		updatedPod := pod.DeepCopy()
-		if updatedPod.Annotations == nil {
-			updatedPod.Annotations = make(map[string]string)
-		}
-		updatedPod.Annotations[corev1.PodDeletionCost] = fmt.Sprintf("%d", cost)
-
-		_, err := kubeClient.CoreV1().Pods(testNamespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update pod with deletion cost")
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, fmt.Sprintf("%d", cost))
 	}
 
 	scaleDownMS := initialMS.DeepCopy()
@@ -2148,25 +2159,19 @@ func TestModelServingBinPackScaleDownRole(t *testing.T) {
 	require.NoError(t, err, "Failed to list pods")
 	require.NotEmpty(t, podList.Items, "Expected pods before role scale down")
 
-	maxRoleID := -1
+	maxRoleOrdinal := -1
 	for _, pod := range podList.Items {
 		roleIDStr := pod.Labels[workload.RoleIDKey]
 		require.NotEmpty(t, roleIDStr, "Pod should have role id label")
 
-		roleID, err := strconv.Atoi(roleIDStr)
-		require.NoError(t, err, "Role id label should be an integer")
-		if roleID > maxRoleID {
-			maxRoleID = roleID
+		_, roleOrdinal := controllerutils.GetParentNameAndOrdinal(roleIDStr)
+		require.GreaterOrEqual(t, roleOrdinal, 0, "Role id label should encode role-<ordinal>")
+
+		if roleOrdinal > maxRoleOrdinal {
+			maxRoleOrdinal = roleOrdinal
 		}
 
-		updatedPod := pod.DeepCopy()
-		if updatedPod.Annotations == nil {
-			updatedPod.Annotations = make(map[string]string)
-		}
-		updatedPod.Annotations[corev1.PodDeletionCost] = fmt.Sprintf("%d", roleID*100)
-
-		_, err = kubeClient.CoreV1().Pods(testNamespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update pod with deletion cost")
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, fmt.Sprintf("%d", roleOrdinal*100))
 	}
 
 	scaleDownMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -2191,9 +2196,9 @@ func TestModelServingBinPackScaleDownRole(t *testing.T) {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-		remainingRoleID, err := strconv.Atoi(pod.Labels[workload.RoleIDKey])
-		require.NoError(t, err, "Remaining pod role id should be an integer")
-		assert.Equal(t, maxRoleID, remainingRoleID, "Pod with highest deletion cost should remain after bin pack scale down")
+		_, remainingOrdinal := controllerutils.GetParentNameAndOrdinal(pod.Labels[workload.RoleIDKey])
+		require.GreaterOrEqual(t, remainingOrdinal, 0, "Remaining pod role id should encode role-<ordinal>")
+		assert.Equal(t, maxRoleOrdinal, remainingOrdinal, "Pod with highest deletion cost should remain after bin pack scale down")
 	}
 
 	t.Log("Bin pack scale down Role test passed successfully")
@@ -2229,21 +2234,15 @@ func TestModelServingBinPackScaleDownCombined(t *testing.T) {
 			maxGroupOrdinal = ordinal
 		}
 
-		roleID := 0
+		roleOrdinal := 0
 		if roleIDStr := pod.Labels[workload.RoleIDKey]; roleIDStr != "" {
-			parsedRoleID, err := strconv.Atoi(roleIDStr)
-			require.NoError(t, err, "Role id label should be an integer")
-			roleID = parsedRoleID
+			_, roleOrdinal = controllerutils.GetParentNameAndOrdinal(roleIDStr)
+			require.GreaterOrEqual(t, roleOrdinal, 0, "Role id label should encode role-<ordinal>")
 		}
 
-		updatedPod := pod.DeepCopy()
-		if updatedPod.Annotations == nil {
-			updatedPod.Annotations = make(map[string]string)
-		}
-		updatedPod.Annotations[corev1.PodDeletionCost] = fmt.Sprintf("%d", int(ordinal)*100+roleID*10)
+		deletionCost := int(ordinal)*100 + roleOrdinal*10
 
-		_, err = kubeClient.CoreV1().Pods(testNamespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update pod with deletion cost")
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, fmt.Sprintf("%d", deletionCost))
 	}
 
 	scaleDownMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
