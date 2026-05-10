@@ -18,6 +18,12 @@ package tokenization
 
 import (
 	"context"
+	"strings"
+)
+
+const (
+	engineVLLM   = "vllm"
+	engineSGLang = "sglang"
 )
 
 type remoteTokenizerImpl struct {
@@ -27,13 +33,27 @@ type remoteTokenizerImpl struct {
 }
 
 func NewRemoteTokenizer(config RemoteTokenizerConfig) (Tokenizer, error) {
-	adapter := newVLLMAdapter(config.Model)
+	adapter, err := newEngineAdapter(config.Engine, config.Model)
+	if err != nil {
+		return nil, err
+	}
 	client := newHTTPClient(config.Endpoint)
 	return &remoteTokenizerImpl{
 		config:  config,
 		client:  client,
 		adapter: adapter,
 	}, nil
+}
+
+func newEngineAdapter(engine, model string) (engineAdapter, error) {
+	switch strings.ToLower(strings.TrimSpace(engine)) {
+	case engineSGLang:
+		return newSGLangAdapter(model), nil
+	case engineVLLM, "":
+		return newVLLMAdapter(model), nil
+	default:
+		return nil, ErrInvalidConfig{Message: "unsupported engine: " + engine}
+	}
 }
 
 func (t *remoteTokenizerImpl) TokenizeInputText(text string) ([]byte, error) {

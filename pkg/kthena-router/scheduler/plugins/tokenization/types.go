@@ -75,3 +75,21 @@ type vllmTokenizeResponse struct {
 	Tokens      []int    `json:"tokens"`
 	TokenStrs   []string `json:"token_strs,omitempty"`
 }
+
+type sglangTokenizeCompletionRequest struct {
+	Model            string `json:"model,omitempty"`
+	Prompt           string `json:"prompt"`
+	AddSpecialTokens *bool  `json:"add_special_tokens,omitempty"`
+}
+
+type sglangTokenizeChatRequest struct {
+	Model            string           `json:"model,omitempty"`
+	Messages         []common.Message `json:"messages"`
+	AddSpecialTokens *bool            `json:"add_special_tokens,omitempty"`
+}
+
+type sglangTokenizeResponse struct {
+	Count       int   `json:"count"`
+	MaxModelLen int   `json:"max_model_len"`
+	Tokens      []int `json:"tokens"`
+}

@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
@@ -29,8 +30,8 @@ import (
 )
 
 type TokenizerManagerConfig struct {
-	EnableVLLMRemote bool
-	EndpointTemplate string
+	// EndpointTemplates maps a lowercase engine name to a sprintf template with one %s for the pod IP.
+	EndpointTemplates map[string]string
 }
 
 type TokenizerManager struct {
@@ -43,7 +44,6 @@ func NewTokenizerManager(config TokenizerManagerConfig) *TokenizerManager {
 	}
 }
 
-// GetTokenizer creates a tokenizer by randomly selecting from the provided pods
 func (m *TokenizerManager) GetTokenizer(model string, pods []*datastore.PodInfo) Tokenizer {
 	return m.createTokenizerFromPods(model, pods)
 }
@@ -54,18 +54,22 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 		return nil
 	}
 
-	// Randomly select a pod to start with
 	startIdx := rand.Intn(len(pods))
-
-	// Try pods starting from random index, wrapping around if needed
 	for i := 0; i < len(pods); i++ {
 		podIdx := (startIdx + i) % len(pods)
 		podInfo := pods[podIdx]
 
-		endpoint := fmt.Sprintf(m.config.EndpointTemplate, podInfo.Pod.Status.PodIP)
+		engine := normalizeEngineName(podInfo.GetEngine())
+		template, ok := m.config.EndpointTemplates[engine]
+		if !ok {
+			klog.V(4).Infof("TokenizerManager: no endpoint template for engine %q (pod %s/%s), skipping",
+				engine, podInfo.Pod.Namespace, podInfo.Pod.Name)
+			continue
+		}
+		endpoint := fmt.Sprintf(template, podInfo.Pod.Status.PodIP)
 
 		config := RemoteTokenizerConfig{
-			Engine:             "vllm",
+			Engine:             engine,
 			Endpoint:           endpoint,
 			Model:              model,
 			AddSpecialTokens:   true,
@@ -74,11 +78,11 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 
 		tok, err := NewRemoteTokenizer(config)
 		if err != nil {
-			klog.Warningf("Failed to create vLLM tokenizer for model %s at endpoint %s: %v", model, endpoint, err)
+			klog.Warningf("Failed to create %s tokenizer for model %s at endpoint %s: %v", engine, model, endpoint, err)
 			continue
 		}
 
-		klog.V(4).Infof("TokenizerManager: successfully created tokenizer for model %s at endpoint %s", model, endpoint)
+		klog.V(4).Infof("TokenizerManager: successfully created %s tokenizer for model %s at endpoint %s", engine, model, endpoint)
 		return tok
 	}
 
@@ -86,7 +90,15 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 	return nil
 }
 
-// TokenizePrompt tokenizes a prompt (text or chat messages) and returns uint32 tokens
+// normalizeEngineName defaults empty to vllm for pods not yet reconciled against a ModelServer.
+func normalizeEngineName(engine string) string {
+	normalized := strings.ToLower(strings.TrimSpace(engine))
+	if normalized == "" {
+		return engineVLLM
+	}
+	return normalized
+}
+
 func (m *TokenizerManager) TokenizePrompt(
 	model string,
 	prompt common.ChatMessage,
@@ -97,14 +109,12 @@ func (m *TokenizerManager) TokenizePrompt(
 		return nil, fmt.Errorf("no tokenizer available for model %s", model)
 	}
 
-	// Handle text prompts directly
 	if prompt.Text != "" {
 		tokens, err := tokenizer.TokenizeInputText(prompt.Text)
 		if err != nil {
 			return nil, fmt.Errorf("text tokenization failed: %w", err)
 		}
 
-		// Convert byte array to uint32 tokens
 		tokens32 := make([]uint32, len(tokens)/4)
 		for i := 0; i < len(tokens32); i++ {
 			tokens32[i] = binary.BigEndian.Uint32(tokens[i*4 : (i+1)*4])
@@ -112,7 +122,6 @@ func (m *TokenizerManager) TokenizePrompt(
 		return tokens32, nil
 	}
 
-	// Handle chat messages with extended tokenizer
 	if len(prompt.Messages) > 0 {
 		extendedTok, ok := tokenizer.(ExtendedTokenizer)
 		if !ok {
@@ -135,7 +144,6 @@ func (m *TokenizerManager) TokenizePrompt(
 			return nil, fmt.Errorf("chat template tokenization failed: %w", err)
 		}
 
-		// Convert int tokens to uint32
 		tokens32 := make([]uint32, len(result.Tokens))
 		for i, token := range result.Tokens {
 			tokens32[i] = uint32(token)
