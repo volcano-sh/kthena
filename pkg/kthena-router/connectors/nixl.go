@@ -33,9 +33,7 @@ import (
 
 // NIXLConnector implements high-performance distributed in-memory KV cache using NIXL
 type NIXLConnector struct {
-	name              string
-	prefillRequest    *http.Request
-	decodeRequestBody map[string]interface{}
+	name string
 }
 
 // NewNIXLConnector creates a new NIXL connector
@@ -62,9 +60,12 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 
 	req := c.Request
 	prefillBody := cloneReqBody(reqBody)
-	n.prefillRequest = n.buildPrefillRequest(req, prefillBody)
+	prefillRequest, err := n.buildPrefillRequest(req, prefillBody)
+	if err != nil {
+		return 0, err
+	}
 	decodeBody := cloneReqBody(reqBody)
-	n.decodeRequestBody = addTokenUsage(c, decodeBody)
+	decodeRequestBody := addTokenUsage(c, decodeBody)
 
 	// Start prefill phase metrics and increment upstream request
 	if metricsRecorder != nil {
@@ -73,7 +74,7 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	// 1. send prefill request
-	kvTransferParams, err := n.prefill(n.prefillRequest, prefillAddr)
+	kvTransferParams, err := n.prefill(prefillRequest, prefillAddr)
 
 	// End prefill phase metrics and handle upstream requests
 	if metricsRecorder != nil {
@@ -95,7 +96,14 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	// 2. send decode request
-	decodeReq := n.buildDecodeRequest(c, n.decodeRequestBody, kvTransferParams)
+	decodeReq, err := n.buildDecodeRequest(c, decodeRequestBody, kvTransferParams)
+	if err != nil {
+		if metricsRecorder != nil {
+			metricsRecorder.FinishDecodePhase("500")
+			metricsRecorder.DecActiveUpstreamRequests()
+		}
+		return 0, err
+	}
 	result, decodeErr := n.decode(c, decodeReq, decodeAddr)
 
 	// End decode phase metrics and decrement upstream request
@@ -144,11 +152,11 @@ func (n *NIXLConnector) prefill(req *http.Request, prefillAddr string) (interfac
 	return kvTransferParams, nil
 }
 
-func (n *NIXLConnector) buildDecodeRequest(c *gin.Context, reqBody map[string]interface{}, kvTransferParams interface{}) *http.Request {
+func (n *NIXLConnector) buildDecodeRequest(c *gin.Context, reqBody map[string]interface{}, kvTransferParams interface{}) (*http.Request, error) {
 	reqBody["kv_transfer_params"] = kvTransferParams
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("nixl connector: failed to marshal decode request body: %w", err)
 	}
 
 	// build request
@@ -157,7 +165,7 @@ func (n *NIXLConnector) buildDecodeRequest(c *gin.Context, reqBody map[string]in
 	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
 	reqCopy.ContentLength = int64(len(body))
 
-	return reqCopy
+	return reqCopy, nil
 }
 
 // decode send decode request with streaming response
@@ -179,7 +187,7 @@ func cloneReqBody(reqBody map[string]interface{}) map[string]interface{} {
 	return clone
 }
 
-func (n *NIXLConnector) buildPrefillRequest(req *http.Request, reqBody map[string]interface{}) *http.Request {
+func (n *NIXLConnector) buildPrefillRequest(req *http.Request, reqBody map[string]interface{}) (*http.Request, error) {
 	// Prepare the body for a generic prefill request.
 	preparePrefillBody(reqBody)
 
@@ -191,8 +199,7 @@ func (n *NIXLConnector) buildPrefillRequest(req *http.Request, reqBody map[strin
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		klog.Errorf("Failed to marshal prefill request body: %v", err)
-		return nil
+		return nil, fmt.Errorf("nixl connector: failed to marshal prefill request body: %w", err)
 	}
 
 	prefillReq := req.Clone(req.Context())
@@ -200,5 +207,5 @@ func (n *NIXLConnector) buildPrefillRequest(req *http.Request, reqBody map[strin
 	prefillReq.Body = io.NopCloser(bytes.NewBuffer(body))
 	prefillReq.ContentLength = int64(len(body))
 
-	return prefillReq
+	return prefillReq, nil
 }

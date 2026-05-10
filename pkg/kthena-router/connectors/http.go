@@ -27,10 +27,7 @@ import (
 
 // HTTPConnector implements simple HTTP-based KV transfer
 // Many kv connectors like LMCache, MoonCakeStore can use this
-type HTTPConnector struct {
-	prefillRequest *http.Request
-	decodeRequest  *http.Request
-}
+type HTTPConnector struct{}
 
 // NewHTTPConnector creates a new HTTP connector with default configuration
 func NewHTTPConnector() KVConnector {
@@ -71,10 +68,16 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	decodeBody := cloneReqBody(reqBody)
-	h.decodeRequest = BuildDecodeRequest(c, c.Request, decodeBody)
+	decodeRequest, err := BuildDecodeRequest(c, c.Request, decodeBody)
+	if err != nil {
+		return 0, err
+	}
 
 	prefillBody := cloneReqBody(reqBody)
-	h.prefillRequest = buildPrefillRequest(c.Request, prefillBody)
+	prefillRequest, err := buildPrefillRequest(c.Request, prefillBody)
+	if err != nil {
+		return 0, err
+	}
 
 	// Start prefill phase metrics and increment upstream request
 	if metricsRecorder != nil {
@@ -82,7 +85,7 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		metricsRecorder.IncActiveUpstreamRequests()
 	}
 
-	err := h.prefill(h.prefillRequest, prefillAddr)
+	err = h.prefill(prefillRequest, prefillAddr)
 
 	// End prefill phase metrics and handle upstream requests
 	if metricsRecorder != nil {
@@ -103,7 +106,7 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		return 0, err
 	}
 
-	result, decodeErr := h.decode(c, h.decodeRequest, decodeAddr)
+	result, decodeErr := h.decode(c, decodeRequest, decodeAddr)
 
 	// End decode phase metrics and decrement upstream request
 	if metricsRecorder != nil {

@@ -720,6 +720,7 @@ func (r *Router) proxyModelEndpoint(
 ) error {
 	// Mark start of upstream processing
 	accesslog.MarkUpstreamStart(c)
+	defer accesslog.MarkUpstreamEnd(c)
 
 	// Get metrics recorder from context
 	var metricsRecorder *metrics.RequestMetricsRecorder
@@ -731,7 +732,10 @@ func (r *Router) proxyModelEndpoint(
 
 	// proxy to pd aggregated pod
 	if ctx.BestPods != nil {
-		decodeRequest := connectors.BuildDecodeRequest(c, req, modelRequest)
+		decodeRequest, err := connectors.BuildDecodeRequest(c, req, modelRequest)
+		if err != nil {
+			return fmt.Errorf("failed to build decode request: %w", err)
+		}
 		// build request
 		stream := isStreaming(modelRequest)
 		userID := ""
@@ -739,7 +743,7 @@ func (r *Router) proxyModelEndpoint(
 			userID = v
 		}
 		modelName := ctx.Model
-		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
+		err = r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
@@ -763,8 +767,6 @@ func (r *Router) proxyModelEndpoint(
 			_ = r.store.UpdateTokenCount(userID, modelName, float64(resp.Usage.PromptTokens), float64(resp.Usage.CompletionTokens))
 		})
 
-		// Mark end of upstream processing
-		accesslog.MarkUpstreamEnd(c)
 		return err
 	}
 

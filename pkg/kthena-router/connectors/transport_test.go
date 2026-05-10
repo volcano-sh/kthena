@@ -257,13 +257,15 @@ func TestBuildPrefillRequest(t *testing.T) {
 			// Create a test HTTP request
 			originalReq := httptest.NewRequest("POST", "/test", nil)
 
-			result := buildPrefillRequest(originalReq, tt.modelRequest)
+			result, err := buildPrefillRequest(originalReq, tt.modelRequest)
 
 			if tt.expectNil {
+				require.Error(t, err)
 				assert.Nil(t, result)
 				return
 			}
 
+			require.NoError(t, err)
 			require.NotNil(t, result)
 
 			// Verify the request body was modified correctly
@@ -290,6 +292,18 @@ func TestBuildPrefillRequest(t *testing.T) {
 			assert.Equal(t, "http", result.URL.Scheme)
 		})
 	}
+}
+
+func TestBuildPrefillRequestMarshalError(t *testing.T) {
+	originalReq := httptest.NewRequest("POST", "/test", nil)
+	result, err := buildPrefillRequest(originalReq, map[string]interface{}{
+		"model":       "test-model",
+		"bad_payload": make(chan struct{}),
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to marshal prefill request body")
 }
 
 func TestBuildDecodeRequest(t *testing.T) {
@@ -338,7 +352,8 @@ func TestBuildDecodeRequest(t *testing.T) {
 			// Create a test HTTP request
 			originalReq := httptest.NewRequest("POST", "/test", nil)
 
-			result := BuildDecodeRequest(c, originalReq, tt.modelRequest)
+			result, err := BuildDecodeRequest(c, originalReq, tt.modelRequest)
+			require.NoError(t, err)
 			require.NotNil(t, result)
 
 			// Verify the request body was modified correctly
@@ -371,6 +386,38 @@ func TestBuildDecodeRequest(t *testing.T) {
 			assert.Equal(t, "http", result.URL.Scheme)
 		})
 	}
+}
+
+func TestBuildDecodeRequestMarshalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	originalReq := httptest.NewRequest("POST", "/test", nil)
+
+	result, err := BuildDecodeRequest(c, originalReq, map[string]interface{}{
+		"model":       "test-model",
+		"bad_payload": func() {},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to marshal decode request body")
+}
+
+func TestHTTPConnectorProxyReturnsMarshalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+
+	connector := NewHTTPConnector()
+	_, err := connector.Proxy(c, map[string]interface{}{
+		"model":       "test-model",
+		"bad_payload": make(chan struct{}),
+	}, "127.0.0.1:1", "127.0.0.1:2")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to marshal decode request body")
 }
 
 func TestHandleNonStreamingResponse(t *testing.T) {

@@ -18,10 +18,10 @@ package connectors
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -30,352 +30,215 @@ import (
 )
 
 func TestNIXLConnectorProxy(t *testing.T) {
-	// Test non-streaming request
-	t.Run("NonStreamingRequest", func(t *testing.T) {
-		connector := NewNIXLConnector()
+	t.Run("BuildsPrefillRequest", func(t *testing.T) {
+		connector := NewNIXLConnector().(*NIXLConnector)
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 
-		// Create a proper test context with a valid HTTP request
-		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = req
-
-		reqBody := map[string]interface{}{
-			"model":      "test-model",
-			"max_tokens": 100,
+		prefillReq, err := connector.buildPrefillRequest(req, map[string]interface{}{
+			"model":                 "test-model",
+			"stream":                true,
+			"stream_options":        map[string]interface{}{"include_usage": true},
+			"max_tokens":            100,
+			"max_completion_tokens": 50,
 			"messages": []interface{}{
-				map[string]interface{}{
-					"role":    "user",
-					"content": "test message",
-				},
+				map[string]interface{}{"role": "user", "content": "test message"},
 			},
+		})
+		if err != nil {
+			t.Fatalf("buildPrefillRequest returned error: %v", err)
 		}
 
-		// The NIXL connector will fail due to network issues (prefill request)
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
-		if err == nil {
-			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
+		prefillBody, err := parseRequestBody(prefillReq)
+		if err != nil {
+			t.Fatalf("Failed to parse prefill request body: %v", err)
 		}
 
-		// Verify that prefill request was built
-		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest == nil {
-			t.Error("Expected prefill request to be built")
+		if maxTokens, ok := prefillBody["max_tokens"].(float64); !ok || maxTokens != 1 {
+			t.Errorf("Expected prefill max_tokens to be 1, got %v", prefillBody["max_tokens"])
+		}
+		if maxCompletionTokens, ok := prefillBody["max_completion_tokens"].(float64); !ok || maxCompletionTokens != 1 {
+			t.Errorf("Expected prefill max_completion_tokens to be 1, got %v", prefillBody["max_completion_tokens"])
+		}
+		if _, hasStream := prefillBody["stream"]; hasStream {
+			t.Error("Expected prefill request to remove stream")
+		}
+		if _, hasStreamOptions := prefillBody["stream_options"]; hasStreamOptions {
+			t.Error("Expected prefill request to remove stream_options")
+		}
+		if model := prefillBody["model"]; model != "test-model" {
+			t.Errorf("Expected prefill model to be preserved, got %v", model)
 		}
 
-		// Verify prefill request body
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				// Prefill request should have max_tokens set to 1
-				if maxTokens, ok := prefillBody["max_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
-				}
-
-				// Prefill request should not have stream field
-				if _, hasStream := prefillBody["stream"]; hasStream {
-					t.Error("Expected prefill request to not have stream field")
-				}
-
-				// Prefill request should not have stream_options field
-				if _, hasStreamOptions := prefillBody["stream_options"]; hasStreamOptions {
-					t.Error("Expected prefill request to not have stream_options field")
-				}
-
-				// Should have kv_transfer_params for NIXL
-				if kvTransferParams, ok := prefillBody["kv_transfer_params"]; !ok {
-					t.Error("Expected prefill request to have kv_transfer_params field")
-				} else if params, isMap := kvTransferParams.(map[string]interface{}); !isMap {
-					t.Error("Expected kv_transfer_params to be a map")
-				} else {
-					// Verify NIXL-specific kv_transfer_params
-					if doRemoteDecode, ok := params["do_remote_decode"]; !ok || doRemoteDecode != true {
-						t.Errorf("Expected do_remote_decode to be true, got %v", doRemoteDecode)
-					}
-					if doRemotePrefill, ok := params["do_remote_prefill"]; !ok || doRemotePrefill != false {
-						t.Errorf("Expected do_remote_prefill to be false, got %v", doRemotePrefill)
-					}
-				}
-
-				// Should still have model and messages
-				if model, ok := prefillBody["model"]; !ok || model != "test-model" {
-					t.Errorf("Expected prefill request to have model 'test-model', got %v", model)
-				}
-			}
+		params, ok := prefillBody["kv_transfer_params"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected kv_transfer_params to be a map, got %T", prefillBody["kv_transfer_params"])
 		}
-
-		// Verify decode request body was prepared (but not executed due to prefill failure)
-		if nixlConn.decodeRequestBody == nil {
-			t.Error("Expected decode request body to be prepared")
-		} else {
-			fmt.Println("Decode request body:", nixlConn.decodeRequestBody)
-			// Decode request should have include_usage set for non-streaming requests
-			if includeUsage, ok := nixlConn.decodeRequestBody["include_usage"]; !ok || includeUsage != true {
-				t.Errorf("Expected decode request body include_usage to be true, got %v", includeUsage)
-			}
-			// Should preserve original max_tokens
-			if maxTokens, ok := nixlConn.decodeRequestBody["max_tokens"]; !ok {
-				t.Error("Expected decode request body to have max_tokens field")
-			} else if maxTokens, ok := maxTokens.(int); !ok || maxTokens != 100 {
-				t.Errorf("Expected decode request body max_tokens to be 100, got %v", maxTokens)
-			}
+		if params["do_remote_decode"] != true {
+			t.Errorf("Expected do_remote_decode to be true, got %v", params["do_remote_decode"])
+		}
+		if params["do_remote_prefill"] != false {
+			t.Errorf("Expected do_remote_prefill to be false, got %v", params["do_remote_prefill"])
 		}
 	})
 
-	// Test streaming request
-	t.Run("StreamingRequest", func(t *testing.T) {
-		connector := NewNIXLConnector()
-
-		// Create a proper test context with a valid HTTP request
-		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+	t.Run("BuildsNonStreamingDecodeRequest", func(t *testing.T) {
+		connector := NewNIXLConnector().(*NIXLConnector)
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = req
 
-		reqBody := map[string]interface{}{
+		decodeBody := addTokenUsage(c, map[string]interface{}{
+			"model":      "test-model",
+			"max_tokens": 100,
+		})
+
+		decodeReq, err := connector.buildDecodeRequest(c, decodeBody, map[string]interface{}{"cache": "ready"})
+		if err != nil {
+			t.Fatalf("buildDecodeRequest returned error: %v", err)
+		}
+
+		parsedBody, err := parseRequestBody(decodeReq)
+		if err != nil {
+			t.Fatalf("Failed to parse decode request body: %v", err)
+		}
+		if parsedBody["include_usage"] != true {
+			t.Errorf("Expected non-streaming decode request to include usage, got %v", parsedBody["include_usage"])
+		}
+		if maxTokens, ok := parsedBody["max_tokens"].(float64); !ok || maxTokens != 100 {
+			t.Errorf("Expected decode max_tokens to stay 100, got %v", parsedBody["max_tokens"])
+		}
+		if params, ok := parsedBody["kv_transfer_params"].(map[string]interface{}); !ok || params["cache"] != "ready" {
+			t.Errorf("Expected decode kv_transfer_params to be attached, got %v", parsedBody["kv_transfer_params"])
+		}
+	})
+
+	t.Run("BuildsStreamingDecodeRequest", func(t *testing.T) {
+		connector := NewNIXLConnector().(*NIXLConnector)
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
+
+		decodeBody := addTokenUsage(c, map[string]interface{}{
 			"model":      "test-model",
 			"stream":     true,
 			"max_tokens": 100,
-			"messages": []interface{}{
-				map[string]interface{}{
-					"role":    "user",
-					"content": "test message",
-				},
-			},
-		}
-
-		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
-		if err == nil {
-			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
-		}
-
-		// Verify that prefill request was built
-		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest == nil {
-			t.Error("Expected prefill request to be built")
-		}
-
-		// For streaming requests, verify that token usage context was set
+		})
 		if val, exists := c.Get(common.TokenUsageKey); !exists || val != true {
 			t.Error("Expected token usage to be set in context for streaming request")
 		}
 
-		// Verify prefill request body for streaming request
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				// Prefill request should have max_tokens set to 1
-				if maxTokens, ok := prefillBody["max_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
-				}
-
-				// Prefill request should not have stream field (removed for prefill)
-				if _, hasStream := prefillBody["stream"]; hasStream {
-					t.Error("Expected prefill request to not have stream field")
-				}
-
-				// Prefill request should not have stream_options field (removed for prefill)
-				if _, hasStreamOptions := prefillBody["stream_options"]; hasStreamOptions {
-					t.Error("Expected prefill request to not have stream_options field")
-				}
-
-				// Should have NIXL-specific kv_transfer_params
-				if kvTransferParams, ok := prefillBody["kv_transfer_params"]; !ok {
-					t.Error("Expected prefill request to have kv_transfer_params field")
-				} else if params, isMap := kvTransferParams.(map[string]interface{}); !isMap {
-					t.Error("Expected kv_transfer_params to be a map")
-				} else {
-					if doRemoteDecode, ok := params["do_remote_decode"]; !ok || doRemoteDecode != true {
-						t.Errorf("Expected do_remote_decode to be true, got %v", doRemoteDecode)
-					}
-				}
-			}
+		decodeReq, err := connector.buildDecodeRequest(c, decodeBody, nil)
+		if err != nil {
+			t.Fatalf("buildDecodeRequest returned error: %v", err)
 		}
-
-		// Verify decode request body
-		if nixlConn.decodeRequestBody != nil {
-			// Decode request should preserve stream field
-			if stream, ok := nixlConn.decodeRequestBody["stream"]; !ok || stream != true {
-				t.Errorf("Expected decode request body stream to be true, got %v", stream)
-			}
-			// Decode request should have stream_options with include_usage added
-			if streamOptions, ok := nixlConn.decodeRequestBody["stream_options"]; !ok {
-				t.Error("Expected decode request body to have stream_options")
-			} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
-				t.Error("Expected stream_options to be a map")
-			} else if includeUsage, ok := opts["include_usage"]; !ok || includeUsage != true {
-				t.Errorf("Expected stream_options include_usage to be true, got %v", includeUsage)
-			}
+		parsedBody, err := parseRequestBody(decodeReq)
+		if err != nil {
+			t.Fatalf("Failed to parse decode request body: %v", err)
+		}
+		if parsedBody["stream"] != true {
+			t.Errorf("Expected decode stream to stay true, got %v", parsedBody["stream"])
+		}
+		streamOptions, ok := parsedBody["stream_options"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected stream_options to be a map, got %T", parsedBody["stream_options"])
+		}
+		if streamOptions["include_usage"] != true {
+			t.Errorf("Expected stream_options include_usage to be true, got %v", streamOptions["include_usage"])
 		}
 	})
 
-	// Test streaming request with existing stream_options
-	t.Run("StreamingRequestWithStreamOptions", func(t *testing.T) {
-		connector := NewNIXLConnector()
-
-		// Create a proper test context with a valid HTTP request
-		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+	t.Run("KeepsExistingStreamOptions", func(t *testing.T) {
+		connector := NewNIXLConnector().(*NIXLConnector)
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = req
 
-		reqBody := map[string]interface{}{
-			"model":  "test-model",
-			"stream": true,
-			"stream_options": map[string]interface{}{
-				"include_usage": true,
-			},
-			"max_tokens": 100,
-			"messages": []interface{}{
-				map[string]interface{}{
-					"role":    "user",
-					"content": "test message",
-				},
-			},
-		}
-
-		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
-		if err == nil {
-			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
-		}
-
-		// For streaming requests with existing stream_options, token usage should not be added to context
+		decodeBody := addTokenUsage(c, map[string]interface{}{
+			"model":          "test-model",
+			"stream":         true,
+			"stream_options": map[string]interface{}{"include_usage": true},
+		})
 		if val, exists := c.Get(common.TokenUsageKey); exists && val == true {
-			t.Error("Did not expect token usage to be set in context when stream_options already exists")
+			t.Error("Did not expect token usage to be set when stream_options already requests usage")
 		}
 
-		// Verify decode request body preserves existing stream_options
-		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.decodeRequestBody != nil {
-			if streamOptions, ok := nixlConn.decodeRequestBody["stream_options"]; !ok {
-				t.Error("Expected decode request body to preserve existing stream_options")
-			} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
-				t.Error("Expected stream_options to be a map")
-			} else if includeUsage, ok := opts["include_usage"]; !ok || includeUsage != true {
-				t.Errorf("Expected existing stream_options include_usage to be preserved as true, got %v", includeUsage)
-			}
+		decodeReq, err := connector.buildDecodeRequest(c, decodeBody, nil)
+		if err != nil {
+			t.Fatalf("buildDecodeRequest returned error: %v", err)
 		}
-	})
-
-	// Test max_completion_tokens handling
-	t.Run("MaxCompletionTokensHandling", func(t *testing.T) {
-		connector := NewNIXLConnector()
-
-		// Create a proper test context with a valid HTTP request
-		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = req
-
-		reqBody := map[string]interface{}{
-			"model":                 "test-model",
-			"max_completion_tokens": 50,
-			"messages": []interface{}{
-				map[string]interface{}{
-					"role":    "user",
-					"content": "test message",
-				},
-			},
+		parsedBody, err := parseRequestBody(decodeReq)
+		if err != nil {
+			t.Fatalf("Failed to parse decode request body: %v", err)
 		}
-
-		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
-		if err == nil {
-			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
+		streamOptions, ok := parsedBody["stream_options"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected stream_options to be a map, got %T", parsedBody["stream_options"])
 		}
-
-		// Verify prefill request handling of max_completion_tokens
-		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				// Prefill request should have max_tokens set to 1
-				if maxTokens, ok := prefillBody["max_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
-				}
-				// Prefill request should have max_completion_tokens set to 1
-				if maxCompletionTokens, ok := prefillBody["max_completion_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_completion_tokens field")
-				} else if maxCompletionTokensFloat, ok := maxCompletionTokens.(float64); !ok || maxCompletionTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_completion_tokens to be 1, got %v", maxCompletionTokens)
-				}
-			}
-		}
-
-		// Verify decode request preserves original max_completion_tokens
-		if nixlConn.decodeRequestBody != nil {
-			if maxCompletionTokens, ok := nixlConn.decodeRequestBody["max_completion_tokens"]; !ok {
-				t.Error("Expected decode request body to have max_completion_tokens field")
-			} else if maxCompletionTokens, ok := maxCompletionTokens.(int); !ok || maxCompletionTokens != 50 {
-				t.Errorf("Expected decode request body max_completion_tokens to be 50, got %v", maxCompletionTokens)
-			}
+		if streamOptions["include_usage"] != true {
+			t.Errorf("Expected existing stream_options include_usage to be preserved, got %v", streamOptions["include_usage"])
 		}
 	})
+}
 
-	// Test NIXL-specific kv_transfer_params structure
-	t.Run("KVTransferParamsStructure", func(t *testing.T) {
-		connector := NewNIXLConnector()
+func TestNIXLConnectorBuildPrefillRequestMarshalError(t *testing.T) {
+	connector := NewNIXLConnector().(*NIXLConnector)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 
-		// Create a proper test context with a valid HTTP request
-		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = req
-
-		reqBody := map[string]interface{}{
-			"model": "test-model",
-			"messages": []interface{}{
-				map[string]interface{}{
-					"role":    "user",
-					"content": "test message",
-				},
-			},
-		}
-
-		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
-		if err == nil {
-			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
-		}
-
-		// Verify detailed kv_transfer_params structure in prefill request
-		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				if kvTransferParams, ok := prefillBody["kv_transfer_params"]; !ok {
-					t.Error("Expected prefill request to have kv_transfer_params field")
-				} else if params, isMap := kvTransferParams.(map[string]interface{}); !isMap {
-					t.Error("Expected kv_transfer_params to be a map")
-				} else {
-					// Verify all expected NIXL kv_transfer_params fields
-					expectedFields := map[string]interface{}{
-						"do_remote_decode":  true,
-						"do_remote_prefill": false,
-					}
-
-					for field, expectedValue := range expectedFields {
-						if actualValue, ok := params[field]; !ok {
-							t.Errorf("Expected kv_transfer_params to have field '%s'", field)
-						} else if actualValue != expectedValue {
-							t.Errorf("Expected kv_transfer_params['%s'] to be %v, got %v", field, expectedValue, actualValue)
-						}
-					}
-				}
-			}
-		}
+	result, err := connector.buildPrefillRequest(req, map[string]interface{}{
+		"model":       "test-model",
+		"bad_payload": make(chan struct{}),
 	})
+
+	if err == nil {
+		t.Fatal("Expected marshal error")
+	}
+	if result != nil {
+		t.Fatal("Expected nil request on marshal error")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to marshal prefill request body") {
+		t.Fatalf("Expected prefill marshal error, got %q", got)
+	}
+}
+
+func TestNIXLConnectorBuildDecodeRequestMarshalError(t *testing.T) {
+	connector := NewNIXLConnector().(*NIXLConnector)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+
+	result, err := connector.buildDecodeRequest(c, map[string]interface{}{
+		"model":       "test-model",
+		"bad_payload": func() {},
+	}, nil)
+
+	if err == nil {
+		t.Fatal("Expected marshal error")
+	}
+	if result != nil {
+		t.Fatal("Expected nil request on marshal error")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to marshal decode request body") {
+		t.Fatalf("Expected decode marshal error, got %q", got)
+	}
+}
+
+func TestNIXLConnectorProxyReturnsMarshalError(t *testing.T) {
+	connector := NewNIXLConnector()
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+
+	_, err := connector.Proxy(c, map[string]interface{}{
+		"model":       "test-model",
+		"bad_payload": make(chan struct{}),
+	}, "127.0.0.1:1", "127.0.0.1:2")
+
+	if err == nil {
+		t.Fatal("Expected marshal error")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to marshal prefill request body") {
+		t.Fatalf("Expected prefill marshal error, got %q", got)
+	}
 }
 
 // TestNIXLConnectorRetryBodyNotDrained checks that calling Proxy() twice on the

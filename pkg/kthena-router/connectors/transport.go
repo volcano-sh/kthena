@@ -89,13 +89,13 @@ func preparePrefillBody(reqBody map[string]interface{}) {
 	}
 }
 
-func buildPrefillRequest(req *http.Request, modelRequest map[string]interface{}) *http.Request {
+func buildPrefillRequest(req *http.Request, modelRequest map[string]interface{}) (*http.Request, error) {
 	// In PD disaggregated mode, we need to send a prefill request to the prefill pod with non stream mode.
 	preparePrefillBody(modelRequest)
 
 	body, err := json.Marshal(modelRequest)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("http connector: failed to marshal prefill request body: %w", err)
 	}
 
 	// build request
@@ -104,14 +104,14 @@ func buildPrefillRequest(req *http.Request, modelRequest map[string]interface{})
 	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
 	reqCopy.ContentLength = int64(len(body))
 
-	return reqCopy
+	return reqCopy, nil
 }
 
-func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) *http.Request {
+func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) (*http.Request, error) {
 	modelRequest = addTokenUsage(c, modelRequest)
 	body, err := json.Marshal(modelRequest)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("http connector: failed to marshal decode request body: %w", err)
 	}
 
 	reqCopy := req.Clone(req.Context())
@@ -119,7 +119,7 @@ func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[stri
 	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
 	reqCopy.ContentLength = int64(len(body))
 
-	return reqCopy
+	return reqCopy, nil
 }
 
 // addTokenUsage adds token usage to the request body if it is not already present
