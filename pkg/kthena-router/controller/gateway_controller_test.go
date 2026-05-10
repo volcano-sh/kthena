@@ -145,17 +145,23 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 	}
 
 	t.Run("NonKthenaGatewayNotStored", func(t *testing.T) {
-		gw := newTestGateway("other-gateway", "default", "other-gateway-class")
+		// we will first drain the workqueuee here
+		for controller.workqueue.Len() > 0 {
+			controller.processNextWorkItem()
+		}
 
+		gw := newTestGateway("other-gateway", "default", "other-gateway-class")
 		_, err := gatewayClient.GatewayV1().Gateways("default").Create(
 			context.Background(), gw, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
-		// syncHandler still works but store should not be called for non-kthena gateways
-		// via the filter — directly calling syncHandler will still store it,
-		// but the event handler won't enqueue it
+		// wait and verify the non-kthena gateway was not enqueued
+		time.Sleep(100 * time.Millisecond)
+		assert.Equal(t, 0, controller.workqueue.Len(),
+			"Non-kthena gateway should not be enqueued by the filter")
+
 		stored := store.GetGateway("default/other-gateway")
-		assert.Nil(t, stored, "Non-kthena gateway should not be in store via event handler")
+		assert.Nil(t, stored, "Non-kthena gateway should not be in store")
 	})
 }
 
