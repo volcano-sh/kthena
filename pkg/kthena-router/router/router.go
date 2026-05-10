@@ -210,7 +210,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			return
 		}
 
-		// step 2: Detection of rate limit
+		// step 2: Extract model name and prepare request metadata
 		modelName := modelRequest["model"].(string)
 
 		// Set model name in access log
@@ -263,33 +263,8 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
-		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
-			var errorMsg string
-			var errorType string
-			var tokenType string
-			switch err.(type) {
-			case *ratelimit.InputRateLimitExceededError:
-				errorMsg = "input token rate limit exceeded"
-				errorType = "input_rate_limit"
-				tokenType = metrics.LimitTypeInputTokens
-			case *ratelimit.OutputRateLimitExceededError:
-				errorMsg = "output token rate limit exceeded"
-				errorType = "output_rate_limit"
-				tokenType = metrics.LimitTypeOutputTokens
-			default:
-				errorMsg = "token usage exceeds rate limit"
-				errorType = "rate_limit"
-				tokenType = metrics.LimitTypeRequests
-			}
-			accesslog.SetError(c, errorType, errorMsg)
-
-			// Record rate limit exceeded
-			metricsRecorder.RecordRateLimitExceeded(tokenType)
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
-			c.Set("finishReason", "rate_limit")
-			return
-		}
+		// Store prompt string in context for deferred rate limiting after backend validation
+		c.Set("promptStr", promptStr)
 
 		requestID := uuid.New().String()
 		if c.Request.Header.Get("x-request-id") == "" {
@@ -399,6 +374,43 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		accesslog.SetError(c, "route_not_found", "route not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
 		return
+	}
+
+	// Apply rate limiting after backend validation succeeds.
+	// This ensures quota is only consumed when a valid backend exists.
+	if promptStr, exists := c.Get("promptStr"); exists {
+		if ps, ok := promptStr.(string); ok {
+			if err := r.loadRateLimiter.RateLimit(modelName, ps); err != nil {
+				var errorMsg string
+				var errorType string
+				var tokenType string
+				switch err.(type) {
+				case *ratelimit.InputRateLimitExceededError:
+					errorMsg = "input token rate limit exceeded"
+					errorType = "input_rate_limit"
+					tokenType = metrics.LimitTypeInputTokens
+				case *ratelimit.OutputRateLimitExceededError:
+					errorMsg = "output token rate limit exceeded"
+					errorType = "output_rate_limit"
+					tokenType = metrics.LimitTypeOutputTokens
+				default:
+					errorMsg = "token usage exceeds rate limit"
+					errorType = "rate_limit"
+					tokenType = metrics.LimitTypeRequests
+				}
+				accesslog.SetError(c, errorType, errorMsg)
+
+				// Get metrics recorder from gin context for rate limit recording
+				if recorder, exists := c.Get("metricsRecorder"); exists {
+					if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+						rec.RecordRateLimitExceeded(tokenType)
+					}
+				}
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
+				c.Set("finishReason", "rate_limit")
+				return
+			}
+		}
 	}
 
 	// Common scheduling logic for both ModelServer and InferencePool

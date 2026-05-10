@@ -368,6 +368,66 @@ func TestParseModelRequestValidatesModelName(t *testing.T) {
 	}
 }
 
+// TestRouter_HandlerFunc_NoQuotaOnFailedPodDiscovery verifies that input token
+// quota is NOT consumed when pod discovery fails (issue #991).
+func TestRouter_HandlerFunc_NoQuotaOnFailedPodDiscovery(t *testing.T) {
+	router, store, backend := setupTestRouter(t, nil)
+	defer backend.Close()
+
+	// Set up a model route with a tight rate limit so quota drain is visible
+	inputLimit := uint32(20)
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-rate", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "rate-test-model",
+			RateLimit: &aiv1alpha1.RateLimit{
+				InputTokensPerUnit: &inputLimit,
+				Unit:               aiv1alpha1.Second,
+			},
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ModelServerName: "ms-missing"},
+					},
+				},
+			},
+		},
+	}
+
+	// Add model server with NO pods -- simulates missing backend
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-missing", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("rate-test-model-base"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: 8080},
+			InferenceEngine: "vLLM",
+		},
+	}
+
+	store.AddOrUpdateModelRoute(modelRoute)
+	// Register model server with empty pod set -- no pods exist
+	store.AddOrUpdateModelServer(modelServer, sets.New[types.NamespacedName]())
+
+	// First request: should get 404 because no pods exist
+	w1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(w1)
+	reqBody := `{"model": "rate-test-model", "messages": [{"role":"user","content":"one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen"}]}`
+	c1.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c1.Request.Header.Set("Content-Type", "application/json")
+	router.HandlerFunc()(c1)
+	assert.Equal(t, http.StatusNotFound, w1.Code, "first request should return 404 (no backend pods)")
+
+	// Second request: should also get 404, NOT 429
+	// Before the fix, this would return 429 because the first request consumed quota
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	router.HandlerFunc()(c2)
+	assert.Equal(t, http.StatusNotFound, w2.Code, "second request should return 404, not 429 -- quota must not be consumed on failed pod discovery")
+	assert.NotEqual(t, http.StatusTooManyRequests, w2.Code, "quota should not be consumed when backend pod discovery fails")
+}
+
 func TestAccessLogConfigurationFromEnv(t *testing.T) {
 	// Save original environment variables
 	originalEnabled := os.Getenv("ACCESS_LOG_ENABLED")
