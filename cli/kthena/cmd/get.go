@@ -489,7 +489,11 @@ func runGetModelRoutes(cmd *cobra.Command, args []string) error {
 		age := time.Since(route.CreationTimestamp.Time).Truncate(time.Second)
 		model := route.Spec.ModelName
 		if model == "" {
-			model = "<lora>"
+			if len(route.Spec.LoraAdapters) > 0 {
+				model = strings.Join(route.Spec.LoraAdapters, ",")
+			} else {
+				model = "<lora>"
+			}
 		}
 		rules := len(route.Spec.Rules)
 		if getAllNamespaces {
