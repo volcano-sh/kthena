@@ -1497,7 +1497,7 @@ func TestSglangMetricsShared(t *testing.T, testCtx *routercontext.RouterTestCont
 	assert.Contains(t, histogramMetrics, routerutils.TPOT,
 		"Missing TPOT (sglang:time_per_output_token_seconds) in histogram metrics")
 
-	t.Logf("Pod %s: gpu_usage=%.4f, request_waiting_num=%.0f, TTFT=%.6f, TPOT=%.6f",
+	t.Logf("Pod %s: kv_cache_usage=%.4f, request_waiting_num=%.0f, TTFT=%.6f, TPOT=%.6f",
 		targetPod.Name,
 		countMetrics[routerutils.KVCacheUsage],
 		countMetrics[routerutils.RequestWaitingNum],
