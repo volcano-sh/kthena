@@ -237,6 +237,50 @@ func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 	}
 }
 
+func TestBuildModelServingDisableGangScheduling(t *testing.T) {
+	tests := []struct {
+		name                 string
+		input                string
+		expectSchedulerEmpty bool
+	}{
+		{
+			name:                 "vLLM backend with gang scheduling disabled",
+			input:                "testdata/input/model.yaml",
+			expectSchedulerEmpty: false,
+		},
+		{
+			name:                 "vLLMDisaggregated backend with gang scheduling disabled and volcano scheduler cleared",
+			input:                "testdata/input/pd-disaggregated-model-mooncake.yaml",
+			expectSchedulerEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := loadYaml[workload.ModelBooster](t, tt.input)
+			model.Spec.Backend.DisableGangScheduling = true
+
+			serving, err := BuildModelServing(model)
+			assert.NoError(t, err)
+			assert.Nil(t, serving.Spec.Template.GangPolicy, "gangPolicy should be nil when DisableGangScheduling is true")
+			if tt.expectSchedulerEmpty {
+				assert.Empty(t, serving.Spec.SchedulerName, "schedulerName should be cleared when disabling gang scheduling with volcano scheduler")
+			} else {
+				assert.Equal(t, model.Spec.Backend.SchedulerName, serving.Spec.SchedulerName, "schedulerName should not be modified if it is not volcano")
+			}
+		})
+	}
+
+	// Verify default behavior: gangPolicy is present when DisableGangScheduling is not set
+	t.Run("default behavior preserves gangPolicy", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+
+		serving, err := BuildModelServing(model)
+		assert.NoError(t, err)
+		assert.NotNil(t, serving.Spec.Template.GangPolicy, "gangPolicy should be present by default")
+	})
+}
+
 func TestBuildCacheVolume(t *testing.T) {
 	tests := []struct {
 		name         string

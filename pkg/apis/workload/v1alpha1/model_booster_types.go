@@ -101,6 +101,13 @@ type ModelBackend struct {
 	// SchedulerName defines the name of the scheduler used by ModelServing for this backend.
 	// +optional
 	SchedulerName string `json:"schedulerName,omitempty"`
+
+	// DisableGangScheduling disables gang scheduling for the generated ModelServing.
+	// When set to true, the gangPolicy will not be included in the ServingGroup template.
+	// If the schedulerName is "volcano", it will be cleared to ensure gang scheduling is disabled.
+	// Default is false (gangPolicy is enabled).
+	// +optional
+	DisableGangScheduling bool `json:"disableGangScheduling,omitempty"`
 }
 
 // ModelBackendType defines the type of model backend.
