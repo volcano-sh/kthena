@@ -1,0 +1,27 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: test
+  namespace: default
+spec:
+  modelName: "test"
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "test-backend"
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: test-backend
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: slow-backend
+  workloadPort:
+    port: 8080
+  model: "test"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 30s

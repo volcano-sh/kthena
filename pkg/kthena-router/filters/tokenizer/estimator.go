@@ -17,7 +17,9 @@ limitations under the License.
 package tokenizer
 
 import (
+	"fmt"
 	"math"
+	"unicode/utf8"
 )
 
 type SimpleEstimateTokenizer struct {
@@ -31,9 +33,12 @@ func NewSimpleEstimateTokenizer() Tokenizer {
 }
 
 func (s *SimpleEstimateTokenizer) CalculateTokenNum(prompt string) (int, error) {
-	// TODO: estimate token
+	if s.CharactersPerToken <= 0 {
+		return 0, fmt.Errorf("CharactersPerToken must be positive, but got %f", s.CharactersPerToken)
+	}
 	if prompt == "" {
 		return 0, nil
 	}
-	return int(math.Ceil(float64(len(prompt)) / s.CharactersPerToken)), nil
+	characterCount := utf8.RuneCountInString(prompt)
+	return int(math.Ceil(float64(characterCount) / s.CharactersPerToken)), nil
 }

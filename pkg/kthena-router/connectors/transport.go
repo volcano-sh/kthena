@@ -114,12 +114,12 @@ func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[stri
 		return nil
 	}
 
-	// build request
-	req.URL.Scheme = "http"
-	req.Body = io.NopCloser(bytes.NewBuffer(body))
-	req.ContentLength = int64(len(body))
+	reqCopy := req.Clone(req.Context())
+	reqCopy.URL.Scheme = "http"
+	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
+	reqCopy.ContentLength = int64(len(body))
 
-	return req
+	return reqCopy
 }
 
 // addTokenUsage adds token usage to the request body if it is not already present

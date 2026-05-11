@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +28,6 @@ import (
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	"github.com/volcano-sh/kthena/test/e2e/framework"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -66,42 +66,17 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
-	ns := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testNamespace,
-		},
-	}
-	_, err = kubeClient.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
-	if err != nil {
-		fmt.Printf("Failed to create test namespace %s: %v\n", testNamespace, err)
+	if err := utils.CreateTestNamespace(kubeClient, testNamespace); err != nil {
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
-	fmt.Printf("Created test namespace: %s\n", testNamespace)
 
 	// Run tests
 	code := m.Run()
 
 	// Cleanup test namespace
-	fmt.Printf("Deleting test namespace: %s\n", testNamespace)
-	err = kubeClient.CoreV1().Namespaces().Delete(ctx, testNamespace, metav1.DeleteOptions{})
-	if err != nil {
-		fmt.Printf("Failed to delete test namespace %s: %v\n", testNamespace, err)
-	}
-
-	// Wait for namespace to be deleted
-	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	err = wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-		_, err := kubeClient.CoreV1().Namespaces().Get(ctx, testNamespace, metav1.GetOptions{})
-		if err != nil {
-			return true, nil // namespace is gone
-		}
-		return false, nil
-	})
-	if err != nil {
-		fmt.Printf("Timeout waiting for namespace %s deletion: %v\n", testNamespace, err)
+	if err := utils.DeleteTestNamespaceAndWait(kubeClient, testNamespace, 2*time.Minute); err != nil {
+		fmt.Printf("Warning: Failed to delete test namespace %s: %v\n", testNamespace, err)
 	}
 
 	if err := framework.UninstallKthena(config.Namespace); err != nil {
@@ -111,12 +86,41 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func setupControllerManagerE2ETest(t *testing.T) (context.Context, *clientset.Clientset) {
+func setupControllerManagerE2ETest(t *testing.T) (context.Context, *clientset.Clientset, *kubernetes.Clientset) {
 	t.Helper()
 	ctx := context.Background()
 	config, err := utils.GetKubeConfig()
 	require.NoError(t, err, "Failed to get kubeconfig")
 	kthenaClient, err := clientset.NewForConfig(config)
 	require.NoError(t, err, "Failed to create kthena client")
-	return ctx, kthenaClient
+	kubeClient, err := kubernetes.NewForConfig(config)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+	return ctx, kthenaClient, kubeClient
+}
+
+func waitForWebhookReady(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace string) {
+	t.Helper()
+	t.Log("Waiting for webhook server to accept requests")
+
+	waitCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer cancel()
+
+	err := wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+		probe := createValidModelBoosterForWebhookTest()
+		probe.Namespace = namespace
+		probe.Name = "webhook-ready-probe-" + utils.RandomString(5)
+
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
+		if err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "connect: connection refused") {
+				t.Logf("Webhook not ready yet (connection refused), retrying: %v", err)
+				return false, nil
+			}
+			return false, err
+		}
+
+		return true, nil
+	})
+	require.NoError(t, err, "Webhook did not become ready in time")
 }

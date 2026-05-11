@@ -20,9 +20,17 @@ on:
 
 jobs:
   e2e-tests:
-    name: E2E Tests
+    name: E2E (${{ matrix.category }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        category:
+          - controller-manager
+          - router
+          - gateway-api
+          - gateway-inference-extension
     steps:
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@v1.3.1
@@ -34,46 +42,54 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: true
+
       - name: Checkout code
         uses: actions/checkout@v6
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+
       - name: Install helm
         shell: bash
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
       - name: Create k8s Kind Cluster
         uses: helm/kind-action@v1
         with:
-          install_only: true # Skips cluster creation, only install kind
-      - name: Run E2E Tests
-        run: make test-e2e
+          install_only: true
+
+      - name: Run E2E Tests (${{ matrix.category }})
+        run: make test-e2e-${{ matrix.category }}
         env:
-          CLUSTER_NAME: kthena-e2e-ci # Create a cluster named kthena-e2e-ci, then run tests in it
+          CLUSTER_NAME: kthena-${{ matrix.category }}
+
       - name: Collect logs on failure
         if: failure()
         run: |
-          echo "=== Kind cluster logs ==="
+          echo "=== Kind cluster logs for ${{ matrix.category }} ==="
           mkdir -p /tmp/kind-logs
-          if kind get clusters | grep -q kthena-e2e-ci; then
-            kind export logs --name kthena-e2e-ci /tmp/kind-logs || true
+          if kind get clusters | grep -q "kthena-${{ matrix.category }}"; then
+            kind export logs --name "kthena-${{ matrix.category }}" /tmp/kind-logs || true
             echo "Logs exported to /tmp/kind-logs"
             ls -la /tmp/kind-logs/ || true
           else
             echo "No kind clusters found."
           fi
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-logs
+          name: e2e-logs-${{ matrix.category }}
           path: /tmp/kind-logs/
           retention-days: 7
           if-no-files-found: warn
+
       - name: Cleanup E2E Environment
         if: always()
         run: make test-e2e-cleanup
         env:
-          CLUSTER_NAME: kthena-e2e-ci
+          CLUSTER_NAME: kthena-${{ matrix.category }}

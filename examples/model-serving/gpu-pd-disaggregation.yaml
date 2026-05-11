@@ -1,7 +1,7 @@
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
-  name: PD-sample
+  name: vllm-qwen-06b
   namespace: default
 spec:
   schedulerName: volcano
@@ -20,30 +20,28 @@ spec:
                 image: ghcr.io/volcano-sh/downloader:latest
                 args:
                   - --source
-                  - Qwen/Qwen3-8B
+                  - Qwen/Qwen3-0.6B
                   - --output-dir
-                  - /models/Qwen3-8B/
+                  - /models/Qwen3-0.6B/
                 volumeMounts:
                   - name: models
                     mountPath: /models
             containers:
               - name: prefill
-                image: kvcache-container-image-hb2-cn-beijing.cr.volces.com/aibrix/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
-                command: [ "sh", "-c" ]
+                image: ghcr.io/volcano-sh/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
+                command: ["sh", "-c"]
                 args:
                   - |
                     python3 -m vllm.entrypoints.openai.api_server \
                     --host "0.0.0.0" \
                     --port "8000" \
                     --uvicorn-log-level warning \
-                    --model /models/Qwen3-8B \
-                    --served-model-name qwen3-8B \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                    --model /models/Qwen3-0.6B \
+                    --served-model-name Qwen/Qwen3-0.6B \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
                 env:
                   - name: PYTHONHASHSEED
                     value: "1047"
-                  - name: VLLM_SERVER_DEV_MODE
-                    value: "1"
                   - name: VLLM_NIXL_SIDE_CHANNEL_HOST
                     value: "0.0.0.0"
                   - name: VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -60,8 +58,6 @@ spec:
                     value: "0"
                   - name: NCCL_IB_GID_INDEX
                     value: "7"
-                  - name: NCCL_DEBUG
-                    value: "INFO"
                   - name: UCX_TLS
                     value: ^gga
                 volumeMounts:
@@ -109,30 +105,28 @@ spec:
                 image: ghcr.io/volcano-sh/downloader:latest
                 args:
                   - --source
-                  - Qwen/Qwen3-8B
+                  - Qwen/Qwen3-0.6B
                   - --output-dir
-                  - /models/Qwen3-8B/
+                  - /models/Qwen3-0.6B/
                 volumeMounts:
                   - name: models
                     mountPath: /models
             containers:
               - name: decode
-                image: kvcache-container-image-hb2-cn-beijing.cr.volces.com/aibrix/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
-                command: [ "sh", "-c" ]
+                image: ghcr.io/volcano-sh/vllm-openai:v0.10.0-cu128-nixl-v0.4.1-lmcache-0.3.2
+                command: ["sh", "-c"]
                 args:
                   - |
                     python3 -m vllm.entrypoints.openai.api_server \
                     --host "0.0.0.0" \
                     --port "8000" \
                     --uvicorn-log-level warning \
-                    --model /models/Qwen3-8B \
-                    --served-model-name qwen3-8B \
-                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                    --model /models/Qwen3-0.6B \
+                    --served-model-name Qwen/Qwen3-0.6B \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
                 env:
                   - name: PYTHONHASHSEED
                     value: "1047"
-                  - name: VLLM_SERVER_DEV_MODE
-                    value: "1"
                   - name: VLLM_NIXL_SIDE_CHANNEL_HOST
                     value: "0.0.0.0"
                   - name: VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -149,8 +143,6 @@ spec:
                     value: "0"
                   - name: NCCL_IB_GID_INDEX
                     value: "7"
-                  - name: NCCL_DEBUG
-                    value: "INFO"
                   - name: UCX_TLS
                     value: ^gga
                 volumeMounts:

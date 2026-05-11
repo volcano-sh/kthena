@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-binding-gateway
+  namespace: default
+spec:
+  modelName: "deepseek-binding-gateway"
+  parentRefs:
+  - name: "default"
+    namespace: "kthena-system"
+    kind: "Gateway"
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "deepseek-r1-1-5b"

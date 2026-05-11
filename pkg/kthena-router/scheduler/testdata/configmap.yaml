@@ -11,6 +11,7 @@ scheduler:
       blockSizeToHash: 64
       maxBlocksToMatch: 128
       maxHashCacheSize: 50000
+      topKMatches: 5
   plugins:
     Filter:
       enabled:

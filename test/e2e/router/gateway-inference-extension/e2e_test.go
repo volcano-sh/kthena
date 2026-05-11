@@ -20,11 +20,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/framework"
+	"github.com/volcano-sh/kthena/test/e2e/router"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,7 +99,7 @@ func TestGatewayInferenceExtension(t *testing.T) {
 
 	// 1. Deploy InferencePool
 	t.Log("Deploying InferencePool...")
-	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool]("examples/kthena-router/InferencePool.yaml")
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(routercontext.TestDataDir, "InferencePool.yaml"))
 	inferencePool.Namespace = testNamespace
 
 	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
@@ -109,7 +113,7 @@ func TestGatewayInferenceExtension(t *testing.T) {
 
 	// 2. Deploy HTTPRoute
 	t.Log("Deploying HTTPRoute...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
 	httpRoute.Namespace = testNamespace
 
 	// Update parentRefs to point to the kthena installation namespace
@@ -136,6 +140,27 @@ func TestGatewayInferenceExtension(t *testing.T) {
 	}
 
 	utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", messages)
+
+	// 4. Verify access log contains Gateway API + HTTPRoute + InferencePool info
+	routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+	expectedGateway := fmt.Sprintf("%s/%s", kthenaNamespace, "default")
+	expectedHTTPRoute := fmt.Sprintf("%s/%s", testNamespace, "llm-route")
+	expectedInferencePool := fmt.Sprintf("%s/%s", testNamespace, "deepseek-r1-1-5b")
+
+	utils.WaitForPodLogsContain(
+		t,
+		testCtx.KubeClient,
+		kthenaNamespace,
+		routerPod.Name,
+		90*time.Second,
+		[]string{
+			" gateway=" + expectedGateway,
+			" http_route=" + expectedHTTPRoute,
+			" inference_pool=" + expectedInferencePool,
+		},
+		90*time.Second,
+		2*time.Second,
+	)
 }
 
 // TestBothAPIsConfigured tests both ModelRoute/ModelServer and HTTPRoute/InferencePool APIs configured together.
@@ -145,7 +170,7 @@ func TestBothAPIsConfigured(t *testing.T) {
 
 	// 1. Deploy ModelRoute and ModelServer for ModelRoute/ModelServer API
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-binding-gateway.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRoute-binding-gateway.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Update parentRefs to point to the kthena installation namespace
@@ -203,7 +228,7 @@ func TestBothAPIsConfigured(t *testing.T) {
 
 	// 3. Deploy HTTPRoute pointing to the 7b InferencePool
 	t.Log("Deploying HTTPRoute...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
 	httpRoute.Namespace = testNamespace
 	httpRoute.Name = "llm-route-7b"
 
@@ -245,3 +270,152 @@ func TestBothAPIsConfigured(t *testing.T) {
 	}
 	utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", messages7b)
 }
+
+// TestHTTPRouteNotSkippedAfterRouterRestart verifies that HTTPRoute volcano-router-gateway
+// is not skipped when HTTPRouteController sync runs (e.g. after router pod restart).
+func TestHTTPRouteNotSkippedAfterRouterRestart(t *testing.T) {
+	ctx := context.Background()
+	httpRouteName := "volcano-router-gateway"
+	ktNamespace := gatewayv1.Namespace(kthenaNamespace)
+
+	// 1. Deploy InferencePool
+	t.Log("Deploying InferencePool...")
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(routercontext.TestDataDir, "InferencePool.yaml"))
+	inferencePool.Namespace = testNamespace
+
+	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create InferencePool")
+
+	t.Cleanup(func() {
+		_ = testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Delete(context.Background(), createdInferencePool.Name, metav1.DeleteOptions{})
+	})
+
+	// 2. Create HTTPRoute volcano-router-gateway (parentRef to default Gateway, which listens on port 80)
+	t.Log("Creating HTTPRoute volcano-router-gateway...")
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
+	httpRoute.Name, httpRoute.Namespace = httpRouteName, testNamespace
+	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
+		{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("default"), Namespace: &ktNamespace},
+	}
+
+	_, err = testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create HTTPRoute")
+
+	t.Cleanup(func() {
+		_ = testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(context.Background(), httpRouteName, metav1.DeleteOptions{})
+	})
+
+	// 3. Restart router to trigger sync race
+	t.Log("Restarting kthena-router...")
+	require.NoError(t, exec.Command("kubectl", "rollout", "restart", "deployment/kthena-router", "-n", kthenaNamespace).Run())
+	require.NoError(t, exec.Command("kubectl", "rollout", "status", "deployment/kthena-router", "-n", kthenaNamespace, "--timeout=120s").Run())
+
+	// Wait for all terminating pods to be fully gone before setting up port-forward.
+	// A pod in "Terminating" state still has Phase=Running, so findPodForService
+	// can connect to a dying container whose ports are already closed.
+	routerDeploy, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, "kthena-router", metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router deployment")
+	routerPodSelector := metav1.FormatLabelSelector(routerDeploy.Spec.Selector)
+	require.Eventually(t, func() bool {
+		pods, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: routerPodSelector,
+		})
+		if err != nil {
+			return false
+		}
+		// Defensive: rollout status already confirmed new pods are Ready,
+		// so empty list indicates a transient API hiccup, not expected state.
+		if len(pods.Items) == 0 {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Minute, 2*time.Second, "Terminating router pods should be fully removed")
+
+	// 4. Re-establish port-forward (original breaks when pod restarts)
+	pf, err := utils.SetupPortForward(kthenaNamespace, "kthena-router", "9080", "80")
+	require.NoError(t, err, "Failed to setup port-forward after restart")
+	t.Cleanup(func() { pf.Close() })
+
+	// 5. Verify HTTPRoute was not skipped
+	t.Log("Verifying HTTPRoute volcano-router-gateway is processed...")
+	utils.CheckChatCompletionsWithURL(t, "http://127.0.0.1:9080/v1/chat/completions", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", []utils.ChatMessage{utils.NewChatMessage("user", "Hello")})
+}
+
+// TestGatewayCreatedLaterThanHTTPRoute verifies that when HTTPRoute is created before its Gateway,
+// the HTTPRoute is correctly processed after the Gateway is created (via Gateway event handler).
+func TestGatewayCreatedLaterThanHTTPRoute(t *testing.T) {
+	ctx := context.Background()
+	gatewayName := "late-gateway"
+	httpRouteName := "late-route"
+	ktNamespace := gatewayv1.Namespace(kthenaNamespace)
+
+	// 1. Create HTTPRoute first (parentRef to Gateway that does not exist yet)
+	t.Log("Creating HTTPRoute before Gateway...")
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute](filepath.Join(routercontext.TestDataDir, "HTTPRoute.yaml"))
+	httpRoute.Name, httpRoute.Namespace = httpRouteName, testNamespace
+	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
+		{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName(gatewayName), Namespace: &ktNamespace},
+	}
+
+	_, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create HTTPRoute")
+
+	t.Cleanup(func() {
+		_ = testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(context.Background(), httpRouteName, metav1.DeleteOptions{})
+	})
+
+	// 2. Deploy InferencePool
+	t.Log("Deploying InferencePool...")
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool](filepath.Join(routercontext.TestDataDir, "InferencePool.yaml"))
+	inferencePool.Namespace = testNamespace
+
+	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create InferencePool")
+
+	t.Cleanup(func() {
+		_ = testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Delete(context.Background(), createdInferencePool.Name, metav1.DeleteOptions{})
+	})
+
+	// 3. Create Gateway (triggers HTTPRoute re-enqueue)
+	t.Log("Creating Gateway...")
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: gatewayName, Namespace: kthenaNamespace},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: gatewayv1.ObjectName("kthena-router"),
+			Listeners: []gatewayv1.Listener{
+				{Name: gatewayv1.SectionName("http"), Port: gatewayv1.PortNumber(8082), Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	_, err = testCtx.GatewayClient.GatewayV1().Gateways(kthenaNamespace).Create(ctx, gateway, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create Gateway")
+
+	t.Cleanup(func() {
+		_ = testCtx.GatewayClient.GatewayV1().Gateways(kthenaNamespace).Delete(context.Background(), gatewayName, metav1.DeleteOptions{})
+	})
+
+	// 4. Wait for router to process, then verify via port 8082 (pod port, Service does not expose it)
+	time.Sleep(5 * time.Second)
+
+	routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+	pf, err := utils.SetupPortForwardToPod(kthenaNamespace, routerPod.Name, "9081", "8082")
+	require.NoError(t, err, "Failed to setup port-forward to late-gateway listener")
+	t.Cleanup(func() { pf.Close() })
+
+	t.Log("Verifying HTTPRoute is processed after Gateway creation...")
+	utils.CheckChatCompletionsWithURL(t, "http://127.0.0.1:9081/v1/chat/completions", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", []utils.ChatMessage{utils.NewChatMessage("user", "Hello late gateway")})
+}
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+func TestRouterConfigUpdate(t *testing.T) {
+	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
+func ptr[T any](v T) *T { return &v }

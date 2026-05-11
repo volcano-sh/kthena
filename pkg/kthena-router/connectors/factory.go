@@ -53,6 +53,7 @@ func NewDefaultFactory() *Factory {
 	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeLMCache, NewHTTPConnector)      // LMCache uses HTTP connector for now
 	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeMoonCake, NewMoonCakeConnector) // MoonCakeConnector in vllm-ascend
 	factory.RegisterConnectorBuilder(v1alpha1.ConnectorTypeNIXL, NewNIXLConnector)
+	factory.RegisterConnectorBuilder(ConnectorTypeSGLang, NewSGLangConnector) // SGLang disaggregated prefill-decode (internal, not user-configurable)
 
 	return factory
 }

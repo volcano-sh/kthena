@@ -1,0 +1,32 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  annotations:
+    api.kubernetes.io/name: example
+  name: deepseek-r1-distill-llama-8b
+spec:
+  name: "deepseek-r1-distill-llama-8b"
+  owner: "example"
+  autoscalingPolicy:
+    metrics:
+      - metricName: "kthena:num_requests_waiting"
+        targetValue: 10
+  backend:
+    name: "deepseek-r1-distill-llama-8b-vllm"
+    type: "vLLM"
+    modelURI: "s3://model-bucket/deepseek-r1-distill-llama-8b"
+    cacheURI: "hostpath://tmp/test"
+    minReplicas: 1
+    maxReplicas: 3
+    workers:
+      - type: "server"
+        image: "vllm/vllm-openai:v0.7.1"
+        replicas: 0
+        pods: 0
+        config:
+          maxModelLen: 12288
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+          requests:
+            nvidia.com/gpu: "1"

@@ -19,6 +19,7 @@ package utils
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,7 +59,7 @@ func ParsePrompt(body map[string]interface{}) (common.ChatMessage, error) {
 			return common.ChatMessage{}, fmt.Errorf("messages is not a list")
 		}
 
-		var msgs []common.Message
+		msgs := make([]common.Message, 0, len(messageList))
 		for _, message := range messageList {
 			msgMap, ok := message.(map[string]interface{})
 			if !ok {
@@ -96,11 +97,11 @@ func GetPromptString(chatMessage common.ChatMessage) string {
 	}
 
 	// For chat messages, convert to ChatML format
-	result := ""
+	var result strings.Builder
 	for _, msg := range chatMessage.Messages {
-		result += fmt.Sprintf("<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content)
+		fmt.Fprintf(&result, "<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content)
 	}
-	return result
+	return result.String()
 }
 
 func LoadEnv(key, defaultValue string) string {

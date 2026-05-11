@@ -87,7 +87,7 @@ Pod Controller monitors all pod creation, deletion, and update events related to
 ## 4. Expected Results
 
 ```yaml
-apiVersion: workload.volcano.sh/v1alpha1
+apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelInfer
 metadata:
   name: sample

@@ -225,6 +225,7 @@ spec:
                       "RUNTIME_PORT": default is 8100
                       "RUNTIME_METRICS_PATH": default is /metrics
                       "HF_ENDPOINT":The url of hugging face. Default is https://huggingface.co/
+                      "KTHENA_SKIP_ENGINE_DEPENDENCY_INSTALL": default is false. When set to true, skip startup-time pip install of engine connector dependencies.
                       Cannot be updated.
                     items:
                       description: EnvVar represents an environment variable present
@@ -455,14 +456,19 @@ spec:
                     type: integer
                   modelURI:
                     description: ModelURI is the URI where you download the model.
-                      Support hf://, s3://, pvc://.
-                    pattern: ^(hf://|s3://|pvc://).+
+                      Support hf://, s3://, pvc://, ms://.
+                    pattern: ^(hf://|s3://|pvc://|ms://).+
                     type: string
                   name:
                     description: |-
                       Name is the name of the backend. Can't duplicate with other ModelBackend name in the same ModelBooster CR.
                       Note: update name will cause the old modelInfer deletion and a new modelInfer creation.
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  runtimeClassName:
+                    description: |-
+                      RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,
+                      which should be used to run pods generated for this backend.
                     type: string
                   schedulerName:
                     description: SchedulerName defines the name of the scheduler used

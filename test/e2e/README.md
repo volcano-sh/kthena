@@ -4,7 +4,16 @@ This directory contains end-to-end (E2E) tests for the Kthena project using Kind
 
 ## Overview
 
-The E2E tests will use helm to install kthena into the Kind cluster and verify the core functionality.
+The E2E tests use helm to install kthena into a Kind cluster and verify core functionality. Tests are organized into categories that can run in parallel on CI.
+
+## Test Categories
+
+| Category | Description | Make Target |
+|----------|-------------|-------------|
+| `controller-manager` | ModelServing, ModelBooster, Autoscaling | `make test-e2e-controller-manager` |
+| `router` | ModelRoute without Gateway API | `make test-e2e-router` |
+| `gateway-api` | ModelRoute with Gateway API | `make test-e2e-gateway-api` |
+| `gateway-inference-extension` | HTTPRoute, InferencePool | `make test-e2e-gateway-inference-extension` |
 
 ## Prerequisites
 
@@ -23,19 +32,42 @@ The tests create a Kind cluster with the following characteristics:
 
 ## Running the Tests
 
-### Using Make (Recommended)
+### Run All Tests (Legacy)
 
 ```bash
-# Run E2E tests (automatically sets up Kind Cluster and run test)
 make test-e2e
-
-# Clean up E2E test environment (if needed)
 make test-e2e-cleanup
 ```
 
-### Local Testing Considerations
+### Run Specific Category
 
-#### CPU Limitations (AVX-512)
+```bash
+# Controller manager tests
+make test-e2e-controller-manager
+
+# Router tests (no Gateway API)
+make test-e2e-router
+
+# Gateway API tests
+make test-e2e-gateway-api
+
+# Gateway Inference Extension tests
+make test-e2e-gateway-inference-extension
+
+# Cleanup after any test
+make test-e2e-cleanup
+```
+
+### Environment Variables
+
+- `CLUSTER_NAME`: Override Kind cluster name (default: `kthena-e2e`)
+- `TEST_CATEGORY`: Specify which CRDs to install (used by setup.sh)
+- `HUB`: Docker image registry (default: `ghcr.io/volcano-sh`)
+- `TAG`: Docker image tag (default: `latest`)
+
+## Local Testing Considerations
+
+### CPU Limitations (AVX-512)
 
 Some E2E tests (e.g., `TestModelCR` in `model_booster_test.go`) use vLLM-based images (`ghcr.io/huntersman/vllm-cpu-env:latest`).
 
@@ -47,7 +79,7 @@ Some E2E tests (e.g., `TestModelCR` in `model_booster_test.go`) use vLLM-based i
 
 If you run these tests on an incompatible machine, the vLLM containers may crash with `SIGILL` (Illegal Instruction). For more details, see the [vLLM CPU installation guide](https://docs.vllm.ai/en/stable/getting_started/installation/cpu/).
 
-#### Running Non-vLLM Tests Locally
+### Running Non-vLLM Tests Locally
 
 Tests that do not require the vLLM image (like webhook validation/mutation tests) can be executed locally even without AVX-512 support.
 

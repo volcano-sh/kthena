@@ -94,11 +94,7 @@ func SetupController(ctx context.Context, cc Config) {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
 			case AutoscalerController:
-				namespace, err := utils.GetInClusterNameSpace()
-				if err != nil {
-					klog.Fatalf("failed to get in-cluster namespace: %v", err)
-				}
-				ac = autoscaler.NewAutoscaleController(kubeClient, client, namespace)
+				ac = autoscaler.NewAutoscaleController(kubeClient, client)
 			}
 		}
 	}

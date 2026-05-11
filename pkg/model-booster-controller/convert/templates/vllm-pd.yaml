@@ -16,6 +16,7 @@ spec:
         entryTemplate:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime
@@ -69,6 +70,7 @@ spec:
         entryTemplate:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime

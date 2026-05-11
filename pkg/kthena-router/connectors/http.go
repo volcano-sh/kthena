@@ -70,15 +70,11 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		}
 	}
 
-	if h.decodeRequest == nil {
-		h.decodeRequest = BuildDecodeRequest(c, c.Request, reqBody)
-	}
+	decodeBody := cloneReqBody(reqBody)
+	h.decodeRequest = BuildDecodeRequest(c, c.Request, decodeBody)
 
-	// build prefillRequest after decodeRequest, because prefillRequest needs to delete stream and stream_options
-	// and modify the max_tokens
-	if h.prefillRequest == nil {
-		h.prefillRequest = buildPrefillRequest(c.Request, reqBody)
-	}
+	prefillBody := cloneReqBody(reqBody)
+	h.prefillRequest = buildPrefillRequest(c.Request, prefillBody)
 
 	// Start prefill phase metrics and increment upstream request
 	if metricsRecorder != nil {

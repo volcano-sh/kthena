@@ -87,6 +87,13 @@ func SetRequestRouting(c *gin.Context, modelRoute, modelServer, selectedPod stri
 	}
 }
 
+// SetGatewayAPIInfo sets Gateway API / inference extension routing information in the access log context.
+func SetGatewayAPIInfo(c *gin.Context, gateway, httpRoute, inferencePool string) {
+	if ctx := GetAccessLogContext(c); ctx != nil {
+		ctx.SetGatewayAPIInfo(gateway, httpRoute, inferencePool)
+	}
+}
+
 // SetTokenCounts sets token counts in the access log context
 func SetTokenCounts(c *gin.Context, inputTokens, outputTokens int) {
 	if ctx := GetAccessLogContext(c); ctx != nil {

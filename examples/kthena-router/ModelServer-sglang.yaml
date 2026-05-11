@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: sglang-mock
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: sglang-mock
+  workloadPort:
+    port: 30000
+  model: "Qwen/Qwen3-8B"
+  inferenceEngine: "SGLang"
+  trafficPolicy:
+    timeout: 10s

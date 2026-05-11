@@ -262,7 +262,7 @@ func findPodForService(clientset *kubernetes.Clientset, namespace, serviceName s
 
 	// Find the first running pod and resolve the targetPort
 	for _, pod := range pods.Items {
-		if pod.Status.Phase == v1.PodRunning {
+		if pod.Status.Phase == v1.PodRunning && pod.DeletionTimestamp == nil {
 			// Resolve the container port from targetPort
 			containerPort, err := resolveContainerPort(&pod, targetPort)
 			if err != nil {
@@ -348,6 +348,9 @@ func (f *forwarder) buildK8sPortForwarder(readyCh chan struct{}) (*portforward.P
 	}
 	if pod.Status.Phase != v1.PodRunning {
 		return nil, fmt.Errorf("pod is not running. Status=%v", pod.Status.Phase)
+	}
+	if pod.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("pod %s/%s is terminating", pod.Namespace, pod.Name)
 	}
 
 	return fw, nil

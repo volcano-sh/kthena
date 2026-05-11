@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
@@ -25,6 +26,8 @@ import (
 	"github.com/cespare/xxhash"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
@@ -172,4 +175,56 @@ func TestPrefixCacheScore(t *testing.T) {
 			t.Errorf("expected nil for empty prompt, got %v", scores)
 		}
 	})
+}
+
+func TestNewPrefixCacheWithEmptyArgs(t *testing.T) {
+	state := klog.CaptureState()
+	defer state.Restore()
+
+	var logBuffer bytes.Buffer
+	klog.LogToStderr(false)
+	klog.SetOutput(&logBuffer)
+
+	plugin := NewPrefixCache(datastore.New(), runtime.RawExtension{Raw: []byte{}})
+	klog.Flush()
+
+	if plugin.blockSizeToHash != 64 {
+		t.Fatalf("unexpected default blockSizeToHash: got %d, want %d", plugin.blockSizeToHash, 64)
+	}
+	if plugin.maxBlocksToMatch != 128 {
+		t.Fatalf("unexpected default maxBlocksToMatch: got %d, want %d", plugin.maxBlocksToMatch, 128)
+	}
+	if strings.Contains(logBuffer.String(), "Failed to unmarshal PrefixCacheArgs") {
+		t.Fatalf("expected no unmarshal error log for empty args, got: %s", logBuffer.String())
+	}
+}
+
+func TestNewPrefixCacheRespectsTopKMatches(t *testing.T) {
+	plugin := NewPrefixCache(datastore.New(), runtime.RawExtension{
+		Raw: []byte(`{"blockSizeToHash": 64, "maxBlocksToMatch": 128, "maxHashCacheSize": 50000, "topKMatches": 1}`),
+	})
+
+	pod1 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
+	pod2 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"}}}
+
+	prompt := "same prompt for both pods"
+	hashes := plugin.hashPrompt("test-model", prompt)
+	plugin.store.Add("test-model", hashes, pod1)
+	plugin.store.Add("test-model", hashes, pod2)
+
+	ctx := &framework.Context{
+		Model:  "test-model",
+		Prompt: common.ChatMessage{Text: prompt},
+	}
+	scores := plugin.Score(ctx, []*datastore.PodInfo{pod1, pod2})
+
+	nonZero := 0
+	for _, score := range scores {
+		if score > 0 {
+			nonZero++
+		}
+	}
+	if nonZero != 1 {
+		t.Fatalf("expected exactly 1 pod with non-zero score when topKMatches=1, got %d", nonZero)
+	}
 }

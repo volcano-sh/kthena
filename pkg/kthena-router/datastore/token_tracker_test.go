@@ -21,6 +21,36 @@ import (
 	"time"
 )
 
+func TestPruneExpiredBuckets_RebasesCumulativeCountsAfterCompaction(t *testing.T) {
+	tracker := NewInMemorySlidingWindowTokenTracker().(*InMemorySlidingWindowTokenTracker)
+	tracker.userBucketStore["user1"] = map[string]*userBucketData{
+		"model1": {
+			buckets: []bucketNode{
+				{timestamp: 1, tokens: 1, cumSum: 1, reqCount: 1, reqCumSum: 1},
+				{timestamp: 2, tokens: 2, cumSum: 3, reqCount: 1, reqCumSum: 2},
+				{timestamp: 3, tokens: 3, cumSum: 6, reqCount: 1, reqCumSum: 3},
+				{timestamp: 4, tokens: 4, cumSum: 10, reqCount: 1, reqCumSum: 4},
+			},
+		},
+	}
+
+	tracker.pruneExpiredBuckets("user1", "model1", 3)
+	bucketData := tracker.userBucketStore["user1"]["model1"]
+
+	if bucketData.start != 0 {
+		t.Fatalf("Expected start to be reset after compaction, got %d", bucketData.start)
+	}
+	if len(bucketData.buckets) != 2 {
+		t.Fatalf("Expected 2 remaining buckets after compaction, got %d", len(bucketData.buckets))
+	}
+	if got := tracker.getActiveTotal(bucketData); got != 7 {
+		t.Fatalf("Expected active token total 7 after compaction, got %v", got)
+	}
+	if got := tracker.getActiveRequestCount(bucketData); got != 2 {
+		t.Fatalf("Expected active request total 2 after compaction, got %d", got)
+	}
+}
+
 func TestNewInMemorySlidingWindowTokenTracker(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -685,4 +715,85 @@ func BenchmarkConcurrentAccess(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestGetRequestCount_Basic(t *testing.T) {
+	tracker := NewInMemorySlidingWindowTokenTracker()
+
+	user := "test-user"
+	model := "test-model"
+
+	// Initially zero
+	count, err := tracker.GetRequestCount(user, model)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0, got %d", count)
+	}
+
+	// After 3 updates, should have 3 requests
+	for i := 0; i < 3; i++ {
+		if err := tracker.UpdateTokenCount(user, model, 10, 5); err != nil {
+			t.Fatalf("UpdateTokenCount failed: %v", err)
+		}
+	}
+
+	count, err = tracker.GetRequestCount(user, model)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3, got %d", count)
+	}
+}
+
+func TestGetRequestCount_EmptyInputs(t *testing.T) {
+	tracker := NewInMemorySlidingWindowTokenTracker()
+
+	count, err := tracker.GetRequestCount("", "model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 for empty user, got %d", count)
+	}
+
+	count, err = tracker.GetRequestCount("user", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 for empty model, got %d", count)
+	}
+}
+
+func TestGetRequestCount_Concurrent(t *testing.T) {
+	tracker := NewInMemorySlidingWindowTokenTracker()
+	user := "concurrent-user"
+	model := "concurrent-model"
+	numGoroutines := 10
+	numOps := 100
+
+	var wg sync.WaitGroup
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < numOps; j++ {
+				_ = tracker.UpdateTokenCount(user, model, 1, 0)
+				_, _ = tracker.GetRequestCount(user, model)
+			}
+		}()
+	}
+	wg.Wait()
+
+	count, err := tracker.GetRequestCount(user, model)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := numGoroutines * numOps
+	if count != expected {
+		t.Errorf("expected %d, got %d", expected, count)
+	}
 }

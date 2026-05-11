@@ -1,0 +1,30 @@
+import LightboxImage from '@site/src/components/LightboxImage';
+import pdIntroduction from '../../assets/diagrams/pd-introduction.svg';
+
+# Prefill Decode Disaggregation
+
+With the rapid evolution of Large Language Models (LLMs), the computational demands for inference have grown
+significantly. Traditional inference approaches process both prefill and decode phases on the same hardware resources,
+which can lead to inefficient resource utilization and suboptimal performance, particularly on specialized hardware like XPUs.
+
+## Why disaggregated prefilling?
+
+Prefill-decode disaggregation is an innovative optimization strategy that separates the prefill phase (processing input
+tokens) from the decode phase (generating output tokens) across different computational resources. This approach allows
+for specialized hardware allocation and improved resource efficiency, maximizing the utilization of XPU.
+
+## How to deploy with Kthena?
+
+To address this optimization need, `Kthena` provides enhanced `ModelServing` CR capabilities to describe prefill-decode
+disaggregated inference deployments, enabling flexible and efficient deployment patterns for LLM inference workloads.
+
+The figure below shows a 2-batch PD-separated inference instance, where each instance can independently complete inference tasks. In each inference instance, Pods are divided into two categories for Prefill and Decode, corresponding to the Role in ModelServing. Each Prefill and Decode consists of 4 Pods, including 1 entry Pod and 3 worker Pods, and the Ray deployment method can be applied here.
+
+
+<div style={{ textAlign: 'center' }}>
+  <LightboxImage src={pdIntroduction} alt="Prefill Decode Disaggregation Example"/>
+</div>
+
+For a detailed definition of the `ModelServing`, please refer to the [ModelServing Reference](../../reference/crd/workload.serving.volcano.sh.md#modelserving) pages.
+
+

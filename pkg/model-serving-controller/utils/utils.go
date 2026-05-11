@@ -93,9 +93,9 @@ func GeneratePodName(groupName, roleName string, podIndex int) string {
 	return groupName + "-" + roleName + "-" + strconv.Itoa(podIndex)
 }
 
-func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision string) *corev1.Pod {
+func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision, roleTemplateHash string) *corev1.Pod {
 	entryPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), 0)
-	entryPod := createBasePod(role, ms, entryPodName, groupName, revision, roleIndex)
+	entryPod := createBasePod(role, ms, entryPodName, groupName, revision, roleTemplateHash, roleIndex)
 	entryPod.ObjectMeta.Labels[workloadv1alpha1.EntryLabelKey] = Entry
 	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
 	entryPod.Spec = role.EntryTemplate.Spec
@@ -106,19 +106,23 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 	return entryPod
 }
 
-func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision string) *corev1.Pod {
+func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
+	if role.WorkerTemplate == nil {
+		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s", role.Name)
+		return nil
+	}
+
 	workerPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
-	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleIndex)
+	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleTemplateHash, roleIndex)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
-	// Build environment variables into each container of all pod
 	envVars := createCommonEnvVars(role, entryPod, podIndex)
 	addPodEnvVars(workerPod, envVars...)
 	return workerPod
 }
 
-func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, revision string, roleIndex int) *corev1.Pod {
+func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, revision, roleTemplateHash string, roleIndex int) *corev1.Pod {
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -133,6 +137,7 @@ func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing
 				workloadv1alpha1.RoleLabelKey:             role.Name,
 				workloadv1alpha1.RoleIDKey:                GenerateRoleID(role.Name, roleIndex),
 				workloadv1alpha1.RevisionLabelKey:         revision,
+				workloadv1alpha1.RoleTemplateHashLabelKey: roleTemplateHash,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(ms),
@@ -146,11 +151,17 @@ func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metada
 		return
 	}
 	if metadata.Labels != nil {
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
 		for k, v := range metadata.Labels {
 			pod.Labels[k] = v
 		}
 	}
 	if metadata.Annotations != nil {
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
 		for k, v := range metadata.Annotations {
 			pod.Annotations[k] = v
 		}
@@ -302,6 +313,10 @@ func ObjectRevision(obj metav1.Object) string {
 	return obj.GetLabels()[workloadv1alpha1.RevisionLabelKey]
 }
 
+func ObjectRoleTemplateHash(obj metav1.Object) string {
+	return obj.GetLabels()[workloadv1alpha1.RoleTemplateHashLabelKey]
+}
+
 // GetRoleName returns the role name of the resource.
 func GetRoleName(resource metav1.Object) string {
 	return resource.GetLabels()[workloadv1alpha1.RoleLabelKey]
@@ -406,7 +421,21 @@ func SetCondition(ms *workloadv1alpha1.ModelServing, progressingGroups, updatedG
 
 	partition := 0
 	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partition = int(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+		p := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition
+		if p.Type == intstr.Int {
+			partition = int(p.IntVal)
+		} else if ms.Spec.Replicas != nil {
+			replicas := int(*ms.Spec.Replicas)
+			partitionValue, err := intstr.GetScaledValueFromIntOrPercent(p, replicas, true)
+			if err != nil {
+				klog.ErrorS(err, "Failed to get partition from RollingUpdateConfiguration; defaulting to 0",
+					"modelServingNamespace", ms.Namespace,
+					"modelServingName", ms.Name,
+					"partition", p.String())
+			} else {
+				partition = partitionValue
+			}
+		}
 	}
 
 	// If progressingGroups is empty, all groups are running. In addition, we still need to check revision.
@@ -560,14 +589,19 @@ func RoleIDIndexFunc(obj interface{}) ([]string, error) {
 	return []string{compositeKey}, nil
 }
 
-func GetMaxUnavailable(mi *workloadv1alpha1.ModelServing) (int, error) {
+func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 	maxUnavailable := intstr.FromInt(1) // Default value
-	replicas := int(*mi.Spec.Replicas)
-	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
-		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable != nil {
-			maxUnavailable = *mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
+	replicas := int(*ms.Spec.Replicas)
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
+		if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable != nil {
+			maxUnavailable = *ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
 		}
 	}
 	// Calculate maxUnavailable as absolute numbers
 	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
+}
+
+func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
+	copy := RemoveRoleReplicasForRoleTemplateHash(role)
+	return Revision(copy)
 }

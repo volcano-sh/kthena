@@ -56,7 +56,7 @@ func NewStatus(behavior *v1alpha1.AutoscalingPolicyBehavior) *Status {
 		History: &algorithm.History{
 			MaxRecommendation:     datastructure.NewMaximumRecordSlidingWindow[int32](scaleDownStabilizationWindowMilliseconds),
 			MinRecommendation:     datastructure.NewMinimumRecordSlidingWindow[int32](scaleUpStabilizationWindowMilliseconds),
-			MaxCorrected:          datastructure.NewMinimumLineChartSlidingWindow[int32](scaleDownPeriodMilliseconds),
+			MaxCorrected:          datastructure.NewMaximumLineChartSlidingWindow[int32](scaleDownPeriodMilliseconds),
 			MinCorrectedForStable: datastructure.NewMinimumLineChartSlidingWindow[int32](scaleUpStablePolicyPeriodMilliseconds),
 			MinCorrectedForPanic:  datastructure.NewMinimumLineChartSlidingWindow[int32](behavior.ScaleUp.PanicPolicy.Period.Milliseconds()),
 		},

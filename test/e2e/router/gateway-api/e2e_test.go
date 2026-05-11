@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -129,10 +130,22 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 	router.TestModelRouteWithRateLimitShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
+// TestModelRouteWithGlobalRateLimit tests global rate limiting enforced by the Kthena Router.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestModelRouteWithGlobalRateLimit(t *testing.T) {
+	router.TestModelRouteWithGlobalRateLimitShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
 // TestModelRouteLora tests ModelRoute with LoRA adapter routing.
 // This test runs the shared test function with Gateway API enabled (with ParentRefs).
 func TestModelRouteLora(t *testing.T) {
 	router.TestModelRouteLoraShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
+// TestModelRouteDuplicatePreferOldest tests that duplicate ModelRoutes for the same model
+// are evaluated oldest-first and the first match wins; after the oldest is deleted, the newer takes over.
+func TestModelRouteDuplicatePreferOldest(t *testing.T) {
+	router.TestModelRouteDuplicatePreferOldestShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
 // TestMetrics tests router metrics collection.
@@ -147,6 +160,12 @@ func TestRateLimitMetrics(t *testing.T) {
 	router.TestRateLimitMetricsShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
+// TestSglangMetrics verifies that the runtime can correctly scrape and parse SGLang metrics
+// from the sglang-mock deployment.
+func TestSglangMetrics(t *testing.T) {
+	router.TestSglangMetricsShared(t, testCtx, testNamespace)
+}
+
 // TestDuplicateModelName tests that the same modelName can route to different backend models
 // when accessed through different Gateways (ports). This demonstrates how Gateway API resolves
 // the global modelName conflict problem by allowing modelName isolation per Gateway.
@@ -155,7 +174,7 @@ func TestDuplicateModelName(t *testing.T) {
 
 	// 1. Deploy ModelRouteSimple.yaml with parentRefs to default Gateway
 	t.Log("Deploying ModelRouteSimple binding to default Gateway...")
-	modelRoute1 := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSimple.yaml")
+	modelRoute1 := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
 	modelRoute1.Namespace = testNamespace
 	modelRoute1.Name = "deepseek-simple-default"
 
@@ -184,7 +203,7 @@ func TestDuplicateModelName(t *testing.T) {
 
 	// 2. Create custom Gateway with port 8081
 	t.Log("Creating custom Gateway with port 8081...")
-	customGateway := utils.LoadYAMLFromFile[gatewayv1.Gateway]("examples/kthena-router/Gateway.yaml")
+	customGateway := utils.LoadYAMLFromFile[gatewayv1.Gateway](filepath.Join(routercontext.TestDataDir, "Gateway.yaml"))
 	customGateway.Namespace = kthenaNamespace
 	customGateway.Name = "kthena-gateway-custom"
 	customGateway.Spec.Listeners[0].Port = gatewayv1.PortNumber(8081)
@@ -298,4 +317,11 @@ func TestDuplicateModelName(t *testing.T) {
 	assert.Contains(t, response2.Body, "DeepSeek-R1-Distill-Qwen-7B", "Response should indicate 7B model")
 
 	t.Log("Test completed successfully: same modelName routes to different models via different ports")
+}
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestRouterConfigUpdate(t *testing.T) {
+	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }

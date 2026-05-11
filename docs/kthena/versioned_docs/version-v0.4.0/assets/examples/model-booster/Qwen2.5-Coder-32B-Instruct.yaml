@@ -1,0 +1,38 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  annotations:
+    api.kubernetes.io/name: example
+  name: qwen25
+spec:
+  name: qwen25-coder-32b
+  owner: example
+  backend:
+    name: "qwen25-coder-32b-server"
+    type: "vLLM"
+    modelURI: s3://kthena/Qwen/Qwen2.5-Coder-32B-Instruct
+    cacheURI: hostpath:///cache/
+    envFrom:
+      - secretRef:
+          name: your-secrets
+    env:
+      - name: "RUNTIME_PORT"  # default 8100
+        value: "8200"
+      - name: "RUNTIME_URL"   # default http://localhost:8000/metrics
+        value: "http://localhost:8100/metrics"
+    minReplicas: 1
+    maxReplicas: 2
+    workers:
+      - type: server
+        image: openeuler/vllm-ascend:latest
+        replicas: 1
+        pods: 1
+        resources:
+          limits:
+            cpu: "8"
+            memory: 96Gi
+            huawei.com/ascend-1980: "2"
+          requests:
+            cpu: "1"
+            memory: 96Gi
+            huawei.com/ascend-1980: "2"

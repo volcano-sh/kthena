@@ -53,7 +53,7 @@ func (alg CorrectedInstancesAlgorithm) GetCorrectedInstances() int32 {
 
 func (alg CorrectedInstancesAlgorithm) getCorrectedInstancesForPanic() int32 {
 	corrected := alg.RecommendedInstances
-	if pastSample, ok := alg.History.MinCorrectedForPanic.GetBest(alg.CurrentInstances); ok {
+	if pastSample, ok := alg.History.MinCorrectedForPanic.GetBest(alg.CurrentInstances); ok && pastSample > 0 {
 		relativeConstraint := pastSample + int32(float64(pastSample)*float64(*alg.Behavior.ScaleUp.PanicPolicy.Percent)/100.0)
 		corrected = min(corrected, relativeConstraint)
 	}

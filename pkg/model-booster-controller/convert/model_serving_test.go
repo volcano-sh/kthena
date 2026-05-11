@@ -17,11 +17,13 @@ limitations under the License.
 package convert
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-booster-controller/env"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -103,11 +105,53 @@ func TestGetCachePath(t *testing.T) {
 	}
 }
 
+func TestGetPVCClaimName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal pvc URI",
+			input:    "pvc://my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "extra leading slashes",
+			input:    "pvc:///my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "trailing slash",
+			input:    "pvc://my-pvc/",
+			expected: "my-pvc",
+		},
+		{
+			name:     "multiple surrounding slashes",
+			input:    "pvc:////my-pvc////",
+			expected: "my-pvc",
+		},
+		{
+			name:     "empty",
+			input:    "",
+			expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetPVCClaimName(tt.input); got != tt.expected {
+				t.Errorf("GetPVCClaimName() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestCreateModelServingResources(t *testing.T) {
 	tests := []struct {
 		name         string
 		input        *workload.ModelBooster
 		expected     *workload.ModelServing
+		checkFn      func(*testing.T, *workload.ModelServing)
 		expectErrMsg string
 	}{
 		{
@@ -125,6 +169,40 @@ func TestCreateModelServingResources(t *testing.T) {
 			input:    loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-mooncake.yaml"),
 			expected: loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving-mooncake.yaml"),
 		},
+		{
+			name:  "vLLM with runtimeClassName",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model-with-runtimeclass.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Equal(t, ptr.To("nvidia"), role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have runtimeClassName", role.Name)
+					if role.WorkerReplicas > 0 {
+						assert.Equal(t, ptr.To("nvidia"), role.WorkerTemplate.Spec.RuntimeClassName,
+							"role %s workerTemplate should have runtimeClassName", role.Name)
+					}
+				}
+			},
+		},
+		{
+			name:  "PD disaggregated with runtimeClassName",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-with-runtimeclass.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Equal(t, ptr.To("nvidia"), role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have runtimeClassName", role.Name)
+				}
+			},
+		},
+		{
+			name:  "vLLM without runtimeClassName is nil",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Nil(t, role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have nil runtimeClassName", role.Name)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,9 +212,65 @@ func TestCreateModelServingResources(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+			if tt.checkFn != nil {
+				tt.checkFn(t, got)
+				return
+			}
 			diff := cmp.Diff(tt.expected, got)
 			if diff != "" {
 				t.Errorf("ModelServing mismatch (-expected +actual):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
+	tests := []struct {
+		name              string
+		mutateModel       func(*workload.ModelBooster)
+		connectorFragment string
+	}{
+		{
+			name:              "MooncakeConnector",
+			mutateModel:       func(*workload.ModelBooster) {},
+			connectorFragment: "mooncake-transfer-engine",
+		},
+		{
+			name: "NixlConnector",
+			mutateModel: func(model *workload.ModelBooster) {
+				for i := range model.Spec.Backend.Workers {
+					model.Spec.Backend.Workers[i].Config.Raw = []byte(strings.ReplaceAll(
+						string(model.Spec.Backend.Workers[i].Config.Raw),
+						"MooncakeConnector",
+						"NixlConnector",
+					))
+				}
+			},
+			connectorFragment: "nixl &&",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-mooncake.yaml")
+			model.Spec.Backend.Env = append(model.Spec.Backend.Env, corev1.EnvVar{
+				Name:  env.SkipEngineDependencyInstall,
+				Value: "true",
+			})
+			tt.mutateModel(model)
+
+			serving, err := BuildModelServing(model)
+			assert.NoError(t, err)
+
+			for _, role := range serving.Spec.Template.Roles {
+				for _, container := range role.EntryTemplate.Spec.Containers {
+					if container.Name != "vllm" {
+						continue
+					}
+					command := strings.Join(container.Command, " ")
+					assert.NotContains(t, command, "pip install", "role %s should not install engine dependencies at startup", role.Name)
+					assert.NotContains(t, command, tt.connectorFragment, "role %s should use the prebuilt engine image dependencies", role.Name)
+				}
 			}
 		})
 	}
@@ -172,7 +306,22 @@ func TestBuildCacheVolume(t *testing.T) {
 				Name: "test-backend-weights",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "/test-pvc",
+						ClaimName: "test-pvc",
+					},
+				},
+			},
+		},
+		{
+			name: "PVC URI with extra slashes",
+			input: &workload.ModelBackend{
+				Name:     "test-backend",
+				CacheURI: "pvc:///test-pvc",
+			},
+			expected: &corev1.Volume{
+				Name: "test-backend-weights",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "test-pvc",
 					},
 				},
 			},

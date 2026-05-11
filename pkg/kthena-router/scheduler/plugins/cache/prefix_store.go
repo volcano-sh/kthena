@@ -114,14 +114,11 @@ func (s *ModelPrefixStore) onPodDeleted(data datastore.EventData) {
 		for model, hashSlice := range hashByModel {
 			s.onHashEvicted(model, hashSlice, data.Pod)
 			// check whether we need to delete entries
-			s.entriesMu.RLock()
-			modelCache, exists := s.entries[model]
-			s.entriesMu.RUnlock()
-			if exists && isModelHashShardEmpty(modelCache) {
-				s.entriesMu.Lock()
+			s.entriesMu.Lock()
+			if modelCache, exists := s.entries[model]; exists && isModelHashShardEmpty(modelCache) {
 				delete(s.entries, model)
-				s.entriesMu.Unlock()
 			}
+			s.entriesMu.Unlock()
 		}
 	}
 }

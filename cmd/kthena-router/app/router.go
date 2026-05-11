@@ -80,8 +80,26 @@ func (s *Server) startRouter(ctx context.Context, router *router.Router, store d
 			listenerManager.StartListenersForGateway(gw)
 		}
 	} else {
-		// When gateway-api is disabled, start standalone default server
-		s.startDefaultServer(ctx, router, store)
+		_ = store
+		// No Gateway API: default HTTP server.
+		startListener(ctx, listenerConfig{
+			addr:             ":" + s.Port,
+			enableTLS:        s.EnableTLS,
+			tlsCertFile:      s.TLSCertFile,
+			tlsKeyFile:       s.TLSKeyFile,
+			tlsMissingMsg:    "",
+			defaultRouter:    router,
+			readyCheck:       s.HasSynced,
+			startLog:         fmt.Sprintf("Starting default server on port %s", s.Port),
+			shutdownStartLog: "Shutting down default HTTP server ...",
+			shutdownDoneLog:  "Default HTTP server exited",
+			logShutdownErr: func(err error) {
+				klog.Errorf("Default server shutdown failed: %v", err)
+			},
+			logListenErr: func(err error) {
+				klog.Fatalf("listen failed: %v", err)
+			},
+		})
 		klog.Info("Gateway API features are disabled")
 	}
 }
@@ -137,70 +155,151 @@ func (s *Server) startDebugServer(ctx context.Context, store datastore.Store) {
 	}()
 }
 
-// startDefaultServer starts the default HTTP server on fixed port
-// This server handles healthz, readyz, metrics, and /v1/*path
-func (s *Server) startDefaultServer(ctx context.Context, router *router.Router, store datastore.Store) {
-	engine := gin.New()
-	engine.Use(gin.LoggerWithWriter(gin.DefaultWriter, "/healthz", "/readyz", "/metrics"), gin.Recovery())
+func writeHealthzJSON(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "ok",
+	})
+}
 
-	engine.GET("/healthz", func(c *gin.Context) {
+func writeReadyzJSON(c *gin.Context, synced bool) {
+	if synced {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "ok",
+			"message": "router is ready",
 		})
-	})
+	} else {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"message": "router is not ready",
+		})
+	}
+}
 
-	engine.GET("/readyz", func(c *gin.Context) {
-		if s.HasSynced() {
-			c.JSON(http.StatusOK, gin.H{
-				"message": "router is ready",
-			})
-		} else {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"message": "router is not ready",
-			})
-		}
-	})
+// listenerGatewayConfig: Gateway listener mode for startListener (host match + mgmt paths on main port).
+type listenerGatewayConfig struct {
+	lm   *ListenerManager
+	port int32
+}
 
-	// Prometheus metrics endpoint
-	engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+// listenerConfig: options for startListener (default server or Gateway port).
+type listenerConfig struct {
+	addr          string
+	enableTLS     bool
+	tlsCertFile   string
+	tlsKeyFile    string
+	tlsMissingMsg string
+	// Default-server mode: health, metrics, /v1.
+	defaultRouter *router.Router
+	readyCheck    func() bool
+	// Gateway mode (non-nil => use gateway branch).
+	gateway          *listenerGatewayConfig
+	startLog         string
+	shutdownStartLog string
+	shutdownDoneLog  string
+	logShutdownErr   func(err error)
+	logListenErr     func(err error)
+}
 
-	// Handle /v1/*path with middleware
-	v1Group := engine.Group("/v1")
-	v1Group.Use(AccessLogMiddleware(router))
-	v1Group.Use(AuthMiddleware(router))
-	v1Group.Any("/*path", router.HandlerFunc())
+// startListener: build Gin, listen, graceful shutdown on ctx.
+func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
+	engine := gin.New()
+	if g := cfg.gateway; g != nil {
+		lm := g.lm
+		port := g.port
+		engine.Use(gin.Recovery())
+		engine.Use(func(c *gin.Context) {
+			if strconv.Itoa(int(port)) == lm.server.Port {
+				path := c.Request.URL.Path
+				if path == "/healthz" {
+					writeHealthzJSON(c)
+					c.Abort()
+					return
+				}
+				if path == "/readyz" {
+					writeReadyzJSON(c, lm.server.HasSynced())
+					c.Abort()
+					return
+				}
+				if path == "/metrics" {
+					promhttp.Handler().ServeHTTP(c.Writer, c.Request)
+					c.Abort()
+					return
+				}
+			}
 
-	server := &http.Server{
-		Addr:    ":" + s.Port,
+			hostname := c.Request.Host
+			if idx := strings.Index(hostname, ":"); idx != -1 {
+				hostname = hostname[:idx]
+			}
+
+			matched, found := lm.findBestMatchingListener(port, hostname)
+			if !found {
+				c.JSON(http.StatusNotFound, gin.H{
+					"message": "No matching listener found",
+				})
+				c.Abort()
+				return
+			}
+
+			c.Set(router.GatewayKey, matched.GatewayKey)
+			c.Next()
+		})
+		engine.Use(AccessLogMiddleware(lm.router))
+		engine.Use(AuthMiddleware(lm.router))
+		engine.Any("/*path", lm.router.HandlerFunc())
+	} else if cfg.defaultRouter != nil && cfg.readyCheck != nil {
+		engine.Use(gin.LoggerWithWriter(gin.DefaultWriter, "/healthz", "/readyz", "/metrics"), gin.Recovery())
+		engine.GET("/healthz", func(c *gin.Context) {
+			writeHealthzJSON(c)
+		})
+		engine.GET("/readyz", func(c *gin.Context) {
+			writeReadyzJSON(c, cfg.readyCheck())
+		})
+		engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+		v1Group := engine.Group("/v1")
+		v1Group.Use(AccessLogMiddleware(cfg.defaultRouter))
+		v1Group.Use(AuthMiddleware(cfg.defaultRouter))
+		v1Group.Any("/*path", cfg.defaultRouter.HandlerFunc())
+	} else {
+		klog.Fatal("startListener: invalid listenerConfig (need gateway or defaultRouter+readyCheck)")
+	}
+	srv := &http.Server{
+		Addr:    cfg.addr,
 		Handler: engine.Handler(),
 	}
+
 	go func() {
-		klog.Infof("Starting default server on port %s", s.Port)
-		var err error
-		if s.EnableTLS {
-			if s.TLSCertFile == "" || s.TLSKeyFile == "" {
-				klog.Fatalf("TLS enabled but cert or key file not specified")
+		klog.Info(cfg.startLog)
+		if cfg.enableTLS {
+			if cfg.tlsCertFile == "" || cfg.tlsKeyFile == "" {
+				msg := cfg.tlsMissingMsg
+				if msg == "" {
+					msg = "TLS enabled but cert or key file not specified"
+				}
+				klog.Fatal(msg)
 			}
-			err = server.ListenAndServeTLS(s.TLSCertFile, s.TLSKeyFile)
-		} else {
-			err = server.ListenAndServe()
+			if err := srv.ListenAndServeTLS(cfg.tlsCertFile, cfg.tlsKeyFile); err != nil && err != http.ErrServerClosed {
+				cfg.logListenErr(err)
+			}
+			return
 		}
-		if err != nil && err != http.ErrServerClosed {
-			klog.Fatalf("listen failed: %v", err)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			cfg.logListenErr(err)
 		}
 	}()
 
 	go func() {
 		<-ctx.Done()
-		// graceful shutdown
-		klog.Info("Shutting down default HTTP server ...")
+		klog.Info(cfg.shutdownStartLog)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			klog.Errorf("Default server shutdown failed: %v", err)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			cfg.logShutdownErr(err)
 		}
-		klog.Info("Default HTTP server exited")
+		if cfg.shutdownDoneLog != "" {
+			klog.Info(cfg.shutdownDoneLog)
+		}
 	}()
+
+	return srv
 }
 
 // ListenerConfig represents a single listener configuration
@@ -266,13 +365,28 @@ func (lm *ListenerManager) findBestMatchingListener(port int32, hostname string)
 	// First, try to find an exact hostname match
 	for i := range portInfo.Listeners {
 		listener := &portInfo.Listeners[i]
-		if listener.Hostname != nil && *listener.Hostname == hostname {
+		if listener.Hostname != nil && strings.EqualFold(*listener.Hostname, hostname) {
 			return listener, true
 		}
 	}
 
-	// If no exact match, try to find a listener without hostname restriction (wildcard)
-	// TODO: support wildcard hostname matching
+	// Then, try wildcard hostname matches and prefer the most specific suffix.
+	var wildcardMatch *ListenerConfig
+	longestPattern := -1
+	for i := range portInfo.Listeners {
+		listener := &portInfo.Listeners[i]
+		if listener.Hostname != nil && wildcardHostnameMatch(*listener.Hostname, hostname) {
+			if l := len(*listener.Hostname); l > longestPattern {
+				wildcardMatch = listener
+				longestPattern = l
+			}
+		}
+	}
+	if wildcardMatch != nil {
+		return wildcardMatch, true
+	}
+
+	// If no exact/wildcard match, try a listener without hostname restriction.
 	for i := range portInfo.Listeners {
 		listener := &portInfo.Listeners[i]
 		if listener.Hostname == nil {
@@ -284,68 +398,21 @@ func (lm *ListenerManager) findBestMatchingListener(port int32, hostname string)
 	return nil, false
 }
 
-// createPortHandler creates a gin handler for a specific port that routes to the best matching listener
-func (lm *ListenerManager) createPortHandler(port int32) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if strconv.Itoa(int(port)) == lm.server.Port {
-			// Handle management endpoints first (healthz, readyz, metrics)
-			path := c.Request.URL.Path
-			if path == "/healthz" {
-				c.JSON(http.StatusOK, gin.H{
-					"message": "ok",
-				})
-				return
-			}
-			if path == "/readyz" {
-				if lm.server.HasSynced() {
-					c.JSON(http.StatusOK, gin.H{
-						"message": "router is ready",
-					})
-				} else {
-					c.JSON(http.StatusServiceUnavailable, gin.H{
-						"message": "router is not ready",
-					})
-				}
-				return
-			}
-			if path == "/metrics" {
-				promhttp.Handler().ServeHTTP(c.Writer, c.Request)
-				return
-			}
-		}
-
-		hostname := c.Request.Host
-		// Remove port from hostname if present
-		if idx := strings.Index(hostname, ":"); idx != -1 {
-			hostname = hostname[:idx]
-		}
-
-		listenerConfig, found := lm.findBestMatchingListener(port, hostname)
-		if !found {
-			c.JSON(http.StatusNotFound, gin.H{
-				"message": "No matching listener found",
-			})
-			return
-		}
-
-		// Set gateway key in context so router can filter ModelRoutes by gateway
-		c.Set(router.GatewayKey, listenerConfig.GatewayKey)
-
-		// Apply middleware and route
-		AccessLogMiddleware(lm.router)(c)
-		if c.IsAborted() {
-			return
-		}
-
-		AuthMiddleware(lm.router)(c)
-		if c.IsAborted() {
-			return
-		}
-
-		// Route handling logic is now in router.HandlerFunc()
-		// It will handle both /v1/* paths (ModelRoute with HTTPRoute fallback) and non-/v1/* paths (HTTPRoute)
-		lm.router.HandlerFunc()(c)
+func wildcardHostnameMatch(pattern, hostname string) bool {
+	if !strings.HasPrefix(pattern, "*.") {
+		return false
 	}
+
+	patternLower := strings.ToLower(pattern)
+	hostnameLower := strings.ToLower(hostname)
+	suffix := patternLower[1:] // ".example.com"
+	if !strings.HasSuffix(hostnameLower, suffix) {
+		return false
+	}
+
+	prefix := hostnameLower[:len(hostnameLower)-len(suffix)]
+	// Gateway wildcard hostnames represent exactly one leading label.
+	return prefix != "" && !strings.Contains(prefix, ".")
 }
 
 // listenerConfigKey creates a unique key for a listener config for comparison
@@ -416,53 +483,33 @@ func (lm *ListenerManager) removeListenerFromPort(port int32, configToRemove Lis
 func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, enableTLS bool, tlsCertFile, tlsKeyFile string) {
 	portInfo, exists := lm.portListeners[port]
 	if !exists {
-		// Create new port listener
-		engine := gin.New()
-		engine.Use(gin.Recovery())
-		engine.Any("/*path", lm.createPortHandler(port))
+		// New port: middleware order matches default server (access log wraps handler).
+		listenerCtx, cancel := context.WithCancel(lm.ctx)
 
-		server := &http.Server{
-			Addr:    ":" + strconv.Itoa(int(port)),
-			Handler: engine.Handler(),
-		}
+		server := startListener(listenerCtx, listenerConfig{
+			addr:             ":" + strconv.Itoa(int(port)),
+			enableTLS:        enableTLS,
+			tlsCertFile:      tlsCertFile,
+			tlsKeyFile:       tlsKeyFile,
+			tlsMissingMsg:    fmt.Sprintf("TLS enabled but cert or key file not specified for port %d", port),
+			gateway:          &listenerGatewayConfig{lm: lm, port: port},
+			startLog:         fmt.Sprintf("Starting Gateway listener server on port %d", port),
+			shutdownStartLog: fmt.Sprintf("Shutting down Gateway listener server on port %d ...", port),
+			shutdownDoneLog:  "",
+			logShutdownErr: func(err error) {
+				klog.Errorf("Gateway listener server on port %d shutdown failed: %v", port, err)
+			},
+			logListenErr: func(err error) {
+				klog.Errorf("listen failed for port %d: %v", port, err)
+			},
+		})
 
 		portInfo = &PortListenerInfo{
 			Server:    server,
 			Listeners: []ListenerConfig{config},
 		}
 		lm.portListeners[port] = portInfo
-
-		// Create context for this port's server
-		listenerCtx, cancel := context.WithCancel(lm.ctx)
 		portInfo.ShutdownFunc = cancel
-
-		// Start the server
-		go func(p int32, srv *http.Server, ctx context.Context, tls bool, cert, key string) {
-			klog.Infof("Starting Gateway listener server on port %d", p)
-			var err error
-			if tls {
-				if cert == "" || key == "" {
-					klog.Fatalf("TLS enabled but cert or key file not specified for port %d", p)
-				}
-				err = srv.ListenAndServeTLS(cert, key)
-			} else {
-				err = srv.ListenAndServe()
-			}
-			if err != nil && err != http.ErrServerClosed {
-				klog.Errorf("listen failed for port %d: %v", p, err)
-			}
-		}(port, server, listenerCtx, enableTLS, tlsCertFile, tlsKeyFile)
-
-		// Start graceful shutdown goroutine
-		go func(p int32, srv *http.Server, cancel context.CancelFunc) {
-			<-listenerCtx.Done()
-			klog.Infof("Shutting down Gateway listener server on port %d ...", p)
-			shutdownCtx, cancelTimeout := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
-			defer cancelTimeout()
-			if err := srv.Shutdown(shutdownCtx); err != nil {
-				klog.Errorf("Gateway listener server on port %d shutdown failed: %v", p, err)
-			}
-		}(port, server, cancel)
 	} else {
 		// Add listener to existing port
 		portInfo.mu.Lock()

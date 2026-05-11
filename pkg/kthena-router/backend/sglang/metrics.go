@@ -23,12 +23,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/vllm"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
 var (
 	GPUCacheUsage     = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
+	RequestRunningNum = "sglang:num_running_reqs"
 	TPOT              = "sglang:time_per_output_token_seconds"
 	TTFT              = "sglang:time_to_first_token_seconds"
 )
@@ -37,6 +39,7 @@ var (
 	CounterAndGaugeMetrics = []string{
 		GPUCacheUsage,
 		RequestWaitingNum,
+		RequestRunningNum,
 	}
 
 	HistogramMetrics = []string{
@@ -47,6 +50,7 @@ var (
 	mapOfMetricsName = map[string]string{
 		GPUCacheUsage:     utils.GPUCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
+		RequestRunningNum: utils.RequestRunningNum,
 		TPOT:              utils.TPOT,
 		TTFT:              utils.TTFT,
 	}
@@ -83,7 +87,7 @@ func (engine *sglangEngine) GetCountMetricsInfo(allMetrics map[string]*dto.Metri
 			continue
 		}
 		for _, metric := range metricInfo.Metric {
-			metricValue := metric.GetCounter().GetValue()
+			metricValue := metric.GetGauge().GetValue()
 			wantMetrics[mapOfMetricsName[metricName]] = metricValue
 		}
 	}
@@ -115,7 +119,7 @@ func (engine *sglangEngine) GetHistogramPodMetrics(allMetrics map[string]*dto.Me
 	return wantMetrics, histogramMetrics
 }
 
-// TODO： Methods to get Models from sglang
+// GetPodModels retrieves the list of models from a pod running the sglang engine.
 func (engine *sglangEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
-	return nil, nil
+	return vllm.FetchPodModels(pod.Status.PodIP, engine.MetricPort)
 }

@@ -35,6 +35,8 @@ const (
 	// DefaultRouterURL is the default URL for the router service via port-forward
 	// Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI environments
 	DefaultRouterURL = "http://127.0.0.1:8080/v1/chat/completions"
+	// DefaultChatMaxTokens matches OpenAI-style e2e backends (e.g. Dynamo mocker) that require max_tokens.
+	DefaultChatMaxTokens = 16
 )
 
 // ChatMessage represents a chat message in the request
@@ -45,9 +47,10 @@ type ChatMessage struct {
 
 // ChatCompletionsRequest represents a chat completions API request
 type ChatCompletionsRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model     string        `json:"model"`
+	Messages  []ChatMessage `json:"messages"`
+	Stream    bool          `json:"stream"`
+	MaxTokens int           `json:"max_tokens"`
 }
 
 // ChatCompletionsResponse represents the response from chat completions API
@@ -88,9 +91,10 @@ func SendChatRequestWithRetryQuiet(t *testing.T, url string, modelName string, m
 
 func sendChatRequestWithRetry(t *testing.T, url string, modelName string, messages []ChatMessage, headers map[string]string, quiet bool) *ChatCompletionsResponse {
 	requestBody := ChatCompletionsRequest{
-		Model:    modelName,
-		Messages: messages,
-		Stream:   false,
+		Model:     modelName,
+		Messages:  messages,
+		Stream:    false,
+		MaxTokens: DefaultChatMaxTokens,
 	}
 
 	jsonData, err := json.Marshal(requestBody)
@@ -201,7 +205,12 @@ func CheckChatCompletionsQuiet(t *testing.T, modelName string, messages []ChatMe
 // Use before assertions when the router may need time to discover new models.
 func WaitForChatModelReady(t *testing.T, url, modelName string, messages []ChatMessage, timeout time.Duration) {
 	t.Helper()
-	requestBody := ChatCompletionsRequest{Model: modelName, Messages: messages, Stream: false}
+	requestBody := ChatCompletionsRequest{
+		Model:     modelName,
+		Messages:  messages,
+		Stream:    false,
+		MaxTokens: DefaultChatMaxTokens,
+	}
 	jsonData, err := json.Marshal(requestBody)
 	require.NoError(t, err)
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -256,9 +265,10 @@ func SendChatRequest(t *testing.T, modelName string, messages []ChatMessage) *ht
 
 func SendChatRequestWithURL(t *testing.T, url string, modelName string, messages []ChatMessage) *http.Response {
 	requestBody := ChatCompletionsRequest{
-		Model:    modelName,
-		Messages: messages,
-		Stream:   false,
+		Model:     modelName,
+		Messages:  messages,
+		Stream:    false,
+		MaxTokens: DefaultChatMaxTokens,
 	}
 
 	jsonData, err := json.Marshal(requestBody)

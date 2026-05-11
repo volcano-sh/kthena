@@ -55,8 +55,8 @@ type ModelBackend struct {
 	Name string `json:"name"`
 	// Type is the type of the backend.
 	Type ModelBackendType `json:"type"`
-	// ModelURI is the URI where you download the model. Support hf://, s3://, pvc://.
-	// +kubebuilder:validation:Pattern=`^(hf://|s3://|pvc://).+`
+	// ModelURI is the URI where you download the model. Support hf://, s3://, pvc://, ms://.
+	// +kubebuilder:validation:Pattern=`^(hf://|s3://|pvc://|ms://).+`
 	ModelURI string `json:"modelURI"`
 	// CacheURI is the URI where the downloaded model stored. Support hostpath://, pvc://.
 	// +kubebuilder:validation:Pattern=`^(hostpath://|pvc://).+`
@@ -77,6 +77,7 @@ type ModelBackend struct {
 	// "RUNTIME_PORT": default is 8100
 	// "RUNTIME_METRICS_PATH": default is /metrics
 	// "HF_ENDPOINT":The url of hugging face. Default is https://huggingface.co/
+	// "KTHENA_SKIP_ENGINE_DEPENDENCY_INSTALL": default is false. When set to true, skip startup-time pip install of engine connector dependencies.
 	// Cannot be updated.
 	// +optional
 	// +patchMergeKey=name
@@ -100,6 +101,10 @@ type ModelBackend struct {
 	// SchedulerName defines the name of the scheduler used by ModelServing for this backend.
 	// +optional
 	SchedulerName string `json:"schedulerName,omitempty"`
+	// RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,
+	// which should be used to run pods generated for this backend.
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 }
 
 // ModelBackendType defines the type of model backend.

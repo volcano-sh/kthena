@@ -119,7 +119,7 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 // TestModelRouteSubset tests ModelRoute with subset routing.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteSubset(t *testing.T) {
-	TestModelRouteSubsetShared(t, testCtx, testNamespace, false, "")
+	TestModelRouteSubsetShared(t, testCtx, testNamespace, false, kthenaNamespace)
 }
 
 // TestModelRouteWithRateLimit tests local rate limiting enforced by the Kthena Router.
@@ -128,10 +128,22 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 	TestModelRouteWithRateLimitShared(t, testCtx, testNamespace, false, "")
 }
 
+// TestModelRouteWithGlobalRateLimit tests global rate limiting enforced by the Kthena Router.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestModelRouteWithGlobalRateLimit(t *testing.T) {
+	TestModelRouteWithGlobalRateLimitShared(t, testCtx, testNamespace, false, kthenaNamespace)
+}
+
 // TestModelRouteLora tests ModelRoute with LoRA adapter routing.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteLora(t *testing.T) {
 	TestModelRouteLoraShared(t, testCtx, testNamespace, false, "")
+}
+
+// TestModelRouteDuplicatePreferOldest tests that duplicate ModelRoutes for the same model
+// are evaluated oldest-first and the first match wins; after the oldest is deleted, the newer takes over.
+func TestModelRouteDuplicatePreferOldest(t *testing.T) {
+	TestModelRouteDuplicatePreferOldestShared(t, testCtx, testNamespace, false, "")
 }
 
 // TestMetrics tests router metrics collection.
@@ -144,4 +156,17 @@ func TestMetrics(t *testing.T) {
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestRateLimitMetrics(t *testing.T) {
 	TestRateLimitMetricsShared(t, testCtx, testNamespace, false, kthenaNamespace)
+}
+
+// TestSglangMetrics verifies that the runtime can correctly scrape and parse SGLang metrics
+// from the sglang-mock deployment.
+func TestSglangMetrics(t *testing.T) {
+	TestSglangMetricsShared(t, testCtx, testNamespace)
+}
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestRouterConfigUpdate(t *testing.T) {
+	TestRouterConfigUpdateShared(t, testCtx, testNamespace, false, kthenaNamespace)
 }

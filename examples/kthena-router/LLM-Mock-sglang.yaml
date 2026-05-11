@@ -1,0 +1,27 @@
+# SGLang metrics mock deployment for kthena runtime verification.
+# Exposes Prometheus metrics at :30000/metrics compatible with sglang metrics format.
+# Build from dynamo docker build -t ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23 -f Dockerfile.sglang .
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-mock
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sglang-mock
+  template:
+    metadata:
+      labels:
+        app: sglang-mock
+    spec:
+      containers:
+        - name: llm-engine
+          image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 30000
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3-8B"

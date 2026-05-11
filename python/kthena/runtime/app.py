@@ -34,7 +34,7 @@ from kthena.runtime.collect import process_metrics
 from kthena.runtime.events import get_event_publisher, EventType
 from kthena.runtime.kv_cache_manager import get_vllm_kv_cache_handler
 from kthena.runtime.redis_client import get_redis_client
-from kthena.runtime.standard import MetricStandard
+from kthena.runtime.standard import MetricStandard, EngineType
 from kthena.runtime.zmq_subscriber import get_vllm_zmq_subscriber
 
 
@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI):
     state.vllm_zmq_subscriber = None
 
     if (state.metric_standard and
-            state.metric_standard.engine == 'vllm' and
+            state.metric_standard.engine == EngineType.VLLM and
             state.pod_identifier and
             state.model_name):
 

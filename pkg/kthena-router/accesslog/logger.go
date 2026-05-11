@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -118,7 +119,7 @@ func (l *accessLoggerImpl) Log(entry *AccessLogEntry) error {
 		return fmt.Errorf("failed to format access log entry: %w", err)
 	}
 
-	_, err = l.writer.Write([]byte(output + "\n"))
+	_, err = fmt.Fprintf(l.writer, "%s\n", output)
 	if err != nil {
 		return fmt.Errorf("failed to write access log entry: %w", err)
 	}
@@ -151,46 +152,59 @@ func (l *accessLoggerImpl) formatText(entry *AccessLogEntry) (string, error) {
 
 	timestamp := entry.Timestamp.Format(time.RFC3339Nano)
 
+	var line strings.Builder
+
 	// Basic request line with status code
-	line := fmt.Sprintf(`[%s] "%s %s %s" %d`,
+	fmt.Fprintf(&line, `[%s] "%s %s %s" %d`,
 		timestamp, entry.Method, entry.Path, entry.Protocol,
 		entry.StatusCode)
 
 	// Add error information immediately after status code
 	if entry.Error != nil {
-		line += fmt.Sprintf(" error=%s:%s", entry.Error.Type, entry.Error.Message)
+		fmt.Fprintf(&line, " error=%s:%s", entry.Error.Type, entry.Error.Message)
 	}
 
 	// Add AI-specific fields
 	if entry.ModelName != "" {
-		line += fmt.Sprintf(" model_name=%s", entry.ModelName)
+		fmt.Fprintf(&line, " model_name=%s", entry.ModelName)
 	}
 	if entry.ModelRoute != "" {
-		line += fmt.Sprintf(" model_route=%s", entry.ModelRoute)
+		fmt.Fprintf(&line, " model_route=%s", entry.ModelRoute)
 	}
 	if entry.ModelServer != "" {
-		line += fmt.Sprintf(" model_server=%s", entry.ModelServer)
+		fmt.Fprintf(&line, " model_server=%s", entry.ModelServer)
 	}
 	if entry.SelectedPod != "" {
-		line += fmt.Sprintf(" selected_pod=%s", entry.SelectedPod)
+		fmt.Fprintf(&line, " selected_pod=%s", entry.SelectedPod)
 	}
 	if entry.RequestID != "" {
-		line += fmt.Sprintf(" request_id=%s", entry.RequestID)
+		fmt.Fprintf(&line, " request_id=%s", entry.RequestID)
+	}
+
+	// Add Gateway API / Inference Extension fields (if present)
+	if entry.Gateway != "" {
+		fmt.Fprintf(&line, " gateway=%s", entry.Gateway)
+	}
+	if entry.HTTPRoute != "" {
+		fmt.Fprintf(&line, " http_route=%s", entry.HTTPRoute)
+	}
+	if entry.InferencePool != "" {
+		fmt.Fprintf(&line, " inference_pool=%s", entry.InferencePool)
 	}
 
 	// Add token information
 	if entry.InputTokens > 0 || entry.OutputTokens > 0 {
-		line += fmt.Sprintf(" tokens=%d/%d", entry.InputTokens, entry.OutputTokens)
+		fmt.Fprintf(&line, " tokens=%d/%d", entry.InputTokens, entry.OutputTokens)
 	}
 
 	// Add complete timing breakdown with total and breakdown
-	line += fmt.Sprintf(" timings=%dms(%d+%d+%d)",
+	fmt.Fprintf(&line, " timings=%dms(%d+%d+%d)",
 		entry.DurationTotal,
 		entry.DurationRequestProcessing,
 		entry.DurationUpstreamProcessing,
 		entry.DurationResponseProcessing)
 
-	return line, nil
+	return line.String(), nil
 }
 
 // noopAccessLogger is a no-op implementation when logging is disabled

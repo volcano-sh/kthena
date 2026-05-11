@@ -89,6 +89,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
+	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -149,27 +150,18 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 	// Validate partition field
 	if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
 		partitionPath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition")
-		partitionValue := *ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition
-
-		// Check if partition is non-negative
-		if partitionValue < 0 {
-			allErrs = append(allErrs, field.Invalid(partitionPath, partitionValue, "partition must be greater than or equal to 0"))
-		}
-
-		// Check if partition is less than replicas
-		if ms.Spec.Replicas != nil && partitionValue >= *ms.Spec.Replicas {
-			allErrs = append(allErrs, field.Invalid(partitionPath, partitionValue,
-				fmt.Sprintf("partition must be less than replicas (%d)", *ms.Spec.Replicas)))
-		}
+		allErrs = append(allErrs, validateIntOrPercent(ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition, partitionPath)...)
 	}
 
-	maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)
-	if err != nil {
-		allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "invalidate maxUnavailable"))
-	} else if maxUnavailableValue == 0 {
-		allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
-			"",
-			"maxUnavailable cannot be 0"))
+	if ms.Spec.Replicas != nil && maxUnavailable != nil {
+		maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)
+		if err != nil {
+			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))
+		} else if maxUnavailableValue == 0 {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
+				"",
+				"maxUnavailable cannot be 0"))
+		}
 	}
 	return allErrs
 }
@@ -217,15 +209,16 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	minRoleReplicasPath := field.NewPath("spec").Child("template").Child("gangPolicy").Child("minRoleReplicas")
 
 	// Create a map of role names for quick lookup
-	roleNames := make(map[string]bool)
+	roleMap := make(map[string]workloadv1alpha1.Role)
 	for _, role := range ms.Spec.Template.Roles {
-		roleNames[role.Name] = true
+		roleMap[role.Name] = role
 	}
 
 	// Validate each minRoleReplicas entry
 	for roleName, minReplicas := range minRoleReplicas {
 		// Check if the role exists
-		if !roleNames[roleName] {
+		roleElement, ok := roleMap[roleName]
+		if !ok {
 			allErrs = append(allErrs, field.Invalid(
 				minRoleReplicasPath.Key(roleName),
 				roleName,
@@ -234,35 +227,30 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 			continue
 		}
 
-		// Find the role to check its actual replicas
-		for _, role := range ms.Spec.Template.Roles {
-			if role.Name == roleName {
-				/// Calculate total replicas for this role
-				// minRoleReplicas is compared against the number of Role replicas
-				replicas := int32(1)
-				if role.Replicas != nil {
-					replicas = *role.Replicas
-				}
+		// Find the role in the roleMap then check its actual replicas
+		// Calculate total replicas for this role
+		// minRoleReplicas is compared against the number of Role replicas
+		replicas := int32(1)
+		if roleElement.Replicas != nil {
+			replicas = *roleElement.Replicas
+		}
 
-				// Validate minReplicas doesn't exceed total replicas
-				if minReplicas > replicas {
-					allErrs = append(allErrs, field.Invalid(
-						minRoleReplicasPath.Key(roleName),
-						minReplicas,
-						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed replicas (%d)", minReplicas, roleName, replicas),
-					))
-				}
+		// Validate minReplicas doesn't exceed total replicas
+		if minReplicas > replicas {
+			allErrs = append(allErrs, field.Invalid(
+				minRoleReplicasPath.Key(roleName),
+				minReplicas,
+				fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed replicas (%d)", minReplicas, roleName, replicas),
+			))
+		}
 
-				// Validate minReplicas is non-negative
-				if minReplicas < 0 {
-					allErrs = append(allErrs, field.Invalid(
-						minRoleReplicasPath.Key(roleName),
-						minReplicas,
-						fmt.Sprintf("minRoleReplicas for role %s must be non-negative", roleName),
-					))
-				}
-				break
-			}
+		// Validate minReplicas is non-negative
+		if minReplicas < 0 {
+			allErrs = append(allErrs, field.Invalid(
+				minRoleReplicasPath.Key(roleName),
+				minReplicas,
+				fmt.Sprintf("minRoleReplicas for role %s must be non-negative", roleName),
+			))
 		}
 	}
 
@@ -282,21 +270,33 @@ func validateWorkerReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 				"workerReplicas must be a non-negative integer",
 			))
 		}
+		if role.WorkerReplicas > 0 && role.WorkerTemplate == nil {
+			allErrs = append(allErrs, field.Required(
+				field.NewPath("spec").Child("template").Child("roles").Index(i).Child("workerTemplate"),
+				"workerTemplate is required when workerReplicas is greater than 0",
+			))
+		}
 	}
-
 	return allErrs
 }
 
 func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+	if value == nil {
+		return allErrs
+	}
 	switch value.Type {
 	case intstr.String:
 		for _, msg := range validation.IsValidPercent(value.StrVal) {
 			allErrs = append(allErrs, field.Invalid(fieldPath, value, msg))
 		}
-		// Converting percentages to int values(Only the % has been removed.)
-		percent, _ := strconv.Atoi(value.StrVal[:len(value.StrVal)-1])
-		if percent < 0 || percent > 100 {
+		if len(allErrs) > 0 {
+			break
+		}
+		// Strip trailing '%' and parse; IsValidPercent already ensures the format is valid.
+		percentStr := strings.TrimSuffix(value.StrVal, "%")
+		percent, err := strconv.Atoi(percentStr)
+		if err != nil || percent < 0 || percent > 100 {
 			allErrs = append(allErrs, field.Invalid(fieldPath, value, "must be a valid percent value (0-100)"))
 		}
 	case intstr.Int:
@@ -367,4 +367,53 @@ func validateImageField(image string) error {
 	}
 
 	return nil
+}
+
+func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	// Effective defaults:
+	// - recoveryPolicy: RoleRecreate
+	// - rolloutStrategy.type: ServingGroupRollingUpdate
+	// Required one-to-one mapping not be:
+	// - ServingGroupRecreate <-> roleRollingUpdate
+	effectiveRecoveryPolicy := ms.Spec.RecoveryPolicy
+	if effectiveRecoveryPolicy == "" {
+		effectiveRecoveryPolicy = workloadv1alpha1.RoleRecreate
+	}
+
+	effectiveRolloutType := workloadv1alpha1.ServingGroupRollingUpdate
+	if ms.Spec.RolloutStrategy != nil {
+		effectiveRolloutType = ms.Spec.RolloutStrategy.Type
+		if effectiveRolloutType == "" {
+			effectiveRolloutType = workloadv1alpha1.ServingGroupRollingUpdate
+		}
+	}
+
+	unMatched := (effectiveRecoveryPolicy == workloadv1alpha1.ServingGroupRecreate && effectiveRolloutType == workloadv1alpha1.RoleRollingUpdate)
+
+	if unMatched {
+		// Point to the explicitly specified field when possible.
+		errPath := field.NewPath("spec").Child("rolloutStrategy").Child("type")
+		errValue := any(effectiveRolloutType)
+		if ms.Spec.RolloutStrategy == nil {
+			errPath = field.NewPath("spec").Child("recoveryPolicy")
+			errValue = effectiveRecoveryPolicy
+		}
+
+		allErrs = append(allErrs, field.Invalid(
+			errPath,
+			errValue,
+			fmt.Sprintf(
+				"incompatible recoveryPolicy and rolloutStrategy.type after applying defaults: recoveryPolicy=%s, rolloutStrategy.type=%s; valid pairs: (%s,%s) or (%s,%s)",
+				effectiveRecoveryPolicy,
+				effectiveRolloutType,
+				workloadv1alpha1.ServingGroupRecreate,
+				workloadv1alpha1.ServingGroupRollingUpdate,
+				workloadv1alpha1.RoleRecreate,
+				workloadv1alpha1.RoleRollingUpdate,
+			),
+		))
+	}
+
+	return allErrs
 }

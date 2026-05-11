@@ -19,10 +19,12 @@ package datastore
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,6 +132,32 @@ type EventData struct {
 // CallbackFunc is the type of function that can be registered as a callback
 type CallbackFunc func(data EventData)
 
+// PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
+type PodRuntimeInspector interface {
+	GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	GetPodModels(engine string, pod *corev1.Pod) ([]string, error)
+}
+
+type realPodRuntimeInspector struct{}
+
+func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	return backend.GetPodMetrics(engine, pod, previousHistogram)
+}
+
+func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
+	return backend.GetPodModels(engine, pod)
+}
+
+type Option func(*store)
+
+func WithPodRuntimeInspector(inspector PodRuntimeInspector) Option {
+	return func(s *store) {
+		if inspector != nil {
+			s.podRuntimeInspector = inspector
+		}
+	}
+}
+
 // Store is an interface for storing and retrieving data
 type Store interface {
 	// Add modelServer which are selected by modelServer.Spec.WorkloadSelector
@@ -174,6 +202,8 @@ type Store interface {
 	GetTokenCount(userId, modelName string) (float64, error)
 	// UpdateTokenCount updates token usage for a user and model
 	UpdateTokenCount(userId, modelName string, inputTokens, outputTokens float64) error
+	// GetRequestCount returns the request count for a user and model in the current window
+	GetRequestCount(userId, modelName string) (int, error)
 
 	// Enqueue adds a request to the fair queue
 	Enqueue(*Request) error
@@ -278,10 +308,13 @@ type store struct {
 	// model -> RequestPriorityQueue
 	requestWaitingQueue sync.Map
 	tokenTracker        TokenTracker
+	podRuntimeInspector PodRuntimeInspector
+	rootCtx             context.Context // Lifecycle context for queue goroutines, set by Run()
+	fairnessQueueConfig FairnessQueueConfig
 }
 
-func New() Store {
-	return &store{
+func New(opts ...Option) Store {
+	s := &store{
 		modelServer:         sync.Map{},
 		pods:                sync.Map{},
 		routeInfo:           make(map[string]*modelRouteInfo),
@@ -296,11 +329,86 @@ func New() Store {
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
-		tokenTracker: createTokenTracker(),
+		tokenTracker:        createTokenTracker(),
+		podRuntimeInspector: realPodRuntimeInspector{},
+		fairnessQueueConfig: createFairnessQueueConfig(),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
+}
+
+func (s *store) getPodRuntimeInspector() PodRuntimeInspector {
+	if s.podRuntimeInspector == nil {
+		return realPodRuntimeInspector{}
+	}
+	return s.podRuntimeInspector
+}
+
+// createFairnessQueueConfig reads fairness queue configuration from environment variables.
+func createFairnessQueueConfig() FairnessQueueConfig {
+	cfg := DefaultFairnessQueueConfig()
+
+	if v := os.Getenv("FAIRNESS_MAX_CONCURRENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.MaxConcurrent = n
+		} else {
+			klog.Warningf("Invalid FAIRNESS_MAX_CONCURRENT: %q, using default %d", v, cfg.MaxConcurrent)
+		}
+	}
+
+	if v := os.Getenv("FAIRNESS_MAX_QPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.MaxQPS = n
+		} else {
+			klog.Warningf("Invalid FAIRNESS_MAX_QPS: %q, using default %d", v, cfg.MaxQPS)
+		}
+	}
+
+	if v := os.Getenv("FAIRNESS_PRIORITY_REFRESH_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.MaxPriorityRefreshRetries = n
+		} else {
+			klog.Warningf("Invalid FAIRNESS_PRIORITY_REFRESH_RETRIES: %q, using default %d", v, cfg.MaxPriorityRefreshRetries)
+		}
+	}
+
+	if v := os.Getenv("FAIRNESS_REBUILD_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.RebuildThreshold = n
+		} else {
+			klog.Warningf("Invalid FAIRNESS_REBUILD_THRESHOLD: %q, using default %d", v, cfg.RebuildThreshold)
+		}
+	}
+
+	if v := os.Getenv("FAIRNESS_PRIORITY_TOKEN_WEIGHT"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && isValidFairnessWeight(n) {
+			cfg.TokenWeight = n
+		} else {
+			klog.Warningf("Invalid FAIRNESS_PRIORITY_TOKEN_WEIGHT: %q, using default %v", v, cfg.TokenWeight)
+		}
+	}
+
+	if v := os.Getenv("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && isValidFairnessWeight(n) {
+			cfg.RequestNumWeight = n
+		} else {
+			klog.Warningf("Invalid FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT: %q, using default %v", v, cfg.RequestNumWeight)
+		}
+	}
+
+	return cfg
+}
+
+func isValidFairnessWeight(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
 }
 
 func (s *store) Run(ctx context.Context) {
+	s.rootCtx = ctx
 	go func() {
 		for {
 			select {
@@ -328,6 +436,10 @@ func (s *store) UpdateTokenCount(userID, model string, inputTokens, outputTokens
 	return s.tokenTracker.UpdateTokenCount(userID, model, inputTokens, outputTokens)
 }
 
+func (s *store) GetRequestCount(userID, model string) (int, error) {
+	return s.tokenTracker.GetRequestCount(userID, model)
+}
+
 func (s *store) Enqueue(req *Request) error {
 	modelName := req.ModelName
 	var queue *RequestPriorityQueue
@@ -335,10 +447,15 @@ func (s *store) Enqueue(req *Request) error {
 	if ok {
 		queue, _ = val.(*RequestPriorityQueue)
 	} else {
-		newQueue := NewRequestPriorityQueue(nil)
+		newQueue := NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, s.tokenTracker)
 		val, ok = s.requestWaitingQueue.LoadOrStore(modelName, newQueue)
 		if !ok {
-			go newQueue.Run(context.TODO(), defaultQueueQPS)
+			queueCtx := s.rootCtx
+			if queueCtx == nil {
+				klog.Warning("store.Enqueue called before Run(); using background context for queue")
+				queueCtx = context.Background()
+			}
+			go newQueue.Run(queueCtx, s.fairnessQueueConfig.MaxQPS)
 		}
 		queue, _ = val.(*RequestPriorityQueue)
 	}
@@ -519,17 +636,14 @@ func (s *store) GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedNam
 
 func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.ModelServer) error {
 	podName := utils.GetNamespaceName(pod)
-	newPodInfo := &PodInfo{
-		Pod:         pod,
-		modelServer: sets.Set[types.NamespacedName]{},
-		models:      sets.New[string](),
-	}
 
+	newModelServers := sets.New[types.NamespacedName]()
+	var engine string
 	for _, ms := range modelServers {
 		modelServerName := utils.GetNamespaceName(ms)
-		newPodInfo.AddModelServer(modelServerName)
+		newModelServers.Insert(modelServerName)
 		// NOTE: even if a pod belongs to multiple model servers, the backend should be the same
-		newPodInfo.engine = string(ms.Spec.InferenceEngine)
+		engine = string(ms.Spec.InferenceEngine)
 		if value, ok := s.modelServer.Load(modelServerName); ok {
 			ms := value.(*modelServer)
 			ms.addPod(podName)
@@ -539,12 +653,12 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		}
 	}
 
-	var oldPodInfo *PodInfo
 	if value, ok := s.pods.Load(podName); ok {
-		oldPodInfo = value.(*PodInfo)
+		// Update existing pod in place — preserve runtime metrics and models.
+		oldPodInfo := value.(*PodInfo)
 		oldModelServers := oldPodInfo.GetModelServers()
-		// Handle the case where the pod is no longer belong to some model servers
-		for msName := range oldModelServers.Difference(newPodInfo.modelServer) {
+		// Handle the case where the pod no longer belongs to some model servers
+		for msName := range oldModelServers.Difference(newModelServers) {
 			if value, ok := s.modelServer.Load(msName); ok {
 				ms := value.(*modelServer)
 				ms.deletePod(podName)
@@ -552,14 +666,25 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 				ms.removePodFromPDGroups(podName, oldPodInfo.Pod.Labels)
 			}
 		}
+
+		oldPodInfo.mutex.Lock()
+		oldPodInfo.Pod = pod
+		oldPodInfo.engine = engine
+		oldPodInfo.modelServer = newModelServers
+		oldPodInfo.mutex.Unlock()
+		return nil
 	}
 
+	// New pod — create PodInfo and fetch initial metrics.
+	newPodInfo := &PodInfo{
+		Pod:         pod,
+		engine:      engine,
+		modelServer: newModelServers,
+		models:      sets.New[string](),
+	}
 	s.pods.Store(podName, newPodInfo)
-
-	if oldPodInfo == nil {
-		s.updatePodMetrics(newPodInfo)
-		s.updatePodModels(newPodInfo)
-	}
+	s.updatePodMetrics(newPodInfo)
+	s.updatePodModels(newPodInfo)
 
 	return nil
 }
@@ -641,14 +766,17 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range routes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				routes[i] = mr                       // Update existing
+				routes[i] = mr // Update existing
+				sortModelRoutesInPlace(routes)
 				s.routes[mr.Spec.ModelName] = routes // Update the map
 				found = true
 				break
 			}
 		}
 		if !found {
-			s.routes[mr.Spec.ModelName] = append(routes, mr)
+			routes = append(routes, mr)
+			sortModelRoutesInPlace(routes)
+			s.routes[mr.Spec.ModelName] = routes
 		}
 	}
 
@@ -658,14 +786,17 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range loraRoutes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				loraRoutes[i] = mr              // Update existing
+				loraRoutes[i] = mr // Update existing
+				sortModelRoutesInPlace(loraRoutes)
 				s.loraRoutes[lora] = loraRoutes // Update the map
 				found = true
 				break
 			}
 		}
 		if !found {
-			s.loraRoutes[lora] = append(loraRoutes, mr)
+			loraRoutes = append(loraRoutes, mr)
+			sortModelRoutesInPlace(loraRoutes)
+			s.loraRoutes[lora] = loraRoutes
 		}
 	}
 
@@ -694,6 +825,20 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		ModelRoute: mr,
 	})
 	return nil
+}
+
+func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
+	sort.Slice(routes, func(i, j int) bool {
+		ti, tj := routes[i].CreationTimestamp.Time, routes[j].CreationTimestamp.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		ri, rj := routes[i].ResourceVersion, routes[j].ResourceVersion
+		if ri != rj {
+			return ri < rj
+		}
+		return routes[i].Namespace+"/"+routes[i].Name < routes[j].Namespace+"/"+routes[j].Name
+	})
 }
 
 func (s *store) DeleteModelRoute(namespacedName string) error {
@@ -810,7 +955,7 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		isLora = true
 	}
 
-	// Try each ModelRoute until we find one that matches
+	// candidateRoutes are kept sorted oldest-first by AddOrUpdateModelRoute
 	for _, mr := range candidateRoutes {
 		// Check parentRefs if specified
 		if len(mr.Spec.ParentRefs) > 0 {
@@ -951,12 +1096,19 @@ func matchString(sm *aiv1alpha1.StringMatch, value string) bool {
 }
 
 func (s *store) selectDestination(targets []*aiv1alpha1.TargetModel) (*aiv1alpha1.TargetModel, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no target models specified in rule")
+	}
+
 	weightedSlice, err := toWeightedSlice(targets)
 	if err != nil {
 		return nil, err
 	}
 
-	index := selectFromWeightedSlice(weightedSlice)
+	index, err := selectFromWeightedSlice(weightedSlice)
+	if err != nil {
+		return nil, err
+	}
 
 	return targets[index], nil
 }
@@ -985,7 +1137,11 @@ func toWeightedSlice(targets []*aiv1alpha1.TargetModel) ([]uint32, error) {
 	return res, nil
 }
 
-func selectFromWeightedSlice(weights []uint32) int {
+func selectFromWeightedSlice(weights []uint32) (int, error) {
+	if len(weights) == 0 {
+		return 0, fmt.Errorf("no weights provided")
+	}
+
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	totalWeight := 0
@@ -993,16 +1149,20 @@ func selectFromWeightedSlice(weights []uint32) int {
 		totalWeight += int(weight)
 	}
 
+	if totalWeight == 0 {
+		return 0, fmt.Errorf("total weight is zero")
+	}
+
 	randomNum := rng.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
 		if randomNum < 0 {
-			return i
+			return i, nil
 		}
 	}
 
-	return 0
+	return 0, nil
 }
 
 func (s *store) updatePodMetrics(pod *PodInfo) {
@@ -1012,9 +1172,13 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 	}
 
 	previousHistogram := getPreviousHistogram(pod)
-	gaugeMetrics, histogramMetrics := backend.GetPodMetrics(pod.engine, pod.Pod, previousHistogram)
-	updateGaugeMetricsInfo(pod, gaugeMetrics)
-	updateHistogramMetrics(pod, histogramMetrics)
+	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(pod.engine, pod.Pod, previousHistogram)
+	if gaugeMetrics != nil {
+		updateGaugeMetricsInfo(pod, gaugeMetrics)
+	}
+	if histogramMetrics != nil {
+		updateHistogramMetrics(pod, histogramMetrics)
+	}
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) {
@@ -1023,9 +1187,10 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 		return
 	}
 
-	models, err := backend.GetPodModels(podInfo.engine, podInfo.Pod)
+	models, err := s.getPodRuntimeInspector().GetPodModels(podInfo.engine, podInfo.Pod)
 	if err != nil {
-		klog.V(4).Infof("failed to get models of pod %s/%s", podInfo.Pod.GetNamespace(), podInfo.Pod.GetName())
+		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podInfo.Pod.GetNamespace(), podInfo.Pod.GetName(), err)
+		return
 	}
 
 	podInfo.UpdateModels(models)

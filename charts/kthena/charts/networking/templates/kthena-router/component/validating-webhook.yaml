@@ -26,7 +26,7 @@ webhooks:
       caBundle: {{ required "A caBundle is required for the kthena-router validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
-      - apiGroups: [ "networking.volcano.sh" ]
+      - apiGroups: [ "networking.serving.volcano.sh" ]
         apiVersions: [ "v1alpha1" ]
         resources: [ "modelroutes" ]
         operations: [ "CREATE", "UPDATE" ]
@@ -46,7 +46,7 @@ webhooks:
       caBundle: {{ required "A caBundle is required for the kthena-router validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
       {{- end }}
     rules:
-      - apiGroups: [ "networking.volcano.sh" ]
+      - apiGroups: [ "networking.serving.volcano.sh" ]
         apiVersions: [ "v1alpha1" ]
         resources: [ "modelservers" ]
         operations: [ "CREATE", "UPDATE" ]

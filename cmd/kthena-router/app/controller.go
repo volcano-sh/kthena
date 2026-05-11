@@ -28,8 +28,10 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayclientset "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
@@ -79,27 +81,17 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	modelRouteController := controller.NewModelRouteController(kthenaInformerFactory, store)
 	modelServerController := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
 
-	kubeInformerFactory.Start(stop)
-	kthenaInformerFactory.Start(stop)
-
-	go func() {
-		if err := modelRouteController.Run(stop); err != nil {
-			klog.Fatalf("Error running model route controller: %s", err.Error())
-		}
-	}()
-
-	go func() {
-		if err := modelServerController.Run(stop); err != nil {
-			klog.Fatalf("Error running model server controller: %s", err.Error())
-		}
-	}()
-
-	controllers := []Controller{
-		modelRouteController,
-		modelServerController,
+	cacheSyncs := []cache.InformerSynced{
+		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
+		kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().HasSynced,
+		kubeInformerFactory.Core().V1().Pods().Informer().HasSynced,
 	}
 
-	// Gateway API controllers are optional
+	var gatewayInformerFactory gatewayinformers.SharedInformerFactory
+	var gatewayController *controller.GatewayController
+	var httpRouteController *controller.HTTPRouteController
+	var inferencePoolController *controller.InferencePoolController
+
 	if enableGatewayAPI {
 		gatewayClient, err := gatewayclientset.NewForConfig(cfg)
 		if err != nil {
@@ -116,18 +108,50 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 			klog.Fatalf("Failed to ensure default Gateway: %s", err.Error())
 		}
 
-		gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
-		gatewayController := controller.NewGatewayController(gatewayInformerFactory, store)
+		gatewayInformerFactory = gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
+		gatewayController = controller.NewGatewayController(gatewayInformerFactory, store)
+		cacheSyncs = append(cacheSyncs,
+			gatewayInformerFactory.Gateway().V1().Gateways().Informer().HasSynced,
+			gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced,
+		)
 
-		// Gateway API Inference Extension controllers are optional
-		var httpRouteController *controller.HTTPRouteController
 		if enableGatewayAPIInferenceExtension {
 			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, store)
+			dynamicClient, err := dynamic.NewForConfig(cfg)
+			if err != nil {
+				klog.Fatalf("Error building dynamic client: %s", err.Error())
+			}
+			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
+			inferencePoolController = controller.NewInferencePoolController(dynamicInformerFactory, store)
+			cacheSyncs = append(cacheSyncs, dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced)
+			dynamicInformerFactory.Start(stop)
 		}
-
-		// Start informer factory after all controllers that use it are created
 		gatewayInformerFactory.Start(stop)
+	} else {
+		klog.Info("Gateway API controllers are disabled")
+	}
 
+	kubeInformerFactory.Start(stop)
+	kthenaInformerFactory.Start(stop)
+
+	if !cache.WaitForCacheSync(stop, cacheSyncs...) {
+		klog.Fatalf("Failed to sync informer caches")
+	}
+
+	controllers := []Controller{modelRouteController, modelServerController}
+
+	go func() {
+		if err := modelRouteController.Run(stop); err != nil {
+			klog.Fatalf("Error running model route controller: %s", err.Error())
+		}
+	}()
+	go func() {
+		if err := modelServerController.Run(stop); err != nil {
+			klog.Fatalf("Error running model server controller: %s", err.Error())
+		}
+	}()
+
+	if enableGatewayAPI {
 		go func() {
 			if err := gatewayController.Run(stop); err != nil {
 				klog.Fatalf("Error running gateway controller: %s", err.Error())
@@ -138,33 +162,20 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 
 		// Gateway API Inference Extension controllers are optional
 		if enableGatewayAPIInferenceExtension {
-			dynamicClient, err := dynamic.NewForConfig(cfg)
-			if err != nil {
-				klog.Fatalf("Error building dynamic client: %s", err.Error())
-			}
-			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
-			inferencePoolController := controller.NewInferencePoolController(dynamicInformerFactory, store)
-
-			dynamicInformerFactory.Start(stop)
-
 			go func() {
 				if err := httpRouteController.Run(stop); err != nil {
 					klog.Fatalf("Error running httproute controller: %s", err.Error())
 				}
 			}()
-
 			go func() {
 				if err := inferencePoolController.Run(stop); err != nil {
 					klog.Fatalf("Error running inferencepool controller: %s", err.Error())
 				}
 			}()
-
 			controllers = append(controllers, httpRouteController, inferencePoolController)
 		} else {
 			klog.Info("Gateway API Inference Extension controllers are disabled")
 		}
-	} else {
-		klog.Info("Gateway API controllers are disabled")
 	}
 
 	return &aggregatedController{

@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: default
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      containers:
+      - name: hey
+        image: curlimages/curl:8.10.1
+        command:
+        - sh
+        - -c
+        - |
+          while true; do
+            for i in $(seq 1 30); do
+              curl -s -o /dev/null --max-time 30 -X POST \
+                http://kthena-router.kthena-system.svc.cluster.local/v1/completions \
+                -H "Content-Type: application/json" \
+                -d '{"model":"test","prompt":"hello","max_tokens":16}' &
+            done
+            wait
+          done

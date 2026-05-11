@@ -18,8 +18,11 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,15 +33,27 @@ import (
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
+	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/restmapper"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const (
-	defaultMetricsURL = "http://127.0.0.1:8080/metrics"
+	defaultMetricsURL     = "http://127.0.0.1:8080/metrics"
+	defaultScalingTimeout = 3 * time.Minute
 )
 
 func getCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
@@ -80,6 +95,119 @@ func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bo
 	return true
 }
 
+func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
+	t.Helper()
+	ctx := context.Background()
+
+	config, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	require.NoError(t, err, "Failed to create dynamic client")
+
+	redisManifestPath := filepath.Join(routercontext.TestDataDir, "redis-standalone.yaml")
+
+	redisObjects := utils.LoadUnstructuredYAMLFromFile(redisManifestPath)
+	require.NotEmpty(t, redisObjects, "Redis manifest is empty")
+
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(kubeClient.Discovery()))
+	type createdResourceRef struct {
+		gvr       schema.GroupVersionResource
+		namespace string
+		name      string
+	}
+	createdRefs := make([]createdResourceRef, 0, len(redisObjects))
+	var redisDeploymentName string
+
+	for _, obj := range redisObjects {
+		if obj.GetKind() == "Deployment" && redisDeploymentName == "" {
+			redisDeploymentName = obj.GetName()
+		}
+		gvk := obj.GroupVersionKind()
+		mapping, mapErr := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		require.NoError(t, mapErr, "Failed to map GVK %s", gvk.String())
+
+		resourceClient := dynamicClient.Resource(mapping.Resource)
+		namespaceToUse := obj.GetNamespace()
+		resource := func() dynamic.ResourceInterface {
+			if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+				if namespaceToUse == "" {
+					namespaceToUse = namespace
+					obj.SetNamespace(namespaceToUse)
+				}
+				return resourceClient.Namespace(namespaceToUse)
+			}
+			return resourceClient
+		}()
+
+		_, createErr := resource.Create(ctx, obj, metav1.CreateOptions{})
+		if createErr != nil {
+			require.True(t, apierrors.IsAlreadyExists(createErr), "Failed to create %s/%s: %v", gvk.Kind, obj.GetName(), createErr)
+			continue
+		}
+
+		createdRefs = append(createdRefs, createdResourceRef{
+			gvr:       mapping.Resource,
+			namespace: namespaceToUse,
+			name:      obj.GetName(),
+		})
+	}
+
+	require.NotEmpty(t, redisDeploymentName, "Redis Deployment not found in manifest")
+
+	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, redisDeploymentName, 1, 2*time.Minute)
+	t.Log("Redis is ready")
+
+	return func() {
+		cleanupCtx := context.Background()
+		for i := len(createdRefs) - 1; i >= 0; i-- {
+			ref := createdRefs[i]
+			resourceClient := dynamicClient.Resource(ref.gvr)
+			if ref.namespace != "" {
+				_ = resourceClient.Namespace(ref.namespace).Delete(cleanupCtx, ref.name, metav1.DeleteOptions{})
+			} else {
+				_ = resourceClient.Delete(cleanupCtx, ref.name, metav1.DeleteOptions{})
+			}
+		}
+	}
+}
+
+func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namespace string, replicas int32) func() {
+	t.Helper()
+	ctx := context.Background()
+	const deploymentName = "kthena-router"
+
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get kthena-router deployment")
+
+	originalReplicas := int32(1)
+	if deployment.Spec.Replicas != nil {
+		originalReplicas = *deployment.Spec.Replicas
+	}
+	if originalReplicas != replicas {
+		t.Logf("Scaling kthena-router from %d to %d replicas", originalReplicas, replicas)
+		deployment.Spec.Replicas = &replicas
+		_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to scale kthena-router deployment")
+	}
+
+	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, replicas, defaultScalingTimeout)
+	t.Log("kthena-router deployment is ready")
+
+	return func() {
+		if originalReplicas == replicas {
+			return
+		}
+		restoreCtx := context.Background()
+		deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(restoreCtx, deploymentName, metav1.GetOptions{})
+		if err != nil {
+			return
+		}
+		deploy.Spec.Replicas = &originalReplicas
+		_, _ = kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{})
+	}
+}
+
 // setupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
 func setupModelRouteWithGatewayAPI(modelRoute *networkingv1alpha1.ModelRoute, useGatewayAPI bool, kthenaNamespace string) {
 	if useGatewayAPI {
@@ -110,7 +238,7 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSimple.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -134,7 +262,23 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 	messages := []utils.ChatMessage{
 		utils.NewChatMessage("user", "Hello"),
 	}
-	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+
+	// When Gateway API is enabled, ensure access log includes the Gateway key.
+	if useGatewayAPI && kthenaNamespace != "" && resp.StatusCode == 200 {
+		routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+		expectedGateway := fmt.Sprintf("%s/%s", kthenaNamespace, "default")
+		utils.WaitForPodLogsContain(
+			t,
+			testCtx.KubeClient,
+			kthenaNamespace,
+			routerPod.Name,
+			90*time.Second,
+			[]string{" gateway=" + expectedGateway},
+			90*time.Second,
+			2*time.Second,
+		)
+	}
 }
 
 // TestModelRouteMultiModelsShared is a shared test function that can be used by both
@@ -143,7 +287,7 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 func TestModelRouteMultiModelsShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
 	ctx := context.Background()
 
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteMultiModels.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteMultiModels.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -214,7 +358,7 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 
 	// Deploy ModelServing
 	t.Log("Deploying ModelServing for PD disaggregation...")
-	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing]("examples/kthena-router/ModelServing-ds1.5b-pd-disaggragation.yaml")
+	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing](filepath.Join(routercontext.TestDataDir, "ModelServing-ds1.5b-pd-disaggregation.yaml"))
 	modelServing.Namespace = testNamespace
 	createdModelServing, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -235,7 +379,7 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 
 	// Deploy ModelServer
 	t.Log("Deploying ModelServer for PD disaggregation...")
-	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer]("examples/kthena-router/ModelServer-ds1.5b-pd-disaggragation.yaml")
+	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-pd-disaggregation.yaml"))
 	modelServer.Namespace = testNamespace
 	createdModelServer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServer")
@@ -253,7 +397,7 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute for PD disaggregation...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-ds1.5b-pd-disaggragation.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRoute-ds1.5b-pd-disaggregation.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -280,6 +424,24 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }
 
+// subsetCanaryBackendCountsFromRouterLogs counts canary traffic to each mock pool using
+// router access logs (selected_pod). Chat response bodies no longer differ when both
+// backends use the same HuggingFace model id without -v1/-v2 suffixes.
+func subsetCanaryBackendCountsFromRouterLogs(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, since *metav1.Time) (v1, v2 int) {
+	t.Helper()
+	routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
+	opts := &corev1.PodLogOptions{}
+	if since != nil {
+		opts.SinceTime = since
+	}
+	logs, err := kube.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
+	require.NoError(t, err)
+	s := string(logs)
+	// Pod names are deployment-prefixed: deepseek-r1-1-5b-v1-<rs>-<suffix>
+	return strings.Count(s, "selected_pod=deepseek-r1-1-5b-v1-"),
+		strings.Count(s, "selected_pod=deepseek-r1-1-5b-v2-")
+}
+
 // TestModelRouteSubsetShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
@@ -290,7 +452,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	t.Log("Deploying Canary ModelServers and LLM-Mock deployments...")
 
 	// Deploy Canary LLM-Mock deployments from YAML file
-	canaryDeployments := utils.LoadMultiResourceYAMLFromFile[appsv1.Deployment]("examples/kthena-router/LLM-Mock-ds1.5b-Canary.yaml")
+	canaryDeployments := utils.LoadMultiResourceYAMLFromFile[appsv1.Deployment](filepath.Join(routercontext.TestDataDir, "LLM-Mock-ds1.5b-Canary.yaml"))
 	require.Len(t, canaryDeployments, 2, "Canary YAML should contain 2 deployments")
 
 	deploymentV1 := canaryDeployments[0]
@@ -304,21 +466,11 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	require.NoError(t, err, "Failed to create Canary deployment v2")
 
 	// Wait for deployments to be ready
-	require.Eventually(t, func() bool {
-		deployV1, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, "deepseek-r1-1-5b-v1", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		deployV2, err := testCtx.KubeClient.AppsV1().Deployments(testNamespace).Get(ctx, "deepseek-r1-1-5b-v2", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		return deployV1.Status.ReadyReplicas == *deployV1.Spec.Replicas &&
-			deployV2.Status.ReadyReplicas == *deployV2.Spec.Replicas
-	}, 5*time.Minute, 5*time.Second, "Canary deployments should be ready")
+	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, testNamespace, "deepseek-r1-1-5b-v1", 1, 2*time.Minute)
+	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, testNamespace, "deepseek-r1-1-5b-v2", 1, 2*time.Minute)
 
 	// Deploy Canary ModelServers from YAML file
-	canaryModelServers := utils.LoadMultiResourceYAMLFromFile[networkingv1alpha1.ModelServer]("examples/kthena-router/ModelServer-ds1.5b-Canary.yaml")
+	canaryModelServers := utils.LoadMultiResourceYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-Canary.yaml"))
 	require.Len(t, canaryModelServers, 2, "Canary YAML should contain 2 ModelServers")
 
 	modelServerV1 := canaryModelServers[0]
@@ -342,7 +494,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	})
 
 	// Create ModelRoute with Canary ModelServer names
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSubset.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSubset.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -371,29 +523,25 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		// Use more requests to reduce randomness impact
 		const totalRequests = 500
 		const sumTolerance = 0.01 // Allow ±1% deviation for floating-point rounding errors
-		v1Count := 0
-		v2Count := 0
+		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
 
 		for i := 0; i < totalRequests; i++ {
 			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
-
-			if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v1") {
-				v1Count++
-			} else if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v2") {
-				v2Count++
-			}
 		}
 
-		// Verify weight distribution statistics across multiple requests
-		// 1. Verify statistics completeness: all requests are accounted for
-		totalCounted := v1Count + v2Count
-		assert.Equal(t, totalRequests, totalCounted, "All requests should be accounted for in statistics")
+		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
+		totalFromLogs := v1Count + v2Count
+		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
+			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
+		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
+		require.Greater(t, v2Count, 0, "canary v2 should receive some traffic")
 
-		// 2. Calculate and verify distribution ratios
-		v1Ratio := float64(v1Count) / float64(totalRequests)
-		v2Ratio := float64(v2Count) / float64(totalRequests)
+		// Verify weight distribution statistics across multiple requests
+		// 1. Ratios from access logs (retries may add extra lines; use log totals for proportions)
+		v1Ratio := float64(v1Count) / float64(totalFromLogs)
+		v2Ratio := float64(v2Count) / float64(totalFromLogs)
 		expectedV1Ratio := 0.70
 		expectedV2Ratio := 0.30
 		maxDeviation := 0.05 // Allow ±5% deviation for randomness
@@ -404,16 +552,16 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		assert.LessOrEqual(t, v1Ratio, expectedV1Ratio+maxDeviation,
 			"deepseek-r1-1-5b ratio should be at most %.1f%% (expected %.1f%%)", (expectedV1Ratio+maxDeviation)*100, expectedV1Ratio*100)
 		assert.GreaterOrEqual(t, v2Ratio, expectedV2Ratio-maxDeviation,
-			"deepseek-r1-7b ratio should be at least %.1f%% (expected %.1f%%)", (expectedV2Ratio-maxDeviation)*100, expectedV2Ratio*100)
+			"deepseek-r1-1-5b-v2 ratio should be at least %.1f%% (expected %.1f%%)", (expectedV2Ratio-maxDeviation)*100, expectedV2Ratio*100)
 		assert.LessOrEqual(t, v2Ratio, expectedV2Ratio+maxDeviation,
-			"deepseek-r1-7b ratio should be at most %.1f%% (expected %.1f%%)", (expectedV2Ratio+maxDeviation)*100, expectedV2Ratio*100)
+			"deepseek-r1-1-5b-v2 ratio should be at most %.1f%% (expected %.1f%%)", (expectedV2Ratio+maxDeviation)*100, expectedV2Ratio*100)
 
 		// 4. Verify statistics sum to 100% (with tolerance for floating-point rounding)
 		assert.InDelta(t, 1.0, v1Ratio+v2Ratio, sumTolerance, "Distribution ratios should sum to approximately 100%")
 
 		// Log statistics for debugging
 		t.Logf("Weight distribution statistics verified:")
-		t.Logf("  Total requests: %d, Counted: %d", totalRequests, totalCounted)
+		t.Logf("  Total requests: %d, log lines (v1+v2): %d", totalRequests, totalFromLogs)
 		t.Logf("  deepseek-r1-1-5b-v1: %d requests (%.1f%%, expected %.1f%%)", v1Count, v1Ratio*100, expectedV1Ratio*100)
 		t.Logf("  deepseek-r1-1-5b-v2: %d requests (%.1f%%, expected %.1f%%)", v2Count, v2Ratio*100, expectedV2Ratio*100)
 	})
@@ -438,34 +586,31 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		require.Eventually(t, func() bool {
 			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 			return resp.StatusCode == 200 && resp.Body != "" &&
-				(strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v1") || strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v2"))
+				strings.Contains(resp.Body, `"choices"`) &&
+				strings.Contains(resp.Body, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
 		}, 1*time.Minute, 2*time.Second, "ModelRoute update should propagate and requests should route successfully")
 
 		// Verify requests still work and verify the normalized weight distribution (50:30 = 5/8:3/8)
 		// Send multiple requests to verify weight distribution statistics
 		const totalRequests = 500
-		v1Count := 0
-		v2Count := 0
+		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
 
 		for i := 0; i < totalRequests; i++ {
 			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
-
-			if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v1") {
-				v1Count++
-			} else if strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B-v2") {
-				v2Count++
-			}
 		}
 
-		// Verify weight distribution statistics
-		totalCounted := v1Count + v2Count
-		assert.Equal(t, totalRequests, totalCounted, "All requests should be accounted for in statistics")
+		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
+		totalFromLogs := v1Count + v2Count
+		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
+			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
+		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
+		require.Greater(t, v2Count, 0, "canary v2 should receive some traffic")
 
 		// Calculate and verify distribution ratios (50:30 should normalize to 5/8:3/8 = 62.5%:37.5%)
-		v1Ratio := float64(v1Count) / float64(totalRequests)
-		v2Ratio := float64(v2Count) / float64(totalRequests)
+		v1Ratio := float64(v1Count) / float64(totalFromLogs)
+		v2Ratio := float64(v2Count) / float64(totalFromLogs)
 		expectedV1Ratio := 0.625 // 5/8 = 62.5%
 		expectedV2Ratio := 0.375 // 3/8 = 37.5%
 		maxDeviation := 0.05     // Allow ±5% deviation for randomness
@@ -485,7 +630,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 		// Log statistics for debugging
 		t.Logf("Normalized weight distribution verified (50:30 -> 5/8:3/8):")
-		t.Logf("  Total requests: %d, Counted: %d", totalRequests, totalCounted)
+		t.Logf("  Total requests: %d, log lines (v1+v2): %d", totalRequests, totalFromLogs)
 		t.Logf("  deepseek-r1-1-5b-v1: %d requests (%.1f%%, expected %.1f%%)", v1Count, v1Ratio*100, expectedV1Ratio*100)
 		t.Logf("  deepseek-r1-1-5b-v2: %d requests (%.1f%%, expected %.1f%%)", v2Count, v2Ratio*100, expectedV2Ratio*100)
 
@@ -520,7 +665,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 1: Verifying input token rate limit")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
 		if modelRoute.Spec.RateLimit != nil {
@@ -545,8 +690,10 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		// First request: use CheckChatCompletions to handle router reconciliation
 		resp := utils.CheckChatCompletions(t, createdModelRoute.Spec.ModelName, standardMessage)
-		tokensConsumed := resp.Attempts * tokensPerRequest
-		t.Logf("Router reconciliation complete (consumed %d tokens in %d attempts)", tokensConsumed, resp.Attempts)
+		// CheckChatCompletions retries on transient failures (e.g., 404 before route is ready),
+		// but only the final successful request counts toward rate limit quota.
+		tokensConsumed := tokensPerRequest
+		t.Logf("Router reconciliation complete (consumed %d tokens, %d attempts including retries)", tokensConsumed, resp.Attempts)
 
 		// Calculate remaining quota
 		remainingQuota := inputTokenLimit - tokensConsumed
@@ -575,14 +722,14 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		assert.Contains(t, strings.ToLower(string(responseBody)), "rate limit",
 			"Rate limit error response must contain descriptive message")
 
-		t.Logf("Input token rate limit enforced after %d total requests", resp.Attempts+expectedSuccessfulRequests)
+		t.Logf("Input token rate limit enforced after %d quota-consuming requests", 1+expectedSuccessfulRequests)
 	})
 
 	// Test 2 Verify rate limit window accuracy and persistence
 	t.Run("VerifyRateLimitWindowAccuracy", func(t *testing.T) {
 		t.Log("Test 2: Verifying rate limit window accuracy...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
 		if modelRoute.Spec.RateLimit != nil {
@@ -607,7 +754,9 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		// First request: handle reconciliation and track tokens
 		resp := utils.CheckChatCompletions(t, createdModelRoute.Spec.ModelName, standardMessage)
-		tokensConsumed := resp.Attempts * tokensPerRequest
+		// Only the final successful request counts toward rate limit quota.
+		tokensConsumed := tokensPerRequest
+		t.Logf("Router reconciliation complete (consumed %d tokens, %d attempts including retries)", tokensConsumed, resp.Attempts)
 
 		// Exhaust remaining quota
 		remainingQuota := inputTokenLimit - tokensConsumed
@@ -651,7 +800,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitResetMechanism", func(t *testing.T) {
 		t.Log("Test 3: Verifying rate limit reset mechanism...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
 		if modelRoute.Spec.RateLimit != nil {
@@ -676,7 +825,9 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		// First request: handle reconciliation and track tokens
 		resp := utils.CheckChatCompletions(t, createdModelRoute.Spec.ModelName, standardMessage)
-		tokensConsumed := resp.Attempts * tokensPerRequest
+		// Only the final successful request counts toward rate limit quota.
+		tokensConsumed := tokensPerRequest
+		t.Logf("Router reconciliation complete (consumed %d tokens, %d attempts including retries)", tokensConsumed, resp.Attempts)
 
 		// Consume remaining quota
 		remainingQuota := inputTokenLimit - tokensConsumed
@@ -721,7 +872,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
@@ -792,6 +943,207 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	})
 }
 
+// TestModelRouteWithGlobalRateLimitShared tests global rate limiting (Redis-backed).
+func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayApi bool, kthenaNamespace string) {
+	const (
+		inputTokenLimit = 300
+		maxRequests     = 20
+	)
+	ctx := context.Background()
+
+	redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
+	t.Cleanup(redisCleanup)
+
+	scaleCleanup := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 3)
+	t.Cleanup(scaleCleanup)
+
+	standardMessage := []utils.ChatMessage{
+		utils.NewChatMessage("user", "hi"),
+	}
+
+	buildModelRoute := func(name, modelName, redisAddr string) *networkingv1alpha1.ModelRoute {
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithGlobalRateLimit.yaml"))
+		modelRoute.Namespace = testNamespace
+		modelRoute.Name = name
+		modelRoute.Spec.ModelName = modelName
+		if modelRoute.Spec.RateLimit != nil {
+			inputLimit := uint32(inputTokenLimit)
+			modelRoute.Spec.RateLimit.InputTokensPerUnit = &inputLimit
+			modelRoute.Spec.RateLimit.Unit = networkingv1alpha1.Minute
+			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil // only test input limit; avoid output limit 429
+			if modelRoute.Spec.RateLimit.Global != nil && modelRoute.Spec.RateLimit.Global.Redis != nil {
+				modelRoute.Spec.RateLimit.Global.Redis.Address = redisAddr
+			}
+		}
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		return modelRoute
+	}
+
+	t.Run("VerifyRedisConnectionConfiguration", func(t *testing.T) {
+		modelName := "deepseek-global-redis-" + utils.RandomString(5)
+		redisAddr := fmt.Sprintf("redis-server.%s.svc.cluster.local:6379", kthenaNamespace)
+		modelRoute := buildModelRoute("deepseek-global-redis", modelName, redisAddr)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		var successCount int
+		for i := 0; i < maxRequests; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				successCount++
+				continue
+			}
+			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "Expected rate limit after successes")
+			break
+		}
+		assert.Greater(t, successCount, 0, "Expected at least one successful request before rate limiting")
+	})
+
+	t.Run("VerifyGlobalRateLimitSharingAcrossInstances", func(t *testing.T) {
+		modelName := "deepseek-global-sharing-" + utils.RandomString(5)
+		redisAddr := fmt.Sprintf("redis-server.%s.svc.cluster.local:6379", kthenaNamespace)
+		modelRoute := buildModelRoute("deepseek-global-sharing", modelName, redisAddr)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		pods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+		require.GreaterOrEqual(t, len(pods), 3, "Need at least three router pods for global sharing test")
+
+		pf1, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[0].Name, "18080", "8080")
+		require.NoError(t, err, "Failed to port-forward to router pod 1")
+		t.Cleanup(pf1.Close)
+
+		pf2, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[1].Name, "18081", "8080")
+		require.NoError(t, err, "Failed to port-forward to router pod 2")
+		t.Cleanup(pf2.Close)
+
+		pf3, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[2].Name, "18082", "8080")
+		require.NoError(t, err, "Failed to port-forward to router pod 3")
+		t.Cleanup(pf3.Close)
+
+		urls := []string{
+			"http://127.0.0.1:18080/v1/chat/completions",
+			"http://127.0.0.1:18081/v1/chat/completions",
+			"http://127.0.0.1:18082/v1/chat/completions",
+		}
+
+		successByURL := make(map[string]int)
+		for i := 0; i < maxRequests; i++ {
+			url := urls[i%len(urls)]
+			resp := utils.SendChatRequestWithRetry(t, url, createdModelRoute.Spec.ModelName, standardMessage, nil)
+			if resp.StatusCode == http.StatusOK {
+				successByURL[url]++
+				continue
+			}
+			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "Global rate limit should be enforced across instances")
+			break
+		}
+		assert.Greater(t, successByURL[urls[0]]+successByURL[urls[1]]+successByURL[urls[2]], 0, "Expected successful requests before rate limiting")
+	})
+
+	t.Run("VerifyFallbackWhenRedisUnavailable", func(t *testing.T) {
+		modelName := "deepseek-global-fallback-" + utils.RandomString(5)
+		redisAddr := "redis-server.invalid.svc.cluster.local:6379"
+		modelRoute := buildModelRoute("deepseek-global-fallback", modelName, redisAddr)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		for i := 0; i < 5; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed without Redis", i+1)
+		}
+	})
+
+	t.Run("VerifyMultipleModelRoutesSharingGlobalRateLimit", func(t *testing.T) {
+		modelName := "deepseek-global-multi-" + utils.RandomString(5)
+		redisAddr := fmt.Sprintf("redis-server.%s.svc.cluster.local:6379", kthenaNamespace)
+
+		premiumRoute := buildModelRoute("deepseek-global-premium", modelName, redisAddr)
+		premium := "premium"
+		premiumRoute.Spec.Rules[0].ModelMatch = &networkingv1alpha1.ModelMatch{
+			Headers: map[string]*networkingv1alpha1.StringMatch{
+				"user-type": {Exact: &premium},
+			},
+		}
+
+		defaultRoute := buildModelRoute("deepseek-global-default", modelName, redisAddr)
+
+		createdPremium, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, premiumRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create premium ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdPremium.Name, metav1.DeleteOptions{})
+		})
+
+		createdDefault, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, defaultRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create default ModelRoute")
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdDefault.Name, metav1.DeleteOptions{})
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdPremium.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "Premium ModelRoute should be created")
+
+		headers := map[string]string{"user-type": "premium"}
+		var premiumSuccess, defaultSuccess int
+		for i := 0; i < maxRequests; i++ {
+			var resp *utils.ChatCompletionsResponse
+			if i%2 == 0 {
+				resp = utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, modelName, standardMessage, headers)
+				if resp.StatusCode == http.StatusOK {
+					premiumSuccess++
+					continue
+				}
+			} else {
+				resp = utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, modelName, standardMessage, nil)
+				if resp.StatusCode == http.StatusOK {
+					defaultSuccess++
+					continue
+				}
+			}
+			assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode, "Rate limit should be shared across ModelRoutes")
+			break
+		}
+		assert.Greater(t, premiumSuccess, 0, "Expected premium requests to succeed before rate limiting")
+		assert.Greater(t, defaultSuccess, 0, "Expected default requests to succeed before rate limiting")
+	})
+}
+
 // TestModelRouteLoraShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
@@ -800,7 +1152,7 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 
 	// Deploy ModelRoute with LoRA adapters
 	t.Log("Deploying ModelRoute with LoRA adapters...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteLora.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteLora.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
@@ -901,6 +1253,101 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 	t.Log("LoRA adapters unloaded successfully")
 }
 
+// TestModelRouteDuplicatePreferOldestShared verifies that when multiple ModelRoutes
+// exist for the same model name, the router evaluates them oldest-first (CreationTimestamp)
+// and the first matching route wins; after the oldest route is deleted, the next one takes over.
+func TestModelRouteDuplicatePreferOldestShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	ctx := context.Background()
+	const duplicateModelName = "dup-model"
+	weight100 := uint32(100)
+
+	// Create "prebuilt" route first so it gets older CreationTimestamp (oldest-first wins).
+	prebuiltRoute := &networkingv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "prebuilt-route",
+		},
+		Spec: networkingv1alpha1.ModelRouteSpec{
+			ModelName: duplicateModelName,
+			Rules: []*networkingv1alpha1.Rule{
+				{
+					Name: "default",
+					TargetModels: []*networkingv1alpha1.TargetModel{
+						{ModelServerName: routercontext.ModelServer1_5bName, Weight: &weight100},
+					},
+				},
+			},
+		},
+	}
+	setupModelRouteWithGatewayAPI(prebuiltRoute, useGatewayAPI, kthenaNamespace)
+	createdPrebuilt, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, prebuiltRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create prebuilt ModelRoute")
+	t.Logf("Created ModelRoute: %s/%s (oldest)", createdPrebuilt.Namespace, createdPrebuilt.Name)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdPrebuilt.Name, metav1.DeleteOptions{})
+	})
+
+	// Ensure second route has strictly newer CreationTimestamp (API server uses second precision).
+	time.Sleep(2 * time.Second)
+
+	// Create "newer" route second (newer CreationTimestamp).
+	newerRoute := &networkingv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "newer-route",
+		},
+		Spec: networkingv1alpha1.ModelRouteSpec{
+			ModelName: duplicateModelName,
+			Rules: []*networkingv1alpha1.Rule{
+				{
+					Name: "default",
+					TargetModels: []*networkingv1alpha1.TargetModel{
+						{ModelServerName: routercontext.ModelServer7bName, Weight: &weight100},
+					},
+				},
+			},
+		},
+	}
+	setupModelRouteWithGatewayAPI(newerRoute, useGatewayAPI, kthenaNamespace)
+	createdNewer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, newerRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create newer ModelRoute")
+	t.Logf("Created ModelRoute: %s/%s (newer)", createdNewer.Namespace, createdNewer.Name)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdNewer.Namespace, createdNewer.Name)
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdNewer.Name, metav1.DeleteOptions{})
+	})
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Hello")}
+
+	// 1) Oldest route should win: traffic goes to 1.5B backend.
+	t.Run("PreferOldestRoute", func(t *testing.T) {
+		resp := utils.CheckChatCompletions(t, duplicateModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B", "Oldest route (prebuilt) should be used; response should be from 1.5B model")
+	})
+
+	// 2) Delete oldest route; newer route should take over (7B).
+	err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(ctx, createdPrebuilt.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete prebuilt ModelRoute")
+	t.Log("Deleted prebuilt ModelRoute; expecting newer route to take over")
+
+	// Wait for router to reconcile.
+	require.Eventually(t, func() bool {
+		resp := utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, duplicateModelName, messages, nil)
+		return resp.StatusCode == 200 && strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-7B")
+	}, 2*time.Minute, 2*time.Second, "After deleting oldest route, requests should hit 7B model")
+
+	t.Run("NewerTakesOverAfterOldestDeleted", func(t *testing.T) {
+		resp := utils.CheckChatCompletions(t, duplicateModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-7B", "Newer route should take over after prebuilt is deleted")
+	})
+}
+
 // TestMetricsShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
@@ -909,7 +1356,7 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 
 	// Deploy ModelRoute
 	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSimple.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
@@ -939,6 +1386,8 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 			"status_code": "200",
 		}
 
+		utils.WaitForChatModelReady(t, utils.DefaultRouterURL, modelName, messages, 60*time.Second)
+
 		// Capture baseline metrics
 		baselineMetrics, err := backendmetrics.ParseMetricsURL(defaultMetricsURL)
 		require.NoError(t, err, "Failed to fetch baseline metrics")
@@ -948,8 +1397,11 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 
 		// Send requests
 		for range 3 {
-			resp := utils.CheckChatCompletions(t, modelName, messages)
-			assert.Equal(t, 200, resp.StatusCode)
+			resp := utils.SendChatRequest(t, modelName, messages)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, resp.Body.Close(), "Failed to close response body")
+			require.NoError(t, err, "Failed to read response body")
+			require.Equal(t, 200, resp.StatusCode, "Request failed with body: %s", string(body))
 		}
 
 		// Verify metrics incremented by exactly numRequests
@@ -1007,6 +1459,52 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 	})
 }
 
+// TestSglangMetricsShared verifies that the kthena runtime can correctly scrape and parse
+// SGLang metrics from the sglang-mock deployment. It uses port-forward to access pod
+func TestSglangMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string) {
+	pods := utils.ListPodsByLabel(t, testCtx.KubeClient, testNamespace, "app=sglang-mock")
+	require.NotEmpty(t, pods, "No sglang-mock pods found - ensure SetupCommonComponents deployed LLM-Mock-sglang")
+
+	// Find first running pod with PodIP
+	var targetPod *corev1.Pod
+	for i := range pods {
+		if pods[i].Status.Phase == corev1.PodRunning && pods[i].Status.PodIP != "" {
+			targetPod = &pods[i]
+			break
+		}
+	}
+	require.NotNil(t, targetPod, "No running sglang-mock pod with PodIP found")
+
+	pf, err := utils.SetupPortForwardToPod(testNamespace, targetPod.Name, "30300", "30000")
+	require.NoError(t, err, "Failed to setup port-forward to sglang-mock pod")
+	defer pf.Close()
+
+	metricsURL := "http://127.0.0.1:30300/metrics"
+	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
+	require.NoError(t, err, "Failed to fetch metrics from sglang-mock via port-forward")
+	require.NotEmpty(t, allMetrics, "No metrics returned from sglang-mock")
+
+	engine := sglang.NewSglangEngine()
+	countMetrics := engine.GetCountMetricsInfo(allMetrics)
+	assert.Contains(t, countMetrics, routerutils.GPUCacheUsage,
+		"Missing gpu_usage (sglang:token_usage) in count metrics")
+	assert.Contains(t, countMetrics, routerutils.RequestWaitingNum,
+		"Missing request_waiting_num (sglang:num_queue_reqs) in count metrics")
+
+	histogramMetrics, _ := engine.GetHistogramPodMetrics(allMetrics, nil)
+	assert.Contains(t, histogramMetrics, routerutils.TTFT,
+		"Missing TTFT (sglang:time_to_first_token_seconds) in histogram metrics")
+	assert.Contains(t, histogramMetrics, routerutils.TPOT,
+		"Missing TPOT (sglang:time_per_output_token_seconds) in histogram metrics")
+
+	t.Logf("Pod %s: gpu_usage=%.4f, request_waiting_num=%.0f, TTFT=%.6f, TPOT=%.6f",
+		targetPod.Name,
+		countMetrics[routerutils.GPUCacheUsage],
+		countMetrics[routerutils.RequestWaitingNum],
+		histogramMetrics[routerutils.TTFT],
+		histogramMetrics[routerutils.TPOT])
+}
+
 // TestRateLimitMetricsShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
@@ -1015,7 +1513,7 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 	// Deploy ModelRoute with rate limiting
 	t.Log("Deploying ModelRoute with rate limiting...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 	modelRoute.Namespace = testNamespace
 
 	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
@@ -1093,5 +1591,215 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 
 			return rateLimitDelta == float64(rateLimitedCount) && requestDelta == float64(rateLimitedCount)
 		}, 15*time.Second, time.Second, "Rate limit metrics did not match expected values")
+	})
+}
+
+// TestRouterConfigUpdateShared is a shared test function that can be used by both
+// router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
+// with ParentRefs to the default Gateway.
+func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	ctx := context.Background()
+	const configMapName = "kthena-router-config"
+	const routerDeploymentName = "kthena-router"
+	const routerConfigKey = "routerConfiguration"
+
+	// Deploy ModelRoute
+	t.Log("Deploying ModelRoute...")
+
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
+	modelRoute.Namespace = testNamespace
+
+	// Configure ParentRefs if using Gateway API
+	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelRoute")
+	assert.NotNil(t, createdModelRoute)
+	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	// Register cleanup function to delete ModelRoute after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	messages := []utils.ChatMessage{
+		utils.NewChatMessage("user", "Hello"),
+	}
+
+	// Verify routing works with the initial (default) config.
+	t.Run("VerifyInitialConfig", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err, "Failed to find an available port")
+		initialRouterPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+		listener.Close()
+
+		pf, err := utils.SetupPortForward(kthenaNamespace, routerDeploymentName, initialRouterPort, "80")
+		require.NoError(t, err, "Failed to setup initial port-forward")
+		defer pf.Close()
+
+		initialRouterURL := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", initialRouterPort)
+
+		resp := utils.CheckChatCompletionsWithURL(t, initialRouterURL, modelRoute.Spec.ModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode, "Routing should work with initial config")
+	})
+
+	// Save the original ConfigMap data for restoration after test.
+	cm, err := testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(ctx, configMapName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router ConfigMap")
+	originalConfigData := cm.Data[routerConfigKey]
+	require.NotEmpty(t, originalConfigData, "Router configuration should not be empty")
+
+	// Derive the pod label selector and expected replicas from the router deployment.
+	routerDeploy, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routerDeploymentName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router deployment")
+	routerPodSelector := metav1.FormatLabelSelector(routerDeploy.Spec.Selector)
+	expectedReplicas := int32(1)
+	if routerDeploy.Spec.Replicas != nil {
+		expectedReplicas = *routerDeploy.Spec.Replicas
+	}
+
+	// Register cleanup to restore original ConfigMap, restart router, and
+	// re-establish port-forward for subsequent tests.
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Log("Restoring original router ConfigMap...")
+
+		latestCM, err := testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(cleanupCtx, configMapName, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Warning: Failed to get ConfigMap for restoration: %v", err)
+			return
+		}
+		latestCM.Data[routerConfigKey] = originalConfigData
+		if _, err := testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(cleanupCtx, latestCM, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore original ConfigMap: %v", err)
+			return
+		}
+
+		// Delete router pods so the deployment controller recreates them with the restored config.
+		pods, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(cleanupCtx, metav1.ListOptions{
+			LabelSelector: routerPodSelector,
+		})
+		if err != nil {
+			t.Logf("Warning: Failed to list router pods for cleanup: %v", err)
+			return
+		}
+		for i := range pods.Items {
+			_ = testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(cleanupCtx, pods.Items[i].Name, metav1.DeleteOptions{})
+		}
+
+		// Wait for the router to become ready with the restored config.
+		_ = utils.WaitForDeploymentReadyE(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout)
+	})
+
+	// Update the ConfigMap with a new scheduler configuration:
+	// use only least-request as score plugin (remove gpu-usage, least-latency, prefix-cache)
+	// and increase maxWaitingRequests from 10 to 100.
+	updatedConfig := `scheduler:
+  pluginConfig:
+  - name: least-request
+    args:
+      maxWaitingRequests: 100
+  plugins:
+    Filter:
+      enabled:
+        - least-request
+    Score:
+      enabled:
+        - name: least-request
+          weight: 1`
+
+	// Re-fetch the ConfigMap to get the latest ResourceVersion and avoid optimistic concurrency conflicts.
+	cm, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(ctx, configMapName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to re-fetch router ConfigMap")
+	t.Log("Updating router ConfigMap with new scheduler configuration...")
+	cm.Data[routerConfigKey] = updatedConfig
+	_, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update router ConfigMap")
+
+	// Record pre-restart pod names to confirm they get replaced.
+	preRestartPods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+	preRestartPodNames := make(map[string]bool, len(preRestartPods))
+	for _, pod := range preRestartPods {
+		preRestartPodNames[pod.Name] = true
+	}
+
+	// Delete router pods so the deployment controller recreates them with the updated config.
+	t.Log("Deleting router pods to trigger restart...")
+	for _, pod := range preRestartPods {
+		err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+		require.NoError(t, err, "Failed to delete router pod %s", pod.Name)
+	}
+
+	// Wait for pre-restart pods to be replaced by new ones.
+	require.Eventually(t, func() bool {
+		pods, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: routerPodSelector,
+		})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if preRestartPodNames[pod.Name] {
+				return false
+			}
+		}
+		return len(pods.Items) > 0
+	}, defaultScalingTimeout, 2*time.Second, "Pre-restart pods should be replaced")
+
+	// Wait for the deployment to be ready with the new pods.
+	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, defaultScalingTimeout)
+	t.Log("Router deployment is ready after restart")
+
+	// Set up port-forward to the restarted router on a dynamically selected local port
+	// to avoid conflicts with the framework port-forward on 8080 and other parallel tests.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "Failed to find an available port")
+	restartedRouterPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	listener.Close()
+
+	pf, err := utils.SetupPortForward(kthenaNamespace, routerDeploymentName, restartedRouterPort, "80")
+	require.NoError(t, err, "Failed to setup port-forward to restarted router")
+	defer pf.Close()
+
+	restartedRouterURL := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", restartedRouterPort)
+	restartedMetricsURL := fmt.Sprintf("http://127.0.0.1:%s/metrics", restartedRouterPort)
+
+	// Verify routing works after config update and restart.
+	t.Run("VerifyUpdatedConfig", func(t *testing.T) {
+		resp := utils.CheckChatCompletionsWithURL(t, restartedRouterURL, modelRoute.Spec.ModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode, "Routing should work after config update and restart")
+	})
+
+	// Verify the updated config took effect by checking scheduler plugin metrics.
+	// After restart, only the configured score plugins should appear in metrics.
+	t.Run("VerifyPluginMetricsAfterConfigUpdate", func(t *testing.T) {
+		// With the updated config, only "least-request" should be active as a score plugin.
+		require.Eventually(t, func() bool {
+			metricsData, err := backendmetrics.ParseMetricsURL(restartedMetricsURL)
+			if err != nil {
+				return false
+			}
+			activeCount := getHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
+				"plugin": plugins.LeastRequestPluginName,
+				"type":   "score",
+			})
+			return activeCount > 0
+		}, 30*time.Second, time.Second, "Expected least-request score plugin to be active in metrics")
+
+		metricsData, err := backendmetrics.ParseMetricsURL(restartedMetricsURL)
+		require.NoError(t, err, "Failed to fetch metrics after config update")
+
+		// Removed plugins should not appear in fresh metrics after restart.
+		for _, removedPlugin := range []string{plugins.PrefixCachePluginName, plugins.GPUCacheUsagePluginName, plugins.LeastLatencyPluginName} {
+			count := getHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
+				"plugin": removedPlugin,
+				"type":   "score",
+			})
+			assert.Equal(t, uint64(0), count, "Plugin %q should not be active after config update", removedPlugin)
+		}
 	})
 }

@@ -19,9 +19,12 @@ package router
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -78,6 +81,11 @@ type Router struct {
 
 	// KV Connector management
 	connectorFactory *connectors.Factory
+
+	// Fairness scheduling configuration
+	fairnessTimeout  time.Duration
+	tokenWeight      float64 // Weight for token-based priority (default 1.0)
+	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -154,7 +162,41 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		metrics:          metricsInstance,
 		tokenizer:        tokenizerInstance,
 		connectorFactory: connectors.NewDefaultFactory(),
+		fairnessTimeout:  parseFairnessTimeout(),
+		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
+		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
+}
+
+const defaultFairnessTimeout = 60 * time.Second
+
+func parseFairnessTimeout() time.Duration {
+	if s, ok := os.LookupEnv("FAIRNESS_QUEUE_TIMEOUT"); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+		klog.Warningf("Invalid FAIRNESS_QUEUE_TIMEOUT %q, using default %v", s, defaultFairnessTimeout)
+	}
+	return defaultFairnessTimeout
+}
+
+func parseEnvFloat(key string, fallback float64) float64 {
+	if s, ok := os.LookupEnv(key); ok {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 {
+			return v
+		}
+		klog.Warningf("Invalid %s %q, using default %v", key, s, fallback)
+	}
+	return fallback
+}
+
+func (r *Router) calculateRequestPriority(userID, modelName string) float64 {
+	priority, err := datastore.CalculateFairnessPriority(r.store, userID, modelName, r.tokenWeight, r.requestNumWeight)
+	if err != nil {
+		klog.Warningf("failed to calculate fairness priority for user=%s model=%s: %v", userID, modelName, err)
+		return 0
+	}
+	return priority
 }
 
 type ModelRequest map[string]interface{}
@@ -288,6 +330,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		if k, ok := key.(string); ok {
 			gatewayKey = k
 		}
+	}
+	if gatewayKey != "" {
+		accesslog.SetGatewayAPIInfo(c, gatewayKey, "", "")
 	}
 
 	var isLora bool
@@ -523,6 +568,10 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 		return false, types.NamespacedName{}
 	}
 
+	// Record Gateway API match into access log (gatewayKey is already "namespace/name").
+	httpRouteKey := fmt.Sprintf("%s/%s", matchedRoute.Namespace, matchedRoute.Name)
+	accesslog.SetGatewayAPIInfo(c, gatewayKey, httpRouteKey, "")
+
 	// Store the matched prefix in context for URL rewriting
 	if matchedPrefix != "" {
 		c.Set("matchedPrefix", matchedPrefix)
@@ -555,6 +604,10 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	if !found {
 		return false, types.NamespacedName{}
 	}
+
+	// Record InferencePool match into access log.
+	inferencePoolKey := fmt.Sprintf("%s/%s", inferencePoolName.Namespace, inferencePoolName.Name)
+	accesslog.SetGatewayAPIInfo(c, "", "", inferencePoolKey)
 
 	// Apply HTTPURLRewriteFilter if present
 	if matchedRule != nil && matchedRule.Filters != nil {
@@ -867,10 +920,13 @@ func (r *Router) getKVConnector(modelServerName types.NamespacedName) (connector
 		return nil, fmt.Errorf("model server %s not found", modelServerName)
 	}
 
-	// Determine connector type from ModelServer CRD
+	// Determine connector type from ModelServer CRD.
+	// If kvConnector is explicitly set, use it; otherwise infer from inferenceEngine.
 	connectorType := v1alpha1.ConnectorTypeHTTP
 	if modelServer.Spec.KVConnector != nil && modelServer.Spec.KVConnector.Type != "" {
 		connectorType = modelServer.Spec.KVConnector.Type
+	} else if modelServer.Spec.InferenceEngine == v1alpha1.SGLang {
+		connectorType = connectors.ConnectorTypeSGLang
 	}
 
 	connector := r.connectorFactory.GetConnector(connectorType)
@@ -975,8 +1031,11 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		return fmt.Errorf("userId is not a string")
 	}
 
-	// TODO: better cal priority based on input and output token count
-	pri, _ := r.store.GetTokenCount(userId, modelName)
+	// Create request-scoped context that unifies client disconnect and server timeout
+	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.fairnessTimeout)
+	defer cancel()
+
+	pri := r.calculateRequestPriority(userId, modelName)
 	queueReq := &datastore.Request{
 		ReqID:       requestID,
 		UserID:      userId,
@@ -984,6 +1043,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		Priority:    pri,
 		RequestTime: time.Now(),
 		NotifyChan:  make(chan struct{}),
+		CancelCh:    reqCtx.Done(),
 	}
 
 	if err := r.store.Enqueue(queueReq); err != nil {
@@ -993,12 +1053,22 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 
 	select {
 	case <-queueReq.NotifyChan:
+		if queueReq.Release != nil {
+			defer queueReq.Release()
+		}
 		r.doLoadbalance(c, modelRequest)
 		return nil
-	case <-time.After(60 * time.Second):
-		// avoid blocking indefinitely
-		klog.Errorf("request %s processing timed out after 60 seconds", requestID)
-		c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out")
-		return fmt.Errorf("request processing timed out")
+	case <-reqCtx.Done():
+		if queueReq.Release != nil {
+			queueReq.Release()
+		}
+		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+			klog.Errorf("request %s timed out in fairness queue after %v", requestID, r.fairnessTimeout)
+			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out")
+			return fmt.Errorf("request processing timed out in fairness queue")
+		}
+		klog.Infof("request %s cancelled: client disconnected", requestID)
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in fairness queue")
+		return fmt.Errorf("client disconnected while waiting in fairness queue")
 	}
 }

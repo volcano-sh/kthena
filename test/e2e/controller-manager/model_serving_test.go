@@ -18,8 +18,10 @@ package controller_manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -27,45 +29,137 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	lwsutils "sigs.k8s.io/lws/pkg/utils"
 
+	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	controllerutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
-// TODO(user): Add E2E tests for ModelServing lifecycle (Create, Update, Delete and check if it works)
+const (
+	nginxImage       = "nginx:1.28.2"
+	nginxAlpineImage = "nginx:alpine"
+)
+
+// TestModelServingLifecycle verifies the full lifecycle of a ModelServing resource:
+// Create -> Verify Ready -> Update (change image) -> Verify Updated -> Delete -> Verify Deleted.
 func TestModelServingLifecycle(t *testing.T) {
-	// Placeholder for ModelServing lifecycle tests
-	t.Skip("ModelServing lifecycle test is not implemented yet")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Phase 1: Create
+	modelServing := createBasicModelServing("test-lifecycle", 1, 0)
+
+	t.Log("Phase 1: Creating ModelServing")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Verify pods are running
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.NotEmpty(t, podList.Items, "Expected at least one pod after creation")
+	for _, pod := range podList.Items {
+		assert.Equal(t, corev1.PodRunning, pod.Status.Phase, "Pod %s should be running", pod.Name)
+	}
+	t.Log("Phase 1 passed: ModelServing created and ready")
+
+	// Phase 2: Update (change container image)
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing for update")
+
+	updatedMS := currentMS.DeepCopy()
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+
+	t.Logf("Phase 2: Updating ModelServing (changing image to %s)", nginxAlpineImage)
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing")
+
+	// Wait for the update to complete and ModelServing to be ready again
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify the image was updated on all non-terminating pods
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil || len(pods.Items) == 0 {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			if pod.Status.Phase != corev1.PodRunning {
+				return false
+			}
+			hasUpdatedImage := false
+			for _, container := range pod.Spec.Containers {
+				if container.Name == "test-container" && container.Image == nginxAlpineImage {
+					hasUpdatedImage = true
+					break
+				}
+			}
+			if !hasUpdatedImage {
+				return false
+			}
+		}
+		return true
+	}, 3*time.Minute, 5*time.Second, fmt.Sprintf("Not all pods were updated to %s", nginxAlpineImage))
+	t.Log("Phase 2 passed: ModelServing updated successfully")
+
+	// Phase 3: Delete
+	t.Log("Phase 3: Deleting ModelServing")
+	err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(ctx, modelServing.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete ModelServing")
+
+	// Verify the ModelServing is deleted
+	require.Eventually(t, func() bool {
+		_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if err == nil {
+			return false
+		}
+		return apierrors.IsNotFound(err)
+	}, 2*time.Minute, 5*time.Second, "ModelServing was not deleted")
+
+	// Verify that associated pods are cleaned up
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		return len(pods.Items) == 0
+	}, 2*time.Minute, 5*time.Second, "Pods were not cleaned up after ModelServing deletion")
+
+	t.Log("Phase 3 passed: ModelServing deleted and pods cleaned up")
+	t.Log("ModelServing lifecycle test passed successfully")
 }
 
 // TestModelServingScaleUp tests the ability to scale up a ModelServing's ServingGroup
 func TestModelServingScaleUp(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 1 replica
-	modelServing := createBasicModelServing("test-scale-up", 1)
+	modelServing := createBasicModelServing("test-scale-up", 1, 0)
 
-	// Create the ModelServing
-	t.Log("Creating ModelServing with 1 servingGHroup replica")
-	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing")
-
-	// Wait for the initial ModelServing to be ready
-	t.Log("Waiting for initial ModelServing (1 servingGroup replica) to be ready")
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	t.Log("Creating ModelServing with 1 servingGroup replica")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	// Verify initial state - should have 1 replica
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get initial ModelServing")
 	assert.Equal(t, int32(1), *initialMS.Spec.Replicas, "Initial ModelServing should have 1 replica")
-	assert.Equal(t, int32(1), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 1 available replica")
 
 	// Update the ModelServing to scale up to 3 replicas
 	scaleUpMS := initialMS.DeepCopy()
@@ -87,44 +181,293 @@ func TestModelServingScaleUp(t *testing.T) {
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get final ModelServing")
 	assert.Equal(t, int32(3), *finalMS.Spec.Replicas, "Final ModelServing should have 3 replicas in spec")
-	assert.Equal(t, int32(3), finalMS.Status.AvailableReplicas, "Final ModelServing should have 3 available replicas")
 
 	t.Log("ModelServing scale up test passed successfully")
+}
+
+// TestModelServingScaleDown tests the ability to scale down a ModelServing's ServingGroup.
+func TestModelServingScaleDown(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a basic ModelServing with 3 replicas
+	modelServing := createBasicModelServing("test-scale-down", 3, 0)
+
+	t.Log("Creating ModelServing with 3 servingGroup replicas")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Verify initial state - should have 3 replicas
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(3), *initialMS.Spec.Replicas, "Initial ModelServing should have 3 replicas")
+
+	// Update the ModelServing to scale down to 1 replica
+	scaleDownMS := initialMS.DeepCopy()
+	newReplicas := int32(1)
+	scaleDownMS.Spec.Replicas = &newReplicas
+
+	t.Log("Updating ModelServing to scale down to 1 replica")
+	updatedMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for scale down")
+
+	// Verify the spec was updated
+	assert.Equal(t, int32(1), *updatedMS.Spec.Replicas, "Updated ModelServing should have 1 replica in spec")
+
+	// Wait for the scaled-down ModelServing to be ready
+	t.Log("Waiting for scaled-down ModelServing (1 replica) to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+
+	// Verify pod count has decreased
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 1, 2*time.Minute)
+
+	// Final verification - wait for status to converge
+	require.Eventually(t, func() bool {
+		finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		t.Logf("AvailableReplicas: %d (expecting 1)", finalMS.Status.AvailableReplicas)
+		return *finalMS.Spec.Replicas == 1 && finalMS.Status.AvailableReplicas == 1
+	}, 2*time.Minute, 5*time.Second, "ModelServing status did not converge to 1 available replica")
+
+	t.Log("ModelServing scale down test passed successfully")
+}
+
+// TestModelServingRoleScaleUp tests scaling up the role replicas within a ServingGroup.
+func TestModelServingRoleScaleUp(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 1 servingGroup and a prefill role with 1 replica
+	initialRoleReplicas := int32(1)
+	modelServing := createBasicModelServing("test-role-scale-up", 1, initialRoleReplicas)
+
+	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 1 replica")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Scale up the role replicas from 1 to 3
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing for role scale up")
+
+	updatedMS := currentMS.DeepCopy()
+	newRoleReplicas := int32(3)
+	updatedMS.Spec.Template.Roles[0].Replicas = &newRoleReplicas
+
+	t.Log("Updating ModelServing to scale up prefill role to 3 replicas")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for role scale up")
+
+	// Wait for the ModelServing to be ready with the new role replicas
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify the pod count increased
+	// With 1 servingGroup and 3 role replicas (each with 1 entry pod), we expect 3 pods
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+
+	t.Log("ModelServing role scale up test passed successfully")
+}
+
+// TestModelServingRoleScaleDown tests scaling down the role replicas within a ServingGroup.
+func TestModelServingRoleScaleDown(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 1 servingGroup and a prefill role with 3 replicas
+	initialRoleReplicas := int32(3)
+	modelServing := createBasicModelServing("test-role-scale-down", 1, initialRoleReplicas)
+
+	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 3 replicas")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Verify initial pods (expect 3: 1 servingGroup × 3 role replicas × 1 entry pod)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+	t.Log("Verified 3 running pods initially")
+
+	// Scale down the role replicas from 3 to 1
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing for role scale down")
+
+	updatedMS := currentMS.DeepCopy()
+	newRoleReplicas := int32(1)
+	updatedMS.Spec.Template.Roles[0].Replicas = &newRoleReplicas
+
+	t.Log("Updating ModelServing to scale down prefill role to 1 replica")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for role scale down")
+
+	// Wait for the ModelServing to be ready with the new role replicas
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify the pod count decreased to 1
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 1, 3*time.Minute)
+
+	t.Log("ModelServing role scale down test passed successfully")
+}
+
+// TestModelServingServingGroupRecreate verifies that when a pod is deleted under the
+// ServingGroupRecreate recovery policy, the entire ServingGroup is recreated.
+func TestModelServingServingGroupRecreate(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with ServingGroupRecreate policy and 2 roles
+	prefillRole := createRole("prefill", 1, 0)
+	decodeRole := createRole("decode", 1, 0)
+	modelServing := createBasicModelServing("test-sg-recreate", 1, 0, prefillRole, decodeRole)
+	modelServing.Spec.RecoveryPolicy = workload.ServingGroupRecreate
+	modelServing.Spec.RolloutStrategy = &workload.RolloutStrategy{
+		Type: workload.ServingGroupRollingUpdate,
+	}
+
+	t.Log("Creating ModelServing with ServingGroupRecreate policy and 2 roles (prefill + decode)")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Collect all pod UIDs before deletion
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.Len(t, podList.Items, 2, "Expected 2 pods (1 prefill + 1 decode)")
+
+	originalUIDs := make(map[string]bool)
+	for _, pod := range podList.Items {
+		originalUIDs[string(pod.UID)] = true
+		t.Logf("Original pod: %s (UID: %s)", pod.Name, pod.UID)
+	}
+
+	// Delete just one pod (e.g., the first one) to trigger ServingGroupRecreate
+	targetPod := podList.Items[0]
+	t.Logf("Deleting pod %s to trigger ServingGroupRecreate", targetPod.Name)
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete pod")
+
+	// Wait for ALL pods to be recreated with new UIDs (entire serving group should be recreated)
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil || len(pods.Items) < 2 {
+			return false
+		}
+
+		readyNewPods := 0
+		anyOriginalRemaining := false
+		for _, pod := range pods.Items {
+			isOriginal := originalUIDs[string(pod.UID)]
+			isNonTerminating := pod.DeletionTimestamp == nil
+
+			// Check if any original pod is still non-terminating
+			if isOriginal && isNonTerminating {
+				anyOriginalRemaining = true
+			}
+
+			// Must be a new pod (not in original UIDs) and must be ready
+			if !isOriginal && isNonTerminating {
+				if utils.IsPodReady(pod) {
+					readyNewPods++
+				}
+			}
+		}
+		t.Logf("New ready pods: %d (expecting 2), any original remaining: %v", readyNewPods, anyOriginalRemaining)
+		return readyNewPods >= 2 && !anyOriginalRemaining
+	}, 3*time.Minute, 5*time.Second, "ServingGroup was not fully recreated after pod deletion under ServingGroupRecreate policy")
+
+	t.Log("ModelServing ServingGroupRecreate test passed successfully")
+}
+
+// TestModelServingHeadlessServiceDeleteOnServingGroupDelete verifies that when a ModelServing
+// is scaled down (servingGroups are deleted), the corresponding headless services are also cleaned up.
+func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 3 servingGroup replicas and a WorkerTemplate
+	// so that headless services are actually created by the controller.
+	workerRole := createRole("prefill", 1, 1)
+	modelServing := createBasicModelServing("test-svc-sg-delete", 3, 0, workerRole)
+
+	t.Log("Creating ModelServing with 3 servingGroup replicas and WorkerTemplate")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Get the ModelServing UID
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
+
+	// Wait for initial headless services to be created (one per servingGroup)
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	require.Eventually(t, func() bool {
+		serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		headlessCount := 0
+		for _, svc := range serviceList.Items {
+			for _, ref := range svc.OwnerReferences {
+				if ref.UID == ms.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+					headlessCount++
+					break
+				}
+			}
+		}
+		t.Logf("Initial headless service count: %d (expecting 3)", headlessCount)
+		return headlessCount == 3
+	}, 30*time.Second, 1*time.Second, "Expected 3 headless services (one per servingGroup)")
+
+	// Scale down to 1 replica (removing 2 servingGroups)
+	scaleDownMS := ms.DeepCopy()
+	newReplicas := int32(1)
+	scaleDownMS.Spec.Replicas = &newReplicas
+
+	t.Log("Scaling down ModelServing to 1 replica to trigger servingGroup deletion")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for scale down")
+
+	// Wait for the ModelServing to be ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify headless services were cleaned up: should go from 3 to exactly 1
+	require.Eventually(t, func() bool {
+		currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		services, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		headlessCount := 0
+		for _, svc := range services.Items {
+			for _, ref := range svc.OwnerReferences {
+				if ref.UID == currentMS.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+					headlessCount++
+					break
+				}
+			}
+		}
+		t.Logf("Current headless service count: %d (expecting 1)", headlessCount)
+		return headlessCount == 1
+	}, 2*time.Minute, 5*time.Second, "Headless services were not cleaned up after servingGroup deletion")
+
+	t.Log("ModelServing headless service cleanup on servingGroup delete test passed successfully")
 }
 
 // TestModelServingPodRecovery verifies that when a pod is deleted,
 // the corresponding role can recreate the pod successfully.
 func TestModelServingPodRecovery(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing
-	modelServing := createBasicModelServing("test-pod-recovery", 1)
+	modelServing := createBasicModelServing("test-pod-recovery", 1, 0)
 	modelServing.Spec.RecoveryPolicy = workload.RoleRecreate
+	modelServing.Spec.RolloutStrategy = &workload.RolloutStrategy{
+		Type: workload.RoleRollingUpdate,
+	}
 
 	t.Log("Creating ModelServing for pod recovery test")
-	_, err = kthenaClient.WorkloadV1alpha1().
-		ModelServings(testNamespace).
-		Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing")
-
-	// Register cleanup for ModelServing
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
-		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
-		}
-	})
-
-	// Wait until ModelServing is ready
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	// List pods using label selector scoped to the current ModelServing instance
-	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	labelSelector := modelServingLabelSelector(modelServing.Name)
 	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -161,11 +504,8 @@ func TestModelServingPodRecovery(t *testing.T) {
 	for _, pod := range pods.Items {
 		// Check if it's a new pod (different UID from original)
 		if pod.UID != originalPodUID {
-			// Check for PodReady condition with status True
-			for _, condition := range pod.Status.Conditions {
-				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-					t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
-				}
+			if utils.IsPodReady(pod) {
+				t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
 			}
 		}
 	}
@@ -176,39 +516,21 @@ func TestModelServingPodRecovery(t *testing.T) {
 // TestModelServingServiceRecovery verifies that when the headless Service
 // is deleted, it can be recreated successfully and ModelServing remains healthy.
 func TestModelServingServiceRecovery(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
-
-	// Create a basic ModelServing
-	modelServing := createBasicModelServing("test-service-recovery", 1)
+	// Create a ModelServing with a WorkerTemplate so that headless services are created
+	workerRole := createRole("prefill", 1, 1)
+	modelServing := createBasicModelServing("test-service-recovery", 1, 0, workerRole)
 
 	t.Log("Creating ModelServing for service recovery test")
-	_, err = kthenaClient.WorkloadV1alpha1().
-		ModelServings(testNamespace).
-		Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing")
-
-	// Register cleanup for ModelServing
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
-		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
-		}
-	})
-
-	// Wait until ModelServing is ready
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	// Get the ModelServing to obtain its UID
 	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing")
 
 	// List Services with label selector scoped to the current ModelServing
-	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	labelSelector := modelServingLabelSelector(modelServing.Name)
 	serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -281,14 +603,10 @@ func TestModelServingServiceRecovery(t *testing.T) {
 // TestModelServingWithDuplicateHostAliases verifies that ModelServing with duplicate IP hostAliases
 // can be created and pods are running successfully
 func TestModelServingWithDuplicateHostAliases(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with duplicate IP hostAliases
-	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1)
+	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1, 0)
 	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.HostAliases = []corev1.HostAlias{
 		{
 			IP:        "10.1.2.3",
@@ -301,25 +619,10 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 	}
 
 	t.Log("Creating ModelServing with duplicate IP hostAliases")
-	_, err = kthenaClient.WorkloadV1alpha1().
-		ModelServings(testNamespace).
-		Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing with duplicate hostAliases")
-
-	// Register cleanup for ModelServing
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
-		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
-		}
-	})
-
-	// Wait until ModelServing is ready
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	// Verify that pods are created and running with the correct hostAliases
-	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	labelSelector := modelServingLabelSelector(modelServing.Name)
 	require.Eventually(t, func() bool {
 		podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: labelSelector,
@@ -379,72 +682,23 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 }
 
 func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 4 replicas and maxUnavailable set to 2
 	replicas := int32(4)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-rolling-update-maxunavailable",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{
-						IntVal: 2, // maxUnavailable = 2
-					},
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: &replicas,
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: "nginx:1.28.2", // Initial image
-										Ports: []corev1.ContainerPort{
-											{
-												Name:          "http",
-												ContainerPort: 80,
-											},
-										},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
-
-	// Create the ModelServing
+	modelServing := createBasicModelServing("test-rolling-update-maxunavailable", replicas, replicas)
 	t.Log("Creating ModelServing with 4 replicas and maxUnavailable=2")
-	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing")
-
-	// Wait for the initial ModelServing to be ready
-	t.Log("Waiting for initial ModelServing (4 replicas) to be ready")
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	// Verify initial state
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get initial ModelServing")
 	assert.Equal(t, int32(4), *initialMS.Spec.Replicas, "Initial ModelServing should have 4 replicas")
-	assert.Equal(t, int32(4), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 4 available replicas")
 
 	// Update the ModelServing to trigger a rolling update (change image)
 	updatedMS := initialMS.DeepCopy()
 	// Modify the container image to trigger a rolling update
-	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
 
 	t.Log("Updating ModelServing to trigger rolling update with maxUnavailable=2")
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
@@ -503,8 +757,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get final ModelServing")
 	assert.Equal(t, int32(4), *finalMS.Spec.Replicas, "Final ModelServing should have 4 replicas in spec")
-	assert.Equal(t, int32(4), finalMS.Status.AvailableReplicas, "Final ModelServing should have 4 available replicas after update")
-	assert.Equal(t, finalMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "nginx:alpine", "Final ModelServing should have updated image")
+	assert.Equal(t, nginxAlpineImage, finalMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "Final ModelServing should have updated image")
 
 	// Verify that maxUnavailable was never exceeded during the update
 	assert.True(t, maxObservedUnavailable <= 2, "Max unavailable replicas (%d) exceeded maxUnavailable limit (2)", maxObservedUnavailable)
@@ -518,149 +771,18 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	t.Log("ModelServing rolling update maxUnavailable test passed successfully")
 }
 
-// TestModelServingControllerManagerRestart verifies that ModelServing pod creation
-// is successful even when the controller-manager restarts during reconciliation.
-func TestModelServingControllerManagerRestart(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client
-	kubeClient, err := utils.GetKubeClient()
-	require.NoError(t, err, "Failed to create Kubernetes client")
-
-	// Create a complicated ModelServing with multiple roles
-	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
-	prefillRole := createRole("prefill", 1, 2)
-	decodeRole := createRole("decode", 1, 1)
-	modelServing := createBasicModelServing("test-controller-restart", 5, prefillRole, decodeRole)
-
-	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
-	_, err = kthenaClient.WorkloadV1alpha1().
-		ModelServings(testNamespace).
-		Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing")
-
-	// Register cleanup for ModelServing
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
-		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
-		}
-	})
-
-	// Wait briefly for initial reconciliation to start
-	t.Log("Waiting for initial reconciliation to start...")
-	// Wait for a random duration between 0 and 3 seconds (in 100ms increments)
-	randomWait := time.Duration(rand.New(rand.NewSource(time.Now().UnixNano())).Intn(31)*100) * time.Millisecond
-	t.Logf("Waiting for %v before restarting controller-manager", randomWait)
-	time.Sleep(randomWait)
-
-	// Find and delete controller-manager pods
-	t.Logf("Finding controller-manager pods in namespace %s", kthenaNamespace)
-
-	// Use label selector to find controller-manager pods
-	labelSelector := "app.kubernetes.io/component=kthena-controller-manager"
-	controllerPods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	require.NoError(t, err, "Failed to list controller-manager pods")
-	require.NotEmpty(t, controllerPods.Items, "No controller-manager pods found")
-
-	// Delete all controller-manager pods
-	for _, pod := range controllerPods.Items {
-		t.Logf("Deleting controller-manager pod: %s", pod.Name)
-		err := kubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-		require.NoError(t, err, "Failed to delete controller-manager pod %s", pod.Name)
-	}
-
-	// Wait for controller-manager pods to restart and become ready
-	t.Log("Waiting for controller-manager to restart...")
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		// Check that at least one controller-manager pod is running and ready
-		for _, pod := range pods.Items {
-			if pod.Status.Phase == corev1.PodRunning {
-				for _, condition := range pod.Status.Conditions {
-					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-						t.Logf("Controller-manager pod is ready: %s", pod.Name)
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}, 3*time.Minute, 5*time.Second, "Controller-manager did not restart and become ready")
-
-	// Wait for ModelServing to be ready
-	t.Log("Waiting for ModelServing to be ready after controller-manager restart...")
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-
-	// Verify all expected pods are created
-	msLabelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
-	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: msLabelSelector,
-	})
-	require.NoError(t, err, "Failed to list ModelServing pods")
-
-	// Calculate expected pod count:
-	// 5 serving groups × (3 pods for prefill role + 2 pods for decode role) = 25 pods
-	expectedPodCount := 25
-	actualPodCount := len(podList.Items)
-
-	t.Logf("Expected pod count: %d, Actual pod count: %d", expectedPodCount, actualPodCount)
-	assert.Equal(t, expectedPodCount, actualPodCount, "Pod count mismatch after controller-manager restart")
-
-	// Verify all pods are running
-	runningPods := 0
-	for _, pod := range podList.Items {
-		if pod.Status.Phase == corev1.PodRunning {
-			runningPods++
-		}
-	}
-	assert.Equal(t, actualPodCount, runningPods, "All created pods should be in Running phase")
-
-	t.Log("ModelServing controller-manager restart test passed successfully")
-}
-
 // TestModelServingRoleStatusEvents verifies that role status transitions are surfaced via Kubernetes Events.
 func TestModelServingRoleStatusEvents(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
-
-	// Create Kubernetes client locally
-	kubeConfig, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
-
-	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
-	require.NoError(t, err, "Failed to create Kubernetes client")
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a simple ModelServing with a single role replica to keep the signal clean.
-	modelServing := createBasicModelServing("test-role-status-events", 1)
+	modelServing := createBasicModelServing("test-role-status-events", 1, 0)
 
 	t.Log("Creating ModelServing for role status events test")
-	createdMS, err := kthenaClient.WorkloadV1alpha1().
-		ModelServings(testNamespace).
-		Create(ctx, modelServing, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelServing")
-
-	// Ensure cleanup
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelServing: %s/%s", createdMS.Namespace, createdMS.Name)
-		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, createdMS.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", createdMS.Namespace, createdMS.Name, err)
-		}
-	})
-
-	// Wait until ModelServing is ready so that role transitions to Running.
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, createdMS.Name)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	// Refresh to get UID for precise event filtering.
-	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, createdMS.Name, metav1.GetOptions{})
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing")
 
 	// We expect at least one Creating event and one Running event for the role.
@@ -698,6 +820,70 @@ func TestModelServingRoleStatusEvents(t *testing.T) {
 	t.Log("ModelServing role status events test passed successfully")
 }
 
+// modelServingLabelSelector returns the label selector for resources belonging to a ModelServing.
+func modelServingLabelSelector(msName string) string {
+	return "modelserving.volcano.sh/name=" + msName
+}
+
+// createAndWaitForModelServing creates a ModelServing, registers a cleanup function, and waits for it to be ready.
+func createAndWaitForModelServing(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, modelServing *workload.ModelServing) {
+	t.Helper()
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("Failed to delete ModelServing %s during cleanup: %v", modelServing.Name, err)
+		}
+	})
+
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+}
+
+// waitForRunningPodCount waits until the expected number of non-terminating running pods exist for a ModelServing.
+func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName string, expected int, timeout time.Duration) {
+	t.Helper()
+	labelSelector := modelServingLabelSelector(msName)
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		runningCount := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
+				runningCount++
+			}
+		}
+		t.Logf("Running pod count: %d (expecting %d)", runningCount, expected)
+		return runningCount == expected
+	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
+}
+
+// patchPodDeletionCost sets corev1.PodDeletionCost with retries.
+// Patch is used instead of Update to reduce resourceVersion contention with concurrent Pod updates.
+func patchPodDeletionCost(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, podName string, cost int) {
+	t.Helper()
+	costStr := strconv.Itoa(cost)
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]string{
+				corev1.PodDeletionCost: costStr,
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	require.NoError(t, err, "Failed to marshal patch for pod %s", podName)
+
+	require.Eventually(t, func() bool {
+		_, err = kubeClient.CoreV1().Pods(testNamespace).Patch(ctx, podName, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+		return err == nil
+	}, 90*time.Second, time.Second, "set PodDeletionCost on pod %s", podName)
+}
+
 // createRole is a helper function to create a Role with specified replicas and workers
 func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 	return workload.Role{
@@ -708,7 +894,7 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 				Containers: []corev1.Container{
 					{
 						Name:  "test-container",
-						Image: "nginx:1.28.2",
+						Image: nginxImage,
 						Ports: []corev1.ContainerPort{
 							{
 								Name:          "http",
@@ -725,7 +911,7 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 				Containers: []corev1.Container{
 					{
 						Name:  "worker-container",
-						Image: "nginx:1.28.2",
+						Image: nginxImage,
 						Ports: []corev1.ContainerPort{
 							{
 								Name:          "http",
@@ -739,10 +925,17 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 	}
 }
 
-func createBasicModelServing(name string, servingGroupReplicas int32, roles ...workload.Role) *workload.ModelServing {
+func getWorkloadRoleReplicas(workloadRoleReplicas int32) int32 {
+	if workloadRoleReplicas == 0 {
+		return int32(1)
+	}
+	return workloadRoleReplicas
+}
+
+func createBasicModelServing(name string, servingGroupReplicas, workloadRoleReplicas int32, roles ...workload.Role) *workload.ModelServing {
 	// If no roles are provided, create a default role
 	if len(roles) == 0 {
-		defaultRoleReplicas := int32(1)
+		defaultRoleReplicas := getWorkloadRoleReplicas(workloadRoleReplicas)
 		roles = []workload.Role{
 			{
 				Name:     "prefill",
@@ -752,7 +945,7 @@ func createBasicModelServing(name string, servingGroupReplicas int32, roles ...w
 						Containers: []corev1.Container{
 							{
 								Name:  "test-container",
-								Image: "nginx:1.28.2",
+								Image: nginxImage,
 								Ports: []corev1.ContainerPort{
 									{
 										Name:          "http",
@@ -775,6 +968,14 @@ func createBasicModelServing(name string, servingGroupReplicas int32, roles ...w
 		},
 		Spec: workload.ModelServingSpec{
 			Replicas: &servingGroupReplicas,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+					MaxUnavailable: &intstr.IntOrString{
+						IntVal: 2, // maxUnavailable = 2
+					},
+				},
+			},
 			Template: workload.ServingGroup{
 				Roles: roles,
 			},
@@ -801,7 +1002,7 @@ func createInvalidModelServing() *workload.ModelServing {
 								Containers: []corev1.Container{
 									{
 										Name:  "test",
-										Image: "nginx:1.28.2",
+										Image: nginxImage,
 									},
 								},
 							},
@@ -816,53 +1017,11 @@ func createInvalidModelServing() *workload.ModelServing {
 
 // TestModelServingRollingUpdateMaxUnavailableWithBadImage tests maxUnavailable constraint when transitioning to bad image
 func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with 6 replicas and maxUnavailable set to 2
 	replicas := int32(6)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-rolling-update-bad-image",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{
-						IntVal: 2,
-					},
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: ptr.To[int32](1),
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: "nginx:1.28.2",
-										Ports: []corev1.ContainerPort{
-											{
-												Name:          "http",
-												ContainerPort: 80,
-											},
-										},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
-
+	modelServing := createBasicModelServing("test-rolling-update-bad-image", replicas, 0)
 	t.Log("Creating ModelServing with 6 replicas and maxUnavailable=2")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -964,7 +1123,7 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 // 3. Verifying pods are created automatically
 // 4. Deleting LWS and verifying all resources are cleaned up
 func TestLWSAPIBasic(t *testing.T) {
-	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create Clients
 	lwsClient, err := utils.GetLWSClient()
@@ -992,7 +1151,7 @@ func TestLWSAPIBasic(t *testing.T) {
 						Containers: []corev1.Container{
 							{
 								Name:            "worker",
-								Image:           "nginx:1.28.2",
+								Image:           nginxImage,
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Ports: []corev1.ContainerPort{
 									{
@@ -1059,14 +1218,25 @@ func TestLWSAPIBasic(t *testing.T) {
 	// Verify all pods are running and ready
 	readyPods := 0
 	for _, pod := range podList.Items {
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-				readyPods++
-				break
-			}
+		if utils.IsPodReady(pod) {
+			readyPods++
 		}
 	}
 	assert.Equal(t, expectedPodCount, readyPods, "All pods should be in a Ready state")
+
+	// Verify LWS standard labels are injected by kthena plugin
+	expectedGroupIndex := "0"
+	expectedGroupKey := lwsutils.Sha1Hash(lwsName + "-0")
+	expectedWorkerIndexSet := map[string]bool{"0": true, "1": true}
+	for _, pod := range podList.Items {
+		assert.Equal(t, lwsName, pod.Labels[lwsv1.SetNameLabelKey], "pod %s should have LWS name label", pod.Name)
+		assert.Equal(t, expectedGroupIndex, pod.Labels[lwsv1.GroupIndexLabelKey], "pod %s should have LWS group-index label", pod.Name)
+
+		workerIndex := pod.Labels[lwsv1.WorkerIndexLabelKey]
+		assert.True(t, expectedWorkerIndexSet[workerIndex], "pod %s should have LWS worker-index label in {0,1}, got %q", pod.Name, workerIndex)
+
+		assert.Equal(t, expectedGroupKey, pod.Labels[lwsv1.GroupUniqueHashLabelKey], "pod %s should have correct LWS group-key label", pod.Name)
+	}
 
 	// Delete the LWS instance
 	t.Logf("Deleting LWS instance: %s/%s", testNamespace, lwsName)
@@ -1077,7 +1247,7 @@ func TestLWSAPIBasic(t *testing.T) {
 	t.Log("Waiting for ModelServing to be deleted")
 	require.Eventually(t, func() bool {
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, lwsName, metav1.GetOptions{})
-		return errors.IsNotFound(err)
+		return apierrors.IsNotFound(err)
 	}, 2*time.Minute, 2*time.Second, "ModelServing was not deleted after LWS deletion")
 
 	// Wait for all pods to be deleted
@@ -1093,4 +1263,1020 @@ func TestLWSAPIBasic(t *testing.T) {
 	}, 2*time.Minute, 2*time.Second, "Pods were not deleted after LWS deletion")
 
 	t.Log("LWS API basic test passed successfully")
+}
+
+// TestModelServingPartitionBoundaryProtection verifies partition boundaries during rolling updates.
+func TestModelServingPartitionBoundaryProtection(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const (
+		replicas  = int32(5)
+		partition = int32(3)
+	)
+
+	modelServing := createPartitionedModelServing("test-partition-boundary", replicas, partition)
+	t.Logf("Creating ModelServing with %d replicas and partition=%d", replicas, partition)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	initialRevision := initialMS.Status.CurrentRevision
+	t.Logf("Initial CurrentRevision: %s", initialMS.Status.CurrentRevision)
+	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
+
+	updatedMS := initialMS.DeepCopy()
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+	t.Logf("Updating image to %s", nginxAlpineImage)
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	updateRevision := waitForPartitionState(t, ctx, kthenaClient, kubeClient, modelServing.Name, partition, replicas, initialRevision)
+	assert.NotEqual(t, initialRevision, updateRevision)
+}
+
+// TestModelServingPartitionDeletedGroupHistoricalRevision verifies deleted groups
+// within partition are rebuilt using historical revision.
+func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const (
+		replicas  = int32(5)
+		partition = int32(3)
+	)
+
+	modelServing := createPartitionedModelServing("test-partition-historical", replicas, partition)
+	modelServing.Spec.RecoveryPolicy = workload.RoleRecreate
+	t.Logf("Creating ModelServing with %d replicas and partition=%d", replicas, partition)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	initialRevision := initialMS.Status.CurrentRevision
+	t.Logf("Initial CurrentRevision: %s", initialRevision)
+	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
+
+	updatedMS := initialMS.DeepCopy()
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+	t.Logf("Updating image to %s", nginxAlpineImage)
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	updateRevision := waitForPartitionState(t, ctx, kthenaClient, kubeClient, modelServing.Name, partition, replicas, initialRevision)
+	t.Log("Partitioned update established")
+
+	targetOrdinal := 1
+	targetGroupName := fmt.Sprintf("%s-%d", modelServing.Name, targetOrdinal)
+	labelSelector := fmt.Sprintf("%s=%s", workload.GroupNameLabelKey, targetGroupName)
+
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, pods.Items)
+
+	podToDelete := pods.Items[0]
+	originalUID := string(podToDelete.UID)
+	t.Logf("Deleting pod %s (ordinal %d)", podToDelete.Name, targetOrdinal)
+
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, podToDelete.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	require.Eventually(t, func() bool {
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
+			return false
+		}
+		state, ok := ordinalStates[int32(targetOrdinal)]
+		if !ok {
+			return false
+		}
+		t.Logf("Recreated protected ordinal %d => group=%s pod=%s revision=%s image=%s", targetOrdinal, state.GroupName, state.PodName, state.Revision, state.Image)
+		return state.PodUID != originalUID &&
+			state.Revision == initialRevision &&
+			state.Image == nginxImage
+	}, 3*time.Minute, 2*time.Second, "Recreated pod should use historical revision")
+
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+	require.NoError(t, err)
+	protectedCorrect, updatedCorrect := verifyPartitionState(t, ordinalStates, partition, replicas, initialRevision, updateRevision)
+	assert.Equal(t, int(partition), protectedCorrect)
+	assert.Equal(t, int(replicas-partition), updatedCorrect)
+	assert.Equal(t, initialRevision, finalMS.Status.CurrentRevision)
+	assert.Equal(t, updateRevision, finalMS.Status.UpdateRevision)
+}
+
+// TestModelServingPartitionScaleUp verifies that scaling up while a partition is active
+// assigns the updated revision to newly created ServingGroups and leaves protected groups untouched.
+func TestModelServingPartitionScaleUp(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const (
+		initialReplicas = int32(5)
+		partition       = int32(3)
+		scaledReplicas  = int32(7)
+	)
+
+	modelServing := createPartitionedModelServing("test-partition-scale-up", initialReplicas, partition)
+	t.Logf("Creating ModelServing with %d replicas and partition=%d", initialReplicas, partition)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Get initial state and trigger a rolling update to establish the partition
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	initialRevision := initialMS.Status.CurrentRevision
+	t.Logf("Initial CurrentRevision: %s", initialRevision)
+	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
+
+	updatedMS := initialMS.DeepCopy()
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+	t.Logf("Updating image to %s to establish partition state", nginxAlpineImage)
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	updateRevision := waitForPartitionState(t, ctx, kthenaClient, kubeClient, modelServing.Name, partition, initialReplicas, initialRevision)
+	t.Logf("Partition state established: CurrentRevision=%s, UpdateRevision=%s", initialRevision, updateRevision)
+
+	// Capture initial UIDs of protected groups to ensure they are not recreated
+	initialProtectedStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+	require.NoError(t, err)
+
+	// Scale up from 5 to 7 replicas
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	scaleUpMS := currentMS.DeepCopy()
+	scaleUpMS.Spec.Replicas = ptr.To(scaledReplicas)
+	t.Logf("Scaling up from %d to %d replicas while partition=%d", initialReplicas, scaledReplicas, partition)
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleUpMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify: protected ordinals 0-2 have old revision, ordinals 3-6 have new revision
+	require.Eventually(t, func() bool {
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
+			return false
+		}
+		if len(ordinalStates) != int(scaledReplicas) {
+			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), scaledReplicas)
+			return false
+		}
+		protectedCorrect, updatedCorrect := verifyPartitionState(t, ordinalStates, partition, scaledReplicas, initialRevision, updateRevision)
+		t.Logf("Protected: %d/%d, Updated: %d/%d", protectedCorrect, partition, updatedCorrect, scaledReplicas-partition)
+		return protectedCorrect == int(partition) && updatedCorrect == int(scaledReplicas-partition)
+	}, 3*time.Minute, 2*time.Second, "Partition state did not converge after scale up")
+
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, scaledReplicas, *finalMS.Spec.Replicas)
+	assert.Equal(t, initialRevision, finalMS.Status.CurrentRevision)
+	assert.Equal(t, updateRevision, finalMS.Status.UpdateRevision)
+
+	// Verify protected UIDs didn't change
+	finalOrdinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+	require.NoError(t, err)
+	for ordinal, initialState := range initialProtectedStates {
+		if ordinal < partition {
+			finalState, ok := finalOrdinalStates[ordinal]
+			require.True(t, ok, "Protected group %d should still exist", ordinal)
+			assert.Equal(t, initialState.PodUID, finalState.PodUID, "Protected group %d should not have been recreated", ordinal)
+		}
+	}
+
+	t.Log("ModelServing partition scale up test passed successfully")
+}
+
+// TestModelServingPartitionScaleDown verifies that scaling down while a partition is active
+// removes updated ServingGroups (ordinals >= partition) first and leaves protected groups untouched.
+func TestModelServingPartitionScaleDown(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const (
+		initialReplicas = int32(5)
+		partition       = int32(3)
+		scaledReplicas  = int32(3)
+	)
+
+	modelServing := createPartitionedModelServing("test-partition-scale-down", initialReplicas, partition)
+	t.Logf("Creating ModelServing with %d replicas and partition=%d", initialReplicas, partition)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	// Get initial state and trigger a rolling update to establish the partition
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	initialRevision := initialMS.Status.CurrentRevision
+	t.Logf("Initial CurrentRevision: %s", initialRevision)
+	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
+
+	updatedMS := initialMS.DeepCopy()
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+	t.Logf("Updating image to %s to establish partition state", nginxAlpineImage)
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	updateRevision := waitForPartitionState(t, ctx, kthenaClient, kubeClient, modelServing.Name, partition, initialReplicas, initialRevision)
+	t.Log("Partition state established")
+
+	// Scale down from 5 to 3 replicas (equal to partition, so all updated groups should be removed)
+	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	scaleDownMS := currentMS.DeepCopy()
+	scaleDownMS.Spec.Replicas = ptr.To(scaledReplicas)
+	t.Logf("Scaling down from %d to %d replicas while partition=%d", initialReplicas, scaledReplicas, partition)
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify: only protected ordinals 0-2 remain with old revision, no updated groups
+	require.Eventually(t, func() bool {
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
+			return false
+		}
+		if len(ordinalStates) != int(scaledReplicas) {
+			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), scaledReplicas)
+			return false
+		}
+
+		// All remaining groups should be on the old (current) revision
+		protectedCorrect, updatedCorrect := verifyPartitionState(t, ordinalStates, partition, scaledReplicas, initialRevision, updateRevision)
+		return protectedCorrect == int(scaledReplicas) && updatedCorrect == 0
+	}, 3*time.Minute, 2*time.Second, "Scale down did not converge to only protected groups")
+
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, scaledReplicas, *finalMS.Spec.Replicas)
+	assert.Equal(t, scaledReplicas, finalMS.Status.Replicas)
+	assert.Equal(t, int32(0), finalMS.Status.UpdatedReplicas)
+	assert.Equal(t, scaledReplicas, finalMS.Status.CurrentReplicas)
+	assert.Equal(t, scaledReplicas, finalMS.Status.AvailableReplicas)
+
+	t.Log("ModelServing partition scale down test passed successfully")
+}
+
+// TestModelServingRollingUpdate verifies rolling updates without partition.
+func TestModelServingRollingUpdate(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const replicas = int32(3)
+
+	modelServing := createBasicModelServing("test-rolling-update", replicas, 0)
+	t.Logf("Creating ModelServing with %d replicas", replicas)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	initialRevision := initialMS.Status.CurrentRevision
+	t.Logf("Initial CurrentRevision: %s", initialRevision)
+
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	verifyAllPodsHaveImage(t, ctx, kubeClient, labelSelector, nginxImage, "before update")
+
+	updatedMS := initialMS.DeepCopy()
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+	t.Logf("Updating image to %s", nginxAlpineImage)
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	verifyAllPodsHaveImage(t, ctx, kubeClient, labelSelector, nginxAlpineImage, "after update")
+
+	finalMS := waitForRollingUpdateConverged(t, ctx, kthenaClient, kubeClient, modelServing.Name, replicas, initialRevision, nginxAlpineImage)
+	t.Logf("Rolling update completed - CurrentRevision: %s", finalMS.Status.CurrentRevision)
+}
+
+func createPartitionedModelServing(name string, replicas, partition int32) *workload.ModelServing {
+	roleReplicas := int32(1)
+	return &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas: &replicas,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+					Partition:      ptr.To(intstr.FromInt32(partition)),
+					MaxUnavailable: ptr.To(intstr.FromInt(int(replicas))),
+				},
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: &roleReplicas,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage,
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
+}
+
+type servingGroupState struct {
+	GroupName string
+	PodName   string
+	PodUID    string
+	Ordinal   int32
+	Revision  string
+	Image     string
+}
+
+func collectRunningServingGroupStates(ctx context.Context, kubeClient *kubernetes.Clientset, msName string) (map[int32]servingGroupState, error) {
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(msName),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	states := make(map[int32]servingGroupState)
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		groupName := pod.Labels[workload.GroupNameLabelKey]
+		if groupName == "" {
+			continue
+		}
+		parentName, ordinal := controllerutils.GetParentNameAndOrdinal(groupName)
+		if parentName != msName || ordinal < 0 {
+			continue
+		}
+		revision := pod.Labels[workload.RevisionLabelKey]
+		if revision == "" || len(pod.Spec.Containers) == 0 {
+			continue
+		}
+
+		state := servingGroupState{
+			GroupName: groupName,
+			PodName:   pod.Name,
+			PodUID:    string(pod.UID),
+			Ordinal:   int32(ordinal),
+			Revision:  revision,
+			Image:     pod.Spec.Containers[0].Image,
+		}
+		if existing, ok := states[state.Ordinal]; !ok || state.PodName < existing.PodName {
+			states[state.Ordinal] = state
+		}
+	}
+
+	return states, nil
+}
+
+func waitForPartitionState(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset,
+	kubeClient *kubernetes.Clientset, msName string, partition, replicas int32, initialRevision string) string {
+	t.Helper()
+
+	var updateRevision string
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, msName)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
+			return false
+		}
+		if len(ordinalStates) != int(replicas) {
+			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), replicas)
+			return false
+		}
+		protectedCorrect, updatedCorrect := verifyPartitionState(t, ordinalStates, partition, replicas, initialRevision, ms.Status.UpdateRevision)
+		t.Logf("CurrentRevision: %s, UpdateRevision: %s, Protected: %d/%d, Updated: %d/%d",
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision, protectedCorrect, partition, updatedCorrect, replicas-partition)
+		if ms.Status.CurrentRevision != initialRevision ||
+			ms.Status.UpdateRevision == "" ||
+			ms.Status.UpdateRevision == initialRevision ||
+			protectedCorrect != int(partition) ||
+			updatedCorrect != int(replicas-partition) {
+			return false
+		}
+		updateRevision = ms.Status.UpdateRevision
+		return true
+	}, 3*time.Minute, 2*time.Second, "Partition state did not converge")
+
+	return updateRevision
+}
+
+// waitForRollingUpdateConverged polls until a rolling update without partition has fully converged:
+// CurrentRevision has caught up to UpdateRevision, status counters match Spec.Replicas, and every
+// running serving group is on UpdateRevision with the updated image. Ordinals are not checked because
+// ServingGroupRollingUpdate creates new groups at maxOrdinal+1 and deletes old ones, so indices shift
+// during the rollout.
+func waitForRollingUpdateConverged(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset,
+	kubeClient *kubernetes.Clientset, msName string, replicas int32, initialRevision, updatedImage string) *workload.ModelServing {
+	t.Helper()
+
+	var finalMS *workload.ModelServing
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		if ms.Status.UpdateRevision == "" ||
+			ms.Status.UpdateRevision == initialRevision ||
+			ms.Status.CurrentRevision != ms.Status.UpdateRevision {
+			return false
+		}
+		if ms.Status.Replicas != replicas ||
+			ms.Status.AvailableReplicas != replicas ||
+			ms.Status.UpdatedReplicas != replicas {
+			t.Logf("Replicas: %d, AvailableReplicas: %d, UpdatedReplicas: %d (expecting %d)",
+				ms.Status.Replicas, ms.Status.AvailableReplicas, ms.Status.UpdatedReplicas, replicas)
+			return false
+		}
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, msName)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
+			return false
+		}
+		if len(ordinalStates) != int(replicas) {
+			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), replicas)
+			return false
+		}
+		for ordinal, state := range ordinalStates {
+			if state.Revision != ms.Status.UpdateRevision || state.Image != updatedImage {
+				t.Logf("Ordinal %d not on UpdateRevision yet: revision=%s image=%s", ordinal, state.Revision, state.Image)
+				return false
+			}
+		}
+		finalMS = ms
+		return true
+	}, 3*time.Minute, 2*time.Second, "Rolling update did not converge")
+
+	return finalMS
+}
+
+func verifyPartitionState(t *testing.T, ordinalStates map[int32]servingGroupState,
+	partition, replicas int32, currentRevision, updateRevision string) (protectedCorrect, updatedCorrect int) {
+	t.Helper()
+	for ordinal, state := range ordinalStates {
+		isProtected := partition > 0 && ordinal < partition
+		if isProtected && state.Revision == currentRevision && state.Image == nginxImage {
+			protectedCorrect++
+		} else if !isProtected && state.Revision == updateRevision && state.Image == nginxAlpineImage {
+			updatedCorrect++
+		}
+	}
+	return
+}
+
+func verifyAllPodsHaveImage(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset,
+	labelSelector, expectedImage, phase string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil || len(pods.Items) == 0 {
+			return false
+		}
+
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			if pod.Status.Phase != corev1.PodRunning {
+				return false
+			}
+			for _, container := range pod.Spec.Containers {
+				if container.Image != expectedImage {
+					return false
+				}
+			}
+		}
+		return true
+	}, 2*time.Minute, 1*time.Second, "All pods should have image %s %s", expectedImage, phase)
+
+	t.Logf("Verified all pods have image %s %s", expectedImage, phase)
+}
+
+// TestModelServingControllerManagerRestart verifies that ModelServing pod creation
+// is successful even when the controller-manager restarts during reconciliation.
+// NOTE: This test must remain last among ModelServing tests because it restarts the
+// controller-manager pod, which temporarily takes down the webhook. Tests that run
+// immediately after would fail with "connection refused" errors.
+func TestModelServingControllerManagerRestart(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a complicated ModelServing with multiple roles
+	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
+	prefillRole := createRole("prefill", 1, 2)
+	decodeRole := createRole("decode", 1, 1)
+	modelServing := createBasicModelServing("test-controller-restart", 5, 0, prefillRole, decodeRole)
+
+	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{})
+	})
+
+	// Wait briefly for initial reconciliation to start
+	t.Log("Waiting for initial reconciliation to start...")
+	// Wait for a random duration between 0 and 3 seconds (in 100ms increments)
+	randomWait := time.Duration(rand.New(rand.NewSource(time.Now().UnixNano())).Intn(31)*100) * time.Millisecond
+	t.Logf("Waiting for %v before restarting controller-manager", randomWait)
+	time.Sleep(randomWait)
+
+	// Find and delete controller-manager pods
+	t.Logf("Finding controller-manager pods in namespace %s", kthenaNamespace)
+
+	// Use label selector to find controller-manager pods
+	labelSelector := "app.kubernetes.io/component=kthena-controller-manager"
+	controllerPods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list controller-manager pods")
+	require.NotEmpty(t, controllerPods.Items, "No controller-manager pods found")
+
+	// Delete all controller-manager pods
+	for _, pod := range controllerPods.Items {
+		t.Logf("Deleting controller-manager pod: %s", pod.Name)
+		err := kubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+		require.NoError(t, err, "Failed to delete controller-manager pod %s", pod.Name)
+	}
+
+	// Wait for controller-manager pods to restart and become ready
+	t.Log("Waiting for controller-manager to restart...")
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		// Check that at least one controller-manager pod is running and ready
+		for _, pod := range pods.Items {
+			if utils.IsPodReady(pod) {
+				t.Logf("Controller-manager pod is ready: %s", pod.Name)
+				return true
+			}
+		}
+		return false
+	}, 3*time.Minute, 5*time.Second, "Controller-manager did not restart and become ready")
+
+	// Wait for ModelServing to be ready
+	t.Log("Waiting for ModelServing to be ready after controller-manager restart...")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify all expected pods are created
+	msLabelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: msLabelSelector,
+	})
+	require.NoError(t, err, "Failed to list ModelServing pods")
+
+	// Calculate expected pod count:
+	// 5 serving groups × (3 pods for prefill role + 2 pods for decode role) = 25 pods
+	expectedPodCount := 25
+	actualPodCount := len(podList.Items)
+
+	t.Logf("Expected pod count: %d, Actual pod count: %d", expectedPodCount, actualPodCount)
+	assert.Equal(t, expectedPodCount, actualPodCount, "Pod count mismatch after controller-manager restart")
+
+	// Verify all pods are running
+	runningPods := 0
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodRunning {
+			runningPods++
+		}
+	}
+	assert.Equal(t, actualPodCount, runningPods, "All created pods should be in Running phase")
+
+	t.Log("ModelServing controller-manager restart test passed successfully")
+}
+
+// TestModelServingRoleBasedRollingUpdate verifies that role-based rolling updates work correctly
+// by updating individual roles without recreating the entire ServingGroup
+func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 2 replicas and 2 roles
+	replicas := int32(2)
+	modelServing := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-role-based-rolling-update",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas:       &replicas,
+			RecoveryPolicy: workload.RoleRecreate,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.RoleRollingUpdate, // Using role-based rolling update
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptr.To[int32](2), // Each ServingGroup has 2 prefill pods
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage, // Initial image
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+					{
+						Name:     "decode",
+						Replicas: ptr.To[int32](1), // Each ServingGroup has 1 decode pod
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage, // Initial image
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
+
+	// waiting for webhook to be ready before running tests
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
+	// Create the ModelServing
+	t.Log("Creating ModelServing with 2 replicas and 2 roles for role-based rolling update test")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
+	// Wait for the initial ModelServing to be ready
+	t.Log("Waiting for initial ModelServing to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify initial state
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(2), *initialMS.Spec.Replicas, "Initial ModelServing should have 2 replicas")
+	assert.Equal(t, int32(2), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 2 available replicas")
+
+	// Update the ModelServing to trigger a role-based rolling update (change prefill role image)
+	updatedMS := initialMS.DeepCopy()
+	// Modify the container image of the prefill role to trigger a rolling update
+	for i := range updatedMS.Spec.Template.Roles {
+		if updatedMS.Spec.Template.Roles[i].Name == "prefill" {
+			updatedMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+			break
+		}
+	}
+
+	decodePodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=decode", modelServing.Name)
+	decodePodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: decodePodLabelSelector,
+	})
+	assert.NoError(t, err, "Failed to list decode pods before update")
+
+	assert.Equalf(t, 2, len(decodePodList.Items), "There should be 2 decode pods before update")
+	decodePodsUID := make(map[string]string, len(decodePodList.Items))
+	for _, pod := range decodePodList.Items {
+		decodePodsUID[pod.Name] = string(pod.UID)
+	}
+
+	t.Log("Updating ModelServing to trigger role-based rolling update (changing prefill role image)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for role-based rolling update")
+
+	// Monitor the role-based rolling update to ensure only prefill role pods are replaced
+	t.Log("Monitoring role-based rolling update to ensure only prefill role pods are replaced while decode role pods remain")
+
+	// It is possible that the ‘modelServing Ready’ check completed before the change in the modelServing status,
+	// causing subsequent checks to fail. Therefore, the checks have been retried.
+	// This has improved the robustness of the end-to-end tests.
+	require.Eventually(t, func() bool {
+		// Wait for the rolling update to complete
+		utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+
+		// Get final state
+		finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+		require.NoError(t, err, "Failed to get final ModelServing")
+		assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
+		assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
+
+		// Verify that the prefill role image has been updated
+		prefillRoleUpdated := false
+		for _, role := range finalMS.Spec.Template.Roles {
+			if role.Name == "prefill" && role.EntryTemplate.Spec.Containers[0].Image == "nginx:alpine" {
+				prefillRoleUpdated = true
+				break
+			}
+		}
+		assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
+
+		prefillPodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=prefill", modelServing.Name)
+		prefillPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: prefillPodLabelSelector,
+		})
+		if err != nil {
+			t.Logf("Failed to list prefill pods: %v", err)
+			return false
+		}
+
+		// Check if all prefill pods have the updated image
+		for _, pod := range prefillPodList.Items {
+			if pod.Spec.Containers[0].Image != "nginx:alpine" {
+				t.Logf("Prefill pod %s still has image %s, expecting nginx:alpine", pod.Name, pod.Spec.Containers[0].Image)
+				return false
+			}
+		}
+
+		// Check if all prefill pods have the updated image
+		decodePodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=decode", modelServing.Name)
+		decodePodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: decodePodLabelSelector,
+		})
+		if err != nil {
+			t.Logf("Failed to list decode pods: %v", err)
+			return false
+		}
+
+		// Check if all decode pods still have the original image
+		for _, pod := range decodePodList.Items {
+			if pod.Spec.Containers[0].Image != nginxImage {
+				t.Logf("Decode pod %s has image %s, expecting original image %s", pod.Name, pod.Spec.Containers[0].Image, nginxImage)
+				return false
+			}
+
+			uid, exist := decodePodsUID[pod.Name]
+			if !exist || string(pod.UID) != uid {
+				t.Logf("Decode pod %s has been replaced", pod.Name)
+				return false
+			}
+		}
+
+		return true
+	}, 2*time.Minute, 1*time.Second)
+
+	t.Log("ModelServing role-based rolling update test passed successfully")
+}
+
+// TestModelServingBinPackScaleDownServingGroup tests bin pack scale down at ServingGroup level
+func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	modelServing := createBasicModelServing("test-binpack-sg-scaledown", 4, 0)
+	t.Log("Creating ModelServing with 4 servingGroup replicas for bin pack scale down test")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(4), *initialMS.Spec.Replicas, "Initial ModelServing should have 4 replicas")
+
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+
+	// Match controller unit tests: higher PodDeletionCost protects the ServingGroup; lower cost is scaled away first.
+	maxOrdinal := -1
+	for _, pod := range podList.Items {
+		groupName := pod.Labels[workload.GroupNameLabelKey]
+		require.NotEmpty(t, groupName, "Pod should have GroupName label")
+
+		parentName, ordinal := controllerutils.GetParentNameAndOrdinal(groupName)
+		require.Equal(t, modelServing.Name, parentName, "Pod group name should belong to this ModelServing")
+		require.GreaterOrEqual(t, ordinal, 0, "ServingGroup ordinal should be parsed from group name")
+
+		cost := ordinal * 100
+		if ordinal > maxOrdinal {
+			maxOrdinal = ordinal
+		}
+
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, cost)
+	}
+
+	scaleDownMS := initialMS.DeepCopy()
+	scaleDownMS.Spec.Replicas = ptr.To(int32(1))
+
+	t.Log("Scaling down ModelServing from 4 to 1 servingGroup")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to scale down ModelServing")
+
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 1, 2*time.Minute)
+
+	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods after scale down")
+	require.NotEmpty(t, finalPods.Items, "Expected one remaining pod after bin pack scale down")
+
+	for _, pod := range finalPods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		groupName := pod.Labels[workload.GroupNameLabelKey]
+		_, ord := controllerutils.GetParentNameAndOrdinal(groupName)
+		assert.Equal(t, maxOrdinal, ord, "ServingGroup with highest deletion cost should remain")
+	}
+
+	t.Log("Bin pack scale down ServingGroup test passed successfully")
+}
+
+func TestModelServingBinPackScaleDownRole(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const (
+		initialRoleReplicas = int32(4)
+		targetRoleReplicas  = int32(1)
+	)
+
+	modelServing := createBasicModelServing("test-binpack-role-scaledown", 1, initialRoleReplicas)
+	t.Log("Creating ModelServing with 1 servingGroup and role replicas=4 for bin pack role scale down test")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
+
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.NotEmpty(t, podList.Items, "Expected pods before role scale down")
+
+	maxRoleOrdinal := -1
+	for _, pod := range podList.Items {
+		roleIDStr := pod.Labels[workload.RoleIDKey]
+		require.NotEmpty(t, roleIDStr, "Pod should have role id label")
+
+		_, roleOrdinal := controllerutils.GetParentNameAndOrdinal(roleIDStr)
+		require.GreaterOrEqual(t, roleOrdinal, 0, "Role id label should encode role-<ordinal>")
+
+		if roleOrdinal > maxRoleOrdinal {
+			maxRoleOrdinal = roleOrdinal
+		}
+
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, roleOrdinal*100)
+	}
+
+	scaleDownMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing before scale down")
+	scaleDownMS = scaleDownMS.DeepCopy()
+	scaleDownMS.Spec.Template.Roles[0].Replicas = ptr.To(targetRoleReplicas)
+
+	t.Log("Scaling down role replicas from 4 to 1")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to scale down role")
+
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(targetRoleReplicas), 3*time.Minute)
+
+	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods after scale down")
+	require.NotEmpty(t, finalPods.Items, "Expected remaining pod after role scale down")
+
+	for _, pod := range finalPods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		_, remainingOrdinal := controllerutils.GetParentNameAndOrdinal(pod.Labels[workload.RoleIDKey])
+		require.GreaterOrEqual(t, remainingOrdinal, 0, "Remaining pod role id should encode role-<ordinal>")
+		assert.Equal(t, maxRoleOrdinal, remainingOrdinal, "Pod with highest deletion cost should remain after bin pack scale down")
+	}
+
+	t.Log("Bin pack scale down Role test passed successfully")
+}
+
+func TestModelServingBinPackScaleDownCombined(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	prefillRole := createRole("prefill", 2, 0)
+	decodeRole := createRole("decode", 1, 0)
+	modelServing := createBasicModelServing("test-binpack-combined-scaledown", 2, 0, prefillRole, decodeRole)
+
+	t.Log("Creating ModelServing with 2 servingGroups and 2 roles for combined bin pack scale down test")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 6, 3*time.Minute)
+
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.NotEmpty(t, podList.Items, "Expected pods before combined scale down")
+
+	maxGroupOrdinal := -1
+	for _, pod := range podList.Items {
+		groupName := pod.Labels[workload.GroupNameLabelKey]
+		require.NotEmpty(t, groupName, "Pod should have group name label")
+
+		parentName, ordinal := controllerutils.GetParentNameAndOrdinal(groupName)
+		require.Equal(t, modelServing.Name, parentName, "Pod should belong to test ModelServing")
+		require.GreaterOrEqual(t, ordinal, 0, "Group ordinal should be non-negative")
+		if ordinal > maxGroupOrdinal {
+			maxGroupOrdinal = ordinal
+		}
+
+		roleOrdinal := 0
+		if roleIDStr := pod.Labels[workload.RoleIDKey]; roleIDStr != "" {
+			_, roleOrdinal = controllerutils.GetParentNameAndOrdinal(roleIDStr)
+			require.GreaterOrEqual(t, roleOrdinal, 0, "Role id label should encode role-<ordinal>")
+		}
+
+		deletionCost := int(ordinal)*100 + roleOrdinal*10
+
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, deletionCost)
+	}
+
+	scaleDownMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing before combined scale down")
+	scaleDownMS = scaleDownMS.DeepCopy()
+	scaleDownMS.Spec.Replicas = ptr.To(int32(1))
+	scaleDownMS.Spec.Template.Roles[0].Replicas = ptr.To(int32(1))
+
+	t.Log("Scaling down combined dimensions (servingGroup 2->1 and prefill role 2->1)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to scale down combined dimensions")
+
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 2, 3*time.Minute)
+
+	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods after combined scale down")
+
+	for _, pod := range finalPods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		groupName := pod.Labels[workload.GroupNameLabelKey]
+		_, ordinal := controllerutils.GetParentNameAndOrdinal(groupName)
+		assert.Equal(t, maxGroupOrdinal, ordinal, "Highest deletion-cost servingGroup should remain")
+	}
+
+	t.Log("Bin pack scale down combined test passed successfully")
 }

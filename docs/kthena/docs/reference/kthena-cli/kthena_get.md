@@ -34,6 +34,8 @@ Examples:
 * [kthena get autoscaling-policies](kthena_get_autoscaling-policies.md)	 - List autoscaling policies
 * [kthena get autoscaling-policy-bindings](kthena_get_autoscaling-policy-bindings.md)	 - List autoscaling policy bindings
 * [kthena get model-boosters](kthena_get_model-boosters.md)	 - List registered models
+* [kthena get model-routes](kthena_get_model-routes.md)	 - List model routes
+* [kthena get model-servers](kthena_get_model-servers.md)	 - List model servers
 * [kthena get model-servings](kthena_get_model-servings.md)	 - List model serving workloads
 * [kthena get template](kthena_get_template.md)	 - Get a specific template
 * [kthena get templates](kthena_get_templates.md)	 - List available manifest templates

@@ -41,6 +41,7 @@ import (
 	kthenainformers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	kthenalisters "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	msplugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 )
 
 func InitializeLWSController(
@@ -348,6 +349,12 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: &replicas,
+			Plugins: []workloadv1alpha1.PluginSpec{
+				{
+					Name: msplugins.LWSLabelsPluginName,
+					Type: workloadv1alpha1.PluginTypeBuiltIn,
+				},
+			},
 			Template: workloadv1alpha1.ServingGroup{
 				Roles: []workloadv1alpha1.Role{role},
 			},

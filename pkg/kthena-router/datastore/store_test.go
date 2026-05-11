@@ -18,18 +18,18 @@ package datastore
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/agiledragon/gomonkey/v2"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
@@ -40,6 +40,31 @@ import (
 // ptr is a helper function to get pointer to a value
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestCreateFairnessQueueConfig_RejectsInvalidWeights(t *testing.T) {
+	t.Setenv("FAIRNESS_PRIORITY_TOKEN_WEIGHT", "NaN")
+	t.Setenv("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", strconv.FormatFloat(math.Inf(1), 'f', -1, 64))
+
+	cfg := createFairnessQueueConfig()
+	defaultCfg := DefaultFairnessQueueConfig()
+
+	if cfg.TokenWeight != defaultCfg.TokenWeight {
+		t.Fatalf("Expected default token weight %v, got %v", defaultCfg.TokenWeight, cfg.TokenWeight)
+	}
+	if cfg.RequestNumWeight != defaultCfg.RequestNumWeight {
+		t.Fatalf("Expected default request weight %v, got %v", defaultCfg.RequestNumWeight, cfg.RequestNumWeight)
+	}
+
+	t.Setenv("FAIRNESS_PRIORITY_TOKEN_WEIGHT", "-1")
+	t.Setenv("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", "-2")
+	cfg = createFairnessQueueConfig()
+	if cfg.TokenWeight != defaultCfg.TokenWeight {
+		t.Fatalf("Expected default token weight for negative alpha, got %v", cfg.TokenWeight)
+	}
+	if cfg.RequestNumWeight != defaultCfg.RequestNumWeight {
+		t.Fatalf("Expected default request weight for negative beta, got %v", cfg.RequestNumWeight)
+	}
 }
 
 func Test_updateHistogramMetrics(t *testing.T) {
@@ -166,6 +191,26 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 	s := &store{
 		pods:        sync.Map{},
 		modelServer: sync.Map{},
+		podRuntimeInspector: &fakePodRuntimeInspector{
+			metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+				return map[string]float64{
+						utils.GPUCacheUsage:     0.8,
+						utils.RequestWaitingNum: 15,
+						utils.RequestRunningNum: 10,
+						utils.TPOT:              120,
+						utils.TTFT:              210,
+					}, map[string]*dto.Histogram{
+						utils.TPOT: {
+							SampleSum:   &sum2,
+							SampleCount: &count2,
+						},
+						utils.TTFT: {
+							SampleSum:   &sum2,
+							SampleCount: &count2,
+						},
+					}
+			},
+		},
 	}
 
 	podName := types.NamespacedName{
@@ -181,27 +226,6 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 	s.modelServer.Store(modelServerName, &modelServer{
 		pods: sets.New[types.NamespacedName](podName),
 	})
-
-	patch := gomonkey.NewPatches()
-	patch.ApplyFunc(backend.GetPodMetrics, func(backend string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-		return map[string]float64{
-				utils.GPUCacheUsage:     0.8,
-				utils.RequestWaitingNum: 15,
-				utils.RequestRunningNum: 10,
-				utils.TPOT:              120,
-				utils.TTFT:              210,
-			}, map[string]*dto.Histogram{
-				utils.TPOT: {
-					SampleSum:   &sum2,
-					SampleCount: &count2,
-				},
-				utils.TTFT: {
-					SampleSum:   &sum2,
-					SampleCount: &count2,
-				},
-			}
-	})
-	defer patch.Reset()
 
 	s.updatePodMetrics(&podinfo)
 
@@ -1229,6 +1253,185 @@ func TestStoreMatchModelServer(t *testing.T) {
 			expectedError:  false,
 		},
 		{
+			name: "duplicate model route - prefer prebuilt (oldest) ModelRoute",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				// Prebuilt route (older CreationTimestamp)
+				prebuilt := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "prebuilt-route",
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{
+										ModelServerName: "prebuilt-server",
+										Weight:          ptr(uint32(100)),
+									},
+								},
+							},
+						},
+					},
+				}
+				// Newer duplicate route (newer CreationTimestamp) - should be ignored in favor of prebuilt
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "newer-route",
+						CreationTimestamp: metav1.NewTime(time.Now()),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{
+										ModelServerName: "newer-server",
+										Weight:          ptr(uint32(100)),
+									},
+								},
+							},
+						},
+					},
+				}
+				// Add newer first then prebuilt to verify sort order (CreationTimestamp) wins over add order
+				s.AddOrUpdateModelRoute(newer)
+				s.AddOrUpdateModelRoute(prebuilt)
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "prebuilt-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
+			name: "duplicate model route - same CreationTimestamp, resourceVersion tie-break prefers older",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				baseTime := time.Now()
+				// Older route (smaller resourceVersion = earlier in etcd)
+				older := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "z-older-route",
+						CreationTimestamp: metav1.NewTime(baseTime),
+						ResourceVersion:   "10",
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "older-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				// Newer route (larger resourceVersion, created in same second)
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "a-newer-route",
+						CreationTimestamp: metav1.NewTime(baseTime),
+						ResourceVersion:   "11",
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "newer-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				// Add newer first - lexicographic name would wrongly prefer a-newer-route; resourceVersion ensures z-older-route wins
+				s.AddOrUpdateModelRoute(newer)
+				s.AddOrUpdateModelRoute(older)
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "older-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
+			name: "duplicate model route - newer takes over after prebuilt deleted",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				prebuilt := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "prebuilt-route",
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "prebuilt-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "newer-route",
+						CreationTimestamp: metav1.NewTime(time.Now()),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "newer-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				s.AddOrUpdateModelRoute(prebuilt)
+				s.AddOrUpdateModelRoute(newer)
+				// Delete prebuilt - newer should take over
+				s.DeleteModelRoute("default/prebuilt-route")
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "newer-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
 			name: "no matching route",
 			setupStore: func() *store {
 				return &store{
@@ -1260,4 +1463,440 @@ func TestStoreMatchModelServer(t *testing.T) {
 			assert.Equal(t, tt.expectedServer, server)
 		})
 	}
+}
+
+type fakePodRuntimeInspector struct {
+	metricsFn    func(string, *corev1.Pod, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	modelsFn     func(string, *corev1.Pod) ([]string, error)
+	metricsCalls int
+	modelsCalls  int
+}
+
+func (f *fakePodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	f.metricsCalls++
+	if f.metricsFn == nil {
+		return nil, nil
+	}
+	return f.metricsFn(engine, pod, previousHistogram)
+}
+
+func (f *fakePodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
+	f.modelsCalls++
+	if f.modelsFn == nil {
+		return nil, nil
+	}
+	return f.modelsFn(engine, pod)
+}
+
+func newStore(inspector ...PodRuntimeInspector) *store {
+	if len(inspector) == 0 || inspector[0] == nil {
+		return New().(*store)
+	}
+	return New(WithPodRuntimeInspector(inspector[0])).(*store)
+}
+
+func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
+	sampleCount := uint64(100)
+	sampleSum := 0.42
+	stubHistogram := &dto.Histogram{
+		SampleCount: &sampleCount,
+		SampleSum:   &sampleSum,
+	}
+
+	tests := []struct {
+		name            string
+		initialMetrics  map[string]float64
+		initialHist     map[string]*dto.Histogram
+		initialModels   []string
+		updatedLabels   map[string]string
+		wantGPUCache    float64
+		wantWaiting     float64
+		wantRunning     float64
+		wantTPOT        float64
+		wantTTFT        float64
+		wantModels      []string
+		wantHistPresent bool
+	}{
+		{
+			name: "pod label update preserves all gauge metrics",
+			initialMetrics: map[string]float64{
+				utils.GPUCacheUsage:     0.75,
+				utils.RequestWaitingNum: 8,
+				utils.RequestRunningNum: 12,
+				utils.TPOT:              0.03,
+				utils.TTFT:              0.15,
+			},
+			initialHist:     map[string]*dto.Histogram{},
+			initialModels:   []string{"llama-3"},
+			updatedLabels:   map[string]string{"version": "v2"},
+			wantGPUCache:    0.75,
+			wantWaiting:     8,
+			wantRunning:     12,
+			wantTPOT:        0.03,
+			wantTTFT:        0.15,
+			wantModels:      []string{"llama-3"},
+			wantHistPresent: false,
+		},
+		{
+			name: "pod update preserves histogram metrics",
+			initialMetrics: map[string]float64{
+				utils.GPUCacheUsage:     0.5,
+				utils.RequestWaitingNum: 3,
+				utils.RequestRunningNum: 7,
+				utils.TPOT:              0.02,
+				utils.TTFT:              0.1,
+			},
+			initialHist: map[string]*dto.Histogram{
+				utils.TPOT: stubHistogram,
+				utils.TTFT: stubHistogram,
+			},
+			initialModels:   []string{"mistral-7b", "lora-adapter-1"},
+			updatedLabels:   map[string]string{},
+			wantGPUCache:    0.5,
+			wantWaiting:     3,
+			wantRunning:     7,
+			wantTPOT:        0.02,
+			wantTTFT:        0.1,
+			wantModels:      []string{"mistral-7b", "lora-adapter-1"},
+			wantHistPresent: true,
+		},
+		{
+			name: "pod update with zero initial metrics preserves zeros",
+			initialMetrics: map[string]float64{
+				utils.GPUCacheUsage:     0,
+				utils.RequestWaitingNum: 0,
+				utils.RequestRunningNum: 0,
+			},
+			initialHist:     map[string]*dto.Histogram{},
+			initialModels:   []string{},
+			updatedLabels:   map[string]string{"canary": "true"},
+			wantGPUCache:    0,
+			wantWaiting:     0,
+			wantRunning:     0,
+			wantTPOT:        0,
+			wantTTFT:        0,
+			wantModels:      []string{},
+			wantHistPresent: false,
+		},
+		{
+			name: "pod update with high load preserves high metrics",
+			initialMetrics: map[string]float64{
+				utils.GPUCacheUsage:     0.99,
+				utils.RequestWaitingNum: 50,
+				utils.RequestRunningNum: 100,
+				utils.TPOT:              0.08,
+				utils.TTFT:              0.5,
+			},
+			initialHist:     map[string]*dto.Histogram{},
+			initialModels:   []string{"gpt-j"},
+			updatedLabels:   map[string]string{"zone": "us-east-1"},
+			wantGPUCache:    0.99,
+			wantWaiting:     50,
+			wantRunning:     100,
+			wantTPOT:        0.08,
+			wantTTFT:        0.5,
+			wantModels:      []string{"gpt-j"},
+			wantHistPresent: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inspector := &fakePodRuntimeInspector{
+				metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+					return tc.initialMetrics, tc.initialHist
+				},
+				modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+					return tc.initialModels, nil
+				},
+			}
+			s := newStore(inspector)
+
+			ms := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
+			s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
+
+			pod := createTestPod("default", "pod1")
+			err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
+			assert.NoError(t, err)
+			assert.Equal(t, 1, inspector.metricsCalls, "backend metrics should be fetched on initial pod add")
+			assert.Equal(t, 1, inspector.modelsCalls, "backend models should be fetched on initial pod add")
+			inspector.metricsCalls = 0
+			inspector.modelsCalls = 0
+
+			// Simulate a pod update (e.g. label change)
+			updatedPod := pod.DeepCopy()
+			if tc.updatedLabels != nil {
+				updatedPod.Labels = tc.updatedLabels
+			}
+
+			err = s.AddOrUpdatePod(updatedPod, []*aiv1alpha1.ModelServer{ms})
+			assert.NoError(t, err)
+			assert.Equal(t, 0, inspector.metricsCalls, "backend.GetPodMetrics must not be called on pod update")
+			assert.Equal(t, 0, inspector.modelsCalls, "backend.GetPodModels must not be called on pod update")
+
+			podInfo := s.GetPodInfo(utils.GetNamespaceName(updatedPod))
+			assert.NotNil(t, podInfo)
+
+			assert.InDelta(t, tc.wantGPUCache, podInfo.GetGPUCacheUsage(), 1e-9,
+				"GPUCacheUsage dropped after pod update")
+			assert.InDelta(t, tc.wantWaiting, podInfo.GetRequestWaitingNum(), 1e-9,
+				"RequestWaitingNum dropped after pod update")
+			assert.InDelta(t, tc.wantRunning, podInfo.GetRequestRunningNum(), 1e-9,
+				"RequestRunningNum dropped after pod update")
+			assert.InDelta(t, tc.wantTPOT, podInfo.GetTPOT(), 1e-9,
+				"TPOT dropped after pod update")
+			assert.InDelta(t, tc.wantTTFT, podInfo.GetTTFT(), 1e-9,
+				"TTFT dropped after pod update")
+
+			models := podInfo.GetModels()
+			for _, m := range tc.wantModels {
+				assert.True(t, models.Contains(m), "model %s lost after pod update", m)
+			}
+			assert.Equal(t, len(tc.wantModels), models.Len(),
+				"model count changed after pod update")
+
+			if tc.wantHistPresent {
+				podInfo.mutex.RLock()
+				assert.NotNil(t, podInfo.TimePerOutputToken, "TPOT histogram lost after pod update")
+				assert.NotNil(t, podInfo.TimeToFirstToken, "TTFT histogram lost after pod update")
+				podInfo.mutex.RUnlock()
+			}
+		})
+	}
+}
+
+func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
+	inspector := &fakePodRuntimeInspector{
+		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			return map[string]float64{
+				utils.GPUCacheUsage:     0.3,
+				utils.RequestRunningNum: 2,
+			}, map[string]*dto.Histogram{}
+		},
+		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+			return []string{"base-model"}, nil
+		},
+	}
+	s := newStore(inspector)
+
+	ms := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
+	s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
+
+	pod := createTestPod("default", "fresh-pod")
+	err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
+	assert.NoError(t, err)
+
+	assert.Equal(t, 1, inspector.metricsCalls, "backend.GetPodMetrics must be called for new pods")
+	assert.Equal(t, 1, inspector.modelsCalls, "backend.GetPodModels must be called for new pods")
+
+	podInfo := s.GetPodInfo(utils.GetNamespaceName(pod))
+	assert.InDelta(t, 0.3, podInfo.GetGPUCacheUsage(), 1e-9)
+	assert.InDelta(t, 2.0, podInfo.GetRequestRunningNum(), 1e-9)
+}
+
+func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {
+	inspector := &fakePodRuntimeInspector{
+		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			return map[string]float64{
+				utils.GPUCacheUsage:     0.6,
+				utils.RequestWaitingNum: 5,
+				utils.RequestRunningNum: 10,
+				utils.TPOT:              0.04,
+				utils.TTFT:              0.2,
+			}, map[string]*dto.Histogram{}
+		},
+		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+			return []string{"model-a"}, nil
+		},
+	}
+	s := newStore(inspector)
+
+	ms1 := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
+	ms2 := createTestModelServer("default", "ms2", aiv1alpha1.VLLM)
+	s.AddOrUpdateModelServer(ms1, sets.New[types.NamespacedName]())
+	s.AddOrUpdateModelServer(ms2, sets.New[types.NamespacedName]())
+
+	pod := createTestPod("default", "pod1")
+	err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms1})
+	assert.NoError(t, err)
+	assert.Equal(t, 1, inspector.metricsCalls, "backend metrics should be fetched on initial pod add")
+	assert.Equal(t, 1, inspector.modelsCalls, "backend models should be fetched on initial pod add")
+	inspector.metricsCalls = 0
+	inspector.modelsCalls = 0
+
+	// Move pod from ms1 to ms2
+	err = s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms2})
+	assert.NoError(t, err)
+	assert.Equal(t, 0, inspector.metricsCalls, "backend.GetPodMetrics must not be called on pod update")
+	assert.Equal(t, 0, inspector.modelsCalls, "backend.GetPodModels must not be called on pod update")
+
+	podInfo := s.GetPodInfo(utils.GetNamespaceName(pod))
+	assert.InDelta(t, 0.6, podInfo.GetGPUCacheUsage(), 1e-9,
+		"GPUCacheUsage lost during model server reassignment")
+	assert.InDelta(t, 5.0, podInfo.GetRequestWaitingNum(), 1e-9,
+		"RequestWaitingNum lost during model server reassignment")
+	assert.InDelta(t, 10.0, podInfo.GetRequestRunningNum(), 1e-9,
+		"RequestRunningNum lost during model server reassignment")
+	assert.InDelta(t, 0.04, podInfo.GetTPOT(), 1e-9,
+		"TPOT lost during model server reassignment")
+	assert.InDelta(t, 0.2, podInfo.GetTTFT(), 1e-9,
+		"TTFT lost during model server reassignment")
+
+	models := podInfo.GetModels()
+	assert.True(t, models.Contains("model-a"), "model lost during model server reassignment")
+}
+
+func TestSelectDestination_EmptyTargets(t *testing.T) {
+	// This test verifies the fix for the panic when TargetModels is empty.
+	// Before the fix, toWeightedSlice would panic with index out of range [0] with length 0.
+	targets := []*aiv1alpha1.TargetModel{}
+	s := &store{}
+	_, err := s.selectDestination(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no target models specified in rule")
+}
+
+func TestToWeightedSlice_SingleTarget(t *testing.T) {
+	weight := uint32(100)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &weight},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{100}, result)
+}
+
+func TestToWeightedSlice_MultipleTargets(t *testing.T) {
+	w1 := uint32(70)
+	w2 := uint32(30)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &w1},
+		{ModelServerName: "server-b", Weight: &w2},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{70, 30}, result)
+}
+
+func TestToWeightedSlice_NoWeights(t *testing.T) {
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a"},
+		{ModelServerName: "server-b"},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{1, 1}, result)
+}
+
+func TestToWeightedSlice_MixedWeights(t *testing.T) {
+	w1 := uint32(50)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &w1},
+		{ModelServerName: "server-b"}, // no weight
+	}
+	_, err := toWeightedSlice(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "weight field in targetModel must be either fully specified or not specified")
+}
+
+func TestSelectFromWeightedSlice_EmptyWeights(t *testing.T) {
+	_, err := selectFromWeightedSlice([]uint32{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no weights provided")
+}
+
+func TestSelectFromWeightedSlice_ZeroTotalWeight(t *testing.T) {
+	// This test verifies the fix for the panic when all weights are zero.
+	// Before the fix, rng.Intn(0) would panic.
+	_, err := selectFromWeightedSlice([]uint32{0, 0, 0})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "total weight is zero")
+}
+
+func TestSelectFromWeightedSlice_ValidWeights(t *testing.T) {
+	// Run multiple times to verify no panics and results are within range
+	for i := 0; i < 100; i++ {
+		idx, err := selectFromWeightedSlice([]uint32{50, 30, 20})
+		assert.NoError(t, err)
+		assert.True(t, idx >= 0 && idx < 3, "index should be in range [0, 3)")
+	}
+}
+
+func TestMatchModelServer_EmptyTargetModels_NoPanic(t *testing.T) {
+	// This is the end-to-end test for the bug: a ModelRoute with a rule
+	// that has empty TargetModels should return an error, not panic.
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+	}
+
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "broken-route",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "my-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					Name:         "catch-all",
+					TargetModels: []*aiv1alpha1.TargetModel{}, // empty — the bug trigger
+				},
+			},
+		},
+	}
+	s.AddOrUpdateModelRoute(mr)
+
+	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
+
+	// Before the fix this would panic. After the fix it returns an error.
+	assert.NotPanics(t, func() {
+		_, _, _, err := s.MatchModelServer("my-model", req, "")
+		assert.Error(t, err)
+	})
+}
+
+func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
+	// When the first rule has empty TargetModels but a second rule is valid,
+	// the request should fall through to the second rule.
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+	}
+
+	w := uint32(100)
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "route-with-fallback",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "my-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					Name: "broken-rule",
+					ModelMatch: &aiv1alpha1.ModelMatch{
+						Uri: &aiv1alpha1.StringMatch{Exact: ptr("/v1/broken")},
+					},
+					TargetModels: []*aiv1alpha1.TargetModel{}, // empty
+				},
+				{
+					Name: "valid-rule",
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ModelServerName: "good-server", Weight: &w},
+					},
+				},
+			},
+		},
+	}
+	s.AddOrUpdateModelRoute(mr)
+
+	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
+	server, _, _, err := s.MatchModelServer("my-model", req, "")
+	assert.NoError(t, err)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, server)
 }

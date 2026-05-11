@@ -66,7 +66,7 @@ likely to be processed multiple times.
 Configuration Parameters:
 - BlockSizeToHash: Size of each block for hashing (default: 64 bytes)
 - MaxBlocksToMatch: Maximum number of blocks to process (default: 128), longer prompts are not processed
-- Cache capacity and top-K results are configurable (default: 1000 and 5 respectively)
+- Cache capacity and top-K results are configurable (default: 50000 and 5 respectively)
 
 */
 
@@ -74,10 +74,10 @@ import (
 	"fmt"
 
 	"github.com/cespare/xxhash"
-	"github.com/stretchr/testify/assert/yaml"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/yaml"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -86,6 +86,13 @@ import (
 )
 
 const PrefixCachePluginName = "prefix-cache"
+
+const (
+	defaultPrefixCacheBlockSizeToHash  = 64
+	defaultPrefixCacheMaxBlocksToMatch = 128
+	defaultPrefixCacheMaxHashCacheSize = 50000
+	defaultPrefixCacheTopKMatches      = 5
+)
 
 var _ framework.ScorePlugin = &PrefixCache{}
 
@@ -101,19 +108,41 @@ type PrefixCacheArgs struct {
 	BlockSizeToHash  int `yaml:"blockSizeToHash,omitempty"`
 	MaxBlocksToMatch int `yaml:"maxBlocksToMatch,omitempty"`
 	MaxHashCacheSize int `yaml:"maxHashCacheSize,omitempty"`
+	TopKMatches      int `yaml:"topKMatches,omitempty"`
 }
 
 // Default token block size of vLLM is 16, and a good guess of average characters per token is 4.
 // So we use 64 as the default block size.
 func NewPrefixCache(store datastore.Store, pluginArg runtime.RawExtension) *PrefixCache {
-	var prefixCacheArgs PrefixCacheArgs
-	if yaml.Unmarshal(pluginArg.Raw, &prefixCacheArgs) != nil {
-		klog.Errorf("Unmarshal PrefixCacheArgs error, setting default value")
-		prefixCacheArgs = PrefixCacheArgs{
-			64,
-			128,
-			50000,
+	prefixCacheArgs := PrefixCacheArgs{
+		BlockSizeToHash:  defaultPrefixCacheBlockSizeToHash,
+		MaxBlocksToMatch: defaultPrefixCacheMaxBlocksToMatch,
+		MaxHashCacheSize: defaultPrefixCacheMaxHashCacheSize,
+		TopKMatches:      defaultPrefixCacheTopKMatches,
+	}
+
+	if len(pluginArg.Raw) > 0 {
+		if err := yaml.Unmarshal(pluginArg.Raw, &prefixCacheArgs); err != nil {
+			klog.Errorf("Failed to unmarshal PrefixCacheArgs, using default values: %v", err)
+			prefixCacheArgs = PrefixCacheArgs{
+				BlockSizeToHash:  defaultPrefixCacheBlockSizeToHash,
+				MaxBlocksToMatch: defaultPrefixCacheMaxBlocksToMatch,
+				MaxHashCacheSize: defaultPrefixCacheMaxHashCacheSize,
+				TopKMatches:      defaultPrefixCacheTopKMatches,
+			}
 		}
+	}
+	if prefixCacheArgs.BlockSizeToHash <= 0 {
+		prefixCacheArgs.BlockSizeToHash = defaultPrefixCacheBlockSizeToHash
+	}
+	if prefixCacheArgs.MaxBlocksToMatch <= 0 {
+		prefixCacheArgs.MaxBlocksToMatch = defaultPrefixCacheMaxBlocksToMatch
+	}
+	if prefixCacheArgs.MaxHashCacheSize <= 0 {
+		prefixCacheArgs.MaxHashCacheSize = defaultPrefixCacheMaxHashCacheSize
+	}
+	if prefixCacheArgs.TopKMatches <= 0 {
+		prefixCacheArgs.TopKMatches = defaultPrefixCacheTopKMatches
 	}
 
 	p := &PrefixCache{
@@ -122,8 +151,7 @@ func NewPrefixCache(store datastore.Store, pluginArg runtime.RawExtension) *Pref
 		blockSizeToHash:  prefixCacheArgs.BlockSizeToHash,
 		maxBlocksToMatch: prefixCacheArgs.MaxBlocksToMatch,
 	}
-	// Initialize store with default values
-	p.store = cache.NewModelPrefixStore(store, prefixCacheArgs.MaxHashCacheSize, 5) // TODO: make these configurable
+	p.store = cache.NewModelPrefixStore(store, prefixCacheArgs.MaxHashCacheSize, prefixCacheArgs.TopKMatches)
 	return p
 }
 

@@ -88,7 +88,7 @@ Fields: {
 
 ```yaml
 # KVCacheAware configuration
-blockSizeToHash: 128      # Tokens per block for hashing
+blockSizeToHash: 16       # Tokens per block for hashing
 maxBlocksToMatch: 128     # Maximum blocks to process
 ```
 

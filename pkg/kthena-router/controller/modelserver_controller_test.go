@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agiledragon/gomonkey/v2"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -35,10 +35,27 @@ import (
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
+
+type fakePodRuntimeInspector struct{}
+
+func (fakePodRuntimeInspector) GetPodMetrics(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	return map[string]float64{
+		utils.GPUCacheUsage:     0.5,
+		utils.RequestWaitingNum: 10,
+		utils.RequestRunningNum: 5,
+	}, nil
+}
+
+func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod) ([]string, error) {
+	return []string{"test-model"}, nil
+}
+
+func newStoreWithMockBackend() datastore.Store {
+	return datastore.New(datastore.WithPodRuntimeInspector(fakePodRuntimeInspector{}))
+}
 
 func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 	// Create fake clients
@@ -50,7 +67,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create store
-	store := datastore.New()
+	store := newStoreWithMockBackend()
 
 	// Create controller
 	controller := NewModelServerController(
@@ -58,6 +75,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 		kubeInformerFactory,
 		store,
 	)
+	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -82,24 +100,15 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		// Add ModelServer to fake client
-		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
-			context.Background(), ms, metav1.CreateOptions{})
-		assert.NoError(t, err)
-
 		// Wait for cache to sync gracefully
 		if !waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced) {
 			t.Fatal("Failed to sync caches within timeout")
 		}
 
-		// Additionally wait for the specific object to be available in cache
-		found := waitForObjectInCache(t, 2*time.Second, func() bool {
-			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver")
-			return err == nil
-		})
-		if !found {
-			t.Log("ModelServer not found in cache - proceeding anyway for unit test")
-		}
+		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
+		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver")
+		require.NoError(t, err)
+
 		// Simulate controller receiving the event
 		controller.enqueueModelServer(ms)
 		assert.Equal(t, 1, controller.workqueue.Len())
@@ -113,7 +122,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			Namespace: "default",
 			Name:      "test-modelserver",
 		})
-		assert.NotNil(t, storedMS, "ModelServer should be found in store after creation")
+		require.NotNil(t, storedMS, "ModelServer should be found in store after creation")
 		assert.Equal(t, "test-modelserver", storedMS.Name)
 	})
 
@@ -137,19 +146,10 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		// Create initial ModelServer
-		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
-			context.Background(), ms, metav1.CreateOptions{})
-		assert.NoError(t, err)
+		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
+		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+		require.NoError(t, err)
 
-		// Additionally wait for the specific object to be available in cache
-		found := waitForObjectInCache(t, 2*time.Second, func() bool {
-			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
-			return err == nil
-		})
-		if !found {
-			t.Log("ModelServer not found in cache after creation - proceeding anyway")
-		}
 		// Process initial creation
 		controller.enqueueModelServer(ms)
 		err = controller.syncModelServerHandler("default/test-modelserver-update")
@@ -160,18 +160,11 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 		updatedMS.Labels["version"] = "v2"
 		updatedMS.Spec.WorkloadSelector.MatchLabels["environment"] = "production"
 
-		_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Update(
-			context.Background(), updatedMS, metav1.UpdateOptions{})
-		assert.NoError(t, err)
+		require.NoError(t, modelServerIndexer.Update(updatedMS.DeepCopy()))
+		cachedMS, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+		require.NoError(t, err)
+		assert.Equal(t, "v2", cachedMS.Labels["version"])
 
-		// Additionally wait for the specific object to be available in cache
-		found = waitForObjectInCache(t, 2*time.Second, func() bool {
-			ms, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
-			return err == nil && ms.Labels["version"] == "v2"
-		})
-		if !found {
-			t.Log("ModelServer not found in cache after creation - proceeding anyway")
-		}
 		// Simulate controller receiving update event
 		controller.enqueueModelServer(updatedMS)
 		// Clear any previous items from queue
@@ -192,7 +185,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			Namespace: "default",
 			Name:      "test-modelserver-update",
 		})
-		assert.NotNil(t, storedMS, "ModelServer should be found in store after update")
+		require.NotNil(t, storedMS, "ModelServer should be found in store after update")
 		assert.Equal(t, "v2", storedMS.Labels["version"])
 		assert.Equal(t, "production", storedMS.Spec.WorkloadSelector.MatchLabels["environment"])
 	})
@@ -214,15 +207,9 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		// Create ModelServer first
-		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
-			context.Background(), ms, metav1.CreateOptions{})
-		assert.NoError(t, err)
-
-		waitForObjectInCache(t, 2*time.Second, func() bool {
-			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
-			return err == nil
-		})
+		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
+		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+		require.NoError(t, err)
 
 		// Process creation
 		err = controller.syncModelServerHandler("default/test-modelserver-delete")
@@ -233,17 +220,11 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			Namespace: "default",
 			Name:      "test-modelserver-delete",
 		})
-		assert.NotNil(t, storedMS, "ModelServer should be found in store before deletion")
+		require.NotNil(t, storedMS, "ModelServer should be found in store before deletion")
 
-		// Delete ModelServer
-		err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Delete(
-			context.Background(), "test-modelserver-delete", metav1.DeleteOptions{})
-		assert.NoError(t, err)
-
-		waitForObjectInCache(t, 2*time.Second, func() bool {
-			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
-			return err != nil
-		})
+		require.NoError(t, modelServerIndexer.Delete(ms.DeepCopy()))
+		_, err = controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+		assert.Error(t, err)
 
 		// Process the deletion - this should handle the NotFound error gracefully
 		err = controller.syncModelServerHandler("default/test-modelserver-delete")
@@ -259,9 +240,6 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 }
 
 func TestModelServerController_PodLifecycle(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
 	// Create fake clients
 	kubeClient := kubefake.NewSimpleClientset()
 	kthenaClient := kthenafake.NewSimpleClientset()
@@ -290,7 +268,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create store
-	store := datastore.New()
+	store := newStoreWithMockBackend()
 
 	// Create controller
 	controller := NewModelServerController(
@@ -506,7 +484,7 @@ func TestModelServerController_ErrorHandling(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create store
-	store := datastore.New()
+	store := newStoreWithMockBackend()
 
 	// Create controller
 	controller := NewModelServerController(
@@ -550,7 +528,7 @@ func TestModelServerController_WorkQueueProcessing(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create store
-	store := datastore.New()
+	store := newStoreWithMockBackend()
 
 	// Create controller
 	controller := NewModelServerController(
@@ -625,7 +603,7 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create store
-	store := datastore.New()
+	store := newStoreWithMockBackend()
 
 	// Create controller
 	controller := NewModelServerController(
@@ -815,7 +793,7 @@ func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 	defer close(stopCh)
 
 	// Create controller and store
-	store := datastore.New()
+	store := newStoreWithMockBackend()
 	controller := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
@@ -899,9 +877,6 @@ func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 // 3. Then we sync the second modelserver (ms2)
 // 4. Verify that GetPodsByModelServer(ms2) returns all pods correctly
 func TestModelServerController_SharedPods(t *testing.T) {
-	patch := setupMockBackend()
-	defer patch.Reset()
-
 	// Create fake clients
 	kubeClient := kubefake.NewSimpleClientset()
 	kthenaClient := kthenafake.NewSimpleClientset()
@@ -992,7 +967,7 @@ func TestModelServerController_SharedPods(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create store
-	store := datastore.New()
+	store := newStoreWithMockBackend()
 
 	// Create controller
 	controller := NewModelServerController(
@@ -1120,20 +1095,4 @@ func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() 
 			}
 		}
 	}
-}
-
-// Helper function to setup mock for backend calls
-func setupMockBackend() *gomonkey.Patches {
-	patch := gomonkey.NewPatches()
-	patch.ApplyFunc(backend.GetPodMetrics, func(backend string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-		return map[string]float64{
-			utils.GPUCacheUsage:     0.5,
-			utils.RequestWaitingNum: 10,
-			utils.RequestRunningNum: 5,
-		}, map[string]*dto.Histogram{}
-	})
-	patch.ApplyFunc(backend.GetPodModels, func(backend string, pod *corev1.Pod) ([]string, error) {
-		return []string{"test-model"}, nil
-	})
-	return patch
 }

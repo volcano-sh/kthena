@@ -102,6 +102,18 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 	if len(hfEndpointEnvVars) > 0 && hfEndpointEnvVars[0].Value != "" {
 		envVars = append(envVars, hfEndpointEnvVars[0])
 	}
+	msTokenEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsToken, []corev1.EnvVar{
+		{Name: env.MsToken},
+	})
+	if len(msTokenEnvVars) > 0 && msTokenEnvVars[0].Value != "" {
+		envVars = append(envVars, msTokenEnvVars[0])
+	}
+	msRevisionEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsRevision, []corev1.EnvVar{
+		{Name: env.MsRevision},
+	})
+	if len(msRevisionEnvVars) > 0 && msRevisionEnvVars[0].Value != "" {
+		envVars = append(envVars, msRevisionEnvVars[0])
+	}
 	initContainers := []corev1.Container{
 		{
 			Name:  model.Name + "-model-downloader",
@@ -123,12 +135,12 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 	var decodeCommand []string
 	for _, worker := range backend.Workers {
 		if worker.Type == workload.ModelWorkerTypePrefill {
-			preFillCommand, err = buildCommands(&worker.Config, modelDownloadPath, workersMap)
+			preFillCommand, err = buildCommands(backend, &worker.Config, modelDownloadPath, workersMap)
 			if err != nil {
 				return nil, err
 			}
 		} else if worker.Type == workload.ModelWorkerTypeDecode {
-			decodeCommand, err = buildCommands(&worker.Config, modelDownloadPath, workersMap)
+			decodeCommand, err = buildCommands(backend, &worker.Config, modelDownloadPath, workersMap)
 			if err != nil {
 				return nil, err
 			}
@@ -194,6 +206,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		"ENGINE_PREFILL_RESOURCES":           workersMap[workload.ModelWorkerTypePrefill].Resources,
 		"ENGINE_PREFILL_IMAGE":               workersMap[workload.ModelWorkerTypePrefill].Image,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
+		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
 	}
 	return loadModelServingTemplate(VllmDisaggregatedTemplatePath, &data)
 }
@@ -211,7 +224,7 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	}
 	modelDownloadPath := GetCachePath(backend.CacheURI) + GetMountPath(backend.ModelURI)
 	// only one worker in such circumstance so get the first worker's config as commands
-	commands, err := buildCommands(&backend.Workers[0].Config, modelDownloadPath, workersMap)
+	commands, err := buildCommands(backend, &backend.Workers[0].Config, modelDownloadPath, workersMap)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +242,18 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	})
 	if len(hfEndpointEnvVars) > 0 && hfEndpointEnvVars[0].Value != "" {
 		envVars = append(envVars, hfEndpointEnvVars[0])
+	}
+	msTokenEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsToken, []corev1.EnvVar{
+		{Name: env.MsToken},
+	})
+	if len(msTokenEnvVars) > 0 && msTokenEnvVars[0].Value != "" {
+		envVars = append(envVars, msTokenEnvVars[0])
+	}
+	msRevisionEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsRevision, []corev1.EnvVar{
+		{Name: env.MsRevision},
+	})
+	if len(msRevisionEnvVars) > 0 && msRevisionEnvVars[0].Value != "" {
+		envVars = append(envVars, msRevisionEnvVars[0])
 	}
 	initContainers := []corev1.Container{
 		{
@@ -306,6 +331,7 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"ENGINE_SERVER_COMMAND":              commands,
 		"WORKER_REPLICAS":                    workersMap[workload.ModelWorkerTypeServer].Pods - 1,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
+		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
 	}
 	return loadModelServingTemplate(VllmTemplatePath, &data)
 }
@@ -320,7 +346,7 @@ func mapWorkers(workers []workload.ModelWorker) map[workload.ModelWorkerType]*wo
 }
 
 // buildCommands constructs the command list for the backend.
-func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
+func buildCommands(backend *workload.ModelBackend, workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 	workersMap map[workload.ModelWorkerType]*workload.ModelWorker) ([]string, error) {
 	commands := []string{"python3", "-m", "vllm.entrypoints.openai.api_server", "--model", modelDownloadPath}
 	args, err := utils.ConvertVLLMArgsFromJson(workerConfig)
@@ -333,7 +359,7 @@ func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 	// vllm image does not have mooncake-transfer-engine or nixl installed by default
 	// so we need to install them if GPU is requested
 	kvConnector := getKvConnectorFromConfig(workerConfig)
-	if hasGPU(workersMap) {
+	if hasGPU(workersMap) && !env.GetEnvValueOrDefault[bool](backend, env.SkipEngineDependencyInstall, false) {
 		if kvConnector == "MooncakeConnector" {
 			commands = []string{"bash", "-c", "pip install mooncake-transfer-engine && " + strings.Join(commands, " ")}
 		} else if kvConnector == "NixlConnector" {
@@ -408,7 +434,7 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: GetCachePath(backend.CacheURI),
+					ClaimName: GetPVCClaimName(backend.CacheURI),
 				},
 			},
 		}, nil
@@ -426,7 +452,11 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 	return nil, fmt.Errorf("not support prefix in CacheURI: %s", backend.CacheURI)
 }
 
-// GetCachePath gets the path from string after "://". For example, for "pvc://my-pvc", it returns "/my-pvc".
+// GetCachePath returns the in-container mount path derived from a cache URI.
+// It takes the substring after "://", trims surrounding slashes, and prepends a
+// single "/" so the result is a valid absolute path suitable for a container's
+// VolumeMount.MountPath or HostPath.Path. For example, for "pvc://my-pvc" it
+// returns "/my-pvc". It is NOT a PVC ClaimName; use GetPVCClaimName for that.
 func GetCachePath(path string) string {
 	if path == "" || !strings.Contains(path, URIPrefixSeparator) {
 		return ""
@@ -437,6 +467,13 @@ func GetCachePath(path string) string {
 	builder.WriteString("/")
 	builder.WriteString(s)
 	return builder.String()
+}
+
+// GetPVCClaimName extracts the bare PVC name from a "pvc://" cache URI, trimming
+// surrounding slashes so malformed inputs like "pvc:///my-pvc" still yield a
+// valid Kubernetes resource name (which cannot contain slashes).
+func GetPVCClaimName(uri string) string {
+	return strings.Trim(strings.TrimPrefix(uri, CacheURIPrefixPVC), "/")
 }
 
 func getVolumeName(backendName string) string {

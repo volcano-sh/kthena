@@ -1,0 +1,66 @@
+import LightboxImage from '@site/src/components/LightboxImage';
+import modelServing from '../assets/diagrams/model-serving.svg';
+
+# Model Serving Controller
+
+ModelServing Controller is the controller for the serving workload `ModelServing` in Kthena, which is used to reconcile `ModelServing` resources and manage the lifecycle of serving pods.
+
+## Model Serving Overview
+
+`ModelServing` represents the optimal deployment paradigm for distributed serving scenarios involving large models, offering flexible and user-friendly workload configurations with
+Prefilling Decoding Disaggregation and parallel serving services like Pipeline Parallelism (PP) and Tensor Parallelism (TP).
+
+## Model Serving Architecture
+
+<LightboxImage src={modelServing} alt="modelServing.svg"/>
+
+The Custom Resource Definition (CRD) of `ModelServing` is primarily divided into three layers, namely:
+
+1. ModelServing
+
+`ModelServing` is a novel type of workload designed to define specific serving services. It manages a set of `ServingGroup` serving instances with consistent configurations
+
+- Supports topology aware and gang scheduling: It enables the simultaneous scheduling of serving pods within an `ServingGroup` to the same **HyperNode**, and allows for the configuration of gang scheduling parameters.
+  Scheduling is only permitted when the HyperNode meets the **minimum number** of pods required for the serving tasks.
+- Supports scaling and rolling upgrades: It provides scaling capabilities at both the `ServingGroup` level and `Role` level, along with fault recovery capabilities. The current controller supports sequential rolling upgrades for ServingGroups.
+
+2. ServingGroup
+
+`ServingGroup` is a group of serving instances, representing the smallest unit capable of independently completing a single serving service.
+
+- Supports defining multiple serving roles: Based on `Role` to represent serving roles such as **Prefill** and **Decode**, enabling the management of complex serving scenarios like xPyD configurations.
+- Supports graceful reconstruction: During the execution of serving tasks, if a failure occurs, the system allows a configurable grace period for pods recovery before triggering rebuilding, minimizing service interruption.
+
+3. Role
+
+`Role` represents the smallest functional unit, which can correspond to specific instance types such as Prefill, Decode, Aggregated.
+
+- Supports double-Pod templates: Within a single `Role` instance, two distinct Pod templates can be defined as `Entry` Pod and `Worker` Pod. 
+`Entry` Pod serves as the entry point to receive serving requests and distribute tasks, while the `Worker` Pod is responsible for executing the actual serving computations.
+- Supports network topology aware scheduling: Enables the co-location scheduling of `Entry` Pods and `Worker` Pods within the same `Role` to the same **HyperNode**.
+
+## Example
+
+Read the [examples](https://github.com/volcano-sh/kthena/tree/main/examples/model-serving/sample.yaml) to learn more.
+
+## Labels and Environment Variables
+
+### Labels
+
+| Key                                  | Description                              | Example    | Applies to  |
+|--------------------------------------|------------------------------------------|------------|-------------|
+| modelserving.volcano.sh/name       | The label key for the ModelServing name    | sample     | pod         |
+| modelserving.volcano.sh/group-name | The label key for the ServingGroup name    | sample-0   | pod,service |
+| modelserving.volcano.sh/role       | The label key for the Role name          | decode     | pod,service |
+| modelserving.volcano.sh/role-id    | The label key for the role serial number | decode-0   | pod,service |
+| modelserving.volcano.sh/revision   | The revision label for the modelServing   | 67b8d4b8c7 | pod         |
+| modelserving.volcano.sh/entry      | The entry pod label key                  | true       | pod         |
+
+
+### Environment Variables
+
+| Key           | Description                                                         | Example                                         | Applies to |
+|---------------|---------------------------------------------------------------------|-------------------------------------------------|------------|
+| GROUP_SIZE    | The environment variable for the serving Role instance size       | 4                                               | pod        |
+| ENTRY_ADDRESS | The address of the Entry via the headless service                   | sample-0-decode-0-0.sample-0-decode-0-0.default | pod        |
+| WORKER_INDEX  | The index or identity of the pod within the serving Role instance | 0                                               | pod        |

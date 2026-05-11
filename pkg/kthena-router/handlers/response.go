@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Response handler can be used to handle inference response, do ratelimt for input tokens.
+// Response handler can be used to handle inference responses and parse usage data to support downstream rate limiting and usage tracking.
 package handlers
 
 import (
@@ -62,8 +62,8 @@ const (
 //
 // data: [DONE]
 //
-// Noticed that vLLM returns two entries in one response.
-// We need to strip the `data:` prefix and next Data: [DONE] from the message to fetch response data.
+// Note that vLLM returns usage data in a `data:` entry.
+// We strip the `data:` prefix from usage entries and skip `data: [DONE]` markers.
 //
 // If include_usage is not included in the request, `data: [DONE]` is returned separately, which
 // indicates end of streaming.

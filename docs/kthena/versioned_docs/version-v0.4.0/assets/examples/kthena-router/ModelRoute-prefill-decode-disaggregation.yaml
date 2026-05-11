@@ -1,0 +1,11 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-v2
+  namespace: dev
+spec:
+  modelName: "deepseek-ai/DeepSeekV2"
+  rules:
+    - name: "default"
+      targetModels:
+        - modelServerName: "deepseek-v2"
