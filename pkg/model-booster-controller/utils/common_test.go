@@ -159,8 +159,8 @@ func TestGetDeviceNum(t *testing.T) {
 }
 
 func TestNewModelOwnerRef(t *testing.T) {
-	// Verifies that NewModelOwnerRef returns an OwnerReference with the correct
-	// fields populated from the ModelBooster.
+	// Verifies that NewModelOwnerRef returns an OwnerReference with the correct fields
+
 	model := makeTestModelBooster("test-model", "test-uid-123")
 	ref := NewModelOwnerRef(model)
 
