@@ -465,6 +465,11 @@ spec:
                       Note: update name will cause the old modelInfer deletion and a new modelInfer creation.
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
+                  runtimeClassName:
+                    description: |-
+                      RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,
+                      which should be used to run pods generated for this backend.
+                    type: string
                   schedulerName:
                     description: SchedulerName defines the name of the scheduler used
                       by ModelServing for this backend.
