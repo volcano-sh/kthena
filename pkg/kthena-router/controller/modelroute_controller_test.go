@@ -108,7 +108,7 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 
 		found := waitForObjectInCache(t, 2*time.Second, func() bool {
 			mr, err := controller.modelRouteLister.ModelRoutes("default").Get("test-modelroute")
-			return err == nil && mr.Spec.ModelName == "updated-model"
+			return err == nil && len(mr.Spec.Rules) > 0 && mr.Spec.Rules[0].Name == "rule-updated"
 		})
 		assert.True(t, found, "ModelRoute update should be reflected in cache")
 
