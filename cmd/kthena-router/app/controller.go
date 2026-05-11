@@ -109,20 +109,20 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		}
 
 		gatewayInformerFactory = gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
-		gatewayController = controller.NewGatewayController(gatewayInformerFactory, store)
+		gatewayController = controller.NewGatewayController(gatewayClient, gatewayInformerFactory, store)
+		httpRouteController = controller.NewHTTPRouteController(gatewayClient, gatewayInformerFactory, store)
 		cacheSyncs = append(cacheSyncs,
 			gatewayInformerFactory.Gateway().V1().Gateways().Informer().HasSynced,
 			gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced,
 		)
 
 		if enableGatewayAPIInferenceExtension {
-			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, store)
 			dynamicClient, err := dynamic.NewForConfig(cfg)
 			if err != nil {
 				klog.Fatalf("Error building dynamic client: %s", err.Error())
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
-			inferencePoolController = controller.NewInferencePoolController(dynamicInformerFactory, store)
+			inferencePoolController = controller.NewInferencePoolController(dynamicClient, dynamicInformerFactory, gatewayInformerFactory, store)
 			cacheSyncs = append(cacheSyncs, dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced)
 			dynamicInformerFactory.Start(stop)
 		}
@@ -157,8 +157,13 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 				klog.Fatalf("Error running gateway controller: %s", err.Error())
 			}
 		}()
+		go func() {
+			if err := httpRouteController.Run(stop); err != nil {
+				klog.Fatalf("Error running httproute controller: %s", err.Error())
+			}
+		}()
 
-		controllers = append(controllers, gatewayController)
+		controllers = append(controllers, gatewayController, httpRouteController)
 
 		// Gateway API Inference Extension controllers are optional
 		if enableGatewayAPIInferenceExtension {

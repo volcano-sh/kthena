@@ -38,7 +38,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
+	ctrl := NewHTTPRouteController(gatewayClient, gatewayInformerFactory, store)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)
@@ -118,7 +118,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
+	ctrl := NewHTTPRouteController(gatewayClient, gatewayInformerFactory, store)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)
@@ -195,7 +195,7 @@ func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
+	ctrl := NewHTTPRouteController(gatewayClient, gatewayInformerFactory, store)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)

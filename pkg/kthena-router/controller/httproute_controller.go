@@ -17,11 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayclientset "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
 
@@ -36,6 +39,7 @@ import (
 )
 
 type HTTPRouteController struct {
+	gatewayClient   gatewayclientset.Interface
 	httpRouteLister gatewaylisters.HTTPRouteLister
 	gatewayLister   gatewaylisters.GatewayLister
 	httpRouteSynced cache.InformerSynced
@@ -47,6 +51,7 @@ type HTTPRouteController struct {
 }
 
 func NewHTTPRouteController(
+	gatewayClient gatewayclientset.Interface,
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
 	store datastore.Store,
 ) *HTTPRouteController {
@@ -54,6 +59,7 @@ func NewHTTPRouteController(
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
 
 	controller := &HTTPRouteController{
+		gatewayClient:   gatewayClient,
 		httpRouteLister: httpRouteInformer.Lister(),
 		gatewayLister:   gatewayInformer.Lister(),
 		httpRouteSynced: httpRouteInformer.Informer().HasSynced,
@@ -183,7 +189,13 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 			continue
 		}
 		if string(gw.Spec.GatewayClassName) == DefaultGatewayClassName {
-			return c.store.AddOrUpdateHTTPRoute(httpRoute)
+			if err := c.store.AddOrUpdateHTTPRoute(httpRoute); err != nil {
+				return err
+			}
+			if err := c.updateHTTPRouteStatus(httpRoute); err != nil {
+				klog.Errorf("failed to update status for httproute %s/%s: %v", httpRoute.Namespace, httpRoute.Name, err)
+			}
+			return nil
 		}
 	}
 	if gatewayPending {
@@ -192,6 +204,216 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	klog.V(4).Infof("Skipping HTTPRoute %s/%s: does not reference kthena-router Gateway", namespace, name)
 	_ = c.store.DeleteHTTPRoute(key)
 	return nil
+}
+
+func (c *HTTPRouteController) updateHTTPRouteStatus(httpRoute *gatewayv1.HTTPRoute) error {
+	hr := httpRoute.DeepCopy()
+
+	for _, parentRef := range hr.Spec.ParentRefs {
+		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+			continue
+		}
+
+		gatewayNamespace := hr.Namespace
+		if parentRef.Namespace != nil {
+			gatewayNamespace = string(*parentRef.Namespace)
+		}
+		gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, string(parentRef.Name))
+		gw := c.store.GetGateway(gatewayKey)
+
+		// Call c.store.GetGateway(gatewayKey). If nil or GatewayClassName != DefaultGatewayClassName, skip this parent (do NOT write status for it).
+		if gw == nil || string(gw.Spec.GatewayClassName) != DefaultGatewayClassName {
+			continue
+		}
+
+		acceptedCond := metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.RouteReasonAccepted),
+			Message:            "HTTPRoute has been accepted by kthena-router",
+			ObservedGeneration: hr.Generation,
+		}
+
+		resolvedStatus, reason, message := c.resolveBackendRefs(hr)
+		resolvedCond := metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionResolvedRefs),
+			Status:             metav1.ConditionTrue,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: hr.Generation,
+		}
+		if !resolvedStatus {
+			resolvedCond.Status = metav1.ConditionFalse
+		}
+
+		newStatus := gatewayv1.RouteParentStatus{
+			ParentRef:      parentRef,
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+			Conditions:     []metav1.Condition{},
+		}
+
+		// Find existing parent status to preserve LastTransitionTime
+		var existingConditions []metav1.Condition
+		for _, p := range httpRoute.Status.Parents {
+			if isSameParentRef(p.ParentRef, parentRef, hr.Namespace) {
+				existingConditions = p.Conditions
+				break
+			}
+		}
+
+		newStatus.Conditions = setRouteCondition(existingConditions, acceptedCond)
+		newStatus.Conditions = setRouteCondition(newStatus.Conditions, resolvedCond)
+
+		setHTTPRouteParentStatus(hr, newStatus, hr.Namespace)
+	}
+
+	if httpRouteStatusUnchanged(httpRoute, hr) {
+		return nil
+	}
+
+	_, err := c.gatewayClient.GatewayV1().HTTPRoutes(hr.Namespace).UpdateStatus(
+		context.Background(), hr, metav1.UpdateOptions{},
+	)
+	return err
+}
+
+func (c *HTTPRouteController) resolveBackendRefs(httpRoute *gatewayv1.HTTPRoute) (bool, string, string) {
+	for _, rule := range httpRoute.Spec.Rules {
+		for _, ref := range rule.BackendRefs {
+			ns := httpRoute.Namespace
+			if ref.Namespace != nil {
+				ns = string(*ref.Namespace)
+			}
+
+			kind := "Service"
+			if ref.Kind != nil {
+				kind = string(*ref.Kind)
+			}
+
+			if kind == "InferencePool" {
+				key := fmt.Sprintf("%s/%s", ns, string(ref.Name))
+				if pool := c.store.GetInferencePool(key); pool == nil {
+					return false, "BackendNotFound", fmt.Sprintf("InferencePool %q not found in namespace %q", ref.Name, ns)
+				}
+			}
+			// Kind is "Service": skip validation, treat as resolved.
+		}
+	}
+	return true, string(gatewayv1.RouteReasonResolvedRefs), "All references resolved"
+}
+
+func isSameParentRef(a, b gatewayv1.ParentReference, routeNamespace string) bool {
+	if a.Name != b.Name {
+		return false
+	}
+
+	nsA := routeNamespace
+	if a.Namespace != nil {
+		nsA = string(*a.Namespace)
+	}
+	nsB := routeNamespace
+	if b.Namespace != nil {
+		nsB = string(*b.Namespace)
+	}
+	if nsA != nsB {
+		return false
+	}
+
+	kindA := "Gateway"
+	if a.Kind != nil {
+		kindA = string(*a.Kind)
+	}
+	kindB := "Gateway"
+	if b.Kind != nil {
+		kindB = string(*b.Kind)
+	}
+	if kindA != kindB {
+		return false
+	}
+
+	if (a.SectionName == nil) != (b.SectionName == nil) {
+		return false
+	}
+	if a.SectionName != nil && *a.SectionName != *b.SectionName {
+		return false
+	}
+
+	if (a.Port == nil) != (b.Port == nil) {
+		return false
+	}
+	if a.Port != nil && *a.Port != *b.Port {
+		return false
+	}
+
+	return true
+}
+
+func setHTTPRouteParentStatus(httpRoute *gatewayv1.HTTPRoute, newStatus gatewayv1.RouteParentStatus, routeNamespace string) {
+	for i, existing := range httpRoute.Status.Parents {
+		if isSameParentRef(existing.ParentRef, newStatus.ParentRef, routeNamespace) {
+			httpRoute.Status.Parents[i] = newStatus
+			return
+		}
+	}
+	httpRoute.Status.Parents = append(httpRoute.Status.Parents, newStatus)
+}
+
+func httpRouteStatusUnchanged(original, updated *gatewayv1.HTTPRoute) bool {
+	if len(original.Status.Parents) != len(updated.Status.Parents) {
+		return false
+	}
+
+	for i := range updated.Status.Parents {
+		found := false
+		for j := range original.Status.Parents {
+			if isSameParentRef(updated.Status.Parents[i].ParentRef, original.Status.Parents[j].ParentRef, updated.Namespace) {
+				if updated.Status.Parents[i].ControllerName != original.Status.Parents[j].ControllerName {
+					return false
+				}
+				if len(updated.Status.Parents[i].Conditions) != len(original.Status.Parents[j].Conditions) {
+					return false
+				}
+				for _, newCond := range updated.Status.Parents[i].Conditions {
+					condFound := false
+					for _, oldCond := range original.Status.Parents[j].Conditions {
+						if newCond.Type == oldCond.Type {
+							if newCond.Status != oldCond.Status ||
+								newCond.Reason != oldCond.Reason ||
+								newCond.Message != oldCond.Message {
+								return false
+							}
+							condFound = true
+							break
+						}
+					}
+					if !condFound {
+						return false
+					}
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+func setRouteCondition(existing []metav1.Condition, newCond metav1.Condition) []metav1.Condition {
+	newCond.LastTransitionTime = metav1.Now()
+	for i, cond := range existing {
+		if cond.Type == newCond.Type {
+			if cond.Status == newCond.Status && cond.Reason == newCond.Reason && cond.Message == newCond.Message {
+				newCond.LastTransitionTime = cond.LastTransitionTime
+			}
+			existing[i] = newCond
+			return existing
+		}
+	}
+	return append(existing, newCond)
 }
 
 func (c *HTTPRouteController) enqueueHTTPRoute(obj interface{}) {

@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -317,6 +318,7 @@ type PortListenerInfo struct {
 	Server       *http.Server
 	ShutdownFunc context.CancelFunc
 	Listeners    []ListenerConfig
+	LastError    error
 }
 
 // ListenerManager manages Gateway listeners dynamically
@@ -476,6 +478,10 @@ func (lm *ListenerManager) removeListenerFromPort(port int32, configToRemove Lis
 	}
 	portInfo.Listeners = filtered
 	portInfo.mu.Unlock()
+
+	// Remove listener status
+	lm.store.RemoveListenerStatus(configToRemove.GatewayKey, configToRemove.ListenerName)
+	klog.V(4).Infof("Removed listener status for %s/%s", configToRemove.GatewayKey, configToRemove.ListenerName)
 }
 
 // addListenerToPort adds a listener config to a port
@@ -485,6 +491,15 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 	if !exists {
 		// New port: middleware order matches default server (access log wraps handler).
 		listenerCtx, cancel := context.WithCancel(lm.ctx)
+
+		portInfo = &PortListenerInfo{
+			Listeners: []ListenerConfig{config},
+		}
+		lm.portListeners[port] = portInfo
+		portInfo.ShutdownFunc = cancel
+
+		// nil error indicates listener started successfully (healthy state)
+		lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, nil)
 
 		server := startListener(listenerCtx, listenerConfig{
 			addr:             ":" + strconv.Itoa(int(port)),
@@ -501,21 +516,68 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 			},
 			logListenErr: func(err error) {
 				klog.Errorf("listen failed for port %d: %v", port, err)
+				portInfo.mu.Lock()
+				portInfo.LastError = err
+				for _, l := range portInfo.Listeners {
+					lm.store.SetListenerStatus(l.GatewayKey, l.ListenerName, err)
+				}
+				portInfo.mu.Unlock()
+				if gw := lm.store.GetGateway(config.GatewayKey); gw != nil {
+					lm.store.AddOrUpdateGateway(gw)
+				}
 			},
 		})
 
-		portInfo = &PortListenerInfo{
-			Server:    server,
-			Listeners: []ListenerConfig{config},
-		}
-		lm.portListeners[port] = portInfo
-		portInfo.ShutdownFunc = cancel
+		portInfo.Server = server
+
+		go func(gwKey, listenerName string, p int32, pi *PortListenerInfo) {
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				time.Sleep(100 * time.Millisecond)
+
+				// If logListenErr already fired then stop (error is already in store)
+				pi.mu.RLock()
+				bindErr := pi.LastError
+				pi.mu.RUnlock()
+				if bindErr != nil {
+					return
+				}
+
+				// TCP connection to confirm port is actually listening
+				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), 200*time.Millisecond)
+				if err == nil {
+					conn.Close()
+					// Port confirmed open (now mark healthy)
+					lm.store.SetListenerStatus(gwKey, listenerName, nil)
+					// Trigger gateway re-reconcile so controller writes Programmed=True
+					if gw := lm.store.GetGateway(gwKey); gw != nil {
+						lm.store.AddOrUpdateGateway(gw)
+					}
+					return
+				}
+			}
+			// Port not ready (timeout after 5 seconds)
+			pi.mu.RLock()
+			bindErr := pi.LastError
+			pi.mu.RUnlock()
+			if bindErr == nil {
+				timeoutErr := fmt.Errorf("timeout waiting for port %d to become ready", p)
+				lm.store.SetListenerStatus(gwKey, listenerName, timeoutErr)
+				if gw := lm.store.GetGateway(gwKey); gw != nil {
+					lm.store.AddOrUpdateGateway(gw)
+				}
+			}
+		}(config.GatewayKey, config.ListenerName, port, portInfo)
 	} else {
 		// Add listener to existing port
 		portInfo.mu.Lock()
 		portInfo.Listeners = append(portInfo.Listeners, config)
+		currentError := portInfo.LastError
 		portInfo.mu.Unlock()
-		klog.V(4).Infof("Added listener %s/%s to existing port %d", config.GatewayKey, config.ListenerName, port)
+
+		// Report listener status as healthy
+		lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, currentError)
+		klog.V(4).Infof("Added listener %s/%s to existing port %d (portErr=%v)", config.GatewayKey, config.ListenerName, port, currentError)
 	}
 }
 
@@ -600,6 +662,12 @@ func (lm *ListenerManager) StopListenersForGateway(gatewayKey string) {
 		for i := range portInfo.Listeners {
 			if portInfo.Listeners[i].GatewayKey != gatewayKey {
 				filtered = append(filtered, portInfo.Listeners[i])
+			} else {
+				// Remove listener status per gateway
+				lm.store.RemoveListenerStatus(
+					portInfo.Listeners[i].GatewayKey,
+					portInfo.Listeners[i].ListenerName,
+				)
 			}
 		}
 		portInfo.Listeners = filtered

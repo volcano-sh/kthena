@@ -237,6 +237,11 @@ type Store interface {
 	GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute
 	GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelServer
 	GetAllPods() map[types.NamespacedName]*PodInfo
+
+	// Listener status methods
+	SetListenerStatus(gatewayKey, listenerName string, err error)
+	GetListenerStatus(gatewayKey, listenerName string) error
+	RemoveListenerStatus(gatewayKey, listenerName string)
 }
 
 // QueueStat holds per-model queue metrics to aid scheduling decisions
@@ -311,6 +316,10 @@ type store struct {
 	podRuntimeInspector PodRuntimeInspector
 	rootCtx             context.Context // Lifecycle context for queue goroutines, set by Run()
 	fairnessQueueConfig FairnessQueueConfig
+
+	// Listener status
+	listenerStatusMutex sync.RWMutex
+	listenerStatuses    map[string]map[string]error
 }
 
 func New(opts ...Option) Store {
@@ -328,6 +337,7 @@ func New(opts ...Option) Store {
 		callbacks:           make(map[string][]CallbackFunc),
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
+		listenerStatuses:    make(map[string]map[string]error),
 		// Create token tracker with environment-based configuration
 		tokenTracker:        createTokenTracker(),
 		podRuntimeInspector: realPodRuntimeInspector{},
@@ -1582,6 +1592,10 @@ func (s *store) DeleteGateway(key string) error {
 	delete(s.gateways, key)
 	s.gatewayMutex.Unlock()
 
+	s.listenerStatusMutex.Lock()
+	delete(s.listenerStatuses, key)
+	s.listenerStatusMutex.Unlock()
+
 	klog.V(4).Infof("Deleted Gateway: %s", key)
 
 	// Trigger callback outside the lock to avoid potential deadlocks
@@ -1811,4 +1825,35 @@ func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRo
 		}
 	}
 	return result
+}
+
+// ListenerStatus methods
+
+func (s *store) SetListenerStatus(gatewayKey, listenerName string, err error) {
+	s.listenerStatusMutex.Lock()
+	defer s.listenerStatusMutex.Unlock()
+	if _, ok := s.listenerStatuses[gatewayKey]; !ok {
+		s.listenerStatuses[gatewayKey] = make(map[string]error)
+	}
+	s.listenerStatuses[gatewayKey][listenerName] = err
+}
+
+func (s *store) GetListenerStatus(gatewayKey, listenerName string) error {
+	s.listenerStatusMutex.RLock()
+	defer s.listenerStatusMutex.RUnlock()
+	if listeners, ok := s.listenerStatuses[gatewayKey]; ok {
+		return listeners[listenerName]
+	}
+	return nil
+}
+
+func (s *store) RemoveListenerStatus(gatewayKey, listenerName string) {
+	s.listenerStatusMutex.Lock()
+	defer s.listenerStatusMutex.Unlock()
+	if listeners, ok := s.listenerStatuses[gatewayKey]; ok {
+		delete(listeners, listenerName)
+		if len(listeners) == 0 {
+			delete(s.listenerStatuses, gatewayKey)
+		}
+	}
 }
