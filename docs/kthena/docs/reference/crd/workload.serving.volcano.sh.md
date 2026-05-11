@@ -372,6 +372,7 @@ _Appears in:_
 | `maxReplicas` _integer_ | MaxReplicas is the maximum number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 | `workers` _[ModelWorker](#modelworker) array_ | Workers is the list of workers associated with this backend. |  | MaxItems: 1000 <br />MinItems: 1 <br /> |
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing for this backend. |  |  |
+| `runtimeClassName` _string_ | RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,<br />which should be used to run pods generated for this backend. |  |  |
 
 
 #### ModelBackendType

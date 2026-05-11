@@ -101,6 +101,10 @@ type ModelBackend struct {
 	// SchedulerName defines the name of the scheduler used by ModelServing for this backend.
 	// +optional
 	SchedulerName string `json:"schedulerName,omitempty"`
+	// RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,
+	// which should be used to run pods generated for this backend.
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 }
 
 // ModelBackendType defines the type of model backend.

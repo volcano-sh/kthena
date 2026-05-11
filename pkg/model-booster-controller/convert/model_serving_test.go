@@ -151,6 +151,7 @@ func TestCreateModelServingResources(t *testing.T) {
 		name         string
 		input        *workload.ModelBooster
 		expected     *workload.ModelServing
+		checkFn      func(*testing.T, *workload.ModelServing)
 		expectErrMsg string
 	}{
 		{
@@ -168,6 +169,40 @@ func TestCreateModelServingResources(t *testing.T) {
 			input:    loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-mooncake.yaml"),
 			expected: loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving-mooncake.yaml"),
 		},
+		{
+			name:  "vLLM with runtimeClassName",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model-with-runtimeclass.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Equal(t, ptr.To("nvidia"), role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have runtimeClassName", role.Name)
+					if role.WorkerReplicas > 0 {
+						assert.Equal(t, ptr.To("nvidia"), role.WorkerTemplate.Spec.RuntimeClassName,
+							"role %s workerTemplate should have runtimeClassName", role.Name)
+					}
+				}
+			},
+		},
+		{
+			name:  "PD disaggregated with runtimeClassName",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-with-runtimeclass.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Equal(t, ptr.To("nvidia"), role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have runtimeClassName", role.Name)
+				}
+			},
+		},
+		{
+			name:  "vLLM without runtimeClassName is nil",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Nil(t, role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have nil runtimeClassName", role.Name)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -177,6 +212,10 @@ func TestCreateModelServingResources(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+			if tt.checkFn != nil {
+				tt.checkFn(t, got)
+				return
+			}
 			diff := cmp.Diff(tt.expected, got)
 			if diff != "" {
 				t.Errorf("ModelServing mismatch (-expected +actual):\n%s", diff)

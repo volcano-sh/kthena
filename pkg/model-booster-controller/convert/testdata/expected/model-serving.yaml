@@ -6,7 +6,7 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: 55d7bd6c6d
+    workload.serving.volcano.sh/revision: 59b8b55cc4
   name: test-model-backend1
   namespace: default
   ownerReferences:
@@ -30,7 +30,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: test-model
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 55d7bd6c6d
+              workload.serving.volcano.sh/revision: 59b8b55cc4
           spec:
             containers:
               - args:
@@ -213,7 +213,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: test-model
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 55d7bd6c6d
+              workload.serving.volcano.sh/revision: 59b8b55cc4
           spec:
             containers:
               - command:
