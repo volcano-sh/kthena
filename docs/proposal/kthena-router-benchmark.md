@@ -2,13 +2,13 @@
 
 - **Status**: Draft
 - **Issue**: [#942](https://github.com/volcano-sh/kthena/issues/942)
-- **Author**: [Leo Xie]
+- **Author**: Leo Xie
 
 ---
 
 ## Summary
 
-This proposal introduces a reusable, config-driven benchmark framework for the Kthena Router — the LLM routing data-plane component of the Volcano/Kthena project. The framework enables reproducible performance measurement under realistic LLM traffic patterns, produces structured reports for regression detection across releases, and supports local and CI execution. Where the benchmark surfaces clear bottlenecks, targeted optimizations will be proposed and submitted as upstream PRs with before/after performance data.
+This proposal introduces a reusable, config-driven benchmark framework for the Kthena Router — the LLM routing data-plane component of the Volcano/Kthena project. The framework uses a **sandwich isolation model**: user traffic (Load Generator) and backend responses (Mock LLM Backend) are both fully controlled, allowing the Router's performance to be measured in isolation. It enables reproducible performance measurement under realistic LLM traffic patterns, produces structured reports for regression detection across releases, and supports local and CI execution. Where the benchmark surfaces clear bottlenecks, targeted optimizations will be proposed and submitted as upstream PRs with before/after performance data.
 
 ## Motivation
 
@@ -24,12 +24,12 @@ The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/t
 ### Goals
 
 - Design and implement a **reusable benchmark framework** (load generator, scenario configuration, metrics collection, result aggregation) that runs both locally and in CI
-- Define a **standardized benchmark scenario format** (YAML) covering typical LLM routing patterns:
-  - Variable QPS and concurrency levels
-  - Short vs. long prompt/response lengths
-  - Variable number of mock backends
-  - Different routing strategies (ModelRoute, HTTPRoute, ExternalModelProvider)
-- Build a **mock LLM inference backend** in Go that simulates realistic streaming token generation with configurable latency profiles (TTFT, TPOT, token burst characteristics)
+- Define a **standardized benchmark scenario format** (YAML) built around the sandwich isolation model, covering both sides of the control plane:
+  - **User traffic**: QPS levels, burstiness (Gamma distribution), ramp-up profiles (linear/exponential), prompt length distributions, concurrency
+  - **Backend response**: TTFT/TPOT latency profiles (homogeneous, heterogeneous, degrading), backend count, error rates, pod churn (crash/scale), metrics emission fidelity
+- Define an **orthogonal condition matrix** identifying high-value test combinations that expose Router-unique failure modes (scheduler staleness, failover latency, cross-engine metrics, fair queue behavior under burst)
+- Retain the 8 original scenarios as a **Smoke Test Suite** for fast (~15 min) regression detection in CI
+- Build a **mock LLM inference backend** in Go that simulates realistic streaming token generation with configurable latency profiles **and Prometheus metric emission** matching real vLLM/SGLang engines
 - Produce a **comprehensive benchmark report** with throughput, TTFT, TPOT, latency percentiles (P50/P95/P99), CPU/memory/goroutine metrics, and bottleneck analysis via `pprof`
 - Document the **end-to-end test procedure as a runbook** covering cluster preparation, mock/real backend deployment, benchmark execution, and result interpretation
 - **Identify and optimize** up to 3 clear performance hotspots, submitting upstream PRs with before/after comparison data
@@ -46,7 +46,38 @@ The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/t
 
 ### Framework Architecture
 
-The benchmark framework consists of four loosely coupled components, each independently configurable and testable:
+The benchmark framework centers on a **sandwich isolation model**: Router performance can only be measured in isolation when **both** the user traffic (upstream) and backend responses (downstream) are fully controlled. Without this dual control, measured latency confounds routing overhead with backend inference variance.
+
+```
+                        ┌─────────────────────────────────────────┐
+    USER TRAFFIC        │                                       │      BACKEND RESPONSE
+    (Fully Controlled)   │           ROUTER (Under Test)          │     (Fully Controlled)
+                        │                                       │
+  ┌──────────────┐      │  ┌──────────────────────────────────┐  │      ┌──────────────────────┐
+  │ Load Generator│ ────┼─►│  Parse → Schedule → Proxy (SSE)  │──┼─────►│ Mock LLM Backend(s)  │
+  │              │      │  │                                  │  │      │                      │
+  │ • QPS / ramp │      │  │  Router Self-Metrics:             │  │      │ • TTFT (Gaussian)    │
+  │ • burstiness │      │  │  scheduler_plugin_duration        │  │      │ • TPOT (Gaussian)    │
+  │ • prompt dist│      │  │  active_upstream_requests         │  │      │ • response tokens    │
+  │ • concurrency│      │  │  fairness_queue_*                 │  │      │ • error_rate         │
+  └──────────────┘      │  └──────────────────────────────────┘  │      │ • Prometheus metrics │
+                        │                                       │      └──────────────────────┘
+                        └─────────────────────────────────────────┘
+                                          │
+                                   Metrics Collector
+                                   (observes both ends
+                                    + router internals)
+```
+
+#### Why Dual Control is Necessary
+
+| What happens if... | Consequence |
+|---|---|
+| User traffic is uncontrolled | Cannot attribute latency changes to Router vs. load variation |
+| Backend response is uncontrolled | Real GPU inference variance (batch size, KV cache) drowns out routing overhead |
+| Neither is controlled | Results are non-reproducible; regression detection is meaningless |
+
+The framework consists of four loosely coupled components around this sandwich:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -77,9 +108,12 @@ The benchmark framework consists of four loosely coupled components, each indepe
 │  └──────────────┘    │ - Configurable TTFT   ││
 │                      │ - Configurable TPOT   ││
 │                      │ - Variable token count││
+│                      │ - Prometheus metrics   ││
 │                      └──────────────────────┘│
 └──────────────────────────────────────────────┘
 ```
+
+**Key insight for Router benchmarking**: the router does not generate TTFT/TPOT—it **observes** them from backend engines. The mock backend must simulate not only streaming responses, but also the **Prometheus metric emission patterns** of real vLLM/SGLang engines (identical metric names, histogram buckets, update frequency at `/metrics` on port 8000/30000). This allows the router's existing metrics parsers (`backend/vllm/metrics.go`, `backend/sglang/metrics.go`) and scheduler plugins (`least_latency.go`, `least_request.go`) to function identically to how they would against real backends.
 
 #### 1. Benchmark Orchestrator (`cmd/benchmark/main.go`)
 
@@ -98,8 +132,8 @@ A Go CLI tool that:
 A Go-based HTTP load generator tailored for LLM serving benchmarks. Key features:
 
 - **Concurrency model**: Configurable number of concurrent virtual users (VUs), each maintaining a persistent HTTP connection for SSE streaming
-- **Rate control**: Supports both constant rate (requests/second) and ramp-up profiles (e.g., 10→50→100 QPS over phases)
-- **Token-aware metrics**: Tracks TTFT (time to first response byte) and TPOT (inter-chunk interval) from SSE stream timing
+- **Rate control**: Supports constant rate (requests/second), ramp-up profiles (linear/exponential, e.g., 10→50→100 QPS over phases), and Gamma-distributed burstiness (shape parameter γ controlling inter-request gap distribution)
+- **Token-aware metrics**: Tracks TTFT (time to first token) and TPOT (inter-token interval) from SSE stream timing
 - **Configurable request body**: Supports variable prompt lengths (short ~100 tokens → long ~4000 tokens) using tokenizer-aware payload generation
 - **Output**: Latency histograms, success/error counts, throughput (requests/sec and tokens/sec), streamed to Metrics Collector
 
@@ -120,17 +154,17 @@ Generates outputs from raw benchmark data:
 
 - **JSON**: Machine-readable result file for automated comparison and CI assertions
 - **Markdown report**: Human-readable summary with tables and key findings, suitable for pasting into GitHub issues
-- **Comparison mode**: When a baseline result file is provided, computes deltas and highlights regressions (>5% latency increase, >10% throughput decrease)
+- **Comparison mode**: When a baseline result file is provided, computes deltas and highlights regressions using **P95 latency** for latency comparisons; the reporter emits a warning for `>5%` P95 latency increase, while CI failure is reserved for `>10%` P95 latency increase. It also highlights `>10%` throughput decrease
 - **CSV export**: For further analysis in spreadsheet tools
 
 ### Benchmark Scenario Configuration
 
-Benchmarks are defined via YAML configuration files for reproducibility:
+Benchmarks are defined via YAML configuration files for reproducibility. The configuration is structured around the sandwich model—**user traffic** on the left, **backend response** on the right, with routing strategy in the middle:
 
 ```yaml
 # benchmark.yaml
-name: "router-throughput-50qps"
-description: "Baseline throughput test at 50 QPS with 4 backends"
+name: "router-throughput-50qps-4backends"
+description: "Baseline throughput test at 50 QPS with 4 homogeneous backends"
 
 environment:
   router:
@@ -140,45 +174,84 @@ environment:
       cpu: "2"
       memory: "4Gi"
 
+# ── LEFT SIDE: User Traffic (Load Generator) ──
+load:
+  # Request scheduling mode
+  schedule:
+    mode: "rate"            # rate | timestamp_replay | trace_file
+    rate: 50                # requests/second (when mode=rate)
+
+  # Traffic shape (inspired by AISBench traffic_cfg)
+  traffic:
+    burstiness: 0.5         # Gamma shape param: 0=uniform, 1=Poisson, <1=bursty
+    ramp:
+      strategy: "none"      # none | linear | exponential
+      # start_rps: 10       # only when ramp enabled
+      # end_rps: 200        # only when ramp enabled
+
+  # Concurrency
+  concurrency:
+    connections: 100        # max concurrent persistent connections
+
+  # Request characteristics
+  prompts:
+    - tokens: 100
+      weight: 7             # 70% short prompts
+    - tokens: 2000
+      weight: 3             # 30% long prompts
+  max_tokens:
+    - tokens: 128
+      weight: 5             # 50% short responses
+    - tokens: 1024
+      weight: 5             # 50% medium responses
+
+# ── RIGHT SIDE: Backend Response (Mock LLM Backend) ──
 backends:
   count: 4
-  mock:
-    image: "kthena-mock-backend:latest"
-    ttftMean: "50ms"
-    ttftStddev: "10ms"
-    tpotMean: "15ms"
-    tpotStddev: "5ms"
-    responseTokens: 500
+  profiles:                 # per-backend latency profiles
+    - name: "fast"
+      count: 2              # 2 fast pods
+      ttftMean: "30ms"
+      ttftStddev: "5ms"
+      tpotMean: "10ms"
+      tpotStddev: "2ms"
+    - name: "normal"
+      count: 2              # 2 normal pods
+      ttftMean: "100ms"
+      ttftStddev: "15ms"
+      tpotMean: "20ms"
+      tpotStddev: "5ms"
 
-load:
-  phases:
-    - duration: "30s"
-      rate: 10          # ramp-up: 10 req/s
-    - duration: "60s"
-      rate: 50          # steady-state: 50 req/s
-    - duration: "30s"
-      rate: 10          # cool-down
+  # Behavior
+  responseTokens: 500       # default when max_tokens not in request
+  errorRate: 0.0            # chaos testing: 0.0–1.0
 
-  concurrency: 100      # max concurrent connections
-  prompts:
-    - name: "short"
-      tokens: 100
-      weight: 7         # 70% short prompts
-    - name: "long"
-      tokens: 2000
-      weight: 3         # 30% long prompts
+  # Metrics emission (must match real vLLM/SGLang)
+  metrics:
+    port: 8000              # vLLM-compatible /metrics endpoint
+    scrapeInterval: "1s"    # how often Router scrapes → affects scheduler freshness
+    histogramBuckets: "vllm" # vllm | sglang (same bucket distribution as real engine)
 
+# ── MIDDLE: Routing Strategy ──
 routing:
-  strategy: "round-robin"  # round-robin | least-connection | random
+  strategy: "least-latency" # round-robin | least-connection | least-latency | least-request
+  plugins: ["gpu", "prefix"] # scheduler plugin chain
 
+# ── COLLECTION ──
 metrics:
-  pprof: true           # capture CPU/memory profiles during steady-state
-  prometheus: true      # scrape Router metrics endpoint
+  pprof: true
+  prometheus: true
 
 output:
   dir: "./results/"
   formats: ["json", "markdown"]
 ```
+
+**Configuration design principles:**
+
+- **Independence**: Each side of the sandwich can vary independently—you can test the same backend profile under different traffic patterns, or the same traffic pattern against different backend profiles
+- **Orthogonality**: Parameters within each side are also independent; `burstiness` and `ramp` can be combined with any `prompts` distribution
+- **Fidelity**: The mock backend emits the same Prometheus metric names, histogram buckets, and scrape ports as real vLLM/SGLang engines—Router's existing parsers work unchanged
 
 ### Mock LLM Inference Backend (`pkg/benchmark/mockbackend/`)
 
@@ -198,6 +271,7 @@ A purpose-built Go HTTP server that simulates an OpenAI-compatible `/v1/chat/com
 6. Close the SSE connection
 
 **Configuration** (via environment variables or flags):
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `TTFT_MEAN` | 50ms | Mean time-to-first-token |
@@ -206,21 +280,107 @@ A purpose-built Go HTTP server that simulates an OpenAI-compatible `/v1/chat/com
 | `TPOT_STDDEV` | 5ms | Standard deviation of TPOT |
 | `DEFAULT_TOKENS` | 500 | Default token count when `max_tokens` not in request |
 | `ERROR_RATE` | 0.0 | Simulated error rate (0.0–1.0) for chaos testing |
+| `METRICS_PORT` | 8000 | Prometheus /metrics endpoint port (8000=vLLM, 30000=SGLang) |
+| `METRICS_ENGINE` | vllm | Metrics naming convention: `vllm` or `sglang` |
+
+The mock backend must also expose a `/metrics` endpoint that emits Prometheus metrics with the **identical naming, histogram bucket distribution, and data types** as a real vLLM or SGLang engine. This is essential because the Router's scheduler plugins (`least_latency.go`, `least_request.go`) consume these scraped metrics to make routing decisions. Key metrics to simulate:
+
+| Metric | vLLM Name | SGLang Name | Type |
+|--------|-----------|-------------|------|
+| GPU Cache Usage | `vllm:gpu_cache_usage_perc` | `sglang:token_usage` | Gauge |
+| Waiting Requests | `vllm:num_requests_waiting` | `sglang:num_queue_reqs` | Gauge |
+| Running Requests | `vllm:num_requests_running` | `sglang:num_running_reqs` | Gauge |
+| Time to First Token | `vllm:time_to_first_token_seconds` | `sglang:time_to_first_token_seconds` | Histogram |
+| Time Per Output Token | `vllm:time_per_output_token_seconds` | `sglang:time_per_output_token_seconds` | Histogram |
 
 ### Test Scenarios
 
-The following scenarios will be delivered as pre-built YAML configuration files:
+> ⭐️Test scenarios also work as user stories.
 
-| Scenario | Purpose | Key Parameters |
-|----------|---------|---------------|
-| **Throughput Baseline** | Establish max throughput | Ramp QPS until 50% error rate |
-| **Latency vs. QPS** | Measure latency at different loads | QPS: 10, 50, 100, 200, 500 |
-| **Concurrency Scaling** | Router scaling under connections | Concurrency: 10, 100, 500, 1000 |
-| **Backend Count Impact** | Load balancing overhead | Backends: 1, 4, 16, 32 |
-| **Prompt Length Impact** | Cost of large request bodies | Prompt tokens: 100, 1000, 4000 |
-| **Long Response** | Streaming overhead for long outputs | Response tokens: 100, 1000, 4096 |
-| **Backend Latency Variance** | Behavior under slow/uneven backends | TTFT: 10ms → 500ms |
-| **Routing Strategy** | Compare routing algorithm overhead | round-robin vs. least-connection |
+The test strategy uses a **two-tier** approach: a lightweight **Smoke Test Suite** (the 8 scenarios from the original proposal) for quick validation, plus an **Orthogonal Condition Matrix** to systematically explore the full design space.
+
+#### Tier 1: Smoke Test Suite (Quick Validation)
+
+These 8 scenarios serve as the "fast path"—run them first to catch obvious regressions. They represent the most representative single-variable sweeps:
+
+| # | Scenario | What It Validates | Key Parameters |
+|---|----------|-------------------|---------------|
+| S1 | **Throughput Baseline** | Maximum sustainable throughput | Ramp QPS until 50% error rate; 4 homogeneous backends |
+| S2 | **Latency vs. QPS** | Router overhead under increasing load | QPS: 10, 50, 100, 200, 500; fixed TTFT=50ms, TPOT=15ms |
+| S3 | **Concurrency Scaling** | Connection pool behavior | Connections: 10, 100, 500, 1000; fixed QPS=100 |
+| S4 | **Backend Count Impact** | Scheduler scaling with pod count | Backends: 1, 4, 16, 32; homogeneous profiles |
+| S5 | **Prompt Length Impact** | Request body parsing cost | Prompt tokens: 100, 1000, 4000; fixed QPS=50 |
+| S6 | **Long Response** | SSE relay overhead for long streams | Response tokens: 100, 1000, 4096 |
+| S7 | **Backend Latency Variance** | Scheduler behavior under uneven backends | 3 pods: TTFT 10ms / 100ms / 500ms; measures if scheduler avoids slow pod |
+| S8 | **Routing Strategy Comparison** | Plugin overhead vs. routing quality | round-robin vs. least-latency vs. least-request |
+
+**Smoke test execution time target**: All 8 scenarios should complete within **15 minutes** on a kind cluster.
+
+#### Tier 2: Orthogonal Condition Matrix (Comprehensive Coverage)
+
+For deeper characterization, conditions from the User Traffic (left) and Backend Response (right) control planes are cross-combined:
+
+##### User Traffic Control Plane
+
+| Dimension | Values | Description |
+|-----------|--------|-------------|
+| **Schedule Mode** | `constant_rate`, `ramp_up`, `burst`, `timestamp_replay` | How requests are dispatched over time |
+| **QPS Level** | 10, 50, 100, 500, 1000 | Base request rate (when mode ≠ timestamp_replay) |
+| **Burstiness (γ)** | 0 (uniform), 0.5 (bursty), 1 (Poisson), 10 (smooth) | Gamma distribution shape parameter for inter-request gaps |
+| **Ramp Strategy** | none, linear, exponential | RPS growth pattern (start_rps → end_rps over scenario duration) |
+| **Prompt Distribution** | fixed(512), narrow(μ=512,σ=100), wide(μ=1000,σ=800), bimodal(100+4000) | Distribution of input token counts |
+| **Max-Token Distribution** | fixed(128), normal(μ=256,σ=100), long-tail(128+2048+4096) | Distribution of requested output lengths |
+| **Concurrent Connections** | 1, 10, 100, 500 | Persistent SSE connections per load generator instance |
+
+##### Backend Response Control Plane
+
+| Dimension | Values | Description |
+|-----------|--------|-------------|
+| **Pod Count** | 1, 3, 10, 30 | Number of mock backend replicas |
+| **TTFT Profile** | `homogeneous(50ms)`, `heterogeneous(10/100/500ms)`, `degrading(50→500ms ramp)` | Per-pod TTFT distribution |
+| **TPOT Profile** | `homogeneous(15ms)`, `heterogeneous(5/15/50ms)`, `high_variance(μ=20,σ=15)` | Per-pod TPOT distribution |
+| **Error Rate** | 0%, 1%, 5% | Fraction of requests returning 5xx errors |
+| **Pod Churn** | `static`, `crash_recover(1 pod)`, `scale_out(3→6)`, `scale_in(6→3)` | Pod lifecycle events during benchmark |
+| **Metrics Update Interval** | 1s, 5s, 10s | Backend /metrics scrape frequency → affects scheduler decision freshness |
+| **Engine Type** | `vllm`, `sglang`, `mixed(2 vllm + 2 sglang)` | Prometheus metric format on /metrics endpoint |
+
+##### High-Value Combinations (Priority Matrix)
+
+Not all cross-combinations are equally valuable. The following matrix identifies the **highest-priority intersections**—conditions where Router-specific behavior is most likely to diverge from baseline:
+
+|  | User Traffic →<br>Backend ↓ | Low QPS<br>Uniform | High QPS<br>Burst | High QPS<br>Ramp | Multi-tenant<br>Bimodal |
+|---|---|---|---|---|---|
+| **Homogeneous<br>Backends** | ✅ S1+S2 | ✅ S2+S3 | 🔶 P1.1 | 🔶 P1.2 |
+| **Heterogeneous<br>Backends** | ✅ S7 | 🔴 P0.1 | 🔴 P0.2 | 🔶 P1.3 |
+| **Pod Churn<br>(crash/scale)** | 🔶 P1.4 | 🔴 P0.3 | 🔶 P1.5 | — |
+| **Slow Metrics<br>Update** | — | 🔴 P0.4 | 🔶 P1.6 | — |
+| **High Error Rate** | ✅ S1 | 🔶 P1.7 | 🔶 P1.8 | 🔶 P1.9 |
+| **Engine Mix<br>(vllm+sglang)** | 🔶 P1.10 | 🔴 P0.5 | — | 🔶 P1.11 |
+
+> **Legend**: ✅ = covered by Smoke Test Suite | 🔴 P0 = must-test (directly exposes Router weakness) | 🔶 P1 = should-test (valuable characterization) | — = low value
+
+**P0 scenarios rationale** (each exposes a specific, Router-unique failure mode):
+
+| ID | User Traffic | Backend | Risk Exposed |
+|----|-------------|---------|-------------|
+| **P0.1** | High QPS (500) + Burst (γ=0.5) | 3 pods: TTFT 10/100/500ms | Scheduler saturation—can it still avoid the 500ms pod under burst? |
+| **P0.2** | High QPS (500) + Ramp (10→500) | 3 pods: TTFT 10/100/500ms | Scheduler adaptation—does it discover the slow pod quickly enough during ramp? |
+| **P0.3** | Burst traffic | 1 of 4 pods crashes mid-benchmark | Failover latency—are in-flight streaming requests dropped? How fast is reconnection? |
+| **P0.4** | High QPS | metrics interval=10s, degrading TTFT (50→500ms) | Stale metrics—does scheduler route to a newly-degraded pod based on 10s-old data? |
+| **P0.5** | Burst traffic | 2 vLLM + 2 SGLang pods, heterogeneous TTFT | Cross-engine scheduling—can least-latency correctly compare metrics from different engines? |
+| **P1.1** | Ramp 10→500 QPS | 4 homogeneous pods | Identifies the QPS level at which Router overhead becomes the bottleneck |
+| **P1.2** | Bimodal prompts (100+4000) | 4 homogeneous pods | Cost of large request body parsing on the hot path |
+| **P1.3** | Bimodal prompts | 3 heterogeneous pods | Does prompt length correlate with pod selection quality? |
+| **P1.4** | Uniform, low QPS | 1 pod crashes + recovers | Baseline failover behavior in isolation |
+| **P1.5** | Ramp traffic | Scale-out 3→6 pods | New pod discovery latency and initial routing accuracy |
+| **P1.6** | Ramp traffic | metrics interval=5s | Quantifies scheduler staleness penalty at moderate load |
+| **P1.7** | Burst | error_rate=5% | Error propagation—does Router correctly surface backend errors vs. masking them? |
+| **P1.8** | Ramp | error_rate=5% | Error rate at the boundary where throughput collapses |
+| **P1.9** | Bimodal | error_rate=5% | Do long-prompt requests fail differently than short ones? |
+| **P1.10** | Uniform, low QPS | 2 vLLM + 2 SGLang, homogeneous | Baseline cross-engine routing correctness |
+| **P1.11** | Bimodal | 2 vLLM + 2 SGLang, heterogeneous | Worst-case metrics normalization across engine types |
+
+This matrix is not meant to be run in its entirety—that would be a combinatorial explosion. Instead, the **smoke tests** give fast feedback in CI, while **selected P0/P1 combinations** are run as periodic characterization jobs or on-demand when investigating specific Router behaviors.
 
 ### CI Integration
 
@@ -252,7 +412,7 @@ benchmark:
 Key CI design decisions:
 - Use **kind** (Kubernetes in Docker) for zero-cost ephemeral clusters
 - Store baseline results as version-controlled JSON files in `benchmarks/baselines/`
-- Fail the CI check when regression exceeds thresholds: >10% P95 latency increase or >10% max throughput decrease
+- Fail the CI check when regression exceeds thresholds: >5% P95 latency increase or >10% max throughput decrease
 - PR authors can update baselines by running the benchmark locally and committing the new JSON
 
 ### Optimization Strategy
@@ -273,7 +433,7 @@ The optimization phase follows a structured approach to prevent scope creep:
 | Lock contention | Global mutex on backend selection | Per-backend atomic counters or lock-free data structures |
 | Connection pool | Default HTTP transport not tuned for LLM workloads | Tune `MaxIdleConnsPerHost`, idle timeout, disable HTTP/2 coalescing for backend connections |
 | Serialization | Per-request JSON marshal/unmarshal in proxy path | Avoid re-serializing unchanged fields; use `json.RawMessage` pass-through |
-| Goroutine | Unbounded goroutine creation for streaming connections | Introduce bounded worker pools for SSE relay |
+| Goroutine | Unbounded goroutine creation for streaming connections | Introduce semaphores or connection limits for SSE relay |
 
 **Fallback clause:** If profiling reveals no hotspots exceeding a 5% CPU/memory impact threshold, the optimization deliverable is replaced with:
 - A performance characterization report documenting the Router's existing efficiency
@@ -295,11 +455,12 @@ The optimization phase follows a structured approach to prevent scope creep:
 
 ### Phase 2: Scenarios & CI (Weeks 5-6)
 
-- Create all 8 pre-built benchmark scenario YAML files
-- Integrate with GitHub Actions (kind cluster setup + benchmark execution + baseline comparison)
+- Create all 8 smoke test YAML files for quick CI validation
+- Create P0 priority matrix YAML files (5 scenarios exposing Router-unique failure modes)
+- Integrate with GitHub Actions: kind cluster setup → smoke test suite (every PR) → P0 periodic jobs (daily)
 - Establish initial baseline results committed to the repository
 - Write the runbook documenting the full test procedure
-- Deliverable: CI pipeline runs benchmark suite on every PR to the Router
+- Deliverable: CI pipeline runs smoke test suite on every PR; P0 matrix runs nightly
 
 ### Phase 3: Benchmark Report (Weeks 7-8)
 
@@ -340,9 +501,12 @@ The optimization phase follows a structured approach to prevent scope creep:
 ## Open Questions
 
 1. **Baseline storage strategy**: Should baseline results be stored as JSON files in the repo (simpler, but bloats repo size over time), or fetched from a GitHub Release artifact (cleaner, but more complex CI setup)?
-2. **Multi-Router-instance benchmarks**: Should Phase 2 include scenarios with horizontally scaled Router instances behind a load balancer? This would measure the effectiveness of Router statelessness but adds significant CI complexity.
-3. **Real-backend validation**: After the LFX term, should the framework add an optional "real backend" mode using vLLM/SGLang for validation that mock backend results correlate with real-world performance?
-4. **Threshold tuning**: What regression thresholds should trigger CI failure? The initial proposal of >10% P95 latency or >10% max throughput needs community input based on production SLOs.
+2. **Mock backend implementation**: Should the mock backend be built from scratch (full control, but more effort) or by extending the existing Dynamo Mocker used in kthena E2E tests (less effort, but limited to Dynamo Mocker's extension points)? The latter provides an existing `/v1/chat/completions` endpoint and `/metrics` emission—only latency configurability needs to be added.
+3. **Orthogonal matrix execution model**: The P0/P1 matrix contains ~20 high-value combinations. Should these be run as (a) a single nightly CI job, (b) on-demand manual triggers, or (c) a subset (e.g., 5 P0 scenarios) in CI + the rest on-demand?
+4. **Multi-Router-instance benchmarks**: Should Phase 2 include scenarios with horizontally scaled Router instances behind a load balancer? This would measure the effectiveness of Router statelessness but adds significant CI complexity.
+5. **Real-backend validation**: After the LFX term, should the framework add an optional "real backend" mode using vLLM/SGLang for validation that mock backend results correlate with real-world performance?
+6. **Threshold tuning**: What regression thresholds should trigger CI failure? The initial proposal of >10% P95 latency or >10% max throughput needs community input based on production SLOs.
+7. **Traffic replay integration**: Should Phase 2 include a "trace replay" mode that captures and replays real kthena deployment traffic (via httptape or GoReplay) as an alternative to hand-crafted traffic patterns?
 
 ## References
 
@@ -352,3 +516,9 @@ The optimization phase follows a structured approach to prevent scope creep:
 - sglang bench_serving: https://github.com/sgl-project/sglang/blob/main/python/sglang/bench_serving.py
 - Go pprof Documentation: https://pkg.go.dev/net/http/pprof
 - LFX Mentorship 2026 Term 2: https://github.com/cncf/mentoring/blob/main/programs/lfx-mentorship/2026/02-Jun-Aug/README.md
+- **AISBench benchmark framework**: https://github.com/AISBench/benchmark — Reference for traffic pattern design (burstiness via Gamma distribution, ramp-up profiles, timestamp-based trace replay) and orthogonal condition decomposition
+- **Dynamo Mocker**: https://github.com/FAUST-BENCHOU/dynamo/tree/main/examples/backends/mocker — Existing mock backend for vLLM/SGLang used in kthena E2E tests (PR #920). Provides OpenAI-compatible `/v1/chat/completions` and `/metrics` endpoints. The proposed mock backend extends this with configurable latency profiles, token-level streaming control, and cross-engine metrics simulation
+- **AISBench Mooncake Trace**: https://github.com/AISBench/benchmark/blob/master/ais_bench/benchmark/configs/datasets/mooncake_trace/README.md — Deterministic prompt generation with hash_id caching and timestamp-based request scheduling for reproducible benchmarks
+- **Real-world LLM workload characterization**: "Towards Efficient and Reliable LLM Serving: A Real-World Workload Study" (arXiv:2401.17644) — First public dataset of production LLM serving traces, documenting burstiness patterns and request distributions
+- vLLM Benchmarking Guide: https://docs.vllm.ai/en/stable/benchmarking/
+- GuideLLM: https://github.com/vllm-project/guidellm — vLLM project's official benchmark tool with multi-profile testing
