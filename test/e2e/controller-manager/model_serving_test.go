@@ -18,8 +18,10 @@ package controller_manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
@@ -860,20 +863,23 @@ func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kuber
 	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
 }
 
-// patchPodDeletionCost sets corev1.PodDeletionCost with retries to tolerate concurrent Pod updates (resourceVersion conflicts).
-func patchPodDeletionCost(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, podName, cost string) {
+// patchPodDeletionCost sets corev1.PodDeletionCost with retries.
+// Patch is used instead of Update to reduce resourceVersion contention with concurrent Pod updates.
+func patchPodDeletionCost(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, podName string, cost int) {
 	t.Helper()
+	costStr := strconv.Itoa(cost)
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]string{
+				corev1.PodDeletionCost: costStr,
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	require.NoError(t, err, "Failed to marshal patch for pod %s", podName)
+
 	require.Eventually(t, func() bool {
-		cur, err := kubeClient.CoreV1().Pods(testNamespace).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		upd := cur.DeepCopy()
-		if upd.Annotations == nil {
-			upd.Annotations = make(map[string]string)
-		}
-		upd.Annotations[corev1.PodDeletionCost] = cost
-		_, err = kubeClient.CoreV1().Pods(testNamespace).Update(ctx, upd, metav1.UpdateOptions{})
+		_, err = kubeClient.CoreV1().Pods(testNamespace).Patch(ctx, podName, types.MergePatchType, patchBytes, metav1.PatchOptions{})
 		return err == nil
 	}, 90*time.Second, time.Second, "set PodDeletionCost on pod %s", podName)
 }
@@ -2108,7 +2114,7 @@ func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 			maxOrdinal = ordinal
 		}
 
-		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, fmt.Sprintf("%d", cost))
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, cost)
 	}
 
 	scaleDownMS := initialMS.DeepCopy()
@@ -2171,7 +2177,7 @@ func TestModelServingBinPackScaleDownRole(t *testing.T) {
 			maxRoleOrdinal = roleOrdinal
 		}
 
-		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, fmt.Sprintf("%d", roleOrdinal*100))
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, roleOrdinal*100)
 	}
 
 	scaleDownMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -2242,7 +2248,7 @@ func TestModelServingBinPackScaleDownCombined(t *testing.T) {
 
 		deletionCost := int(ordinal)*100 + roleOrdinal*10
 
-		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, fmt.Sprintf("%d", deletionCost))
+		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, deletionCost)
 	}
 
 	scaleDownMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
