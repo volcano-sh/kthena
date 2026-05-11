@@ -1,0 +1,36 @@
+# Description: Template for DeepSeek R1 Distill Qwen 32B model deployment with vLLM backend
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  annotations:
+    api.kubernetes.io/name: {{ .Values.annotationName | default "example" | quote }}
+  name: {{ .Values.name | default "deepseek-r1-distill-qwen-32b" | quote }}
+  {{- if .Values.namespace }}
+  namespace: {{ .Values.namespace | quote }}
+  {{- end }}
+spec:
+  name: {{ .Values.modelName | default .Values.name | default "deepseek-r1-distill-qwen-32b" | quote }}
+  owner: {{ .Values.owner | default "example" | quote }}
+  backend:
+    name: {{ .Values.backendName | default "deepseek-r1-distill-qwen-32b-vllm" | quote }}
+    type: {{ .Values.backendType | default "vLLM" | quote }}
+    modelURI: {{ .Values.modelURI | default "hf://deepseek-ai/DeepSeek-R1-Distill-Qwen-32B" | quote }}
+    cacheURI: {{ .Values.cacheURI | default "hostpath://mnt/cache" | quote }}
+    minReplicas: {{ .Values.minReplicas | default 1 }}
+    maxReplicas: {{ .Values.maxReplicas | default 3 }}
+    workers:
+      - type: {{ .Values.workerType | default "server" | quote }}
+        image: {{ .Values.workerImage | default "vllm/vllm-openai:latest" | quote }}
+        replicas: {{ .Values.workerReplicas | default 1 }}
+        pods: {{ .Values.workerPods | default 1 }}
+        config:
+          served-model-name: {{ .Values.modelName | default .Values.name | default "deepseek-r1-distill-qwen-32b" | quote }}
+          tensor-parallel-size: {{ .Values.tensorParallelSize | default 4 }}
+          enforce-eager: ""  # Enable PyTorch eager mode if GPU compute capability is below 8.0
+          gpu-memory-utilization: {{ .Values.gpuMemoryUtilization | default "0.85" }}  # Set GPU memory utilization to 85%
+          max-model-len: {{ .Values.maxModelLen | default "2048" }}
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.gpuLimit | default "4" | quote }}
+          requests:
+            nvidia.com/gpu: {{ .Values.gpuRequest | default "4" | quote }}
