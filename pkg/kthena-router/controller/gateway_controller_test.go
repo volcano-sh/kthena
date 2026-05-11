@@ -61,6 +61,8 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 	gatewayInformerFactory.Start(stop)
 
 	t.Run("GatewayCreate", func(t *testing.T) {
+		// Verifies that creating a kthena-router Gateway appears in the
+		// informer cache and gets synced into the datastore
 		gw := newTestGateway("test-gateway", "default", DefaultGatewayClassName)
 
 		_, err := gatewayClient.GatewayV1().Gateways("default").Create(
@@ -86,6 +88,8 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 	})
 
 	t.Run("GatewayUpdate", func(t *testing.T) {
+		// Verifies that updating a Gateway spec is reflected in the
+		// informer cache and datastore after syncHandler is called
 		existing, err := gatewayClient.GatewayV1().Gateways("default").Get(
 			context.Background(), "test-gateway", metav1.GetOptions{})
 		assert.NoError(t, err)
@@ -112,14 +116,17 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 	})
 
 	t.Run("GatewayDelete", func(t *testing.T) {
+		// Verifies that deleting a Gateway removes it from the informer
+		// cache and the datastore after syncHandler is called.
 		err := gatewayClient.GatewayV1().Gateways("default").Delete(
 			context.Background(), "test-gateway", metav1.DeleteOptions{})
 		assert.NoError(t, err)
 
-		waitForObjectInCache(t, 2*time.Second, func() bool {
+		found := waitForObjectInCache(t, 2*time.Second, func() bool {
 			_, err := controller.gatewayLister.Gateways("default").Get("test-gateway")
 			return err != nil
 		})
+		assert.True(t, found, "Gateway should be removed from cache")
 
 		err = controller.syncHandler("default/test-gateway")
 		assert.NoError(t, err)
@@ -145,7 +152,9 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 	}
 
 	t.Run("NonKthenaGatewayNotStored", func(t *testing.T) {
-		// we will first drain the workqueuee here
+		// Verifies that the FilteringResourceEventHandler only enqueues Gateways
+		// with DefaultGatewayClassName. A Gateway with a different class should
+		// not appear in the workqueue after the informer processes it.
 		for controller.workqueue.Len() > 0 {
 			controller.processNextWorkItem()
 		}
@@ -155,7 +164,7 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 			context.Background(), gw, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
-		// wait and verify the non-kthena gateway was not enqueued
+		// Wait for informer to process the event, then check workqueue is empty.
 		time.Sleep(100 * time.Millisecond)
 		assert.Equal(t, 0, controller.workqueue.Len(),
 			"Non-kthena gateway should not be enqueued by the filter")
@@ -177,11 +186,13 @@ func TestGatewayController_ErrorHandling(t *testing.T) {
 	gatewayInformerFactory.Start(stop)
 
 	t.Run("InvalidKey", func(t *testing.T) {
+		// Verifies that a malformed key is handled gracefully without error.
 		err := controller.syncHandler("invalid/key/format")
 		assert.NoError(t, err)
 	})
 
 	t.Run("NonExistentGateway", func(t *testing.T) {
+		// Verifies that syncing a non-existent key is a no-op without error.
 		err := controller.syncHandler("default/non-existent")
 		assert.NoError(t, err)
 	})
@@ -199,6 +210,8 @@ func TestGatewayController_WorkQueueProcessing(t *testing.T) {
 	gatewayInformerFactory.Start(stop)
 
 	t.Run("InitialSyncSignal", func(t *testing.T) {
+		// Verifies that the initialSyncSignal sentinel marks the controller
+		// as synced via HasSynced().
 		assert.False(t, controller.HasSynced())
 		controller.workqueue.Add(initialSyncSignal)
 		controller.processNextWorkItem()
@@ -206,6 +219,8 @@ func TestGatewayController_WorkQueueProcessing(t *testing.T) {
 	})
 
 	t.Run("UnknownResourceType", func(t *testing.T) {
+		// Verifies that an unexpected workqueue item type is dropped
+		// without crashing the worker.
 		controller.workqueue.Add(12345)
 		result := controller.processNextWorkItem()
 		assert.True(t, result)
