@@ -165,8 +165,11 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Wait for informer to process the event, then check workqueue is empty.
-		time.Sleep(100 * time.Millisecond)
-		assert.Equal(t, 0, controller.workqueue.Len(),
+		// Poll with a timeout instead of sleeping to deterministically verify
+		// the non-kthena gateway is never enqueued.
+		assert.Eventually(t, func() bool {
+			return controller.workqueue.Len() == 0
+		}, 1*time.Second, 10*time.Millisecond,
 			"Non-kthena gateway should not be enqueued by the filter")
 
 		stored := store.GetGateway("default/other-gateway")
