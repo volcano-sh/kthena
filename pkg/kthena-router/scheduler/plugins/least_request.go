@@ -42,7 +42,7 @@ type LeastRequestArgs struct {
 
 func NewLeastRequest(pluginArg runtime.RawExtension) *LeastRequest {
 	var leastRequestArgs LeastRequestArgs
-	if yaml.Unmarshal(pluginArg.Raw, &leastRequestArgs) != nil {
+	if pluginArg.Raw == nil || yaml.Unmarshal(pluginArg.Raw, &leastRequestArgs) != nil {
 		klog.Errorf("Unmarshal LeastRequestArgs error, setting default value")
 		leastRequestArgs = LeastRequestArgs{
 			10,
