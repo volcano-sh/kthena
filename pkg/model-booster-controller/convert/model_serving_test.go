@@ -105,11 +105,53 @@ func TestGetCachePath(t *testing.T) {
 	}
 }
 
+func TestGetPVCClaimName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal pvc URI",
+			input:    "pvc://my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "extra leading slashes",
+			input:    "pvc:///my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "trailing slash",
+			input:    "pvc://my-pvc/",
+			expected: "my-pvc",
+		},
+		{
+			name:     "multiple surrounding slashes",
+			input:    "pvc:////my-pvc////",
+			expected: "my-pvc",
+		},
+		{
+			name:     "empty",
+			input:    "",
+			expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetPVCClaimName(tt.input); got != tt.expected {
+				t.Errorf("GetPVCClaimName() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestCreateModelServingResources(t *testing.T) {
 	tests := []struct {
 		name         string
 		input        *workload.ModelBooster
 		expected     *workload.ModelServing
+		checkFn      func(*testing.T, *workload.ModelServing)
 		expectErrMsg string
 	}{
 		{
@@ -127,6 +169,40 @@ func TestCreateModelServingResources(t *testing.T) {
 			input:    loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-mooncake.yaml"),
 			expected: loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving-mooncake.yaml"),
 		},
+		{
+			name:  "vLLM with runtimeClassName",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model-with-runtimeclass.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Equal(t, ptr.To("nvidia"), role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have runtimeClassName", role.Name)
+					if role.WorkerReplicas > 0 {
+						assert.Equal(t, ptr.To("nvidia"), role.WorkerTemplate.Spec.RuntimeClassName,
+							"role %s workerTemplate should have runtimeClassName", role.Name)
+					}
+				}
+			},
+		},
+		{
+			name:  "PD disaggregated with runtimeClassName",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-with-runtimeclass.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Equal(t, ptr.To("nvidia"), role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have runtimeClassName", role.Name)
+				}
+			},
+		},
+		{
+			name:  "vLLM without runtimeClassName is nil",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Nil(t, role.EntryTemplate.Spec.RuntimeClassName,
+						"role %s entryTemplate should have nil runtimeClassName", role.Name)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,6 +212,10 @@ func TestCreateModelServingResources(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+			if tt.checkFn != nil {
+				tt.checkFn(t, got)
+				return
+			}
 			diff := cmp.Diff(tt.expected, got)
 			if diff != "" {
 				t.Errorf("ModelServing mismatch (-expected +actual):\n%s", diff)
@@ -226,7 +306,22 @@ func TestBuildCacheVolume(t *testing.T) {
 				Name: "test-backend-weights",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "/test-pvc",
+						ClaimName: "test-pvc",
+					},
+				},
+			},
+		},
+		{
+			name: "PVC URI with extra slashes",
+			input: &workload.ModelBackend{
+				Name:     "test-backend",
+				CacheURI: "pvc:///test-pvc",
+			},
+			expected: &corev1.Volume{
+				Name: "test-backend-weights",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "test-pvc",
 					},
 				},
 			},

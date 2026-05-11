@@ -22,6 +22,7 @@ spec:
         entryTemplate:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
             initContainers: ${INIT_CONTAINERS}
             terminationGracePeriodSeconds: 300
             volumes: ${VOLUMES}
@@ -89,6 +90,7 @@ spec:
         workerTemplate:
           metadata: ${SERVER_WORKER_TEMPLATE_METADATA}
           spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
             volumes: ${VOLUMES}
             initContainers: ${INIT_CONTAINERS}
             containers:

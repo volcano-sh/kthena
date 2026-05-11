@@ -48,11 +48,7 @@ const ConnectorTypeSGLang v1alpha1.KVConnectorType = "sglang"
 //
 //	https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler.py
 type SGLangConnector struct {
-	prefillRequest  *http.Request
-	decodeRequest   *http.Request
-	bootstrapRoom   int64
-	lastPrefillAddr string
-	lastDecodeAddr  string
+	bootstrapRoom int64
 }
 
 // NewSGLangConnector creates a new SGLang connector with a unique bootstrap room id.
@@ -105,30 +101,28 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	// Build the decode request first (before preparePrefillBody mutates reqBody).
 	// bootstrap_host = prefillHost so the decode receiver can find the prefill's
 	// bootstrap server and exchange ZMQ metadata.
-	if s.decodeRequest == nil || s.lastDecodeAddr != decodeAddr || s.lastPrefillAddr != prefillAddr {
-		decodeBody := cloneReqBody(reqBody)
-		decodeBody = addTokenUsage(c, decodeBody)
-		decodeBody["bootstrap_room"] = s.bootstrapRoom
-		decodeBody["bootstrap_host"] = prefillHost
-		s.decodeRequest, err = buildRequest(c.Request, decodeBody)
-		if err != nil {
-			return http.StatusInternalServerError, err
-		}
-		s.lastDecodeAddr = decodeAddr
+	//
+	// Both requests are rebuilt on every Proxy call: the request body is a
+	// one-shot bytes.Buffer wrapped in io.NopCloser, so it cannot be retried
+	// against a different upstream pod by the router's PD retry loop.
+	decodeBody := cloneReqBody(reqBody)
+	decodeBody = addTokenUsage(c, decodeBody)
+	decodeBody["bootstrap_room"] = s.bootstrapRoom
+	decodeBody["bootstrap_host"] = prefillHost
+	decodeRequest, err := buildRequest(c.Request, decodeBody)
+	if err != nil {
+		return http.StatusInternalServerError, err
 	}
 
 	// Build the prefill request: strip streaming, cap max_tokens, add bootstrap_room.
 	// The prefill sender uses bootstrap_room to track the ZMQ metadata sent by the
 	// decode receiver; it does not need bootstrap_host.
-	if s.prefillRequest == nil || s.lastPrefillAddr != prefillAddr {
-		prefillBody := cloneReqBody(reqBody)
-		preparePrefillBody(prefillBody)
-		prefillBody["bootstrap_room"] = s.bootstrapRoom
-		s.prefillRequest, err = buildRequest(req, prefillBody)
-		if err != nil {
-			return http.StatusInternalServerError, err
-		}
-		s.lastPrefillAddr = prefillAddr
+	prefillBody := cloneReqBody(reqBody)
+	preparePrefillBody(prefillBody)
+	prefillBody["bootstrap_room"] = s.bootstrapRoom
+	prefillRequest, err := buildRequest(req, prefillBody)
+	if err != nil {
+		return http.StatusInternalServerError, err
 	}
 
 	// --- Launch prefill and decode concurrently ---
@@ -153,13 +147,13 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 
 	go func() {
 		prefillCh <- prefillOutcome{
-			err: s.prefill(s.prefillRequest.WithContext(prefillCtx), prefillAddr),
+			err: s.prefill(prefillRequest.WithContext(prefillCtx), prefillAddr),
 		}
 	}()
 
 	// Run decode in the current goroutine so that streaming writes reach the
 	// gin.Context from the request-handling goroutine.
-	result, decodeErr := s.decode(c, s.decodeRequest, decodeAddr)
+	result, decodeErr := s.decode(c, decodeRequest, decodeAddr)
 
 	if decodeErr != nil {
 		// Decode failed: cancel the prefill context so the prefill goroutine is

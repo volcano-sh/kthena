@@ -87,6 +87,27 @@ This will display the autoscaling policy configuration and rules.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDescribeAutoscalingPolicy,
 }
+var describeModelRouteCmd = &cobra.Command{
+	Use:     "model-route [NAME]",
+	Aliases: []string{"mroute"},
+	Short:   "Show detailed information about a model route",
+	Long: `Show detailed information about a specific ModelRoute resource in the cluster.
+
+This will display the model route configuration including rules, target models, and rate limits.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runDescribeModelRoute,
+}
+
+var describeModelServerCmd = &cobra.Command{
+	Use:     "model-server [NAME]",
+	Aliases: []string{"mserver"},
+	Short:   "Show detailed information about a model server",
+	Long: `Show detailed information about a specific ModelServer resource in the cluster.
+
+This will display the model server configuration including inference engine, workload selector, and traffic policy.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runDescribeModelServer,
+}
 
 func init() {
 	rootCmd.AddCommand(describeCmd)
@@ -94,6 +115,8 @@ func init() {
 	describeCmd.AddCommand(describeModelBoosterCmd)
 	describeCmd.AddCommand(describeModelServingCmd)
 	describeCmd.AddCommand(describeAutoscalingPolicyCmd)
+	describeCmd.AddCommand(describeModelRouteCmd)
+	describeCmd.AddCommand(describeModelServerCmd)
 
 	// Add namespace flags
 	describeCmd.PersistentFlags().StringVarP(&getNamespace, "namespace", "n", "", "Kubernetes namespace (default: current context namespace)")
@@ -225,6 +248,79 @@ func runDescribeAutoscalingPolicy(cmd *cobra.Command, args []string) error {
 	data, err := yaml.Marshal(policy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal AutoscalingPolicy to YAML: %v", err)
+	}
+
+	fmt.Println("Resource Details:")
+	fmt.Println("=================")
+	fmt.Print(string(data))
+
+	return nil
+}
+func runDescribeModelRoute(cmd *cobra.Command, args []string) error {
+	routeName := args[0]
+
+	client, err := getKthenaClient()
+	if err != nil {
+		return err
+	}
+
+	namespace := getNamespace
+	if namespace == "" {
+		namespace = "default"
+	}
+	ctx := context.Background()
+
+	route, err := client.NetworkingV1alpha1().ModelRoutes(namespace).Get(ctx, routeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get ModelRoute '%s': %v", routeName, err)
+	}
+
+	fmt.Printf("ModelRoute: %s\n", route.Name)
+	fmt.Println("================")
+	fmt.Printf("Namespace: %s\n", route.Namespace)
+	fmt.Printf("Created: %s\n", route.CreationTimestamp.Time.Format(time.RFC3339))
+	fmt.Printf("Age: %s\n\n", time.Since(route.CreationTimestamp.Time).Truncate(time.Second))
+
+	data, err := yaml.Marshal(route)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ModelRoute to YAML: %v", err)
+	}
+
+	fmt.Println("Resource Details:")
+	fmt.Println("=================")
+	fmt.Print(string(data))
+
+	return nil
+}
+
+func runDescribeModelServer(cmd *cobra.Command, args []string) error {
+	serverName := args[0]
+
+	client, err := getKthenaClient()
+	if err != nil {
+		return err
+	}
+
+	namespace := getNamespace
+	if namespace == "" {
+		namespace = "default"
+	}
+	ctx := context.Background()
+
+	server, err := client.NetworkingV1alpha1().ModelServers(namespace).Get(ctx, serverName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get ModelServer '%s': %v", serverName, err)
+	}
+
+	fmt.Printf("ModelServer: %s\n", server.Name)
+	fmt.Println("================")
+	fmt.Printf("Namespace: %s\n", server.Namespace)
+	fmt.Printf("Created: %s\n", server.CreationTimestamp.Time.Format(time.RFC3339))
+	fmt.Printf("Age: %s\n\n", time.Since(server.CreationTimestamp.Time).Truncate(time.Second))
+
+	data, err := yaml.Marshal(server)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ModelServer to YAML: %v", err)
 	}
 
 	fmt.Println("Resource Details:")
