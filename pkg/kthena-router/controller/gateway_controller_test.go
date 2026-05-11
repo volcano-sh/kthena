@@ -164,12 +164,15 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 			context.Background(), gw, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
-		// Wait for informer to process the event, then check workqueue is empty.
-		// Poll with a timeout instead of sleeping to deterministically verify
-		// the non-kthena gateway is never enqueued.
-		assert.Eventually(t, func() bool {
-			return controller.workqueue.Len() == 0
-		}, 1*time.Second, 10*time.Millisecond,
+		// Wait for the Gateway to appear in the informer cache first,
+		// then verify it is never enqueued.
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.gatewayLister.Gateways("default").Get("other-gateway")
+			return err == nil
+		})
+		assert.Never(t, func() bool {
+			return controller.workqueue.Len() > 0
+		}, 500*time.Millisecond, 10*time.Millisecond,
 			"Non-kthena gateway should not be enqueued by the filter")
 
 		stored := store.GetGateway("default/other-gateway")

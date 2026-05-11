@@ -93,7 +93,14 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 		assert.NoError(t, err)
 
 		updated := existing.DeepCopy()
-		updated.Spec.ModelName = "updated-model"
+		updated.Spec.Rules = []*aiv1alpha1.Rule{
+			{
+				Name: "rule-updated",
+				TargetModels: []*aiv1alpha1.TargetModel{
+					{ModelServerName: "updated-server"},
+				},
+			},
+		}
 
 		_, err = kthenaClient.NetworkingV1alpha1().ModelRoutes("default").Update(
 			context.Background(), updated, metav1.UpdateOptions{})
@@ -110,7 +117,7 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 
 		storedRoute := store.GetModelRoute("default/test-modelroute")
 		assert.NotNil(t, storedRoute)
-		assert.Equal(t, "updated-model", storedRoute.Spec.ModelName)
+		assert.Equal(t, "updated-server", storedRoute.Spec.Rules[0].TargetModels[0].ModelServerName)
 	})
 
 	// verifies that deleting a ModelRoute removes it from the informer
