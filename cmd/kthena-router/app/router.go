@@ -523,7 +523,9 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 				}
 				portInfo.mu.Unlock()
 				if gw := lm.store.GetGateway(config.GatewayKey); gw != nil {
-					lm.store.AddOrUpdateGateway(gw)
+					if err := lm.store.AddOrUpdateGateway(gw); err != nil {
+						klog.Errorf("Failed to update gateway %s: %v", config.GatewayKey, err)
+					}
 				}
 			},
 		})
@@ -533,6 +535,13 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		go func(gwKey, listenerName string, p int32, pi *PortListenerInfo) {
 			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
+				// Check for shutdown
+				select {
+				case <-lm.ctx.Done():
+					return
+				default:
+				}
+
 				time.Sleep(100 * time.Millisecond)
 
 				// If logListenErr already fired then stop (error is already in store)
@@ -551,7 +560,9 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 					lm.store.SetListenerStatus(gwKey, listenerName, nil)
 					// Trigger gateway re-reconcile so controller writes Programmed=True
 					if gw := lm.store.GetGateway(gwKey); gw != nil {
-						lm.store.AddOrUpdateGateway(gw)
+						if err := lm.store.AddOrUpdateGateway(gw); err != nil {
+							klog.Errorf("Failed to update gateway %s: %v", gwKey, err)
+						}
 					}
 					return
 				}
@@ -564,7 +575,9 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 				timeoutErr := fmt.Errorf("timeout waiting for port %d to become ready", p)
 				lm.store.SetListenerStatus(gwKey, listenerName, timeoutErr)
 				if gw := lm.store.GetGateway(gwKey); gw != nil {
-					lm.store.AddOrUpdateGateway(gw)
+					if err := lm.store.AddOrUpdateGateway(gw); err != nil {
+						klog.Errorf("Failed to update gateway %s: %v", gwKey, err)
+					}
 				}
 			}
 		}(config.GatewayKey, config.ListenerName, port, portInfo)

@@ -168,7 +168,7 @@ func (c *GatewayController) syncHandler(key string) error {
 
 	// Update Gateway status
 	if err := c.updateGatewayStatus(gateway); err != nil {
-		klog.Errorf("failed to update status for gateway %s: %v", key, err)
+		return err
 	}
 
 	return nil
@@ -197,23 +197,37 @@ func (c *GatewayController) updateGatewayStatus(gateway *gatewayv1.Gateway) erro
 		Message:            acceptedMessage,
 	})
 
-	allProgrammed := true
-	programmedMessage := "Gateway has been programmed by kthena-router"
-	for _, listener := range gw.Spec.Listeners {
-		if !isSupportedProtocol(listener.Protocol) {
-			allProgrammed = false
+	// Programmed is False if not accepted, or if any listener is unhealthy
+	programmedStatus := metav1.ConditionFalse
+	programmedReason := string(gatewayv1.GatewayReasonPending)
+	programmedMessage := "Waiting for Gateway to be accepted"
 
-			programmedMessage = fmt.Sprintf("Listener %q uses unsupported protocol %s", listener.Name, listener.Protocol)
-			break
+	if accepted {
+		allProgrammed := true
+		programmedMessage = "Gateway has been programmed by kthena-router"
+
+		for _, listener := range gw.Spec.Listeners {
+			listenerErr := c.store.GetListenerStatus(gatewayKey, string(listener.Name))
+			if listenerErr != nil {
+				allProgrammed = false
+				programmedMessage = fmt.Sprintf("Listener %q failed: %v", listener.Name, listenerErr)
+				break
+			}
+			if !isSupportedProtocol(listener.Protocol) {
+				allProgrammed = false
+				programmedMessage = fmt.Sprintf("Listener %q uses unsupported protocol %s", listener.Name, listener.Protocol)
+				break
+			}
+		}
+
+		if allProgrammed {
+			programmedStatus = metav1.ConditionTrue
+			programmedReason = string(gatewayv1.GatewayReasonProgrammed)
+		} else {
+			programmedReason = "Invalid"
 		}
 	}
 
-	programmedStatus := metav1.ConditionFalse
-	programmedReason := "Invalid"
-	if allProgrammed {
-		programmedStatus = metav1.ConditionTrue
-		programmedReason = string(gatewayv1.GatewayReasonProgrammed)
-	}
 	setGatewayCondition(gw, metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
 		Status:             programmedStatus,
@@ -223,8 +237,10 @@ func (c *GatewayController) updateGatewayStatus(gateway *gatewayv1.Gateway) erro
 		Message:            programmedMessage,
 	})
 
+	// Per-listener status — use actual health from store
 	for _, listener := range gw.Spec.Listeners {
-		acceptedCond, programmedCond := getGatewayListenerConditions(listener.Protocol, nil, gw.Generation)
+		listenerErr := c.store.GetListenerStatus(gatewayKey, string(listener.Name))
+		acceptedCond, programmedCond := getGatewayListenerConditions(listener.Protocol, listenerErr, gw.Generation)
 		setGatewayListenerStatus(gw, listener.Name, listener.Protocol, []metav1.Condition{acceptedCond, programmedCond})
 	}
 
@@ -305,7 +321,8 @@ func mergeListenerConditions(existing, incoming []metav1.Condition) []metav1.Con
 func getGatewayListenerConditions(protocol gatewayv1.ProtocolType, listenerErr error, generation int64) (accepted, programmed metav1.Condition) {
 	now := metav1.Now()
 
-	if isSupportedProtocol(protocol) {
+	// Accepted: True only if protocol is supported AND port bound successfully
+	if isSupportedProtocol(protocol) && listenerErr == nil {
 		accepted = metav1.Condition{
 			Type:               string(gatewayv1.ListenerConditionAccepted),
 			Status:             metav1.ConditionTrue,
@@ -315,16 +332,23 @@ func getGatewayListenerConditions(protocol gatewayv1.ProtocolType, listenerErr e
 			Message:            "Listener has been accepted",
 		}
 	} else {
+		reason := string(gatewayv1.ListenerReasonUnsupportedProtocol)
+		message := fmt.Sprintf("Protocol %s is not supported", protocol)
+		if listenerErr != nil {
+			reason = "PortUnavailable"
+			message = fmt.Sprintf("Listener failed to bind: %v", listenerErr)
+		}
 		accepted = metav1.Condition{
 			Type:               string(gatewayv1.ListenerConditionAccepted),
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
-			Reason:             string(gatewayv1.ListenerReasonUnsupportedProtocol),
-			Message:            fmt.Sprintf("Protocol %s is not supported", protocol),
+			Reason:             reason,
+			Message:            message,
 		}
 	}
 
+	// Programmed: True only if no bind error
 	if listenerErr == nil {
 		programmed = metav1.Condition{
 			Type:               string(gatewayv1.ListenerConditionProgrammed),
@@ -378,7 +402,28 @@ func listenerStatusesEqual(a, b []gatewayv1.ListenerStatus) bool {
 		if a[i].Name != b[i].Name {
 			return false
 		}
+		if !supportedKindsEqual(a[i].SupportedKinds, b[i].SupportedKinds) {
+			return false
+		}
 		if !conditionsEqual(a[i].Conditions, b[i].Conditions) {
+			return false
+		}
+	}
+	return true
+}
+
+func supportedKindsEqual(a, b []gatewayv1.RouteGroupKind) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if (a[i].Group == nil) != (b[i].Group == nil) {
+			return false
+		}
+		if a[i].Group != nil && b[i].Group != nil && *a[i].Group != *b[i].Group {
+			return false
+		}
+		if a[i].Kind != b[i].Kind {
 			return false
 		}
 	}

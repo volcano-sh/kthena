@@ -19,13 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 
-	"k8s.io/apimachinery/pkg/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
@@ -33,9 +34,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
-	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
@@ -176,21 +177,21 @@ func (c *InferencePoolController) syncHandler(key string) error {
 	}
 
 	if err := c.updateInferencePoolStatus(inferencePool); err != nil {
-		klog.Errorf("failed to update status for inferencepool %s: %v", key, err)
+		return err
 	}
 
 	return nil
 }
 
 func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *inferencev1.InferencePool) error {
-	// Fetch current object from API server to have latest status and resourceVersion
-	gvr := inferencev1.SchemeGroupVersion.WithResource("inferencepools")
-	unstructuredObj, err := c.dynamicClient.Resource(gvr).Namespace(inferencePool.Namespace).Get(context.Background(), inferencePool.Name, metav1.GetOptions{})
+	// Convert the typed object from informer cache — no redundant API Get needed
+	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(inferencePool.DeepCopy())
 	if err != nil {
-		return fmt.Errorf("failed to get latest InferencePool: %w", err)
+		return fmt.Errorf("failed to convert InferencePool to unstructured: %w", err)
 	}
+	unstructuredObj := &unstructured.Unstructured{Object: content}
 
-	observedGeneration := int64(unstructuredObj.GetGeneration())
+	observedGeneration := inferencePool.Generation
 
 	// 1. Find all HTTPRoutes that reference this InferencePool
 	uniqueGateways := make(map[types.NamespacedName]bool)
@@ -202,7 +203,6 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 			for _, backend := range rule.BackendRefs {
 				if backend.Kind != nil && *backend.Kind == "InferencePool" &&
 					string(backend.Name) == inferencePool.Name {
-					// Check namespace match
 					backendNamespace := route.Namespace
 					if backend.Namespace != nil {
 						backendNamespace = string(*backend.Namespace)
@@ -219,11 +219,9 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 		}
 
 		if matches {
-			// Find its parent Gateways
 			for _, parentRef := range route.Spec.ParentRefs {
 				if (parentRef.Kind == nil || *parentRef.Kind == "Gateway") &&
 					(parentRef.Group == nil || *parentRef.Group == gatewayv1.GroupName) {
-
 					gwNamespace := route.Namespace
 					if parentRef.Namespace != nil {
 						gwNamespace = string(*parentRef.Namespace)
@@ -242,9 +240,21 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 
 	existingParents, _, _ := unstructured.NestedSlice(unstructuredObj.Object, "status", "parents")
 
+	// Sort gateway keys for deterministic output (avoids unnecessary updates)
+	var gatewayKeys []types.NamespacedName
+	for k := range uniqueGateways {
+		gatewayKeys = append(gatewayKeys, k)
+	}
+	sort.Slice(gatewayKeys, func(i, j int) bool {
+		if gatewayKeys[i].Namespace != gatewayKeys[j].Namespace {
+			return gatewayKeys[i].Namespace < gatewayKeys[j].Namespace
+		}
+		return gatewayKeys[i].Name < gatewayKeys[j].Name
+	})
+
 	var newParents []interface{}
-	if len(uniqueGateways) > 0 {
-		for pk := range uniqueGateways {
+	if len(gatewayKeys) > 0 {
+		for _, pk := range gatewayKeys {
 			pStatus := map[string]interface{}{
 				"parentRef": map[string]interface{}{
 					"group":     string(gatewayv1.GroupName),
@@ -255,7 +265,6 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 				"controllerName": ControllerName,
 			}
 
-			// Find existing conditions for this parent to preserve transition time
 			var existingConditions []interface{}
 			for _, p := range existingParents {
 				if ep, ok := p.(map[string]interface{}); ok {
@@ -275,7 +284,6 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 			newParents = append(newParents, pStatus)
 		}
 	} else {
-		// Fallback: No HTTPRoute references this pool
 		fallbackParent := map[string]interface{}{
 			"parentRef": map[string]interface{}{
 				"name":      inferencePool.Name,
@@ -297,7 +305,6 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 		newParents = []interface{}{fallbackParent}
 	}
 
-	// Check if status actually changed
 	if !inferencePoolParentsChanged(existingParents, newParents) {
 		return nil
 	}
@@ -306,6 +313,7 @@ func (c *InferencePoolController) updateInferencePoolStatus(inferencePool *infer
 		return err
 	}
 
+	gvr := inferencev1.SchemeGroupVersion.WithResource("inferencepools")
 	_, err = c.dynamicClient.Resource(gvr).Namespace(inferencePool.Namespace).UpdateStatus(
 		context.Background(), unstructuredObj, metav1.UpdateOptions{},
 	)

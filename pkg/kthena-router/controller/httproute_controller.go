@@ -193,7 +193,7 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 				return err
 			}
 			if err := c.updateHTTPRouteStatus(httpRoute); err != nil {
-				klog.Errorf("failed to update status for httproute %s/%s: %v", httpRoute.Namespace, httpRoute.Name, err)
+				return err
 			}
 			return nil
 		}

@@ -168,16 +168,10 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		// Gateway API Inference Extension controllers are optional
 		if enableGatewayAPIInferenceExtension {
 			go func() {
-				if err := httpRouteController.Run(stop); err != nil {
-					klog.Fatalf("Error running httproute controller: %s", err.Error())
-				}
-			}()
-			go func() {
 				if err := inferencePoolController.Run(stop); err != nil {
 					klog.Fatalf("Error running inferencepool controller: %s", err.Error())
 				}
 			}()
-			controllers = append(controllers, httpRouteController, inferencePoolController)
 		} else {
 			klog.Info("Gateway API Inference Extension controllers are disabled")
 		}

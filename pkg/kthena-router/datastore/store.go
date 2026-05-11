@@ -1838,6 +1838,9 @@ func (s *store) SetListenerStatus(gatewayKey, listenerName string, err error) {
 	s.listenerStatuses[gatewayKey][listenerName] = err
 }
 
+// GetListenerStatus returns the health state of a listener
+// Returns nil if the listener is healthy OR if no status has been recorded yet
+// Callers should ensure SetListenerStatus has been called before checking
 func (s *store) GetListenerStatus(gatewayKey, listenerName string) error {
 	s.listenerStatusMutex.RLock()
 	defer s.listenerStatusMutex.RUnlock()
