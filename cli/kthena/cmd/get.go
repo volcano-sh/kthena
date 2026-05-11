@@ -26,11 +26,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
-
-	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
 var (
