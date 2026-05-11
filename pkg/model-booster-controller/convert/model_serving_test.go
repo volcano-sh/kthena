@@ -105,6 +105,47 @@ func TestGetCachePath(t *testing.T) {
 	}
 }
 
+func TestGetPVCClaimName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal pvc URI",
+			input:    "pvc://my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "extra leading slashes",
+			input:    "pvc:///my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "trailing slash",
+			input:    "pvc://my-pvc/",
+			expected: "my-pvc",
+		},
+		{
+			name:     "multiple surrounding slashes",
+			input:    "pvc:////my-pvc////",
+			expected: "my-pvc",
+		},
+		{
+			name:     "empty",
+			input:    "",
+			expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetPVCClaimName(tt.input); got != tt.expected {
+				t.Errorf("GetPVCClaimName() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestCreateModelServingResources(t *testing.T) {
 	tests := []struct {
 		name         string

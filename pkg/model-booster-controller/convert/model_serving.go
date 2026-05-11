@@ -432,7 +432,7 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: strings.Trim(strings.TrimPrefix(backend.CacheURI, CacheURIPrefixPVC), "/"),
+					ClaimName: GetPVCClaimName(backend.CacheURI),
 				},
 			},
 		}, nil
@@ -450,7 +450,11 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 	return nil, fmt.Errorf("not support prefix in CacheURI: %s", backend.CacheURI)
 }
 
-// GetCachePath gets the path from string after "://". For example, for "pvc://my-pvc", it returns "/my-pvc".
+// GetCachePath returns the in-container mount path derived from a cache URI.
+// It takes the substring after "://", trims surrounding slashes, and prepends a
+// single "/" so the result is a valid absolute path suitable for a container's
+// VolumeMount.MountPath or HostPath.Path. For example, for "pvc://my-pvc" it
+// returns "/my-pvc". It is NOT a PVC ClaimName; use GetPVCClaimName for that.
 func GetCachePath(path string) string {
 	if path == "" || !strings.Contains(path, URIPrefixSeparator) {
 		return ""
@@ -461,6 +465,13 @@ func GetCachePath(path string) string {
 	builder.WriteString("/")
 	builder.WriteString(s)
 	return builder.String()
+}
+
+// GetPVCClaimName extracts the bare PVC name from a "pvc://" cache URI, trimming
+// surrounding slashes so malformed inputs like "pvc:///my-pvc" still yield a
+// valid Kubernetes resource name (which cannot contain slashes).
+func GetPVCClaimName(uri string) string {
+	return strings.Trim(strings.TrimPrefix(uri, CacheURIPrefixPVC), "/")
 }
 
 func getVolumeName(backendName string) string {
