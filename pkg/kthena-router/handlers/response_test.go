@@ -67,6 +67,18 @@ func TestParseOpenAIResponseBody(t *testing.T) {
 }
 
 func TestParseStreamRespForUsage(t *testing.T) {
+	validUsageResponse := OpenAIResponse{
+		ID:      "test-id",
+		Object:  "text_completion",
+		Created: 1739400043,
+		Model:   "tweet-summary-0",
+		Usage: Usage{
+			PromptTokens:     7,
+			CompletionTokens: 10,
+			TotalTokens:      17,
+		},
+	}
+
 	tests := []struct {
 		name         string
 		responseText string
@@ -75,22 +87,32 @@ func TestParseStreamRespForUsage(t *testing.T) {
 		{
 			name:         "valid stream with usage",
 			responseText: `data: {"id":"test-id","object":"text_completion","created":1739400043,"model":"tweet-summary-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}`,
-			want: OpenAIResponse{
-				ID:      "test-id",
-				Object:  "text_completion",
-				Created: 1739400043,
-				Model:   "tweet-summary-0",
-				Usage: Usage{
-					PromptTokens:     7,
-					CompletionTokens: 10,
-					TotalTokens:      17,
-				},
-			},
+			want:         validUsageResponse,
 		},
 		{
 			name:         "stream [DONE]",
 			responseText: `data: [DONE]`,
 			want:         OpenAIResponse{},
+		},
+		{
+			name:         "stream [DONE] with whitespace",
+			responseText: " data: [DONE]\r\n",
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "stream [DONE] without space after prefix",
+			responseText: `data:[DONE]`,
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "valid stream without space after prefix",
+			responseText: `data:{"id":"test-id","object":"text_completion","created":1739400043,"model":"tweet-summary-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}`,
+			want:         validUsageResponse,
+		},
+		{
+			name:         "valid stream with CRLF",
+			responseText: "data: {\"id\":\"test-id\",\"object\":\"text_completion\",\"created\":1739400043,\"model\":\"tweet-summary-0\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"total_tokens\":17,\"completion_tokens\":10}}\r\n",
+			want:         validUsageResponse,
 		},
 		{
 			name:         "no data: prefix",
