@@ -165,6 +165,105 @@ func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 	assert.Empty(t, errorMsg)
 }
 
+func TestValidateAutoscalingPolicy_TolerancePercentRange(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+	tests := []struct {
+		name             string
+		tolerancePercent int32
+		wantError        string
+	}{
+		{
+			name:             "negative tolerance percent",
+			tolerancePercent: -1,
+			wantError:        "tolerance percent must be between 0 and 100",
+		},
+		{
+			name:             "tolerance percent greater than 100",
+			tolerancePercent: 101,
+			wantError:        "tolerance percent must be between 0 and 100",
+		},
+		{
+			name:             "minimum tolerance percent",
+			tolerancePercent: 0,
+			wantError:        "",
+		},
+		{
+			name:             "maximum tolerance percent",
+			tolerancePercent: 100,
+			wantError:        "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := validAutoscalingPolicy()
+			policy.Spec.TolerancePercent = tt.tolerancePercent
+
+			allowed, errorMsg := validator.validateAutoscalingPolicy(policy)
+			if tt.wantError == "" {
+				assert.True(t, allowed)
+				assert.Empty(t, errorMsg)
+				return
+			}
+
+			assert.False(t, allowed)
+			assert.Contains(t, errorMsg, tt.wantError)
+		})
+	}
+}
+
+func TestValidateAutoscalingPolicy_PanicThresholdPercentRange(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+	tests := []struct {
+		name                  string
+		panicThresholdPercent *int32
+		wantError             string
+	}{
+		{
+			name:                  "panic threshold below minimum",
+			panicThresholdPercent: ptr.To(int32(109)),
+			wantError:             "panic threshold percent must be between 110 and 1000",
+		},
+		{
+			name:                  "panic threshold above maximum",
+			panicThresholdPercent: ptr.To(int32(1001)),
+			wantError:             "panic threshold percent must be between 110 and 1000",
+		},
+		{
+			name:                  "minimum panic threshold",
+			panicThresholdPercent: ptr.To(int32(110)),
+			wantError:             "",
+		},
+		{
+			name:                  "maximum panic threshold",
+			panicThresholdPercent: ptr.To(int32(1000)),
+			wantError:             "",
+		},
+		{
+			name:                  "nil panic threshold",
+			panicThresholdPercent: nil,
+			wantError:             "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := validAutoscalingPolicy()
+			policy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent = tt.panicThresholdPercent
+
+			allowed, errorMsg := validator.validateAutoscalingPolicy(policy)
+			if tt.wantError == "" {
+				assert.True(t, allowed)
+				assert.Empty(t, errorMsg)
+				return
+			}
+
+			assert.False(t, allowed)
+			assert.Contains(t, errorMsg, tt.wantError)
+		})
+	}
+}
+
 func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
 
@@ -237,5 +336,47 @@ func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 	assert.Equal(t, types.UID("test-uid"), responseReview.Response.UID)
 	if responseReview.Response.Result != nil {
 		assert.Empty(t, responseReview.Response.Result.Message)
+	}
+}
+
+func validAutoscalingPolicy() *registryv1.AutoscalingPolicy {
+	return &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []registryv1.AutoscalingPolicyMetric{
+				{
+					MetricName:  "cpu",
+					TargetValue: resource.MustParse("80"),
+				},
+			},
+			Behavior: registryv1.AutoscalingPolicyBehavior{
+				ScaleDown: registryv1.AutoscalingPolicyStablePolicy{
+					Instances:           ptr.To(int32(1)),
+					Percent:             ptr.To(int32(10)),
+					Period:              &metav1.Duration{Duration: time.Minute},
+					SelectPolicy:        registryv1.SelectPolicyOr,
+					StabilizationWindow: &metav1.Duration{Duration: time.Minute * 5},
+				},
+				ScaleUp: registryv1.AutoscalingPolicyScaleUpPolicy{
+					StablePolicy: registryv1.AutoscalingPolicyStablePolicy{
+						Instances:           ptr.To(int32(2)),
+						Percent:             ptr.To(int32(20)),
+						Period:              &metav1.Duration{Duration: time.Minute},
+						SelectPolicy:        registryv1.SelectPolicyOr,
+						StabilizationWindow: &metav1.Duration{Duration: time.Second * 30},
+					},
+					PanicPolicy: registryv1.AutoscalingPolicyPanicPolicy{
+						Percent:               ptr.To(int32(50)),
+						Period:                metav1.Duration{Duration: time.Second * 10},
+						PanicThresholdPercent: ptr.To(int32(200)),
+						PanicModeHold:         &metav1.Duration{Duration: time.Minute},
+					},
+				},
+			},
+		},
 	}
 }

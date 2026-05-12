@@ -85,6 +85,9 @@ func (v *AutoscalingPolicyValidator) Handle(w http.ResponseWriter, r *http.Reque
 func (v *AutoscalingPolicyValidator) validateAutoscalingPolicy(policy *registryv1.AutoscalingPolicy) (bool, string) {
 	var allErrs field.ErrorList
 
+	// Validate tolerance
+	allErrs = append(allErrs, v.validateTolerance(policy)...)
+
 	// Validate metrics
 	allErrs = append(allErrs, v.validateMetrics(policy)...)
 
@@ -102,6 +105,19 @@ func (v *AutoscalingPolicyValidator) validateAutoscalingPolicy(policy *registryv
 		return false, fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
 	}
 	return true, ""
+}
+
+// validateTolerance validates the global autoscaling tolerance configuration.
+func (v *AutoscalingPolicyValidator) validateTolerance(policy *registryv1.AutoscalingPolicy) field.ErrorList {
+	var allErrs field.ErrorList
+	if policy.Spec.TolerancePercent < 0 || policy.Spec.TolerancePercent > 100 {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec").Child("tolerancePercent"),
+			policy.Spec.TolerancePercent,
+			"tolerance percent must be between 0 and 100",
+		))
+	}
+	return allErrs
 }
 
 // validateMetrics validates the metrics configuration
@@ -226,6 +242,15 @@ func (v *AutoscalingPolicyValidator) validatePanicPolicy(policy *registryv1.Auto
 			panicPolicyPath.Child("panicModeHold"),
 			panicPolicy.PanicModeHold,
 			"panic policy panic mode hold must be between 0 and 30 minutes",
+		))
+	}
+
+	// Validate panic threshold percent
+	if panicPolicy.PanicThresholdPercent != nil && (*panicPolicy.PanicThresholdPercent < 110 || *panicPolicy.PanicThresholdPercent > 1000) {
+		allErrs = append(allErrs, field.Invalid(
+			panicPolicyPath.Child("panicThresholdPercent"),
+			*panicPolicy.PanicThresholdPercent,
+			"panic threshold percent must be between 110 and 1000",
 		))
 	}
 
