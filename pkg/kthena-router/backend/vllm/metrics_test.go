@@ -20,31 +20,31 @@ import (
 	"testing"
 
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
 // gaugeMetricFamily creates a mock gauge metric family for testing gauge/counter metrics.
 func gaugeMetricFamily(value float64) *dto.MetricFamily {
-	v := value
 	return &dto.MetricFamily{
 		Metric: []*dto.Metric{
-			{Gauge: &dto.Gauge{Value: &v}},
+			{Gauge: &dto.Gauge{Value: &value}},
 		},
 	}
 }
 
 // histogramMetricFamily creates a mock histogram metric family for testing histogram metrics.
 func histogramMetricFamily(sum float64, count uint64) *dto.MetricFamily {
-	s, c := sum, count
 	return &dto.MetricFamily{
 		Metric: []*dto.Metric{
-			{Histogram: &dto.Histogram{SampleSum: &s, SampleCount: &c}},
+			{Histogram: &dto.Histogram{SampleSum: &sum, SampleCount: &count}},
 		},
 	}
 }
 
-// TestGetCountMetricsInfo will test the extraction and mapping of gauge/counter metrics.
+// TestGetCountMetricsInfo tests extraction and mapping of gauge/counter metrics.
 func TestGetCountMetricsInfo(t *testing.T) {
 	engine := NewVllmEngine()
 
@@ -114,21 +114,20 @@ func TestGetCountMetricsInfo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := engine.GetCountMetricsInfo(tt.allMetrics)
-			if len(got) != len(tt.want) {
-				t.Errorf("got %d keys, want %d keys", len(got), len(tt.want))
-			}
+
+			require.Len(t, got, len(tt.want))
+
 			for k, wantVal := range tt.want {
-				if gotVal, ok := got[k]; !ok {
-					t.Errorf("missing key %q in result", k)
-				} else if gotVal != wantVal {
-					t.Errorf("key %q: got %v, want %v", k, gotVal, wantVal)
-				}
+				gotVal, ok := got[k]
+				require.True(t, ok, "missing key %q in result", k)
+				assert.Equal(t, wantVal, gotVal)
 			}
 		})
 	}
 }
 
-// TestGetHistogramPodMetrics will test histogram metric processing and rolling-average calculations
+// TestGetHistogramPodMetrics tests histogram metric processing
+// and rolling-average calculations.
 func TestGetHistogramPodMetrics(t *testing.T) {
 	engine := NewVllmEngine()
 
@@ -201,24 +200,20 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gotMetrics, gotHistograms := engine.GetHistogramPodMetrics(tt.allMetrics, tt.previousHistogram)
 
-			if len(gotMetrics) != len(tt.wantMetrics) {
-				t.Errorf("got %d metric keys, want %d", len(gotMetrics), len(tt.wantMetrics))
-			}
+			require.Len(t, gotMetrics, len(tt.wantMetrics))
+
 			for k, wantVal := range tt.wantMetrics {
-				if gotVal, ok := gotMetrics[k]; !ok {
-					t.Errorf("missing metric key %q", k)
-				} else if gotVal != wantVal {
-					t.Errorf("metric %q: got %v, want %v", k, gotVal, wantVal)
-				}
+				gotVal, ok := gotMetrics[k]
+				require.True(t, ok, "missing metric key %q", k)
+				assert.Equal(t, wantVal, gotVal)
 			}
 
+			require.Len(t, gotHistograms, len(tt.wantHistogramKeys))
+
 			for _, k := range tt.wantHistogramKeys {
-				if _, ok := gotHistograms[k]; !ok {
-					t.Errorf("missing histogram key %q", k)
-				}
-			}
-			if len(gotHistograms) != len(tt.wantHistogramKeys) {
-				t.Errorf("got %d histogram keys, want %d", len(gotHistograms), len(tt.wantHistogramKeys))
+				h, ok := gotHistograms[k]
+				require.True(t, ok, "missing histogram key %q", k)
+				assert.NotNil(t, h)
 			}
 		})
 	}
