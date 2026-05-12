@@ -157,4 +157,4 @@ Run the existing tests to ensure your changes don't break existing functionality
 go test ./pkg/model-booster-controller/webhook/...
 ```
 
-For integration testing, you can deploy the webhook to a test cluster and verify the behavior with actual Model resources.
+For integration testing, you can deploy the webhook to a test cluster and verify the behavior with actual ModelBooster resources.
