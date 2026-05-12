@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -357,13 +358,13 @@ func validateImageField(image string) error {
 		return nil
 	}
 
-	// Simple validation: check if image contains at least one character and no spaces
+	// Simple validation: check if image contains at least one character and no whitespace.
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("image cannot be empty or whitespace only")
 	}
 
-	if strings.Contains(image, " ") {
-		return fmt.Errorf("image cannot contain spaces")
+	if strings.IndexFunc(image, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("image cannot contain whitespace")
 	}
 
 	return nil

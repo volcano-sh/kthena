@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -197,13 +198,13 @@ func validateImageField(image string) error {
 		return nil
 	}
 
-	// Simple validation: check if image contains at least one character and no spaces
+	// Simple validation: check if image contains at least one character and no whitespace.
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("image cannot be empty or whitespace only")
 	}
 
-	if strings.Contains(image, " ") {
-		return fmt.Errorf("image cannot contain spaces")
+	if strings.IndexFunc(image, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("image cannot contain whitespace")
 	}
 
 	// Basic format check: should contain at least one character

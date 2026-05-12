@@ -1077,6 +1077,16 @@ func TestValidateRoleNames(t *testing.T) {
 	}
 }
 
+func TestValidateImageFieldRejectsWhitespace(t *testing.T) {
+	assert.NoError(t, validateImageField("registry.example.com/model-serving:v1"))
+
+	for _, image := range []string{"model serving:v1", "model\tserving:v1", "model\nserving:v1", "\t\n"} {
+		t.Run(image, func(t *testing.T) {
+			assert.Error(t, validateImageField(image))
+		})
+	}
+}
+
 func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 	replicas := int32(3)
 
