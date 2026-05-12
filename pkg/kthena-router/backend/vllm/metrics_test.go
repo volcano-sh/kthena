@@ -24,7 +24,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
-// this creates a mock gauge metric family for testing gauge/counter metrics.
+// gaugeMetricFamily creates a mock gauge metric family for testing gauge/counter metrics.
 func gaugeMetricFamily(value float64) *dto.MetricFamily {
 	v := value
 	return &dto.MetricFamily{
@@ -34,7 +34,7 @@ func gaugeMetricFamily(value float64) *dto.MetricFamily {
 	}
 }
 
-// this creates a mock histogram metric family for testing histogram metrics.
+// histogramMetricFamily creates a mock histogram metric family for testing histogram metrics.
 func histogramMetricFamily(sum float64, count uint64) *dto.MetricFamily {
 	s, c := sum, count
 	return &dto.MetricFamily{
@@ -44,7 +44,7 @@ func histogramMetricFamily(sum float64, count uint64) *dto.MetricFamily {
 	}
 }
 
-// this will test the extraction and mapping of gauge/counter metrics.
+// TestGetCountMetricsInfo will test the extraction and mapping of gauge/counter metrics.
 func TestGetCountMetricsInfo(t *testing.T) {
 	engine := NewVllmEngine()
 
@@ -128,7 +128,7 @@ func TestGetCountMetricsInfo(t *testing.T) {
 	}
 }
 
-// this will test histogram metric processing and rolling-average calculations
+// TestGetHistogramPodMetrics will test histogram metric processing and rolling-average calculations
 func TestGetHistogramPodMetrics(t *testing.T) {
 	engine := NewVllmEngine()
 
