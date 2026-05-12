@@ -43,6 +43,13 @@ spec:
           {{- if .Values.kthenaRouter.kubeAPIBurst }}
             - --kube-api-burst={{ .Values.kthenaRouter.kubeAPIBurst }}
           {{- end }}
+            - --session-sticky-store={{ .Values.kthenaRouter.sessionSticky.store }}
+          {{- if eq .Values.kthenaRouter.sessionSticky.store "redis" }}
+            - --session-sticky-redis-address={{ .Values.kthenaRouter.sessionSticky.redis.address }}
+          {{- if .Values.kthenaRouter.sessionSticky.redis.password }}
+            - --session-sticky-redis-password={{ .Values.kthenaRouter.sessionSticky.redis.password }}
+          {{- end }}
+          {{- end }}
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
             - --tls-cert=/etc/router-tls/tls.crt
             - --tls-key=/etc/router-tls/tls.key

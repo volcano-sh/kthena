@@ -31,6 +31,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/cmd/kthena-router/app"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/router"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/webhook"
 	webhookcert "github.com/volcano-sh/kthena/pkg/webhook/cert"
 )
@@ -53,6 +54,9 @@ func main() {
 		debugPort                          int
 		kubeAPIQPS                         float32
 		kubeAPIBurst                       int
+		sessionStickyStoreType             string
+		sessionStickyRedisAddress          string
+		sessionStickyRedisPassword         string
 	)
 
 	klog.InitFlags(nil)
@@ -78,6 +82,9 @@ func main() {
 	pflag.IntVar(&debugPort, "debug-port", 15000, "The port for the debug server (localhost only)")
 	pflag.Float32Var(&kubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&kubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
+	pflag.StringVar(&sessionStickyStoreType, "session-sticky-store", router.SessionStickyStoreMemory, "Session sticky store backend: memory or redis")
+	pflag.StringVar(&sessionStickyRedisAddress, "session-sticky-redis-address", "", "Redis address for session sticky store when --session-sticky-store=redis")
+	pflag.StringVar(&sessionStickyRedisPassword, "session-sticky-redis-password", "", "Redis password for session sticky store when --session-sticky-store=redis")
 	defer klog.Flush()
 	pflag.Parse()
 
@@ -118,7 +125,11 @@ func main() {
 		klog.Info("Webhook server is disabled")
 	}
 
-	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst).Run(ctx)
+	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst, router.SessionStickyStoreConfig{
+		Type:          sessionStickyStoreType,
+		RedisAddress:  sessionStickyRedisAddress,
+		RedisPassword: sessionStickyRedisPassword,
+	}).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.

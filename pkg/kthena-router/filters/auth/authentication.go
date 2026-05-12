@@ -104,6 +104,47 @@ func (j *JWTAuthenticator) authenticate(tokenStr string) (string, error) {
 	return sub, nil
 }
 
+func (j *JWTAuthenticator) parseAndValidateToken(tokenStr string) (jwt.Token, error) {
+	if j == nil || !j.enabled || j.rotator == nil {
+		return nil, fmt.Errorf("jwt authentication is disabled")
+	}
+	jwksValue := j.rotator.GetJwks()
+	if jwksValue.Jwks == nil {
+		return nil, fmt.Errorf("no JWKS available for token validation")
+	}
+
+	token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(jwksValue.Jwks, jws.WithInferAlgorithmFromKey(true)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse jwt: %w", err)
+	}
+	if err := j.validateClaims(token, jwksValue); err != nil {
+		return nil, fmt.Errorf("failed to validate claims: %w", err)
+	}
+	return token, nil
+}
+
+// ExtractStringClaim validates the bearer token on the request and returns a
+// string claim value. Missing, non-string, or invalid claims return an error.
+func (j *JWTAuthenticator) ExtractStringClaim(req *http.Request, claimName string) (string, error) {
+	if req == nil {
+		return "", fmt.Errorf("request is nil")
+	}
+	tokenStr := extractTokenFromHeader(req)
+	if tokenStr == "" {
+		return "", fmt.Errorf("authorization header missing or empty")
+	}
+
+	token, err := j.parseAndValidateToken(tokenStr)
+	if err != nil {
+		return "", err
+	}
+	var claim string
+	if err := token.Get(claimName, &claim); err != nil || claim == "" {
+		return "", fmt.Errorf("claim %q missing or empty", claimName)
+	}
+	return claim, nil
+}
+
 func (j *JWTAuthenticator) validateClaims(token jwt.Token, jwks *Jwks) error {
 	if err := j.validateIssuer(token, jwks); err != nil {
 		return fmt.Errorf("issuer validation failed: %w", err)

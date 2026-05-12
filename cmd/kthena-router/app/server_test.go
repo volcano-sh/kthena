@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/router"
 )
 
 // TestNewServerDebugPortDefault tests that NewServer accepts different debug port values
@@ -35,7 +37,7 @@ func TestNewServerDebugPortDefault(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			server := NewServer("8080", false, "", "", false, false, tc.debugPort, 0, 0)
+			server := NewServer("8080", false, "", "", false, false, tc.debugPort, 0, 0, router.SessionStickyStoreConfig{})
 			assert.Equal(t, tc.debugPort, server.DebugPort, "DebugPort should match the provided value")
 		})
 	}

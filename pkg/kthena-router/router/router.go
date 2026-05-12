@@ -35,7 +35,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -52,7 +51,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
@@ -73,6 +71,17 @@ func getEnvBool(key string, fallback bool) bool {
 
 var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
 
+const (
+	SessionStickyStoreMemory = "memory"
+	SessionStickyStoreRedis  = "redis"
+)
+
+type SessionStickyStoreConfig struct {
+	Type          string
+	RedisAddress  string
+	RedisPassword string
+}
+
 type Router struct {
 	scheduler       scheduler.Scheduler
 	authenticator   *auth.JWTAuthenticator
@@ -90,10 +99,10 @@ type Router struct {
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 
-	sessionAffinityHeaderName string
+	sessionStickyStore sessionStickyStore
 }
 
-func NewRouter(store datastore.Store, routerConfigPath string) *Router {
+func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig ...SessionStickyStoreConfig) *Router {
 	// Create a unified rate limiter for all models
 	loadRateLimiter := ratelimit.NewTokenRateLimiter()
 
@@ -158,20 +167,48 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
 
-	return &Router{
-		store:                     store,
-		scheduler:                 scheduler.NewScheduler(store, routerConfig),
-		authenticator:             auth.NewJWTAuthenticator(routerConfig),
-		loadRateLimiter:           loadRateLimiter,
-		accessLogger:              accessLogger,
-		metrics:                   metricsInstance,
-		tokenizer:                 tokenizerInstance,
-		connectorFactory:          connectors.NewDefaultFactory(),
-		fairnessTimeout:           parseFairnessTimeout(),
-		tokenWeight:               parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
-		requestNumWeight:          parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
-		sessionAffinityHeaderName: getSessionAffinityHeaderName(routerConfig),
+	router := &Router{
+		store:            store,
+		scheduler:        scheduler.NewScheduler(store, routerConfig),
+		authenticator:    auth.NewJWTAuthenticator(routerConfig),
+		loadRateLimiter:  loadRateLimiter,
+		accessLogger:     accessLogger,
+		metrics:          metricsInstance,
+		tokenizer:        tokenizerInstance,
+		connectorFactory: connectors.NewDefaultFactory(),
+		fairnessTimeout:  parseFairnessTimeout(),
+		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
+		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
+	router.sessionStickyStore = newSessionStickyStoreFromConfig(firstSessionStickyStoreConfig(sessionStickyConfig))
+	return router
+}
+
+func firstSessionStickyStoreConfig(configs []SessionStickyStoreConfig) SessionStickyStoreConfig {
+	if len(configs) == 0 {
+		return SessionStickyStoreConfig{Type: SessionStickyStoreMemory}
+	}
+	return configs[0]
+}
+
+func newSessionStickyStoreFromConfig(config SessionStickyStoreConfig) sessionStickyStore {
+	storeType := strings.ToLower(strings.TrimSpace(config.Type))
+	if storeType == "" {
+		storeType = SessionStickyStoreMemory
+	}
+	switch storeType {
+	case SessionStickyStoreMemory:
+		return newMemorySessionStickyStore()
+	case SessionStickyStoreRedis:
+		store, err := newRedisSessionStickyStore(config.RedisAddress, config.RedisPassword)
+		if err != nil {
+			klog.Fatalf("failed to initialize redis session sticky store: %v", err)
+		}
+		return store
+	default:
+		klog.Fatalf("invalid session sticky store type %q", config.Type)
+	}
+	return newMemorySessionStickyStore()
 }
 
 const defaultFairnessTimeout = 60 * time.Second
@@ -194,19 +231,6 @@ func parseEnvFloat(key string, fallback float64) float64 {
 		klog.Warningf("Invalid %s %q, using default %v", key, s, fallback)
 	}
 	return fallback
-}
-
-func getSessionAffinityHeaderName(routerConfig *conf.RouterConfiguration) string {
-	if routerConfig == nil {
-		return plugins.ParseSessionAffinityArgs(runtime.RawExtension{}).HeaderName
-	}
-	for _, pluginConfig := range routerConfig.Scheduler.PluginConfig {
-		if pluginConfig.Name != plugins.SessionAffinityPluginName {
-			continue
-		}
-		return plugins.ParseSessionAffinityArgs(pluginConfig.Args).HeaderName
-	}
-	return plugins.ParseSessionAffinityArgs(runtime.RawExtension{}).HeaderName
 }
 
 func (r *Router) calculateRequestPriority(userID, modelName string) float64 {
@@ -349,7 +373,6 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	var modelServerName types.NamespacedName
 	var modelRoute *v1alpha1.ModelRoute
 	var modelServer *v1alpha1.ModelServer
-	var affinityScopeKey string
 
 	// Get gateway key from context if available (set by Gateway listener)
 	var gatewayKey string
@@ -389,7 +412,6 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
-		affinityScopeKey = "modelserver/" + modelServerName.String()
 	} else if matched, inferencePoolName := r.handleHTTPRoute(c, gatewayKey); matched {
 		// If ModelRoute is not matched, try to match HTTPRoute
 
@@ -421,7 +443,6 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 		// Use the first target port
 		port = int32(inferencePool.Spec.TargetPorts[0].Number)
-		affinityScopeKey = "inferencepool/" + inferencePoolName.String()
 
 		klog.V(4).Infof("InferencePool is %v, pods count: %d, port: %d", inferencePoolName, len(pods), port)
 	} else {
@@ -452,14 +473,34 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		pdGroup = modelServer.Spec.WorkloadSelector.PDGroup
 	}
 
+	sessionKey, sessionTTL := r.prepareSessionSticky(c.Request, modelRoute, pdGroup, pods)
+	routeKey := routeSessionKey(modelRoute)
+	if sessionKey != "" && routeKey != "" && pdGroup == nil {
+		if boundPod, ok := r.sessionStickyStore.Get(routeKey, sessionKey); ok {
+			if pod, exists := findPodByName(pods, boundPod); exists {
+				pods = []*datastore.PodInfo{pod}
+			} else {
+				klog.Infof("session sticky binding for route %s session %s points to unavailable pod %s/%s; deleting binding",
+					routeKey, hashSessionKey(sessionKey), boundPod.Namespace, boundPod.Name)
+				r.sessionStickyStore.Delete(routeKey, sessionKey)
+			}
+		}
+	}
+
+	affinityScopeKey := ""
+	if sessionKey != "" {
+		affinityScopeKey = routeKey
+	}
+
 	ctx := &framework.Context{
-		Model:            modelName,
-		Prompt:           prompt,
-		SessionKey:       r.getSessionKey(c.Request),
-		AffinityScopeKey: affinityScopeKey,
-		ModelServerName:  modelServerName,
-		PDGroup:          pdGroup,
-		MetricsRecorder:  metricsRecorder,
+		Model:              modelName,
+		Prompt:             prompt,
+		SessionKey:         sessionKey,
+		AffinityScopeKey:   affinityScopeKey,
+		SessionAffinityTTL: sessionTTL,
+		ModelServerName:    modelServerName,
+		PDGroup:            pdGroup,
+		MetricsRecorder:    metricsRecorder,
 	}
 
 	err = r.scheduler.Schedule(ctx, pods)
@@ -494,11 +535,26 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 }
 
-func (r *Router) getSessionKey(req *http.Request) string {
-	if req == nil || r.sessionAffinityHeaderName == "" {
-		return ""
+func (r *Router) prepareSessionSticky(req *http.Request, modelRoute *v1alpha1.ModelRoute, pdGroup *v1alpha1.PDGroup, pods []*datastore.PodInfo) (string, time.Duration) {
+	if r.sessionStickyStore == nil {
+		r.sessionStickyStore = newMemorySessionStickyStore()
 	}
-	return strings.TrimSpace(req.Header.Get(r.sessionAffinityHeaderName))
+	if modelRoute == nil || modelRoute.Spec.SessionSticky == nil {
+		return "", 0
+	}
+	if pdGroup != nil {
+		klog.Warningf("session sticky is configured on ModelRoute %s/%s but PD disaggregation targets are not supported; bypassing sticky routing",
+			modelRoute.Namespace, modelRoute.Name)
+		return "", 0
+	}
+	if len(pods) == 0 {
+		return "", 0
+	}
+	sessionKey := extractSessionKey(req, modelRoute.Spec.SessionSticky, r.authenticator)
+	if sessionKey == "" {
+		return "", 0
+	}
+	return sessionKey, sessionAffinityTTL(modelRoute.Spec.SessionSticky)
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
@@ -756,12 +812,30 @@ func (r *Router) proxy(
 			klog.Errorf(" pod request error: %v", err)
 			continue
 		}
+		r.recordSessionStickyBinding(ctx, i)
 		// record in prefix cache
 		r.scheduler.RunPostHooks(ctx, i)
 		return nil
 	}
 	c.AbortWithStatusJSON(http.StatusNotFound, "request to all pods failed")
 	return fmt.Errorf("request to all pods failed")
+}
+
+func (r *Router) recordSessionStickyBinding(ctx *framework.Context, index int) {
+	if r.sessionStickyStore == nil || ctx == nil || ctx.SessionKey == "" || ctx.AffinityScopeKey == "" || ctx.SessionAffinityTTL <= 0 {
+		return
+	}
+	if index < 0 || index >= len(ctx.BestPods) {
+		return
+	}
+	pod := ctx.BestPods[index]
+	if pod == nil || pod.Pod == nil {
+		return
+	}
+	r.sessionStickyStore.Set(ctx.AffinityScopeKey, ctx.SessionKey, types.NamespacedName{
+		Namespace: pod.Pod.Namespace,
+		Name:      pod.Pod.Name,
+	}, ctx.SessionAffinityTTL)
 }
 
 func (r *Router) proxyModelEndpoint(

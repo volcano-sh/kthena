@@ -280,6 +280,97 @@ func TestValidateModelRoute(t *testing.T) {
 			expectedReason: "validation failed:   - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
 		},
 		{
+			name: "valid model route with session sticky",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					SessionSticky: &networkingv1alpha1.SessionSticky{
+						Sources: []networkingv1alpha1.SessionKeySource{{
+							Type: networkingv1alpha1.SessionKeySourceHeader,
+							Name: "X-Session-ID",
+						}},
+					},
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "test-server"},
+							},
+						},
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "invalid model route - session sticky without sources",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName:     "test-model",
+					SessionSticky: &networkingv1alpha1.SessionSticky{},
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "test-server"},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.sessionSticky.sources: Required value: sources must be non-empty when sessionSticky is set",
+		},
+		{
+			name: "invalid model route - session sticky ttl too small",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					SessionSticky: &networkingv1alpha1.SessionSticky{
+						SessionAffinitySeconds: func() *int32 { v := int32(0); return &v }(),
+						Sources: []networkingv1alpha1.SessionKeySource{{
+							Type: networkingv1alpha1.SessionKeySourceHeader,
+							Name: "X-Session-ID",
+						}},
+					},
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "test-server"},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.sessionSticky.sessionAffinitySeconds: Invalid value: 0: sessionAffinitySeconds must be at least 1",
+		},
+		{
 			name: "invalid model route - multiple rules with empty targetModels",
 			modelRoute: &networkingv1alpha1.ModelRoute{
 				TypeMeta: metav1.TypeMeta{

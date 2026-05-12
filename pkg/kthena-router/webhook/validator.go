@@ -170,6 +170,35 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		}
 	}
 
+	if sessionSticky := modelRoute.Spec.SessionSticky; sessionSticky != nil {
+		sessionStickyField := specField.Child("sessionSticky")
+		if len(sessionSticky.Sources) == 0 {
+			allErrs = append(allErrs, field.Required(sessionStickyField.Child("sources"), "sources must be non-empty when sessionSticky is set"))
+		}
+		if sessionSticky.SessionAffinitySeconds != nil && *sessionSticky.SessionAffinitySeconds < 1 {
+			allErrs = append(allErrs, field.Invalid(sessionStickyField.Child("sessionAffinitySeconds"), *sessionSticky.SessionAffinitySeconds, "sessionAffinitySeconds must be at least 1"))
+		}
+		for i, source := range sessionSticky.Sources {
+			sourceField := sessionStickyField.Child("sources").Index(i)
+			switch source.Type {
+			case networkingv1alpha1.SessionKeySourceHeader,
+				networkingv1alpha1.SessionKeySourceQuery,
+				networkingv1alpha1.SessionKeySourceCookie,
+				networkingv1alpha1.SessionKeySourceJWTClaim:
+			default:
+				allErrs = append(allErrs, field.NotSupported(sourceField.Child("type"), source.Type, []string{
+					string(networkingv1alpha1.SessionKeySourceHeader),
+					string(networkingv1alpha1.SessionKeySourceQuery),
+					string(networkingv1alpha1.SessionKeySourceCookie),
+					string(networkingv1alpha1.SessionKeySourceJWTClaim),
+				}))
+			}
+			if source.Name == "" {
+				allErrs = append(allErrs, field.Required(sourceField.Child("name"), "source name must be non-empty"))
+			}
+		}
+	}
+
 	rulesField := specField.Child("rules")
 	for i, rule := range modelRoute.Spec.Rules {
 		if rule == nil {

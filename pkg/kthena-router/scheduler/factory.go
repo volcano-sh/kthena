@@ -84,10 +84,6 @@ func registerDefaultPlugins(registry *PluginRegistry) {
 	registry.registerScorePlugin(plugins.KVCacheAwarePluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewKVCacheAware(args)
 	})
-	registry.registerScorePlugin(plugins.SessionAffinityPluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		// store is intentionally unused: session-affinity manages its own in-memory affinity store.
-		return plugins.NewSessionAffinity(args)
-	})
 	// filterPlugin
 	registry.registerFilterPlugin(plugins.LeastRequestPluginName, func(args runtime.RawExtension) framework.FilterPlugin {
 		return plugins.NewLeastRequest(args)

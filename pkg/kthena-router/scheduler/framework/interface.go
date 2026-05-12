@@ -17,6 +17,8 @@ limitations under the License.
 package framework
 
 import (
+	"time"
+
 	"k8s.io/apimachinery/pkg/types"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -32,8 +34,9 @@ type Context struct {
 
 	Hashes []uint64
 
-	SessionKey       string
-	AffinityScopeKey string
+	SessionKey         string
+	AffinityScopeKey   string
+	SessionAffinityTTL time.Duration
 
 	// ModelServer information for efficient PDGroup scheduling
 	ModelServerName types.NamespacedName

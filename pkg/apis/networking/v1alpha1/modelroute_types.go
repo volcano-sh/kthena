@@ -53,6 +53,49 @@ type ModelRouteSpec struct {
 	// There is no limitation if this field is not set.
 	// +optional
 	RateLimit *RateLimit `json:"rateLimit,omitempty"`
+
+	// SessionSticky configures optional route-level session affinity.
+	// If omitted, requests are scheduled without session affinity.
+	// +optional
+	SessionSticky *SessionSticky `json:"sessionSticky,omitempty"`
+}
+
+// SessionSticky defines how the router extracts a session key and how long
+// the session-to-pod binding remains valid.
+type SessionSticky struct {
+	// SessionAffinitySeconds is the binding TTL in seconds.
+	// If omitted, the router uses 10800 seconds.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	SessionAffinitySeconds *int32 `json:"sessionAffinitySeconds,omitempty"`
+
+	// Sources are evaluated in order; the first non-empty extracted value is used
+	// as the session key.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	Sources []SessionKeySource `json:"sources,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=Header;Query;Cookie;JWTClaim
+type SessionKeySourceType string
+
+const (
+	SessionKeySourceHeader   SessionKeySourceType = "Header"
+	SessionKeySourceQuery    SessionKeySourceType = "Query"
+	SessionKeySourceCookie   SessionKeySourceType = "Cookie"
+	SessionKeySourceJWTClaim SessionKeySourceType = "JWTClaim"
+)
+
+// SessionKeySource defines one session key extraction rule.
+type SessionKeySource struct {
+	// Type is the source kind to read the session key from.
+	// +kubebuilder:validation:Required
+	Type SessionKeySourceType `json:"type"`
+
+	// Name is the header name, query key, cookie name, or JWT claim name.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 type Rule struct {

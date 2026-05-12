@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/router"
 )
 
 type Server struct {
@@ -38,9 +39,10 @@ type Server struct {
 	DebugPort                          int
 	KubeAPIQPS                         float32
 	KubeAPIBurst                       int
+	SessionStickyStore                 router.SessionStickyStoreConfig
 }
 
-func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int) *Server {
+func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int, sessionStickyStore router.SessionStickyStoreConfig) *Server {
 	return &Server{
 		store:                              nil,
 		EnableTLS:                          enableTLS,
@@ -52,6 +54,7 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		DebugPort:                          debugPort,
 		KubeAPIQPS:                         kubeAPIQPS,
 		KubeAPIBurst:                       kubeAPIBurst,
+		SessionStickyStore:                 sessionStickyStore,
 	}
 }
 
@@ -61,7 +64,7 @@ func (s *Server) Run(ctx context.Context) {
 	s.store = store
 
 	// must be run before the controller, because it will register callbacks
-	r := NewRouter(store)
+	r := NewRouter(store, s.SessionStickyStore)
 	// start controller
 	s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst)
 

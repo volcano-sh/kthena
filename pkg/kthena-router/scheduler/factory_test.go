@@ -53,7 +53,6 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		plugins.RandomPluginName,
 		plugins.PrefixCachePluginName,
 		plugins.KVCacheAwarePluginName,
-		plugins.SessionAffinityPluginName,
 	}
 
 	for _, pluginName := range expectedScorePlugins {
@@ -218,20 +217,6 @@ func TestGetScorePlugins(t *testing.T) {
 			expectedCount: 1,
 			expectedWeights: map[string]int{
 				plugins.PrefixCachePluginName: 10,
-			},
-			expectedHooks: 1,
-		},
-		{
-			name: "session affinity plugin registers post hook",
-			scorePluginMap: map[string]int{
-				plugins.SessionAffinityPluginName: 10,
-			},
-			pluginsArgMap: map[string]runtime.RawExtension{
-				plugins.SessionAffinityPluginName: {Raw: []byte(`{"ttl": "30m"}`)},
-			},
-			expectedCount: 1,
-			expectedWeights: map[string]int{
-				plugins.SessionAffinityPluginName: 10,
 			},
 			expectedHooks: 1,
 		},

@@ -53,6 +53,15 @@ kthenaRouter:
     format: "text"
     # output specifies where to write logs: "stdout", "stderr", or file path (default: stdout)
     output: "stdout"
+  # sessionSticky configures the router process backing store for ModelRoute.spec.sessionSticky.
+  sessionSticky:
+    # store is "memory" for single-router state or "redis" to share bindings across replicas.
+    store: "memory"
+    redis:
+      # address is required when store is "redis".
+      address: ""
+      # password is optional.
+      password: ""
   # gatewayAPI configuration
   gatewayAPI:
     # enabled controls whether Gateway API related features are enabled

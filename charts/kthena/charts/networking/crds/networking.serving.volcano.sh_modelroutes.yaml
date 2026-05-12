@@ -347,6 +347,48 @@ spec:
                   type: object
                 maxItems: 16
                 type: array
+              sessionSticky:
+                description: |-
+                  SessionSticky configures optional route-level session affinity.
+                  If omitted, requests are scheduled without session affinity.
+                properties:
+                  sessionAffinitySeconds:
+                    description: |-
+                      SessionAffinitySeconds is the binding TTL in seconds.
+                      If omitted, the router uses 10800 seconds.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  sources:
+                    description: |-
+                      Sources are evaluated in order; the first non-empty extracted value is used
+                      as the session key.
+                    items:
+                      description: SessionKeySource defines one session key extraction
+                        rule.
+                      properties:
+                        name:
+                          description: Name is the header name, query key, cookie
+                            name, or JWT claim name.
+                          minLength: 1
+                          type: string
+                        type:
+                          description: Type is the source kind to read the session
+                            key from.
+                          enum:
+                          - Header
+                          - Query
+                          - Cookie
+                          - JWTClaim
+                          type: string
+                      required:
+                      - name
+                      - type
+                      type: object
+                    maxItems: 16
+                    minItems: 1
+                    type: array
+                type: object
             required:
             - rules
             type: object
