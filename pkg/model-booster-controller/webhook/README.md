@@ -48,7 +48,6 @@ The validation webhook enforces the following rules for ModelBooster resources:
 
 - Ensures metric target values are positive
 - Rejects duplicate metric names
-- Validates tolerance and panic threshold ranges
 - Validates scale up and scale down policy periods
 
 ## Default Values (Mutator Webhook)
