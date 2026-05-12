@@ -689,7 +689,22 @@ func (r *Router) proxy(
 		}
 	}
 
+	// Capture body bytes once so each retry attempt gets a fresh reader.
+	// transport.RoundTrip drains req.Body on every call, so reusing the same
+	// request across loop iterations sends an empty body to subsequent pods.
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		req.Body.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read request body: %w", err)
+		}
+	}
+
 	for i := 0; i < len(ctx.BestPods); i++ {
+		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
@@ -898,6 +913,7 @@ func doRequest(
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
 		return nil, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
 	}
 	return resp, nil
