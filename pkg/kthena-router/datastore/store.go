@@ -755,49 +755,24 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	s.routeMutex.Lock()
 	key := mr.Namespace + "/" + mr.Name
+	s.removeModelRouteIndexesLocked(key)
 	s.routeInfo[key] = &modelRouteInfo{
 		model: mr.Spec.ModelName,
 		loras: mr.Spec.LoraAdapters,
 	}
 
 	if mr.Spec.ModelName != "" {
-		// Check if this ModelRoute already exists in the slice
 		routes := s.routes[mr.Spec.ModelName]
-		found := false
-		for i, route := range routes {
-			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				routes[i] = mr // Update existing
-				sortModelRoutesInPlace(routes)
-				s.routes[mr.Spec.ModelName] = routes // Update the map
-				found = true
-				break
-			}
-		}
-		if !found {
-			routes = append(routes, mr)
-			sortModelRoutesInPlace(routes)
-			s.routes[mr.Spec.ModelName] = routes
-		}
+		routes = append(routes, mr)
+		sortModelRoutesInPlace(routes)
+		s.routes[mr.Spec.ModelName] = routes
 	}
 
 	for _, lora := range mr.Spec.LoraAdapters {
-		// Check if this ModelRoute already exists in the slice
 		loraRoutes := s.loraRoutes[lora]
-		found := false
-		for i, route := range loraRoutes {
-			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				loraRoutes[i] = mr // Update existing
-				sortModelRoutesInPlace(loraRoutes)
-				s.loraRoutes[lora] = loraRoutes // Update the map
-				found = true
-				break
-			}
-		}
-		if !found {
-			loraRoutes = append(loraRoutes, mr)
-			sortModelRoutesInPlace(loraRoutes)
-			s.loraRoutes[lora] = loraRoutes
-		}
+		loraRoutes = append(loraRoutes, mr)
+		sortModelRoutesInPlace(loraRoutes)
+		s.loraRoutes[lora] = loraRoutes
 	}
 
 	// Update gateway model routes mapping
@@ -825,6 +800,49 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		ModelRoute: mr,
 	})
 	return nil
+}
+
+func (s *store) removeModelRouteIndexesLocked(key string) {
+	info := s.routeInfo[key]
+	if info != nil {
+		if info.model != "" {
+			s.routes[info.model] = removeModelRouteByKey(s.routes[info.model], key)
+			if len(s.routes[info.model]) == 0 {
+				delete(s.routes, info.model)
+			}
+		}
+
+		for _, lora := range info.loras {
+			s.loraRoutes[lora] = removeModelRouteByKey(s.loraRoutes[lora], key)
+			if len(s.loraRoutes[lora]) == 0 {
+				delete(s.loraRoutes, lora)
+			}
+		}
+	}
+
+	removeRouteKeyFromGatewayMap(s.gatewayModelRoutes, key)
+}
+
+func removeModelRouteByKey(routes []*aiv1alpha1.ModelRoute, key string) []*aiv1alpha1.ModelRoute {
+	if len(routes) == 0 {
+		return routes
+	}
+	filtered := routes[:0]
+	for _, route := range routes {
+		if route.Namespace+"/"+route.Name != key {
+			filtered = append(filtered, route)
+		}
+	}
+	return filtered
+}
+
+func removeRouteKeyFromGatewayMap(gatewayRoutes map[string]sets.Set[string], routeKey string) {
+	for gatewayKey, routeSet := range gatewayRoutes {
+		routeSet.Delete(routeKey)
+		if routeSet.IsEmpty() {
+			delete(gatewayRoutes, gatewayKey)
+		}
+	}
 }
 
 func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
@@ -1516,6 +1534,10 @@ func (s *store) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
 
+	return s.getModelRouteByKeyLocked(namespacedName)
+}
+
+func (s *store) getModelRouteByKeyLocked(namespacedName string) *aiv1alpha1.ModelRoute {
 	info, exists := s.routeInfo[namespacedName]
 	if !exists {
 		return nil
@@ -1708,6 +1730,7 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 	key := fmt.Sprintf("%s/%s", httpRoute.Namespace, httpRoute.Name)
 
 	s.httpRouteMutex.Lock()
+	removeRouteKeyFromGatewayMap(s.gatewayRoutes, key)
 	s.httpRoutes[key] = httpRoute
 
 	// Update gateway routes mapping
@@ -1794,19 +1817,8 @@ func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRo
 	var result []*aiv1alpha1.ModelRoute
 	if routeSet, exists := s.gatewayModelRoutes[gatewayKey]; exists {
 		for routeKey := range routeSet {
-			// Find the ModelRoute in routes or loraRoutes
-			if info, ok := s.routeInfo[routeKey]; ok {
-				// Try to find from primary model routes
-				if info.model != "" {
-					if routes, exists := s.routes[info.model]; exists {
-						for _, route := range routes {
-							if route.Namespace+"/"+route.Name == routeKey {
-								result = append(result, route)
-								break
-							}
-						}
-					}
-				}
+			if route := s.getModelRouteByKeyLocked(routeKey); route != nil {
+				result = append(result, route)
 			}
 		}
 	}

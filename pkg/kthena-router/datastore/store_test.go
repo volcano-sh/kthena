@@ -35,6 +35,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // ptr is a helper function to get pointer to a value
@@ -807,6 +808,111 @@ func TestStoreDeleteModelRoute_ConcurrentAccess(t *testing.T) {
 		t.Errorf("Queue should not exist for key: %v", key)
 		return true
 	})
+}
+
+func TestStoreAddOrUpdateModelRouteRefreshesIndexes(t *testing.T) {
+	s := New().(*store)
+	gatewayKind := gatewayv1.Kind("Gateway")
+
+	route := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-route",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName:    "base-model",
+			LoraAdapters: []string{"old-lora"},
+			ParentRefs: []gatewayv1.ParentReference{
+				{
+					Kind: &gatewayKind,
+					Name: gatewayv1.ObjectName("old-gateway"),
+				},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(route))
+
+	updated := route.DeepCopy()
+	updated.Spec.LoraAdapters = []string{"new-lora"}
+	updated.Spec.ParentRefs = []gatewayv1.ParentReference{
+		{
+			Kind: &gatewayKind,
+			Name: gatewayv1.ObjectName("new-gateway"),
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(updated))
+
+	s.routeMutex.RLock()
+	assert.Empty(t, s.loraRoutes["old-lora"])
+	assert.Len(t, s.loraRoutes["new-lora"], 1)
+	assert.Nil(t, s.gatewayModelRoutes["default/old-gateway"])
+	assert.True(t, s.gatewayModelRoutes["default/new-gateway"].Contains("default/test-route"))
+	s.routeMutex.RUnlock()
+
+	assert.Empty(t, s.GetModelRoutesByGateway("default/old-gateway"))
+	assert.Len(t, s.GetModelRoutesByGateway("default/new-gateway"), 1)
+}
+
+func TestStoreGetModelRoutesByGatewayIncludesLoraOnlyRoutes(t *testing.T) {
+	s := New().(*store)
+	gatewayKind := gatewayv1.Kind("Gateway")
+
+	route := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "lora-route",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			LoraAdapters: []string{"math-lora"},
+			ParentRefs: []gatewayv1.ParentReference{
+				{
+					Kind: &gatewayKind,
+					Name: gatewayv1.ObjectName("gateway"),
+				},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(route))
+
+	routes := s.GetModelRoutesByGateway("default/gateway")
+	assert.Len(t, routes, 1)
+	assert.Equal(t, "lora-route", routes[0].Name)
+}
+
+func TestStoreAddOrUpdateHTTPRouteRefreshesGatewayIndexes(t *testing.T) {
+	s := New().(*store)
+	gatewayKind := gatewayv1.Kind("Gateway")
+
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-route",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{
+						Kind: &gatewayKind,
+						Name: gatewayv1.ObjectName("old-gateway"),
+					},
+				},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(route))
+
+	updated := route.DeepCopy()
+	updated.Spec.ParentRefs = []gatewayv1.ParentReference{
+		{
+			Kind: &gatewayKind,
+			Name: gatewayv1.ObjectName("new-gateway"),
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(updated))
+
+	assert.Empty(t, s.GetHTTPRoutesByGateway("default/old-gateway"))
+	assert.Len(t, s.GetHTTPRoutesByGateway("default/new-gateway"), 1)
+	assert.Equal(t, updated, s.GetHTTPRoute("default/test-route"))
 }
 
 // createComplexModelRoute creates a ModelRoute with multiple rules for different models
