@@ -8,7 +8,7 @@ metadata:
     {{- include "kthena.labels" . | nindent 4 }}
   {{- if eq .Values.global.certManagementMode "cert-manager" }}
   annotations:
-    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/kthena-webhook-cert
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/kthena-controller-manager-webhook-cert
   {{- end }}
 webhooks:
   - name: validate-modelbooster.volcano.sh
