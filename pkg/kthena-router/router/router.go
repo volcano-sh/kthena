@@ -694,16 +694,16 @@ func (r *Router) proxy(
 	// request across loop iterations sends an empty body to subsequent pods.
 	var bodyBytes []byte
 	if req.Body != nil {
-		var err error
-		bodyBytes, err = io.ReadAll(req.Body)
+		b, err := io.ReadAll(req.Body)
 		req.Body.Close()
 		if err != nil {
 			return fmt.Errorf("failed to read request body: %w", err)
 		}
+		bodyBytes = b
 	}
 
 	for i := 0; i < len(ctx.BestPods); i++ {
-		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)

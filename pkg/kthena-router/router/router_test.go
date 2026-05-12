@@ -452,6 +452,93 @@ func TestAccessLogConfigurationFromEnv(t *testing.T) {
 	}
 }
 
+// TestProxy_RetryBodyNotDrained verifies that when the first pod returns a non-2xx
+// response, the retry attempt to the next pod carries the full request body.
+// Before the fix, transport.RoundTrip drained the body on the first attempt, so
+// every subsequent pod received an empty POST body.
+func TestProxy_RetryBodyNotDrained(t *testing.T) {
+	var receivedBodies []string
+
+	// Single backend: returns 503 on the first call, 200 on the second.
+	// Both pods in the test point to this same server so we can observe both attempts.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBodies = append(receivedBodies, string(body))
+		if len(receivedBodies) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"retry-ok"}`)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendIP := backendURL.Hostname()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-retry", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("base-model"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-retry-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-retry-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-retry", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "retry-model",
+			Rules: []*aiv1alpha1.Rule{
+				{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-retry"}}},
+			},
+		},
+	}
+
+	store.AddOrUpdateModelServer(modelServer, sets.New(
+		types.NamespacedName{Name: "pod-retry-1", Namespace: "default"},
+		types.NamespacedName{Name: "pod-retry-2", Namespace: "default"},
+	))
+	store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+
+	// Give pod-2 a non-zero waiting count so pod-1 scores higher and is always
+	// BestPods[0]. This guarantees the 503 is hit first, forcing a retry to pod-2.
+	podInfo2 := store.GetPodInfo(types.NamespacedName{Name: "pod-retry-2", Namespace: "default"})
+	assert.NotNil(t, podInfo2)
+	podInfo2.RequestWaitingNum = 1
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model": "retry-model", "prompt": "test prompt for retry path"}`
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	if assert.Len(t, receivedBodies, 2, "expected exactly 2 backend attempts (first 503, then retry)") {
+		// The router rewrites model name to the ModelServer's base model before dispatch,
+		// so check for the prompt which passes through unchanged.
+		assert.Contains(t, receivedBodies[0], "test prompt for retry path", "first attempt body was missing")
+		// Regression assertion: before the fix, transport.RoundTrip drained the body on the
+		// first attempt, so this would be an empty string.
+		assert.Contains(t, receivedBodies[1], "test prompt for retry path", "retry attempt sent empty body (body reuse regression)")
+	}
+}
+
 // Helper function to parse boolean (same logic as strconv.ParseBool but simpler for test)
 func parseBool(str string) (bool, error) {
 	switch str {
