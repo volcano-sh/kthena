@@ -56,12 +56,12 @@ func TestGetCountMetricsInfo(t *testing.T) {
 		{
 			name: "all known counter/gauge metrics present",
 			allMetrics: map[string]*dto.MetricFamily{
-				GPUCacheUsage:     gaugeMetricFamily(0.75),
+				KVCacheUsage:     gaugeMetricFamily(0.75),
 				RequestWaitingNum: gaugeMetricFamily(3.0),
 				RequestRunningNum: gaugeMetricFamily(5.0),
 			},
 			want: map[string]float64{
-				utils.GPUCacheUsage:     0.75,
+				utils.KVCacheUsage:     0.75,
 				utils.RequestWaitingNum: 3.0,
 				utils.RequestRunningNum: 5.0,
 			},
@@ -81,21 +81,21 @@ func TestGetCountMetricsInfo(t *testing.T) {
 		{
 			name: "partial metrics — only gpu cache present",
 			allMetrics: map[string]*dto.MetricFamily{
-				GPUCacheUsage: gaugeMetricFamily(0.5),
+				KVCacheUsage: gaugeMetricFamily(0.5),
 			},
 			want: map[string]float64{
-				utils.GPUCacheUsage: 0.5,
+				utils.KVCacheUsage: 0.5,
 			},
 		},
 		{
 			name: "zero values stored correctly",
 			allMetrics: map[string]*dto.MetricFamily{
-				GPUCacheUsage:     gaugeMetricFamily(0.0),
+				KVCacheUsage:     gaugeMetricFamily(0.0),
 				RequestWaitingNum: gaugeMetricFamily(0.0),
 				RequestRunningNum: gaugeMetricFamily(0.0),
 			},
 			want: map[string]float64{
-				utils.GPUCacheUsage:     0.0,
+				utils.KVCacheUsage:     0.0,
 				utils.RequestWaitingNum: 0.0,
 				utils.RequestRunningNum: 0.0,
 			},
@@ -141,7 +141,7 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 		{
 			name: "no previous histogram — zero latency (fair initial chance)",
 			allMetrics: map[string]*dto.MetricFamily{
-				TPOT: histogramMetricFamily(10.0, 5),
+				ITL: histogramMetricFamily(10.0, 5),
 				TTFT: histogramMetricFamily(20.0, 8),
 			},
 			previousHistogram: map[string]*dto.Histogram{},
@@ -154,7 +154,7 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 		{
 			name: "with previous — correct delta avg",
 			allMetrics: map[string]*dto.MetricFamily{
-				TPOT: histogramMetricFamily(20.0, 10),
+				ITL: histogramMetricFamily(20.0, 10),
 			},
 			previousHistogram: map[string]*dto.Histogram{
 				utils.TPOT: func() *dto.Histogram {
