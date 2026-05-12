@@ -18,7 +18,9 @@ limitations under the License.
 
 package v1alpha1
 
-import networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+import (
+	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+)
 
 // SessionKeySourceApplyConfiguration represents a declarative configuration of the SessionKeySource type for use
 // with apply.
