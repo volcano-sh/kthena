@@ -1,0 +1,16 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-pd-with-sticky
+  namespace: default
+spec:
+  modelName: "deepseek-r1-1-5b-pd-disaggregation"
+  sessionSticky:
+    sessionAffinitySeconds: 300
+    sources:
+      - type: Header
+        name: X-Sticky-Session
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "deepseek-r1-1-5b-pd-disaggregation"

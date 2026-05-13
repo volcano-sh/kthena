@@ -37,3 +37,5 @@ data:
               weight: 1
             - name: prefix-cache
               weight: 1
+    sessionSticky:
+      backend: memory

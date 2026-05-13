@@ -310,6 +310,52 @@ func (j *JWTAuthenticator) IsEnabled() bool {
 	return j.enabled
 }
 
+// StringClaimFromRequest parses and validates the Bearer token (same path as middleware)
+// and returns the named claim as a string, or empty if unavailable.
+func (j *JWTAuthenticator) StringClaimFromRequest(req *http.Request, claimName string) string {
+	if !j.enabled || j.rotator == nil || claimName == "" {
+		return ""
+	}
+	tokenStr := extractTokenFromHeader(req)
+	if tokenStr == "" {
+		return ""
+	}
+	jwksValue := j.rotator.GetJwks()
+	if jwksValue.Jwks == nil {
+		return ""
+	}
+	token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(jwksValue.Jwks, jws.WithInferAlgorithmFromKey(true)))
+	if err != nil {
+		return ""
+	}
+	if err := j.validateClaims(token, jwksValue); err != nil {
+		return ""
+	}
+	var s string
+	if err := token.Get(claimName, &s); err == nil && strings.TrimSpace(s) != "" {
+		return strings.TrimSpace(s)
+	}
+	var raw any
+	if err := token.Get(claimName, &raw); err != nil || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case json.Number:
+		return strings.TrimSpace(v.String())
+	case float64:
+		return strings.TrimSpace(fmt.Sprint(v))
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
 // Authenticate returns a Gin middleware for JWT token validation
 func (j *JWTAuthenticator) Authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {

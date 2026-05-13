@@ -26,8 +26,21 @@ import (
 )
 
 type RouterConfiguration struct {
-	Scheduler SchedulerConfiguration `yaml:"scheduler"`
-	Auth      AuthenticationConfig   `yaml:"auth"`
+	Scheduler     SchedulerConfiguration `yaml:"scheduler"`
+	Auth          AuthenticationConfig   `yaml:"auth"`
+	SessionSticky *SessionStickyConfig   `yaml:"sessionSticky,omitempty"`
+}
+
+// SessionStickyConfig selects the session affinity backing store for the router.
+type SessionStickyConfig struct {
+	// Backend is "memory" (default) or "redis".
+	Backend string              `yaml:"backend"`
+	Redis   *SessionStickyRedis `yaml:"redis,omitempty"`
+}
+
+// SessionStickyRedis holds Redis connection settings for shared session stickiness.
+type SessionStickyRedis struct {
+	Address string `yaml:"address"`
 }
 
 type SchedulerConfiguration struct {

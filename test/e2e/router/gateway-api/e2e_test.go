@@ -331,3 +331,7 @@ func TestDuplicateModelName(t *testing.T) {
 func TestRouterConfigUpdate(t *testing.T) {
 	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
+
+func TestSessionSticky(t *testing.T) {
+	router.TestSessionStickyShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}

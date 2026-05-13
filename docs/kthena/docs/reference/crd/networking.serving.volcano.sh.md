@@ -175,6 +175,7 @@ _Appears in:_
 | `parentRefs` _ParentReference array_ | ParentRefs references the Gateways that this ModelRoute should be attached to.<br />If empty, the ModelRoute will be attached to all Gateways in the same namespace. |  |  |
 | `rules` _[Rule](#rule) array_ | An ordered list of route rules for LLM traffic. The first rule<br />matching an incoming request will be used.<br />If no rule is matched, an HTTP 404 status code MUST be returned. |  | MaxItems: 16 <br /> |
 | `rateLimit` _[RateLimit](#ratelimit)_ | Rate limit for the LLM request based on prompt tokens or output tokens.<br />There is no limitation if this field is not set. |  |  |
+| `sessionSticky` _[SessionSticky](#sessionsticky)_ | SessionSticky pins requests with the same extracted session key to the same<br />backend Pod for a TTL. Nil or omitted disables session affinity for this route. |  |  |
 
 
 #### ModelRouteStatus
@@ -367,6 +368,61 @@ _Appears in:_
 | `name` _string_ | Name is the name of the rule. |  |  |
 | `modelMatch` _[ModelMatch](#modelmatch)_ | Match conditions to be satisfied for the rule to be activated.<br />Empty `modelMatch` means matching all requests. |  |  |
 | `targetModels` _[TargetModel](#targetmodel) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+
+
+#### SessionKeySource
+
+
+
+SessionKeySource defines one session key extraction rule.
+
+
+
+_Appears in:_
+- [SessionSticky](#sessionsticky)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[SessionKeySourceType](#sessionkeysourcetype)_ |  |  | Enum: [Header Query Cookie JWTClaim] <br />Required: \{\} <br /> |
+| `name` _string_ | Name is the header name, query key, cookie name, or JWT claim name. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### SessionKeySourceType
+
+_Underlying type:_ _string_
+
+SessionKeySourceType identifies how a session key fragment is read.
+
+_Validation:_
+- Enum: [Header Query Cookie JWTClaim]
+
+_Appears in:_
+- [SessionKeySource](#sessionkeysource)
+
+| Field | Description |
+| --- | --- |
+| `Header` |  |
+| `Query` |  |
+| `Cookie` |  |
+| `JWTClaim` |  |
+
+
+#### SessionSticky
+
+
+
+SessionSticky configures per-route session key extraction and binding TTL.
+The backing store (memory vs Redis) is configured in the router process, not here.
+
+
+
+_Appears in:_
+- [ModelRouteSpec](#modelroutespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is binding TTL in seconds. When unset, the default is 10800. |  | Minimum: 1 <br /> |
+| `sources` _[SessionKeySource](#sessionkeysource) array_ | Sources are evaluated in order; the first non-empty extracted value is the session key. |  | MaxItems: 16 <br /> |
 
 
 #### StringMatch

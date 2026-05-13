@@ -132,6 +132,22 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		return err
 	}
 
+	if ctx.PDGroup == nil && ctx.StickyPodName != "" {
+		var pinned []*datastore.PodInfo
+		for _, p := range pods {
+			if p.Pod != nil && p.Pod.Name == ctx.StickyPodName {
+				pinned = append(pinned, p)
+				break
+			}
+		}
+		if len(pinned) > 0 {
+			pods = pinned
+		} else {
+			ctx.StickyPodMiss = true
+			ctx.StickyPodName = ""
+		}
+	}
+
 	if ctx.PDGroup != nil {
 		// Use optimized PDGroup scheduling with pre-categorized pods from store
 		klog.V(4).Info("Using optimized PD disaggregated scheduling")

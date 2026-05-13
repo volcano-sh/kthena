@@ -42,7 +42,16 @@ const (
 	ModelServer1_5bName   = "deepseek-r1-1-5b"
 	ModelServer7bName     = "deepseek-r1-7b"
 	ModelServerSglangName = "sglang-mock"
-	TestDataDir           = "test/e2e/router/testdata"
+	// ModelServerPDDisaggregationName matches testdata ModelServer-ds1.5b-pd-disaggregation.yaml.
+	ModelServerPDDisaggregationName = "deepseek-r1-1-5b-pd-disaggregation"
+	TestDataDir                     = "test/e2e/router/testdata"
+
+	// KthenaRouter* match charts/kthena/charts/networking kthena-router templates.
+	KthenaRouterConfigMapName    = "kthena-router-config"
+	KthenaRouterConfigMapDataKey = "routerConfiguration"
+	KthenaRouterDeploymentName   = "kthena-router"
+	// BackendDeploymentAppLabelKey matches app labels on LLM Deployments in router e2e testdata.
+	BackendDeploymentAppLabelKey = "app"
 )
 
 // RouterTestContext holds the clients needed for router tests

@@ -23,6 +23,7 @@ import (
 
 // ModelRouteSpec defines the desired state of ModelRoute.
 // +kubebuilder:validation:XValidation:rule="self.modelName != \"\" || size(self.loraAdapters) > 0", message="ModelName and LoraAdapters cannot both be empty"
+// +kubebuilder:validation:XValidation:rule="!has(self.sessionSticky) || self.sessionSticky == null || size(self.sessionSticky.sources) > 0", message="sessionSticky.sources must be non-empty when sessionSticky is set"
 type ModelRouteSpec struct {
 	// `model` in the LLM request, it could be a base model name, lora adapter name or even
 	// a virtual model name. This field is used to match scenarios other than model adapter name and
@@ -53,6 +54,45 @@ type ModelRouteSpec struct {
 	// There is no limitation if this field is not set.
 	// +optional
 	RateLimit *RateLimit `json:"rateLimit,omitempty"`
+
+	// SessionSticky pins requests with the same extracted session key to the same
+	// backend Pod for a TTL. Nil or omitted disables session affinity for this route.
+	// +optional
+	SessionSticky *SessionSticky `json:"sessionSticky,omitempty"`
+}
+
+// SessionSticky configures per-route session key extraction and binding TTL.
+// The backing store (memory vs Redis) is configured in the router process, not here.
+type SessionSticky struct {
+	// SessionAffinitySeconds is binding TTL in seconds. When unset, the default is 10800.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	SessionAffinitySeconds *int32 `json:"sessionAffinitySeconds,omitempty"`
+	// Sources are evaluated in order; the first non-empty extracted value is the session key.
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Sources []SessionKeySource `json:"sources,omitempty"`
+}
+
+// SessionKeySourceType identifies how a session key fragment is read.
+// +kubebuilder:validation:Enum=Header;Query;Cookie;JWTClaim
+type SessionKeySourceType string
+
+const (
+	SessionKeySourceHeader   SessionKeySourceType = "Header"
+	SessionKeySourceQuery    SessionKeySourceType = "Query"
+	SessionKeySourceCookie   SessionKeySourceType = "Cookie"
+	SessionKeySourceJWTClaim SessionKeySourceType = "JWTClaim"
+)
+
+// SessionKeySource defines one session key extraction rule.
+type SessionKeySource struct {
+	// +kubebuilder:validation:Required
+	Type SessionKeySourceType `json:"type"`
+	// Name is the header name, query key, cookie name, or JWT claim name.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 type Rule struct {
