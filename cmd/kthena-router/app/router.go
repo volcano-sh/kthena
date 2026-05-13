@@ -197,6 +197,7 @@ type listenerConfig struct {
 	shutdownDoneLog  string
 	logShutdownErr   func(err error)
 	logListenErr     func(err error)
+	readyChan        chan struct{}
 }
 
 // startListener: build Gin, listen, graceful shutdown on ctx.
@@ -267,6 +268,21 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 		Handler: engine.Handler(),
 	}
 
+	listener, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		cfg.logListenErr(err)
+		if cfg.readyChan != nil {
+			// Signal that we failed (channel stays open, caller will timeout)
+			close(cfg.readyChan) // or don't close, let caller timeout
+		}
+		return nil
+	}
+
+	// Signal ready: port is bound
+	if cfg.readyChan != nil {
+		close(cfg.readyChan)
+	}
+
 	go func() {
 		klog.Info(cfg.startLog)
 		if cfg.enableTLS {
@@ -277,12 +293,12 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 				}
 				klog.Fatal(msg)
 			}
-			if err := srv.ListenAndServeTLS(cfg.tlsCertFile, cfg.tlsKeyFile); err != nil && err != http.ErrServerClosed {
+			if err := srv.ServeTLS(listener, cfg.tlsCertFile, cfg.tlsKeyFile); err != nil && err != http.ErrServerClosed {
 				cfg.logListenErr(err)
 			}
 			return
 		}
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			cfg.logListenErr(err)
 		}
 	}()
@@ -501,6 +517,9 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		// nil error indicates listener started successfully (healthy state)
 		lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, nil)
 
+		// create a ready channel
+		ready := make(chan struct{})
+
 		server := startListener(listenerCtx, listenerConfig{
 			addr:             ":" + strconv.Itoa(int(port)),
 			enableTLS:        enableTLS,
@@ -522,65 +541,28 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 					lm.store.SetListenerStatus(l.GatewayKey, l.ListenerName, err)
 				}
 				portInfo.mu.Unlock()
-				if gw := lm.store.GetGateway(config.GatewayKey); gw != nil {
-					if err := lm.store.AddOrUpdateGateway(gw); err != nil {
-						klog.Errorf("Failed to update gateway %s: %v", config.GatewayKey, err)
-					}
-				}
 			},
+			readyChan: ready,
 		})
 
 		portInfo.Server = server
 
-		go func(gwKey, listenerName string, p int32, pi *PortListenerInfo) {
-			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) {
-				// Check for shutdown
-				select {
-				case <-lm.ctx.Done():
-					return
-				default:
-				}
-
-				time.Sleep(100 * time.Millisecond)
-
-				// If logListenErr already fired then stop (error is already in store)
-				pi.mu.RLock()
-				bindErr := pi.LastError
-				pi.mu.RUnlock()
-				if bindErr != nil {
-					return
-				}
-
-				// TCP connection to confirm port is actually listening
-				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), 200*time.Millisecond)
-				if err == nil {
-					conn.Close()
-					// Port confirmed open (now mark healthy)
-					lm.store.SetListenerStatus(gwKey, listenerName, nil)
-					// Trigger gateway re-reconcile so controller writes Programmed=True
-					if gw := lm.store.GetGateway(gwKey); gw != nil {
-						if err := lm.store.AddOrUpdateGateway(gw); err != nil {
-							klog.Errorf("Failed to update gateway %s: %v", gwKey, err)
-						}
-					}
-					return
-				}
+		// Wait for listener to bind or fail
+		if server != nil {
+			select {
+			case <-ready:
+				// Port bound successfully, mark healthy
+				lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, nil)
+				klog.V(4).Infof("Listener %s/%s on port %d is ready", config.GatewayKey, config.ListenerName, port)
+			case <-lm.ctx.Done():
+				// Server shutting down
+				return
 			}
-			// Port not ready (timeout after 5 seconds)
-			pi.mu.RLock()
-			bindErr := pi.LastError
-			pi.mu.RUnlock()
-			if bindErr == nil {
-				timeoutErr := fmt.Errorf("timeout waiting for port %d to become ready", p)
-				lm.store.SetListenerStatus(gwKey, listenerName, timeoutErr)
-				if gw := lm.store.GetGateway(gwKey); gw != nil {
-					if err := lm.store.AddOrUpdateGateway(gw); err != nil {
-						klog.Errorf("Failed to update gateway %s: %v", gwKey, err)
-					}
-				}
-			}
-		}(config.GatewayKey, config.ListenerName, port, portInfo)
+		} else {
+			// startListener returned nil (bind failed), error already logged
+			lm.store.SetListenerStatus(config.GatewayKey, config.ListenerName, portInfo.LastError)
+		}
+
 	} else {
 		// Add listener to existing port
 		portInfo.mu.Lock()
