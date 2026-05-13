@@ -54,7 +54,7 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller := NewGatewayController(gatewayClient, gatewayInformerFactory, store)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -141,7 +141,7 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller := NewGatewayController(gatewayClient, gatewayInformerFactory, store)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -185,7 +185,7 @@ func TestGatewayController_ErrorHandling(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller := NewGatewayController(gatewayClient, gatewayInformerFactory, store)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -209,7 +209,7 @@ func TestGatewayController_WorkQueueProcessing(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller := NewGatewayController(gatewayClient, gatewayInformerFactory, store)
 
 	stop := make(chan struct{})
 	defer close(stop)
