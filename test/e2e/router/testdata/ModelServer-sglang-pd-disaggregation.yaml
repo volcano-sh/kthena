@@ -15,7 +15,7 @@ spec:
         modelserving.volcano.sh/rolename: "D-instance"
   workloadPort:
     port: 30000
-  model: "Qwen/Qwen3-8B"
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
   inferenceEngine: "SGLang"
   trafficPolicy:
     timeout: 10s

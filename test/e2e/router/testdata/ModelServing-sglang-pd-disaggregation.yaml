@@ -23,7 +23,7 @@ spec:
                 imagePullPolicy: IfNotPresent
                 env:
                   - name: MODEL_NAME
-                    value: "Qwen/Qwen3-8B"
+                    value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
                 ports:
                   - containerPort: 30000
         workerReplicas: 0
@@ -42,7 +42,7 @@ spec:
                 imagePullPolicy: IfNotPresent
                 env:
                   - name: MODEL_NAME
-                    value: "Qwen/Qwen3-8B"
+                    value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
                 ports:
                   - containerPort: 30000
         workerReplicas: 0
