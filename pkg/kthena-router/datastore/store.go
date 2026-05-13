@@ -221,6 +221,7 @@ type Store interface {
 	DeletePod(podName types.NamespacedName) error
 
 	// New methods for routing functionality
+	// MatchModelTarget matches a ModelRoute and selects a destination by rule weights.
 	MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error)
 
 	// Model routing methods
@@ -1402,6 +1403,22 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 }
 
 func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
+	mr, rule, isLora, err := s.matchModelRoute(model, req, gatewayKey)
+	if err != nil {
+		return ModelTarget{}, false, nil, err
+	}
+	dst, err := s.selectDestination(rule.TargetModels)
+	if err != nil {
+		return ModelTarget{}, false, nil, err
+	}
+	target, err := modelTargetFromDestination(mr.Namespace, dst)
+	if err != nil {
+		return ModelTarget{}, false, nil, err
+	}
+	return target, isLora, mr, nil
+}
+
+func (s *store) matchModelRoute(model string, req *http.Request, gatewayKey string) (*aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, bool, error) {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
 
@@ -1417,7 +1434,7 @@ func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey str
 		// Try to find routes by lora name
 		loraRoutes, ok := s.loraRoutes[model]
 		if !ok {
-			return ModelTarget{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
+			return nil, nil, false, fmt.Errorf("not found route rules for model %s", model)
 		}
 		candidateRoutes = loraRoutes
 		isLora = true
@@ -1446,23 +1463,17 @@ func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey str
 		if err != nil {
 			continue // Try next ModelRoute
 		}
-
-		dst, err := s.selectDestination(rule.TargetModels)
-		if err != nil {
-			continue // Try next ModelRoute
+		if rule == nil || len(rule.TargetModels) == 0 {
+			continue
 		}
-
-		// Found a matching ModelRoute
-		target, err := modelTargetFromDestination(mr.Namespace, dst)
-		if err != nil {
-			klog.Warningf("failed to resolve target for ModelRoute %s/%s: %v", mr.Namespace, mr.Name, err)
-			continue // Try next ModelRoute
+		if _, err := toWeightedSlice(rule.TargetModels); err != nil {
+			continue
 		}
-		return target, isLora, mr, nil
+		return mr, rule, isLora, nil
 	}
 
 	// No matching ModelRoute found
-	return ModelTarget{}, false, nil, fmt.Errorf("no matching ModelRoute found for model %s", model)
+	return nil, nil, false, fmt.Errorf("no matching ModelRoute found for model %s", model)
 }
 
 func modelTargetFromDestination(namespace string, target *aiv1alpha1.TargetModel) (ModelTarget, error) {

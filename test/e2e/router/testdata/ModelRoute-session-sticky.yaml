@@ -1,0 +1,11 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-sticky
+  namespace: default
+spec:
+  modelName: "deepseek-sticky"
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "deepseek-r1-1-5b-sticky"

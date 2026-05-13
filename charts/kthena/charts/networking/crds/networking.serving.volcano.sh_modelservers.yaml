@@ -134,6 +134,49 @@ spec:
                         description: RetryInterval is the interval between retries.
                         type: string
                     type: object
+                  sessionSticky:
+                    description: |-
+                      SessionSticky pins requests with the same extracted session key to the same
+                      backend Pod of this ModelServer for a TTL. Nil or omitted disables session
+                      affinity for this ModelServer. It does not override ModelRoute weighted
+                      selection among ModelServers.
+                    properties:
+                      sessionAffinitySeconds:
+                        description: |-
+                          SessionAffinitySeconds is binding TTL in seconds.
+                          Once the session has been idle for more than the specified duration, the session becomes invalid.
+                          When unset, the default is 300 (5 minutes).
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      sources:
+                        description: Sources are evaluated in order; the first non-empty
+                          extracted value is the session key.
+                        items:
+                          description: SessionKeySource defines one session key extraction
+                            rule.
+                          properties:
+                            name:
+                              description: Name is the header name, query key, cookie
+                                name, or JWT claim name.
+                              minLength: 1
+                              type: string
+                            type:
+                              description: SessionKeySourceType identifies how a session
+                                key fragment is read.
+                              enum:
+                              - Header
+                              - Query
+                              - Cookie
+                              - JWTClaim
+                              type: string
+                          required:
+                          - name
+                          - type
+                          type: object
+                        maxItems: 16
+                        type: array
+                    type: object
                   timeout:
                     description: |-
                       Timeout bounds how long the router waits for the backend to start responding,
@@ -143,6 +186,11 @@ spec:
                       complete response. By default, there is no timeout.
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: sessionSticky.sources must be non-empty when sessionSticky
+                    is set
+                  rule: '!has(self.sessionSticky) || self.sessionSticky == null ||
+                    size(self.sessionSticky.sources) > 0'
               workloadPort:
                 description: WorkloadPort defines the port and protocol configuration
                   for the model server.
