@@ -184,6 +184,14 @@ func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConf
 	return router
 }
 
+// Close releases resources owned by the router.
+func (r *Router) Close() error {
+	if r == nil || r.sessionStickyStore == nil {
+		return nil
+	}
+	return r.sessionStickyStore.Close()
+}
+
 func firstSessionStickyStoreConfig(configs []SessionStickyStoreConfig) SessionStickyStoreConfig {
 	if len(configs) == 0 {
 		return SessionStickyStoreConfig{Type: SessionStickyStoreMemory}
