@@ -18,6 +18,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -56,7 +57,17 @@ import (
 const (
 	defaultMetricsURL     = "http://127.0.0.1:8080/metrics"
 	defaultScalingTimeout = 3 * time.Minute
+	sessionStickyHeader   = "X-Session-ID"
 )
+
+type accessLogLine struct {
+	ModelName   string `json:"model_name"`
+	ModelRoute  string `json:"model_route"`
+	ModelServer string `json:"model_server"`
+	SelectedPod string `json:"selected_pod"`
+	RequestID   string `json:"request_id"`
+	StatusCode  int    `json:"status_code"`
+}
 
 func getCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
 	mf, ok := metrics[metricName]
@@ -267,6 +278,212 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 	}
 }
 
+func configureRouterSessionStickyRedis(t *testing.T, kubeClient kubernetes.Interface, namespace, redisAddress string) func() {
+	t.Helper()
+	ctx := context.Background()
+	const deploymentName = "kthena-router"
+
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get kthena-router deployment")
+	require.NotEmpty(t, deployment.Spec.Template.Spec.Containers, "kthena-router deployment has no containers")
+
+	originalArgs := append([]string(nil), deployment.Spec.Template.Spec.Containers[0].Args...)
+	setRouterArg(&deployment.Spec.Template.Spec.Containers[0].Args, "--session-sticky-store=", "--session-sticky-store=redis")
+	setRouterArg(&deployment.Spec.Template.Spec.Containers[0].Args, "--session-sticky-redis-address=", "--session-sticky-redis-address="+redisAddress)
+
+	_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to enable Redis session sticky store")
+	expectedReplicas := int32(1)
+	if deployment.Spec.Replicas != nil {
+		expectedReplicas = *deployment.Spec.Replicas
+	}
+	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, expectedReplicas, defaultScalingTimeout)
+
+	return func() {
+		restoreCtx := context.Background()
+		deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(restoreCtx, deploymentName, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Warning: Failed to get kthena-router deployment for restore: %v", err)
+			return
+		}
+		if len(deploy.Spec.Template.Spec.Containers) == 0 {
+			return
+		}
+		deploy.Spec.Template.Spec.Containers[0].Args = originalArgs
+		if _, err := kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore kthena-router args: %v", err)
+			return
+		}
+		_ = utils.WaitForDeploymentReadyE(restoreCtx, kubeClient, namespace, deploymentName, defaultScalingTimeout)
+	}
+}
+
+func setRouterArg(args *[]string, prefix, value string) {
+	for i, arg := range *args {
+		if strings.HasPrefix(arg, prefix) {
+			(*args)[i] = value
+			return
+		}
+	}
+	*args = append(*args, value)
+}
+
+func createSessionStickyModelRoute(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string, sticky *networkingv1alpha1.SessionSticky) *networkingv1alpha1.ModelRoute {
+	t.Helper()
+	ctx := context.Background()
+
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
+	suffix := utils.RandomString(5)
+	modelRoute.Name = "session-sticky-" + suffix
+	modelRoute.Namespace = testNamespace
+	modelRoute.Spec.ModelName = "session-sticky-" + suffix
+	modelRoute.Spec.SessionSticky = sticky
+	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create session sticky ModelRoute")
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "ready")}
+	utils.WaitForChatModelReady(t, utils.DefaultRouterURL, createdModelRoute.Spec.ModelName, messages, 2*time.Minute)
+	return createdModelRoute
+}
+
+func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeySource) *networkingv1alpha1.SessionSticky {
+	return &networkingv1alpha1.SessionSticky{
+		SessionAffinitySeconds: seconds,
+		Sources:                sources,
+	}
+}
+
+func stickySource(sourceType networkingv1alpha1.SessionKeySourceType, name string) networkingv1alpha1.SessionKeySource {
+	return networkingv1alpha1.SessionKeySource{Type: sourceType, Name: name}
+}
+
+func selectedPodForRequest(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string) string {
+	t.Helper()
+	requestID := "sticky-" + utils.RandomString(10)
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	headers["x-request-id"] = requestID
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Hello")}
+	resp := utils.CheckChatCompletionsWithURLAndHeaders(t, url, modelName, messages, headers)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	return waitForSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, requestID, 45*time.Second)
+}
+
+func waitForSelectedPodInRouterLogs(t *testing.T, kubeClient kubernetes.Interface, namespace, requestID string, timeout time.Duration) string {
+	t.Helper()
+	var selectedPod string
+	require.Eventually(t, func() bool {
+		for _, pod := range utils.GetReadyRouterPods(t, kubeClient, namespace) {
+			logs, err := kubeClient.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Do(context.Background()).Raw()
+			if err != nil {
+				continue
+			}
+			if parsed := selectedPodFromAccessLogs(string(logs), requestID); parsed != "" {
+				selectedPod = parsed
+				return true
+			}
+		}
+		return false
+	}, timeout, time.Second, "router access logs did not include request id %s", requestID)
+	return selectedPod
+}
+
+func waitForRouterLogsContainAnyPod(t *testing.T, kubeClient kubernetes.Interface, namespace string, since time.Duration, substrings []string, timeout time.Duration) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		sec := int64(since.Seconds())
+		for _, pod := range utils.GetReadyRouterPods(t, kubeClient, namespace) {
+			logs, err := kubeClient.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+				SinceSeconds: &sec,
+			}).Do(context.Background()).Raw()
+			if err != nil {
+				continue
+			}
+			logText := string(logs)
+			matched := true
+			for _, substring := range substrings {
+				if !strings.Contains(logText, substring) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+		return false
+	}, timeout, time.Second, "router logs did not contain expected substrings: %v", substrings)
+}
+
+func selectedPodFromAccessLogs(logs, requestID string) string {
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, requestID) {
+			continue
+		}
+		var entry accessLogLine
+		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.RequestID == requestID {
+			if entry.SelectedPod != "" {
+				return entry.SelectedPod
+			}
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if strings.HasPrefix(field, "selected_pod=") {
+				return strings.TrimPrefix(field, "selected_pod=")
+			}
+		}
+	}
+	return ""
+}
+
+func assertSameSessionPod(t *testing.T, pods ...string) {
+	t.Helper()
+	require.NotEmpty(t, pods)
+	first := pods[0]
+	require.NotEmpty(t, first)
+	for _, pod := range pods[1:] {
+		require.Equal(t, first, pod, "same session key should stay on one pod")
+	}
+}
+
+func distinctPodCount(pods []string) int {
+	seen := map[string]struct{}{}
+	for _, pod := range pods {
+		if pod != "" {
+			seen[pod] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func collectSelectedPods(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string, requests int) []string {
+	t.Helper()
+	pods := make([]string, 0, requests)
+	for i := 0; i < requests; i++ {
+		pods = append(pods, selectedPodForRequest(t, testCtx, kthenaNamespace, url, modelName, headers))
+	}
+	return pods
+}
+
+func freeLocalPort(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "Failed to allocate local port")
+	defer listener.Close()
+	return fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+}
+
 // setupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
 func setupModelRouteWithGatewayAPI(modelRoute *networkingv1alpha1.ModelRoute, useGatewayAPI bool, kthenaNamespace string) {
 	if useGatewayAPI {
@@ -406,6 +623,183 @@ func TestModelRouteMultiModelsShared(t *testing.T, testCtx *routercontext.Router
 		assert.Equal(t, 200, resp.StatusCode)
 		assert.NotEmpty(t, resp.Body)
 		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B", "Empty header should fall back to 1.5B model")
+	})
+}
+
+// TestModelRouteSessionStickyShared covers the proposal-defined e2e scenarios for
+// ModelRoute.spec.sessionSticky. The assertions use router access logs because the
+// shared mock backend returns model text, not the serving Pod identity.
+func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	if kthenaNamespace == "" {
+		t.Skip("session sticky e2e requires kthena namespace to read router access logs")
+	}
+
+	baseURL := utils.DefaultRouterURL
+
+	t.Run("E2E-SS-01-BasicStickiness", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "basic"}, 5)
+		assertSameSessionPod(t, pods...)
+	})
+
+	t.Run("E2E-SS-02-Isolation", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		first := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "first"})
+		second := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "second"})
+		firstAgain := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "first"})
+		secondAgain := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "second"})
+		require.NotEmpty(t, second)
+		require.Equal(t, first, firstAgain, "returning to the first key must keep the first binding")
+		require.Equal(t, second, secondAgain, "returning to the second key must keep the second binding")
+	})
+
+	t.Run("E2E-SS-03-NoKeyUsesPlainLoadBalancing", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, nil, 30)
+		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "missing sticky key should not pin all requests")
+	})
+
+	t.Run("E2E-SS-04-AbsentSessionStickyIgnoresHeader", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace, nil)
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "ignored"}, 30)
+		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "header should not pin when sessionSticky is absent")
+	})
+
+	t.Run("E2E-SS-05-QuerySource", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceQuery, "sid")))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL+"?sid=query-key", route.Spec.ModelName, nil, 5)
+		assertSameSessionPod(t, pods...)
+	})
+
+	t.Run("E2E-SS-06-CookieSource", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceCookie, "sid")))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{"Cookie": "sid=cookie-key"}, 5)
+		assertSameSessionPod(t, pods...)
+	})
+
+	t.Run("E2E-SS-07-TTLExpiresAndAllowsRebinding", func(t *testing.T) {
+		ttl := int32(1)
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(&ttl, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		headers := map[string]string{sessionStickyHeader: "short-ttl"}
+		beforeA := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		beforeB := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.Equal(t, beforeA, beforeB, "session should stay bound before TTL expires")
+		time.Sleep(2 * time.Second)
+		after := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.NotEmpty(t, after, "request after TTL expiry should be served")
+	})
+
+	t.Run("E2E-SS-08-FailoverDeletedPod", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		headers := map[string]string{sessionStickyHeader: "failover"}
+		originalPod := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.NotEmpty(t, originalPod)
+		err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Delete(context.Background(), originalPod, metav1.DeleteOptions{})
+		require.NoError(t, err, "Failed to delete sticky backend pod")
+		require.Eventually(t, func() bool {
+			_, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Get(context.Background(), originalPod, metav1.GetOptions{})
+			return apierrors.IsNotFound(err)
+		}, 2*time.Minute, 2*time.Second, "deleted pod should leave the endpoint set")
+		utils.WaitForDeploymentReady(t, context.Background(), testCtx.KubeClient, testNamespace, routercontext.Deployment1_5bName, 3, 3*time.Minute)
+		newPod := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.NotEqual(t, originalPod, newPod, "sticky binding should fail over away from deleted pod")
+	})
+
+	t.Run("E2E-SS-09-RedisStoreAcrossRouterReplicas", func(t *testing.T) {
+		cleanupRedis := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
+		t.Cleanup(cleanupRedis)
+		restoreRedisArgs := configureRouterSessionStickyRedis(t, testCtx.KubeClient, kthenaNamespace, "redis-server."+kthenaNamespace+".svc.cluster.local:6379")
+		t.Cleanup(restoreRedisArgs)
+		restoreScale := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 2)
+		t.Cleanup(restoreScale)
+
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		routerPods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+		require.GreaterOrEqual(t, len(routerPods), 2, "Redis scenario needs two router replicas")
+
+		urls := make([]string, 0, 2)
+		for i := 0; i < 2; i++ {
+			localPort := freeLocalPort(t)
+			pf, err := utils.SetupPortForwardToPod(kthenaNamespace, routerPods[i].Name, localPort, "8080")
+			require.NoError(t, err, "Failed to port-forward router pod %s", routerPods[i].Name)
+			t.Cleanup(pf.Close)
+			urls = append(urls, fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", localPort))
+		}
+
+		headers := map[string]string{sessionStickyHeader: "redis-shared"}
+		first := selectedPodForRequest(t, testCtx, kthenaNamespace, urls[0], route.Spec.ModelName, headers)
+		second := selectedPodForRequest(t, testCtx, kthenaNamespace, urls[1], route.Spec.ModelName, headers)
+		require.Equal(t, first, second, "same session key should resolve to one backend pod across router replicas")
+	})
+
+	t.Run("E2E-SS-10-AdmissionRejectsEmptySources", func(t *testing.T) {
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
+		modelRoute.Name = "session-sticky-invalid-" + utils.RandomString(5)
+		modelRoute.Namespace = testNamespace
+		modelRoute.Spec.ModelName = "session-sticky-invalid-" + utils.RandomString(5)
+		modelRoute.Spec.SessionSticky = &networkingv1alpha1.SessionSticky{}
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+		_, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(context.Background(), modelRoute, metav1.CreateOptions{})
+		require.Error(t, err, "empty sources should be rejected")
+		require.True(t, apierrors.IsInvalid(err) || apierrors.IsBadRequest(err), "expected Invalid or BadRequest, got %v", err)
+	})
+
+	t.Run("E2E-SS-11-SourcePrecedence", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil,
+				stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader),
+				stickySource(networkingv1alpha1.SessionKeySourceQuery, "sid")))
+		headerOnly := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "precedence"})
+		bothSources := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL+"?sid=query-other", route.Spec.ModelName, map[string]string{sessionStickyHeader: "precedence"})
+		require.Equal(t, headerOnly, bothSources, "header source must win before query source")
+	})
+
+	t.Run("E2E-SS-12-PDTargetBypassesSticky", func(t *testing.T) {
+		ctx := context.Background()
+		modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing](filepath.Join(routercontext.TestDataDir, "ModelServing-ds1.5b-pd-disaggregation.yaml"))
+		modelServing.Namespace = testNamespace
+		createdModelServing, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create PD ModelServing")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(context.Background(), createdModelServing.Name, metav1.DeleteOptions{})
+		})
+		utils.WaitForModelServingReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelServing.Name)
+
+		modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-pd-disaggregation.yaml"))
+		modelServer.Name = "session-sticky-pd-" + utils.RandomString(5)
+		modelServer.Namespace = testNamespace
+		createdModelServer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create PD ModelServer")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(context.Background(), createdModelServer.Name, metav1.DeleteOptions{})
+		})
+
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRoute-ds1.5b-pd-disaggregation.yaml"))
+		modelRoute.Name = "session-sticky-pd-" + utils.RandomString(5)
+		modelRoute.Namespace = testNamespace
+		modelRoute.Spec.ModelName = modelRoute.Name
+		modelRoute.Spec.Rules[0].TargetModels[0].ModelServerName = createdModelServer.Name
+		modelRoute.Spec.SessionSticky = sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader))
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create PD sticky ModelRoute")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), createdModelRoute.Name, metav1.DeleteOptions{})
+		})
+
+		pod := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, createdModelRoute.Spec.ModelName, map[string]string{sessionStickyHeader: "pd-bypass"})
+		require.NotEmpty(t, pod, "PD sticky bypass request should be served")
+		waitForRouterLogsContainAnyPod(t, testCtx.KubeClient, kthenaNamespace, 2*time.Minute,
+			[]string{"PD disaggregation targets are not supported; bypassing sticky routing"}, 45*time.Second)
 	})
 }
 

@@ -801,14 +801,91 @@ func TestRouterDoLoadbalanceIgnoresSessionHeaderWhenSessionStickyAbsent(t *testi
 	assert.Empty(t, capture.ctx.AffinityScopeKey)
 }
 
+func TestRouterDoLoadbalanceRetriesWithAllPodsWhenStickyBoundPodCannotSchedule(t *testing.T) {
+	store := datastore.New()
+	capture := &capturingScheduler{errs: []error{
+		errors.New("pinned pod filtered"),
+		errors.New("stop after retry"),
+	}}
+	stickyStore := newMemorySessionStickyStore()
+	router := &Router{
+		store:              store,
+		scheduler:          capture,
+		sessionStickyStore: stickyStore,
+	}
+
+	ttl := int32(30)
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: 8080},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.2", Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model",
+			SessionSticky: &aiv1alpha1.SessionSticky{
+				SessionAffinitySeconds: &ttl,
+				Sources: []aiv1alpha1.SessionKeySource{
+					{Type: aiv1alpha1.SessionKeySourceHeader, Name: "X-Session-ID"},
+				},
+			},
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-1"}},
+			}},
+		},
+	}
+
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, sets.New(
+		types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		types.NamespacedName{Name: "pod-2", Namespace: "default"},
+	)))
+	require.NoError(t, store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+
+	stickyStore.Set("default/mr-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-1"}, time.Minute)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Session-ID", "session-1")
+
+	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
+
+	require.Len(t, capture.podsByCall, 2)
+	require.Len(t, capture.podsByCall[0], 1, "first scheduling attempt should use the bound pod")
+	assert.Equal(t, "pod-1", capture.podsByCall[0][0].Pod.Name)
+	require.Len(t, capture.podsByCall[1], 2, "retry should use the original full pod list")
+	_, ok := stickyStore.Get("default/mr-1", "session-1")
+	assert.False(t, ok, "failed sticky binding should be deleted")
+}
+
 type capturingScheduler struct {
-	ctx *framework.Context
-	err error
+	ctx        *framework.Context
+	err        error
+	errs       []error
+	podsByCall [][]*datastore.PodInfo
 }
 
 func (c *capturingScheduler) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
 	cloned := *ctx
 	c.ctx = &cloned
+	c.podsByCall = append(c.podsByCall, append([]*datastore.PodInfo(nil), pods...))
+	if len(c.errs) >= len(c.podsByCall) {
+		return c.errs[len(c.podsByCall)-1]
+	}
 	return c.err
 }
 

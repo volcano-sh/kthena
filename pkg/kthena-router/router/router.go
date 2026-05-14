@@ -483,10 +483,13 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 
 	sessionKey, sessionTTL := r.prepareSessionSticky(c.Request, modelRoute, pdGroup, pods)
 	routeKey := routeSessionKey(modelRoute)
+	originalPods := pods
+	sessionBindingApplied := false
 	if sessionKey != "" && routeKey != "" && pdGroup == nil {
 		if boundPod, ok := r.sessionStickyStore.Get(routeKey, sessionKey); ok {
 			if pod, exists := findPodByName(pods, boundPod); exists {
 				pods = []*datastore.PodInfo{pod}
+				sessionBindingApplied = true
 			} else {
 				klog.Infof("session sticky binding for route %s session %s points to unavailable pod %s/%s; deleting binding",
 					routeKey, hashSessionKey(sessionKey), boundPod.Namespace, boundPod.Name)
@@ -512,6 +515,17 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 
 	err = r.scheduler.Schedule(ctx, pods)
+	if err != nil {
+		if sessionBindingApplied {
+			klog.Infof("session sticky binding for route %s session %s could not be scheduled: %v; deleting binding and retrying",
+				routeKey, hashSessionKey(sessionKey), err)
+			r.sessionStickyStore.Delete(routeKey, sessionKey)
+			ctx.BestPods = nil
+			ctx.DecodePods = nil
+			ctx.PrefillPods = nil
+			err = r.scheduler.Schedule(ctx, originalPods)
+		}
+	}
 	if err != nil {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
