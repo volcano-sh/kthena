@@ -96,12 +96,6 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 }
 
 func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
-	// first filter out invalid pods that wonot be selected to loadbalance to.
-	pods, err := s.RunFilterPlugins(pods, ctx)
-	if err != nil {
-		return err
-	}
-
 	if ctx.PDGroup != nil {
 		// Use optimized PDGroup scheduling with pre-categorized pods from store
 		klog.V(4).Info("Using optimized PD disaggregated scheduling")
@@ -114,6 +108,10 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 
 		if len(decodePods) == 0 {
 			return fmt.Errorf("no decode pod found")
+		}
+		decodePods, err = s.RunFilterPlugins(decodePods, ctx)
+		if err != nil {
+			return fmt.Errorf("no valid decode pod found: %w", err)
 		}
 
 		var topNDecodePods []*datastore.PodInfo
@@ -139,6 +137,11 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", klog.KObj(decodePod.Pod), "error", err)
 				continue
 			}
+			selectedPods, err = s.RunFilterPlugins(selectedPods, ctx)
+			if err != nil {
+				klog.V(4).InfoS("prefill pods for decode group filtered out", "decode instance", klog.KObj(decodePod.Pod), "error", err)
+				continue
+			}
 
 			var bestPrefillPod []*datastore.PodInfo
 			if pinnedPod, ok := s.findHardPinnedPod(ctx, selectedPods); ok {
@@ -161,6 +164,12 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			return fmt.Errorf("no valid prefill-decode pod pairs found")
 		}
 		return nil
+	}
+
+	// first filter out invalid pods that wonot be selected to loadbalance to.
+	pods, err := s.RunFilterPlugins(pods, ctx)
+	if err != nil {
+		return err
 	}
 	if pinnedPod, ok := s.findHardPinnedPod(ctx, pods); ok {
 		ctx.BestPods = []*datastore.PodInfo{pinnedPod}

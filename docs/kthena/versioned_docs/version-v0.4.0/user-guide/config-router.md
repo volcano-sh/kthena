@@ -81,7 +81,7 @@ data:
           enabled:
             - name: least-request
               weight: 1
-            - name: kv-cache
+            - name: kvcache-aware
               weight: 1
             - name: least-latency
               weight: 1
@@ -148,7 +148,7 @@ data:
           enabled:
             - name: least-request
               weight: 1
-            - name: kv-cache
+            - name: kvcache-aware
               weight: 1
             - name: least-latency
               weight: 1

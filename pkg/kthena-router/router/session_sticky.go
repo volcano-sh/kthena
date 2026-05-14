@@ -37,6 +37,7 @@ import (
 
 const defaultSessionAffinitySeconds int32 = 10800
 const redisOperationTimeout = 2 * time.Second
+const memorySessionStickyCleanupInterval = time.Minute
 const redisSetSessionBindingScript = `
 local current = redis.call("GET", KEYS[1])
 if not current then
@@ -63,15 +64,20 @@ type sessionStickyStore interface {
 }
 
 type memorySessionStickyStore struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	bindings map[string]sessionBinding
+	mu              sync.Mutex
+	now             func() time.Time
+	cleanupInterval time.Duration
+	nextCleanup     time.Time
+	bindings        map[string]sessionBinding
 }
 
 func newMemorySessionStickyStore() *memorySessionStickyStore {
+	now := time.Now()
 	return &memorySessionStickyStore{
-		now:      time.Now,
-		bindings: make(map[string]sessionBinding),
+		now:             time.Now,
+		cleanupInterval: memorySessionStickyCleanupInterval,
+		nextCleanup:     now.Add(memorySessionStickyCleanupInterval),
+		bindings:        make(map[string]sessionBinding),
 	}
 }
 
@@ -99,11 +105,7 @@ func (s *memorySessionStickyStore) Set(routeKey, sessionKey string, pod types.Na
 	defer s.mu.Unlock()
 
 	now := s.now()
-	for key, binding := range s.bindings {
-		if !binding.expiresAt.After(now) {
-			delete(s.bindings, key)
-		}
-	}
+	s.cleanupExpiredLocked(now)
 	s.bindings[sessionStoreKey(routeKey, sessionKey)] = sessionBinding{
 		pod:       pod,
 		expiresAt: now.Add(ttl),
@@ -118,6 +120,18 @@ func (s *memorySessionStickyStore) Delete(routeKey, sessionKey string) {
 
 func (s *memorySessionStickyStore) Close() error {
 	return nil
+}
+
+func (s *memorySessionStickyStore) cleanupExpiredLocked(now time.Time) {
+	if s.cleanupInterval <= 0 || now.Before(s.nextCleanup) {
+		return
+	}
+	for key, binding := range s.bindings {
+		if !binding.expiresAt.After(now) {
+			delete(s.bindings, key)
+		}
+	}
+	s.nextCleanup = now.Add(s.cleanupInterval)
 }
 
 type redisSessionStickyStore struct {

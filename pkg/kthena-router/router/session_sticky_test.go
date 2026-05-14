@@ -60,3 +60,42 @@ func TestRedisSessionStickyStoreSetRefreshesExistingSamePod(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-a"}, pod)
 }
+
+func TestMemorySessionStickyStoreSetDoesNotScanEveryInsert(t *testing.T) {
+	store := newMemorySessionStickyStore()
+	now := time.Unix(100, 0)
+	store.now = func() time.Time { return now }
+	store.cleanupInterval = time.Minute
+	store.nextCleanup = now.Add(time.Minute)
+
+	expiredKey := sessionStoreKey("route", "expired")
+	store.bindings[expiredKey] = sessionBinding{
+		pod:       types.NamespacedName{Namespace: "default", Name: "old"},
+		expiresAt: now.Add(-time.Second),
+	}
+
+	store.Set("route", "new", types.NamespacedName{Namespace: "default", Name: "new"}, time.Minute)
+
+	require.Contains(t, store.bindings, expiredKey, "expired entries should be cleaned lazily, not on every Set")
+	require.Contains(t, store.bindings, sessionStoreKey("route", "new"))
+}
+
+func TestMemorySessionStickyStorePeriodicCleanup(t *testing.T) {
+	store := newMemorySessionStickyStore()
+	now := time.Unix(100, 0)
+	store.now = func() time.Time { return now }
+	store.cleanupInterval = time.Minute
+	store.nextCleanup = now
+
+	expiredKey := sessionStoreKey("route", "expired")
+	store.bindings[expiredKey] = sessionBinding{
+		pod:       types.NamespacedName{Namespace: "default", Name: "old"},
+		expiresAt: now.Add(-time.Second),
+	}
+
+	store.Set("route", "new", types.NamespacedName{Namespace: "default", Name: "new"}, time.Minute)
+
+	require.NotContains(t, store.bindings, expiredKey)
+	require.Contains(t, store.bindings, sessionStoreKey("route", "new"))
+	require.Equal(t, now.Add(time.Minute), store.nextCleanup)
+}

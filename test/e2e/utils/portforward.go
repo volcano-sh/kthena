@@ -78,7 +78,11 @@ func (f *forwarder) Start() error {
 			}
 			var err error
 			// Build a new port forwarder.
-			fw, err = f.buildK8sPortForwarder(readyCh)
+			currentReadyCh := readyCh
+			if f.ready.Load() {
+				currentReadyCh = make(chan struct{})
+			}
+			fw, err = f.buildK8sPortForwarder(currentReadyCh)
 			if err != nil {
 				if !f.ready.Load() {
 					f.errCh <- fmt.Errorf("building port forwarder: %v", err)
@@ -92,7 +96,6 @@ func (f *forwarder) Start() error {
 					f.errCh <- fmt.Errorf("port forward: %v", err)
 					return
 				}
-				readyCh = nil
 				time.Sleep(time.Second)
 				continue
 			}
@@ -101,8 +104,6 @@ func (f *forwarder) Start() error {
 			}
 			// At this point, either the stopCh has been closed, or port forwarder connection is broken.
 			// the port forwarder should have already been ready before.
-			// No need to notify the ready channel anymore when forwarding again.
-			readyCh = nil
 		}
 	}()
 

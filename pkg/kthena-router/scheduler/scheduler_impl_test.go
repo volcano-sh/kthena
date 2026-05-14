@@ -78,6 +78,28 @@ func (f *fixedHardPinPlugin) HardPin(_ *framework.Context, pods []*datastore.Pod
 	return nil, false
 }
 
+type nameExcludingFilterPlugin struct {
+	name     string
+	exclude  map[string]bool
+	seenPods []string
+}
+
+func (f *nameExcludingFilterPlugin) Name() string { return f.name }
+
+func (f *nameExcludingFilterPlugin) Filter(_ *framework.Context, pods []*datastore.PodInfo) []*datastore.PodInfo {
+	filtered := make([]*datastore.PodInfo, 0, len(pods))
+	for _, pod := range pods {
+		if pod == nil || pod.Pod == nil {
+			continue
+		}
+		f.seenPods = append(f.seenPods, pod.Pod.Name)
+		if !f.exclude[pod.Pod.Name] {
+			filtered = append(filtered, pod)
+		}
+	}
+	return filtered
+}
+
 // TestTopNPodInfos tests the TopNPodInfos function
 func TestTopNPodInfos(t *testing.T) {
 	tests := []struct {
@@ -380,6 +402,94 @@ func TestScheduleHardPinOverridesWeightedScores(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ctx.BestPods, 1)
 	assert.Equal(t, "pod1", ctx.BestPods[0].Pod.Name)
+}
+
+func TestSchedulePDGroupFiltersStoreCandidatesBeforeHardPin(t *testing.T) {
+	store := datastore.New()
+	modelServerName := types.NamespacedName{Namespace: "default", Name: "test-model-server"}
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      modelServerName.Name,
+			Namespace: modelServerName.Namespace,
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "pd-group",
+					DecodeLabels:  map[string]string{"role": "decode"},
+					PrefillLabels: map[string]string{"role": "prefill"},
+				},
+			},
+		},
+	}
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, nil))
+
+	addPod := func(name, role string) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					"pd-group": "group-1",
+					"role":     role,
+				},
+			},
+			Status: corev1.PodStatus{PodIP: "10.0.0.1"},
+		}
+		require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	}
+	addPod("decode-allowed", "decode")
+	addPod("decode-filtered", "decode")
+	addPod("prefill-allowed", "prefill")
+	addPod("prefill-filtered", "prefill")
+
+	filter := &nameExcludingFilterPlugin{
+		name: "test-filter",
+		exclude: map[string]bool{
+			"decode-filtered":  true,
+			"prefill-filtered": true,
+		},
+	}
+	scheduler := &SchedulerImpl{
+		store:         store,
+		filterPlugins: []framework.FilterPlugin{filter},
+		scorePlugins: []*scorePlugin{
+			{
+				plugin: &fixedHardPinPlugin{
+					name:      "session-affinity",
+					pinPod:    "decode-filtered",
+					scoreByID: map[string]int{},
+				},
+				weight: 1,
+			},
+			{
+				plugin: &fixedHardPinPlugin{
+					name:      "session-affinity-prefill",
+					pinPod:    "prefill-filtered",
+					scoreByID: map[string]int{},
+				},
+				weight: 1,
+			},
+		},
+	}
+	ctx := &framework.Context{
+		ModelServerName: modelServerName,
+		PDGroup: &aiv1alpha1.PDGroup{
+			GroupKey:      "pd-group",
+			DecodeLabels:  map[string]string{"role": "decode"},
+			PrefillLabels: map[string]string{"role": "prefill"},
+		},
+	}
+	pods, err := store.GetPodsByModelServer(modelServerName)
+	require.NoError(t, err)
+
+	require.NoError(t, scheduler.Schedule(ctx, pods))
+	require.Len(t, ctx.DecodePods, 1)
+	require.Len(t, ctx.PrefillPods, 1)
+	require.NotNil(t, ctx.PrefillPods[0])
+	assert.Equal(t, "decode-allowed", ctx.DecodePods[0].Pod.Name)
+	assert.Equal(t, "prefill-allowed", ctx.PrefillPods[0].Pod.Name)
+	assert.ElementsMatch(t, []string{"decode-allowed", "decode-filtered", "prefill-allowed", "prefill-filtered"}, filter.seenPods)
 }
 
 // Helper function to create test PodInfo
