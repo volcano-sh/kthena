@@ -1,17 +1,5 @@
 ---
 title: ExternalModelProvider for Third-Party LLM API Routing
-authors:
-- "@xrwang8"
-reviewers:
-- "@hzxuzhonghu"
-- "@YaoZengzeng"
-- "@LiZhenCheng9527"
-- "@git-malu"
-- TBD
-approvers:
-- "@LiZhenCheng9527"
-- TBD
-
 creation-date: 2026-05-09
 
 ---
@@ -40,14 +28,15 @@ This creates operational overhead and duplicates functionality that should be bu
 - Reuse `ModelRoute` for unified traffic management (weight-based splitting, rate limiting, etc.)
 - Support mixed routing: in-cluster + external backends for the same model name
 - Namespace isolation for multi-tenant deployments
-- Reserve a forward-compatible extension point on `ModelRoute` (`selectionPolicy`) for future cost-aware and latency-aware routing, without committing to a cost-data schema in v1alpha1
+- Keep the initial API small while leaving room for a future cost-aware routing proposal
 
 #### Non-Goals
 
 - Support for non-OpenAI-compatible APIs (can be added later)
 - Built-in API key rotation (users manage Secrets)
 - Request/response transformation beyond model name rewriting
-- Cost / billing data modeling on `ExternalModelProvider` in v1alpha1 — deferred to a follow-up proposal that selects the data source (see Design Rationale §1)
+- Cost / billing data modeling on `ExternalModelProvider` in v1alpha1
+- Adding a concrete `ModelRoute.spec.selectionPolicy` API in v1alpha1; cost-aware and latency-aware selection policies are deferred to a follow-up proposal
 
 ### Proposal
 
@@ -113,11 +102,13 @@ and default to `apiKey`.
 type ExternalSecretKeyRef struct {
     // Name of the Secret in the same namespace as the ExternalModelProvider.
     // +kubebuilder:validation:Required
+    // +kubebuilder:validation:MinLength=1
     Name string `json:"name"`
 
     // Key in the Secret data map. Defaults to "apiKey".
     // +optional
     // +kubebuilder:default=apiKey
+    // +kubebuilder:validation:MinLength=1
     Key string `json:"key,omitempty"`
 }
 
@@ -148,6 +139,7 @@ type ExternalModelProviderAuth struct {
     // HeaderName is the HTTP header used to carry the token.
     // Required when type=APIKeyHeader; rejected otherwise.
     // +optional
+    // +kubebuilder:validation:MinLength=1
     HeaderName string `json:"headerName,omitempty"`
 }
 ```
@@ -169,8 +161,11 @@ The full Go type for `ExternalModelProvider` (spec and status):
 type ExternalModelProviderSpec struct {
     // BaseURL is the HTTPS root of the external API (no trailing /v1).
     // +kubebuilder:validation:Required
+    // +kubebuilder:validation:MinLength=9
+    // +kubebuilder:validation:MaxLength=2048
     // +kubebuilder:validation:XValidation:rule="self.lowerAscii().startsWith('https://')",message="baseURL must use HTTPS"
     // +kubebuilder:validation:XValidation:rule="!self.contains('@')",message="baseURL must not contain userinfo"
+    // +kubebuilder:validation:XValidation:rule="!self.contains('?') && !self.contains('#')",message="baseURL must not contain query or fragment"
     // +kubebuilder:validation:XValidation:rule="!self.matches('^.*/v\\\\d+/?$')",message="baseURL must not end with a version path segment"
     BaseURL string `json:"baseURL"`
 
@@ -179,6 +174,8 @@ type ExternalModelProviderSpec struct {
     Auth ExternalModelProviderAuth `json:"auth"`
 
     // Models lists the upstream model names this provider serves.
+    // +listType=map
+    // +listMapKey=name
     // +kubebuilder:validation:MinItems=1
     // +kubebuilder:validation:MaxItems=64
     Models []ExternalModel `json:"models"`
@@ -192,6 +189,7 @@ type ExternalModelProviderSpec struct {
 type ExternalModel struct {
     // Name is the upstream model identifier (e.g. "gpt-4o-mini").
     // +kubebuilder:validation:Required
+    // +kubebuilder:validation:MinLength=1
     // +kubebuilder:validation:MaxLength=253
     Name string `json:"name"`
 }
@@ -251,6 +249,7 @@ type TargetModel struct {
     
     // ModelServerName references an in-cluster ModelServer
     // +optional
+    // +kubebuilder:validation:MinLength=1
     ModelServerName string `json:"modelServerName,omitempty"`
     
     // ExternalProviderRef references an ExternalModelProvider
@@ -268,105 +267,37 @@ type TargetModel struct {
 type ExternalProviderRef struct {
     // Name of the ExternalModelProvider in the same namespace
     // +kubebuilder:validation:Required
+    // +kubebuilder:validation:MinLength=1
     Name string `json:"name"`
     
     // ModelName specifies which model in the provider to use
     // Must match one of ExternalModelProvider.spec.models[].name
     // +kubebuilder:validation:Required
+    // +kubebuilder:validation:MinLength=1
     ModelName string `json:"modelName"`
 }
 ```
 
 **CRD Validation**: The CEL rule uses `filter` form rather than `!=` to ensure it extends cleanly when a third backend type is added: `[has(self.modelServerName), has(self.externalProviderRef)].filter(x, x).size() == 1`. Adding a third field (e.g. `inferencePoolRef`) only requires appending it to the list — no rule replacement needed.
 
-#### ModelRouteSpec Extension: SelectionPolicy
+#### Versioning and Compatibility
 
-`ModelRouteSpec` is extended with an optional `selectionPolicy` field. v1alpha1
-only defines `Weighted` (the current behavior). Future policy types will be
-added in follow-up proposals; admitting an unknown value at the API server is
-not the right way to "reserve" them, because it forces consumers to handle
-silent fallback.
+The existing v1alpha1 `TargetModel` schema requires `modelServerName`. This
+proposal changes `TargetModel` into a union by removing that field from the CRD
+`required` list and adding a CEL rule that requires exactly one backend field.
 
-```go
-type ModelRouteSpec struct {
-    ModelName string `json:"modelName,omitempty"`
-    Rules     []*Rule `json:"rules"`
+Existing `ModelRoute` objects that set `modelServerName` remain valid under the
+new schema. No stored-object migration is required for normal routes.
 
-    // SelectionPolicy determines how to pick a target when multiple are eligible.
-    // If unset, Weighted is used (current behavior, backward compatible).
-    // +optional
-    SelectionPolicy *SelectionPolicy `json:"selectionPolicy,omitempty"`
-}
+There is still a rollout constraint: an old router binary or old typed client
+does not understand `externalProviderRef`. A future implementation PR must
+upgrade the API types, generated clients, Helm CRDs, router informers, and data
+plane together. The ExternalModelProvider CRD should not be installed on its own
+against routers that only know `MatchModelServer`; otherwise an admitted
+external target could be treated as an empty in-cluster backend.
 
-type Rule struct {
-    // Match conditions to be satisfied for the rule to be activated.
-    // Empty modelMatch means matching all requests.
-    // +optional
-    ModelMatch *ModelMatch `json:"modelMatch,omitempty"`
-
-    // +kubebuilder:validation:MinItems=1
-    // +kubebuilder:validation:MaxItems=16
-    TargetModels []*TargetModel `json:"targetModels"`
-}
-
-type SelectionPolicy struct {
-    // Type of selection strategy.
-    // v1alpha1 only accepts "Weighted". Additional types (e.g. LeastCost,
-    // LowestLatency) will be introduced in follow-up proposals when their
-    // data sources and semantics are defined.
-    // +kubebuilder:default=Weighted
-    Type SelectionPolicyType `json:"type"`
-}
-
-// SelectionPolicyType enumerates the supported target-selection strategies.
-// +kubebuilder:validation:Enum=Weighted
-type SelectionPolicyType string
-
-const (
-    // SelectionPolicyWeighted picks a target proportionally to TargetModel.Weight.
-    SelectionPolicyWeighted SelectionPolicyType = "Weighted"
-)
-```
-
-**Why a struct, not a plain enum field**: future policies will need parameters
-(e.g. cost budget, latency SLO, fallback chain). Wrapping the enum in a struct
-keeps the API forward-compatible without breaking changes — new policies are
-added by appending to the enum and adding sibling fields on `SelectionPolicy`,
-never by mutating existing field shapes.
-
-**Backward compatibility of `TargetModel`**: existing v1alpha1 `ModelRoute`
-resources that set only `modelServerName` remain valid — the new CEL rule
-accepts them unchanged. No data migration is required.
-
-#### ModelRouteStatus Extension: Conditions
-
-The current `ModelRouteStatus` is empty. This proposal adds a `Conditions`
-field so the `ExternalModelProvider` controller can surface cross-resource
-validation failures (e.g. a `TargetModel.externalProviderRef.modelName` that
-does not exist in the referenced provider's `models[]`).
-
-```go
-// ModelRouteStatus defines the observed state of ModelRoute.
-type ModelRouteStatus struct {
-    // ObservedGeneration is the .metadata.generation the controller last reconciled.
-    // +optional
-    ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-
-    // Conditions summarize the route's readiness and any cross-resource
-    // validation failures. Known types:
-    //   - Ready: True when all references resolve.
-    //   - ModelNotFoundInProvider: True when an externalProviderRef.modelName
-    //     does not match any entry in the referenced provider's spec.models[].
-    // +listType=map
-    // +listMapKey=type
-    // +optional
-    Conditions []metav1.Condition `json:"conditions,omitempty"`
-}
-```
-
-**Backward compatibility**: adding fields to a previously empty `Status` is
-non-breaking. Existing controllers that ignore `status` continue to work; new
-consumers can opt into reading `conditions`.
+This proposal keeps the change in networking v1alpha1 because the API is already
+alpha and the old `modelServerName` form remains valid.
 
 One edge case: the current `modelroute_types.go:110` marks `ModelServerName`
 as `+kubebuilder:validation:required`, which enforces key presence but not
@@ -381,26 +312,25 @@ reference to an in-cluster `ModelServer`.
 #### Validation Rules
 
 **ExternalModelProvider**:
-- `spec.baseURL`: required, must be a valid **HTTPS** URL. HTTP is rejected because auth headers (Bearer token / API key) are always injected; allowing HTTP would leak credentials to any network observer on the path. CRD validation enforces this with two rules:
+- `spec.baseURL`: required, must be an **HTTPS** API root. HTTP is rejected because auth headers (Bearer token / API key) are always injected; allowing HTTP would leak credentials to any network observer on the path. CRD validation provides conservative string-level guards:
   1. `self.lowerAscii().startsWith('https://')` — rejects HTTP and other schemes.
   2. `!self.contains('@')` — rejects userinfo-form URLs (e.g. `https://token@evil.example/`) that could redirect auth headers to an attacker-controlled endpoint (SSRF via credential forwarding).
+  3. `!self.contains('?') && !self.contains('#')` — rejects query strings and fragments in the root URL.
 - `spec.baseURL`: must **not** end with a version path segment (e.g. `/v1`, `/v2`). The router appends the full inbound path as-is, so a trailing version segment would produce a doubled prefix like `/v1/v1/chat/completions`. CRD validation enforces this with: `!self.matches('^.*/v\\d+/?$')`.
-- `spec.models`: required, must contain at least one entry
-- `spec.models[].name`: required, must be non-empty
-- `spec.auth.secretRef`: required; uses `ExternalSecretKeyRef`, a `corev1.SecretKeySelector`-shaped struct with `name` required and `key` optional/defaulted to `apiKey`
+- A validating webhook additionally parses `baseURL` as a URL and rejects empty hosts, malformed URLs, or unsupported URL shapes that cannot be expressed cleanly in CEL.
+- `spec.models`: required, must contain at least one unique entry; represented as a map-list keyed by `name`.
+- `spec.models[].name`: required, must be non-empty.
+- `spec.auth.secretRef`: required; uses `ExternalSecretKeyRef`, a `corev1.SecretKeySelector`-shaped struct with `name` required and `key` optional/defaulted to `apiKey`. Both fields must be non-empty when present.
 - `spec.auth.type`: optional, default `Bearer`; valid values: `Bearer`, `APIKeyHeader`, `RawToken`
-- `spec.auth.headerName`: **required** when `type=APIKeyHeader`; **rejected** otherwise. Enforced by CEL: `(self.type == 'APIKeyHeader') == has(self.headerName)`. This converts the previous "silently ignored" behavior into a clear admission error.
-- `spec.timeout`: optional, must be a positive duration
+- `spec.auth.headerName`: **required** and non-empty when `type=APIKeyHeader`; **rejected** otherwise. Enforced by CEL plus `MinLength=1`.
+- `spec.timeout`: optional, defaults to 60s. The validating webhook rejects non-positive durations if CRD duration validation cannot express the constraint portably.
 
 **TargetModel**:
 - Exactly one of `modelServerName` or `externalProviderRef` must be set (CEL filter rule on `TargetModel`)
 - `modelServerName`: when set, must be non-empty (`+kubebuilder:validation:MinLength=1`). Replaces the prior `+kubebuilder:validation:required` on `modelroute_types.go:110` — see the edge-case paragraph above.
-- `externalProviderRef.name`: required when `externalProviderRef` is set
-- `externalProviderRef.modelName`: required when `externalProviderRef` is set
+- `externalProviderRef.name`: required and non-empty when `externalProviderRef` is set
+- `externalProviderRef.modelName`: required and non-empty when `externalProviderRef` is set
 - **Cross-resource consistency** (`externalProviderRef.modelName` must match a name in `ExternalModelProvider.spec.models[]`) is **not** enforced by CRD validation, since CEL cannot read other objects. The `ExternalModelProvider` controller emits a Warning event on referencing `ModelRoute` resources when it detects an invalid model reference; the router data plane returns a clear error if a request hits an invalid reference.
-
-**ModelRouteSpec**:
-- `selectionPolicy.type`: optional, default `Weighted`. v1alpha1 accepts only `Weighted`; future policy types will be added in follow-up proposals.
 
 #### baseURL Path Construction
 
@@ -426,32 +356,102 @@ reference to an in-cluster `ModelServer`.
 **Model Name Mapping:**
 - Client sends `model: gpt-4-mini` (in request body)
 - Router looks up `ModelRoute` with `modelName: gpt-4-mini`
-- Router selects a `TargetModel` (by weight or future selection policy)
+- Router selects a `TargetModel` using the existing weight semantics
 - If selected target is `externalProviderRef`, router rewrites request body to `model: <externalProviderRef.modelName>`
 - Router forwards to `ExternalModelProvider.spec.baseURL`
 
+#### Implementation Impact
+
+The current router data plane is named around in-cluster `ModelServer` targets:
+`MatchModelServer` returns a `types.NamespacedName`, and the router immediately
+enters pod discovery and scheduling. Mixed in-cluster and external routing
+requires a typed destination result instead of a bare ModelServer name.
+
+A future implementation should evolve the internal contract along these lines:
+
+```go
+type RouteTargetKind string
+
+const (
+    RouteTargetKindModelServer      RouteTargetKind = "ModelServer"
+    RouteTargetKindExternalProvider RouteTargetKind = "ExternalProvider"
+)
+
+type RouteTarget struct {
+    Kind RouteTargetKind
+
+    // Set when Kind=ModelServer.
+    ModelServerName types.NamespacedName
+
+    // Set when Kind=ExternalProvider.
+    ExternalProviderName types.NamespacedName
+    UpstreamModelName    string
+
+    ModelRoute *networkingv1alpha1.ModelRoute
+    IsLora     bool
+}
+```
+
+The store still performs rule matching and weighted target selection once. The
+router then branches by `RouteTarget.Kind`:
+
+- `ModelServer`: existing pod discovery, scheduler, request rewrite to
+  `ModelServer.spec.model`, and in-cluster proxy path.
+- `ExternalProvider`: skip pod scheduling, resolve the provider and Secret from
+  informer-backed caches, rewrite the request body to the upstream model name,
+  inject auth, and proxy to `ExternalModelProvider.spec.baseURL`.
+
+The implementation PR must add informer/cache and RBAC coverage for
+`ExternalModelProvider` and referenced `Secret` objects. Secret rotation is
+observed through the Secret informer cache; there is no controller-mediated
+copying of credentials.
+
+External proxying must reuse the parsed model request that the router already
+has, not re-read the original request body. The proxy path must rebuild the JSON
+body after model rewrite, set the correct `ContentLength`, avoid forwarding the
+original `Host` / `Content-Length`, overwrite inbound `Authorization`, and pass
+through upstream status codes and error bodies without writing a second error
+response after streaming has started.
+
+Streaming support follows the same high-level contract as the existing
+in-cluster path: respect client cancellation, flush incrementally, avoid
+unbounded buffering, and treat `spec.timeout` as an idle timeout for streaming
+responses. Non-streaming responses may be inspected for usage accounting, but
+large responses must not require unbounded memory growth.
+
+Metrics and access logs need backend attribution in addition to the existing
+client-facing model and route labels. The implementation should expose at least
+the backend kind, provider name, upstream model name, upstream status, and error
+class so operators can distinguish local ModelServer traffic from external API
+traffic.
+
+Fairness scheduling continues to use the client-facing `ModelRoute.spec.modelName`
+as the quota and accounting key. External traffic does not enter pod scheduling,
+but its token usage still updates the same per-model accounting after the
+response is observed.
+
 #### Controller Ownership & Status
 
-A dedicated `ExternalModelProvider` controller owns the `status` subresource of
-the CRD. Its responsibilities:
+The initial API adds status only to `ExternalModelProvider`. A dedicated
+`ExternalModelProvider` controller owns that status subresource. Its
+responsibilities:
 
 - **Secret watch**: watches the referenced `Secret` in the same namespace and
   updates `status.conditions[type=SecretAvailable]` when the Secret appears,
-  disappears, or is missing the referenced key. The router data plane reads
-  credentials directly from the informer cache; there is no controller-mediated
-  credential plumbing, so Secret rotation is reflected on the next request
-  without restart.
+  disappears, or is missing the referenced key.
 - **Reference validation**: watches `ModelRoute` resources that point at this
-  provider and emits a Warning event on those routes
-  when `externalProviderRef.modelName` does not match any entry in
-  `spec.models[].name`. This is the cross-resource check that CRD CEL
-  validation cannot express.
+  provider and emits a Warning event on those routes when
+  `externalProviderRef.modelName` does not match any entry in
+  `spec.models[].name`. This is the cross-resource check that CRD CEL validation
+  cannot express.
 - **Ready aggregation**: `status.conditions[type=Ready]` is `True` iff the
   provider spec is valid and the referenced Secret is available. Invalid
   `ModelRoute` references do not make the provider itself NotReady.
 
-The router data plane does **not** write to status; status is strictly
-controller-owned.
+This proposal does not add `ModelRoute.status.conditions` in v1alpha1. If route
+reference status is added later, it should be owned by the ModelRoute controller
+and use positive condition types such as `ResolvedRefs=False` with reasons like
+`ModelNotFoundInProvider`. The router data plane does **not** write status.
 
 #### Security Considerations
 
@@ -527,124 +527,37 @@ External OpenAI-compatible API
 The router performs auth injection, model field rewrite, and streaming proxy
 in-process. There is no separate "external proxy" component to deploy.
 
-### Design Rationale & Review Response
+### Design Rationale
 
-This section addresses review feedback from @hzxuzhonghu (PR #968).
+#### 1. Cost-Aware Routing Is Deferred
 
-#### 1. Cost-Aware Routing Extension Point
+This proposal intentionally does **not** add concrete cost fields or a
+`selectionPolicy` field in v1alpha1.
 
-**Review**: "Consider how can we expand the api to support cost-saving model routing"
+The API still leaves room for cost-aware routing because `TargetModel` becomes a
+single abstraction over in-cluster `modelServerName` targets and external
+`externalProviderRef` targets. A future selector can evaluate both target kinds
+without introducing a parallel routing mechanism for external providers.
 
-**Response**: This proposal intentionally does **not** add concrete cost fields
-to the API. Instead, it reserves a clean extension point on `ModelRoute` so that
-cost-aware routing can be added in a follow-up without breaking changes.
+Cost data is deferred because pricing and in-cluster cost are different
+domains:
 
-**What ships in this proposal**
+- External MaaS providers usually price per input/output token.
+- In-cluster cost is derived from GPU time, instance price, utilization, and
+  amortization.
+- Comparing those two requires a normalization model and a data source; locking
+  either into `ExternalModelProvider` now would make the alpha API harder to
+  correct later.
 
-- `ModelRoute.spec.selectionPolicy` (struct, not a plain enum field) is added.
-  v1alpha1 accepts only `Weighted`; additional policy types will be introduced
-  as the enum is widened in follow-up proposals, once their data sources and
-  semantics are defined.
-- `TargetModel` is already a unified abstraction over in-cluster (`ModelServerName`)
-  and external (`ExternalProviderRef`) backends, so a future cost-aware selector
-  can apply the same logic to both target types — no parallel mechanism for
-  external providers.
+A follow-up proposal can add `ModelRoute.spec.selectionPolicy` (for example,
+`Weighted`, `LeastCost`, or `LowestLatency`) once the cost data source,
+normalization rules, and fallback semantics are defined. Adding an optional
+policy field later is backward-compatible, so v1alpha1 stays focused on the
+external backend reference itself.
 
-**Why no `cost` field on `ExternalModelProvider`**
+#### 2. Secret Keys Are Customizable
 
-- **Vendor prices are external facts, not desired state.** OpenAI / Anthropic
-  adjust prices every few months; encoding them in a CRD makes `kubectl apply`
-  the de-facto price-update channel, with no clear ownership or freshness
-  guarantee.
-- **Premature schema lock-in.** Once a `cost` field is shipped, its units,
-  granularity (per-provider vs per-model), and update path become contract.
-  Every mainstream LLM gateway (LiteLLM, Portkey, OpenRouter, Envoy AI Gateway)
-  keeps pricing data outside deployment resources for the same reason.
-
-**Cost data source: deferred to a follow-up proposal**
-
-The trade-offs below will be evaluated separately, once concrete user demand
-clarifies which approach fits best:
-
-| Approach | Pros | Cons |
-|---|---|---|
-| Per-model annotation on `ExternalModelProvider.models[]` | Simple, co-located | Manual upkeep, easily stale |
-| Separate `ModelPriceCatalog` CRD with periodic sync | Decoupled, versionable, single source of truth | New resource to manage |
-| External pricing service (LiteLLM-style table) | Real-time, industry-standard | Runtime dependency |
-| Observed cost from request metrics | Data-driven, self-healing | Cold-start fallback needed |
-
-Whichever data source is selected must provide comparable cost metadata for both
-`modelServerName` and `externalProviderRef` targets; otherwise hybrid routing
-cannot make a meaningful cost-saving decision.
-
-**Cost attribution vs cost routing (two distinct concerns)**
-
-Even after a follow-up proposal lands the data source, two cost concepts must
-not be conflated:
-
-| Concern | Dimension | What it answers |
-|---|---|---|
-| **Attribution** (billing, usage reports, quota) | `ModelRoute.spec.modelName` (the client-facing name, e.g. `gpt5`) | "How much did the user spend on `gpt5`?" |
-| **Routing** (selector decision, internal) | per-target cost (per `ExternalModelProvider.models[]` entry, or per in-cluster target via a separate mechanism) | "Among the eligible backends, which is cheapest right now?" |
-
-Concretely, given:
-
-```yaml
-kind: ModelRoute
-spec:
-  modelName: gpt5
-  rules:
-    - targetModels:
-        - modelServerName: local-gpt5            # in-cluster
-        - externalProviderRef:
-            name: openai
-            modelName: gpt-5                     # upstream
-        - externalProviderRef:
-            name: azure
-            modelName: gpt-5                     # upstream
-```
-
-- **Cost / usage metrics MUST be tagged with `model="gpt5"`** (the
-  `ModelRoute.modelName`), not the rewritten upstream name. Per-backend
-  breakdown is exposed as a secondary label (e.g. `backend="openai-gpt-5"`)
-  for internal cost analysis but does not replace the primary attribution.
-- **Selector input is per-target cost**, not the aggregated `gpt5` cost. A
-  single `gpt5` request may incur very different upstream costs depending on
-  which backend handled it.
-
-This separation is also why `cost` does not belong on `ModelRoute` itself: the
-route describes *what is exposed to the client*; per-target cost describes
-*what each backend charges*. Mixing them on one resource conflates the two
-concerns.
-
-**Why no per-target cost field on `TargetModel` in v1alpha1**
-
-A natural follow-up question is whether `TargetModel.cost` should be added now
-as an "override" so that in-cluster `modelServerName` targets can also
-participate in cost-aware selection. v1alpha1 deliberately does not do this:
-
-- External APIs price per token (USD / 1K tokens) — a clear, comparable unit.
-- In-cluster `ModelServer` "cost" is GPU time × instance price ÷ utilization,
-  amortized over many requests — a fundamentally different unit.
-- Comparing the two requires a normalization model (e.g. converting GPU
-  amortized cost into a synthetic per-token price) that is itself a
-  non-trivial design problem.
-
-Forcing users to fill a `TargetModel.cost` field before that normalization
-model exists would produce inconsistent, unreliable inputs to `LeastCost`. The
-follow-up proposal will resolve normalization first, then choose where to
-attach per-target cost.
-
-**Net effect for the reviewer's question**: the API can grow into cost-aware
-routing without breaking existing users — `selectionPolicy` is the entry point,
-and the data-source decision is intentionally postponed rather than locked in
-prematurely.
-
-#### 2. Customizable Secret Key
-
-**Review**: "what `key` of the secret? Should we allow customize?"
-
-**Response**: Changed `secretRef` from a string to a structured reference:
+`secretRef` is a structured reference instead of a plain Secret name:
 
 ```yaml
 auth:
@@ -653,13 +566,13 @@ auth:
     key: apiKey          # Optional, defaults to "apiKey"
 ```
 
-This follows standard Kubernetes patterns (e.g., `envFrom.secretKeyRef`) and allows users to reuse existing Secrets without creating new ones.
+This follows standard Kubernetes patterns and lets users reuse existing Secrets
+without creating new ones just to satisfy a fixed key name.
 
-#### 3. Bearer Token as Default
+#### 3. Bearer Token Is the Default
 
-**Review**: "Most maas requires bearer token"
-
-**Response**: Simplified `auth` to use an enum with `Bearer` as the default:
+Most OpenAI-compatible MaaS providers use bearer-token authentication, so
+`auth.type` defaults to `Bearer`:
 
 ```yaml
 auth:
@@ -669,16 +582,15 @@ auth:
 
 **Behavior**:
 - `type: Bearer` (default) → `Authorization: Bearer <token>`
-- `type: APIKeyHeader` → `<headerName>: <token>` (e.g., `api-key: <token>` for Azure)
+- `type: APIKeyHeader` → `<headerName>: <token>`
 - `type: RawToken` → `Authorization: <token>` (no "Bearer " prefix)
 
-90% of users get the right behavior with zero configuration.
+This makes the common MaaS behavior the zero-configuration path.
 
-#### 4. Relationship with ModelRoute
+#### 4. ExternalModelProvider Is a Backend Reference
 
-**Review**: "Explain how this works? We have model defined in modelRoute, so this need to match that one?"
-
-**Response**: The new design eliminates this confusion by making `ExternalModelProvider` a **backend reference**, not an independent routing layer.
+`ExternalModelProvider` is a **backend reference**, not an independent routing
+layer.
 
 **How it works**:
 1. `ModelRoute.spec.modelName` defines the client-facing model name
@@ -865,62 +777,30 @@ spec:
 
 ### Extension Points
 
-This proposal implements weight-based traffic splitting. The following extension points are designed into the API for future enhancements without breaking changes:
+This proposal implements only weight-based target selection through the existing
+`TargetModel.weight` field. The following items are intentionally future work:
 
 #### 1. Cost-Aware Routing
 
-The API entry point already exists: `ModelRoute.spec.selectionPolicy` is a
-struct, and a future proposal can widen its `type` enum to include `LeastCost`
-without breaking changes. v1alpha1 admission rejects `LeastCost` outright
-(rather than silently falling back) — see "Design Rationale §1" above for the
-rationale, including why cost data is intentionally **not** modeled on
-`ExternalModelProvider` in v1alpha1.
-
-A follow-up proposal will pick the cost data source from the candidate list in
-§1 and define request-time cost estimation. The field shape is already reserved;
-turning the policy on only requires widening the `SelectionPolicy.Type` enum and
-defining the new policy semantics.
+A follow-up proposal may add `ModelRoute.spec.selectionPolicy` and a `LeastCost`
+policy after defining cost data sources and normalization across external APIs
+and in-cluster ModelServers.
 
 #### 2. Latency-Aware Routing
 
-A future proposal may widen `SelectionPolicy.Type` to include `LowestLatency`.
-Observed latency data will be reported on `ExternalModelProvider.status` (e.g.
-`status.observedLatency.p50Ms` / `p99Ms`) by the router's metrics pipeline.
-
-```yaml
-status:
-  observedLatency:
-    p50Ms: 120
-    p99Ms: 350
-```
-
-When `selectionPolicy.type=LowestLatency` is supported in a future version,
-router will select the target with the best latency profile. Like cost-aware
-routing, this works uniformly for in-cluster and external targets.
+A future proposal may add latency-aware target selection. That proposal should
+define where observed latency is stored, which controller owns it, and how it is
+compared across in-cluster and external backends.
 
 #### 3. Quota and Rate-Limit Aware Routing
 
-When an external provider returns HTTP 429 (rate limit exceeded), router can:
-- Temporarily exclude it from selection
-- Automatically failover to other providers serving the same model
-- Emit metrics for alerting
+External 429 handling, temporary backend exclusion, and automatic failover are
+left to a later routing-policy proposal.
 
 #### 4. Regional Failover
 
-Add multiple `baseURL` entries per provider for regional redundancy:
-
-```yaml
-spec:
-  baseURLs:
-    - url: https://api.openai.com
-      region: us-east-1
-      priority: 1
-    - url: https://eu-api.openai.com
-      region: eu-west-1
-      priority: 2
-```
-
-Router tries URLs in priority order, failing over on connection errors.
+Multiple `baseURL` entries, regional priorities, and provider-level failover are
+out of scope for v1alpha1.
 
 ### Alternatives Considered
 
@@ -948,39 +828,10 @@ The new design unifies all routing through `ModelRoute`, making `ExternalModelPr
 
 #### 5. Extend Gateway API `HTTPRoute.backendRefs` / Inference Extension
 
-**Rejected for v1alpha1, kept under review for follow-up alignment**:
-
-The Gateway API Inference Extension (kgateway / sig-network) is the natural
-long-term home for in-cluster inference routing, and a maintainer may
-reasonably ask why this proposal does not extend `HTTPRoute.backendRefs` to
-point at a Secret-augmented external endpoint instead of introducing a new CRD.
-
-Reasons for a kthena-native CRD in v1alpha1:
-
-- **Co-evolution with `ModelRoute`**: `ExternalModelProvider` is consumed by
-  `ModelRoute.rules[].targetModels[]` (a kthena-native target list), not by a generic Gateway
-  resource. Forcing the relationship through `HTTPRoute.backendRefs` would
-  require either a parallel `ModelRoute → HTTPRoute → backendRef` indirection
-  or a custom `BackendObjectReference` group/kind — both of which are larger
-  changes than this proposal.
-- **Inference Extension scope**: the Gateway API Inference Extension
-  (`InferencePool`) reached v1.0.0 GA in September 2025, but its scope is
-  strictly in-cluster pod selection — `InferencePool` uses a pod label
-  `selector` and `targetPorts`; it defines no external backend or
-  Secret-authenticated upstream model. There is no upstream pattern to align
-  with for this use case today.
-- **Auth model gap**: Gateway API has no first-class concept for injecting
-  Secret-backed auth headers per-backend; today, this requires policy
-  attachment or a side-channel CRD. The shape of that abstraction in upstream
-  is unresolved.
-
-This is an explicit deferral, not a rejection. Once the Inference Extension
-stabilizes a backend-auth model, kthena will evaluate migrating
-`ExternalModelProvider` to a Gateway-aligned representation (or layering it on
-top). The current CRD shape — narrow scope, no novel auth primitives — is
-designed to make such migration straightforward.
-
-### Questions
-
-1. Should we support non-OpenAI-compatible APIs in a future iteration? (e.g., Anthropic Claude API, Google Gemini API)
-2. Should we support Azure OpenAI's deployment-specific URL patterns and query parameters in the initial delivery or defer to a future iteration?
+**Deferred for v1alpha1**: `ExternalModelProvider` is consumed by
+`ModelRoute.rules[].targetModels[]`, which already carries kthena-specific LLM
+routing semantics such as model-name matching and model rewrite. Routing through
+generic `HTTPRoute.backendRefs` would add another indirection and still would
+not solve Secret-backed per-backend auth injection. Kthena should revisit this
+once Gateway API or the Inference Extension has a stable external-backend auth
+pattern.
