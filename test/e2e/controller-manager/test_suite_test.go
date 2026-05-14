@@ -74,13 +74,12 @@ func TestMain(m *testing.M) {
 	// Run tests
 	code := m.Run()
 
-	// Cleanup test namespace
-	if err := utils.DeleteTestNamespaceAndWait(kubeClient, testNamespace, 2*time.Minute); err != nil {
-		fmt.Printf("Warning: Failed to delete test namespace %s: %v\n", testNamespace, err)
-	}
-
 	if err := framework.UninstallKthena(config.Namespace); err != nil {
 		fmt.Printf("Failed to uninstall kthena: %v\n", err)
+	}
+
+	if err := waitForControllerManagerToStop(kubeClient, kthenaNamespace, 2*time.Minute); err != nil {
+		fmt.Printf("Warning: controller-manager did not fully stop before namespace deletion: %v\n", err)
 	}
 
 	os.Exit(code)
@@ -124,3 +123,44 @@ func waitForWebhookReady(t *testing.T, ctx context.Context, kthenaClient *client
 	})
 	require.NoError(t, err, "Webhook did not become ready in time")
 }
+
+func waitForControllerManagerToStop(kubeClient *kubernetes.Clientset, namespace string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	labelSelector := "app.kubernetes.io/component=kthena-controller-manager"
+	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+		pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false, err
+		}
+		return len(pods.Items) == 0, nil
+	})
+}
+
+
+function RetryOnConflict(retryFunc):
+    maxRetries = 5
+    attempts = 0
+
+    loop:
+        err = retryFunc()
+
+        if err == nil:
+            return success
+
+        if err is NOT a conflict error (HTTP 409 / "object has been modified"):
+            return err  // unretryable, bail immediately
+
+        attempts++
+
+        if attempts >= maxRetries:
+            return err  // gave up
+
+        backoff(attempts)  // exponential or fixed sleep
+        
+        // re-fetch the latest object before retrying
+        // so you're applying changes on top of current state
+        refreshObject()
+
+    end loop

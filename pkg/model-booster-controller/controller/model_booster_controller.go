@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -256,13 +257,40 @@ func (mc *ModelBoosterController) isModelServingActive(model *workload.ModelBoos
 
 // updateModelBoosterStatus updates model status.
 func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, modelBooster *workload.ModelBooster) error {
-	modelBooster.Status.ObservedGeneration = modelBooster.Generation
-	if _, err := mc.client.WorkloadV1alpha1().ModelBoosters(modelBooster.Namespace).UpdateStatus(ctx, modelBooster, metav1.UpdateOptions{}); err != nil {
-		klog.Errorf("update modelBooster status failed: %v", err)
+	var finalModel *workload.ModelBooster
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// getting live updates from the api server as a sudden update in model can cause multiple gen of modelBooster to be created and we want to make sure we are updating the latest one.
+		latest, err := mc.client.WorkloadV1alpha1().
+			ModelBoosters(modelBooster.Namespace).
+			Get(ctx, modelBooster.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := latest.DeepCopy()
+		updated.Status.Conditions = modelBooster.Status.Conditions
+
+		updated.Status.ObservedGeneration = updated.Generation
+
+		res, err := mc.client.WorkloadV1alpha1().
+			ModelBoosters(updated.Namespace).
+			UpdateStatus(ctx, updated, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+
+		finalModel = res
+		return nil
+	})
+
+	if err != nil {
+		klog.Errorf("update modelBooster status failed after retries: %v", err)
 		return err
 	}
 
-	// Clean up outdated cache entries for this modelBooster
+	*modelBooster = *finalModel
+
+	//Cleanup the LoRA cache ONLY after confirmed API success.
 	mc.cleanupOutdatedLoraUpdateCache(modelBooster)
 	return nil
 }

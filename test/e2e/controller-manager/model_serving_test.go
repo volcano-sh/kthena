@@ -712,7 +712,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	maxObservedUnavailable := int32(0)
 	var mu sync.Mutex
 
-	watcherCtx, watcherCancel := context.WithCancel(watchContext)
+	watcherCtx, watcherCancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer watcherCancel()
 
 	go func() {
