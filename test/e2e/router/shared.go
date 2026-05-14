@@ -256,9 +256,15 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 	}
 	if originalReplicas != replicas {
 		t.Logf("Scaling kthena-router from %d to %d replicas", originalReplicas, replicas)
-		deployment.Spec.Replicas = &replicas
-		_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to scale kthena-router deployment")
+		require.Eventually(t, func() bool {
+			latest, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			latest.Spec.Replicas = &replicas
+			_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, latest, metav1.UpdateOptions{})
+			return err == nil
+		}, time.Minute, 2*time.Second, "Failed to scale kthena-router deployment")
 	}
 
 	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, replicas, defaultScalingTimeout)
@@ -340,7 +346,7 @@ func createSessionStickyModelRoute(t *testing.T, testCtx *routercontext.RouterTe
 	modelRoute.Spec.SessionSticky = sticky
 	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
-	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	createdModelRoute, err := createModelRouteWithWebhookRetry(ctx, testCtx, testNamespace, modelRoute, 2*time.Minute)
 	require.NoError(t, err, "Failed to create session sticky ModelRoute")
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
@@ -352,6 +358,37 @@ func createSessionStickyModelRoute(t *testing.T, testCtx *routercontext.RouterTe
 	messages := []utils.ChatMessage{utils.NewChatMessage("user", "ready")}
 	utils.WaitForChatModelReady(t, utils.DefaultRouterURL, createdModelRoute.Spec.ModelName, messages, 2*time.Minute)
 	return createdModelRoute
+}
+
+func createModelRouteWithWebhookRetry(ctx context.Context, testCtx *routercontext.RouterTestContext, namespace string, modelRoute *networkingv1alpha1.ModelRoute, timeout time.Duration) (*networkingv1alpha1.ModelRoute, error) {
+	var created *networkingv1alpha1.ModelRoute
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		var err error
+		created, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		if err == nil {
+			return true, nil
+		}
+		if shouldRetryWebhookError(err) {
+			return false, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func shouldRetryWebhookError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return apierrors.IsInternalError(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		strings.Contains(msg, "failed calling webhook") ||
+		strings.Contains(msg, "connect: connection refused") ||
+		strings.Contains(msg, "broken pipe")
 }
 
 func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeySource) *networkingv1alpha1.SessionSticky {

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -60,6 +61,7 @@ type forwarder struct {
 	servicePort  intstr.IntOrString
 	errCh        chan error
 	ready        atomic.Bool
+	closeOnce    sync.Once
 }
 
 func (f *forwarder) Start() error {
@@ -90,6 +92,7 @@ func (f *forwarder) Start() error {
 					f.errCh <- fmt.Errorf("port forward: %v", err)
 					return
 				}
+				readyCh = nil
 				time.Sleep(time.Second)
 				continue
 			}
@@ -146,7 +149,9 @@ func (f *forwarder) address() string {
 }
 
 func (f *forwarder) Close() {
-	close(f.stopCh)
+	f.closeOnce.Do(func() {
+		close(f.stopCh)
+	})
 	// Closing the stop channel should close anything
 	// opened by f.forwarder.ForwardPorts()
 }
