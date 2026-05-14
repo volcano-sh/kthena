@@ -120,6 +120,9 @@ func (h *DebugHandler) ListModelRoutes(c *gin.Context) {
 
 	var responses []ModelRouteResponse
 	for namespacedName, mr := range modelRoutes {
+		if mr == nil {
+			continue
+		}
 		parts := strings.Split(namespacedName, "/")
 		if len(parts) != 2 {
 			continue
@@ -143,6 +146,9 @@ func (h *DebugHandler) ListModelServers(c *gin.Context) {
 
 	var responses []ModelServerResponse
 	for namespacedName, ms := range modelServers {
+		if ms == nil {
+			continue
+		}
 		response := ModelServerResponse{
 			Name:      namespacedName.Name,
 			Namespace: namespacedName.Namespace,
@@ -194,6 +200,9 @@ func (h *DebugHandler) ListPods(c *gin.Context) {
 
 	var responses []PodResponse
 	for namespacedName, podInfo := range pods {
+		if podInfo == nil {
+			continue
+		}
 		response := h.convertPodInfoToResponse(namespacedName, podInfo, false)
 		responses = append(responses, response)
 	}
@@ -207,6 +216,9 @@ func (h *DebugHandler) ListGateways(c *gin.Context) {
 
 	var responses []GatewayResponse
 	for _, gw := range gateways {
+		if gw == nil {
+			continue
+		}
 		response := GatewayResponse{
 			Name:      gw.Name,
 			Namespace: gw.Namespace,

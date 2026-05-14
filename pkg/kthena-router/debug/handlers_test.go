@@ -420,6 +420,20 @@ func TestListModelRoutes(t *testing.T) {
 				assert.Empty(t, response["modelroutes"])
 			},
 		},
+		{
+			name: "skips nil entries",
+			setup: func(m *MockStore) {
+				m.On("GetAllModelRoutes").Return(map[string]*aiv1alpha1.ModelRoute{
+					"default/nil-route": nil,
+				})
+			},
+			expectedStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var response map[string][]ModelRouteResponse
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Empty(t, response["modelroutes"])
+			},
+		},
 	}
 	runHandlerCases(t, cases, func(h *DebugHandler, c *gin.Context) { h.ListModelRoutes(c) })
 }
@@ -552,6 +566,20 @@ func TestListModelServers(t *testing.T) {
 				assert.Nil(t, servers[0].PrefillPods)
 			},
 		},
+		{
+			name: "skips nil entries",
+			setup: func(m *MockStore) {
+				m.On("GetAllModelServers").Return(map[types.NamespacedName]*aiv1alpha1.ModelServer{
+					{Namespace: "default", Name: "nil-server"}: nil,
+				})
+			},
+			expectedStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var response map[string][]ModelServerResponse
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Empty(t, response["modelservers"])
+			},
+		},
 	}
 	runHandlerCases(t, cases, func(h *DebugHandler, c *gin.Context) { h.ListModelServers(c) })
 }
@@ -634,6 +662,20 @@ func TestListPods(t *testing.T) {
 				assert.Equal(t, float64(2), pods[0].Metrics.RequestRunningNum)
 				assert.Equal(t, 1.5, pods[0].Metrics.TPOT)
 				assert.Equal(t, 0.2, pods[0].Metrics.TTFT)
+			},
+		},
+		{
+			name: "skips nil entries",
+			setup: func(m *MockStore) {
+				m.On("GetAllPods").Return(map[types.NamespacedName]*datastore.PodInfo{
+					{Namespace: "default", Name: "nil-pod"}: nil,
+				})
+			},
+			expectedStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var response map[string][]PodResponse
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Empty(t, response["pods"])
 			},
 		},
 	}
@@ -729,6 +771,20 @@ func TestListGateways(t *testing.T) {
 				require.Len(t, gateways, 1)
 				assert.Equal(t, "my-gateway", gateways[0].Name)
 				assert.Equal(t, "default", gateways[0].Namespace)
+			},
+		},
+		{
+			name: "skips nil entries",
+			setup: func(m *MockStore) {
+				m.On("GetAllGateways").Return([]*gatewayv1.Gateway{nil, gw, nil})
+			},
+			expectedStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var response map[string][]GatewayResponse
+				require.NoError(t, json.Unmarshal(body, &response))
+				gateways := response["gateways"]
+				require.Len(t, gateways, 1)
+				assert.Equal(t, "my-gateway", gateways[0].Name)
 			},
 		},
 	}
