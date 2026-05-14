@@ -50,6 +50,7 @@ spec:
             - --session-sticky-redis-password={{ .Values.kthenaRouter.sessionSticky.redis.password }}
           {{- end }}
           {{- end }}
+            - --debug-backend-pod-header={{ .Values.kthenaRouter.debugBackendPodHeader }}
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
             - --tls-cert=/etc/router-tls/tls.crt
             - --tls-key=/etc/router-tls/tls.key

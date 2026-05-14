@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -51,11 +52,14 @@ var _ PortForwarder = &forwarder{}
 type forwarder struct {
 	stopCh       chan struct{}
 	podName      string
+	serviceName  string
 	namespace    string
 	localAddress string
 	localPort    int
 	podPort      int
+	servicePort  intstr.IntOrString
 	errCh        chan error
+	ready        atomic.Bool
 }
 
 func (f *forwarder) Start() error {
@@ -74,14 +78,24 @@ func (f *forwarder) Start() error {
 			// Build a new port forwarder.
 			fw, err = f.buildK8sPortForwarder(readyCh)
 			if err != nil {
-				f.errCh <- fmt.Errorf("building port forwarder: %v", err)
-				return
+				if !f.ready.Load() {
+					f.errCh <- fmt.Errorf("building port forwarder: %v", err)
+					return
+				}
+				time.Sleep(time.Second)
+				continue
 			}
 			if err = fw.ForwardPorts(); err != nil {
-				f.errCh <- fmt.Errorf("port forward: %v", err)
-				return
+				if !f.ready.Load() {
+					f.errCh <- fmt.Errorf("port forward: %v", err)
+					return
+				}
+				time.Sleep(time.Second)
+				continue
 			}
-			f.errCh <- nil
+			if !f.ready.Load() {
+				f.errCh <- nil
+			}
 			// At this point, either the stopCh has been closed, or port forwarder connection is broken.
 			// the port forwarder should have already been ready before.
 			// No need to notify the ready channel anymore when forwarding again.
@@ -95,6 +109,7 @@ func (f *forwarder) Start() error {
 	case err := <-f.errCh:
 		return fmt.Errorf("failure running port forward process: %v", err)
 	case <-readyCh:
+		f.ready.Store(true)
 		p, err := fw.GetPorts()
 		if err != nil {
 			return fmt.Errorf("failed to get ports: %v", err)
@@ -136,6 +151,24 @@ func (f *forwarder) Close() {
 	// opened by f.forwarder.ForwardPorts()
 }
 
+func startServiceForwarder(namespace, serviceName string, localPort int, servicePort intstr.IntOrString) (PortForwarder, error) {
+	f := &forwarder{
+		stopCh:       make(chan struct{}),
+		serviceName:  serviceName,
+		namespace:    namespace,
+		localAddress: "127.0.0.1",
+		localPort:    localPort,
+		servicePort:  servicePort,
+	}
+
+	if err := f.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start port-forward %s:%d -> %s/svc/%s:%v: %v",
+			f.localAddress, localPort, namespace, serviceName, servicePort, err)
+	}
+
+	return f, nil
+}
+
 // startForwarder creates and starts a port forwarder with the given parameters.
 // This is a private helper function to avoid code duplication between SetupPortForward
 // and SetupPortForwardToPod.
@@ -163,26 +196,8 @@ func startForwarder(namespace, podName string, localPort, podPort int) (PortForw
 // If SetupPortForward fails, the test should stop immediately as the error indicates
 // a critical infrastructure issue that prevents the test from continuing.
 func SetupPortForward(namespace, service, localPort, remotePort string) (PortForwarder, error) {
-	// Get Kubernetes config
-	config, err := GetKubeConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get kubeconfig: %v", err)
-	}
-
-	// Create Kubernetes client
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create kubernetes client: %v", err)
-	}
-
 	// Parse remote port (service port)
 	remotePortIntOrStr := intstr.Parse(remotePort)
-
-	// Find a pod for the service and get the targetPort from service configuration
-	podName, targetPort, err := findPodForService(clientset, namespace, service, remotePortIntOrStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find pod for service %s/%s: %v", namespace, service, err)
-	}
 
 	// Parse local port
 	localPortInt, err := strconv.Atoi(localPort)
@@ -190,7 +205,7 @@ func SetupPortForward(namespace, service, localPort, remotePort string) (PortFor
 		return nil, fmt.Errorf("invalid local port %q: %v", localPort, err)
 	}
 
-	return startForwarder(namespace, podName, localPortInt, targetPort)
+	return startServiceForwarder(namespace, service, localPortInt, remotePortIntOrStr)
 }
 
 // SetupPortForwardToPod sets up a port-forward directly to a pod and waits for it to be ready.
@@ -309,6 +324,15 @@ func (f *forwarder) buildK8sPortForwarder(readyCh chan struct{}) (*portforward.P
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kubernetes client: %v", err)
+	}
+
+	if f.serviceName != "" {
+		podName, targetPort, err := findPodForService(clientset, f.namespace, f.serviceName, f.servicePort)
+		if err != nil {
+			return nil, err
+		}
+		f.podName = podName
+		f.podPort = targetPort
 	}
 
 	// Use the REST client from CoreV1() which is already configured for core/v1 API

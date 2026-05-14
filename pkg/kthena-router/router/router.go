@@ -74,12 +74,14 @@ var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
 const (
 	SessionStickyStoreMemory = "memory"
 	SessionStickyStoreRedis  = "redis"
+	BackendPodHeader         = "X-Kthena-Backend-Pod"
 )
 
 type SessionStickyStoreConfig struct {
-	Type          string
-	RedisAddress  string
-	RedisPassword string
+	Type                  string
+	RedisAddress          string
+	RedisPassword         string
+	DebugBackendPodHeader bool
 }
 
 type Router struct {
@@ -99,7 +101,8 @@ type Router struct {
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 
-	sessionStickyStore sessionStickyStore
+	sessionStickyStore    sessionStickyStore
+	debugBackendPodHeader bool
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig ...SessionStickyStoreConfig) *Router {
@@ -180,7 +183,9 @@ func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConf
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
-	router.sessionStickyStore = newSessionStickyStoreFromConfig(firstSessionStickyStoreConfig(sessionStickyConfig))
+	stickyConfig := firstSessionStickyStoreConfig(sessionStickyConfig)
+	router.sessionStickyStore = newSessionStickyStoreFromConfig(stickyConfig)
+	router.debugBackendPodHeader = stickyConfig.DebugBackendPodHeader
 	return router
 }
 
@@ -820,12 +825,20 @@ func (r *Router) proxy(
 
 	for i := 0; i < len(ctx.BestPods); i++ {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		pod := ctx.BestPods[i]
+		if pod == nil || pod.Pod == nil {
+			continue
+		}
+		backendPodHeader := ""
+		if r.debugBackendPodHeader {
+			backendPodHeader = pod.Pod.Name
+		}
 
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, ctx.BestPods[i].Pod.Status.PodIP, port, stream, onUsage)
+		err := proxyRequest(c, req, pod.Pod.Status.PodIP, port, stream, backendPodHeader, onUsage)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
@@ -992,6 +1005,7 @@ func proxyRequest(
 	podIP string,
 	port int32,
 	stream bool,
+	backendPodHeader string,
 	onUsage func(u handlers.OpenAIResponse),
 ) error {
 	resp, err := doRequest(req, podIP, port)
@@ -1002,6 +1016,9 @@ func proxyRequest(
 		for _, v := range vv {
 			c.Header(k, v)
 		}
+	}
+	if backendPodHeader != "" {
+		c.Header(BackendPodHeader, backendPodHeader)
 	}
 	defer resp.Body.Close()
 

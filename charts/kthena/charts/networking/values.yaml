@@ -62,6 +62,9 @@ kthenaRouter:
       address: ""
       # password is optional.
       password: ""
+  # debugBackendPodHeader enables X-Kthena-Backend-Pod on proxied responses for tests/debugging.
+  # Keep disabled for production traffic.
+  debugBackendPodHeader: false
   # gatewayAPI configuration
   gatewayAPI:
     # enabled controls whether Gateway API related features are enabled

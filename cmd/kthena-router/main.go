@@ -57,6 +57,7 @@ func main() {
 		sessionStickyStoreType             string
 		sessionStickyRedisAddress          string
 		sessionStickyRedisPassword         string
+		debugBackendPodHeader              bool
 	)
 
 	klog.InitFlags(nil)
@@ -85,6 +86,7 @@ func main() {
 	pflag.StringVar(&sessionStickyStoreType, "session-sticky-store", router.SessionStickyStoreMemory, "Session sticky store backend: memory or redis")
 	pflag.StringVar(&sessionStickyRedisAddress, "session-sticky-redis-address", "", "Redis address for session sticky store when --session-sticky-store=redis")
 	pflag.StringVar(&sessionStickyRedisPassword, "session-sticky-redis-password", "", "Redis password for session sticky store when --session-sticky-store=redis")
+	pflag.BoolVar(&debugBackendPodHeader, "debug-backend-pod-header", false, "Enable X-Kthena-Backend-Pod response header for tests and debugging")
 	defer klog.Flush()
 	pflag.Parse()
 
@@ -126,9 +128,10 @@ func main() {
 	}
 
 	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst, router.SessionStickyStoreConfig{
-		Type:          sessionStickyStoreType,
-		RedisAddress:  sessionStickyRedisAddress,
-		RedisPassword: sessionStickyRedisPassword,
+		Type:                  sessionStickyStoreType,
+		RedisAddress:          sessionStickyRedisAddress,
+		RedisPassword:         sessionStickyRedisPassword,
+		DebugBackendPodHeader: debugBackendPodHeader,
 	}).Run(ctx)
 }
 

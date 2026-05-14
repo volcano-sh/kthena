@@ -100,6 +100,8 @@ data:
 
 Session affinity is configured on `ModelRoute.spec.sessionSticky`, not as a scheduler plugin. The router evaluates `sources` in order and uses the first non-empty header, query parameter, cookie, or JWT claim value as the session key. The router process store defaults to in-memory; use the parent chart Helm `networking.kthenaRouter.sessionSticky.store=redis` setting to share bindings across router replicas.
 
+For e2e tests and controlled debugging, the router can expose the selected backend Pod in the `X-Kthena-Backend-Pod` response header with `--debug-backend-pod-header=true` or Helm value `networking.kthenaRouter.debugBackendPodHeader=true`. Leave this disabled for production traffic.
+
 ```yaml showLineNumbers
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelRoute
