@@ -263,7 +263,6 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
-		// Store prompt string in context for deferred rate limiting after backend validation
 		c.Set("promptStr", promptStr)
 
 		requestID := uuid.New().String()
@@ -280,7 +279,33 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			return
 		}
 
-		// step 3.2: load balancing for Fairness scheduling enabled case
+		// step 3.2: Fairness scheduling enabled -- rate limit before entering the
+		// queue so that rejected requests do not occupy queue slots.
+		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
+			var errorMsg string
+			var errorType string
+			var tokenType string
+			switch err.(type) {
+			case *ratelimit.InputRateLimitExceededError:
+				errorMsg = "input token rate limit exceeded"
+				errorType = "input_rate_limit"
+				tokenType = metrics.LimitTypeInputTokens
+			case *ratelimit.OutputRateLimitExceededError:
+				errorMsg = "output token rate limit exceeded"
+				errorType = "output_rate_limit"
+				tokenType = metrics.LimitTypeOutputTokens
+			default:
+				errorMsg = "token usage exceeds rate limit"
+				errorType = "rate_limit"
+				tokenType = metrics.LimitTypeRequests
+			}
+			accesslog.SetError(c, errorType, errorMsg)
+			metricsRecorder.RecordRateLimitExceeded(tokenType)
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
+			c.Set("finishReason", "rate_limit")
+			return
+		}
+
 		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName); err != nil {
 			accesslog.SetError(c, "scheduling", err.Error())
 			c.Set("finishReason", "scheduling")
@@ -378,37 +403,41 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 
 	// Apply rate limiting after backend validation succeeds.
 	// This ensures quota is only consumed when a valid backend exists.
-	if promptStr, exists := c.Get("promptStr"); exists {
-		if ps, ok := promptStr.(string); ok {
-			if err := r.loadRateLimiter.RateLimit(modelName, ps); err != nil {
-				var errorMsg string
-				var errorType string
-				var tokenType string
-				switch err.(type) {
-				case *ratelimit.InputRateLimitExceededError:
-					errorMsg = "input token rate limit exceeded"
-					errorType = "input_rate_limit"
-					tokenType = metrics.LimitTypeInputTokens
-				case *ratelimit.OutputRateLimitExceededError:
-					errorMsg = "output token rate limit exceeded"
-					errorType = "output_rate_limit"
-					tokenType = metrics.LimitTypeOutputTokens
-				default:
-					errorMsg = "token usage exceeds rate limit"
-					errorType = "rate_limit"
-					tokenType = metrics.LimitTypeRequests
-				}
-				accesslog.SetError(c, errorType, errorMsg)
-
-				// Get metrics recorder from gin context for rate limit recording
-				if recorder, exists := c.Get("metricsRecorder"); exists {
-					if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
-						rec.RecordRateLimitExceeded(tokenType)
+	// When fairness scheduling is enabled, rate limiting is done before the
+	// queue (see HandlerFunc), so skip the duplicate check here.
+	if !EnableFairnessScheduling {
+		if promptStr, exists := c.Get("promptStr"); exists {
+			if ps, ok := promptStr.(string); ok {
+				if err := r.loadRateLimiter.RateLimit(modelName, ps); err != nil {
+					var errorMsg string
+					var errorType string
+					var tokenType string
+					switch err.(type) {
+					case *ratelimit.InputRateLimitExceededError:
+						errorMsg = "input token rate limit exceeded"
+						errorType = "input_rate_limit"
+						tokenType = metrics.LimitTypeInputTokens
+					case *ratelimit.OutputRateLimitExceededError:
+						errorMsg = "output token rate limit exceeded"
+						errorType = "output_rate_limit"
+						tokenType = metrics.LimitTypeOutputTokens
+					default:
+						errorMsg = "token usage exceeds rate limit"
+						errorType = "rate_limit"
+						tokenType = metrics.LimitTypeRequests
 					}
+					accesslog.SetError(c, errorType, errorMsg)
+
+					// Get metrics recorder from gin context for rate limit recording
+					if recorder, exists := c.Get("metricsRecorder"); exists {
+						if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+							rec.RecordRateLimitExceeded(tokenType)
+						}
+					}
+					c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
+					c.Set("finishReason", "rate_limit")
+					return
 				}
-				c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
-				c.Set("finishReason", "rate_limit")
-				return
 			}
 		}
 	}
