@@ -379,6 +379,32 @@ func createModelRouteWithWebhookRetry(ctx context.Context, testCtx *routercontex
 	return created, nil
 }
 
+func waitForModelRouteValidationError(ctx context.Context, testCtx *routercontext.RouterTestContext, namespace string, modelRoute *networkingv1alpha1.ModelRoute, timeout time.Duration) error {
+	var lastErr error
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		created, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		if err == nil {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Delete(context.Background(), created.Name, metav1.DeleteOptions{})
+			return false, fmt.Errorf("expected ModelRoute validation to reject %s/%s, but create succeeded", namespace, modelRoute.Name)
+		}
+		lastErr = err
+		if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return true, nil
+		}
+		if shouldRetryWebhookError(err) {
+			return false, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		if lastErr != nil {
+			return fmt.Errorf("expected Invalid or BadRequest, last error: %w", lastErr)
+		}
+		return err
+	}
+	return nil
+}
+
 func shouldRetryWebhookError(err error) bool {
 	if err == nil {
 		return false
@@ -857,9 +883,8 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 		modelRoute.Spec.SessionSticky = &networkingv1alpha1.SessionSticky{}
 		setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
-		_, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(context.Background(), modelRoute, metav1.CreateOptions{})
-		require.Error(t, err, "empty sources should be rejected")
-		require.True(t, apierrors.IsInvalid(err) || apierrors.IsBadRequest(err), "expected Invalid or BadRequest, got %v", err)
+		require.NoError(t, waitForModelRouteValidationError(context.Background(), testCtx, testNamespace, modelRoute, 2*time.Minute),
+			"empty sources should be rejected")
 	})
 
 	t.Run("E2E-SS-11-SourcePrecedence", func(t *testing.T) {
@@ -905,8 +930,9 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), createdModelRoute.Name, metav1.DeleteOptions{})
 		})
 
-		pod := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, createdModelRoute.Spec.ModelName, map[string]string{sessionStickyHeader: "pd-bypass"})
-		require.NotEmpty(t, pod, "PD sticky bypass request should be served")
+		messages := []utils.ChatMessage{utils.NewChatMessage("user", "Hello")}
+		resp := utils.CheckChatCompletionsWithHeaders(t, createdModelRoute.Spec.ModelName, messages, map[string]string{sessionStickyHeader: "pd-bypass"})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "PD sticky bypass request should be served")
 		waitForRouterLogsContainAnyPod(t, testCtx.KubeClient, kthenaNamespace, 2*time.Minute,
 			[]string{"PD disaggregation targets are not supported; bypassing sticky routing"}, 45*time.Second)
 	})
