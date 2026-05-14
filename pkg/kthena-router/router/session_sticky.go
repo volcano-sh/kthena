@@ -37,6 +37,18 @@ import (
 
 const defaultSessionAffinitySeconds int32 = 10800
 const redisOperationTimeout = 2 * time.Second
+const redisSetSessionBindingScript = `
+local current = redis.call("GET", KEYS[1])
+if not current then
+	redis.call("PSETEX", KEYS[1], ARGV[2], ARGV[1])
+	return 1
+end
+if current == ARGV[1] then
+	redis.call("PSETEX", KEYS[1], ARGV[2], ARGV[1])
+	return 1
+end
+return 0
+`
 
 type sessionBinding struct {
 	pod       types.NamespacedName
@@ -112,6 +124,8 @@ type redisSessionStickyStore struct {
 	client *redis.Client
 }
 
+var redisSetSessionBinding = redis.NewScript(redisSetSessionBindingScript)
+
 func newRedisSessionStickyStore(address, password string) (*redisSessionStickyStore, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, fmt.Errorf("redis address is required")
@@ -151,14 +165,21 @@ func (s *redisSessionStickyStore) Get(routeKey, sessionKey string) (types.Namesp
 }
 
 func (s *redisSessionStickyStore) Set(routeKey, sessionKey string, pod types.NamespacedName, ttl time.Duration) {
-	if s == nil || s.client == nil || ttl <= 0 {
+	if s == nil || s.client == nil || routeKey == "" || sessionKey == "" || pod.Name == "" || ttl <= 0 {
 		return
 	}
 	ctx, cancel := contextWithRedisTimeout()
 	defer cancel()
 	value := pod.Namespace + "/" + pod.Name
-	if err := s.client.Set(ctx, redisSessionStoreKey(routeKey, sessionKey), value, ttl).Err(); err != nil {
+
+	result, err := redisSetSessionBinding.Run(ctx, s.client, []string{redisSessionStoreKey(routeKey, sessionKey)}, value, ttl.Milliseconds()).Int()
+	if err != nil {
 		klog.Errorf("failed to set session sticky binding in redis: %v", err)
+		return
+	}
+	if result == 0 {
+		klog.V(4).Infof("session sticky binding for route %s session %s already points to another pod; keeping existing binding",
+			routeKey, hashSessionKey(sessionKey))
 	}
 }
 

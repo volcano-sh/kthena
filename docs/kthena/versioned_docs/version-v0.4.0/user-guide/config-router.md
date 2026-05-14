@@ -91,7 +91,7 @@ data:
 
 ### Session Affinity Example
 
-Session affinity is configured on `ModelRoute.spec.sessionSticky`, not as a scheduler plugin. The router evaluates `sources` in order and uses the first non-empty header, query parameter, cookie, or JWT claim value as the session key. The router process store defaults to in-memory; use the Helm `kthenaRouter.sessionSticky.store=redis` setting to share bindings across router replicas.
+Session affinity is configured on `ModelRoute.spec.sessionSticky`, not as a scheduler plugin. The router evaluates `sources` in order and uses the first non-empty header, query parameter, cookie, or JWT claim value as the session key. The router process store defaults to in-memory; use the parent chart Helm `networking.kthenaRouter.sessionSticky.store=redis` setting to share bindings across router replicas.
 
 ```yaml showLineNumbers
 apiVersion: networking.serving.volcano.sh/v1alpha1

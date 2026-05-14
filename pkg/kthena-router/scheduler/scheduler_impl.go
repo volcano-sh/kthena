@@ -212,6 +212,12 @@ func (s *SchedulerImpl) RunFilterPlugins(pods []*datastore.PodInfo, ctx *framewo
 
 func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framework.Context) map[*datastore.PodInfo]int {
 	res := make(map[*datastore.PodInfo]int)
+	if len(s.scorePlugins) == 0 {
+		for _, pod := range pods {
+			res[pod] = 0
+		}
+		return res
+	}
 	for _, scorePlugin := range s.scorePlugins {
 		// Record score plugin execution time
 		startTime := time.Now()

@@ -361,6 +361,75 @@ func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeyS
 	}
 }
 
+func configureRouterScorePluginsDisabled(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
+	t.Helper()
+	ctx := context.Background()
+	const configMapName = "kthena-router-config"
+	const routerDeploymentName = "kthena-router"
+	const routerConfigKey = "routerConfiguration"
+
+	cm, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router ConfigMap")
+	originalConfigData := cm.Data[routerConfigKey]
+	require.NotEmpty(t, originalConfigData, "Router configuration should not be empty")
+
+	updatedConfig := `scheduler:
+  pluginConfig:
+  - name: least-request
+    args:
+      maxWaitingRequests: 10
+  plugins:
+    Filter:
+      enabled:
+        - least-request
+    Score:
+      enabled: []`
+
+	cm.Data[routerConfigKey] = updatedConfig
+	_, err = kubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to disable router score plugins")
+	restartRouterPods(t, kubeClient, namespace, routerDeploymentName)
+
+	return func() {
+		restoreCtx := context.Background()
+		latestCM, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(restoreCtx, configMapName, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Warning: Failed to get router ConfigMap for restore: %v", err)
+			return
+		}
+		latestCM.Data[routerConfigKey] = originalConfigData
+		if _, err := kubeClient.CoreV1().ConfigMaps(namespace).Update(restoreCtx, latestCM, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore router ConfigMap: %v", err)
+			return
+		}
+		_ = restartRouterPodsE(restoreCtx, kubeClient, namespace, routerDeploymentName, defaultScalingTimeout)
+	}
+}
+
+func restartRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace, deploymentName string) {
+	t.Helper()
+	require.NoError(t, restartRouterPodsE(context.Background(), kubeClient, namespace, deploymentName, defaultScalingTimeout))
+}
+
+func restartRouterPodsE(ctx context.Context, kubeClient kubernetes.Interface, namespace, deploymentName string, timeout time.Duration) error {
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: metav1.FormatLabelSelector(deployment.Spec.Selector),
+	})
+	if err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		if err := kubeClient.CoreV1().Pods(namespace).Delete(ctx, pods.Items[i].Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return utils.WaitForDeploymentReadyE(ctx, kubeClient, namespace, deploymentName, timeout)
+}
+
 func stickySource(sourceType networkingv1alpha1.SessionKeySourceType, name string) networkingv1alpha1.SessionKeySource {
 	return networkingv1alpha1.SessionKeySource{Type: sourceType, Name: name}
 }
@@ -633,6 +702,9 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 	if kthenaNamespace == "" {
 		t.Skip("session sticky e2e requires kthena namespace to read router access logs")
 	}
+
+	restoreScorePlugins := configureRouterScorePluginsDisabled(t, testCtx.KubeClient, kthenaNamespace)
+	t.Cleanup(restoreScorePlugins)
 
 	baseURL := utils.DefaultRouterURL
 

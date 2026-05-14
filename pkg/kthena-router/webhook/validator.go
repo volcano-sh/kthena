@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -31,14 +32,17 @@ import (
 	"k8s.io/klog/v2"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
 const timeout = 30 * time.Second
+const defaultRouterConfigPath = "/etc/config/routerConfiguration.yaml"
 
 // KthenaRouterValidator handles validation of ModelRoute and ModelServer resources.
 type KthenaRouterValidator struct {
-	httpServer *http.Server
-	kubeClient kubernetes.Interface
+	httpServer     *http.Server
+	kubeClient     kubernetes.Interface
+	jwtAuthEnabled bool
 }
 
 // NewKthenaRouterValidator creates a new KthenaRouterValidator.
@@ -53,9 +57,23 @@ func NewKthenaRouterValidator(kubeClient kubernetes.Interface, port int) *Kthena
 	}
 
 	return &KthenaRouterValidator{
-		httpServer: server,
-		kubeClient: kubeClient,
+		httpServer:     server,
+		kubeClient:     kubeClient,
+		jwtAuthEnabled: routerJWTAuthEnabled(),
 	}
+}
+
+func routerJWTAuthEnabled() bool {
+	configPath := os.Getenv("KTHENA_ROUTER_CONFIG_PATH")
+	if configPath == "" {
+		configPath = defaultRouterConfigPath
+	}
+	routerConfig, err := conf.ParseRouterConfig(configPath)
+	if err != nil {
+		klog.V(4).Infof("router config unavailable for JWTClaim admission validation: %v", err)
+		return false
+	}
+	return strings.TrimSpace(routerConfig.Auth.JwksUri) != ""
 }
 
 func (v *KthenaRouterValidator) Run(ctx context.Context, tlsCertFile, tlsPrivateKey string) {
@@ -195,6 +213,9 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 			}
 			if source.Name == "" {
 				allErrs = append(allErrs, field.Required(sourceField.Child("name"), "source name must be non-empty"))
+			}
+			if source.Type == networkingv1alpha1.SessionKeySourceJWTClaim && !v.jwtAuthEnabled {
+				allErrs = append(allErrs, field.Invalid(sourceField.Child("type"), source.Type, "JWTClaim session key source requires JWT authentication to be enabled"))
 			}
 		}
 	}
