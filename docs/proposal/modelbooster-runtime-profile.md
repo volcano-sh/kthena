@@ -1,356 +1,346 @@
 ---
-title: Runtime Profile CRD for ModelBooster
+title: ClusterModelRuntime Template Override for ModelBooster
 authors:
 - "@xrwang8"
 reviewers:
 - TBD
 approvers:
 - TBD
-
 creation-date: 2026-05-06
-
 ---
 
-## Runtime Profile CRD for ModelBooster
+## ClusterModelRuntime Template Override for ModelBooster
+Related issue: Refs #953
 
 ### Summary
 
-Add a declarative runtime profile API for `ModelBooster`, similar in spirit to KServe's `ServingRuntime` / `ClusterServingRuntime`, so cluster administrators can define reusable model runtime templates outside the controller binary.
+Phase 1 focuses on template externalization only. It adds a small
+cluster-scoped `ClusterModelRuntime` API that lets cluster operators provide an
+optional `ModelServing` YAML template override for an existing `ModelBooster`
+backend type.
 
-Today `ModelBooster` is the right user-facing abstraction for productized model deployment, but the runtime conversion is still mostly controller-owned. For example, vLLM and vLLM disaggregated deployments are selected from embedded templates in `pkg/model-booster-controller/convert/templates/`, and adding a new runtime shape such as SGLang single-node or SGLang PD disaggregation requires code changes.
+This proposal does not introduce a runtime catalog, runtime selection on
+`ModelBooster`, or new backend types. The controller still owns runtime
+selection, placeholder values, `ModelServer` generation, and `ModelRoute`
+generation. Existing embedded templates remain the controller's default template
+source. A `ClusterModelRuntime` is only an explicit override for one supported
+backend type.
+
+### Current Behavior
+
+`ModelBooster` currently owns one `ModelBackend` in `spec.backend`. Its current
+fields are `name`, `type`, `modelURI`, `cacheURI`, `envFrom`, `env`,
+`minReplicas`, `maxReplicas`, `workers`, `schedulerName`, and
+`runtimeClassName`.
+
+There is no runtime selection field on `ModelBackend` today, and phase 1 does
+not add one.
+
+`ModelBackendType` currently has CRD validation for only:
+
+- `vLLM`
+- `vLLMDisaggregated`
+
+Go constants for `SGLang`, `MindIE`, and `MindIEDisaggregated` exist, but they
+are not accepted by the current CRD validation marker. `BuildModelServing` also
+switches only `vLLM` and `vLLMDisaggregated`.
+
+The controller currently reads embedded template files from
+`pkg/model-booster-controller/convert/templates/`, unmarshals them, and applies
+the existing `${VAR}` placeholder replacement through
+`utils.ReplacePlaceholders`.
 
 ### Motivation
 
-For product/platform users, `ModelBooster` should hide low-level `ModelServing` details such as roles, entry/worker pod templates, runtime sidecars, PD topology, model downloader wiring, metrics endpoints, and runtime-specific commands.
+Operators sometimes need small cluster-specific changes to the existing
+generated `ModelServing` template: private images, pod scheduling constraints,
+probe tuning, image pull settings, or environment wiring. Today those changes
+require editing an embedded template and rolling a new controller image.
 
-However, platform operators still need a supported way to define and maintain runtime presets. The current embedded template approach has several long-term limitations:
+Phase 1 moves only the template override surface into Kubernetes. It does not
+change the `ModelBooster` user API, generated placeholder values, or the
+controller-owned `ModelRoute` behavior.
 
-**1. New runtimes require controller code changes**
+### Goals
 
-Today the runtime selection is effectively compiled into the controller:
+1. Add a cluster-scoped `ClusterModelRuntime` CRD.
+2. Allow one optional `ModelServing` YAML template override per existing
+   supported `ModelBackendType`.
+3. Keep embedded templates as the default behavior and source of default
+   templates.
+4. Continue using the current `${VAR}` placeholder replacement mechanism.
+5. Reject overrides whose declared backend type does not match the backend being
+   converted.
+6. Preserve current `ModelRoute` generation behavior.
 
-- `vLLM` → `pkg/model-booster-controller/convert/templates/vllm.yaml`
-- `vLLMDisaggregated` → `pkg/model-booster-controller/convert/templates/vllm-pd.yaml`
+### Non-Goals
 
-Adding SGLang single-node, SGLang PD disaggregation, MindIE, private vLLM profiles, or hardware-specific profiles requires changing controller code, rebuilding the image, and rolling out the controller.
-
-**2. Templates are not Kubernetes resources**
-
-The templates are embedded with Go `embed`. Cluster administrators cannot add, patch, validate, or version runtime templates through normal Kubernetes workflows such as `kubectl apply`, GitOps, RBAC, admission policy, or status conditions.
-
-**3. Cluster-specific runtime differences are hard to operate**
-
-Real deployments often need different defaults per cluster or tenant (private/offline engine images, GPU vs NPU resource names, preinstalled NIXL/Mooncake dependencies, `nodeSelector`, affinity, tolerations, `/dev/shm` sizing, probes and startup timeouts, security context and image pull secrets, runtime metrics ports and paths).
-
-**4. Product UX is forced to hardcode profiles elsewhere**
-
-A product console usually wants to expose simple choices such as `vllm-single`, `vllm-pd`, `sglang-single`, `sglang-pd`. Without a first-class runtime profile API, these choices must be hardcoded in the console, CLI, or controller logic.
-
-**5. Small runtime changes require a controller release**
-
-Adjusting a probe, command, image, env var, resource default, or volume currently means modifying embedded templates and shipping a new controller image.
-
-**6. No runtime auto-selection or priority model**
-
-KServe's `ClusterServingRuntime` can declare supported formats with `autoSelect` and `priority`. Kthena does not currently have an equivalent mechanism.
-
-**7. Community contributions are heavier than necessary**
-
-Contributing a new runtime shape currently requires touching controller conversion code and tests.
-
-This proposal makes `ModelBooster` a cleaner northbound/product API while leaving `ModelServing` as the generated low-level workload API.
-
-#### Goals
-
-1. Add a cluster-scoped `ClusterModelRuntimeProfile` CRD.
-2. Support explicit `spec.backend.runtimeProfile` on `ModelBooster`.
-3. Move the existing embedded `vLLM` and `vLLMDisaggregated` templates into default installed profiles (`vllm-single`, `vllm-pd`).
-4. When `runtimeProfile` is unset, fall back to current embedded template behavior — no behavior change for existing users.
-5. Add validation to ensure the selected profile supports the requested backend type.
-6. Document how operators can add profiles for SGLang and private engine images.
-
-#### Non-Goals
-
-- Namespace-scoped `ModelRuntimeProfile` (deferred to later phase)
-- Auto-selection with `autoSelect` / `priority` (deferred to later phase)
-- Status conditions for invalid or missing profiles (deferred to later phase)
-- Profile versioning (deferred to later phase)
-- SGLang profiles (can be contributed as profile YAMLs once the CRD exists)
-- PD/multinode structured role templates replacing current placeholder approach (deferred to later phase)
+- Adding a runtime selector field to `ModelBackend`.
+- Adding SGLang, MindIE, or other new backend type support.
+- Moving embedded templates into installed runtime resources.
+- Adding a runtime catalog, automatic selection, ranking, or version negotiation.
+- Supporting multiple selectable runtime templates for the same backend type.
+- Replacing `${VAR}` placeholder replacement with another template engine.
+- Templating `ModelServer`, `ModelRoute`, or route rules.
+- Adding namespace-scoped runtime resources.
 
 ### Proposal
 
-Introduce a new `ClusterModelRuntimeProfile` CRD. The profile mirrors the actual structure of the current embedded templates: each role has an `entryTemplate` (the pod that runs both the kthena `runtime` sidecar and the inference `engine` container) and an optional `workerTemplate` (for multi-node ray workers).
+Introduce `ClusterModelRuntime` as an optional cluster-scoped external template
+override for one supported `ModelBackendType`.
 
-`ModelBooster` can reference a profile explicitly:
+For phase 1, the controller resolves the template source by backend type only.
+It looks for a well-known `ClusterModelRuntime` name for that type. If the
+object exists and matches the backend type, the controller uses `spec.template`.
+If the object is missing, the controller falls back to the existing embedded
+template.
 
-```yaml
-spec:
-  backend:
-    runtimeProfile: vllm-single
-    modelURI: hf://Qwen/Qwen2.5-7B-Instruct
-    minReplicas: 1
-    maxReplicas: 4
+Embedded templates remain the normal default path. Installing or upgrading the
+controller does not require installing `ClusterModelRuntime` resources.
+
+### Go API
+
+`ClusterModelRuntime` is added to the existing workload API package:
+`pkg/apis/workload/v1alpha1`, group `workload.serving.volcano.sh`, version
+`v1alpha1`.
+
+```go
+// ClusterModelRuntimeSpec defines a cluster-level ModelServing template override
+// for one ModelBooster backend type.
+type ClusterModelRuntimeSpec struct {
+	// BackendType specifies which ModelBooster backend type this runtime applies to.
+	// Phase 1 supports only vLLM and vLLMDisaggregated.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=vLLM;vLLMDisaggregated
+	BackendType ModelBackendType `json:"backendType"`
+
+	// Template is a complete ModelServing YAML template.
+	// It uses the existing ${VAR} placeholder replacement mechanism.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Template string `json:"template"`
+}
+
+// +genclient
+// +genclient:nonNamespaced
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=cmrt
+// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backendType`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+type ClusterModelRuntime struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec ClusterModelRuntimeSpec `json:"spec"`
+}
+
+// +kubebuilder:object:root=true
+type ClusterModelRuntimeList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []ClusterModelRuntime `json:"items"`
+}
 ```
 
-When `runtimeProfile` is unset, the controller falls back to the current embedded template behavior, preserving full backward compatibility.
+### Field Reference
 
-#### KServe Reference
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `spec.backendType` | `ModelBackendType` | Yes | The existing ModelBooster backend type this override applies to. Phase 1 accepts only `vLLM` and `vLLMDisaggregated`. |
+| `spec.template` | `string` | Yes | A complete `ModelServing` YAML template using the current `${VAR}` placeholder format. |
 
-KServe has a useful pattern here:
+### Runtime Resolution
 
-- `ServingRuntime` / `ClusterServingRuntime` are Kubernetes resources used as runtime templates.
-- A runtime declares supported model formats through `supportedModelFormats` with fields such as `name`, `version`, `autoSelect`, and `priority`.
-- A runtime carries pod-level details such as containers, args, env, resources, probes, volumes, affinity, annotations, and protocol versions.
-- The KServe multinode HuggingFace runtime includes a `workerSpec`, which is close to Kthena's need to generate entry/worker or prefill/decode role topology.
+Phase 1 uses well-known names derived from backend type:
 
-References:
+```go
+const (
+	DefaultClusterModelRuntimeVLLM              = "kthena-vllm-single"
+	DefaultClusterModelRuntimeVLLMDisaggregated = "kthena-vllm-pd"
+)
 
-- KServe Serving Runtime docs: https://kserve.github.io/website/docs/concepts/resources/servingruntime
-- KServe `ClusterServingRuntime` CRD: https://github.com/kserve/kserve/blob/master/charts/kserve-crd/templates/serving.kserve.io_clusterservingruntimes.yaml
-- KServe HuggingFace runtime example: https://github.com/kserve/kserve/blob/master/config/runtimes/kserve-huggingfaceserver.yaml
-- KServe multinode HuggingFace runtime example: https://github.com/kserve/kserve/blob/master/config/runtimes/kserve-huggingfaceserver-multinode.yaml
+func DefaultClusterModelRuntimeName(t ModelBackendType) string {
+	switch t {
+	case ModelBackendTypeVLLM:
+		return DefaultClusterModelRuntimeVLLM
+	case ModelBackendTypeVLLMDisaggregated:
+		return DefaultClusterModelRuntimeVLLMDisaggregated
+	default:
+		return ""
+	}
+}
+```
 
-### Design Details
+Resolution order:
 
-#### CRD Structure
+1. Read the backend type from `ModelBooster.spec.backend.type`.
+2. Resolve the well-known runtime name for that backend type.
+3. If no well-known name exists, return the current unsupported backend error.
+4. Get the cluster-scoped `ClusterModelRuntime` with that name.
+5. If it is not found, use the current embedded template for that backend type.
+6. If it is found, require `spec.backendType` to equal the backend type being
+   converted.
+7. Parse, replace placeholders, and decode `spec.template`.
 
-The `ClusterModelRuntimeProfile` CRD has the following structure:
+### Template Format
+
+Phase 1 keeps the current placeholder mechanism. Templates continue to use
+`${VAR}` placeholders and `utils.ReplacePlaceholders`.
+
+An example abbreviated from the current `vllm.yaml` template:
 
 ```yaml
 apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ClusterModelRuntimeProfile
-metadata:
-  name: vllm-single
+kind: ModelServing
+metadata: ${MODEL_SERVING_TEMPLATE_METADATA}
 spec:
-  disabled: false
-  supportedBackends:
-    - type: vLLM
-      autoSelect: true
-      priority: 10
-  protocolVersions:
-    - openai-v1
-  defaults:
-    runtimeImage: ghcr.io/volcano-sh/kthena-runtime:v0.10.0  # kthena sidecar
-    engineImage: vllm/vllm-openai:v0.8.5                     # inference engine
-    metricsPath: /metrics
-    metricsPort: 8000
-    runtimePort: 8100
-  modelServingTemplate:
+  schedulerName: ${SCHEDULER_NAME}
+  replicas: ${BACKEND_REPLICAS}
+  template:
     roles:
       - name: leader
+        replicas: ${SERVER_REPLICAS}
         entryTemplate:
           spec:
-            terminationGracePeriodSeconds: 300
-            containers:
-              - name: runtime          # kthena sidecar — proxies requests, exposes /health
-                image: "{{ .defaults.runtimeImage }}"
-                ports:
-                  - containerPort: "{{ .defaults.runtimePort }}"
-                args:
-                  - --port
-                  - "{{ .defaults.runtimePort }}"
-                  - --engine
-                  - "{{ .backendType }}"
-                  - --engine-base-url
-                  - "http://localhost:{{ .defaults.metricsPort }}"
-                  - --engine-metrics-path
-                  - "{{ .defaults.metricsPath }}"
-                  - --pod
-                  - "$(POD_NAME).$(NAMESPACE)"
-                  - --model
-                  - "{{ .modelName }}"
-                readinessProbe:
-                  httpGet:
-                    path: /health
-                    port: "{{ .defaults.runtimePort }}"
-                  initialDelaySeconds: 5
-                  periodSeconds: 10
-              - name: engine           # inference engine — runs the actual model
-                image: "{{ .workerImage }}"
-                command: "{{ .engineCommand }}"
-                resources: "{{ .workerResources }}"
-                volumeMounts: "{{ .volumeMounts }}"
-                readinessProbe:
-                  httpGet:
-                    path: /health
-                    port: "{{ .defaults.metricsPort }}"
-                  initialDelaySeconds: 180
-                  periodSeconds: 5
-                  failureThreshold: 3
-            initContainers: "{{ .initContainers }}"
-            volumes: "{{ .volumes }}"
-        workerTemplate:               # ray worker pods for multi-node
-          spec:
-            containers:
-              - name: "{{ .backendName }}-{{ .backendType }}-worker"
-                image: "{{ .workerImage }}"
-                command:
-                  - bash
-                  - "-c"
-                  - "chmod u+x examples/online_serving/multi-node-serving.sh && examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
-                resources: "{{ .workerResources }}"
-                volumeMounts: "{{ .volumeMounts }}"
-            initContainers: "{{ .initContainers }}"
-            volumes: "{{ .volumes }}"
-```
-
-#### vLLM PD Profile
-
-The PD profile has two independent roles — `prefill` and `decode` — each with its own engine image, env, and command:
-
-```yaml
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ClusterModelRuntimeProfile
-metadata:
-  name: vllm-pd
-spec:
-  disabled: false
-  supportedBackends:
-    - type: vLLMDisaggregated
-      autoSelect: true
-      priority: 10
-  protocolVersions:
-    - openai-v1
-  defaults:
-    runtimeImage: ghcr.io/volcano-sh/kthena-runtime:v0.10.0
-    metricsPath: /metrics
-    metricsPort: 8000
-    runtimePort: 8100
-  modelServingTemplate:
-    roles:
-      - name: prefill
-        entryTemplate:
-          spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
+            volumes: ${VOLUMES}
             containers:
               - name: runtime
-                image: "{{ .defaults.runtimeImage }}"
-                ports:
-                  - containerPort: "{{ .defaults.runtimePort }}"
+                image: ${MODEL_SERVING_RUNTIME_IMAGE}
                 args:
-                  - --port
-                  - "{{ .defaults.runtimePort }}"
                   - --engine
-                  - "{{ .backendType }}"
-                  - --engine-base-url
-                  - "http://localhost:{{ .defaults.metricsPort }}"
-                  - --engine-metrics-path
-                  - "{{ .defaults.metricsPath }}"
-                  - --pod
-                  - "$(POD_NAME).$(NAMESPACE)"
+                  - ${MODEL_SERVING_RUNTIME_ENGINE}
                   - --model
-                  - "{{ .modelName }}"
-              - name: vllm
-                image: "{{ .prefillWorkerImage }}"
-                command: "{{ .prefillCommand }}"
-                resources: "{{ .prefillResources }}"
-                volumeMounts: "{{ .volumeMounts }}"
-                readinessProbe:
-                  httpGet:
-                    path: /health
-                    port: "{{ .defaults.metricsPort }}"
-                  initialDelaySeconds: 5
-                  periodSeconds: 5
-                  failureThreshold: 3
-                livenessProbe:
-                  httpGet:
-                    path: /health
-                    port: "{{ .defaults.metricsPort }}"
-                  initialDelaySeconds: 180
-                  periodSeconds: 5
-                  failureThreshold: 3
-            initContainers: "{{ .initContainers }}"
-            volumes: "{{ .volumes }}"
-        workerReplicas: 0
-      - name: decode
-        entryTemplate:
-          spec:
-            containers:
-              - name: runtime
-                image: "{{ .defaults.runtimeImage }}"
-                ports:
-                  - containerPort: "{{ .defaults.runtimePort }}"
-                args:
-                  - --port
-                  - "{{ .defaults.runtimePort }}"
-                  - --engine
-                  - "{{ .backendType }}"
-                  - --engine-base-url
-                  - "http://localhost:{{ .defaults.metricsPort }}"
-                  - --engine-metrics-path
-                  - "{{ .defaults.metricsPath }}"
-                  - --pod
-                  - "$(POD_NAME).$(NAMESPACE)"
-                  - --model
-                  - "{{ .modelName }}"
-              - name: vllm
-                image: "{{ .decodeWorkerImage }}"
-                command: "{{ .decodeCommand }}"
-                resources: "{{ .decodeResources }}"
-                volumeMounts: "{{ .volumeMounts }}"
-                readinessProbe:
-                  httpGet:
-                    path: /health
-                    port: "{{ .defaults.metricsPort }}"
-                  initialDelaySeconds: 5
-                  periodSeconds: 5
-                  failureThreshold: 3
-                livenessProbe:
-                  httpGet:
-                    path: /health
-                    port: "{{ .defaults.metricsPort }}"
-                  initialDelaySeconds: 180
-                  periodSeconds: 5
-                  failureThreshold: 3
-            initContainers: "{{ .initContainers }}"
-            volumes: "{{ .volumes }}"
-        workerReplicas: 0
+                  - ${MODEL_NAME}
+              - name: engine
+                image: ${ENGINE_SERVER_IMAGE}
+                command: ${ENGINE_SERVER_COMMAND}
+                env: ${ENGINE_ENV}
+                resources: ${ENGINE_SERVER_RESOURCES}
 ```
 
-#### Template Placeholder Format
+This example is intentionally incomplete. Full default templates remain embedded
+in the controller image.
 
-The sketches above use Go template syntax (`{{ .field }}`). The current embedded templates use `${VAR}` string substitution. For phase 1, we lean toward Go templates since they support conditionals and range, which will be needed for optional fields.
+### Supported Placeholders
 
-#### Backward Compatibility
+`ClusterModelRuntime.spec.template` uses the same placeholder contract as the
+current embedded template for the selected backend type. The valid placeholders
+are the keys produced by `BuildModelServing` for that backend.
 
-When `runtimeProfile` is unset on `ModelBooster`, the controller falls back to the current embedded template behavior. This ensures no behavior change for existing users.
+For phase 1, placeholder names and their typed values are part of the
+controller/template compatibility contract. Removing or renaming a placeholder
+that can appear in an override is a breaking change for operators who installed
+that override.
 
-The existing embedded templates will be migrated to default installed profiles (`vllm-single`, `vllm-pd`) that ship with the controller, but the fallback logic ensures smooth migration.
+The current placeholder sets are:
 
-#### Risks and Mitigations
+- `vLLM`: `MODEL_SERVING_TEMPLATE_METADATA`, `MODEL_NAME`, `BACKEND_NAME`,
+  `BACKEND_REPLICAS`, `BACKEND_TYPE`, `ENGINE_ENV`, `WORKER_ENV`,
+  `SERVER_REPLICAS`, `SERVER_ENTRY_TEMPLATE_METADATA`,
+  `SERVER_WORKER_TEMPLATE_METADATA`, `VOLUMES`, `VOLUME_MOUNTS`,
+  `INIT_CONTAINERS`, `MODEL_DOWNLOAD_ENVFROM`, `MODEL_SERVING_RUNTIME_IMAGE`,
+  `MODEL_SERVING_RUNTIME_PORT`, `MODEL_SERVING_RUNTIME_URL`,
+  `MODEL_SERVING_RUNTIME_METRICS_PATH`, `MODEL_SERVING_RUNTIME_ENGINE`,
+  `MODEL_SERVING_RUNTIME_POD`, `ENGINE_SERVER_RESOURCES`,
+  `ENGINE_SERVER_IMAGE`, `ENGINE_SERVER_COMMAND`, `WORKER_REPLICAS`,
+  `SCHEDULER_NAME`, and `RUNTIME_CLASS_NAME`.
+- `vLLMDisaggregated`: `MODEL_SERVING_TEMPLATE_METADATA`, `VOLUME_MOUNTS`,
+  `VOLUMES`, `MODEL_NAME`, `BACKEND_REPLICAS`, `INIT_CONTAINERS`,
+  `MODEL_DOWNLOAD_ENVFROM`, `ENGINE_PREFILL_COMMAND`, `ENGINE_DECODE_COMMAND`,
+  `SERVER_ENTRY_TEMPLATE_METADATA`, `MODEL_SERVING_RUNTIME_IMAGE`,
+  `MODEL_SERVING_RUNTIME_PORT`, `MODEL_SERVING_RUNTIME_URL`,
+  `MODEL_SERVING_RUNTIME_METRICS_PATH`, `ENGINE_PREFILL_ENV`,
+  `ENGINE_DECODE_ENV`, `MODEL_SERVING_RUNTIME_ENGINE`,
+  `MODEL_SERVING_RUNTIME_POD`, `PREFILL_REPLICAS`, `DECODE_REPLICAS`,
+  `ENGINE_DECODE_RESOURCES`, `ENGINE_DECODE_IMAGE`,
+  `ENGINE_PREFILL_RESOURCES`, `ENGINE_PREFILL_IMAGE`, `SCHEDULER_NAME`, and
+  `RUNTIME_CLASS_NAME`.
 
-**Risk**: Template placeholder injection vulnerabilities if user-provided values are not properly escaped.
+The existing renderer preserves structured values when the whole YAML scalar is
+a placeholder such as `${ENGINE_ENV}` or `${VOLUMES}`. A placeholder embedded
+inside a larger string is rendered as text.
 
-**Mitigation**: Use Go's `text/template` with proper escaping. Validate all placeholder values before substitution.
+The proposed override semantics should validate the rendered result before it is
+used. The rendered template must decode to exactly one
+`workload.serving.volcano.sh/v1alpha1` `ModelServing`, and the controller should
+validate the rendered apiVersion/kind.
 
-**Risk**: Profile versioning and compatibility across controller upgrades.
+Generated identity and ownership remain controller-owned. After rendering and
+decoding, the controller should overwrite generated metadata such as resource
+name, namespace, labels, and owner references from the owning `ModelBooster`.
+Object-level metadata from the override is ignored or overwritten. Pod-template
+metadata under `spec.template.roles[*].entryTemplate` or `workerTemplate` remains
+customizable. Overrides are for the `ModelServing` spec/template shape, not for
+changing ownership.
 
-**Mitigation**: Phase 1 does not include versioning. Future phases can add `apiVersion` or `schemaVersion` fields to profiles.
+### Upgrade Semantics
+
+Normal controller image upgrades continue to upgrade embedded default templates
+when no `ClusterModelRuntime` override exists.
+
+If an operator creates a `ClusterModelRuntime`, that object becomes an explicit
+cluster-owned override. The controller should use it until the operator changes
+or deletes it. The operator owns the lifecycle of that override, including
+keeping it compatible with newer controller versions.
+
+### ModelServer and ModelRoute Scope
+
+`ModelServer` and `ModelRoute` remain controller-owned in phase 1.
+
+`BuildModelRoute` currently uses `ModelBooster.spec.modelMatch` for route
+matching and targets the generated `ModelServer` name returned by
+`utils.GetBackendResourceName(model.Name, backend.Name)`. This proposal does
+not change that behavior.
+
+Route-rule templating is deferred. A `ClusterModelRuntime` only overrides the
+`ModelServing` template used by `BuildModelServing`.
+
+### Error Handling
+
+- Missing `ClusterModelRuntime`: fall back to the embedded template for the
+  backend type.
+- Backend type mismatch: if the well-known runtime object exists but
+  `spec.backendType` does not match the backend being converted, return an error
+  and do not generate a `ModelServing`.
+- Invalid template: return an error if YAML parsing, placeholder replacement
+  fails because a required key is missing, or decoding into `ModelServing` fails.
+
+### Risks and Mitigations
+
+- Stale override templates can drift from newer controller placeholder data.
+  Mitigation: embedded templates remain the default path, and operators own
+  override upgrades.
+- Invalid overrides can block `ModelServing` generation for that backend type.
+  Mitigation: surface reconcile errors, while missing overrides fall back to
+  embedded templates.
+- Cluster-scoped template edits can affect many workloads. Mitigation: protect
+  `ClusterModelRuntime` writes with cluster-admin/operator RBAC.
 
 ### Test Plan
 
-1. **Unit tests**: Test profile loading, validation, and template rendering with various placeholder values.
-2. **Integration tests**: Deploy `ModelBooster` with explicit `runtimeProfile` and verify generated `ModelServing` matches expected structure.
-3. **E2E tests**: Deploy vllm-single and vllm-pd profiles, create `ModelBooster` instances, verify pods start correctly and serve requests.
-4. **Backward compatibility tests**: Deploy `ModelBooster` without `runtimeProfile` and verify fallback to embedded templates works.
-5. **Validation tests**: Attempt to reference non-existent profiles, mismatched backend types, and verify validation webhooks reject invalid configurations.
+- Unit test default runtime name resolution for `vLLM` and
+  `vLLMDisaggregated`.
+- Generation check that CRD, client, lister, and informer artifacts include the
+  cluster-scoped `ClusterModelRuntime`.
+- Unit test missing override fallback to the embedded template.
+- Unit test matching override use for each supported backend type.
+- Unit test backend mismatch error when a runtime object exists with the wrong
+  `spec.backendType`.
+- Unit test invalid template failures for YAML parse, missing placeholder key,
+  wrong apiVersion/kind, empty or multi-document input, and decode errors.
+- Unit test unchanged `BuildModelRoute` output.
+- Controller/envtest coverage that `ModelBooster` reconcile reads a
+  cluster-scoped override and falls back when absent.
+- Controller RBAC grants `get`, `list`, and `watch` for `ClusterModelRuntime`.
 
 ### Alternatives
 
-#### Alternative 1: Keep embedded templates, add overlay mechanism
-
-Instead of full CRD-based profiles, add a `ModelBooster` field for template overlays (e.g., `spec.backend.templateOverrides`). This would allow per-instance customization without requiring cluster-scoped resources.
-
-**Rejected because**: This does not solve the problem of cluster operators curating a catalog of runtime offerings. It also makes `ModelBooster` more complex.
-
-#### Alternative 2: Use ConfigMaps for templates
-
-Store templates in ConfigMaps instead of a CRD. The controller watches ConfigMaps and loads templates dynamically.
-
-**Rejected because**: ConfigMaps lack schema validation, versioning, and RBAC granularity. A CRD provides better type safety and operational semantics.
-
-#### Alternative 3: CLI manifest templates remain independent
-
-The CLI currently generates `ModelServing` manifests directly. One option is to keep CLI templates independent and only use profiles for `ModelBooster` controller-generated resources.
-
-**Decision deferred**: Phase 1 focuses on controller-generated resources. CLI integration can be addressed in a later phase.
+- Add `spec.backend.runtimeProfile`: rejected for phase 1 to avoid changing the
+  `ModelBooster` user API.
+- Use ConfigMaps for templates: rejected because a CRD gives typed backend
+  ownership and clearer RBAC.
+- Install default `ClusterModelRuntime` resources: rejected for phase 1 because
+  embedded templates should remain the upgradeable default path.
