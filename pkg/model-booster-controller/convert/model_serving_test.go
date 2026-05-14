@@ -196,6 +196,42 @@ func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 	}
 }
 
+func TestBuildVllmModelServingUsesServerWorkerConfig(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+	serverWorker := model.Spec.Backend.Workers[0]
+	serverWorker.Pods = 1
+	serverWorker.Config.Raw = []byte(`{"served-model-name":"server-model","max-model-len":222}`)
+
+	prefillWorker := serverWorker
+	prefillWorker.Type = workload.ModelWorkerTypePrefill
+	prefillWorker.Config.Raw = []byte(`{"served-model-name":"prefill-model","max-model-len":111}`)
+
+	model.Spec.Backend.Workers = []workload.ModelWorker{prefillWorker, serverWorker}
+
+	serving, err := BuildModelServing(model)
+	assert.NoError(t, err)
+
+	command := engineCommand(t, serving)
+	assert.Contains(t, command, "--served-model-name server-model")
+	assert.Contains(t, command, "--max-model-len 222")
+	assert.NotContains(t, command, "prefill-model")
+	assert.NotContains(t, command, "--max-model-len 111")
+}
+
+func engineCommand(t *testing.T, serving *workload.ModelServing) string {
+	t.Helper()
+
+	for _, role := range serving.Spec.Template.Roles {
+		for _, container := range role.EntryTemplate.Spec.Containers {
+			if container.Name == "engine" {
+				return strings.Join(container.Command, " ")
+			}
+		}
+	}
+	t.Fatal("engine container not found")
+	return ""
+}
+
 func TestBuildCacheVolume(t *testing.T) {
 	tests := []struct {
 		name         string
