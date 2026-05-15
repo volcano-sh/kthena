@@ -19,6 +19,7 @@ package cert
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,7 @@ func TestGenerateSelfSignedCertificate(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, caCert.IsCA)
 	assert.Equal(t, "kthena-webhook-ca", caCert.Subject.CommonName)
+	assert.Positive(t, caCert.SerialNumber.Sign())
 
 	// Verify server certificate
 	certBlock, _ := pem.Decode(bundle.CertPEM)
@@ -55,6 +57,7 @@ func TestGenerateSelfSignedCertificate(t *testing.T) {
 	assert.False(t, serverCert.IsCA)
 	assert.Equal(t, dnsNames, serverCert.DNSNames)
 	assert.Equal(t, dnsNames[0], serverCert.Subject.CommonName)
+	assert.Positive(t, serverCert.SerialNumber.Sign())
 
 	// Verify server key
 	keyBlock, _ := pem.Decode(bundle.KeyPEM)
@@ -108,6 +111,40 @@ func TestGenerateSelfSignedCertificate_MultipleDNSNames(t *testing.T) {
 
 	assert.Equal(t, dnsNames, serverCert.DNSNames)
 	assert.Equal(t, dnsNames[0], serverCert.Subject.CommonName)
+}
+
+func TestGenerateSelfSignedCertificate_RandomSerialNumbers(t *testing.T) {
+	dnsNames := []string{"webhook.default.svc"}
+
+	first, err := GenerateSelfSignedCertificate(dnsNames)
+	require.NoError(t, err)
+	second, err := GenerateSelfSignedCertificate(dnsNames)
+	require.NoError(t, err)
+
+	firstCABlock, _ := pem.Decode(first.CAPEM)
+	firstCertBlock, _ := pem.Decode(first.CertPEM)
+	secondCABlock, _ := pem.Decode(second.CAPEM)
+	secondCertBlock, _ := pem.Decode(second.CertPEM)
+	require.NotNil(t, firstCABlock)
+	require.NotNil(t, firstCertBlock)
+	require.NotNil(t, secondCABlock)
+	require.NotNil(t, secondCertBlock)
+
+	firstCA, err := x509.ParseCertificate(firstCABlock.Bytes)
+	require.NoError(t, err)
+	firstServer, err := x509.ParseCertificate(firstCertBlock.Bytes)
+	require.NoError(t, err)
+	secondCA, err := x509.ParseCertificate(secondCABlock.Bytes)
+	require.NoError(t, err)
+	secondServer, err := x509.ParseCertificate(secondCertBlock.Bytes)
+	require.NoError(t, err)
+
+	assert.Positive(t, firstCA.SerialNumber.Sign())
+	assert.Positive(t, firstServer.SerialNumber.Sign())
+	assert.NotEqual(t, big.NewInt(1), firstCA.SerialNumber)
+	assert.NotEqual(t, big.NewInt(2), firstServer.SerialNumber)
+	assert.NotEqual(t, firstCA.SerialNumber, secondCA.SerialNumber)
+	assert.NotEqual(t, firstServer.SerialNumber, secondServer.SerialNumber)
 }
 
 func TestGenerateSelfSignedCertificate_EmptyDNSNames(t *testing.T) {
