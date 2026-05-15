@@ -66,6 +66,12 @@ kthenaRouter:
   # kubeAPIBurst is the burst to use while talking with kubernetes apiserver
   # If 0 or not specified, uses default value (10)
   kubeAPIBurst: 0
+  # backend metric ports used by router to scrape engine metrics
+  backend:
+    sglang:
+      metricPort: 30000
+    vllm:
+      metricPort: 8000
 
 webhook:
   enabled: true

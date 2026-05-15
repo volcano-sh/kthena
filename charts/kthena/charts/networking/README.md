@@ -52,6 +52,24 @@ kthenaRouter:
 | `kthenaRouter.fairness.inputTokenWeight` | float | `1.0` | Weight for input tokens (≥0) |
 | `kthenaRouter.fairness.outputTokenWeight` | float | `2.0` | Weight for output tokens (≥0) |
 
+#### Backend Metric Port Configuration
+
+Use these values to configure model backend metric ports in `routerConfiguration`:
+
+```yaml
+kthenaRouter:
+  backend:
+    sglang:
+      metricPort: 30000
+    vllm:
+      metricPort: 8000
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `kthenaRouter.backend.sglang.metricPort` | int | `30000` | Metric port used for SGLang backends |
+| `kthenaRouter.backend.vllm.metricPort` | int | `8000` | Metric port used for vLLM backends |
+
 #### Configuration Scenarios
 
 ##### Development Environment
