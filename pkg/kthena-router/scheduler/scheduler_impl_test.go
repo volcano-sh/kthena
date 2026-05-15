@@ -247,6 +247,99 @@ func TestSchedulePDGroup(t *testing.T) {
 	}
 }
 
+func TestSchedulePDGroupHonorsFilterPlugins(t *testing.T) {
+	store := datastore.New()
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model-server",
+			Namespace: "default",
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "pd-group",
+					DecodeLabels:  map[string]string{"role": "decode"},
+					PrefillLabels: map[string]string{"role": "prefill"},
+				},
+			},
+		},
+	}
+	modelServerName := types.NamespacedName{Namespace: "default", Name: "test-model-server"}
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, nil))
+
+	pods := []*corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "decode-overloaded",
+				Namespace: "default",
+				Labels: map[string]string{
+					"pd-group": "group-1",
+					"role":     "decode",
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "prefill-overloaded-group",
+				Namespace: "default",
+				Labels: map[string]string{
+					"pd-group": "group-1",
+					"role":     "prefill",
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "decode-ready",
+				Namespace: "default",
+				Labels: map[string]string{
+					"pd-group": "group-2",
+					"role":     "decode",
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "prefill-ready",
+				Namespace: "default",
+				Labels: map[string]string{
+					"pd-group": "group-2",
+					"role":     "prefill",
+				},
+			},
+		},
+	}
+
+	for _, pod := range pods {
+		require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	}
+
+	overloadedPod := store.GetPodInfo(types.NamespacedName{Namespace: "default", Name: "decode-overloaded"})
+	require.NotNil(t, overloadedPod)
+	overloadedPod.RequestWaitingNum = 20
+
+	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+	ctx := &framework.Context{
+		ModelServerName: modelServerName,
+		PDGroup: &aiv1alpha1.PDGroup{
+			GroupKey:      "pd-group",
+			DecodeLabels:  map[string]string{"role": "decode"},
+			PrefillLabels: map[string]string{"role": "prefill"},
+		},
+	}
+
+	schedulingPods, err := store.GetPodsByModelServer(modelServerName)
+	require.NoError(t, err)
+
+	require.NoError(t, scheduler.Schedule(ctx, schedulingPods))
+	require.Len(t, ctx.DecodePods, 1)
+	require.Len(t, ctx.PrefillPods, 1)
+	require.NotNil(t, ctx.PrefillPods[0])
+	assert.Equal(t, "decode-ready", ctx.DecodePods[0].Pod.Name)
+	assert.Equal(t, "prefill-ready", ctx.PrefillPods[0].Pod.Name)
+}
+
 // TestScheduleNonPDGroupWithEmptyScores tests non-PD scheduling with empty scores
 func TestScheduleNonPDGroupWithEmptyScores(t *testing.T) {
 	store := datastore.New()

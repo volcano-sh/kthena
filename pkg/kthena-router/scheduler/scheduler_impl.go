@@ -106,6 +106,8 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	}
 
 	if ctx.PDGroup != nil {
+		filteredPods := podInfoKeySet(pods)
+
 		// Use optimized PDGroup scheduling with pre-categorized pods from store
 		klog.V(4).Info("Using optimized PD disaggregated scheduling")
 
@@ -114,6 +116,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		if err != nil {
 			return fmt.Errorf("failed to get decode pods: %v", err)
 		}
+		decodePods = filterPodInfosByKeySet(decodePods, filteredPods)
 
 		if len(decodePods) == 0 {
 			return fmt.Errorf("no decode pod found")
@@ -136,6 +139,12 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				})
 			if err != nil || len(selectedPods) == 0 {
 				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", klog.KObj(decodePod.Pod), "error", err)
+				continue
+			}
+			selectedPods = filterPodInfosByKeySet(selectedPods, filteredPods)
+			if len(selectedPods) == 0 {
+				klog.V(4).InfoS("prefill pods for decode group were filtered out",
+					"decode instance", klog.KObj(decodePod.Pod))
 				continue
 			}
 
@@ -162,6 +171,35 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	ctx.BestPods = TopNPodInfos(scores, topN)
 
 	return nil
+}
+
+func podInfoKeySet(pods []*datastore.PodInfo) map[types.NamespacedName]struct{} {
+	res := make(map[types.NamespacedName]struct{}, len(pods))
+	for _, pod := range pods {
+		if pod == nil || pod.Pod == nil {
+			continue
+		}
+		res[types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}] = struct{}{}
+	}
+	return res
+}
+
+func filterPodInfosByKeySet(pods []*datastore.PodInfo, allowed map[types.NamespacedName]struct{}) []*datastore.PodInfo {
+	if len(pods) == 0 || len(allowed) == 0 {
+		return nil
+	}
+
+	filtered := pods[:0]
+	for _, pod := range pods {
+		if pod == nil || pod.Pod == nil {
+			continue
+		}
+		key := types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}
+		if _, ok := allowed[key]; ok {
+			filtered = append(filtered, pod)
+		}
+	}
+	return filtered
 }
 
 func (s *SchedulerImpl) RunFilterPlugins(pods []*datastore.PodInfo, ctx *framework.Context) ([]*datastore.PodInfo, error) {
