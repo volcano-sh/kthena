@@ -1799,6 +1799,24 @@ func TestToWeightedSlice_MixedWeights(t *testing.T) {
 	assert.Contains(t, err.Error(), "weight field in targetModel must be either fully specified or not specified")
 }
 
+func TestToWeightedSlice_NilTarget(t *testing.T) {
+	targets := []*aiv1alpha1.TargetModel{
+		nil,
+	}
+	_, err := toWeightedSlice(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "targetModel[0] must not be nil")
+}
+
+func TestToWeightedSlice_EmptyModelServerName(t *testing.T) {
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: ""},
+	}
+	_, err := toWeightedSlice(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "targetModel[0].modelServerName must be specified")
+}
+
 func TestSelectFromWeightedSlice_EmptyWeights(t *testing.T) {
 	_, err := selectFromWeightedSlice([]uint32{})
 	assert.Error(t, err)
