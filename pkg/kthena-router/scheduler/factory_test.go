@@ -61,7 +61,7 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		assert.NotNil(t, builder, "Score plugin builder for %s should not be nil", pluginName)
 
 		// Test that the builder actually creates a plugin
-		plugin := builder(datastore.New(), runtime.RawExtension{})
+		plugin := builder(runtime.RawExtension{})
 		assert.NotNil(t, plugin, "Plugin %s should be created successfully", pluginName)
 
 		// PrefixCache plugin from registry is not properly initialized (empty struct)
@@ -157,7 +157,9 @@ func TestGetScorePlugins(t *testing.T) {
 	registry := NewPluginRegistry()
 	registerDefaultPlugins(registry)
 
+	// Create a mock prefix cache for testing
 	mockStore := datastore.New()
+	prefixCache := plugins.NewPrefixCache(mockStore, runtime.RawExtension{Raw: []byte(`{"blockSizeToHash": 64}`)})
 
 	tests := []struct {
 		name            string
@@ -165,7 +167,6 @@ func TestGetScorePlugins(t *testing.T) {
 		pluginsArgMap   map[string]runtime.RawExtension
 		expectedCount   int
 		expectedWeights map[string]int
-		expectedHooks   int
 	}{
 		{
 			name:            "empty score plugin map",
@@ -173,7 +174,6 @@ func TestGetScorePlugins(t *testing.T) {
 			pluginsArgMap:   map[string]runtime.RawExtension{},
 			expectedCount:   0,
 			expectedWeights: map[string]int{},
-			expectedHooks:   0,
 		},
 		{
 			name: "single valid plugin",
@@ -187,7 +187,6 @@ func TestGetScorePlugins(t *testing.T) {
 			expectedWeights: map[string]int{
 				plugins.LeastRequestPluginName: 5,
 			},
-			expectedHooks: 0,
 		},
 		{
 			name: "multiple valid plugins with different weights",
@@ -204,7 +203,6 @@ func TestGetScorePlugins(t *testing.T) {
 				plugins.LeastRequestPluginName:  3,
 				plugins.GPUCacheUsagePluginName: 7,
 			},
-			expectedHooks: 0,
 		},
 		{
 			name: "prefix cache plugin special handling",
@@ -218,7 +216,6 @@ func TestGetScorePlugins(t *testing.T) {
 			expectedWeights: map[string]int{
 				plugins.PrefixCachePluginName: 10,
 			},
-			expectedHooks: 1,
 		},
 		{
 			name: "negative weight should be set to 0",
@@ -232,7 +229,6 @@ func TestGetScorePlugins(t *testing.T) {
 			expectedWeights: map[string]int{
 				plugins.LeastRequestPluginName: 0,
 			},
-			expectedHooks: 0,
 		},
 		{
 			name: "non-existent plugin should be skipped",
@@ -248,16 +244,14 @@ func TestGetScorePlugins(t *testing.T) {
 			expectedWeights: map[string]int{
 				plugins.LeastRequestPluginName: 3,
 			},
-			expectedHooks: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scorePlugins, postScheduleHooks := getScorePlugins(registry, mockStore, tt.scorePluginMap, tt.pluginsArgMap)
+			scorePlugins := getScorePlugins(registry, prefixCache, tt.scorePluginMap, tt.pluginsArgMap)
 
 			assert.Equal(t, tt.expectedCount, len(scorePlugins))
-			assert.Len(t, postScheduleHooks, tt.expectedHooks)
 
 			// Verify weights and plugin names
 			for _, scorePlugin := range scorePlugins {

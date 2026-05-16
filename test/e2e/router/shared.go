@@ -427,7 +427,7 @@ func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeyS
 	}
 }
 
-func configureRouterScorePluginsDisabled(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
+func configureRouterRandomScorePlugin(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
 	t.Helper()
 	ctx := context.Background()
 	const configMapName = "kthena-router-config"
@@ -449,11 +449,13 @@ func configureRouterScorePluginsDisabled(t *testing.T, kubeClient kubernetes.Int
       enabled:
         - least-request
     Score:
-      enabled: []`
+      enabled:
+        - name: random
+          weight: 1`
 
 	cm.Data[routerConfigKey] = updatedConfig
 	_, err = kubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
-	require.NoError(t, err, "Failed to disable router score plugins")
+	require.NoError(t, err, "Failed to configure random router score plugin")
 	restartRouterPods(t, kubeClient, namespace, routerDeploymentName)
 
 	return func() {
@@ -770,7 +772,7 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 		t.Skip("session sticky e2e requires kthena namespace to read router access logs")
 	}
 
-	restoreScorePlugins := configureRouterScorePluginsDisabled(t, testCtx.KubeClient, kthenaNamespace)
+	restoreScorePlugins := configureRouterRandomScorePlugin(t, testCtx.KubeClient, kthenaNamespace)
 	t.Cleanup(restoreScorePlugins)
 
 	baseURL := utils.DefaultRouterURL

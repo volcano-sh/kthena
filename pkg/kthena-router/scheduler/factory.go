@@ -17,14 +17,13 @@ limitations under the License.
 package scheduler
 
 import (
-	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 )
 
-type ScorePluginBuilder = func(store datastore.Store, arg runtime.RawExtension) framework.ScorePlugin
+type ScorePluginBuilder = func(arg runtime.RawExtension) framework.ScorePlugin
 type FilterPluginBuilder = func(arg runtime.RawExtension) framework.FilterPlugin
 
 // PluginRegistry manages the registration and retrieval of scheduler plugins
@@ -66,22 +65,24 @@ func (r *PluginRegistry) getFilterPlugin(name string) (FilterPluginBuilder, bool
 // registerDefaultPlugins registers all default plugins to the given registry
 func registerDefaultPlugins(registry *PluginRegistry) {
 	// scorePlugin
-	registry.registerScorePlugin(plugins.GPUCacheUsagePluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
+	registry.registerScorePlugin(plugins.GPUCacheUsagePluginName, func(args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewGPUCacheUsage()
 	})
-	registry.registerScorePlugin(plugins.LeastLatencyPluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
+	registry.registerScorePlugin(plugins.LeastLatencyPluginName, func(args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewLeastLatency(args)
 	})
-	registry.registerScorePlugin(plugins.LeastRequestPluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
+	registry.registerScorePlugin(plugins.LeastRequestPluginName, func(args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewLeastRequest(args)
 	})
-	registry.registerScorePlugin(plugins.RandomPluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
+	registry.registerScorePlugin(plugins.RandomPluginName, func(args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewRandom(args)
 	})
-	registry.registerScorePlugin(plugins.PrefixCachePluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		return plugins.NewPrefixCache(store, args)
+	// PrefixCache requires two parameters and is instantiated during use
+	registry.registerScorePlugin(plugins.PrefixCachePluginName, func(args runtime.RawExtension) framework.ScorePlugin {
+		return &plugins.PrefixCache{}
 	})
-	registry.registerScorePlugin(plugins.KVCacheAwarePluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
+
+	registry.registerScorePlugin(plugins.KVCacheAwarePluginName, func(args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewKVCacheAware(args)
 	})
 	// filterPlugin
@@ -110,29 +111,33 @@ func getFilterPlugins(registry *PluginRegistry, filterPluginMap []string, plugin
 	return list
 }
 
-func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePluginMap map[string]int, pluginsArgMap map[string]runtime.RawExtension) ([]*scorePlugin, []framework.PostScheduleHook) {
+func getScorePlugins(registry *PluginRegistry, prefixCache *plugins.PrefixCache, scorePluginMap map[string]int, pluginsArgMap map[string]runtime.RawExtension) []*scorePlugin {
 	var list []*scorePlugin
-	var postScheduleHooks []framework.PostScheduleHook
 	for pluginName, weight := range scorePluginMap {
 		if weight < 0 {
 			klog.Errorf("Weight for plugin '%s' is invalid, value is %d. Setting to 0", pluginName, weight)
 			weight = 0
 		}
 
+		if pluginName == plugins.PrefixCachePluginName {
+			list = append(list, &scorePlugin{
+				plugin: prefixCache,
+				weight: weight,
+			})
+			continue
+		}
+
 		if builderFunc, exist := registry.getScorePlugin(pluginName); !exist {
 			klog.Errorf("Failed to get plugin %s.", pluginName)
 		} else {
-			plugin := builderFunc(store, pluginsArgMap[pluginName])
+			plugin := builderFunc(pluginsArgMap[pluginName])
 			if plugin != nil {
 				list = append(list, &scorePlugin{
 					plugin: plugin,
 					weight: weight,
 				})
-				if hook, ok := plugin.(framework.PostScheduleHook); ok {
-					postScheduleHooks = append(postScheduleHooks, hook)
-				}
 			}
 		}
 	}
-	return list, postScheduleHooks
+	return list
 }
