@@ -129,6 +129,18 @@ func validateBackendWorkerTypes(model *registryv1alpha1.ModelBooster) field.Erro
 		}
 	}
 
+	if backend.Type == registryv1alpha1.ModelBackendTypeSGLangDisaggregated {
+		for j, w := range workers {
+			if w.Type != registryv1alpha1.ModelWorkerTypePrefill && w.Type != registryv1alpha1.ModelWorkerTypeDecode {
+				allErrs = append(allErrs, field.Invalid(
+					backendPath.Child("workers").Index(j).Child("type"),
+					w.Type,
+					"If backend type is 'SGLangDisaggregated', all workers must be type 'prefill' or 'decode'",
+				))
+			}
+		}
+	}
+
 	// Rule 3: MindIEDisaggregated -> all workers must be 'prefill', 'decode', 'controller', or 'coordinator'
 	if backend.Type == registryv1alpha1.ModelBackendTypeMindIEDisaggregated {
 		validTypes := map[registryv1alpha1.ModelWorkerType]struct{}{

@@ -114,3 +114,73 @@ func TestValidateModel_NoErrors(t *testing.T) {
 	assert.True(t, valid)
 	assert.Empty(t, errorMsg)
 }
+
+// TestValidateBackendWorkerTypes_SGLang covers SGLang and SGLangDisaggregated
+// worker-type rules.
+func TestValidateBackendWorkerTypes_SGLang(t *testing.T) {
+	validator := &ModelValidator{}
+	mkModel := func(backendType registryv1alpha1.ModelBackendType, workers ...registryv1alpha1.ModelWorker) *registryv1alpha1.ModelBooster {
+		return &registryv1alpha1.ModelBooster{
+			ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "default"},
+			Spec: registryv1alpha1.ModelBoosterSpec{
+				Backend: registryv1alpha1.ModelBackend{
+					Name:        "b1",
+					Type:        backendType,
+					MinReplicas: 1,
+					MaxReplicas: 1,
+					Workers:     workers,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		model     *registryv1alpha1.ModelBooster
+		wantValid bool
+		errSubstr string
+	}{
+		{
+			name: "SGLang with exactly one server worker is valid",
+			model: mkModel(registryv1alpha1.ModelBackendTypeSGLang,
+				registryv1alpha1.ModelWorker{Type: registryv1alpha1.ModelWorkerTypeServer, Pods: 1, Image: "sglang:latest"},
+			),
+			wantValid: true,
+		},
+		{
+			name: "SGLang with a non-server worker is rejected",
+			model: mkModel(registryv1alpha1.ModelBackendTypeSGLang,
+				registryv1alpha1.ModelWorker{Type: registryv1alpha1.ModelWorkerTypePrefill, Pods: 1, Image: "sglang:latest"},
+			),
+			wantValid: false,
+			errSubstr: "worker type must be 'server'",
+		},
+		{
+			name: "SGLangDisaggregated with prefill+decode is valid",
+			model: mkModel(registryv1alpha1.ModelBackendTypeSGLangDisaggregated,
+				registryv1alpha1.ModelWorker{Type: registryv1alpha1.ModelWorkerTypePrefill, Pods: 1, Image: "sglang:latest"},
+				registryv1alpha1.ModelWorker{Type: registryv1alpha1.ModelWorkerTypeDecode, Pods: 1, Image: "sglang:latest"},
+			),
+			wantValid: true,
+		},
+		{
+			name: "SGLangDisaggregated containing a server worker is rejected",
+			model: mkModel(registryv1alpha1.ModelBackendTypeSGLangDisaggregated,
+				registryv1alpha1.ModelWorker{Type: registryv1alpha1.ModelWorkerTypePrefill, Pods: 1, Image: "sglang:latest"},
+				registryv1alpha1.ModelWorker{Type: registryv1alpha1.ModelWorkerTypeServer, Pods: 1, Image: "sglang:latest"},
+			),
+			wantValid: false,
+			errSubstr: "SGLangDisaggregated",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			valid, errorMsg := validator.validateModel(tt.model)
+			assert.Equal(t, tt.wantValid, valid, "errorMsg=%s", errorMsg)
+			if tt.errSubstr != "" {
+				assert.Contains(t, errorMsg, tt.errSubstr)
+			}
+		})
+	}
+}
