@@ -45,10 +45,7 @@ spec:
           {{- end }}
             - --session-sticky-store={{ .Values.kthenaRouter.sessionSticky.store }}
           {{- if eq .Values.kthenaRouter.sessionSticky.store "redis" }}
-            - --session-sticky-redis-address={{ .Values.kthenaRouter.sessionSticky.redis.address }}
-          {{- if .Values.kthenaRouter.sessionSticky.redis.password }}
-            - --session-sticky-redis-password={{ .Values.kthenaRouter.sessionSticky.redis.password }}
-          {{- end }}
+            - --session-sticky-redis-address={{ required "kthenaRouter.sessionSticky.redis.address is required when kthenaRouter.sessionSticky.store is redis" .Values.kthenaRouter.sessionSticky.redis.address }}
           {{- end }}
             - --debug-backend-pod-header={{ .Values.kthenaRouter.debugBackendPodHeader }}
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
