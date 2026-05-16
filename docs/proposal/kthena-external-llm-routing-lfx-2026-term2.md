@@ -699,7 +699,7 @@ Docs ship in the same PR as the feature they document. The week-12 docs PR is th
 
 ---
 
-## 14. Long-Term Vision Post-Mentorship
+## 12. Long-Term Vision Post-Mentorship
 
 Concrete commitments past week 12, written into the closing comment on [#939](https://github.com/volcano-sh/kthena/issues/939):
 
@@ -711,7 +711,7 @@ Concrete commitments past week 12, written into the closing comment on [#939](ht
 
 ---
 
-## 15. References
+## 13. References
 
 ### Repository files
 
