@@ -108,7 +108,7 @@ type ModelBackend struct {
 }
 
 // ModelBackendType defines the type of model backend.
-// +kubebuilder:validation:Enum=vLLM;vLLMDisaggregated
+// +kubebuilder:validation:Enum=vLLM;vLLMDisaggregated;SGLang;SGLangDisaggregated
 type ModelBackendType string
 
 const (
@@ -118,6 +118,8 @@ const (
 	ModelBackendTypeVLLMDisaggregated ModelBackendType = "vLLMDisaggregated"
 	// ModelBackendTypeSGLang represents an SGLang backend.
 	ModelBackendTypeSGLang ModelBackendType = "SGLang"
+	// ModelBackendTypeSGLangDisaggregated represents a disaggregated SGLang backend.
+	ModelBackendTypeSGLangDisaggregated ModelBackendType = "SGLangDisaggregated"
 	// ModelBackendTypeMindIE represents a MindIE backend.
 	ModelBackendTypeMindIE ModelBackendType = "MindIE"
 	// ModelBackendTypeMindIEDisaggregated represents a disaggregated MindIE backend.
