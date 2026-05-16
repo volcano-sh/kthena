@@ -12,7 +12,7 @@
 | **Applicant** | Divyam jha |
 | **GitHub** | https://github.com/divyam-jha123 |
 | **Email** | divyamjha.70055594@gmail.com |
-| **Timezone** | UTC +5:30 IST |
+| **Timezone** | UTC+5:30 (India Standard Time) |
 | **Mentor** | Zengzeng Yao ([@YaoZengzeng](https://github.com/YaoZengzeng), yaozengzeng@huawei.com) |
 | **Repository** | [github.com/volcano-sh/kthena](https://github.com/volcano-sh/kthena) |
 | **Proposal version** | v1.0 |
@@ -313,7 +313,7 @@ v1alpha1 ships `OpenAICompatible` (default), which is a pass-through plus model-
 | Path-version doubling (`/v1/v1/chat/completions`) | CEL: `!self.matches('^.*/v\\d+/?$')`. |
 | Query/fragment injection in `baseURL` | CEL: `!self.contains('?') && !self.contains('#')`. |
 | Cross-namespace Secret access | v1alpha1: `Secret` and `ExternalModelProvider` must be in the same namespace. Cross-namespace is deferred to a future `ReferenceGrant`-style proposal. |
-| Client `Authorization` header forwarded to upstream | Sanitizer drops `Authorization`, `Proxy-Authorization`, and all hop-by-hop headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `TE`, `Trailer`, `Proxy-Connection`). Retained: `Content-Type`, `Accept`, `User-Agent`, `x-request-id`. |
+| Client `Authorization` header forwarded to upstream | Sanitizer drops `Authorization`, `Proxy-Authorization`, and all hop-by-hop headers per RFC 7230 (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `Trailer`, `Proxy-Connection`, and related). Retained: `Content-Type`, `Accept`, `User-Agent`, `x-request-id`. |
 | `Content-Length` mismatch after model-name rewrite | `Content-Length` is dropped from the cloned header set; `http.NewRequestWithContext` recomputes from the new body. |
 | Goroutine exhaustion | Per-provider semaphore (§5.3.7) caps in-flight requests. |
 | Credentials in logs | Authenticator scrub list extended; access-log structured fields never include provider credentials. |
@@ -692,7 +692,7 @@ Docs ship in the same PR as the feature they document. The week-12 docs PR is th
 - **Mentor sync:** weekly 30-minute video call with @YaoZengzeng, scheduled at a time that overlaps both timezones. Async daily updates as a comment on [#939](https://github.com/volcano-sh/kthena/issues/939) in the form *"Yesterday: X. Today: Y. Blocked on: Z (or none)."*
 - **Channels:** GitHub Issues for tracking. GitHub Discussions for design questions before they become PR comments. Slack from the project README for synchronous quick clarifications during overlap hours.
 - **Public weekly progress reports:** every Friday a `## Week N progress` comment lands on [#939](https://github.com/volcano-sh/kthena/issues/939) with what merged, what's open, what's blocked. Visible to the rest of the community, not only the mentor.
-- **PR review etiquette:** small PRs (<500 lines diff each, except the necessarily larger CRD-types PR). Each opened as a draft first if I'm uncertain about an approach. Reviewers tagged from `OWNERS` (currently @hzxuzhonghu). Review comments addressed within 24 hours on weekdays in UTC +5:30 IST.
+- **PR review etiquette:** small PRs (<500 lines diff each, except the necessarily larger CRD-types PR). Each opened as a draft first if I'm uncertain about an approach. Reviewers tagged from `OWNERS` (currently @hzxuzhonghu). Review comments addressed within 24 hours on weekdays in UTC+5:30 (India Standard Time).
 - **Disagreement handling:** if a reviewer and I disagree, I write the alternatives on the PR with trade-offs, then defer to maintainer judgment. I don't re-litigate decisions across multiple PRs.
 - **Coordination with the benchmark slot ([#942](https://github.com/volcano-sh/kthena/issues/942)):** sync in week 6 once external routing PRs are mergeable. Contribute a benchmark scenario YAML so their work has external-routing data from day one.
 - **Open community work:** during the buffer week and after week 12, pick up adjacent open issues, particularly the perf and observability cluster ([#1056](https://github.com/volcano-sh/kthena/issues/1056), [#960](https://github.com/volcano-sh/kthena/issues/960), [#347](https://github.com/volcano-sh/kthena/issues/347)).
