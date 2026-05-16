@@ -1,0 +1,34 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: sglang-qwen-06b
+spec:
+  backend:
+    name: "backend1"
+    type: "SGLang"
+    modelURI: "hf://Qwen/Qwen3-0.6B"
+    cacheURI: "hostpath://tmp/cache"
+    minReplicas: 1
+    maxReplicas: 1
+    env:
+      - name: "HF_ENDPOINT" # Optional: Use a Hugging Face mirror if you have network issues
+        value: "https://hf-mirror.com"
+    workers:
+      - type: "server"
+        image: "docker.io/lmsysorg/sglang:latest"
+        replicas: 1
+        pods: 1
+        # Flags here are appended after the kthena defaults.
+        config:
+          served-model-name: "Qwen3-0.6B"
+          mem-fraction-static: "0.85"
+          trust-remote-code: ""
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            cpu: "4"
+            memory: "12Gi"
+          requests:
+            nvidia.com/gpu: "1"
+            cpu: "2"
+            memory: "12Gi"
