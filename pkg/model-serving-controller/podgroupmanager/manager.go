@@ -405,7 +405,20 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 	})
 
-	// TODO: optimize by get from the cache
+	if podGroupLister := m.GetPodGroupLister(); podGroupLister != nil {
+		podGroups, err := podGroupLister.PodGroups(ms.Namespace).List(selector)
+		if err != nil {
+			return nil, err
+		}
+
+		result := make(map[string]*schedulingv1beta1.PodGroup, len(podGroups))
+		for _, pg := range podGroups {
+			result[pg.Name] = pg
+		}
+
+		return result, nil
+	}
+
 	podGroupList, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector.String(),
 	})
@@ -413,7 +426,7 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 		return nil, err
 	}
 
-	result := make(map[string]*schedulingv1beta1.PodGroup)
+	result := make(map[string]*schedulingv1beta1.PodGroup, len(podGroupList.Items))
 	for i := range podGroupList.Items {
 		pg := &podGroupList.Items[i]
 		result[pg.Name] = pg

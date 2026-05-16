@@ -531,11 +531,24 @@ func TestGetExistingPodGroups(t *testing.T) {
 		},
 	}
 
-	t.Run("successful retrieval of existing pod groups", func(t *testing.T) {
+	buildLister := func(podGroups ...*schedulingv1beta1.PodGroup) volcanoschedulerlister.PodGroupLister {
+		indexer := cache.NewIndexer(
+			cache.MetaNamespaceKeyFunc,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		)
+		for _, podGroup := range podGroups {
+			err := indexer.Add(podGroup)
+			assert.NoError(t, err)
+		}
+		return volcanoschedulerlister.NewPodGroupLister(indexer)
+	}
+
+	t.Run("successful retrieval of existing pod groups from cache", func(t *testing.T) {
 		// Create fake volcano client with test data
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1, podGroup2, podGroup3, podGroupDifferentNamespace)
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
+		manager.PodGroupLister = buildLister(podGroup1, podGroup2, podGroup3, podGroupDifferentNamespace)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -554,6 +567,21 @@ func TestGetExistingPodGroups(t *testing.T) {
 		assert.Equal(t, "default", result["test-model-0"].Namespace)
 		assert.Equal(t, "test-model-1", result["test-model-1"].Name)
 		assert.Equal(t, "default", result["test-model-1"].Namespace)
+	})
+
+	t.Run("successful retrieval of existing pod groups from fallback live list", func(t *testing.T) {
+		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1, podGroup2, podGroup3, podGroupDifferentNamespace)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
+
+		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
+
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Len(t, result, 2)
+		assert.Contains(t, result, "test-model-0")
+		assert.Contains(t, result, "test-model-1")
+		assert.NotContains(t, result, "other-model-0")
 	})
 
 	t.Run("no existing pod groups", func(t *testing.T) {
@@ -589,6 +617,7 @@ func TestGetExistingPodGroups(t *testing.T) {
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1, podGroupDifferentNamespace)
 		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
+		manager.PodGroupLister = buildLister(podGroup1, podGroupDifferentNamespace)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
