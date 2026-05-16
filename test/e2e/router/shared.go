@@ -414,6 +414,9 @@ func shouldRetryWebhookError(err error) bool {
 		apierrors.IsServiceUnavailable(err) ||
 		strings.Contains(msg, "failed calling webhook") ||
 		strings.Contains(msg, "connect: connection refused") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "context deadline exceeded") ||
 		strings.Contains(msg, "broken pipe")
 }
 
