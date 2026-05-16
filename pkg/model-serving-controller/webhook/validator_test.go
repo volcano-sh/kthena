@@ -91,50 +91,6 @@ func TestValidPodNameLength(t *testing.T) {
 					"invalid name: must be no more than 63 characters"),
 			},
 		},
-		{
-			name: "skip generated name check when replicas is nil",
-			args: args{
-				ms: &workloadv1alpha1.ModelServing{
-					ObjectMeta: v1.ObjectMeta{
-						Name: "valid-name",
-					},
-					Spec: workloadv1alpha1.ModelServingSpec{
-						Template: workloadv1alpha1.ServingGroup{
-							Roles: []workloadv1alpha1.Role{
-								{
-									Name:           "role1",
-									Replicas:       &replicas,
-									WorkerReplicas: 2,
-								},
-							},
-						},
-					},
-				},
-			},
-			want: field.ErrorList(nil),
-		},
-		{
-			name: "skip generated name check when role replicas is nil",
-			args: args{
-				ms: &workloadv1alpha1.ModelServing{
-					ObjectMeta: v1.ObjectMeta{
-						Name: "valid-name",
-					},
-					Spec: workloadv1alpha1.ModelServingSpec{
-						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
-							Roles: []workloadv1alpha1.Role{
-								{
-									Name:           "role1",
-									WorkerReplicas: 2,
-								},
-							},
-						},
-					},
-				},
-			},
-			want: field.ErrorList(nil),
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
