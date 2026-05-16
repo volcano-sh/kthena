@@ -1796,16 +1796,39 @@ func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRo
 		for routeKey := range routeSet {
 			// Find the ModelRoute in routes or loraRoutes
 			if info, ok := s.routeInfo[routeKey]; ok {
+				var foundRoute *aiv1alpha1.ModelRoute
+
 				// Try to find from primary model routes
 				if info.model != "" {
 					if routes, exists := s.routes[info.model]; exists {
 						for _, route := range routes {
 							if route.Namespace+"/"+route.Name == routeKey {
-								result = append(result, route)
+								foundRoute = route
 								break
 							}
 						}
 					}
+				}
+
+				// If not found, check lora routes (handles lora-only ModelRoutes)
+				if foundRoute == nil {
+					for _, lora := range info.loras {
+						if loraRoutes, ok := s.loraRoutes[lora]; ok {
+							for _, route := range loraRoutes {
+								if route.Namespace+"/"+route.Name == routeKey {
+									foundRoute = route
+									break
+								}
+							}
+							if foundRoute != nil {
+								break
+							}
+						}
+					}
+				}
+
+				if foundRoute != nil {
+					result = append(result, foundRoute)
 				}
 			}
 		}
