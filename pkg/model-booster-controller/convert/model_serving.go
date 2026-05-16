@@ -214,8 +214,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing, error) {
 	backend := &model.Spec.Backend
 	workersMap := mapWorkers(backend.Workers)
-	serverWorker := workersMap[workload.ModelWorkerTypeServer]
-	if serverWorker == nil {
+	if workersMap[workload.ModelWorkerTypeServer] == nil {
 		return nil, fmt.Errorf("server worker not found in backend: %s", backend.Name)
 	}
 	cacheVolume, err := buildCacheVolume(backend)
@@ -223,7 +222,8 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		return nil, err
 	}
 	modelDownloadPath := GetCachePath(backend.CacheURI) + GetMountPath(backend.ModelURI)
-	commands, err := buildCommands(backend, &serverWorker.Config, modelDownloadPath, workersMap)
+	serverWorkerConfig := workersMap[workload.ModelWorkerTypeServer].Config
+	commands, err := buildCommands(backend, &serverWorkerConfig, modelDownloadPath, workersMap)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"BACKEND_TYPE":     strings.ToLower(string(backend.Type)),
 		"ENGINE_ENV":       engineEnv,
 		"WORKER_ENV":       backend.Env,
-		"SERVER_REPLICAS":  serverWorker.Replicas,
+		"SERVER_REPLICAS":  workersMap[workload.ModelWorkerTypeServer].Replicas,
 		"SERVER_ENTRY_TEMPLATE_METADATA": &metav1.ObjectMeta{
 			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 		},
@@ -325,10 +325,10 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
 		"MODEL_SERVING_RUNTIME_ENGINE":       strings.ToLower(string(backend.Type)),
 		"MODEL_SERVING_RUNTIME_POD":          "$(POD_NAME).$(NAMESPACE)",
-		"ENGINE_SERVER_RESOURCES":            serverWorker.Resources,
-		"ENGINE_SERVER_IMAGE":                serverWorker.Image,
+		"ENGINE_SERVER_RESOURCES":            workersMap[workload.ModelWorkerTypeServer].Resources,
+		"ENGINE_SERVER_IMAGE":                workersMap[workload.ModelWorkerTypeServer].Image,
 		"ENGINE_SERVER_COMMAND":              commands,
-		"WORKER_REPLICAS":                    serverWorker.Pods - 1,
+		"WORKER_REPLICAS":                    workersMap[workload.ModelWorkerTypeServer].Pods - 1,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
 	}
 	return loadModelServingTemplate(VllmTemplatePath, &data)
