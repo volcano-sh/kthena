@@ -65,6 +65,7 @@ func (s *Server) Run(ctx context.Context) {
 
 	// must be run before the controller, because it will register callbacks
 	r := NewRouter(store, s.SessionStickyStore)
+	defer r.Close()
 	// start controller
 	s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst)
 
