@@ -39,13 +39,15 @@ import (
 )
 
 const (
-	CacheURIPrefixPVC              = "pvc://"
-	CacheURIPrefixHostPath         = "hostpath://"
-	URIPrefixSeparator             = "://"
-	VllmTemplatePath               = "templates/vllm.yaml"
-	VllmDisaggregatedTemplatePath  = "templates/vllm-pd.yaml"
-	VllmMultiNodeServingScriptPath = "examples/online_serving/multi-node-serving.sh"
-	modelRouteRuleName             = "default"
+	CacheURIPrefixPVC               = "pvc://"
+	CacheURIPrefixHostPath          = "hostpath://"
+	URIPrefixSeparator              = "://"
+	VllmTemplatePath                = "templates/vllm.yaml"
+	VllmDisaggregatedTemplatePath   = "templates/vllm-pd.yaml"
+	VllmMultiNodeServingScriptPath  = "examples/online_serving/multi-node-serving.sh"
+	SGLangTemplatePath              = "templates/sglang.yaml"
+	SGLangDisaggregatedTemplatePath = "templates/sglang-pd.yaml"
+	modelRouteRuleName              = "default"
 	// /dev/shm is too small to support NCCL, we need a larger memory volume
 	dshm = "dshm"
 )
@@ -63,6 +65,10 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 		serving, err = buildVllmModelServing(model)
 	case workload.ModelBackendTypeVLLMDisaggregated:
 		serving, err = buildVllmDisaggregatedModelServing(model)
+	case workload.ModelBackendTypeSGLang:
+		serving, err = buildSGLangModelServing(model)
+	case workload.ModelBackendTypeSGLangDisaggregated:
+		serving, err = buildSGLangDisaggregatedModelServing(model)
 	default:
 		return nil, fmt.Errorf("not support model backend type: %s", backend.Type)
 	}
@@ -326,6 +332,245 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	return loadModelServingTemplate(VllmTemplatePath, &data)
 }
 
+// buildSGLangModelServing handles aggregated SGLang backend creation.
+func buildSGLangModelServing(model *workload.ModelBooster) (*workload.ModelServing, error) {
+	backend := &model.Spec.Backend
+	workersMap := mapWorkers(backend.Workers)
+	if workersMap[workload.ModelWorkerTypeServer] == nil {
+		return nil, fmt.Errorf("server worker not found in backend: %s", backend.Name)
+	}
+	if workersMap[workload.ModelWorkerTypeServer].Pods > 1 {
+		return nil, fmt.Errorf("multi-node SGLang (Pods > 1) is not yet supported")
+	}
+	cacheVolume, err := buildCacheVolume(backend)
+	if err != nil {
+		return nil, err
+	}
+	modelDownloadPath := GetCachePath(backend.CacheURI) + GetMountPath(backend.ModelURI)
+	commands, err := buildSGLangCommands(&workersMap[workload.ModelWorkerTypeServer].Config, modelDownloadPath, "")
+	if err != nil {
+		return nil, err
+	}
+
+	initContainers := buildModelDownloaderInitContainers(model, backend, cacheVolume, modelDownloadPath)
+
+	engineEnv := buildEngineEnvVars(backend)
+	data := map[string]interface{}{
+		"MODEL_SERVING_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Name:      utils.GetBackendResourceName(model.Name, backend.Name),
+			Namespace: model.Namespace,
+			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workload.GroupVersion.String(),
+					Kind:       workload.ModelKind.Kind,
+					Name:       model.Name,
+					UID:        model.UID,
+				},
+			},
+		},
+		"MODEL_NAME":       model.Name,
+		"BACKEND_REPLICAS": backend.MinReplicas,
+		"ENGINE_ENV":       engineEnv,
+		"SERVER_REPLICAS":  workersMap[workload.ModelWorkerTypeServer].Replicas,
+		"SERVER_ENTRY_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+		},
+		"VOLUMES": []*corev1.Volume{
+			cacheVolume,
+			{
+				Name: dshm,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{
+						Medium: corev1.StorageMediumMemory,
+					},
+				},
+			},
+		},
+		"VOLUME_MOUNTS": []corev1.VolumeMount{{
+			Name:      cacheVolume.Name,
+			MountPath: GetCachePath(backend.CacheURI),
+		}, {
+			Name:      dshm,
+			MountPath: "/dev/shm",
+		}},
+		"INIT_CONTAINERS":                    initContainers,
+		"MODEL_DOWNLOAD_ENVFROM":             backend.EnvFrom,
+		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
+		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
+		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:30000"),
+		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
+		"MODEL_SERVING_RUNTIME_ENGINE":       strings.ToLower(string(backend.Type)),
+		"MODEL_SERVING_RUNTIME_POD":          "$(POD_NAME).$(NAMESPACE)",
+		"ENGINE_SERVER_RESOURCES":            workersMap[workload.ModelWorkerTypeServer].Resources,
+		"ENGINE_SERVER_IMAGE":                workersMap[workload.ModelWorkerTypeServer].Image,
+		"ENGINE_SERVER_COMMAND":              commands,
+		"SCHEDULER_NAME":                     backend.SchedulerName,
+		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+	}
+	return loadModelServingTemplate(SGLangTemplatePath, &data)
+}
+
+// buildSGLangDisaggregatedModelServing handles disaggregated SGLang backend creation.
+func buildSGLangDisaggregatedModelServing(model *workload.ModelBooster) (*workload.ModelServing, error) {
+	backend := &model.Spec.Backend
+	workersMap := mapWorkers(backend.Workers)
+	if workersMap[workload.ModelWorkerTypePrefill] == nil {
+		return nil, fmt.Errorf("prefill worker not found in backend")
+	}
+	if workersMap[workload.ModelWorkerTypeDecode] == nil {
+		return nil, fmt.Errorf("decode worker not found in backend")
+	}
+	if workersMap[workload.ModelWorkerTypePrefill].Pods > 1 || workersMap[workload.ModelWorkerTypeDecode].Pods > 1 {
+		return nil, fmt.Errorf("multi-node SGLang (Pods > 1) is not yet supported")
+	}
+	cacheVolume, err := buildCacheVolume(backend)
+	if err != nil {
+		return nil, err
+	}
+	modelDownloadPath := GetCachePath(backend.CacheURI) + GetMountPath(backend.ModelURI)
+
+	initContainers := buildModelDownloaderInitContainers(model, backend, cacheVolume, modelDownloadPath)
+
+	var prefillCommand []string
+	var decodeCommand []string
+	for _, worker := range backend.Workers {
+		switch worker.Type {
+		case workload.ModelWorkerTypePrefill:
+			prefillCommand, err = buildSGLangCommands(&worker.Config, modelDownloadPath, "prefill")
+			if err != nil {
+				return nil, err
+			}
+		case workload.ModelWorkerTypeDecode:
+			decodeCommand, err = buildSGLangCommands(&worker.Config, modelDownloadPath, "decode")
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	prefillEngineEnv := buildEngineEnvVars(backend)
+	decodeEngineEnv := buildEngineEnvVars(backend)
+
+	data := map[string]interface{}{
+		"MODEL_SERVING_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Name:      utils.GetBackendResourceName(model.Name, backend.Name),
+			Namespace: model.Namespace,
+			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workload.GroupVersion.String(),
+					Kind:       workload.ModelKind.Kind,
+					Name:       model.Name,
+					UID:        model.UID,
+				},
+			},
+		},
+		"VOLUME_MOUNTS": []corev1.VolumeMount{{
+			Name:      cacheVolume.Name,
+			MountPath: GetCachePath(backend.CacheURI),
+		}},
+		"VOLUMES": []*corev1.Volume{
+			cacheVolume,
+		},
+		"MODEL_NAME":             model.Name,
+		"BACKEND_REPLICAS":       backend.MinReplicas,
+		"INIT_CONTAINERS":        initContainers,
+		"MODEL_DOWNLOAD_ENVFROM": backend.EnvFrom,
+		"ENGINE_PREFILL_COMMAND": prefillCommand,
+		"ENGINE_DECODE_COMMAND":  decodeCommand,
+		"SERVER_ENTRY_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+		},
+		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
+		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
+		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:30000"),
+		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
+		"ENGINE_PREFILL_ENV":                 prefillEngineEnv,
+		"ENGINE_DECODE_ENV":                  decodeEngineEnv,
+		"MODEL_SERVING_RUNTIME_ENGINE":       strings.ToLower(string(backend.Type)),
+		"MODEL_SERVING_RUNTIME_POD":          "$(POD_NAME).$(NAMESPACE)",
+		"PREFILL_REPLICAS":                   workersMap[workload.ModelWorkerTypePrefill].Replicas,
+		"DECODE_REPLICAS":                    workersMap[workload.ModelWorkerTypeDecode].Replicas,
+		"ENGINE_DECODE_RESOURCES":            workersMap[workload.ModelWorkerTypeDecode].Resources,
+		"ENGINE_DECODE_IMAGE":                workersMap[workload.ModelWorkerTypeDecode].Image,
+		"ENGINE_PREFILL_RESOURCES":           workersMap[workload.ModelWorkerTypePrefill].Resources,
+		"ENGINE_PREFILL_IMAGE":               workersMap[workload.ModelWorkerTypePrefill].Image,
+		"SCHEDULER_NAME":                     backend.SchedulerName,
+		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+	}
+	return loadModelServingTemplate(SGLangDisaggregatedTemplatePath, &data)
+}
+
+// buildSGLangCommands builds the SGLang launch command. A non-empty role
+// ("prefill"/"decode") appends disaggregation flags.
+func buildSGLangCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string, role string) ([]string, error) {
+	commands := []string{
+		"python3", "-m", "sglang.launch_server",
+		"--model-path", modelDownloadPath,
+		"--host", "0.0.0.0",
+		"--port", "30000",
+		"--enable-metrics",
+	}
+	if role == "prefill" || role == "decode" {
+		commands = append(commands,
+			"--disaggregation-mode", role,
+			"--disaggregation-transfer-backend", "mooncake",
+		)
+	}
+	args, err := utils.ConvertEngineArgsFromJson(workerConfig)
+	if err != nil {
+		return nil, err
+	}
+	commands = append(commands, args...)
+	return commands, nil
+}
+
+// buildModelDownloaderInitContainers builds the shared model-downloader init container.
+func buildModelDownloaderInitContainers(model *workload.ModelBooster, backend *workload.ModelBackend, cacheVolume *corev1.Volume, modelDownloadPath string) []corev1.Container {
+	var envVars []corev1.EnvVar
+	endpointEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.Endpoint, []corev1.EnvVar{
+		{Name: env.Endpoint},
+	})
+	if len(endpointEnvVars) > 0 && endpointEnvVars[0].Value != "" {
+		envVars = append(envVars, endpointEnvVars[0])
+	}
+	hfEndpointEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.HfEndpoint, []corev1.EnvVar{
+		{Name: env.HfEndpoint},
+	})
+	if len(hfEndpointEnvVars) > 0 && hfEndpointEnvVars[0].Value != "" {
+		envVars = append(envVars, hfEndpointEnvVars[0])
+	}
+	msTokenEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsToken, []corev1.EnvVar{
+		{Name: env.MsToken},
+	})
+	if len(msTokenEnvVars) > 0 && msTokenEnvVars[0].Value != "" {
+		envVars = append(envVars, msTokenEnvVars[0])
+	}
+	msRevisionEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.MsRevision, []corev1.EnvVar{
+		{Name: env.MsRevision},
+	})
+	if len(msRevisionEnvVars) > 0 && msRevisionEnvVars[0].Value != "" {
+		envVars = append(envVars, msRevisionEnvVars[0])
+	}
+	return []corev1.Container{
+		{
+			Name:  model.Name + "-model-downloader",
+			Image: config.Config.DownloaderImage(),
+			Args: []string{
+				"--source", backend.ModelURI,
+				"--output-dir", modelDownloadPath,
+			},
+			Env:     envVars,
+			EnvFrom: backend.EnvFrom,
+			VolumeMounts: []corev1.VolumeMount{{
+				Name:      cacheVolume.Name,
+				MountPath: GetCachePath(backend.CacheURI),
+			}},
+		},
+	}
+}
+
 // mapWorkers creates a map of workers by type.
 func mapWorkers(workers []workload.ModelWorker) map[workload.ModelWorkerType]*workload.ModelWorker {
 	workersMap := make(map[workload.ModelWorkerType]*workload.ModelWorker, len(workers))
@@ -339,7 +584,7 @@ func mapWorkers(workers []workload.ModelWorker) map[workload.ModelWorkerType]*wo
 func buildCommands(backend *workload.ModelBackend, workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 	workersMap map[workload.ModelWorkerType]*workload.ModelWorker) ([]string, error) {
 	commands := []string{"python3", "-m", "vllm.entrypoints.openai.api_server", "--model", modelDownloadPath}
-	args, err := utils.ConvertVLLMArgsFromJson(workerConfig)
+	args, err := utils.ConvertEngineArgsFromJson(workerConfig)
 	commands = append(commands, args...)
 	if workersMap[workload.ModelWorkerTypeServer] != nil && workersMap[workload.ModelWorkerTypeServer].Pods > 1 {
 		commands = append(commands, "--distributed_executor_backend", "ray")
@@ -514,7 +759,12 @@ func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 			},
 		},
-		{Name: "VLLM_USE_V1", Value: "1"},
+	}
+	if backend.Type == workload.ModelBackendTypeVLLM ||
+		backend.Type == workload.ModelBackendTypeVLLMDisaggregated {
+		standardEnvs = append(standardEnvs, corev1.EnvVar{Name: "VLLM_USE_V1", Value: "1"})
+	}
+	standardEnvs = append(standardEnvs, []corev1.EnvVar{
 		{
 			Name: "REDIS_HOST",
 			ValueFrom: &corev1.EnvVarSource{
@@ -545,6 +795,6 @@ func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1
 				},
 			},
 		},
-	}
+	}...)
 	return append(append(append([]corev1.EnvVar(nil), backend.Env...), standardEnvs...), additionalEnvs...)
 }

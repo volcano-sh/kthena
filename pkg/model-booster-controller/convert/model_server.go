@@ -43,8 +43,10 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 	switch backend.Type {
 	case workload.ModelBackendTypeVLLM, workload.ModelBackendTypeVLLMDisaggregated:
 		inferenceEngine = networking.VLLM
+	case workload.ModelBackendTypeSGLang, workload.ModelBackendTypeSGLangDisaggregated:
+		inferenceEngine = networking.SGLang
 	default:
-		return nil, fmt.Errorf("not support %s backend yet, please use vLLM backend", backend.Type)
+		return nil, fmt.Errorf("not support %s backend yet", backend.Type)
 	}
 	servedModelName := getServedModelName(model, backend)
 	pdGroup := getPdGroup(backend)
@@ -74,7 +76,7 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 				PDGroup: pdGroup,
 			},
 			WorkloadPort: networking.WorkloadPort{
-				Port: 8000, // todo: get port from config
+				Port: getEnginePort(backend.Type),
 			},
 			TrafficPolicy: &networking.TrafficPolicy{
 				Retry: &networking.Retry{
@@ -91,7 +93,23 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 	return modelServers, nil
 }
 
+// getEnginePort returns the engine's listen port (vLLM 8000, SGLang 30000).
+func getEnginePort(backendType workload.ModelBackendType) int32 {
+	switch backendType {
+	case workload.ModelBackendTypeSGLang, workload.ModelBackendTypeSGLangDisaggregated:
+		return 30000
+	default:
+		return 8000
+	}
+}
+
 func getKvConnectorSpec(backend workload.ModelBackend) (*networking.KVConnectorSpec, error) {
+	// SGLang does not use the vLLM kv-transfer-config tree; the router picks the
+	// SGLang connector via InferenceEngine.
+	if backend.Type == workload.ModelBackendTypeSGLang ||
+		backend.Type == workload.ModelBackendTypeSGLangDisaggregated {
+		return nil, nil
+	}
 	var connectorType *networking.KVConnectorType
 	foundConfig := false
 	for _, worker := range backend.Workers {
@@ -146,7 +164,9 @@ func getKvConnectorSpec(backend workload.ModelBackend) (*networking.KVConnectorS
 
 func getPdGroup(backend workload.ModelBackend) *networking.PDGroup {
 	switch backend.Type {
-	case workload.ModelBackendTypeVLLMDisaggregated, workload.ModelBackendTypeMindIEDisaggregated:
+	case workload.ModelBackendTypeVLLMDisaggregated,
+		workload.ModelBackendTypeSGLangDisaggregated,
+		workload.ModelBackendTypeMindIEDisaggregated:
 		return &networking.PDGroup{
 			GroupKey: workload.GroupNameLabelKey,
 			PrefillLabels: map[string]string{

@@ -1,0 +1,122 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata: ${MODEL_SERVING_TEMPLATE_METADATA}
+spec:
+  schedulerName: ${SCHEDULER_NAME}
+  replicas: ${BACKEND_REPLICAS}
+  template:
+    restartGracePeriodSeconds: 60
+    gangPolicy:
+      minRoleReplicas:
+        prefill: ${PREFILL_REPLICAS}
+        decode: ${DECODE_REPLICAS}
+    roles:
+      - name: prefill
+        replicas: ${PREFILL_REPLICAS}
+        entryTemplate:
+          metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
+          spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
+            initContainers: ${INIT_CONTAINERS}
+            containers:
+              - name: runtime
+                image: ${MODEL_SERVING_RUNTIME_IMAGE}
+                ports:
+                  - containerPort: ${MODEL_SERVING_RUNTIME_PORT}
+                env: ${ENGINE_PREFILL_ENV}
+                args:
+                  - --port
+                  - ${MODEL_SERVING_RUNTIME_PORT}
+                  - --engine
+                  - ${MODEL_SERVING_RUNTIME_ENGINE}
+                  - --engine-base-url
+                  - ${MODEL_SERVING_RUNTIME_URL}
+                  - --engine-metrics-path
+                  - ${MODEL_SERVING_RUNTIME_METRICS_PATH}
+                  - --pod
+                  - ${MODEL_SERVING_RUNTIME_POD}
+                  - --model
+                  - ${MODEL_NAME}
+              - name: sglang
+                image: ${ENGINE_PREFILL_IMAGE}
+                ports:
+                  - containerPort: 30000
+                env: ${ENGINE_PREFILL_ENV}
+                command: ${ENGINE_PREFILL_COMMAND}
+                imagePullPolicy: IfNotPresent
+                resources: ${ENGINE_PREFILL_RESOURCES}
+                readinessProbe:
+                  initialDelaySeconds: 180
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                livenessProbe:
+                  initialDelaySeconds: 300
+                  periodSeconds: 15
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                volumeMounts: ${VOLUME_MOUNTS}
+            volumes: ${VOLUMES}
+        workerReplicas: 0
+        workerTemplate:
+          spec:
+            containers: []
+      - name: decode
+        replicas: ${DECODE_REPLICAS}
+        entryTemplate:
+          metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
+          spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
+            initContainers: ${INIT_CONTAINERS}
+            containers:
+              - name: runtime
+                image: ${MODEL_SERVING_RUNTIME_IMAGE}
+                ports:
+                  - containerPort: ${MODEL_SERVING_RUNTIME_PORT}
+                env: ${ENGINE_DECODE_ENV}
+                envFrom: ${MODEL_DOWNLOAD_ENVFROM}
+                args:
+                  - --port
+                  - ${MODEL_SERVING_RUNTIME_PORT}
+                  - --engine
+                  - ${MODEL_SERVING_RUNTIME_ENGINE}
+                  - --engine-base-url
+                  - ${MODEL_SERVING_RUNTIME_URL}
+                  - --engine-metrics-path
+                  - ${MODEL_SERVING_RUNTIME_METRICS_PATH}
+                  - --pod
+                  - ${MODEL_SERVING_RUNTIME_POD}
+                  - --model
+                  - ${MODEL_NAME}
+              - name: sglang
+                image: ${ENGINE_DECODE_IMAGE}
+                ports:
+                  - containerPort: 30000
+                env: ${ENGINE_DECODE_ENV}
+                command: ${ENGINE_DECODE_COMMAND}
+                imagePullPolicy: IfNotPresent
+                resources: ${ENGINE_DECODE_RESOURCES}
+                readinessProbe:
+                  initialDelaySeconds: 180
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                livenessProbe:
+                  initialDelaySeconds: 300
+                  periodSeconds: 15
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                volumeMounts: ${VOLUME_MOUNTS}
+            volumes: ${VOLUMES}
+        workerReplicas: 0
+        workerTemplate:
+          spec:
+            containers: []

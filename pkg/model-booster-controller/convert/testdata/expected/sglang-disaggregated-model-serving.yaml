@@ -1,0 +1,329 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  labels:
+    workload.serving.volcano.sh/backend-name: backend1
+    workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
+    workload.serving.volcano.sh/model-name: sglang-pd-test
+    workload.serving.volcano.sh/model-uid: sglang-pd-uid
+    workload.serving.volcano.sh/revision: c7b4948f5
+  name: sglang-pd-test-backend1
+  namespace: default
+  ownerReferences:
+  - apiVersion: workload.serving.volcano.sh/v1alpha1
+    kind: ModelBooster
+    name: sglang-pd-test
+    uid: sglang-pd-uid
+spec:
+  replicas: 1
+  schedulerName: ""
+  template:
+    gangPolicy:
+      minRoleReplicas:
+        decode: 1
+        prefill: 1
+    restartGracePeriodSeconds: 60
+    roles:
+    - entryTemplate:
+        metadata:
+          labels:
+            workload.serving.volcano.sh/backend-name: backend1
+            workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
+            workload.serving.volcano.sh/model-name: sglang-pd-test
+            workload.serving.volcano.sh/model-uid: sglang-pd-uid
+            workload.serving.volcano.sh/revision: c7b4948f5
+        spec:
+          containers:
+          - args:
+            - --port
+            - "8100"
+            - --engine
+            - sglangdisaggregated
+            - --engine-base-url
+            - http://localhost:30000
+            - --engine-metrics-path
+            - /metrics
+            - --pod
+            - $(POD_NAME).$(NAMESPACE)
+            - --model
+            - sglang-pd-test
+            env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_HOST
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_PORT
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_PASSWORD
+                  name: redis-secret
+                  optional: true
+            image: kthena/runtime:latest
+            name: runtime
+            ports:
+            - containerPort: 8100
+            resources: {}
+          - command:
+            - python3
+            - -m
+            - sglang.launch_server
+            - --model-path
+            - /tmp/test/4005c13ab5d91cb094e41048356abe39
+            - --host
+            - 0.0.0.0
+            - --port
+            - "30000"
+            - --enable-metrics
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - mooncake
+            - --mem-fraction-static
+            - "0.85"
+            - --served-model-name
+            - Qwen3-0.6B
+            env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_HOST
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_PORT
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_PASSWORD
+                  name: redis-secret
+                  optional: true
+            image: docker.io/lmsysorg/sglang:latest
+            imagePullPolicy: IfNotPresent
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 30000
+              initialDelaySeconds: 300
+              periodSeconds: 15
+            name: sglang
+            ports:
+            - containerPort: 30000
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 30000
+              initialDelaySeconds: 180
+              periodSeconds: 5
+            resources:
+              limits:
+                cpu: "4"
+                memory: 12Gi
+                nvidia.com/gpu: "1"
+            volumeMounts:
+            - mountPath: /tmp/test
+              name: backend1-weights
+          initContainers:
+          - args:
+            - --source
+            - hf://Qwen/Qwen3-0.6B
+            - --output-dir
+            - /tmp/test/4005c13ab5d91cb094e41048356abe39
+            image: kthena/downloader:latest
+            name: sglang-pd-test-model-downloader
+            resources: {}
+            volumeMounts:
+            - mountPath: /tmp/test
+              name: backend1-weights
+          volumes:
+          - hostPath:
+              path: /tmp/test
+              type: DirectoryOrCreate
+            name: backend1-weights
+      name: prefill
+      replicas: 1
+      workerReplicas: 0
+      workerTemplate:
+        spec:
+          containers: []
+    - entryTemplate:
+        metadata:
+          labels:
+            workload.serving.volcano.sh/backend-name: backend1
+            workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
+            workload.serving.volcano.sh/model-name: sglang-pd-test
+            workload.serving.volcano.sh/model-uid: sglang-pd-uid
+            workload.serving.volcano.sh/revision: c7b4948f5
+        spec:
+          containers:
+          - args:
+            - --port
+            - "8100"
+            - --engine
+            - sglangdisaggregated
+            - --engine-base-url
+            - http://localhost:30000
+            - --engine-metrics-path
+            - /metrics
+            - --pod
+            - $(POD_NAME).$(NAMESPACE)
+            - --model
+            - sglang-pd-test
+            env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_HOST
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_PORT
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_PASSWORD
+                  name: redis-secret
+                  optional: true
+            image: kthena/runtime:latest
+            name: runtime
+            ports:
+            - containerPort: 8100
+            resources: {}
+          - command:
+            - python3
+            - -m
+            - sglang.launch_server
+            - --model-path
+            - /tmp/test/4005c13ab5d91cb094e41048356abe39
+            - --host
+            - 0.0.0.0
+            - --port
+            - "30000"
+            - --enable-metrics
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - mooncake
+            - --mem-fraction-static
+            - "0.85"
+            - --served-model-name
+            - Qwen3-0.6B
+            env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_HOST
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_PORT
+                  name: redis-config
+                  optional: true
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_PASSWORD
+                  name: redis-secret
+                  optional: true
+            image: docker.io/lmsysorg/sglang:latest
+            imagePullPolicy: IfNotPresent
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 30000
+              initialDelaySeconds: 300
+              periodSeconds: 15
+            name: sglang
+            ports:
+            - containerPort: 30000
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 30000
+              initialDelaySeconds: 180
+              periodSeconds: 5
+            resources:
+              limits:
+                cpu: "4"
+                memory: 12Gi
+                nvidia.com/gpu: "1"
+            volumeMounts:
+            - mountPath: /tmp/test
+              name: backend1-weights
+          initContainers:
+          - args:
+            - --source
+            - hf://Qwen/Qwen3-0.6B
+            - --output-dir
+            - /tmp/test/4005c13ab5d91cb094e41048356abe39
+            image: kthena/downloader:latest
+            name: sglang-pd-test-model-downloader
+            resources: {}
+            volumeMounts:
+            - mountPath: /tmp/test
+              name: backend1-weights
+          volumes:
+          - hostPath:
+              path: /tmp/test
+              type: DirectoryOrCreate
+            name: backend1-weights
+      name: decode
+      replicas: 1
+      workerReplicas: 0
+      workerTemplate:
+        spec:
+          containers: []
+status: {}

@@ -82,7 +82,9 @@ func ReplaceEmbeddedPlaceholders(s string, values *map[string]interface{}) (stri
 	return result.String(), nil
 }
 
-func ConvertVLLMArgsFromJson(config *apiextensionsv1.JSON) ([]string, error) {
+// ConvertEngineArgsFromJson flattens a JSON object into `--foo-bar VALUE` flags,
+// sorted by key. Shared by vLLM and SGLang.
+func ConvertEngineArgsFromJson(config *apiextensionsv1.JSON) ([]string, error) {
 	if config == nil || config.Raw == nil {
 		return []string{}, nil
 	}

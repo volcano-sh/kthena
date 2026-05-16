@@ -170,6 +170,16 @@ func TestCreateModelServingResources(t *testing.T) {
 			expected: loadYaml[workload.ModelServing](t, "testdata/expected/disaggregated-model-serving-mooncake.yaml"),
 		},
 		{
+			name:     "SGLang aggregated",
+			input:    loadYaml[workload.ModelBooster](t, "testdata/input/sglang-aggregated-model.yaml"),
+			expected: loadYaml[workload.ModelServing](t, "testdata/expected/sglang-aggregated-model-serving.yaml"),
+		},
+		{
+			name:     "SGLang disaggregated",
+			input:    loadYaml[workload.ModelBooster](t, "testdata/input/sglang-disaggregated-model.yaml"),
+			expected: loadYaml[workload.ModelServing](t, "testdata/expected/sglang-disaggregated-model-serving.yaml"),
+		},
+		{
 			name:  "vLLM with runtimeClassName",
 			input: loadYaml[workload.ModelBooster](t, "testdata/input/model-with-runtimeclass.yaml"),
 			checkFn: func(t *testing.T, got *workload.ModelServing) {
@@ -274,6 +284,112 @@ func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildSGLangModelServing(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/sglang-aggregated-model.yaml")
+	serving, err := BuildModelServing(model)
+	assert.NoError(t, err)
+	assert.NotNil(t, serving)
+	assert.Len(t, serving.Spec.Template.Roles, 1, "aggregated SGLang produces a single 'leader' role")
+
+	role := serving.Spec.Template.Roles[0]
+	assert.Equal(t, "leader", role.Name)
+	assert.Equal(t, int32(0), role.WorkerReplicas)
+
+	containers := role.EntryTemplate.Spec.Containers
+	assert.Len(t, containers, 2, "expected runtime sidecar + engine container")
+
+	var engine *corev1.Container
+	for i := range containers {
+		if containers[i].Name == "engine" {
+			engine = &containers[i]
+			break
+		}
+	}
+	assert.NotNil(t, engine, "engine container must be present")
+	if engine == nil {
+		return
+	}
+	command := strings.Join(engine.Command, " ")
+	assert.Contains(t, command, "sglang.launch_server")
+	// Bind 0.0.0.0 so the runtime sidecar and preStop drain can reach the
+	// engine on localhost:30000.
+	assert.Contains(t, command, "--host 0.0.0.0")
+	assert.NotContains(t, command, "$(POD_IP)")
+	assert.Contains(t, command, "--port 30000")
+	assert.Contains(t, command, "--enable-metrics")
+	assert.Contains(t, command, "--mem-fraction-static 0.85")
+	assert.NotContains(t, command, "VLLM_USE_V1")
+
+	for _, e := range engine.Env {
+		assert.NotEqual(t, "POD_IP", e.Name, "POD_IP env is unused once SGLang binds 0.0.0.0")
+		assert.NotEqual(t, "VLLM_USE_V1", e.Name)
+	}
+}
+
+func TestBuildSGLangDisaggregatedModelServing(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/sglang-disaggregated-model.yaml")
+	serving, err := BuildModelServing(model)
+	assert.NoError(t, err)
+	assert.NotNil(t, serving)
+	assert.Len(t, serving.Spec.Template.Roles, 2)
+
+	roleByName := map[string]*workload.Role{}
+	for i, r := range serving.Spec.Template.Roles {
+		roleByName[r.Name] = &serving.Spec.Template.Roles[i]
+	}
+	for _, expectedRole := range []string{"prefill", "decode"} {
+		r, ok := roleByName[expectedRole]
+		assert.True(t, ok, "role %q not found", expectedRole)
+		if !ok {
+			continue
+		}
+		var engine *corev1.Container
+		for i := range r.EntryTemplate.Spec.Containers {
+			if r.EntryTemplate.Spec.Containers[i].Name == "sglang" {
+				engine = &r.EntryTemplate.Spec.Containers[i]
+				break
+			}
+		}
+		assert.NotNil(t, engine, "role %q must have an sglang engine container", expectedRole)
+		if engine == nil {
+			continue
+		}
+		command := strings.Join(engine.Command, " ")
+		assert.Contains(t, command, "--disaggregation-mode "+expectedRole)
+		assert.Contains(t, command, "--disaggregation-transfer-backend mooncake")
+		assert.Contains(t, command, "--host 0.0.0.0")
+		assert.NotContains(t, command, "$(POD_IP)")
+
+		for _, e := range engine.Env {
+			assert.NotEqual(t, "POD_IP", e.Name, "role %q: POD_IP env is unused once SGLang binds 0.0.0.0", expectedRole)
+		}
+	}
+}
+
+func TestBuildSGLangModelServerRouting(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/sglang-aggregated-model.yaml")
+	servers, err := BuildModelServer(model)
+	assert.NoError(t, err)
+	assert.Len(t, servers, 1)
+	spec := servers[0].Spec
+	assert.Equal(t, "SGLang", string(spec.InferenceEngine))
+	assert.Equal(t, int32(30000), spec.WorkloadPort.Port)
+	assert.Nil(t, spec.KVConnector)
+	assert.Nil(t, spec.WorkloadSelector.PDGroup)
+}
+
+func TestBuildSGLangDisaggregatedModelServerRouting(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/sglang-disaggregated-model.yaml")
+	servers, err := BuildModelServer(model)
+	assert.NoError(t, err)
+	assert.Len(t, servers, 1)
+	spec := servers[0].Spec
+	assert.Equal(t, "SGLang", string(spec.InferenceEngine))
+	assert.Equal(t, int32(30000), spec.WorkloadPort.Port)
+	assert.Nil(t, spec.KVConnector)
+	assert.NotNil(t, spec.WorkloadSelector.PDGroup)
 }
 
 func TestBuildCacheVolume(t *testing.T) {
