@@ -182,11 +182,7 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		}
 		for j, target := range rule.TargetModels {
 			targetField := ruleField.Child("targetModels").Index(j)
-			if target == nil {
-				allErrs = append(allErrs, field.Invalid(targetField, target, "target model must not be nil"))
-				continue
-			}
-			if target.ModelServerName == "" {
+			if target != nil && target.ModelServerName == "" {
 				allErrs = append(allErrs, field.Required(targetField.Child("modelServerName"), "modelServerName must be specified"))
 			}
 		}
