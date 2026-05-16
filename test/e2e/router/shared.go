@@ -562,6 +562,7 @@ func waitForRouterLogsContainAnyPod(t *testing.T, kubeClient kubernetes.Interfac
 }
 
 func selectedPodFromAccessLogs(logs, requestID string) string {
+	selectedPod := ""
 	for _, line := range strings.Split(logs, "\n") {
 		if !strings.Contains(line, requestID) {
 			continue
@@ -569,17 +570,17 @@ func selectedPodFromAccessLogs(logs, requestID string) string {
 		var entry accessLogLine
 		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.RequestID == requestID {
 			if entry.SelectedPod != "" {
-				return entry.SelectedPod
+				selectedPod = entry.SelectedPod
 			}
 			continue
 		}
 		for _, field := range strings.Fields(line) {
 			if strings.HasPrefix(field, "selected_pod=") {
-				return strings.TrimPrefix(field, "selected_pod=")
+				selectedPod = strings.TrimPrefix(field, "selected_pod=")
 			}
 		}
 	}
-	return ""
+	return selectedPod
 }
 
 func assertSameSessionPod(t *testing.T, pods ...string) {
@@ -1251,18 +1252,25 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	standardMessage := []utils.ChatMessage{
 		utils.NewChatMessage("user", "hello world"),
 	}
+	buildLocalRateLimitRoute := func(testName string) *networkingv1alpha1.ModelRoute {
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
+		suffix := utils.RandomString(5)
+		modelRoute.Name = testName + "-" + suffix
+		modelRoute.Namespace = testNamespace
+		modelRoute.Spec.ModelName = testName + "-" + suffix
+		if modelRoute.Spec.RateLimit != nil {
+			// Only test input rate limit unless the subtest explicitly enables output limiting.
+			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		return modelRoute
+	}
 
 	// Test 1: Verify input token rate limit enforcement
 	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 1: Verifying input token rate limit")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
-		if modelRoute.Spec.RateLimit != nil {
-			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-input")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -1309,13 +1317,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitWindowAccuracy", func(t *testing.T) {
 		t.Log("Test 2: Verifying rate limit window accuracy...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
-		if modelRoute.Spec.RateLimit != nil {
-			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-window")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -1336,7 +1338,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		for i := 0; i < quotaRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			resp.Body.Close()
-			assert.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed", i+1)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed", i+1)
 		}
 
 		// Verify rate limit is active
@@ -1372,13 +1374,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitResetMechanism", func(t *testing.T) {
 		t.Log("Test 3: Verifying rate limit reset mechanism...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
-		if modelRoute.Spec.RateLimit != nil {
-			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-reset")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -1436,9 +1432,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-output")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
