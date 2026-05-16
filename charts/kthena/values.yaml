@@ -83,6 +83,14 @@ networking:
       # -- Enable Gateway API Inference Extension features.<br/>
       # Requires `gatewayAPI.enabled` to be true.
       inferenceExtension: false
+    sessionSticky:
+      # -- Router session sticky store backend. Use `memory` for single-router state or `redis` to share bindings across replicas.
+      store: "memory"
+      redis:
+        # -- Redis address for the router session sticky store. Required when `sessionSticky.store` is `redis`.
+        address: ""
+        # -- Optional Redis password for the router session sticky store. Rendered into `redis-secret` and exposed to the router as `REDIS_PASSWORD`.
+        password: ""
     # -- Enable X-Kthena-Backend-Pod on proxied responses for tests/debugging.
     # Keep disabled for production traffic.
     debugBackendPodHeader: false
