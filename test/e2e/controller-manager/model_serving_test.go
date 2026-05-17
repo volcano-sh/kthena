@@ -2326,13 +2326,13 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 	require.NoError(t, err, "Failed to get ModelServing after pod delete")
 	require.NotNil(t, initialMS.Spec.Replicas, "ModelServing spec.replicas should be set")
 	waitForServingGroupDisruption(t, ctx, kthenaClient, modelServing.Name, *initialMS.Spec.Replicas, 2*time.Minute)
-	// Re-fetch ModelServing to get the latest resourceVersion after status update to avoid conflict on Update.
-	initialMS, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get ModelServing after disruption")
+
+	// Re-fetch to get the latest resourceVersion after status update and avoid conflict on Update.
 	latestMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
- 	require.NoError(t, err, "Failed to re-fetch ModelServing before scale down")
- 	require.NotNil(t, latestMS.Spec.Replicas, "ModelServing spec.replicas should be set")
-	scaleDownMS := initialMS.DeepCopy()
+	require.NoError(t, err, "Failed to re-fetch ModelServing before scale down")
+	require.NotNil(t, latestMS.Spec.Replicas, "ModelServing spec.replicas should be set")
+
+	scaleDownMS := latestMS.DeepCopy()
 	scaleDownMS.Spec.Replicas = ptr.To(int32(3))
 
 	t.Log("Scaling down ModelServing from 4 to 3 servingGroups (expect disrupted group to be removed first)")
