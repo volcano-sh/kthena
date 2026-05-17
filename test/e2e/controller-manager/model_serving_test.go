@@ -863,6 +863,22 @@ func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kuber
 	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
 }
 
+// waitForServingGroupDisruption waits until status.availableReplicas drops after a pod
+// delete so the controller has marked a ServingGroup not Running before scale-down runs.
+// Without this, fast recovery (nginx + RoleRecreate) can leave every group Running and
+// scale-down removes the wrong ServingGroup.
+func waitForServingGroupDisruption(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, msName string, initialAvailable int32, timeout time.Duration) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		t.Logf("AvailableReplicas=%d (waiting for <%d after disruption)", ms.Status.AvailableReplicas, initialAvailable)
+		return ms.Status.AvailableReplicas < initialAvailable
+	}, timeout, 1*time.Second, "timed out waiting for ModelServing %s availableReplicas to reflect disruption before scale down", msName)
+}
+
 // patchPodDeletionCost sets corev1.PodDeletionCost with retries.
 // Patch is used instead of Update to reduce resourceVersion contention with concurrent Pod updates.
 func patchPodDeletionCost(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, podName string, cost int) {
@@ -2307,7 +2323,9 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 	require.NoError(t, err, "Failed to delete pod")
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get ModelServing before scale down")
+	require.NoError(t, err, "Failed to get ModelServing after pod delete")
+	require.NotNil(t, initialMS.Spec.Replicas, "ModelServing spec.replicas should be set")
+	waitForServingGroupDisruption(t, ctx, kthenaClient, modelServing.Name, *initialMS.Spec.Replicas, 2*time.Minute)
 	scaleDownMS := initialMS.DeepCopy()
 	scaleDownMS.Spec.Replicas = ptr.To(int32(3))
 
