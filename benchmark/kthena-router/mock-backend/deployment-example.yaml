@@ -1,0 +1,71 @@
+# Example: run the in-tree mock inference server behind kthena-router.
+# Build the image from repo root, load into your cluster, then apply this file
+# alongside a ModelServer + ModelRoute that match the labels and model name.
+#
+#   docker build -f benchmark/kthena-router/mock-backend/Dockerfile -t kthena-mock-inference:latest .
+#
+# ModelServer spec should use workloadSelector.matchLabels.app=kthena-mock-inference,
+# workloadPort.port=8000, and model matching -model flag (default mock-llm).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kthena-mock-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kthena-mock-inference
+  template:
+    metadata:
+      labels:
+        app: kthena-mock-inference
+    spec:
+      containers:
+        - name: mock
+          image: kthena-mock-inference:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - -listen
+            - :8000
+            - -model
+            - mock-llm
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kthena-mock-inference
+spec:
+  selector:
+    app: kthena-mock-inference
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: mock-llm
+spec:
+  workloadSelector:
+    matchLabels:
+      app: kthena-mock-inference
+  workloadPort:
+    port: 8000
+  model: "mock-llm"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 30s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: mock-llm
+spec:
+  modelName: "mock-llm"
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: "mock-llm"

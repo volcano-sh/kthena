@@ -1,7 +1,36 @@
 # Benchmark for kthena-router
 
-
 This tool is based on [`sglang/bench_serving.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/bench_serving.py). We have packaged it as a Docker image and made it runnable as a Kubernetes Job for easy benchmarking in a cluster environment.
+
+## Mock inference server (no GPU)
+
+For router-only work you can run the tiny OpenAI-compatible server in `mock-backend/`. It implements `GET /v1/models`, `POST /v1/completions`, and `POST /v1/chat/completions` in the shapes `bench_serving.py` expects for the `vllm` / `vllm-chat` backends (streaming SSE by default).
+
+From the repo root:
+
+```bash
+go build -o bin/mock-inference ./benchmark/kthena-router/mock-backend
+./bin/mock-inference -listen :8000 -model mock-llm
+```
+
+Sanity checks:
+
+```bash
+curl -s localhost:8000/v1/models | jq .
+curl -s localhost:8000/v1/completions -H 'Content-Type: application/json' \
+  -d '{"model":"mock-llm","prompt":"hi","max_tokens":3,"stream":false}' | jq .
+```
+
+Kubernetes: build the image (`mock-backend/Dockerfile`), then apply `mock-backend/deployment-example.yaml` (adjust namespace/image as needed). Wire `kthena-router` the same way as other examples in `examples/kthena-router/`; this manifests `ModelServer` + `ModelRoute` for model id `mock-llm`.
+
+When the router handles traffic, scrape or query its Prometheus metrics, for example:
+
+- `kthena_router_requests_total`
+- `kthena_router_request_duration_seconds`
+- `kthena_router_request_prefill_duration_seconds` / `kthena_router_request_decode_duration_seconds` (when emitted for your path)
+- `kthena_router_scheduler_plugin_duration_seconds`
+
+The heavier `job.yaml` flow still uses the SGLang benchmark image against a real engine; the mock is for **cheap smoke tests** and separating router behaviour from model latency.
 
 ### Usage Notes
 

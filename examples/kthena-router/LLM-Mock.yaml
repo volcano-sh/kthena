@@ -2,6 +2,8 @@
 # The mock server will return a fixed response for any input.
 # You can use this mock server to test the inference router without deploying a real LLM server.
 #
+# In-tree alternative (OpenAI-compatible, no external image): benchmark/kthena-router/mock-backend/
+#
 # NOTE: `ghcr.io/faust-benchou/dynamo-mocker-vllm:latest` is built based on `https://github.com/YaoZengzeng/aibrix/tree/vllm-mock`.
 # Move the image to kthena registry once it's public.
 
