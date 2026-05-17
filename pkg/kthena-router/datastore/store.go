@@ -64,7 +64,7 @@ var (
 const (
 	// Configuration constants for fairness scheduling
 	defaultQueueQPS = 100
-	uppdateInterval = 1 * time.Second
+	updateInterval  = 1 * time.Second
 )
 
 // createTokenTracker creates a token tracker with configuration from environment variables
@@ -423,7 +423,7 @@ func (s *store) Run(ctx context.Context) {
 					return true
 				})
 				s.initialSynced.Store(true)
-				time.Sleep(uppdateInterval)
+				time.Sleep(updateInterval)
 			}
 		}
 	}()
@@ -1142,8 +1142,6 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("no weights provided")
 	}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
 	totalWeight := 0
 	for _, weight := range weights {
 		totalWeight += int(weight)
@@ -1153,7 +1151,7 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("total weight is zero")
 	}
 
-	randomNum := rng.Intn(totalWeight)
+	randomNum := rand.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
