@@ -331,6 +331,88 @@ func TestValidateModelRoute(t *testing.T) {
 			expectedReason: "validation failed:   - spec.rules[0]: Invalid value: null: rule must not be nil",
 		},
 		{
+			name: "invalid model route - targetModel with empty modelServerName",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{
+									ModelServerName: "",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.rules[0].targetModels[0].modelServerName: Required value: modelServerName must not be empty",
+		},
+		{
+			name: "invalid model route - nil target model entry",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								nil,
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.rules[0].targetModels[0]: Invalid value: null: target model must not be nil",
+		},
+		{
+			name: "invalid model route - mixed valid and invalid targetModels",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "valid-server"},
+								{ModelServerName: ""},
+								nil,
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.rules[0].targetModels[1].modelServerName: Required value: modelServerName must not be empty  - spec.rules[0].targetModels[2]: Invalid value: null: target model must not be nil",
+		},
+		{
 			name: "invalid model route - combined errors: missing model name and empty targetModels",
 			modelRoute: &networkingv1alpha1.ModelRoute{
 				TypeMeta: metav1.TypeMeta{

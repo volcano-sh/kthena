@@ -180,6 +180,16 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		if len(rule.TargetModels) == 0 {
 			allErrs = append(allErrs, field.Required(ruleField.Child("targetModels"), "each rule must have at least one target model"))
 		}
+		for j, target := range rule.TargetModels {
+			targetField := ruleField.Child("targetModels").Index(j)
+			if target == nil {
+				allErrs = append(allErrs, field.Invalid(targetField, target, "target model must not be nil"))
+				continue
+			}
+			if target.ModelServerName == "" {
+				allErrs = append(allErrs, field.Required(targetField.Child("modelServerName"), "modelServerName must not be empty"))
+			}
+		}
 	}
 
 	if len(allErrs) > 0 {
