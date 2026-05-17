@@ -35,6 +35,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // ptr is a helper function to get pointer to a value
@@ -1899,4 +1900,127 @@ func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
 	server, _, _, err := s.MatchModelServer("my-model", req, "")
 	assert.NoError(t, err)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, server)
+}
+
+func TestGetModelRoutesByGateway_BaseModelRoute(t *testing.T) {
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+		callbacks:          make(map[string][]CallbackFunc),
+	}
+
+	kind := gatewayv1.Kind("Gateway")
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "base-route"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "llama3",
+			ParentRefs: []gatewayv1.ParentReference{
+				{Name: "my-gateway", Kind: &kind},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	result := s.GetModelRoutesByGateway("default/my-gateway")
+	assert.Len(t, result, 1)
+	assert.Equal(t, "base-route", result[0].Name)
+}
+
+func TestGetModelRoutesByGateway_LoraOnlyRoute(t *testing.T) {
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+		callbacks:          make(map[string][]CallbackFunc),
+	}
+
+	kind := gatewayv1.Kind("Gateway")
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "lora-only-route"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName:    "",
+			LoraAdapters: []string{"lora-adapter-1"},
+			ParentRefs: []gatewayv1.ParentReference{
+				{Name: "my-gateway", Kind: &kind},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	result := s.GetModelRoutesByGateway("default/my-gateway")
+	assert.Len(t, result, 1, "lora-only ModelRoute must not be silently dropped")
+	assert.Equal(t, "lora-only-route", result[0].Name)
+}
+
+func TestGetModelRoutesByGateway_WrongGateway(t *testing.T) {
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+		callbacks:          make(map[string][]CallbackFunc),
+	}
+
+	kind := gatewayv1.Kind("Gateway")
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "base-route"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "llama3",
+			ParentRefs: []gatewayv1.ParentReference{
+				{Name: "gateway-a", Kind: &kind},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	result := s.GetModelRoutesByGateway("default/gateway-b")
+	assert.Empty(t, result, "route attached to gateway-a must not appear for gateway-b")
+}
+
+func TestGetModelRoutesByGateway_UnknownGateway(t *testing.T) {
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+		callbacks:          make(map[string][]CallbackFunc),
+	}
+
+	result := s.GetModelRoutesByGateway("default/nonexistent")
+	assert.Empty(t, result)
+}
+
+func TestGetModelRoutesByGateway_MultipleRoutesMixedTypes(t *testing.T) {
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+		callbacks:          make(map[string][]CallbackFunc),
+	}
+
+	kind := gatewayv1.Kind("Gateway")
+	parentRefs := []gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kind}}
+
+	baseRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "base-route"},
+		Spec:       aiv1alpha1.ModelRouteSpec{ModelName: "llama3", ParentRefs: parentRefs},
+	}
+	loraRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "lora-route"},
+		Spec:       aiv1alpha1.ModelRouteSpec{LoraAdapters: []string{"adapter-1"}, ParentRefs: parentRefs},
+	}
+
+	assert.NoError(t, s.AddOrUpdateModelRoute(baseRoute))
+	assert.NoError(t, s.AddOrUpdateModelRoute(loraRoute))
+
+	result := s.GetModelRoutesByGateway("default/my-gateway")
+	assert.Len(t, result, 2)
+
+	names := []string{result[0].Name, result[1].Name}
+	assert.Contains(t, names, "base-route")
+	assert.Contains(t, names, "lora-route")
 }
