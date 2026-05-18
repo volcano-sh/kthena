@@ -11,6 +11,9 @@ spec:
       - name: prefill
         replicas: 1
         entryTemplate:
+          metadata:
+            labels:
+              modelserving.volcano.sh/rolename: "prefill"
           spec:
             containers:
               - name: leader
@@ -25,6 +28,9 @@ spec:
       - name: decode
         replicas: 1
         entryTemplate:
+          metadata:
+            labels:
+              modelserving.volcano.sh/rolename: "decode"
           spec:
             containers:
               - name: leader
