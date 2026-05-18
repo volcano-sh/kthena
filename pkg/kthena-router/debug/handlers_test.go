@@ -207,7 +207,13 @@ func (m *MockStore) GetAllPods() map[types.NamespacedName]*datastore.PodInfo {
 	}
 	return args.Get(0).(map[types.NamespacedName]*datastore.PodInfo)
 }
-
+func (m *MockStore) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute {
+	args := m.Called(namespacedName)
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(*aiv1alpha1.ModelRoute)
+}
 func (m *MockStore) AddOrUpdateGateway(gateway *gatewayv1.Gateway) error {
 	args := m.Called(gateway)
 	return args.Error(0)
