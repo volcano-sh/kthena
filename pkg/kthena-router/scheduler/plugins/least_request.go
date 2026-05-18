@@ -75,7 +75,7 @@ func (l *LeastRequest) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	baseScores := make(map[*datastore.PodInfo]float64)
 	maxScore := 0.0
 	for _, info := range pods {
-		// The weight of waiting requests is 100. It's a magic number just to sinificantly lower the score of the pod when there are waiting reqs.
+		// The weight of waiting requests is 100. It's a magic number just to significantly lower the score of the pod when there are waiting reqs.
 		base := info.GetRequestRunningNum() + 100*info.GetRequestWaitingNum()
 		baseScores[info] = base
 		if base > maxScore {

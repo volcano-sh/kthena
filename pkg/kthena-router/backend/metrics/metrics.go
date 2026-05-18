@@ -34,7 +34,7 @@ func HTTPClient() *http.Client {
 	return httpClient
 }
 
-// This function refer to aibrix(https://github.com/vllm-project/aibrix/blob/main/pkg/metrics/utils.go)
+// This function refers to aibrix(https://github.com/vllm-project/aibrix/blob/main/pkg/metrics/utils.go)
 func ParseMetricsURL(url string) (map[string]*dto.MetricFamily, error) {
 	resp, err := httpClient.Get(url)
 	if err != nil {
