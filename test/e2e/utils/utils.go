@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,6 +66,44 @@ func WaitForModelServingSpecReplicas(t *testing.T, ctx context.Context, kthenaCl
 		}
 		return *ms.Spec.Replicas == want
 	}, timeout, 10*time.Second, "ModelServing %s/%s spec.replicas should converge to %d", namespace, name, want)
+}
+
+// WaitForModelServingAvailableReplicasBelow waits until status.availableReplicas drops below
+// the given count, indicating the controller has observed disruption (e.g. after pod delete)
+// before a scale-down update is applied.
+func WaitForModelServingAvailableReplicasBelow(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace, name string, below int32, timeout time.Duration) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		t.Logf("ModelServing %s/%s AvailableReplicas=%d (waiting for <%d after disruption)", namespace, name, ms.Status.AvailableReplicas, below)
+		return ms.Status.AvailableReplicas < below
+	}, timeout, time.Second, "timed out waiting for ModelServing %s/%s availableReplicas to reflect disruption", namespace, name)
+}
+
+// WaitForModelServingRunningPodCount waits until the expected number of non-terminating running
+// pods exist for a ModelServing.
+func WaitForModelServingRunningPodCount(t *testing.T, ctx context.Context, kubeClient kubernetes.Interface, namespace, msName string, expected int, timeout time.Duration) {
+	t.Helper()
+	labelSelector := workload.ModelServingNameLabelKey + "=" + msName
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		runningCount := 0
+		for _, pod := range pods.Items {
+			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
+				runningCount++
+			}
+		}
+		t.Logf("ModelServing %s running pod count: %d (expecting %d)", msName, runningCount, expected)
+		return runningCount == expected
+	}, timeout, 5*time.Second, "expected %d running pods for ModelServing %s", expected, msName)
 }
 
 // IsPodReady checks if a pod is in Running phase and has PodReady condition set to True.

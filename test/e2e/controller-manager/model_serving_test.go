@@ -217,7 +217,7 @@ func TestModelServingScaleDown(t *testing.T) {
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
 
 	// Verify pod count has decreased
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 1, 2*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 1, 2*time.Minute)
 
 	// Final verification - wait for status to converge
 	require.Eventually(t, func() bool {
@@ -260,7 +260,7 @@ func TestModelServingRoleScaleUp(t *testing.T) {
 
 	// Verify the pod count increased
 	// With 1 servingGroup and 3 role replicas (each with 1 entry pod), we expect 3 pods
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 3, 3*time.Minute)
 
 	t.Log("ModelServing role scale up test passed successfully")
 }
@@ -277,7 +277,7 @@ func TestModelServingRoleScaleDown(t *testing.T) {
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	// Verify initial pods (expect 3: 1 servingGroup × 3 role replicas × 1 entry pod)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 3, 3*time.Minute)
 	t.Log("Verified 3 running pods initially")
 
 	// Scale down the role replicas from 3 to 1
@@ -296,7 +296,7 @@ func TestModelServingRoleScaleDown(t *testing.T) {
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
 	// Verify the pod count decreased to 1
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 1, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 1, 3*time.Minute)
 
 	t.Log("ModelServing role scale down test passed successfully")
 }
@@ -839,44 +839,6 @@ func createAndWaitForModelServing(t *testing.T, ctx context.Context, kthenaClien
 	})
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-}
-
-// waitForRunningPodCount waits until the expected number of non-terminating running pods exist for a ModelServing.
-func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName string, expected int, timeout time.Duration) {
-	t.Helper()
-	labelSelector := modelServingLabelSelector(msName)
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		runningCount := 0
-		for _, pod := range pods.Items {
-			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
-				runningCount++
-			}
-		}
-		t.Logf("Running pod count: %d (expecting %d)", runningCount, expected)
-		return runningCount == expected
-	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
-}
-
-// waitForServingGroupDisruption waits until status.availableReplicas drops after a pod
-// delete so the controller has marked a ServingGroup not Running before scale-down runs.
-// Without this, fast recovery (nginx + RoleRecreate) can leave every group Running and
-// scale-down removes the wrong ServingGroup.
-func waitForServingGroupDisruption(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, msName string, initialAvailable int32, timeout time.Duration) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		t.Logf("AvailableReplicas=%d (waiting for <%d after disruption)", ms.Status.AvailableReplicas, initialAvailable)
-		return ms.Status.AvailableReplicas < initialAvailable
-	}, timeout, 1*time.Second, "timed out waiting for ModelServing %s availableReplicas to reflect disruption before scale down", msName)
 }
 
 // patchPodDeletionCost sets corev1.PodDeletionCost with retries.
@@ -2103,7 +2065,7 @@ func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 	modelServing := createBasicModelServing("test-binpack-sg-scaledown", 4, 0)
 	t.Log("Creating ModelServing with 4 servingGroup replicas for bin pack scale down test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 4, 3*time.Minute)
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get initial ModelServing")
@@ -2141,7 +2103,7 @@ func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 	require.NoError(t, err, "Failed to scale down ModelServing")
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 1, 2*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 1, 2*time.Minute)
 
 	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -2172,7 +2134,7 @@ func TestModelServingBinPackScaleDownRole(t *testing.T) {
 	modelServing := createBasicModelServing("test-binpack-role-scaledown", 1, initialRoleReplicas)
 	t.Log("Creating ModelServing with 1 servingGroup and role replicas=4 for bin pack role scale down test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
 
 	labelSelector := modelServingLabelSelector(modelServing.Name)
 	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
@@ -2206,7 +2168,7 @@ func TestModelServingBinPackScaleDownRole(t *testing.T) {
 	require.NoError(t, err, "Failed to scale down role")
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(targetRoleReplicas), 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, int(targetRoleReplicas), 3*time.Minute)
 
 	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -2235,7 +2197,7 @@ func TestModelServingBinPackScaleDownCombined(t *testing.T) {
 
 	t.Log("Creating ModelServing with 2 servingGroups and 2 roles for combined bin pack scale down test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 6, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 6, 3*time.Minute)
 
 	labelSelector := modelServingLabelSelector(modelServing.Name)
 	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
@@ -2278,7 +2240,7 @@ func TestModelServingBinPackScaleDownCombined(t *testing.T) {
 	require.NoError(t, err, "Failed to scale down combined dimensions")
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 2, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 2, 3*time.Minute)
 
 	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -2305,7 +2267,7 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 	modelServing := createBasicModelServing("test-status-sg-priority", 4, 0)
 	t.Log("Creating ModelServing with 4 servingGroup replicas for status-aware scale down test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 4, 3*time.Minute)
 
 	labelSelector := modelServingLabelSelector(modelServing.Name)
 	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
@@ -2325,7 +2287,7 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing after pod delete")
 	require.NotNil(t, initialMS.Spec.Replicas, "ModelServing spec.replicas should be set")
-	waitForServingGroupDisruption(t, ctx, kthenaClient, modelServing.Name, *initialMS.Spec.Replicas, 2*time.Minute)
+	utils.WaitForModelServingAvailableReplicasBelow(t, ctx, kthenaClient, testNamespace, modelServing.Name, *initialMS.Spec.Replicas, 2*time.Minute)
 
 	// Re-fetch to get the latest resourceVersion after status update and avoid conflict on Update.
 	latestMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -2340,7 +2302,7 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 	require.NoError(t, err, "Failed to scale down ModelServing")
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 3, 3*time.Minute)
 
 	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -2367,7 +2329,7 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 	modelServing := createBasicModelServing("test-status-role-priority", 1, initialRoleReplicas)
 	t.Log("Creating ModelServing with role replicas=4 for status-aware role scale down test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
 
 	labelSelector := modelServingLabelSelector(modelServing.Name)
 	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
@@ -2385,8 +2347,13 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 	require.NoError(t, err, "Failed to delete pod")
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get ModelServing before scale down")
-	scaleDownMS := initialMS.DeepCopy()
+	require.NoError(t, err, "Failed to get ModelServing after pod delete")
+	require.NotNil(t, initialMS.Spec.Replicas, "ModelServing spec.replicas should be set")
+	utils.WaitForModelServingAvailableReplicasBelow(t, ctx, kthenaClient, testNamespace, modelServing.Name, *initialMS.Spec.Replicas, 2*time.Minute)
+
+	latestMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to re-fetch ModelServing before scale down")
+	scaleDownMS := latestMS.DeepCopy()
 	scaleDownMS.Spec.Template.Roles[0].Replicas = ptr.To(int32(3))
 
 	t.Log("Scaling down role from 4 to 3 replicas (expect disrupted replica to be removed first)")
@@ -2394,7 +2361,7 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 	require.NoError(t, err, "Failed to scale down role")
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+	utils.WaitForModelServingRunningPodCount(t, ctx, kubeClient, testNamespace, modelServing.Name, 3, 3*time.Minute)
 
 	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
