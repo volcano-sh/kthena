@@ -151,11 +151,5 @@ func GenerateSelfSignedCertificate(dnsNames []string) (*CertBundle, error) {
 
 func generateSerialNumber() (*big.Int, error) {
 	limit := new(big.Int).Lsh(big.NewInt(1), CertSerialNumberBits)
-	limit.Sub(limit, big.NewInt(1))
-
-	serialNumber, err := rand.Int(rand.Reader, limit)
-	if err != nil {
-		return nil, err
-	}
-	return serialNumber.Add(serialNumber, big.NewInt(1)), nil
+	return rand.Int(rand.Reader, limit)
 }

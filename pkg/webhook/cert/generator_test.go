@@ -147,6 +147,15 @@ func TestGenerateSelfSignedCertificate_RandomSerialNumbers(t *testing.T) {
 	assert.NotEqual(t, firstServer.SerialNumber, secondServer.SerialNumber)
 }
 
+func TestGenerateSerialNumber(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		serialNumber, err := generateSerialNumber()
+		require.NoError(t, err)
+		assert.Positive(t, serialNumber.Sign())
+		assert.LessOrEqual(t, serialNumber.BitLen(), CertSerialNumberBits)
+	}
+}
+
 func TestGenerateSelfSignedCertificate_EmptyDNSNames(t *testing.T) {
 	dnsNames := []string{}
 
