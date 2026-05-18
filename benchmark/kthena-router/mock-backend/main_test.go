@@ -100,3 +100,65 @@ func TestCompletionsStreamHasDONE(t *testing.T) {
 		t.Fatalf("missing [DONE]: %q", string(b))
 	}
 }
+
+func TestChatCompletionsNonStream(t *testing.T) {
+	s := &server{model: "m"}
+	srv := httptest.NewServer(http.HandlerFunc(s.handleChatCompletions))
+	t.Cleanup(srv.Close)
+
+	body := strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":4,"stream":false}`)
+	res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Choices) != 1 || out.Choices[0].Message.Content != "tttt" {
+		t.Fatalf("unexpected body: %+v", out)
+	}
+}
+
+func TestChatCompletionsStreamHasDeltaUsageAndDONE(t *testing.T) {
+	s := &server{model: "m"}
+	srv := httptest.NewServer(http.HandlerFunc(s.handleChatCompletions))
+	t.Cleanup(srv.Close)
+
+	body := strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":2,"stream":true}`)
+	res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyText := string(b)
+	if !strings.Contains(bodyText, `"delta"`) {
+		t.Fatalf("missing delta chunk framing: %q", bodyText)
+	}
+	if !strings.Contains(bodyText, `"usage"`) {
+		t.Fatalf("missing trailing usage chunk: %q", bodyText)
+	}
+	if !strings.Contains(bodyText, "data: [DONE]") {
+		t.Fatalf("missing [DONE]: %q", bodyText)
+	}
+	if strings.Index(bodyText, `"usage"`) > strings.Index(bodyText, "data: [DONE]") {
+		t.Fatalf("usage chunk should be emitted before [DONE]: %q", bodyText)
+	}
+}
