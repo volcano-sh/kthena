@@ -131,6 +131,87 @@ func TestValidateModelServingMissingReplicasDoesNotPanic(t *testing.T) {
 	assert.Contains(t, reason, "spec.template.roles[0].replicas")
 }
 
+func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.T) {
+	replicas := int32(1)
+	longName := "this-is-a-very-long-name-that-exceeds-the-allowed-length-for-generated-name"
+	tests := []struct {
+		name    string
+		ms      *workloadv1alpha1.ModelServing
+		wantErr bool
+	}{
+		{
+			name: "missing top-level replicas",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: "valid-name"},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1", Replicas: &replicas},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "missing role replicas",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: "valid-name"},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: &replicas,
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "missing top-level replicas still validates generated name length",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: longName},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1", Replicas: &replicas},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing role replicas still validates generated name length",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: longName},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: &replicas,
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1"},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got field.ErrorList
+			assert.NotPanics(t, func() {
+				got = validGeneratedNameLength(tt.ms)
+			})
+			if tt.wantErr {
+				assert.NotEmpty(t, got)
+				return
+			}
+			assert.Empty(t, got)
+		})
+	}
+}
+
 func TestValidateRollingUpdateConfiguration(t *testing.T) {
 	replicas := int32(3)
 	type args struct {
