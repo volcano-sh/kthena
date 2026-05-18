@@ -1974,7 +1974,7 @@ func TestMatchModelServer_WithGatewayKey_RouteSkippedForDifferentGateway(t *test
 	s := newStoreWithGateway("default", "gateway-a", []gatewayv1.Listener{
 		{Name: "http"},
 	})
-	// Also add gateway-b so it exists in the store
+	// Also adding gateway-b so it exists in the store
 	gwB := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gateway-b"},
 		Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
