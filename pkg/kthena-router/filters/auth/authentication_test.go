@@ -43,7 +43,7 @@ func TestExtractTokenFromHeader(t *testing.T) {
 		{
 			name:     "no bearer prefix",
 			header:   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-			expected: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+			expected: "",
 		},
 		{
 			name:     "empty header",
@@ -53,6 +53,21 @@ func TestExtractTokenFromHeader(t *testing.T) {
 		{
 			name:     "bearer with space",
 			header:   "Bearer ",
+			expected: "",
+		},
+		{
+			name:     "lowercase bearer scheme",
+			header:   "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+			expected: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+		},
+		{
+			name:     "bearer token with extra whitespace",
+			header:   "  Bearer   eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9  ",
+			expected: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+		},
+		{
+			name:     "token with embedded whitespace",
+			header:   "Bearer token with space",
 			expected: "",
 		},
 	}
@@ -174,6 +189,19 @@ func TestJWTAuthenticatorMiddleware(t *testing.T) {
 		c.Request.Header.Set("Authorization", "Bearer ")
 
 		// Test that middleware returns 401 when empty token provided
+		middleware(c)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
+	t.Run("enabled authenticator with invalid authorization scheme", func(t *testing.T) {
+		validator := &JWTAuthenticator{enabled: true}
+		middleware := validator.Authenticate()
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest("GET", "/", nil)
+		c.Request.Header.Set("Authorization", "Basic some-token")
+
 		middleware(c)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
