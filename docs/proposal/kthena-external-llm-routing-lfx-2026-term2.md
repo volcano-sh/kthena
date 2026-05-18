@@ -153,6 +153,128 @@ type TargetReference struct {
 
 The `targetRef` shape generalizes. When v1beta1 wants to add a Bedrock backend, an MCP-server proxy, or a Gateway-API `InferencePool` target, the change is one switch arm in `store.Resolve`, not a schema modification.
 
+#### 5.3.2.1 Example configuration
+
+Third-party LLM APIs are **not** configured on `ModelServer`. `ModelServer` continues to mean in-cluster pods (label selector, scheduler, pod proxy). External HTTPS backends use `ExternalModelProvider` plus a `ModelRoute` rule that references them via `targetRef`. The manifests below use the same `apiVersion` and namespace conventions as [examples/kthena-router/ModelRouteSimple.yaml](../../examples/kthena-router/ModelRouteSimple.yaml); they are illustrative until the CRD and router changes in this proposal land. Runnable copies will ship under `examples/kthena-router/` in the implementation phase (§9).
+
+**API key (Secret)**
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-api-key
+  namespace: default
+type: Opaque
+stringData:
+  apiKey: "<OPENAI_API_KEY>"
+```
+
+**External provider (OpenAI-compatible)**
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ExternalModelProvider
+metadata:
+  name: openai-provider
+  namespace: default
+spec:
+  baseURL: https://api.openai.com
+  auth:
+    type: Bearer
+    secretRef:
+      name: openai-api-key
+      key: apiKey
+  models:
+    - name: gpt-4o-mini
+  adapter: OpenAICompatible
+  timeout: 60s
+```
+
+**ModelRoute (100% traffic to the external API)**
+
+Clients call the Kthena router with `"model": "gpt-4o-mini"`; the router injects credentials, forwards to `https://api.openai.com`, and rewrites the upstream model name from `targetRef.modelName`.
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: gpt-4o-mini-external
+  namespace: default
+spec:
+  modelName: gpt-4o-mini
+  rules:
+    - name: default
+      targetModels:
+        - targetRef:
+            group: networking.serving.volcano.sh
+            kind: ExternalModelProvider
+            name: openai-provider
+            modelName: gpt-4o-mini
+          weight: 100
+```
+
+**Mixed route (in-cluster `ModelServer` + external overflow)**
+
+Requires an existing in-cluster `ModelServer` (for example `deepseek-r1-1-5b` from the repo examples) plus the `ExternalModelProvider` above.
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: qwen-with-openai-overflow
+  namespace: default
+spec:
+  modelName: qwen-chat
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: deepseek-r1-1-5b
+          weight: 80
+        - targetRef:
+            group: networking.serving.volcano.sh
+            kind: ExternalModelProvider
+            name: openai-provider
+            modelName: gpt-4o-mini
+          weight: 20
+```
+
+**Azure OpenAI (deployment name as upstream model)**
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ExternalModelProvider
+metadata:
+  name: azure-openai
+  namespace: default
+spec:
+  baseURL: https://my-resource.openai.azure.com
+  auth:
+    type: APIKeyHeader
+    headerName: api-key
+    secretRef:
+      name: azure-openai-key
+      key: apiKey
+  models:
+    - name: my-gpt-4o-deployment
+  adapter: OpenAICompatible
+```
+
+```yaml
+# ModelRoute excerpt: client model name vs upstream deployment id
+spec:
+  modelName: gpt-4o
+  rules:
+    - name: default
+      targetModels:
+        - targetRef:
+            group: networking.serving.volcano.sh
+            kind: ExternalModelProvider
+            name: azure-openai
+            modelName: my-gpt-4o-deployment
+          weight: 100
+```
+
 #### 5.3.3 Internal `RouteTarget` typed dispatch
 
 `store.MatchModelServer` is retained as a thin compatibility shim for tests and debug handlers, and is wrapped by a new `Resolve` that returns a typed value:
