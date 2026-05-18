@@ -10,10 +10,9 @@
 | Field | Value |
 |---|---|
 | **Applicant** | Divyam jha |
-| **GitHub** | https://github.com/divyam-jha123 |
-| **Email** | divyamjha.70055594@gmail.com |
+| **GitHub** | [@divyam-jha123](https://github.com/divyam-jha123) |
 | **Timezone** | UTC+5:30 (India Standard Time) |
-| **Mentor** | Zengzeng Yao ([@YaoZengzeng](https://github.com/YaoZengzeng), yaozengzeng@huawei.com) |
+| **Mentor** | Zengzeng Yao ([@YaoZengzeng](https://github.com/YaoZengzeng) )|
 | **Repository** | [github.com/volcano-sh/kthena](https://github.com/volcano-sh/kthena) |
 | **Proposal version** | v1.0 |
 | **Date** | 2026-05-16 |
@@ -167,15 +166,19 @@ const (
 )
 
 type RouteTarget struct {
+    // Kind selects the dispatch arm: in-cluster pod scheduling or external HTTPS proxy.
     Kind       RouteTargetKind
+    // ModelRoute is the rule that matched the client model name (metrics, access log, rate limits).
     ModelRoute *v1alpha1.ModelRoute
+    // IsLora indicates LoRA adapter routing on the in-cluster path (unchanged semantics).
     IsLora     bool
 
-    // Set when Kind == RouteTargetPod
+    // ModelServer is set when Kind == RouteTargetPod (namespaced ModelServer to schedule against).
     ModelServer types.NamespacedName
 
-    // Set when Kind == RouteTargetExternal
+    // Provider is set when Kind == RouteTargetExternal (namespaced ExternalModelProvider).
     Provider      types.NamespacedName
+    // UpstreamModel is the model ID sent to the external API (from targetRef.modelName).
     UpstreamModel string
 }
 
@@ -410,32 +413,39 @@ type ExternalModelProviderSpec struct {
     // +kubebuilder:validation:XValidation:rule="!self.contains('@')",message="baseURL must not contain userinfo"
     // +kubebuilder:validation:XValidation:rule="!self.contains('?') && !self.contains('#')",message="baseURL must not contain query or fragment"
     // +kubebuilder:validation:XValidation:rule="!self.matches('^.*/v\\d+/?$')",message="baseURL must not end with a version path segment"
+    // BaseURL is the HTTPS API root (e.g. https://api.openai.com), without version path or credentials.
     BaseURL string `json:"baseURL"`
 
     // +kubebuilder:validation:Required
+    // Auth describes how to load credentials from a Secret and attach them to outbound requests.
     Auth ExternalModelProviderAuth `json:"auth"`
 
     // +listType=map
     // +listMapKey=name
     // +kubebuilder:validation:MinItems=1
     // +kubebuilder:validation:MaxItems=64
+    // Models lists upstream model IDs served by this provider (validation and /v1/models).
     Models []ExternalModel `json:"models"`
 
     // +optional
     // +kubebuilder:default="OpenAICompatible"
     // +kubebuilder:validation:Enum=OpenAICompatible;Anthropic;Gemini
+    // Adapter selects the request/response translation layer (OpenAI-compatible in v1alpha1).
     Adapter AdapterType `json:"adapter,omitempty"`
 
     // +optional
+    // Timeout caps a single upstream RoundTrip (default 60s when unset).
     Timeout *metav1.Duration `json:"timeout,omitempty"`
 
     // +optional
     // +kubebuilder:validation:Minimum=1
     // +kubebuilder:validation:Maximum=10000
+    // MaxConcurrentRequests limits in-flight requests to this provider (default 256).
     MaxConcurrentRequests *int32 `json:"maxConcurrentRequests,omitempty"`
 
     // +optional
     // +kubebuilder:validation:Minimum=1
+    // QPS applies an optional per-provider token-bucket rate limit (unbounded when unset).
     QPS *int32 `json:"qps,omitempty"`
 }
 
@@ -444,23 +454,28 @@ type ExternalModelProviderAuth struct {
     // +optional
     // +kubebuilder:default=Bearer
     // +kubebuilder:validation:Enum=Bearer;APIKeyHeader;RawToken
+    // Type selects how the Secret value is attached (Authorization Bearer, custom header, or raw token).
     Type AuthType `json:"type,omitempty"`
 
     // +kubebuilder:validation:Required
+    // SecretRef points at the namespaced Secret holding the API key (same namespace as the provider in v1alpha1).
     SecretRef ExternalSecretKeyRef `json:"secretRef"`
 
     // +optional
     // +kubebuilder:validation:MinLength=1
+    // HeaderName is required when Type=APIKeyHeader; must be omitted for Bearer and RawToken.
     HeaderName string `json:"headerName,omitempty"`
 }
 
 type ExternalSecretKeyRef struct {
     // +kubebuilder:validation:Required
     // +kubebuilder:validation:MinLength=1
+    // Name is the Secret object name in the provider namespace.
     Name string `json:"name"`
     // +optional
     // +kubebuilder:default=apiKey
     // +kubebuilder:validation:MinLength=1
+    // Key is the data key within the Secret (defaults to apiKey).
     Key string `json:"key,omitempty"`
 }
 ```
