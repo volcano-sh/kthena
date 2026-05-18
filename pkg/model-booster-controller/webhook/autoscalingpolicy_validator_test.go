@@ -38,125 +38,55 @@ import (
 
 func TestValidateAutoscalingPolicy_ErrorFormatting(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
-
-	// Create an autoscaling policy that will trigger multiple validation errors
-	policy := &registryv1.AutoscalingPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-policy",
-			Namespace: "default",
+	policy := validAutoscalingPolicy()
+	policy.Spec.TolerancePercent = 101
+	policy.Spec.Metrics = []registryv1.AutoscalingPolicyMetric{
+		{
+			MetricName:  "cpu",
+			TargetValue: resource.MustParse("0"),
 		},
-		Spec: registryv1.AutoscalingPolicySpec{
-			TolerancePercent: 101, // This should trigger error: tolerance percent must be between 0 and 100
-			Metrics: []registryv1.AutoscalingPolicyMetric{
-				{
-					MetricName:  "cpu",
-					TargetValue: resource.MustParse("0"), // This should trigger error: target value must be greater than 0
-				},
-				{
-					MetricName:  "cpu", // This should trigger error: duplicate metric name
-					TargetValue: resource.MustParse("80"),
-				},
-			},
-			Behavior: registryv1.AutoscalingPolicyBehavior{
-				ScaleDown: registryv1.AutoscalingPolicyStablePolicy{
-					Instances:           ptr.To(int32(1)),
-					Period:              &metav1.Duration{Duration: -time.Minute},     // This should trigger error: negative period
-					StabilizationWindow: &metav1.Duration{Duration: time.Minute * 35}, // This should trigger error: period too long
-				},
-				ScaleUp: registryv1.AutoscalingPolicyScaleUpPolicy{
-					StablePolicy: registryv1.AutoscalingPolicyStablePolicy{
-						Instances:           ptr.To(int32(2)),
-						Period:              &metav1.Duration{Duration: time.Minute * 35}, // This should trigger error: period too long
-						StabilizationWindow: &metav1.Duration{Duration: -time.Second},     // This should trigger error: negative stabilization window
-					},
-					PanicPolicy: registryv1.AutoscalingPolicyPanicPolicy{
-						Percent:               ptr.To(int32(50)),
-						Period:                metav1.Duration{Duration: time.Minute * 35}, // This should trigger error: period too long
-						PanicThresholdPercent: ptr.To(int32(99)),                           // This should trigger error: threshold must be >= 100
-						PanicModeHold:         &metav1.Duration{Duration: -time.Minute},    // This should trigger error: negative panic mode hold
-					},
-				},
-			},
+		{
+			MetricName:  "cpu",
+			TargetValue: resource.MustParse("80"),
 		},
 	}
+	policy.Spec.Behavior.ScaleDown.Period = &metav1.Duration{Duration: -time.Minute}
+	policy.Spec.Behavior.ScaleDown.StabilizationWindow = &metav1.Duration{Duration: time.Minute * 35}
+	policy.Spec.Behavior.ScaleUp.StablePolicy.Period = &metav1.Duration{Duration: time.Minute * 35}
+	policy.Spec.Behavior.ScaleUp.StablePolicy.StabilizationWindow = &metav1.Duration{Duration: -time.Second}
+	policy.Spec.Behavior.ScaleUp.PanicPolicy.Period = metav1.Duration{Duration: time.Minute * 35}
+	policy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent = ptr.To(int32(99))
+	policy.Spec.Behavior.ScaleUp.PanicPolicy.PanicModeHold = &metav1.Duration{Duration: -time.Minute}
 
 	allowed, errorMsg := validator.validateAutoscalingPolicy(policy)
 
-	// Should not be valid due to multiple errors
-	assert.False(t, allowed)
-	assert.NotEmpty(t, errorMsg)
+	require.False(t, allowed)
+	require.NotEmpty(t, errorMsg)
 
-	// Check that the error message is properly formatted
 	assert.True(t, strings.HasPrefix(errorMsg, "validation failed:\n"))
 
-	// Check that errors are formatted with bullet points and line breaks
 	lines := strings.Split(errorMsg, "\n")
-	assert.True(t, len(lines) > 1, "Error message should be multi-line")
+	require.Greater(t, len(lines), 1, "Error message should be multi-line")
 
-	// Check that each error line (except the first) starts with "  - "
 	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) != "" { // Skip empty lines
+		if strings.TrimSpace(lines[i]) != "" {
 			assert.True(t, strings.HasPrefix(lines[i], "  - "),
 				"Each error line should start with '  - ', but got: %q", lines[i])
 		}
 	}
 
-	// Verify that the error message is more readable than the old format
-	// (should not be in Go slice format like [error1 error2 error3])
 	assert.False(t, strings.HasPrefix(strings.TrimSpace(strings.Split(errorMsg, "\n")[1]), "[") &&
 		strings.HasSuffix(strings.TrimSpace(errorMsg), "]"),
 		"Error message should not be in Go slice format")
-
-	t.Logf("Formatted error message:\n%s", errorMsg)
 }
 
 func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
-
-	// Create a valid autoscaling policy
-	policy := &registryv1.AutoscalingPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-policy",
-			Namespace: "default",
-		},
-		Spec: registryv1.AutoscalingPolicySpec{
-			TolerancePercent: 10,
-			Metrics: []registryv1.AutoscalingPolicyMetric{
-				{
-					MetricName:  "cpu",
-					TargetValue: resource.MustParse("80"),
-				},
-				{
-					MetricName:  "memory",
-					TargetValue: resource.MustParse("75"),
-				},
-			},
-			Behavior: registryv1.AutoscalingPolicyBehavior{
-				ScaleDown: registryv1.AutoscalingPolicyStablePolicy{
-					Instances:           ptr.To(int32(1)),
-					Percent:             ptr.To(int32(10)),
-					Period:              &metav1.Duration{Duration: time.Minute},
-					SelectPolicy:        registryv1.SelectPolicyOr,
-					StabilizationWindow: &metav1.Duration{Duration: time.Minute * 5},
-				},
-				ScaleUp: registryv1.AutoscalingPolicyScaleUpPolicy{
-					StablePolicy: registryv1.AutoscalingPolicyStablePolicy{
-						Instances:           ptr.To(int32(2)),
-						Percent:             ptr.To(int32(20)),
-						Period:              &metav1.Duration{Duration: time.Minute},
-						SelectPolicy:        registryv1.SelectPolicyOr,
-						StabilizationWindow: &metav1.Duration{Duration: time.Second * 30},
-					},
-					PanicPolicy: registryv1.AutoscalingPolicyPanicPolicy{
-						Percent:               ptr.To(int32(50)),
-						Period:                metav1.Duration{Duration: time.Second * 10},
-						PanicThresholdPercent: ptr.To(int32(200)),
-						PanicModeHold:         &metav1.Duration{Duration: time.Minute},
-					},
-				},
-			},
-		},
-	}
+	policy := validAutoscalingPolicy()
+	policy.Spec.Metrics = append(policy.Spec.Metrics, registryv1.AutoscalingPolicyMetric{
+		MetricName:  "memory",
+		TargetValue: resource.MustParse("75"),
+	})
 
 	allowed, errorMsg := validator.validateAutoscalingPolicy(policy)
 
@@ -266,61 +196,7 @@ func TestValidateAutoscalingPolicy_PanicThresholdPercentRange(t *testing.T) {
 
 func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
-
-	// Create a valid AutoscalingPolicy
-	policy := &registryv1.AutoscalingPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-policy",
-			Namespace: "default",
-		},
-		Spec: registryv1.AutoscalingPolicySpec{
-			TolerancePercent: 10,
-			Metrics: []registryv1.AutoscalingPolicyMetric{
-				{
-					MetricName:  "cpu",
-					TargetValue: resource.MustParse("80"),
-				},
-			},
-			Behavior: registryv1.AutoscalingPolicyBehavior{
-				ScaleDown: registryv1.AutoscalingPolicyStablePolicy{
-					Instances:           ptr.To(int32(1)),
-					Percent:             ptr.To(int32(10)),
-					Period:              &metav1.Duration{Duration: time.Minute},
-					SelectPolicy:        registryv1.SelectPolicyOr,
-					StabilizationWindow: &metav1.Duration{Duration: time.Minute * 5},
-				},
-				ScaleUp: registryv1.AutoscalingPolicyScaleUpPolicy{
-					StablePolicy: registryv1.AutoscalingPolicyStablePolicy{
-						Instances:           ptr.To(int32(2)),
-						Percent:             ptr.To(int32(20)),
-						Period:              &metav1.Duration{Duration: time.Minute},
-						SelectPolicy:        registryv1.SelectPolicyOr,
-						StabilizationWindow: &metav1.Duration{Duration: time.Second * 30},
-					},
-					PanicPolicy: registryv1.AutoscalingPolicyPanicPolicy{
-						Percent:               ptr.To(int32(50)),
-						Period:                metav1.Duration{Duration: time.Second * 10},
-						PanicThresholdPercent: ptr.To(int32(200)),
-						PanicModeHold:         &metav1.Duration{Duration: time.Minute},
-					},
-				},
-			},
-		},
-	}
-
-	policyBytes, _ := json.Marshal(policy)
-	admissionReview := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID: types.UID("test-uid"),
-			Object: runtime.RawExtension{
-				Raw: policyBytes,
-			},
-		},
-	}
-
-	body, _ := json.Marshal(admissionReview)
-	req := httptest.NewRequest("POST", "/validate", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := autoscalingPolicyAdmissionRequest(t, validAutoscalingPolicy())
 	w := httptest.NewRecorder()
 
 	validator.Handle(w, req)
@@ -337,6 +213,56 @@ func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 	if responseReview.Response.Result != nil {
 		assert.Empty(t, responseReview.Response.Result.Message)
 	}
+}
+
+func TestAutoscalingPolicyValidator_Handle_InvalidThresholds(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+	policy := validAutoscalingPolicy()
+	policy.Spec.TolerancePercent = 101
+	policy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent = ptr.To(int32(109))
+
+	req := autoscalingPolicyAdmissionRequest(t, policy)
+	w := httptest.NewRecorder()
+
+	validator.Handle(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var responseReview admissionv1.AdmissionReview
+	err := json.Unmarshal(w.Body.Bytes(), &responseReview)
+	require.NoError(t, err)
+	require.NotNil(t, responseReview.Response)
+	require.NotNil(t, responseReview.Response.Result)
+
+	assert.False(t, responseReview.Response.Allowed)
+	assert.Equal(t, types.UID("test-uid"), responseReview.Response.UID)
+	assert.Contains(t, responseReview.Response.Result.Message, "spec.tolerancePercent")
+	assert.Contains(t, responseReview.Response.Result.Message, "tolerance percent must be between 0 and 100")
+	assert.Contains(t, responseReview.Response.Result.Message, "spec.behavior.scaleUp.panicPolicy.panicThresholdPercent")
+	assert.Contains(t, responseReview.Response.Result.Message, "panic threshold percent must be between 110 and 1000")
+}
+
+func autoscalingPolicyAdmissionRequest(t *testing.T, policy *registryv1.AutoscalingPolicy) *http.Request {
+	t.Helper()
+
+	policyBytes, err := json.Marshal(policy)
+	require.NoError(t, err)
+
+	admissionReview := admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			UID: types.UID("test-uid"),
+			Object: runtime.RawExtension{
+				Raw: policyBytes,
+			},
+		},
+	}
+
+	body, err := json.Marshal(admissionReview)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/validate", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
 
 func validAutoscalingPolicy() *registryv1.AutoscalingPolicy {
