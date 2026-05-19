@@ -19,9 +19,9 @@ package controller
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -39,11 +39,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	store := datastore.New()
 
 	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
-	stop := make(chan struct{})
-	defer close(stop)
-	gatewayInformerFactory.Start(stop)
-
-	ctx := context.Background()
 	ns := "default"
 	emptyGroup := gatewayv1.Group("")
 	emptyKind := gatewayv1.Kind("")
@@ -53,8 +48,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 			GatewayClassName: gatewayv1.ObjectName(DefaultGatewayClassName),
 		},
 	}
-	_, err := gatewayClient.GatewayV1().Gateways(ns).Create(ctx, gw, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
 	httpRoute := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route-1"},
@@ -66,8 +59,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 			},
 		},
 	}
-	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
 	httpRoute2 := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route-2"},
@@ -79,8 +70,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 			},
 		},
 	}
-	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute2, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
 	httpRoute3 := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "other-ns", Name: "route-3"},
@@ -92,8 +81,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 			},
 		},
 	}
-	_, err = gatewayClient.GatewayV1().HTTPRoutes("other-ns").Create(ctx, httpRoute3, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
 	httpRoute4 := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route-4"},
@@ -105,27 +92,15 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 			},
 		},
 	}
-	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute4, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
-	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
-	if !cache.WaitForCacheSync(stop, gatewayInformer.Informer().HasSynced) {
-		t.Fatal("gateway cache sync timeout")
-	}
-	httpRouteInformer := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
-	if !cache.WaitForCacheSync(stop, httpRouteInformer.Informer().HasSynced) {
-		t.Fatal("httproute cache sync timeout")
-	}
-
-	time.Sleep(200 * time.Millisecond)
-	for ctrl.workqueue.Len() > 0 {
-		obj, _ := ctrl.workqueue.Get()
-		ctrl.workqueue.Done(obj)
-	}
-
+	addHTTPRoutesToInformer(t, gatewayInformerFactory, httpRoute, httpRoute2, httpRoute3, httpRoute4)
 	ctrl.enqueueHTTPRoutesForGateway(gw)
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 3, ctrl.workqueue.Len(), "route-1, route-3, and route-4 reference gateway-1, route-2 does not")
+
+	assert.ElementsMatch(t, []string{
+		"default/route-1",
+		"other-ns/route-3",
+		"default/route-4",
+	}, drainHTTPRouteQueue(ctrl), "route-1, route-3, and route-4 reference gateway-1, route-2 does not")
 }
 
 func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *testing.T) {
@@ -134,11 +109,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	store := datastore.New()
 
 	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
-	stop := make(chan struct{})
-	defer close(stop)
-	gatewayInformerFactory.Start(stop)
-
-	ctx := context.Background()
 	ns := "default"
 	gw := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "gateway-1"},
@@ -146,8 +116,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 			GatewayClassName: gatewayv1.ObjectName(DefaultGatewayClassName),
 		},
 	}
-	_, err := gatewayClient.GatewayV1().Gateways(ns).Create(ctx, gw, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
 	httpRoute := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route-1"},
@@ -159,8 +127,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 			},
 		},
 	}
-	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
 	serviceGroup := gatewayv1.Group("core")
 	serviceKind := gatewayv1.Kind("Service")
@@ -174,22 +140,10 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 			},
 		},
 	}
-	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute2, metav1.CreateOptions{})
-	assert.NoError(t, err)
 
-	if !cache.WaitForCacheSync(stop, gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced) {
-		t.Fatal("cache sync timeout")
-	}
-
-	time.Sleep(200 * time.Millisecond)
-	for ctrl.workqueue.Len() > 0 {
-		obj, _ := ctrl.workqueue.Get()
-		ctrl.workqueue.Done(obj)
-	}
-
+	addHTTPRoutesToInformer(t, gatewayInformerFactory, httpRoute, httpRoute2)
 	ctrl.enqueueHTTPRoutesForGateway(gw)
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 0, ctrl.workqueue.Len(), "no HTTPRoutes reference gateway-1 as a Gateway parent")
+	assert.Empty(t, drainHTTPRouteQueue(ctrl), "no HTTPRoutes reference gateway-1 as a Gateway parent")
 }
 
 // TestHTTPRouteController_MultipleParentRefs_FirstPending verifies that when the first parentRef
@@ -237,4 +191,26 @@ func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 	err = ctrl.syncHandler(ns + "/route-multi")
 	assert.NoError(t, err)
 	assert.NotNil(t, store.GetHTTPRoute(ns+"/route-multi"))
+}
+
+func addHTTPRoutesToInformer(t *testing.T, factory gatewayinformers.SharedInformerFactory, routes ...*gatewayv1.HTTPRoute) {
+	t.Helper()
+
+	store := factory.Gateway().V1().HTTPRoutes().Informer().GetStore()
+	for _, route := range routes {
+		require.NoError(t, store.Add(route))
+	}
+}
+
+func drainHTTPRouteQueue(ctrl *HTTPRouteController) []string {
+	keys := []string{}
+	for ctrl.workqueue.Len() > 0 {
+		obj, _ := ctrl.workqueue.Get()
+		if key, ok := obj.(string); ok {
+			keys = append(keys, key)
+		}
+		ctrl.workqueue.Done(obj)
+		ctrl.workqueue.Forget(obj)
+	}
+	return keys
 }
