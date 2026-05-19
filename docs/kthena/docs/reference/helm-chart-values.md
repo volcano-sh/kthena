@@ -30,9 +30,10 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for Kthena Router. |
 | networking.kthenaRouter.image.repository | string | `"ghcr.io/volcano-sh/kthena-router"` | Image repository for Kthena Router. |
 | networking.kthenaRouter.image.tag | string | `"latest"` | Image tag for Kthena Router. |
+| networking.kthenaRouter.jwtAuth.enabled | bool | `false` | Allow admission of ModelRoute sessionSticky JWTClaim sources. |
 | networking.kthenaRouter.port | int | `8080` | Container port for Kthena Router. |
 | networking.kthenaRouter.sessionSticky.redis.address | string | `""` | Redis address for the router session sticky store. Required when `sessionSticky.store` is `redis`. |
-| networking.kthenaRouter.sessionSticky.redis.password | string | `""` | Optional Redis password for the router session sticky store. Rendered into `redis-secret` and exposed to the router as `REDIS_PASSWORD`. |
+| networking.kthenaRouter.sessionSticky.redis.password | string | `""` | Optional Redis password for the router session sticky store. Rendered into `redis-secret` and exposed to the router as `REDIS_PASSWORD`; outside Helm, `REDIS_PASSWORD` can provide it directly. |
 | networking.kthenaRouter.sessionSticky.store | string | `"memory"` | Router session sticky store backend. Use `memory` for single-router state or `redis` to share bindings across replicas. |
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |

@@ -44,8 +44,11 @@ Authentication configuration is used to enable and configure JWT authentication.
 |audiences|[]string|JWT audiences list|
 |jwksUri|string|Jwks Provider  URI|
 
+<!-- Add routing rules here -->
+
 ## Examples
 
+<!-- Add examples here -->
 ### Basic Scheduler Configuration
 
 Here's a complete ConfigMap example showing how to configure the scheduler:
@@ -56,63 +59,41 @@ kind: ConfigMap
 metadata:
   name: kthena-router-config
   namespace: default
-data:
-  routerConfiguration: |-
-    scheduler:
-      pluginConfig:
-      - name: least-request
-        args:
-          maxWaitingRequests: 10
-      - name: least-latency
-        args:
-          TTFTTPOTWeightFactor: 0.5
-      - name: prefix-cache
-        args:
-          blockSizeToHash: 64
-          maxBlocksToMatch: 128
-          maxHashCacheSize: 50000
-      plugins:
-        Filter:
-          enabled:
-            - least-request
-          disabled:
-            - lora-affinity
-        Score:
-          enabled:
-            - name: least-request
-              weight: 1
-            - name: kvcache-aware
-              weight: 1
-            - name: least-latency
-              weight: 1
-            - name: prefix-cache
-              weight: 1
-```
-
-### Session Affinity Example
-
-Session affinity is configured on `ModelRoute.spec.sessionSticky`, not as a scheduler plugin. The router evaluates `sources` in order and uses the first non-empty header, query parameter, cookie, or JWT claim value as the session key. The router process store defaults to in-memory; use the parent chart Helm `networking.kthenaRouter.sessionSticky.store=redis` setting to share bindings across router replicas.
-
-For e2e tests and controlled debugging, the router can expose the selected backend Pod in the `X-Kthena-Backend-Pod` response header with `--debug-backend-pod-header=true` or Helm value `networking.kthenaRouter.debugBackendPodHeader=true`. Leave this disabled for production traffic.
-
-```yaml showLineNumbers
-apiVersion: networking.serving.volcano.sh/v1alpha1
-kind: ModelRoute
+apiVersion: v1
+kind: ConfigMap
 metadata:
-  name: deepseek-route
+  name: kthena-router-config
   namespace: default
-spec:
-  modelName: deepseek
-  sessionSticky:
-    sessionAffinitySeconds: 10800
-    sources:
-      - type: Header
-        name: X-Session-ID
-      - type: Query
-        name: session_id
-  rules:
-    - targetModels:
-        - modelServerName: deepseek-server
+data:
+  schedulerConfiguration: |-
+    pluginConfig:
+    - name: least-request
+      args: 
+        maxWaitingRequests: 10
+    - name: least-latency
+      args:
+        TTFTTPOTWeightFactor: 0.5
+    - name: prefix-cache
+      args:
+        blockSizeToHash: 64
+        maxBlocksToMatch: 128
+        maxHashCacheSize: 50000
+    plugins:
+      Filter:
+        enabled:
+          - least-request
+        disabled:
+          - lora-affinity
+      Score:
+        enabled:
+          - name: least-request
+            weight: 1
+          - name: kv-cache
+            weight: 1
+          - name: least-latency
+            weight: 1
+          - name: prefix-cache
+            weight: 1
 ```
 
 If you want to use Authentication feature of router. Here is an example:
@@ -128,7 +109,7 @@ data:
     scheduler:
       pluginConfig:
       - name: least-request
-        args:
+        args: 
           maxWaitingRequests: 10
       - name: least-latency
         args:
@@ -148,7 +129,7 @@ data:
           enabled:
             - name: least-request
               weight: 1
-            - name: kvcache-aware
+            - name: kv-cache
               weight: 1
             - name: least-latency
               weight: 1

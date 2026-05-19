@@ -78,10 +78,9 @@ const (
 )
 
 type SessionStickyStoreConfig struct {
-	Type                  string
-	RedisAddress          string
-	RedisPassword         string
-	DebugBackendPodHeader bool
+	Type          string
+	RedisAddress  string
+	RedisPassword string
 }
 
 type Router struct {
@@ -105,7 +104,7 @@ type Router struct {
 	debugBackendPodHeader bool
 }
 
-func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig ...SessionStickyStoreConfig) *Router {
+func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig SessionStickyStoreConfig, debugBackendPodHeader bool) *Router {
 	// Create a unified rate limiter for all models
 	loadRateLimiter := ratelimit.NewTokenRateLimiter()
 
@@ -183,9 +182,8 @@ func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConf
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
-	stickyConfig := firstSessionStickyStoreConfig(sessionStickyConfig)
-	router.sessionStickyStore = newSessionStickyStoreFromConfig(stickyConfig)
-	router.debugBackendPodHeader = stickyConfig.DebugBackendPodHeader
+	router.sessionStickyStore = newSessionStickyStoreFromConfig(sessionStickyConfig)
+	router.debugBackendPodHeader = debugBackendPodHeader
 	return router
 }
 
@@ -215,13 +213,6 @@ func closeAccessLogger(logger accesslog.AccessLogger) error {
 		return nil
 	}
 	return logger.Close()
-}
-
-func firstSessionStickyStoreConfig(configs []SessionStickyStoreConfig) SessionStickyStoreConfig {
-	if len(configs) == 0 {
-		return SessionStickyStoreConfig{Type: SessionStickyStoreMemory}
-	}
-	return configs[0]
 }
 
 func newSessionStickyStoreFromConfig(config SessionStickyStoreConfig) sessionStickyStore {
@@ -548,6 +539,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 			ctx.BestPods = nil
 			ctx.DecodePods = nil
 			ctx.PrefillPods = nil
+			// Keep the session fields on retry so a successful schedule refreshes the binding.
 			err = r.scheduler.Schedule(ctx, originalPods)
 		}
 	}
@@ -583,9 +575,6 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 }
 
 func (r *Router) prepareSessionSticky(req *http.Request, modelRoute *v1alpha1.ModelRoute, pdGroup *v1alpha1.PDGroup, pods []*datastore.PodInfo) (string, time.Duration) {
-	if r.sessionStickyStore == nil {
-		r.sessionStickyStore = newMemorySessionStickyStore()
-	}
 	if modelRoute == nil || modelRoute.Spec.SessionSticky == nil {
 		return "", 0
 	}

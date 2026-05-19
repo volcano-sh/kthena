@@ -89,11 +89,14 @@ networking:
       redis:
         # -- Redis address for the router session sticky store. Required when `sessionSticky.store` is `redis`.
         address: ""
-        # -- Optional Redis password for the router session sticky store. Rendered into `redis-secret` and exposed to the router as `REDIS_PASSWORD`.
+        # -- Optional Redis password for the router session sticky store. Rendered into `redis-secret` and exposed to the router as `REDIS_PASSWORD`; outside Helm, `REDIS_PASSWORD` can provide it directly.
         password: ""
     # -- Enable X-Kthena-Backend-Pod on proxied responses for tests/debugging.
     # Keep disabled for production traffic.
     debugBackendPodHeader: false
+    jwtAuth:
+      # -- Allow admission of ModelRoute sessionSticky JWTClaim sources.
+      enabled: false
 
 global:
   # -- Certificate Management Mode.<br/>

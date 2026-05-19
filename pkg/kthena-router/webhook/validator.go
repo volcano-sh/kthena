@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,11 +33,10 @@ import (
 	"k8s.io/klog/v2"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
 const timeout = 30 * time.Second
-const defaultRouterConfigPath = "/etc/config/routerConfiguration.yaml"
+const jwtAuthEnabledEnv = "KTHENA_ROUTER_JWT_AUTH_ENABLED"
 
 // KthenaRouterValidator handles validation of ModelRoute and ModelServer resources.
 type KthenaRouterValidator struct {
@@ -64,16 +64,16 @@ func NewKthenaRouterValidator(kubeClient kubernetes.Interface, port int) *Kthena
 }
 
 func routerJWTAuthEnabled() bool {
-	configPath := os.Getenv("KTHENA_ROUTER_CONFIG_PATH")
-	if configPath == "" {
-		configPath = defaultRouterConfigPath
-	}
-	routerConfig, err := conf.ParseRouterConfig(configPath)
-	if err != nil {
-		klog.V(4).Infof("router config unavailable for JWTClaim admission validation: %v", err)
+	value, ok := os.LookupEnv(jwtAuthEnabledEnv)
+	if !ok {
 		return false
 	}
-	return strings.TrimSpace(routerConfig.Auth.JwksUri) != ""
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		klog.Warningf("invalid %s value %q; JWTClaim admission validation will be disabled", jwtAuthEnabledEnv, value)
+		return false
+	}
+	return enabled
 }
 
 func (v *KthenaRouterValidator) Run(ctx context.Context, tlsCertFile, tlsPrivateKey string) {

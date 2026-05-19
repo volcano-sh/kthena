@@ -137,11 +137,10 @@ func main() {
 	}
 
 	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst, router.SessionStickyStoreConfig{
-		Type:                  sessionStickyStoreType,
-		RedisAddress:          sessionStickyRedisAddress,
-		RedisPassword:         sessionStickyRedisPassword,
-		DebugBackendPodHeader: debugBackendPodHeader,
-	}).Run(ctx)
+		Type:          sessionStickyStoreType,
+		RedisAddress:  sessionStickyRedisAddress,
+		RedisPassword: sessionStickyRedisPassword,
+	}, debugBackendPodHeader).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.

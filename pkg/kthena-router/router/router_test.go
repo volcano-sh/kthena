@@ -64,7 +64,7 @@ func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datast
 
 	backend := httptest.NewServer(backendHandler)
 	store := datastore.New()
-	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{}, false)
 
 	return router, store, backend
 }
@@ -576,7 +576,7 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	backendPort, _ := strconv.Atoi(backendURL.Port())
 
 	store := datastore.New()
-	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{}, false)
 
 	modelServer := &aiv1alpha1.ModelServer{
 		ObjectMeta: v1.ObjectMeta{Name: "ms-retry", Namespace: "default"},

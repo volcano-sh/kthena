@@ -60,11 +60,14 @@ kthenaRouter:
     redis:
       # address is required when store is "redis".
       address: ""
-      # password is optional.
+      # password is optional; outside Helm, REDIS_PASSWORD can provide it directly.
       password: ""
   # debugBackendPodHeader enables X-Kthena-Backend-Pod on proxied responses for tests/debugging.
   # Keep disabled for production traffic.
   debugBackendPodHeader: false
+  jwtAuth:
+    # enabled allows admission of ModelRoute sessionSticky JWTClaim sources.
+    enabled: false
   # gatewayAPI configuration
   gatewayAPI:
     # enabled controls whether Gateway API related features are enabled

@@ -14,35 +14,36 @@ The scheduler configuration includes plugin configurations and lists of enabled/
 
 Plugin Configuration (PluginConfig):
 
-|Plugin Name| Parameters                                              |Description|
-|-|---------------------------------------------------------|-|
-|least-request| maxWaitingRequests                                      |Sets the maximum number of waiting requests|
-|least-latency| TTFTTPOTWeightFactor                                    |Sets the weight factor for TTFT and TPOT|
-|prefix-cache| blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize |Configures prefix cache parameters|
+| Plugin Name   | Parameters                                                  | Description                                                                                               |
+| ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| least-request | maxWaitingRequests                                          | Sets the maximum number of waiting requests                                                               |
+| least-latency | TTFTTPOTWeightFactor                                        | Sets the weight factor for TTFT and TPOT                                                                  |
+| prefix-cache  | blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize | Configures prefix cache parameters                                                                        |
+| kvcache-aware | blockSizeToHash<br />maxBlocksToMatch                       | Configures KV cache aware token-block matching parameters. Requires Redis and the Kthena Runtime sidecar. |
 
 Filter Plugins (Filter):
 
-|Configuration Name|Description|
-|-|-|
-|enabled|List of enabled filter plugins|
-|disabled|List of disabled filter plugins|
+| Configuration Name | Description                     |
+| ------------------ | ------------------------------- |
+| enabled            | List of enabled filter plugins  |
+| disabled           | List of disabled filter plugins |
 
 Score Plugins (Score):
 
-|Configuration Item|Description|
-|-|-|
-|enabled|List of enabled score plugins (with weights)|
-|disabled|List of disabled score plugins|
+| Configuration Item | Description                                  |
+| ------------------ | -------------------------------------------- |
+| enabled            | List of enabled score plugins (with weights) |
+| disabled           | List of disabled score plugins               |
 
 ### Authentication Configuration
 
 Authentication configuration is used to enable and configure JWT authentication.
 
-|Parameter|Type|Description|
-|-|-|-|
-|issuer|string|JWT issuer|
-|audiences|[]string|JWT audiences list|
-|jwksUri|string|Jwks Provider  URI|
+| Parameter | Type     | Description        |
+| --------- | -------- | ------------------ |
+| issuer    | string   | JWT issuer         |
+| audiences | []string | JWT audiences list |
+| jwksUri   | string   | Jwks Provider  URI |
 
 <!-- Add routing rules here -->
 
@@ -54,11 +55,6 @@ Authentication configuration is used to enable and configure JWT authentication.
 Here's a complete ConfigMap example showing how to configure the scheduler:
 
 ```yaml showLineNumbers
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kthena-router-config
-  namespace: default
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -78,6 +74,10 @@ data:
         blockSizeToHash: 64
         maxBlocksToMatch: 128
         maxHashCacheSize: 50000
+    - name: kvcache-aware
+      args:
+        blockSizeToHash: 16
+        maxBlocksToMatch: 128
     plugins:
       Filter:
         enabled:
@@ -88,38 +88,12 @@ data:
         enabled:
           - name: least-request
             weight: 1
-          - name: kv-cache
+          - name: kvcache-aware
             weight: 1
           - name: least-latency
             weight: 1
           - name: prefix-cache
             weight: 1
-```
-
-### Session Affinity Example
-
-Session affinity is configured on `ModelRoute.spec.sessionSticky`, not as a scheduler plugin. The router evaluates `sources` in order and uses the first non-empty header, query parameter, cookie, or JWT claim value as the session key. The router process store defaults to in-memory; use the parent chart Helm `networking.kthenaRouter.sessionSticky.store=redis` setting to share bindings across router replicas.
-
-For e2e tests and controlled debugging, the router can expose the selected backend Pod in the `X-Kthena-Backend-Pod` response header with `--debug-backend-pod-header=true` or Helm value `networking.kthenaRouter.debugBackendPodHeader=true`. Leave this disabled for production traffic.
-
-```yaml showLineNumbers
-apiVersion: networking.serving.volcano.sh/v1alpha1
-kind: ModelRoute
-metadata:
-  name: deepseek-route
-  namespace: default
-spec:
-  modelName: deepseek
-  sessionSticky:
-    sessionAffinitySeconds: 10800
-    sources:
-      - type: Header
-        name: X-Session-ID
-      - type: Query
-        name: session_id
-  rules:
-    - targetModels:
-        - modelServerName: deepseek-server
 ```
 
 If you want to use Authentication feature of router. Here is an example:
@@ -145,6 +119,12 @@ data:
           blockSizeToHash: 64
           maxBlocksToMatch: 128
           maxHashCacheSize: 50000
+      - name: kvcache-aware
+        args:
+          # The default block size of vllm is 16, keep in line with it.
+          # Changes as needed.
+          blockSizeToHash: 16
+          maxBlocksToMatch: 128
       plugins:
         Filter:
           enabled:
@@ -155,7 +135,7 @@ data:
           enabled:
             - name: least-request
               weight: 1
-            - name: kv-cache
+            - name: kvcache-aware
               weight: 1
             - name: least-latency
               weight: 1
