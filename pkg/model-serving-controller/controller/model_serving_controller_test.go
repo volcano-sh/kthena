@@ -7287,3 +7287,30 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
 }
+
+func TestCreatePodsByRole_RejectsMissingWorkerTemplateBeforeCreatingPods(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	controller := &ModelServingController{kubeClientSet: kubeClient}
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms"},
+	}
+	role := workloadv1alpha1.Role{
+		Name:           "role1",
+		Replicas:       ptr.To(int32(1)),
+		WorkerReplicas: 1,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "test:latest"}},
+			},
+		},
+	}
+
+	err := controller.CreatePodsByRole(context.Background(), role, ms, 0, 0, "rev1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workerTemplate is required when workerReplicas is greater than 0")
+
+	pods, listErr := kubeClient.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	assert.Empty(t, pods.Items)
+}
