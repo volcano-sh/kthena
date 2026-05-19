@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +68,10 @@ func newTestCollector() *MetricCollector {
 			TargetRef: corev1.ObjectReference{Name: "ut-target"},
 		},
 	}
+}
+
+func ptr[T any](value T) *T {
+	return &value
 }
 
 func TestFetchPrometheusMetric(t *testing.T) {
@@ -197,4 +202,136 @@ func TestFetchPrometheusMetric(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractMetricFromFamilyAggregatesLabeledCounterAndGaugeSamples(t *testing.T) {
+	cases := []struct {
+		name        string
+		metricName  string
+		metricsText string
+		want        float64
+	}{
+		{
+			name:       "counter",
+			metricName: "requests_total",
+			metricsText: `# HELP requests_total Total requests.
+# TYPE requests_total counter
+requests_total{model="llama",status="success"} 2
+requests_total{model="llama",status="error"} 3
+`,
+			want: 5,
+		},
+		{
+			name:       "gauge",
+			metricName: "queue_depth",
+			metricsText: `# HELP queue_depth Current queue depth.
+# TYPE queue_depth gauge
+queue_depth{model="llama",role="prefill"} 4
+queue_depth{model="llama",role="decode"} 6
+`,
+			want: 10,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			families, err := parsePrometheusFamilies(tc.metricsText, map[string][]string{
+				tc.metricName: {tc.metricName},
+			})
+			require.NoError(t, err)
+
+			mf, ok := families[tc.metricName]
+			require.True(t, ok)
+
+			got, snapshot, found, err := extractMetricFromFamily(mf, nil)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Nil(t, snapshot)
+			assert.InDelta(t, tc.want, got, 1e-9)
+		})
+	}
+}
+
+func TestExtractMetricFromFamilySkipsNilCounterAndGaugeSamples(t *testing.T) {
+	cases := []struct {
+		name   string
+		family *io_prometheus_client.MetricFamily
+		want   float64
+	}{
+		{
+			name: "counter",
+			family: &io_prometheus_client.MetricFamily{
+				Name: ptr("requests_total"),
+				Type: ptr(io_prometheus_client.MetricType_COUNTER),
+				Metric: []*io_prometheus_client.Metric{
+					nil,
+					{},
+					{Counter: &io_prometheus_client.Counter{Value: ptr(2.5)}},
+				},
+			},
+			want: 2.5,
+		},
+		{
+			name: "gauge",
+			family: &io_prometheus_client.MetricFamily{
+				Name: ptr("queue_depth"),
+				Type: ptr(io_prometheus_client.MetricType_GAUGE),
+				Metric: []*io_prometheus_client.Metric{
+					nil,
+					{},
+					{Gauge: &io_prometheus_client.Gauge{Value: ptr(4.5)}},
+				},
+			},
+			want: 4.5,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, snapshot, found, err := extractMetricFromFamily(tc.family, nil)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Nil(t, snapshot)
+			assert.InDelta(t, tc.want, got, 1e-9)
+		})
+	}
+}
+
+func TestExtractMetricFromFamilyProcessesHistogramSample(t *testing.T) {
+	const metricName = "request_duration_seconds"
+
+	families, err := parsePrometheusFamilies(`# HELP request_duration_seconds Request duration.
+# TYPE request_duration_seconds histogram
+request_duration_seconds_bucket{le="1"} 1
+request_duration_seconds_bucket{le="+Inf"} 1
+request_duration_seconds_sum 1
+request_duration_seconds_count 1
+`, map[string][]string{
+		metricName: {metricName},
+	})
+	require.NoError(t, err)
+
+	mf, ok := families[metricName]
+	require.True(t, ok)
+
+	got, snapshot, found, err := extractMetricFromFamily(mf, nil)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotNil(t, snapshot)
+
+	// All observations are in the le="1" bucket, so the SLO percentile
+	// extracted from the histogram diff resolves to that upper bound.
+	assert.InDelta(t, 1.0, got, 1e-9)
+}
+
+func TestParsePrometheusFamiliesReturnsErrorOnMalformedPayload(t *testing.T) {
+	_, err := parsePrometheusFamilies(`# HELP requests_total Total requests.
+# TYPE requests_total counter
+requests_total 2
+not a valid prometheus metric line
+`, map[string][]string{
+		"requests_total": {"requests_total"},
+	})
+
+	require.Error(t, err)
 }

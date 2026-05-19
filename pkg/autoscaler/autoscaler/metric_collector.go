@@ -405,19 +405,44 @@ func parsePrometheusFamilies(body string, wanted map[string][]string) (map[strin
 }
 
 // extractMetricFromFamily returns the scalar value (and histogram snapshot, when
-// applicable) for the first metric series of mf.
+// applicable) for mf. Counter and gauge families may contain multiple labeled
+// samples, so their values are summed.
 func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogram *histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
 	if len(mf.Metric) < 1 {
 		return 0, nil, false, nil
 	}
-	metric := mf.Metric[0]
+
 	switch mf.GetType() {
 	case io_prometheus_client.MetricType_COUNTER:
-		return metric.GetCounter().GetValue(), nil, true, nil
+		validSamples := 0
+		for _, metric := range mf.Metric {
+			counter := metric.GetCounter()
+			if counter == nil {
+				continue
+			}
+			value += counter.GetValue()
+			validSamples++
+		}
+		return value, nil, validSamples > 0, nil
 	case io_prometheus_client.MetricType_GAUGE:
-		return metric.GetGauge().GetValue(), nil, true, nil
+		validSamples := 0
+		for _, metric := range mf.Metric {
+			gauge := metric.GetGauge()
+			if gauge == nil {
+				continue
+			}
+			value += gauge.GetValue()
+			validSamples++
+		}
+		return value, nil, validSamples > 0, nil
 	case io_prometheus_client.MetricType_HISTOGRAM:
+		// Histogram samples are cumulative bucket sets. Unlike counters/gauges,
+		// labeled histogram series cannot be safely summed after decoding here.
+		metric := mf.Metric[0]
 		hist := metric.GetHistogram()
+		if hist == nil {
+			return 0, nil, false, nil
+		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
 		if pastHistogram != nil {
