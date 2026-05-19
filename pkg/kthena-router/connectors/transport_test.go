@@ -446,24 +446,53 @@ func TestHandleStreamingResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name         string
-		responseBody string
-		tokenUsage   bool
+		name             string
+		responseBody     string
+		tokenUsage       bool
+		wantOutputTokens int
+		wantResponseBody string
 	}{
 		{
-			name:         "streaming response with usage",
-			responseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
-			tokenUsage:   false,
+			name:             "streaming response with usage",
+			responseBody:     "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
+			tokenUsage:       false,
+			wantOutputTokens: 20,
+			wantResponseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
 		},
 		{
-			name:         "streaming response with token usage filtering",
-			responseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
-			tokenUsage:   true,
+			name:             "streaming response with usage and no optional space after data colon",
+			responseBody:     "data:{\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata:[DONE]\n\n",
+			tokenUsage:       false,
+			wantOutputTokens: 20,
+			wantResponseBody: "data:{\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata:[DONE]\n\n",
 		},
 		{
-			name:         "streaming response without usage",
-			responseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\"}\n\ndata: [DONE]\n\n",
-			tokenUsage:   false,
+			name:             "streaming response with token usage filtering",
+			responseBody:     "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
+			tokenUsage:       true,
+			wantOutputTokens: 20,
+			wantResponseBody: "\ndata: [DONE]\n\n",
+		},
+		{
+			name:             "streaming response filters no-space data usage line",
+			responseBody:     "data:{\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata:[DONE]\n\n",
+			tokenUsage:       true,
+			wantOutputTokens: 20,
+			wantResponseBody: "\ndata:[DONE]\n\n",
+		},
+		{
+			name:             "streaming response with invalid leading whitespace before data field",
+			responseBody:     "\tdata: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
+			tokenUsage:       false,
+			wantOutputTokens: 0,
+			wantResponseBody: "\tdata: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
+		},
+		{
+			name:             "streaming response without usage",
+			responseBody:     "data: {\"id\":\"test\",\"object\":\"text_completion\"}\n\ndata: [DONE]\n\n",
+			tokenUsage:       false,
+			wantOutputTokens: 0,
+			wantResponseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\"}\n\ndata: [DONE]\n\n",
 		},
 	}
 
@@ -487,10 +516,12 @@ func TestHandleStreamingResponse(t *testing.T) {
 			}
 			resp.Header.Set("Content-Type", "text/event-stream")
 
-			_, err := handleStreamingResponse(c, resp)
+			gotOutputTokens, err := handleStreamingResponse(c, resp)
 
 			// Should not return error
 			assert.NoError(t, err)
+			assert.Equal(t, tt.wantOutputTokens, gotOutputTokens)
+			assert.Equal(t, tt.wantResponseBody, w.Body.String())
 		})
 	}
 }

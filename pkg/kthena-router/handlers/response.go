@@ -71,7 +71,10 @@ func ParseStreamRespForUsage(
 	responseText string,
 ) OpenAIResponse {
 	var response OpenAIResponse
-	line := strings.TrimSpace(responseText)
+	// SSE data fields allow both "data: <value>" and "data:<value>".
+	// Do not trim leading whitespace before the prefix check; that would
+	// accept invalid field names such as " data:".
+	line := strings.TrimRight(responseText, "\r\n")
 	if !strings.HasPrefix(line, streamingRespPrefix) {
 		return response
 	}

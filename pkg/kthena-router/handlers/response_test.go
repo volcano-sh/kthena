@@ -91,18 +91,18 @@ func TestParseStreamRespForUsage(t *testing.T) {
 			want:         validUsageResponse,
 		},
 		{
-			name:         "valid stream without space after prefix",
+			name:         "valid stream without optional space after colon",
 			responseText: "data:" + usageChunk,
 			want:         validUsageResponse,
 		},
 		{
-			name:         "valid stream with leading and trailing whitespace",
-			responseText: "\tdata: " + usageChunk + "\r\n",
+			name:         "valid stream with trailing line terminator",
+			responseText: "data: " + usageChunk + "\r\n",
 			want:         validUsageResponse,
 		},
 		{
-			name:         "valid stream with tab after prefix",
-			responseText: "data:\t" + usageChunk,
+			name:         "valid stream with json whitespace after colon",
+			responseText: "data:\t " + usageChunk + " ",
 			want:         validUsageResponse,
 		},
 		{
@@ -111,8 +111,8 @@ func TestParseStreamRespForUsage(t *testing.T) {
 			want:         OpenAIResponse{},
 		},
 		{
-			name:         "stream [DONE] with whitespace",
-			responseText: " data: [DONE]\r\n",
+			name:         "stream [DONE] with trailing line terminator",
+			responseText: "data: [DONE]\r\n",
 			want:         OpenAIResponse{},
 		},
 		{
@@ -123,6 +123,26 @@ func TestParseStreamRespForUsage(t *testing.T) {
 		{
 			name:         "empty data payload",
 			responseText: "data:   ",
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "leading whitespace before data field is not accepted",
+			responseText: "\tdata: " + usageChunk,
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "space before colon is not a data field",
+			responseText: "data : " + usageChunk,
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "other sse field is ignored",
+			responseText: "event: message",
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "data field without colon is ignored",
+			responseText: "data " + usageChunk,
 			want:         OpenAIResponse{},
 		},
 		{
