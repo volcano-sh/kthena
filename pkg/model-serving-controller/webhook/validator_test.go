@@ -17,12 +17,15 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
@@ -1347,6 +1350,157 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 
 			for i := range got {
 				assert.Equalf(t, tt.want[i].Error(), got[i].Error(), "Error mismatch at index %d", i)
+			}
+		})
+	}
+}
+
+// buildUpdateReview is a helper that creates an AdmissionReview for an UPDATE
+// operation, embedding the given old ModelServing in OldObject.
+func buildUpdateReview(oldMS *workloadv1alpha1.ModelServing) *admissionv1.AdmissionReview {
+	raw, _ := json.Marshal(oldMS)
+	return &admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
+			OldObject: runtime.RawExtension{Raw: raw},
+		},
+	}
+}
+
+func TestValidateSchedulingFieldUpdate(t *testing.T) {
+	replicas := int32(3)
+	roleReplicas := int32(2)
+
+	baseMS := func() *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: v1.ObjectMeta{Name: "test-ms"},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: &replicas,
+				Template: workloadv1alpha1.ServingGroup{
+					GangPolicy: &workloadv1alpha1.GangPolicy{
+						MinRoleReplicas: map[string]int32{"prefill": 1},
+					},
+					NetworkTopology: &workloadv1alpha1.NetworkTopology{},
+					Roles: []workloadv1alpha1.Role{
+						{
+							Name:           "prefill",
+							Replicas:       &roleReplicas,
+							WorkerReplicas: 0,
+						},
+						{
+							Name:           "decode",
+							Replicas:       &roleReplicas,
+							WorkerReplicas: 0,
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		review  *admissionv1.AdmissionReview
+		newMS   *workloadv1alpha1.ModelServing
+		wantLen int
+		wantErr string // substring to check in the first error, empty = no check
+	}{
+		{
+			name: "reject: only gangPolicy changed",
+			review: func() *admissionv1.AdmissionReview {
+				return buildUpdateReview(baseMS())
+			}(),
+			newMS: func() *workloadv1alpha1.ModelServing {
+				ms := baseMS()
+				ms.Spec.Template.GangPolicy.MinRoleReplicas["prefill"] = 2
+				return ms
+			}(),
+			wantLen: 1,
+			wantErr: "gangPolicy cannot be updated without also changing roles",
+		},
+		{
+			name: "reject: only networkTopology changed",
+			review: func() *admissionv1.AdmissionReview {
+				return buildUpdateReview(baseMS())
+			}(),
+			newMS: func() *workloadv1alpha1.ModelServing {
+				ms := baseMS()
+				ms.Spec.Template.NetworkTopology = nil // changed from non-nil to nil
+				return ms
+			}(),
+			wantLen: 1,
+			wantErr: "networkTopology cannot be updated without also changing roles",
+		},
+		{
+			name: "reject: both gangPolicy and networkTopology changed without roles",
+			review: func() *admissionv1.AdmissionReview {
+				return buildUpdateReview(baseMS())
+			}(),
+			newMS: func() *workloadv1alpha1.ModelServing {
+				ms := baseMS()
+				ms.Spec.Template.GangPolicy.MinRoleReplicas["decode"] = 1
+				ms.Spec.Template.NetworkTopology = nil
+				return ms
+			}(),
+			wantLen: 2,
+		},
+		{
+			name: "allow: gangPolicy changed together with roles",
+			review: func() *admissionv1.AdmissionReview {
+				return buildUpdateReview(baseMS())
+			}(),
+			newMS: func() *workloadv1alpha1.ModelServing {
+				ms := baseMS()
+				ms.Spec.Template.GangPolicy.MinRoleReplicas["prefill"] = 2
+				// Also change roles
+				newReplicas := int32(3)
+				ms.Spec.Template.Roles[0].Replicas = &newReplicas
+				return ms
+			}(),
+			wantLen: 0,
+		},
+		{
+			name: "allow: networkTopology changed together with roles",
+			review: func() *admissionv1.AdmissionReview {
+				return buildUpdateReview(baseMS())
+			}(),
+			newMS: func() *workloadv1alpha1.ModelServing {
+				ms := baseMS()
+				ms.Spec.Template.NetworkTopology = nil
+				// Also change roles
+				ms.Spec.Template.Roles = ms.Spec.Template.Roles[:1]
+				return ms
+			}(),
+			wantLen: 0,
+		},
+		{
+			name: "allow: neither scheduling field changed",
+			review: func() *admissionv1.AdmissionReview {
+				return buildUpdateReview(baseMS())
+			}(),
+			newMS: func() *workloadv1alpha1.ModelServing {
+				ms := baseMS()
+				// Change only replicas (not a scheduling field)
+				newReplicas := int32(5)
+				ms.Spec.Replicas = &newReplicas
+				return ms
+			}(),
+			wantLen: 0,
+		},
+		{
+			name: "allow: CREATE operation (nil review)",
+			review: nil,
+			newMS:  baseMS(),
+			wantLen: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateSchedulingFieldUpdate(tt.review, tt.newMS)
+			assert.Equal(t, tt.wantLen, len(got), "unexpected error count: %v", got)
+			if tt.wantErr != "" && len(got) > 0 {
+				assert.Contains(t, got[0].Detail, tt.wantErr)
 			}
 		})
 	}

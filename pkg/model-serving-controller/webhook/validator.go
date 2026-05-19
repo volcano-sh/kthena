@@ -17,8 +17,10 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -53,7 +55,7 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate the ModelServing
-	allowed, reason := v.validateModelServing(modelServing)
+	allowed, reason := v.validateModelServing(admissionReview, modelServing)
 
 	// Create the admission response
 	admissionResponse := admissionv1.AdmissionResponse{
@@ -79,7 +81,7 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateModelServing validates the ModelServing resource
-func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alpha1.ModelServing) (bool, string) {
+func (v *ModelServingValidator) validateModelServing(review *admissionv1.AdmissionReview, modelServing *workloadv1alpha1.ModelServing) (bool, string) {
 	var allErrs field.ErrorList
 
 	allErrs = append(allErrs, validGeneratedNameLength(modelServing)...)
@@ -90,6 +92,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
+	allErrs = append(allErrs, validateSchedulingFieldUpdate(review, modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -421,6 +424,58 @@ func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing)
 				workloadv1alpha1.RoleRecreate,
 				workloadv1alpha1.RoleRollingUpdate,
 			),
+		))
+	}
+
+	return allErrs
+}
+
+// validateSchedulingFieldUpdate rejects UPDATE requests that modify
+// spec.template.gangPolicy or spec.template.networkTopology without also
+// changing spec.template.roles. These scheduling fields only take effect
+// during pod creation; changing them alone on a running ServingGroup is
+// a no-op and confusing to users.
+func validateSchedulingFieldUpdate(review *admissionv1.AdmissionReview, newMS *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if review == nil || review.Request == nil || review.Request.Operation != admissionv1.Update {
+		return allErrs
+	}
+
+	if review.Request.OldObject.Raw == nil {
+		return allErrs
+	}
+
+	var oldMS workloadv1alpha1.ModelServing
+	if err := json.Unmarshal(review.Request.OldObject.Raw, &oldMS); err != nil {
+		klog.Errorf("failed to unmarshal old ModelServing for scheduling-field validation: %v", err)
+		return allErrs
+	}
+
+	gangPolicyChanged := !reflect.DeepEqual(oldMS.Spec.Template.GangPolicy, newMS.Spec.Template.GangPolicy)
+	networkTopologyChanged := !reflect.DeepEqual(oldMS.Spec.Template.NetworkTopology, newMS.Spec.Template.NetworkTopology)
+
+	if !gangPolicyChanged && !networkTopologyChanged {
+		return allErrs
+	}
+
+	rolesChanged := !reflect.DeepEqual(oldMS.Spec.Template.Roles, newMS.Spec.Template.Roles)
+	if rolesChanged {
+		return allErrs
+	}
+
+	// At this point, scheduling fields changed but roles did not.
+	tplPath := field.NewPath("spec").Child("template")
+	if gangPolicyChanged {
+		allErrs = append(allErrs, field.Forbidden(
+			tplPath.Child("gangPolicy"),
+			"gangPolicy cannot be updated without also changing roles; scheduling policy only takes effect when pods are recreated",
+		))
+	}
+	if networkTopologyChanged {
+		allErrs = append(allErrs, field.Forbidden(
+			tplPath.Child("networkTopology"),
+			"networkTopology cannot be updated without also changing roles; scheduling policy only takes effect when pods are recreated",
 		))
 	}
 
