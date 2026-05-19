@@ -167,14 +167,10 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	// Check all parentRefs - process immediately if any matches, retry only if no match and a Gateway is pending
 	var gatewayPending bool
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
-		if parentRef.Kind == nil || *parentRef.Kind != "Gateway" {
+		if !isGatewayParentRef(parentRef) {
 			continue
 		}
-		gatewayNamespace := httpRoute.Namespace
-		if parentRef.Namespace != nil {
-			gatewayNamespace = string(*parentRef.Namespace)
-		}
-		gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, string(parentRef.Name))
+		gatewayNamespace, gatewayKey := gatewayParentRefNamespaceAndKey(httpRoute.Namespace, parentRef)
 		gw := c.store.GetGateway(gatewayKey)
 		if gw == nil {
 			if _, err := c.gatewayLister.Gateways(gatewayNamespace).Get(string(parentRef.Name)); err == nil {
@@ -216,16 +212,29 @@ func (c *HTTPRouteController) enqueueHTTPRoutesForGateway(obj interface{}) {
 	}
 	for _, route := range routes {
 		for _, parentRef := range route.Spec.ParentRefs {
-			if parentRef.Kind != nil && *parentRef.Kind == "Gateway" {
-				ns := route.Namespace
-				if parentRef.Namespace != nil {
-					ns = string(*parentRef.Namespace)
-				}
-				if fmt.Sprintf("%s/%s", ns, string(parentRef.Name)) == gatewayKey {
-					c.workqueue.Add(fmt.Sprintf("%s/%s", route.Namespace, route.Name))
-					break
-				}
+			if !isGatewayParentRef(parentRef) {
+				continue
+			}
+			_, parentKey := gatewayParentRefNamespaceAndKey(route.Namespace, parentRef)
+			if parentKey == gatewayKey {
+				c.workqueue.Add(fmt.Sprintf("%s/%s", route.Namespace, route.Name))
+				break
 			}
 		}
 	}
+}
+
+func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
+	if parentRef.Group != nil && *parentRef.Group != "" && *parentRef.Group != gatewayv1.Group(gatewayAPIGroupName) {
+		return false
+	}
+	return parentRef.Kind == nil || *parentRef.Kind == "" || *parentRef.Kind == gatewayv1.Kind("Gateway")
+}
+
+func gatewayParentRefNamespaceAndKey(defaultNamespace string, parentRef gatewayv1.ParentReference) (string, string) {
+	namespace := defaultNamespace
+	if parentRef.Namespace != nil {
+		namespace = string(*parentRef.Namespace)
+	}
+	return namespace, fmt.Sprintf("%s/%s", namespace, string(parentRef.Name))
 }

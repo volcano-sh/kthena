@@ -23,6 +23,8 @@ const (
 	DefaultGatewayClassName = "kthena-router"
 	// ControllerName is the controller name for kthena-router GatewayClass
 	ControllerName = "volcano.sh/kthena-router"
+
+	gatewayAPIGroupName = "gateway.networking.k8s.io"
 )
 
 // this is the signal used to indicate that the controllers has reconciled all the initial resources.

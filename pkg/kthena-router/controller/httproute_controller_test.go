@@ -45,6 +45,8 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 
 	ctx := context.Background()
 	ns := "default"
+	emptyGroup := gatewayv1.Group("")
+	emptyKind := gatewayv1.Kind("")
 	gw := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "gateway-1"},
 		Spec: gatewayv1.GatewaySpec{
@@ -59,7 +61,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 		Spec: gatewayv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{
-					{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway-1")},
+					{Name: gatewayv1.ObjectName("gateway-1")},
 				},
 			},
 		},
@@ -93,6 +95,19 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	_, err = gatewayClient.GatewayV1().HTTPRoutes("other-ns").Create(ctx, httpRoute3, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
+	httpRoute4 := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route-4"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Group: &emptyGroup, Kind: &emptyKind, Name: gatewayv1.ObjectName("gateway-1")},
+				},
+			},
+		},
+	}
+	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute4, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
 	if !cache.WaitForCacheSync(stop, gatewayInformer.Informer().HasSynced) {
 		t.Fatal("gateway cache sync timeout")
@@ -110,7 +125,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 
 	ctrl.enqueueHTTPRoutesForGateway(gw)
 	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 2, ctrl.workqueue.Len(), "route-1 and route-3 reference gateway-1, route-2 does not")
+	assert.Equal(t, 3, ctrl.workqueue.Len(), "route-1, route-3, and route-4 reference gateway-1, route-2 does not")
 }
 
 func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *testing.T) {
@@ -147,6 +162,21 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
+	serviceGroup := gatewayv1.Group("core")
+	serviceKind := gatewayv1.Kind("Service")
+	httpRoute2 := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route-2"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Group: &serviceGroup, Kind: &serviceKind, Name: gatewayv1.ObjectName("gateway-1")},
+				},
+			},
+		},
+	}
+	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute2, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
 	if !cache.WaitForCacheSync(stop, gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced) {
 		t.Fatal("cache sync timeout")
 	}
@@ -159,7 +189,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 
 	ctrl.enqueueHTTPRoutesForGateway(gw)
 	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 0, ctrl.workqueue.Len(), "no HTTPRoutes reference gateway-1")
+	assert.Equal(t, 0, ctrl.workqueue.Len(), "no HTTPRoutes reference gateway-1 as a Gateway parent")
 }
 
 // TestHTTPRouteController_MultipleParentRefs_FirstPending verifies that when the first parentRef
@@ -187,7 +217,7 @@ func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{
 					{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway-1")},
-					{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway-2")},
+					{Name: gatewayv1.ObjectName("gateway-2")},
 				},
 			},
 		},

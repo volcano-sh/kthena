@@ -1945,6 +1945,64 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 			expectedError:  false,
 		},
 		{
+			name: "route matches gateway defaults when group and kind are omitted",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "my-gateway"}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/my-gateway",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "llama3-server"},
+			expectedError:  false,
+		},
+		{
+			name: "route matches gateway defaults when group and kind are empty",
+			setupStore: func() *store {
+				emptyGroup := gatewayv1.Group("")
+				emptyKind := gatewayv1.Kind("")
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{
+							Group: &emptyGroup,
+							Kind:  &emptyKind,
+							Name:  "my-gateway",
+						}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/my-gateway",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "llama3-server"},
+			expectedError:  false,
+		},
+		{
 			name: "route skipped for different gateway",
 			setupStore: func() *store {
 				s := newStore()
@@ -1970,6 +2028,37 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 			},
 			modelName:     "llama3",
 			gatewayKey:    "default/gateway-b",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "route skips explicit non-gateway parent ref",
+			setupStore: func() *store {
+				serviceGroup := gatewayv1.Group("core")
+				serviceKind := gatewayv1.Kind("Service")
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "backend"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{
+							Group: &serviceGroup,
+							Kind:  &serviceKind,
+							Name:  "backend",
+						}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/backend",
 			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
 			expectedError: true,
 		},
@@ -2118,7 +2207,7 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 			expectedError:  false,
 		},
 		{
-			name: "multiple routes — only matching gateway selected",
+			name: "multiple routes - only matching gateway selected",
 			setupStore: func() *store {
 				s := newStore()
 				s.AddOrUpdateGateway(&gatewayv1.Gateway{
@@ -2174,6 +2263,204 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedIsLora, isLora)
 			assert.Equal(t, tt.expectedServer, server)
+		})
+	}
+}
+
+func TestStoreIndexesHTTPRouteGatewayParentRefDefaults(t *testing.T) {
+	emptyGroup := gatewayv1.Group("")
+	emptyKind := gatewayv1.Kind("")
+	gatewayGroup := gatewayv1.Group(gatewayAPIGroupName)
+	gatewayKind := gatewayv1.Kind("Gateway")
+	otherNamespace := gatewayv1.Namespace("other")
+	serviceGroup := gatewayv1.Group("core")
+	serviceKind := gatewayv1.Kind("Service")
+
+	tests := []struct {
+		name        string
+		parentRef   gatewayv1.ParentReference
+		gatewayKey  string
+		wantIndexed bool
+	}{
+		{
+			name:        "omitted group and kind use Gateway defaults",
+			parentRef:   gatewayv1.ParentReference{Name: "gateway"},
+			gatewayKey:  "default/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "empty group and kind use Gateway defaults",
+			parentRef: gatewayv1.ParentReference{
+				Group: &emptyGroup,
+				Kind:  &emptyKind,
+				Name:  "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "explicit Gateway group and kind",
+			parentRef: gatewayv1.ParentReference{
+				Group: &gatewayGroup,
+				Kind:  &gatewayKind,
+				Name:  "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "parent namespace overrides route namespace",
+			parentRef: gatewayv1.ParentReference{
+				Name:      "gateway",
+				Namespace: &otherNamespace,
+			},
+			gatewayKey:  "other/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "explicit non-Gateway group is ignored",
+			parentRef: gatewayv1.ParentReference{
+				Group: &serviceGroup,
+				Name:  "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: false,
+		},
+		{
+			name: "explicit non-Gateway kind is ignored",
+			parentRef: gatewayv1.ParentReference{
+				Kind: &serviceKind,
+				Name: "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore()
+			httpRoute := &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "route",
+				},
+				Spec: gatewayv1.HTTPRouteSpec{
+					CommonRouteSpec: gatewayv1.CommonRouteSpec{
+						ParentRefs: []gatewayv1.ParentReference{tt.parentRef},
+					},
+				},
+			}
+
+			assert.NoError(t, s.AddOrUpdateHTTPRoute(httpRoute))
+
+			routes := s.GetHTTPRoutesByGateway(tt.gatewayKey)
+			if tt.wantIndexed {
+				assert.Len(t, routes, 1)
+				assert.Equal(t, "route", routes[0].Name)
+				return
+			}
+			assert.Empty(t, routes)
+		})
+	}
+}
+
+func TestStoreIndexesModelRouteGatewayParentRefDefaults(t *testing.T) {
+	emptyGroup := gatewayv1.Group("")
+	emptyKind := gatewayv1.Kind("")
+	gatewayGroup := gatewayv1.Group(gatewayAPIGroupName)
+	gatewayKind := gatewayv1.Kind("Gateway")
+	otherNamespace := gatewayv1.Namespace("other")
+	serviceGroup := gatewayv1.Group("core")
+	serviceKind := gatewayv1.Kind("Service")
+
+	tests := []struct {
+		name        string
+		parentRef   gatewayv1.ParentReference
+		gatewayKey  string
+		wantIndexed bool
+	}{
+		{
+			name:        "omitted group and kind use Gateway defaults",
+			parentRef:   gatewayv1.ParentReference{Name: "gateway"},
+			gatewayKey:  "default/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "empty group and kind use Gateway defaults",
+			parentRef: gatewayv1.ParentReference{
+				Group: &emptyGroup,
+				Kind:  &emptyKind,
+				Name:  "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "explicit Gateway group and kind",
+			parentRef: gatewayv1.ParentReference{
+				Group: &gatewayGroup,
+				Kind:  &gatewayKind,
+				Name:  "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "parent namespace overrides route namespace",
+			parentRef: gatewayv1.ParentReference{
+				Name:      "gateway",
+				Namespace: &otherNamespace,
+			},
+			gatewayKey:  "other/gateway",
+			wantIndexed: true,
+		},
+		{
+			name: "explicit non-Gateway group is ignored",
+			parentRef: gatewayv1.ParentReference{
+				Group: &serviceGroup,
+				Name:  "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: false,
+		},
+		{
+			name: "explicit non-Gateway kind is ignored",
+			parentRef: gatewayv1.ParentReference{
+				Kind: &serviceKind,
+				Name: "gateway",
+			},
+			gatewayKey:  "default/gateway",
+			wantIndexed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore()
+			modelRoute := &aiv1alpha1.ModelRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "route",
+				},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName:  "model",
+					ParentRefs: []gatewayv1.ParentReference{tt.parentRef},
+					Rules: []*aiv1alpha1.Rule{
+						{
+							TargetModels: []*aiv1alpha1.TargetModel{
+								{ModelServerName: "model-server", Weight: ptr(uint32(100))},
+							},
+						},
+					},
+				},
+			}
+
+			assert.NoError(t, s.AddOrUpdateModelRoute(modelRoute))
+
+			routeSet, ok := s.gatewayModelRoutes[tt.gatewayKey]
+			indexed := ok && routeSet.Contains("default/route")
+			assert.Equal(t, tt.wantIndexed, indexed)
 		})
 	}
 }

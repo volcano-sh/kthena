@@ -755,6 +755,23 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 }
 
 // Model routing methods
+const gatewayAPIGroupName = "gateway.networking.k8s.io"
+
+func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
+	if parentRef.Group != nil && *parentRef.Group != "" && *parentRef.Group != gatewayv1.Group(gatewayAPIGroupName) {
+		return false
+	}
+	return parentRef.Kind == nil || *parentRef.Kind == "" || *parentRef.Kind == gatewayv1.Kind("Gateway")
+}
+
+func gatewayParentRefKey(defaultNamespace string, parentRef gatewayv1.ParentReference) string {
+	namespace := defaultNamespace
+	if parentRef.Namespace != nil {
+		namespace = string(*parentRef.Namespace)
+	}
+	return fmt.Sprintf("%s/%s", namespace, string(parentRef.Name))
+}
+
 func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	s.routeMutex.Lock()
 	key := mr.Namespace + "/" + mr.Name
@@ -805,19 +822,15 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 
 	// Update gateway model routes mapping
 	for _, parentRef := range mr.Spec.ParentRefs {
-		if parentRef.Kind != nil && *parentRef.Kind == "Gateway" {
-			gatewayName := string(parentRef.Name)
-			gatewayNamespace := mr.Namespace
-			if parentRef.Namespace != nil {
-				gatewayNamespace = string(*parentRef.Namespace)
-			}
-			gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, gatewayName)
-
-			if s.gatewayModelRoutes[gatewayKey] == nil {
-				s.gatewayModelRoutes[gatewayKey] = sets.New[string]()
-			}
-			s.gatewayModelRoutes[gatewayKey].Insert(key)
+		if !isGatewayParentRef(parentRef) {
+			continue
 		}
+		gatewayKey := gatewayParentRefKey(mr.Namespace, parentRef)
+
+		if s.gatewayModelRoutes[gatewayKey] == nil {
+			s.gatewayModelRoutes[gatewayKey] = sets.New[string]()
+		}
+		s.gatewayModelRoutes[gatewayKey].Insert(key)
 	}
 
 	s.routeMutex.Unlock()
@@ -896,19 +909,15 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	// Remove from gateway model routes mapping
 	if deletedRoute != nil {
 		for _, parentRef := range deletedRoute.Spec.ParentRefs {
-			if parentRef.Kind != nil && *parentRef.Kind == "Gateway" {
-				gatewayName := string(parentRef.Name)
-				gatewayNamespace := deletedRoute.Namespace
-				if parentRef.Namespace != nil {
-					gatewayNamespace = string(*parentRef.Namespace)
-				}
-				gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, gatewayName)
+			if !isGatewayParentRef(parentRef) {
+				continue
+			}
+			gatewayKey := gatewayParentRefKey(deletedRoute.Namespace, parentRef)
 
-				if routeSet, exists := s.gatewayModelRoutes[gatewayKey]; exists {
-					routeSet.Delete(namespacedName)
-					if routeSet.IsEmpty() {
-						delete(s.gatewayModelRoutes, gatewayKey)
-					}
+			if routeSet, exists := s.gatewayModelRoutes[gatewayKey]; exists {
+				routeSet.Delete(namespacedName)
+				if routeSet.IsEmpty() {
+					delete(s.gatewayModelRoutes, gatewayKey)
 				}
 			}
 		}
@@ -1011,15 +1020,12 @@ func (s *store) matchesSpecificGateway(mr *aiv1alpha1.ModelRoute, gatewayKey str
 	}
 
 	for _, parentRef := range mr.Spec.ParentRefs {
-		// Get namespace from parentRef, default to ModelRoute's namespace
-		namespace := mr.Namespace
-		if parentRef.Namespace != nil {
-			namespace = string(*parentRef.Namespace)
+		if !isGatewayParentRef(parentRef) {
+			continue
 		}
 
-		// Get name from parentRef
-		name := string(parentRef.Name)
-		key := fmt.Sprintf("%s/%s", namespace, name)
+		// Get namespace from parentRef, default to ModelRoute's namespace
+		key := gatewayParentRefKey(mr.Namespace, parentRef)
 
 		// Check if this parentRef matches the specified gateway
 		if key == gatewayKey {
@@ -1732,19 +1738,15 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 
 	// Update gateway routes mapping
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
-		if parentRef.Kind != nil && *parentRef.Kind == "Gateway" {
-			gatewayName := string(parentRef.Name)
-			gatewayNamespace := httpRoute.Namespace
-			if parentRef.Namespace != nil {
-				gatewayNamespace = string(*parentRef.Namespace)
-			}
-			gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, gatewayName)
-
-			if s.gatewayRoutes[gatewayKey] == nil {
-				s.gatewayRoutes[gatewayKey] = sets.New[string]()
-			}
-			s.gatewayRoutes[gatewayKey].Insert(key)
+		if !isGatewayParentRef(parentRef) {
+			continue
 		}
+		gatewayKey := gatewayParentRefKey(httpRoute.Namespace, parentRef)
+
+		if s.gatewayRoutes[gatewayKey] == nil {
+			s.gatewayRoutes[gatewayKey] = sets.New[string]()
+		}
+		s.gatewayRoutes[gatewayKey].Insert(key)
 	}
 
 	s.httpRouteMutex.Unlock()
