@@ -1488,9 +1488,47 @@ func TestValidateSchedulingFieldUpdate(t *testing.T) {
 			wantLen: 0,
 		},
 		{
-			name: "allow: CREATE operation (nil review)",
-			review: nil,
-			newMS:  baseMS(),
+			name: "allow: invalid json in old object",
+			review: func() *admissionv1.AdmissionReview {
+				review := buildUpdateReview(baseMS())
+				review.Request.OldObject.Raw = []byte("invalid-json")
+				return review
+			}(),
+			newMS:   baseMS(),
+			wantLen: 0,
+		},
+		{
+			name: "allow: old object raw is nil",
+			review: func() *admissionv1.AdmissionReview {
+				review := buildUpdateReview(baseMS())
+				review.Request.OldObject.Raw = nil
+				return review
+			}(),
+			newMS:   baseMS(),
+			wantLen: 0,
+		},
+		{
+			name: "allow: request is nil",
+			review: &admissionv1.AdmissionReview{
+				Request: nil,
+			},
+			newMS:   baseMS(),
+			wantLen: 0,
+		},
+		{
+			name: "allow: CREATE operation (not UPDATE)",
+			review: func() *admissionv1.AdmissionReview {
+				review := buildUpdateReview(baseMS())
+				review.Request.Operation = admissionv1.Create
+				return review
+			}(),
+			newMS:   baseMS(),
+			wantLen: 0,
+		},
+		{
+			name:    "allow: review is nil",
+			review:  nil,
+			newMS:   baseMS(),
 			wantLen: 0,
 		},
 	}
