@@ -26,6 +26,7 @@ import (
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,7 +57,45 @@ func TestModelCR(t *testing.T) {
 		utils.NewChatMessage("user", "Where is the capital of China?"),
 	}
 	utils.CheckChatCompletions(t, "test-model", messages)
-	// TODO(user): Add tests for updating and deleting ModelBooster
+	// Test updating ModelBooster
+	t.Log("Testing update of ModelBooster")
+	require.Eventually(t, func() bool {
+		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Get model error: %v", err)
+			return false
+		}
+		m.Spec.Backend.Workers[0].Replicas = 2
+		_, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Update(ctx, m, metav1.UpdateOptions{})
+		if err != nil {
+			t.Logf("Update model error: %v", err)
+			return false
+		}
+		return true
+	}, 2*time.Minute, 5*time.Second, "Failed to update ModelBooster")
+
+	// Verify the update took effect
+	require.Eventually(t, func() bool {
+		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		return m.Spec.Backend.Workers[0].Replicas == 2
+	}, 2*time.Minute, 5*time.Second, "ModelBooster update was not reflected")
+
+	// Test deleting ModelBooster
+	t.Log("Testing deletion of ModelBooster")
+	err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(ctx, model.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete Model CR")
+
+	require.Eventually(t, func() bool {
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
+		if err != nil {
+			// We expect a NotFound error here
+			return apierrors.IsNotFound(err)
+		}
+		return false
+	}, 2*time.Minute, 5*time.Second, "ModelBooster was not deleted")
 }
 
 func createValidModelBoosterForWebhookTest() *workload.ModelBooster {
