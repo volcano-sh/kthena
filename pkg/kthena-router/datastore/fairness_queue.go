@@ -295,7 +295,7 @@ func (r *Request) isCancelled() bool {
 }
 
 func (pq *RequestPriorityQueue) shouldRebuildLocked() bool {
-	return pq.config.RebuildThreshold <= 0 || len(pq.heap) <= pq.config.RebuildThreshold
+	return pq.config.RebuildThreshold <= 0 || len(pq.heap) >= pq.config.RebuildThreshold
 }
 
 // rebuildHeap refreshes priorities for all queued items and rebuilds the heap.
