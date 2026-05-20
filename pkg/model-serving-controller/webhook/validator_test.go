@@ -127,7 +127,7 @@ func TestValidateModelServingMissingReplicasDoesNotPanic(t *testing.T) {
 	var allowed bool
 	var reason string
 	assert.NotPanics(t, func() {
-		allowed, reason = validator.validateModelServing(ms)
+		allowed, reason = validator.validateModelServing(nil, ms)
 	})
 	assert.False(t, allowed)
 	assert.Contains(t, reason, "spec.replicas")
