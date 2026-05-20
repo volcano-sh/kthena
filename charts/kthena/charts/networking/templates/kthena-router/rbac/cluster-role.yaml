@@ -95,6 +95,22 @@ rules:
       - update
   {{- end }}
   - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - modelservings
+    verbs:
+      - get
+      - list
+      - patch
+  - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - autoscalingpolicybindings
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
       - ""
     resources:
       - services

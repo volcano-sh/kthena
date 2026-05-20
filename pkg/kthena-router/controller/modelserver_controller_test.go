@@ -74,6 +74,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
+		nil,
 	)
 	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
 
@@ -275,6 +276,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
+		nil,
 	)
 
 	stop := make(chan struct{})
@@ -491,6 +493,7 @@ func TestModelServerController_ErrorHandling(t *testing.T) {
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
+		nil,
 	)
 
 	// Test Case 1: Invalid ModelServer Key
@@ -535,6 +538,7 @@ func TestModelServerController_WorkQueueProcessing(t *testing.T) {
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
+		nil,
 	)
 
 	// Test Case 1: Initial Sync Signal
@@ -610,6 +614,7 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
+		nil,
 	)
 
 	stop := make(chan struct{})
@@ -798,6 +803,7 @@ func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
+		nil,
 	)
 
 	kthenaInformerFactory.Start(stopCh)
@@ -974,6 +980,7 @@ func TestModelServerController_SharedPods(t *testing.T) {
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
+		nil,
 	)
 
 	stop := make(chan struct{})

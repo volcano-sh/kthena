@@ -49,6 +49,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/handlers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scalefromzero"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
@@ -87,6 +88,8 @@ type Router struct {
 	fairnessTimeout  time.Duration
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
+
+	sfzManager *scalefromzero.Manager
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -170,6 +173,11 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 }
 
 const defaultFairnessTimeout = 60 * time.Second
+
+// SetScaleFromZeroManager sets the scale-from-zero manager for the router.
+func (r *Router) SetScaleFromZeroManager(m *scalefromzero.Manager) {
+	r.sfzManager = m
+}
 
 func parseFairnessTimeout() time.Duration {
 	if s, ok := os.LookupEnv("FAIRNESS_QUEUE_TIMEOUT"); ok {
@@ -358,10 +366,29 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 
 		pods, modelServer, err = r.getPodsAndServer(modelServerName)
 		if err != nil || len(pods) == 0 {
-			klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
-			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find model server: %v", modelServerName))
-			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find model server: %v", modelServerName))
-			return
+			if r.sfzManager != nil && r.sfzManager.Enabled() {
+				pods, modelServer, err = r.sfzManager.Handle(c.Request.Context(), modelServerName.Namespace, modelServerName.Name)
+				if err != nil {
+					if errors.Is(err, scalefromzero.ErrNotConfigured) {
+						msg := fmt.Sprintf("can't find model server: %v", modelServerName)
+						klog.Error(msg)
+						accesslog.SetError(c, "pod_discovery", msg)
+						c.AbortWithStatusJSON(http.StatusNotFound, msg)
+						return
+					}
+					msg := fmt.Sprintf("scale from zero timeout: %v", modelServerName)
+					klog.Errorf("scale-from-zero timeout: %v", err)
+					accesslog.SetError(c, "scale_from_zero", msg)
+					c.AbortWithStatusJSON(http.StatusGatewayTimeout, msg)
+					return
+				}
+			} else {
+				msg := fmt.Sprintf("can't find model server: %v", modelServerName)
+				klog.Error(msg)
+				accesslog.SetError(c, "pod_discovery", msg)
+				c.AbortWithStatusJSON(http.StatusNotFound, msg)
+				return
+			}
 		}
 
 		model := modelServer.Spec.Model
