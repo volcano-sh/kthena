@@ -21,13 +21,17 @@ the router backend adapter, KV connectors, and the tokenizer adapter. SGLang
 previously had only partial, router-side support and was rejected by the
 ModelBooster converter.
 
-This proposal lifts SGLang to a first-class backend. The user-visible outcome:
-a user declares a `ModelBooster` with `backend.type: SGLang` or
+This proposal lifts SGLang to a first-class backend in the control plane
+(API, converter, templates, webhook). The user-visible outcome: a user
+declares a `ModelBooster` with `backend.type: SGLang` or
 `SGLangDisaggregated` and gets a working aggregated or PD-disaggregated SGLang
-deployment with the same scheduler-plugin behavior, drain semantics, gang
-scheduling, and PD-disaggregation tooling that vLLM ModelBoosters get — the
-router automatically selects the SGLang KV connector and a dedicated SGLang
-tokenizer adapter.
+deployment with the same drain semantics, gang scheduling, and PD bootstrap
+hand-off that vLLM ModelBoosters get; the router auto-selects the existing
+SGLang KV connector based on `InferenceEngine`.
+
+Router-side SGLang work (tokenizer adapter, per-engine endpoint resolution,
+KVCacheAware knob rename) is intentionally out of scope here and is tracked in
+a separate PR.
 
 ### Motivation
 
@@ -49,20 +53,19 @@ not declaratively run SGLang through the platform's primary workload CRD.
 - **Disaggregated SGLang (PD)**: `ModelBooster` with
   `backend.type: SGLangDisaggregated` materializes prefill + decode roles wired
   up for SGLang's `bootstrap_room`/`bootstrap_host` KV-handoff protocol.
-- **Full router integration**: SGLang pods participate in metric-aware
-  scheduling, prefix/KV-cache-aware scoring, and OpenAI-compatible request
-  proxying — selecting the SGLang KV connector automatically.
-- **Dedicated tokenizer adapter**: SGLang's `/tokenize` endpoint is used
-  directly for prefix-cache scoring rather than reusing the vLLM adapter.
+- **Router KV-connector selection**: the existing router auto-selects
+  `ConnectorTypeSGLang` whenever `ModelServer.Spec.InferenceEngine == SGLang`
+  and `KVConnector` is nil. The converter cooperating with this contract
+  (emitting `KVConnector: nil` for SGLang) is in scope here; no new router
+  code is added.
 
 #### Non-Goals
 
 - **Multi-node SGLang (Ray/torchrun)**: out of scope for v1. Both the
   aggregated and disaggregated builders return an explicit error if
   `Pods > 1`.
-- **Native SGLang chat-tokenize**: the adapter flattens chat messages to a
-  role-prefixed text string. Adding a first-party chat-tokenize call is
-  deferred until SGLang ships such an endpoint.
+- **Router-side SGLang tokenizer adapter, per-engine endpoint resolution,
+  KVCacheAware knob rename**: tracked in a separate PR and not landed here.
 - **SGLang version-portable metric names**: the router-side metric names match
   SGLang ≥ 0.4.x. A config-driven metric-name map for older versions is out of
   scope.
@@ -102,20 +105,22 @@ automatically and runs the prefill/decode bootstrap protocol.
 - The webhook permits a prefill-only disaggregated spec while the converter
   errors on it — this split deliberately matches the existing
   `vLLMDisaggregated` precedent.
-- The preStop drain hook and the `/dev/shm` (memory-medium) volume are emitted
-  for **aggregated** SGLang only, not for the disaggregated `prefill`/`decode`
-  roles. This matches the established kthena template convention: `vllm.yaml`,
-  `vllm-pd.yaml`, and `sglang-pd.yaml` all omit both, so the asymmetry is the
-  aggregated path being *enriched*, not the PD path being deprived. PD pods
-  have a distinct termination contract (bootstrap-room teardown / KV-transfer
-  completion) that a request-count drain does not model; extending graceful
-  drain to PD is tracked as a follow-up rather than silently reusing the
-  aggregated script.
-- The aggregated preStop drain is bounded to ~300s (60 × 5s) and aligned with
-  `terminationGracePeriodSeconds`, sums all metric series (multi-model safe),
-  uses an integer comparison (immune to Prometheus `0` vs `0.0` formatting),
-  and exits immediately if the metrics endpoint is unreachable — so a
-  stuck/absent metric can never block termination past the grace period.
+- The preStop drain hook and the memory-medium `/dev/shm` volume are emitted
+  on **all** SGLang engine containers — aggregated `leader`, and both
+  disaggregated `prefill` and `decode`. The drain is bounded to ~300s
+  (60 × 5s) and aligned with `terminationGracePeriodSeconds`, sums all
+  `sglang:num_running_reqs` / `sglang:num_queue_reqs` series (multi-model
+  safe), uses an integer comparison (immune to Prometheus `0` vs `0.0`
+  formatting), and exits immediately if the metrics endpoint is unreachable —
+  so a stuck/absent metric can never block termination past the grace period.
+  The shared `dshm` volume is required by the mooncake transfer engine and
+  NCCL in the disaggregated path and is harmless in the aggregated path.
+- The kthena runtime sidecar receives `--engine sglang` for both aggregated
+  and disaggregated SGLang. The Python runtime's `_get_real_engine_type`
+  collapses `vllm`/`vllmdisaggregated` → `EngineType.VLLM` but only recognizes
+  the literal string `sglang`; emitting `sglangdisaggregated` would crash the
+  sidecar on startup with `UnsupportedEngineError`. The converter centralizes
+  this in a `runtimeEngineName(backendType)` helper.
 
 #### Risks and Mitigations
 
@@ -183,24 +188,15 @@ Two new embed.FS templates parallel the vLLM ones:
 Multi-node SGLang (Ray/torchrun) is out of scope for v1;
 `buildSGLangModelServing` errors out if `Pods > 1`.
 
-#### Router Tokenizer Adapter
+#### Router Tokenizer Adapter (out of scope here)
 
-`pkg/kthena-router/scheduler/plugins/tokenization/`:
-
-- `sglang.go` — new adapter against SGLang's `POST /tokenize` endpoint.
-  Defensive response parsing accepts `token_ids`, `tokens`, or `input_ids`
-  field names so the adapter survives SGLang's field-name drift across
-  versions. Chat inputs are flattened to a single role-prefixed text prompt
-  since SGLang has no native chat tokenize endpoint.
-- `tokenizer.go` — `NewRemoteTokenizer` is now engine-aware
-  (`vllm`/`sglang`/empty=vLLM-default).
-- `tokenizer_manager.go` — per-pod routing:
-  `engineEndpointForPod(podIP, podInfo.GetEngine())` resolves the right port
-  (8000 for vLLM, 30000 for SGLang) and adapter. Pods with unknown engines are
-  skipped, not silently routed to a default.
-- `kvcache_aware.go` — `EnableVLLMRemote` config knob renamed to
-  `EnableRemoteTokenizer`; the engine and endpoint are resolved per-pod, not
-  from a static template string.
+A dedicated SGLang tokenizer adapter (`pkg/kthena-router/scheduler/plugins/
+tokenization/sglang.go`), engine-aware `NewRemoteTokenizer`, per-engine
+endpoint resolution in `tokenizer_manager.go`, and the `EnableVLLMRemote` →
+`EnableRemoteTokenizer` rename in `kvcache_aware.go` are tracked in a separate
+PR. Until that lands, the router's KVCacheAware plugin continues using its
+existing vLLM-only tokenizer path for SGLang pods. This PR ships only the
+control-plane slice (API + converter + templates + webhook).
 
 #### Webhook
 
@@ -246,14 +242,11 @@ bootstrap protocol:
 | Suite | Coverage |
 |---|---|
 | `convert/model_serving_test.go` `TestCreateModelServingResources` | Golden-file diff: `testdata/input/sglang-{aggregated,disaggregated}-model.yaml` → `testdata/expected/sglang-{aggregated,disaggregated}-model-serving.yaml`. Any converter change not captured in a fixture update fails the suite. |
-| `convert/model_serving_test.go` `TestBuildSGLang*` | Structural assertions: command flags, `--host 0.0.0.0`, `--port 30000`, no `POD_IP`/`VLLM_USE_V1` env, disaggregation flags appear only on PD roles. |
-| `convert/model_server_test.go` `TestBuildSGLang*Routing` | `WorkloadPort.Port == 30000`, `InferenceEngine == SGLang`, `KVConnector` nil, `PDGroup` only set for disaggregated. |
+| `convert/model_serving_test.go` `TestBuildSGLangModelServing` / `TestBuildSGLangDisaggregatedModelServing` | Structural assertions: engine container named `engine`, command flags, `--host 0.0.0.0`, `--port 30000`, no `POD_IP`/`VLLM_USE_V1` env, preStop drain on `sglang:num_running_reqs`, memory-backed `/dev/shm`, `terminationGracePeriodSeconds`. Disaggregated test also asserts the runtime sidecar receives `--engine sglang` (never `sglangdisaggregated`). |
+| `convert/model_serving_test.go` `TestBuildSGLangModelServerRouting` / `TestBuildSGLangDisaggregatedModelServerRouting` | `WorkloadPort.Port == 30000`, `InferenceEngine == SGLang`, `KVConnector` nil, `PDGroup` only set for disaggregated. |
+| `convert/model_serving_test.go` `TestBuildSGLangCommandsTransferBackendDedup` | `buildSGLangCommands` does not duplicate `--disaggregation-transfer-backend` when the user supplies it in `worker.Config` (in either dash or underscore key form); default `mooncake` is still applied when unset. |
 | `webhook/model_validator_test.go` `TestValidateBackendWorkerTypes_SGLang` | Aggregated requires one server worker; Disaggregated requires prefill+decode-only. |
-| `tokenization/tokenization_test.go` `TestSGLangAdapter` | Completion + chat request shapes; response parsing for all three SGLang field-name variants. |
-| `tokenization_test.go` `TestEngineEndpointForPod` | Per-engine port and adapter resolution. |
-| `tokenization_test.go` `TestTokenizerManager_GetTokenizer_PicksSGLangPort` | End-to-end manager path picks port 30000 for an SGLang pod. |
-| `router/router_test.go` `TestRouter_HandlerFunc_SGLangAggregated` | Aggregated SGLang request proxies to the backend with no bootstrap mutation. |
-| `router/router_test.go` `TestRouter_HandlerFunc_SGLangDisaggregated` | Both requests fire concurrently, share the same `bootstrap_room`, decode carries `bootstrap_host` = prefill pod IP. |
+| `webhook/model_validator_test.go` `TestValidateSGLangReservedFlags` | Rejects worker.config keys the converter hard-codes (port/host/disaggregation-mode/...); allows non-reserved keys such as `disaggregation-transfer-backend`. |
 
 ##### Layer 3 — Controller-manager E2E (Kind, no GPU)
 
@@ -269,11 +262,11 @@ bootstrap protocol:
 
 ##### Layer 4 — Router E2E (Kind, no GPU)
 
-`test/e2e/router/` already exercises the router against fake backends per
-engine. The unit-level router tests above
-(`TestRouter_HandlerFunc_SGLang*`) cover the SGLang bootstrap protocol
-semantics; the router E2E suite can be extended with a `ModelServer-sglang.yaml`
-testdata fixture if a kind-based check is desired.
+Out of scope for this PR. The router-side SGLang tokenizer adapter and
+per-engine endpoint resolution land in a separate PR; that PR will own the
+matching router unit and E2E coverage. The pre-existing `pkg/kthena-router/
+backend/sglang/metrics.go`, `connectors/sglang.go`, and router KV-connector
+auto-selection on `InferenceEngine == SGLang` are unchanged here.
 
 ##### Layer 5 — GPU verification (requires real hardware)
 
@@ -303,11 +296,6 @@ Disaggregated SGLang on a two-GPU node:
 
 ### Alternatives
 
-- **Reuse the vLLM tokenizer adapter for SGLang.** Rejected: SGLang's
-  `/tokenize` request/response schema and field names differ from vLLM and
-  drift across SGLang versions; reusing the vLLM adapter would silently
-  produce wrong tokenizations for prefix-cache scoring. A dedicated adapter
-  with defensive response parsing is more robust.
 - **Keep rejecting SGLang in the converter; require hand-written
   `ModelServing` YAML.** Rejected: that leaves SGLang a second-class citizen,
   duplicates the rollout/gang/drain logic users would have to hand-author, and
@@ -325,3 +313,43 @@ Disaggregated SGLang on a two-GPU node:
   narrowing the `ModelBackendType` enum to only what is wired
   (`vLLM;vLLMDisaggregated;SGLang;SGLangDisaggregated`) avoids advertising
   unimplemented backends in the CRD schema.
+
+### Known Limitations / Follow-ups
+
+These are intentionally out of scope for the first PR but tracked here so they
+are not lost:
+
+- **Readiness probe uses `/health`, not `/health_generate`.** SGLang's
+  `/health` returns 200 once the HTTP process is up — *before* model weights
+  finish loading — so the router can briefly route to a pod that 503s. SGLang
+  also exposes `/health_generate`, which runs an actual generation and only
+  succeeds once the model is serving. A follow-up should switch the *readiness*
+  probe to `/health_generate` (keeping `/health` for liveness) so traffic is
+  gated on true model-readiness. Deferred because the longer warmup cost of
+  `/health_generate` needs measuring against the `initialDelaySeconds` budget.
+- **`--served-model-name` is not auto-defaulted.** If the user omits
+  `served-model-name` in `worker.config`, SGLang advertises the model under its
+  on-disk path on `/v1/models`, so the auto-created `ModelRoute` (whose
+  `modelName` is the ModelBooster name) will not match and routing fails. The
+  examples set it explicitly. A follow-up should inject
+  `--served-model-name <model.Name>` when the user did not supply one, matching
+  what the router expects.
+- **Disaggregated bootstrap wiring is minimal.** `buildSGLangCommands` emits
+  only `--disaggregation-mode` and `--disaggregation-transfer-backend`. The
+  SGLang bootstrap server port (default 8998) is not exposed as a
+  `containerPort`, and the engine binds `--host 0.0.0.0` rather than the pod
+  IP. The router's `ConnectorTypeSGLang` injects `bootstrap_host`/
+  `bootstrap_room` per request, so aggregated and router-orchestrated PD work,
+  but a fuller PD design (explicit bootstrap port exposure, host advertisement)
+  is needed before disaggregated SGLang is GPU-validated. Disaggregated is not
+  part of the tested path in the first PR.
+- **`spec.topologySpreadConstraints` in the launch templates is dead config.**
+  `ModelServing.Spec` has no `topologySpreadConstraints` field, so the block
+  present in `vllm.yaml`/`sglang.yaml` is silently dropped by
+  `loadModelServingTemplate`. It was deliberately *not* carried into
+  `sglang-pd.yaml` to avoid misleading no-op YAML. Real anti-affinity/spread
+  for engine pods should be expressed at the pod template
+  (`entryTemplate.spec.topologySpreadConstraints`, a real `PodSpec` field) for
+  both vLLM and SGLang in a separate change.
+- **Multi-node (Pods > 1).** Explicitly rejected at convert time with a clear
+  error; no Ray/torchrun bootstrap template is provided for SGLang in v1.

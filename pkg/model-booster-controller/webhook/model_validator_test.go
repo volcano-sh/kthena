@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -171,6 +172,81 @@ func TestValidateBackendWorkerTypes_SGLang(t *testing.T) {
 			),
 			wantValid: false,
 			errSubstr: "SGLangDisaggregated",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			valid, errorMsg := validator.validateModel(tt.model)
+			assert.Equal(t, tt.wantValid, valid, "errorMsg=%s", errorMsg)
+			if tt.errSubstr != "" {
+				assert.Contains(t, errorMsg, tt.errSubstr)
+			}
+		})
+	}
+}
+
+func TestValidateSGLangReservedFlags(t *testing.T) {
+	validator := &ModelValidator{}
+	mkModel := func(backendType registryv1alpha1.ModelBackendType, raw string) *registryv1alpha1.ModelBooster {
+		w := registryv1alpha1.ModelWorker{
+			Type: registryv1alpha1.ModelWorkerTypeServer, Pods: 1, Image: "sglang:latest",
+		}
+		if backendType == registryv1alpha1.ModelBackendTypeSGLangDisaggregated {
+			w.Type = registryv1alpha1.ModelWorkerTypePrefill
+		}
+		if raw != "" {
+			w.Config = apiextensionsv1.JSON{Raw: []byte(raw)}
+		}
+		workers := []registryv1alpha1.ModelWorker{w}
+		if backendType == registryv1alpha1.ModelBackendTypeSGLangDisaggregated {
+			workers = append(workers, registryv1alpha1.ModelWorker{
+				Type: registryv1alpha1.ModelWorkerTypeDecode, Pods: 1, Image: "sglang:latest",
+			})
+		}
+		return &registryv1alpha1.ModelBooster{
+			ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "default"},
+			Spec: registryv1alpha1.ModelBoosterSpec{
+				Backend: registryv1alpha1.ModelBackend{
+					Name: "b1", Type: backendType, MinReplicas: 1, MaxReplicas: 1, Workers: workers,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		model     *registryv1alpha1.ModelBooster
+		wantValid bool
+		errSubstr string
+	}{
+		{
+			name:      "non-reserved flags are allowed",
+			model:     mkModel(registryv1alpha1.ModelBackendTypeSGLang, `{"mem-fraction-static":"0.85","trust-remote-code":""}`),
+			wantValid: true,
+		},
+		{
+			name:      "port override is rejected",
+			model:     mkModel(registryv1alpha1.ModelBackendTypeSGLang, `{"port":"8080"}`),
+			wantValid: false,
+			errSubstr: "managed by kthena",
+		},
+		{
+			name:      "host override (underscore form) is rejected",
+			model:     mkModel(registryv1alpha1.ModelBackendTypeSGLang, `{"host":"127.0.0.1"}`),
+			wantValid: false,
+			errSubstr: "managed by kthena",
+		},
+		{
+			name:      "disaggregation-mode override is rejected for disaggregated",
+			model:     mkModel(registryv1alpha1.ModelBackendTypeSGLangDisaggregated, `{"disaggregation_mode":"prefill"}`),
+			wantValid: false,
+			errSubstr: "managed by kthena",
+		},
+		{
+			name:      "disaggregation-transfer-backend stays user-overridable",
+			model:     mkModel(registryv1alpha1.ModelBackendTypeSGLangDisaggregated, `{"disaggregation-transfer-backend":"nixl"}`),
+			wantValid: true,
 		},
 	}
 

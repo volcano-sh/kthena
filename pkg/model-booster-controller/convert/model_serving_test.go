@@ -25,6 +25,7 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/env"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -345,14 +346,24 @@ func TestBuildSGLangDisaggregatedModelServing(t *testing.T) {
 		if !ok {
 			continue
 		}
-		var engine *corev1.Container
+		var engine, runtime *corev1.Container
 		for i := range r.EntryTemplate.Spec.Containers {
-			if r.EntryTemplate.Spec.Containers[i].Name == "sglang" {
+			switch r.EntryTemplate.Spec.Containers[i].Name {
+			case "engine":
 				engine = &r.EntryTemplate.Spec.Containers[i]
-				break
+			case "runtime":
+				runtime = &r.EntryTemplate.Spec.Containers[i]
 			}
 		}
-		assert.NotNil(t, engine, "role %q must have an sglang engine container", expectedRole)
+		assert.NotNil(t, engine, "role %q must have an engine container", expectedRole)
+		assert.NotNil(t, runtime, "role %q must have a runtime sidecar", expectedRole)
+		if runtime != nil {
+			args := strings.Join(runtime.Args, " ")
+			assert.Contains(t, args, "--engine sglang",
+				"role %q runtime sidecar must receive --engine sglang (the runtime rejects 'sglangdisaggregated')", expectedRole)
+			assert.NotContains(t, args, "sglangdisaggregated",
+				"role %q runtime sidecar must not receive 'sglangdisaggregated'", expectedRole)
+		}
 		if engine == nil {
 			continue
 		}
@@ -365,6 +376,22 @@ func TestBuildSGLangDisaggregatedModelServing(t *testing.T) {
 		for _, e := range engine.Env {
 			assert.NotEqual(t, "POD_IP", e.Name, "role %q: POD_IP env is unused once SGLang binds 0.0.0.0", expectedRole)
 		}
+
+		assert.NotNil(t, engine.Lifecycle, "role %q engine must have a preStop drain hook", expectedRole)
+		if engine.Lifecycle != nil && engine.Lifecycle.PreStop != nil {
+			drain := strings.Join(engine.Lifecycle.PreStop.Exec.Command, " ")
+			assert.Contains(t, drain, "sglang:num_running_reqs", "role %q drain must inspect SGLang metrics", expectedRole)
+		}
+		hasDshm := false
+		for _, vm := range engine.VolumeMounts {
+			if vm.MountPath == "/dev/shm" {
+				hasDshm = true
+			}
+		}
+		assert.True(t, hasDshm, "role %q engine must mount a memory-backed /dev/shm", expectedRole)
+
+		assert.NotNil(t, r.EntryTemplate.Spec.TerminationGracePeriodSeconds,
+			"role %q must set terminationGracePeriodSeconds to bound the drain", expectedRole)
 	}
 }
 
@@ -390,6 +417,41 @@ func TestBuildSGLangDisaggregatedModelServerRouting(t *testing.T) {
 	assert.Equal(t, int32(30000), spec.WorkloadPort.Port)
 	assert.Nil(t, spec.KVConnector)
 	assert.NotNil(t, spec.WorkloadSelector.PDGroup)
+}
+
+func TestBuildSGLangCommandsTransferBackendDedup(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{"dash form", `{"disaggregation-transfer-backend":"nixl"}`, "nixl"},
+		{"underscore form", `{"disaggregation_transfer_backend":"nixl"}`, "nixl"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &apiextensionsv1.JSON{Raw: []byte(tc.config)}
+			cmd, err := buildSGLangCommands(cfg, "/tmp/model", "prefill")
+			assert.NoError(t, err)
+			occurrences := 0
+			for i, tok := range cmd {
+				if tok == "--disaggregation-transfer-backend" {
+					occurrences++
+					if i+1 < len(cmd) {
+						assert.Equal(t, tc.want, cmd[i+1])
+					}
+				}
+			}
+			assert.Equal(t, 1, occurrences,
+				"--disaggregation-transfer-backend must appear exactly once, got %v", cmd)
+		})
+	}
+
+	t.Run("default applied when user did not set it", func(t *testing.T) {
+		cmd, err := buildSGLangCommands(nil, "/tmp/model", "decode")
+		assert.NoError(t, err)
+		assert.Contains(t, strings.Join(cmd, " "), "--disaggregation-transfer-backend mooncake")
+	})
 }
 
 func TestBuildCacheVolume(t *testing.T) {

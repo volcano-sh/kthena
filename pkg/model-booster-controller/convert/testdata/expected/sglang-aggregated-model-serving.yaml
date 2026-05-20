@@ -134,12 +134,7 @@ spec:
                   - /bin/sh
                   - -c
                   - |
-                    # Drain in-flight requests before termination. Bounded
-                    # to ~300s so a stuck/absent metric cannot block past
-                    # terminationGracePeriodSeconds. Sums all series so
-                    # multi-model pods are handled, and uses an integer
-                    # comparison so Prometheus float formatting ("0" vs
-                    # "0.0") does not matter.
+                    # Drain in-flight requests, bounded so it cannot exceed terminationGracePeriodSeconds.
                     i=0
                     while [ $i -lt 60 ]; do
                       METRICS=$(curl -sf http://localhost:30000/metrics 2>/dev/null) || {
@@ -156,6 +151,13 @@ spec:
                       sleep 5
                     done
                     echo "Terminating: drain deadline reached, proceeding" >> /proc/1/fd/1
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: 30000
+              initialDelaySeconds: 300
+              periodSeconds: 15
             name: engine
             ports:
             - containerPort: 30000
@@ -164,11 +166,8 @@ spec:
               httpGet:
                 path: /health
                 port: 30000
-                scheme: HTTP
               initialDelaySeconds: 180
               periodSeconds: 5
-              successThreshold: 1
-              timeoutSeconds: 1
             resources:
               limits:
                 cpu: "4"

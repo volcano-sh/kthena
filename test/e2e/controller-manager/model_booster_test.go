@@ -138,12 +138,12 @@ func TestSGLangModelMaterialization(t *testing.T) {
 
 			var engine *corev1.Container
 			for i := range r.EntryTemplate.Spec.Containers {
-				if r.EntryTemplate.Spec.Containers[i].Name == "sglang" {
+				if r.EntryTemplate.Spec.Containers[i].Name == "engine" {
 					engine = &r.EntryTemplate.Spec.Containers[i]
 					break
 				}
 			}
-			require.NotNil(t, engine, "role %q must have an sglang engine container", expectedRole)
+			require.NotNil(t, engine, "role %q must have an engine container", expectedRole)
 			command := strings.Join(engine.Command, " ")
 			assert.Contains(t, command, "--disaggregation-mode "+expectedRole)
 			assert.Contains(t, command, "--disaggregation-transfer-backend mooncake")

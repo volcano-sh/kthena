@@ -18,12 +18,15 @@ spec:
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
             initContainers: ${INIT_CONTAINERS}
+            terminationGracePeriodSeconds: 300
+            volumes: ${VOLUMES}
             containers:
               - name: runtime
                 image: ${MODEL_SERVING_RUNTIME_IMAGE}
                 ports:
                   - containerPort: ${MODEL_SERVING_RUNTIME_PORT}
                 env: ${ENGINE_PREFILL_ENV}
+                envFrom: ${MODEL_DOWNLOAD_ENVFROM}
                 args:
                   - --port
                   - ${MODEL_SERVING_RUNTIME_PORT}
@@ -37,7 +40,13 @@ spec:
                   - ${MODEL_SERVING_RUNTIME_POD}
                   - --model
                   - ${MODEL_NAME}
-              - name: sglang
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: ${MODEL_SERVING_RUNTIME_PORT}
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+              - name: engine
                 image: ${ENGINE_PREFILL_IMAGE}
                 ports:
                   - containerPort: 30000
@@ -45,6 +54,7 @@ spec:
                 command: ${ENGINE_PREFILL_COMMAND}
                 imagePullPolicy: IfNotPresent
                 resources: ${ENGINE_PREFILL_RESOURCES}
+                volumeMounts: ${VOLUME_MOUNTS}
                 readinessProbe:
                   initialDelaySeconds: 180
                   periodSeconds: 5
@@ -59,8 +69,30 @@ spec:
                   httpGet:
                     path: /health
                     port: 30000
-                volumeMounts: ${VOLUME_MOUNTS}
-            volumes: ${VOLUMES}
+                lifecycle:
+                  preStop:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - |
+                          # Drain in-flight requests, bounded so it cannot exceed terminationGracePeriodSeconds.
+                          i=0
+                          while [ $i -lt 60 ]; do
+                            METRICS=$(curl -sf http://localhost:30000/metrics 2>/dev/null) || {
+                              echo "Terminating: metrics endpoint unreachable, engine already stopping" >> /proc/1/fd/1
+                              exit 0
+                            }
+                            PENDING=$(echo "$METRICS" | awk '/^sglang:num_running_reqs/ || /^sglang:num_queue_reqs/ {s+=$2} END {printf "%d", s+0}')
+                            if [ "$PENDING" -le 0 ]; then
+                              echo "Terminating: drained, no active or waiting requests" >> /proc/1/fd/1
+                              exit 0
+                            fi
+                            echo "Terminating: $PENDING in-flight requests, waiting" >> /proc/1/fd/1
+                            i=$((i+1))
+                            sleep 5
+                          done
+                          echo "Terminating: drain deadline reached, proceeding" >> /proc/1/fd/1
         workerReplicas: 0
         workerTemplate:
           spec:
@@ -72,6 +104,8 @@ spec:
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
             initContainers: ${INIT_CONTAINERS}
+            terminationGracePeriodSeconds: 300
+            volumes: ${VOLUMES}
             containers:
               - name: runtime
                 image: ${MODEL_SERVING_RUNTIME_IMAGE}
@@ -92,7 +126,13 @@ spec:
                   - ${MODEL_SERVING_RUNTIME_POD}
                   - --model
                   - ${MODEL_NAME}
-              - name: sglang
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: ${MODEL_SERVING_RUNTIME_PORT}
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+              - name: engine
                 image: ${ENGINE_DECODE_IMAGE}
                 ports:
                   - containerPort: 30000
@@ -100,6 +140,7 @@ spec:
                 command: ${ENGINE_DECODE_COMMAND}
                 imagePullPolicy: IfNotPresent
                 resources: ${ENGINE_DECODE_RESOURCES}
+                volumeMounts: ${VOLUME_MOUNTS}
                 readinessProbe:
                   initialDelaySeconds: 180
                   periodSeconds: 5
@@ -114,8 +155,30 @@ spec:
                   httpGet:
                     path: /health
                     port: 30000
-                volumeMounts: ${VOLUME_MOUNTS}
-            volumes: ${VOLUMES}
+                lifecycle:
+                  preStop:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - |
+                          # Drain in-flight requests, bounded so it cannot exceed terminationGracePeriodSeconds.
+                          i=0
+                          while [ $i -lt 60 ]; do
+                            METRICS=$(curl -sf http://localhost:30000/metrics 2>/dev/null) || {
+                              echo "Terminating: metrics endpoint unreachable, engine already stopping" >> /proc/1/fd/1
+                              exit 0
+                            }
+                            PENDING=$(echo "$METRICS" | awk '/^sglang:num_running_reqs/ || /^sglang:num_queue_reqs/ {s+=$2} END {printf "%d", s+0}')
+                            if [ "$PENDING" -le 0 ]; then
+                              echo "Terminating: drained, no active or waiting requests" >> /proc/1/fd/1
+                              exit 0
+                            fi
+                            echo "Terminating: $PENDING in-flight requests, waiting" >> /proc/1/fd/1
+                            i=$((i+1))
+                            sleep 5
+                          done
+                          echo "Terminating: drain deadline reached, proceeding" >> /proc/1/fd/1
         workerReplicas: 0
         workerTemplate:
           spec:
