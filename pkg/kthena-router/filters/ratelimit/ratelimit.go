@@ -65,9 +65,9 @@ type TokenRateLimiter struct {
 	inputLimiter  map[string]Limiter
 	outputLimiter map[string]Limiter
 
-	// redisCLient maps redis addresses to their clients, allowing each model
+	// Redis Clients maps redis addresses to their clients, allowing each model
 	// to use its own redis instance for global rate limiting
-	redisClient map[string]*redis.Client
+	redisClients map[string]*redis.Client
 
 	tokenizer tokenizer.Tokenizer
 }
@@ -92,11 +92,11 @@ func (l *LocalLimiter) Tokens() float64 {
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
 func NewTokenRateLimiter() *TokenRateLimiter {
 	return &TokenRateLimiter{
-    inputLimiter:  make(map[string]Limiter),
-    outputLimiter: make(map[string]Limiter),
-    redisClients:  make(map[string]*redis.Client),
-    tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
-}
+		inputLimiter:  make(map[string]Limiter),
+		outputLimiter: make(map[string]Limiter),
+		redisClients:  make(map[string]*redis.Client),
+		tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
+	}
 }
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
@@ -146,45 +146,46 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	// Determine if we should use global or local rate limiting
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
 
-	// look up or create a redis client for this specific address
-	// using a per-address map will make sure models configured with different
-	// redis instances are not accidentally sharing the same client
 	if useGlobal {
-    addr := ratelimit.Global.Redis.Address
-    client, exists := r.redisClients[addr]
-    if !exists {
-        client = redis.NewClient(&redis.Options{
-            Addr: addr,
-        })
-        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-        defer cancel()
-        if err := client.Ping(ctx).Err(); err != nil {
-            return fmt.Errorf("failed to connect to redis at %s: %w", addr, err)
-        }
-        r.redisClients[addr] = client
-    }
+		// look up or create a redis client for this specific address
+		// using a per-address map will make sure models configured with different
+		// redis instances are not accidentally sharing the same client
+		addr := ratelimit.Global.Redis.Address
+		client, exists := r.redisClients[addr]
+		if !exists {
+			client = redis.NewClient(&redis.Options{
+				Addr: addr,
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := client.Ping(ctx).Err(); err != nil {
+				return fmt.Errorf("failed to connect to redis at %s: %w", addr, err)
+			}
+			r.redisClients[addr] = client
+		}
 
-    if ratelimit.InputTokensPerUnit != nil {
-        r.inputLimiter[model] = NewGlobalRateLimiter(
-            client,
-            "kthena:ratelimit",
-            model,
-            "input",
-            *ratelimit.InputTokensPerUnit,
-            ratelimit.Unit,
-        )
-    }
+		if ratelimit.InputTokensPerUnit != nil {
+			r.inputLimiter[model] = NewGlobalRateLimiter(
+				client,
+				"kthena:ratelimit",
+				model,
+				"input",
+				*ratelimit.InputTokensPerUnit,
+				ratelimit.Unit,
+			)
+		}
 
-    if ratelimit.OutputTokensPerUnit != nil {
-        r.outputLimiter[model] = NewGlobalRateLimiter(
-            client,
-            "kthena:ratelimit",
-            model,
-            "output",
-            *ratelimit.OutputTokensPerUnit,
-            ratelimit.Unit,
-        )
-    } else {
+		if ratelimit.OutputTokensPerUnit != nil {
+			r.outputLimiter[model] = NewGlobalRateLimiter(
+				client,
+				"kthena:ratelimit",
+				model,
+				"output",
+				*ratelimit.OutputTokensPerUnit,
+				ratelimit.Unit,
+			)
+		}
+	} else {
 		// Create local rate limiters
 		duration := getTimeUnitDuration(ratelimit.Unit)
 
