@@ -480,8 +480,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 	}
 
-	req := c.Request
-	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
+	if err := r.proxyModelEndpoint(c, ctx, modelRequest, port); err != nil {
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
 		c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
@@ -613,7 +612,6 @@ func (r *Router) applyURLRewrite(c *gin.Context, urlRewrite *gatewayv1.HTTPURLRe
 
 func (r *Router) proxy(
 	c *gin.Context,
-	req *http.Request,
 	ctx *framework.Context,
 	stream bool,
 	port int32,
@@ -629,21 +627,16 @@ func (r *Router) proxy(
 		}
 	}
 
-	// Capture body bytes once so each retry attempt gets a fresh reader.
-	// transport.RoundTrip drains req.Body on every call, so reusing the same
-	// request across loop iterations sends an empty body to subsequent pods.
-	var bodyBytes []byte
-	if req.Body != nil {
-		b, err := io.ReadAll(req.Body)
-		req.Body.Close()
-		if err != nil {
-			return fmt.Errorf("failed to read request body: %w", err)
-		}
-		bodyBytes = b
-	}
-
+	req := c.Request
 	for i := 0; i < len(ctx.BestPods); i++ {
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return fmt.Errorf("failed to rebuild request body: %w", err)
+			}
+			req.Body = body
+		}
+
 		pod := ctx.BestPods[i]
 		podObj := pod.GetPod()
 		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
@@ -651,7 +644,6 @@ func (r *Router) proxy(
 		// Track this request as in-flight to the chosen pod. This is instant and
 		// feeds the scheduler immediately, avoiding the ~1 s engine-metrics lag.
 		r.store.IncrPodOnFlightRequests(podName)
-
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
@@ -681,7 +673,6 @@ func (r *Router) proxy(
 
 func (r *Router) proxyModelEndpoint(
 	c *gin.Context,
-	req *http.Request,
 	ctx *framework.Context,
 	modelRequest ModelRequest,
 	port int32,
@@ -699,12 +690,11 @@ func (r *Router) proxyModelEndpoint(
 
 	// proxy to pd aggregated pod
 	if ctx.BestPods != nil {
-		// build request
-		decodeRequest := connectors.BuildDecodeRequest(c, req, modelRequest)
+		c.Request = connectors.BuildDecodeRequest(c, c.Request, modelRequest)
 		stream := isStreaming(modelRequest)
 		modelName := ctx.Model
 		userID := c.GetString(common.UserIdKey)
-		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
+		err := r.proxy(c, ctx, stream, port, func(resp handlers.OpenAIResponse) {
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
@@ -741,7 +731,7 @@ func (r *Router) proxyModelEndpoint(
 	}
 
 	// PD disaggregated mode - use KV connector
-	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port)
+	return r.proxyToPDDisaggregated(c, ctx, kvConnector, modelRequest, port)
 }
 
 func (r *Router) GetModelServer(modelName string, req *http.Request) (*v1alpha1.ModelServer, error) {
@@ -942,7 +932,6 @@ func (r *Router) getKVConnector(modelServerName types.NamespacedName) (connector
 // proxyToPDDisaggregated handles PD disaggregated routing using KV connectors
 func (r *Router) proxyToPDDisaggregated(
 	c *gin.Context,
-	req *http.Request,
 	ctx *framework.Context,
 	kvConnector connectors.KVConnector,
 	modelRequest ModelRequest,

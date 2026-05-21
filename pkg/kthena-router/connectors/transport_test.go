@@ -379,6 +379,21 @@ func TestBuildDecodeRequest(t *testing.T) {
 
 			// URL scheme should be http
 			assert.Equal(t, "http", result.URL.Scheme)
+
+			// Verify GetBody is set and returns the same content as Body
+			require.NotNil(t, result.GetBody)
+			getBodyReader, err := result.GetBody()
+			require.NoError(t, err)
+			getBodyBytes, err := io.ReadAll(getBodyReader)
+			require.NoError(t, err)
+			assert.Equal(t, body, getBodyBytes, "GetBody should return the same content as Body")
+
+			// Verify GetBody is reusable (can be called multiple times)
+			getBodyReader2, err := result.GetBody()
+			require.NoError(t, err)
+			getBodyBytes2, err := io.ReadAll(getBodyReader2)
+			require.NoError(t, err)
+			assert.Equal(t, body, getBodyBytes2, "GetBody should be reusable and return the same content on subsequent calls")
 		})
 	}
 }

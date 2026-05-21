@@ -125,8 +125,11 @@ func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[stri
 
 	reqCopy := req.Clone(req.Context())
 	reqCopy.URL.Scheme = "http"
-	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
+	reqCopy.Body = io.NopCloser(bytes.NewReader(body))
 	reqCopy.ContentLength = int64(len(body))
+	reqCopy.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
 
 	return reqCopy
 }
