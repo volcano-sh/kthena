@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -45,6 +46,30 @@ const (
 func extractTokenFromHeader(req *http.Request) string {
 	value := req.Header.Get(header)
 	return strings.TrimPrefix(value, prefix)
+}
+
+func extractTokenFromBody(c *gin.Context) string {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		klog.V(4).Infof("failed to read request body: %v", err)
+		return ""
+	}
+
+	c.Request.Body = io.NopCloser(strings.NewReader(string(body)))
+
+	var bodyData map[string]interface{}
+	if err := json.Unmarshal(body, &bodyData); err != nil {
+		klog.V(4).Infof("failed to parse request body as JSON: %v", err)
+		return ""
+	}
+
+	if tokenValue, exists := bodyData["userId"]; exists {
+		if tokenStr, ok := tokenValue.(string); ok {
+			return tokenStr
+		}
+	}
+
+	return ""
 }
 
 // JWTAuthenticator provides JWT token validation with automatic JWKS rotation support
@@ -313,6 +338,12 @@ func (j *JWTAuthenticator) Authenticate() gin.HandlerFunc {
 		if j.enabled {
 			// Extract and validate the JWT token
 			token := extractTokenFromHeader(c.Request)
+
+			// Fallback: try to read token from request body if not in header
+			if token == "" {
+				token = extractTokenFromBody(c)
+			}
+
 			if token == "" {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization header missing or invalid"})
 				return

@@ -17,7 +17,9 @@ limitations under the License.
 package auth
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -64,6 +66,85 @@ func TestExtractTokenFromHeader(t *testing.T) {
 
 			result := extractTokenFromHeader(req)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestExtractTokenFromBody(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		expected     string
+		checkRestore bool
+	}{
+		{
+			name:         "valid token in body",
+			body:         `{"userId":"valid-token-string"}`,
+			expected:     "valid-token-string",
+			checkRestore: true,
+		},
+		{
+			name:         "token with special characters",
+			body:         `{"userId":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"}`,
+			expected:     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
+			checkRestore: true,
+		},
+		{
+			name:         "missing userId field",
+			body:         `{"token":"some-token"}`,
+			expected:     "",
+			checkRestore: true,
+		},
+		{
+			name:         "userId field is not a string",
+			body:         `{"userId":123}`,
+			expected:     "",
+			checkRestore: true,
+		},
+		{
+			name:         "userId is null",
+			body:         `{"userId":null}`,
+			expected:     "",
+			checkRestore: true,
+		},
+		{
+			name:         "empty JSON object",
+			body:         `{}`,
+			expected:     "",
+			checkRestore: true,
+		},
+		{
+			name:         "invalid JSON",
+			body:         `{invalid json}`,
+			expected:     "",
+			checkRestore: false,
+		},
+		{
+			name:         "empty body",
+			body:         ``,
+			expected:     "",
+			checkRestore: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a request with body
+			req := httptest.NewRequest("POST", "/", bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = req
+
+			// Extract token from body
+			result := extractTokenFromBody(c)
+			assert.Equal(t, tt.expected, result)
+
+			// Verify body is restored for later use
+			if tt.checkRestore {
+				restoredBody, err := io.ReadAll(c.Request.Body)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.body, string(restoredBody))
+			}
 		})
 	}
 }
@@ -176,6 +257,41 @@ func TestJWTAuthenticatorMiddleware(t *testing.T) {
 		// Test that middleware returns 401 when empty token provided
 		middleware(c)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
+	t.Run("enabled authenticator with token in body fallback", func(t *testing.T) {
+		validator := &JWTAuthenticator{enabled: true}
+		middleware := validator.Authenticate()
+
+		// Create test request with invalid body (no userId field) to test fallback
+		// When no token in header and body extraction returns empty, should get 401
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		bodyContent := `{"token":"some-value"}` // Wrong field name, not "userId"
+		c.Request = httptest.NewRequest("POST", "/", bytes.NewBufferString(bodyContent))
+
+		// Test that middleware returns 401 when token not found in header or body
+		middleware(c)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
+	t.Run("enabled authenticator verifies body restoration", func(t *testing.T) {
+		validator := &JWTAuthenticator{enabled: true}
+		middleware := validator.Authenticate()
+
+		// Create test request with body to verify it's restored after token extraction
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		bodyContent := `{"data":"preserved"}`
+		c.Request = httptest.NewRequest("POST", "/", bytes.NewBufferString(bodyContent))
+
+		// Call middleware which attempts to read body for token extraction
+		middleware(c)
+
+		// Verify body is still readable (was restored)
+		restoredBody, err := io.ReadAll(c.Request.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, bodyContent, string(restoredBody))
 	})
 }
 
