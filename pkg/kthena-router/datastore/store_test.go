@@ -35,6 +35,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // ptr is a helper function to get pointer to a value
@@ -1899,4 +1900,280 @@ func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
 	server, _, _, err := s.MatchModelServer("my-model", req, "")
 	assert.NoError(t, err)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, server)
+}
+
+func TestMatchModelServer_GatewayScoped(t *testing.T) {
+	kindGateway := gatewayv1.Kind("Gateway")
+	sectionHTTPS := gatewayv1.SectionName("https")
+	sectionNonexistent := gatewayv1.SectionName("nonexistent-listener")
+
+	tests := []struct {
+		name           string
+		setupStore     func() *store
+		modelName      string
+		gatewayKey     string
+		request        *http.Request
+		expectedServer types.NamespacedName
+		expectedIsLora bool
+		expectedError  bool
+	}{
+		{
+			name: "route matches correct gateway",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/my-gateway",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "llama3-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
+			name: "route skipped for different gateway",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gateway-a"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gateway-b"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "gateway-a", Kind: &kindGateway}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "server-a", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/gateway-b",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "route without parentRefs skipped when gatewayKey is set",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama3",
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "route without parentRefs matches when gatewayKey is empty",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama3",
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:      "llama3",
+			gatewayKey:     "",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "llama3-server"},
+			expectedError:  false,
+		},
+		{
+			name: "gateway not in store returns error",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "sectionName matches existing listener",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}, {Name: "https"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTPS}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/my-gateway",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "llama3-server"},
+			expectedError:  false,
+		},
+		{
+			name: "sectionName does not match any listener",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionNonexistent}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "lora-only route matched via gateway key",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "lora-route"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						LoraAdapters: []string{"math-lora"},
+						ParentRefs:   []gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "lora-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:      "math-lora",
+			gatewayKey:     "default/my-gateway",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "lora-server"},
+			expectedIsLora: true,
+			expectedError:  false,
+		},
+		{
+			name: "multiple routes — only matching gateway selected",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gateway-a"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gateway-b"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				kindA := gatewayv1.Kind("Gateway")
+				kindB := gatewayv1.Kind("Gateway")
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "gateway-a", Kind: &kindA}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "server-a", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-b"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "gateway-b", Kind: &kindB}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "server-b", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/gateway-a",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "server-a"},
+			expectedError:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := tt.setupStore()
+			server, isLora, _, err := s.MatchModelServer(tt.modelName, tt.request, tt.gatewayKey)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedIsLora, isLora)
+			assert.Equal(t, tt.expectedServer, server)
+		})
+	}
 }

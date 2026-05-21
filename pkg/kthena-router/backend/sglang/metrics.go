@@ -17,8 +17,6 @@ limitations under the License.
 package sglang
 
 import (
-	"fmt"
-
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 
@@ -70,7 +68,7 @@ func NewSglangEngine() *sglangEngine {
 }
 
 func (engine *sglangEngine) GetPodMetrics(pod *corev1.Pod) (map[string]*dto.MetricFamily, error) {
-	url := fmt.Sprintf("http://%s:%d/metrics", pod.Status.PodIP, engine.MetricPort)
+	url := metrics.PodEndpointURL(pod.Status.PodIP, engine.MetricPort, "/metrics")
 	allMetrics, err := metrics.ParseMetricsURL(url)
 	if err != nil {
 		return nil, err

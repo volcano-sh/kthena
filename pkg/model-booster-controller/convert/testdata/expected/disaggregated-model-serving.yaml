@@ -11,6 +11,8 @@ metadata:
   namespace: demo
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1
+      blockOwnerDeletion: true
+      controller: true
       kind: ModelBooster
       name: ds-r1-qwen-7b-pd
       uid: randomUID

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -76,8 +78,8 @@ type ModelBoosterController struct {
 	kubeInformerFactory               informers.SharedInformerFactory
 	workQueue                         workqueue.TypedRateLimitingInterface[any]
 	// loraUpdateCache stores the previous model version for LoRA adapter comparison
-	// Key format: "namespace/name:generation" to avoid version conflicts
-	loraUpdateCache map[string]*workload.ModelBooster
+	loraUpdateCacheMu sync.Mutex
+	loraUpdateCache   map[string]*workload.ModelBooster
 }
 
 func (mc *ModelBoosterController) Run(ctx context.Context, workers int) {
@@ -170,7 +172,9 @@ func (mc *ModelBoosterController) updateModelBooster(old any, new any) {
 	if oldModel.Status.ObservedGeneration != newModel.Generation {
 		// Store the old model in cache with generation-specific key to avoid conflicts
 		cacheKey := fmt.Sprintf("%s/%s:%d", newModel.Namespace, newModel.Name, newModel.Generation)
+		mc.loraUpdateCacheMu.Lock()
 		mc.loraUpdateCache[cacheKey] = oldModel.DeepCopy()
+		mc.loraUpdateCacheMu.Unlock()
 
 		mc.enqueueModelBooster(newModel)
 	}
@@ -192,10 +196,11 @@ func (mc *ModelBoosterController) reconcile(ctx context.Context, namespaceAndNam
 	if err != nil {
 		return fmt.Errorf("invalid resource key: %s", err)
 	}
-	model, err := mc.modelBoosterLister.ModelBoosters(namespace).Get(name)
+	cached, err := mc.modelBoosterLister.ModelBoosters(namespace).Get(name)
 	if err != nil {
 		return client.IgnoreNotFound(err)
 	}
+	model := cached.DeepCopy()
 	klog.InfoS("Start to process model", "namespace", namespace, "model name", model.Name, "model status", model.Status)
 	if len(model.Status.Conditions) == 0 {
 		if err := mc.setModelInitCondition(ctx, model); err != nil {
@@ -256,8 +261,24 @@ func (mc *ModelBoosterController) isModelServingActive(model *workload.ModelBoos
 
 // updateModelBoosterStatus updates model status.
 func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, modelBooster *workload.ModelBooster) error {
-	modelBooster.Status.ObservedGeneration = modelBooster.Generation
-	if _, err := mc.client.WorkloadV1alpha1().ModelBoosters(modelBooster.Namespace).UpdateStatus(ctx, modelBooster, metav1.UpdateOptions{}); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest, err := mc.modelBoosterLister.ModelBoosters(modelBooster.Namespace).Get(modelBooster.Name)
+		if err != nil {
+			return err
+		}
+		updated := latest.DeepCopy()
+		for i := range modelBooster.Status.Conditions {
+			meta.SetStatusCondition(&updated.Status.Conditions, modelBooster.Status.Conditions[i])
+		}
+		updated.Status.ObservedGeneration = updated.Generation
+		res, err := mc.client.WorkloadV1alpha1().ModelBoosters(updated.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		modelBooster.Status = res.Status
+		return nil
+	})
+	if err != nil {
 		klog.Errorf("update modelBooster status failed: %v", err)
 		return err
 	}
@@ -271,6 +292,8 @@ func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, 
 // Cache key format: "namespace/name:generation"
 func (mc *ModelBoosterController) cleanupOutdatedLoraUpdateCache(modelBooster *workload.ModelBooster) {
 	prefix := fmt.Sprintf("%s/%s:", modelBooster.Namespace, modelBooster.Name)
+	mc.loraUpdateCacheMu.Lock()
+	defer mc.loraUpdateCacheMu.Unlock()
 	for key := range mc.loraUpdateCache {
 		if strings.HasPrefix(key, prefix) {
 			// Keep only the current generation entry, remove others

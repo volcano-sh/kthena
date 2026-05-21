@@ -36,7 +36,7 @@ type ModelList struct {
 }
 
 func FetchPodModels(podIP string, port uint32) ([]string, error) {
-	url := fmt.Sprintf("http://%s:%d/v1/models", podIP, port)
+	url := metrics.PodEndpointURL(podIP, port, "/v1/models")
 	resp, err := metrics.HTTPClient().Get(url)
 	if err != nil {
 		return nil, err

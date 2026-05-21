@@ -20,9 +20,12 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lestrrat-go/jwx/v3/jwt"
@@ -45,7 +48,7 @@ func TestExtractTokenFromHeader(t *testing.T) {
 		{
 			name:     "no bearer prefix",
 			header:   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-			expected: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+			expected: "",
 		},
 		{
 			name:     "empty header",
@@ -55,6 +58,21 @@ func TestExtractTokenFromHeader(t *testing.T) {
 		{
 			name:     "bearer with space",
 			header:   "Bearer ",
+			expected: "",
+		},
+		{
+			name:     "lowercase bearer scheme",
+			header:   "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+			expected: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+		},
+		{
+			name:     "bearer token with extra whitespace",
+			header:   "  Bearer   eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9  ",
+			expected: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+		},
+		{
+			name:     "token with embedded whitespace",
+			header:   "Bearer token with space",
 			expected: "",
 		},
 	}
@@ -293,6 +311,18 @@ func TestJWTAuthenticatorMiddleware(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, bodyContent, string(restoredBody))
 	})
+	t.Run("enabled authenticator with invalid authorization scheme", func(t *testing.T) {
+		validator := &JWTAuthenticator{enabled: true}
+		middleware := validator.Authenticate()
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest("GET", "/", nil)
+		c.Request.Header.Set("Authorization", "Basic some-token")
+
+		middleware(c)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
 }
 
 func TestValidateAudiences(t *testing.T) {
@@ -385,4 +415,222 @@ func TestValidateAudiences(t *testing.T) {
 	})
 
 	token.Remove("aud")
+}
+
+// verifies issuer claim is correctly matched against the configured JWKS issuer
+// including mismatch and missing claim cases
+
+func TestValidateIssuer(t *testing.T) {
+	authenticator := &JWTAuthenticator{}
+
+	t.Run("valid issuer", func(t *testing.T) {
+		token := jwt.New()
+		token.Set("iss", "https://valid-issuer.example.com")
+		jwks := &Jwks{Issuer: "https://valid-issuer.example.com"}
+		err := authenticator.validateIssuer(token, jwks)
+		assert.NoError(t, err)
+	})
+
+	t.Run("issuer mismatch", func(t *testing.T) {
+		token := jwt.New()
+		token.Set("iss", "https://wrong-issuer.example.com")
+		jwks := &Jwks{Issuer: "https://expected-issuer.example.com"}
+		err := authenticator.validateIssuer(token, jwks)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid issuer")
+	})
+
+	t.Run("missing issuer claim", func(t *testing.T) {
+		token := jwt.New()
+		jwks := &Jwks{Issuer: "https://expected-issuer.example.com"}
+		err := authenticator.validateIssuer(token, jwks)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid issuer")
+	})
+}
+
+// verify token expiration across all supported claim types(time.Time, float64, json.Number)
+// including expired tokens, valid tokens, invalid names and unsupported types
+
+func TestValidateExpiration(t *testing.T) {
+	authenticator := &JWTAuthenticator{}
+	now := time.Now()
+
+	t.Run("valid expiration as time.Time", func(t *testing.T) {
+		exp := now.Add(1 * time.Hour)
+		err := authenticator.validateExpiration(exp, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("expired token as time.Time", func(t *testing.T) {
+		exp := now.Add(-1 * time.Hour)
+		err := authenticator.validateExpiration(exp, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token has expired")
+	})
+
+	t.Run("valid expiration as float64", func(t *testing.T) {
+		exp := float64(now.Add(1 * time.Hour).Unix())
+		err := authenticator.validateExpiration(exp, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("expired token as float64", func(t *testing.T) {
+		exp := float64(now.Add(-1 * time.Hour).Unix())
+		err := authenticator.validateExpiration(exp, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token has expired")
+	})
+
+	t.Run("valid expiration as json.Number", func(t *testing.T) {
+		exp := json.Number(fmt.Sprintf("%d", now.Add(1*time.Hour).Unix()))
+		err := authenticator.validateExpiration(exp, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("expired token as json.Number", func(t *testing.T) {
+		exp := json.Number(fmt.Sprintf("%d", now.Add(-1*time.Hour).Unix()))
+		err := authenticator.validateExpiration(exp, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token has expired")
+	})
+
+	t.Run("invalid json.Number", func(t *testing.T) {
+		exp := json.Number("not-a-number")
+		err := authenticator.validateExpiration(exp, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid exp value")
+	})
+
+	t.Run("unsupported type", func(t *testing.T) {
+		err := authenticator.validateExpiration("unsupported", now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported exp type")
+	})
+}
+
+// verifies the nbf claim prevents token use before its activation time across all supported types
+// including boundary and invalid value cases
+
+func TestValidateNotBefore(t *testing.T) {
+	authenticator := &JWTAuthenticator{}
+	now := time.Now()
+
+	t.Run("valid nbf as time.Time — token already active", func(t *testing.T) {
+		nbf := now.Add(-1 * time.Minute)
+		err := authenticator.validateNotBefore(nbf, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("token not yet valid as time.Time", func(t *testing.T) {
+		nbf := now.Add(10 * time.Minute)
+		err := authenticator.validateNotBefore(nbf, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token not yet valid")
+	})
+
+	t.Run("valid nbf as float64", func(t *testing.T) {
+		nbf := float64(now.Add(-1 * time.Minute).Unix())
+		err := authenticator.validateNotBefore(nbf, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("token not yet valid as float64", func(t *testing.T) {
+		nbf := float64(now.Add(10 * time.Minute).Unix())
+		err := authenticator.validateNotBefore(nbf, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token not yet valid")
+	})
+
+	t.Run("valid nbf as json.Number", func(t *testing.T) {
+		nbf := json.Number(fmt.Sprintf("%d", now.Add(-1*time.Minute).Unix()))
+		err := authenticator.validateNotBefore(nbf, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("token not yet valid as json.Number", func(t *testing.T) {
+		nbf := json.Number(fmt.Sprintf("%d", now.Add(10*time.Minute).Unix()))
+		err := authenticator.validateNotBefore(nbf, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token not yet valid")
+	})
+
+	t.Run("invalid json.Number", func(t *testing.T) {
+		nbf := json.Number("not-a-number")
+		err := authenticator.validateNotBefore(nbf, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid nbf value")
+	})
+
+	t.Run("unsupported type", func(t *testing.T) {
+		err := authenticator.validateNotBefore("unsupported", now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported nbf type")
+	})
+}
+
+// verifies the iat claim rejects tokens issued too far in the future
+// while allowing a 1 minute clock skew across all supported types
+
+func TestValidateIssuedAt(t *testing.T) {
+	authenticator := &JWTAuthenticator{}
+	now := time.Now()
+
+	t.Run("valid iat as time.Time", func(t *testing.T) {
+		iat := now.Add(-5 * time.Minute)
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("token issued in future as time.Time — exceeds clock skew", func(t *testing.T) {
+		iat := now.Add(2 * time.Minute) // beyond 1 min clock skew
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token issued in the future")
+	})
+
+	t.Run("token within clock skew as time.Time", func(t *testing.T) {
+		iat := now.Add(30 * time.Second) // within 1 min skew
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("valid iat as float64", func(t *testing.T) {
+		iat := float64(now.Add(-5 * time.Minute).Unix())
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("token issued in future as float64", func(t *testing.T) {
+		iat := float64(now.Add(2 * time.Minute).Unix())
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token issued in the future")
+	})
+
+	t.Run("valid iat as json.Number", func(t *testing.T) {
+		iat := json.Number(fmt.Sprintf("%d", now.Add(-5*time.Minute).Unix()))
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.NoError(t, err)
+	})
+
+	t.Run("token issued in future as json.Number", func(t *testing.T) {
+		iat := json.Number(fmt.Sprintf("%d", now.Add(2*time.Minute).Unix()))
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "token issued in the future")
+	})
+
+	t.Run("invalid json.Number", func(t *testing.T) {
+		iat := json.Number("not-a-number")
+		err := authenticator.validateIssuedAt(iat, now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid iat value")
+	})
+
+	t.Run("unsupported type", func(t *testing.T) {
+		err := authenticator.validateIssuedAt("unsupported", now)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported iat type")
+	})
 }

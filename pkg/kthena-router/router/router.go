@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -203,6 +204,13 @@ type ModelRequest map[string]interface{}
 
 func (r *Router) HandlerFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Handle /v1/models endpoint (OpenAI-compatible model listing)
+		if c.Request.Method == http.MethodGet &&
+			(c.Request.URL.Path == "/v1/models" || c.Request.URL.Path == "/models") {
+			r.ListModels(c)
+			return
+		}
+
 		// Step 1: Parse and validate request
 		modelRequest, err := ParseModelRequest(c)
 		if err != nil {
@@ -476,7 +484,7 @@ func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 	}
 
 	modelName, ok := modelRequest["model"].(string)
-	if !ok {
+	if !ok || strings.TrimSpace(modelName) == "" {
 		c.AbortWithStatusJSON(http.StatusNotFound, "model not found")
 		return nil, fmt.Errorf("model not found")
 	}
@@ -810,6 +818,39 @@ func (r *Router) GetModelServer(modelName string, req *http.Request) (*v1alpha1.
 	return modelServer, nil
 }
 
+type modelObject struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+type modelsResponse struct {
+	Object string        `json:"object"`
+	Data   []modelObject `json:"data"`
+}
+
+// ListModels implements the OpenAI-compatible GET /v1/models endpoint.
+// It returns all model names registered via ModelRoutes.
+func (r *Router) ListModels(c *gin.Context) {
+	modelNames := r.store.GetModelNames()
+
+	data := make([]modelObject, 0, len(modelNames))
+	for _, name := range modelNames {
+		data = append(data, modelObject{
+			ID:      name,
+			Object:  "model",
+			Created: 0,
+			OwnedBy: "kthena",
+		})
+	}
+
+	c.JSON(http.StatusOK, modelsResponse{
+		Object: "list",
+		Data:   data,
+	})
+}
+
 func (r *Router) Auth() gin.HandlerFunc {
 	return r.authenticator.Authenticate()
 }
@@ -904,7 +945,7 @@ func doRequest(
 	port int32,
 ) (*http.Response, error) {
 	// step 1: change request URL to prefill pod URL.
-	req.URL.Host = fmt.Sprintf("%s:%d", podIP, port)
+	req.URL.Host = net.JoinHostPort(podIP, strconv.Itoa(int(port)))
 
 	// step 2: use http.Transport to do request to prefill pod.
 	transport := http.DefaultTransport
@@ -997,8 +1038,8 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 
 		// Build addresses for prefill and decode pods
-		prefillAddr := fmt.Sprintf("%s:%d", ctx.PrefillPods[i].Pod.Status.PodIP, port)
-		decodeAddr := fmt.Sprintf("%s:%d", ctx.DecodePods[i].Pod.Status.PodIP, port)
+		prefillAddr := net.JoinHostPort(ctx.PrefillPods[i].Pod.Status.PodIP, strconv.Itoa(int(port)))
+		decodeAddr := net.JoinHostPort(ctx.DecodePods[i].Pod.Status.PodIP, strconv.Itoa(int(port)))
 
 		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 

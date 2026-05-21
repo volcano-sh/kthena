@@ -11,6 +11,8 @@ metadata:
   namespace: default
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1
+      blockOwnerDeletion: true
+      controller: true
       kind: ModelBooster
       name: test-model
       uid: randomUID

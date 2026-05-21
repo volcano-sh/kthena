@@ -207,7 +207,6 @@ func (m *MockStore) GetAllPods() map[types.NamespacedName]*datastore.PodInfo {
 	}
 	return args.Get(0).(map[types.NamespacedName]*datastore.PodInfo)
 }
-
 func (m *MockStore) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute {
 	args := m.Called(namespacedName)
 	if args.Get(0) == nil {
@@ -215,7 +214,6 @@ func (m *MockStore) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute 
 	}
 	return args.Get(0).(*aiv1alpha1.ModelRoute)
 }
-
 func (m *MockStore) AddOrUpdateGateway(gateway *gatewayv1.Gateway) error {
 	args := m.Called(gateway)
 	return args.Error(0)
@@ -302,14 +300,6 @@ func (m *MockStore) GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPR
 	return args.Get(0).([]*gatewayv1.HTTPRoute)
 }
 
-func (m *MockStore) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRoute {
-	args := m.Called(gatewayKey)
-	if args.Get(0) == nil {
-		return nil
-	}
-	return args.Get(0).([]*aiv1alpha1.ModelRoute)
-}
-
 func (m *MockStore) GetAllHTTPRoutes() []*gatewayv1.HTTPRoute {
 	args := m.Called()
 	if args.Get(0) == nil {
@@ -324,6 +314,14 @@ func (m *MockStore) GetAllInferencePools() []*inferencev1.InferencePool {
 		return nil
 	}
 	return args.Get(0).([]*inferencev1.InferencePool)
+}
+
+func (m *MockStore) GetModelNames() []string {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).([]string)
 }
 
 func newTestContext(params gin.Params) (*gin.Context, *httptest.ResponseRecorder) {

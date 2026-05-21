@@ -167,12 +167,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"VOLUME_MOUNTS": []corev1.VolumeMount{{
@@ -279,12 +274,7 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"MODEL_NAME":       model.Name,

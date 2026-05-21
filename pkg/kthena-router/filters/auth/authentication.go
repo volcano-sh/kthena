@@ -38,14 +38,17 @@ import (
 
 // JWT token extraction constants
 const (
-	header = "Authorization"
-	prefix = "Bearer "
+	header       = "Authorization"
+	bearerScheme = "Bearer"
 )
 
 // extractTokenFromHeader extracts the Bearer token from the Authorization header
 func extractTokenFromHeader(req *http.Request) string {
-	value := req.Header.Get(header)
-	return strings.TrimPrefix(value, prefix)
+	fields := strings.Fields(req.Header.Get(header))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], bearerScheme) {
+		return ""
+	}
+	return fields[1]
 }
 
 func extractTokenFromBody(c *gin.Context) string {
