@@ -96,19 +96,19 @@ class VLLMKVCacheRedisManager:
             logger.error(f"Error adding blocks to Redis: {e}")
             return False
 
-    async def _process_token_blocks_with_mapping(self, model_name: str, vllm_hashes: List[int],
+    async def _process_token_blocks_with_mapping(self, model_name: str, engine_hashes: List[int],
                                                  token_ids: List[int], pod_identifier: str,
                                                  timestamp: str, pipe) -> bool:
-        if not vllm_hashes:
+        if not engine_hashes:
             return False
 
         # Calculate block size: len(token_ids) / len(block_hashes)
-        block_size = len(token_ids) // len(vllm_hashes)
-        if len(token_ids) % len(vllm_hashes) != 0:
-            logger.error(f"Token count ({len(token_ids)}) cannot match block size with {len(vllm_hashes)} hashes")
+        block_size = len(token_ids) // len(engine_hashes)
+        if len(token_ids) % len(engine_hashes) != 0:
+            logger.error(f"Token count ({len(token_ids)}) cannot match block size with {len(engine_hashes)} hashes")
             return False
 
-        for i, vllm_hash in enumerate(vllm_hashes):
+        for i, engine_hash in enumerate(engine_hashes):
             start_idx = i * block_size
             end_idx = min(start_idx + block_size, len(token_ids))
             block_tokens = token_ids[start_idx:end_idx]
@@ -116,8 +116,8 @@ class VLLMKVCacheRedisManager:
                 continue
             std_hash = compute_standardized_hash(block_tokens)
             matrix_block_key = self._get_matrix_block_key(model_name, std_hash)
-            self.hash_mapping[vllm_hash] = std_hash
-            mapping_key = self._get_hash_mapping_key(vllm_hash, pod_identifier)
+            self.hash_mapping[engine_hash] = std_hash
+            mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
             pipe.set(mapping_key, str(std_hash))
             pipe.expire(mapping_key, 86400)
             pipe.hset(matrix_block_key, pod_identifier, timestamp)
@@ -137,17 +137,17 @@ class VLLMKVCacheRedisManager:
 
             removed_count = 0
 
-            for vllm_hash in block_hashes:
-                std_hash = await self._get_std_hash(client, vllm_hash, pod_identifier)
+            for engine_hash in block_hashes:
+                std_hash = await self._get_std_hash(client, engine_hash, pod_identifier)
 
                 if std_hash is not None:
                     matrix_block_key = self._get_matrix_block_key(model_name, std_hash)
-                    mapping_key = self._get_hash_mapping_key(vllm_hash, pod_identifier)
+                    mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
 
                     pipe.hdel(matrix_block_key, pod_identifier)
                     pipe.delete(mapping_key)
 
-                    self.hash_mapping.pop(vllm_hash, None)
+                    self.hash_mapping.pop(engine_hash, None)
                     removed_count += 1
 
             await pipe.execute()
@@ -158,24 +158,24 @@ class VLLMKVCacheRedisManager:
             logger.error(f"Error removing blocks from Redis: {e}")
             return 0
 
-    async def _get_std_hash(self, client, vllm_hash: int, pod_identifier: str = None) -> Optional[int]:
-        std_hash = self.hash_mapping.get(vllm_hash)
+    async def _get_std_hash(self, client, engine_hash: int, pod_identifier: str = None) -> Optional[int]:
+        std_hash = self.hash_mapping.get(engine_hash)
 
         if std_hash is None:
             if pod_identifier:
-                mapping_key = self._get_hash_mapping_key(vllm_hash, pod_identifier)
+                mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
                 std_hash_str = await client.get(mapping_key)
                 if std_hash_str:
                     std_hash = int(std_hash_str)
-                    self.hash_mapping[vllm_hash] = std_hash
+                    self.hash_mapping[engine_hash] = std_hash
             else:
-                pattern = f"{self.MAPPING_KEY_PREFIX}:*@{vllm_hash}"
+                pattern = f"{self.MAPPING_KEY_PREFIX}:*@{engine_hash}"
                 keys = await self.redis_client.keys(pattern)
                 if keys:
                     std_hash_str = await client.get(keys[0])
                     if std_hash_str:
                         std_hash = int(std_hash_str)
-                        self.hash_mapping[vllm_hash] = std_hash
+                        self.hash_mapping[engine_hash] = std_hash
 
         return std_hash
 

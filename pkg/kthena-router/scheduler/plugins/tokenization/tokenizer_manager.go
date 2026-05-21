@@ -26,9 +26,11 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"k8s.io/klog/v2"
 )
 
+// Remote tokenization is always attempted when an engine template exists
 type TokenizerManagerConfig struct {
 	EndpointTemplates map[string]string
 }
@@ -57,6 +59,10 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 	// Randomly select a pod to start with
 	startIdx := rand.Intn(len(pods))
 
+	// Track unsupported engines so we can emit a metric if ALL pods fail
+	// due to incompatible engines
+	unsupportedEngines := make(map[string]struct{})
+
 	// Try pods starting from random index, wrapping around if needed
 	for i := 0; i < len(pods); i++ {
 		podIdx := (startIdx + i) % len(pods)
@@ -65,6 +71,7 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 		engine, err := normalizeEngine(podInfo.GetEngine())
 		if err != nil {
 			klog.Warningf("TokenizerManager: invalid engine for pod %s: %v", podInfo.Pod.Name, err)
+			unsupportedEngines[podInfo.GetEngine()] = struct{}{}
 			continue
 		}
 		template, ok := m.config.EndpointTemplates[engine]
@@ -92,6 +99,11 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 		return tok
 	}
 
+	// All pods exhausted
+	// record a failure metric per unsupported engine
+	for engine := range unsupportedEngines {
+		metrics.DefaultMetrics.RecordTokenizerUnsupportedEngine(model, engine)
+	}
 	klog.Warningf("Failed to create tokenizer for model %s after trying %d pods", model, len(pods))
 	return nil
 }

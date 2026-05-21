@@ -27,6 +27,7 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/testutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -126,19 +127,7 @@ func TestTokenizerManager(t *testing.T) {
 
 	// Test vLLM engine routing
 	t.Run("vLLM engine", func(t *testing.T) {
-		pod := &datastore.PodInfo{
-			Pod: &v1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "pod-vllm",
-					Namespace: "default",
-				},
-				Status: v1.PodStatus{
-					Phase: v1.PodRunning,
-					PodIP: "10.0.0.10",
-				},
-			},
-		}
-		pod.SetEngineForTest(EngineVLLM)
+		pod := testutil.PodInfoWithEngine("pod-vllm", "default", "10.0.0.10", EngineVLLM)
 
 		tok := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod})
 		if tok == nil {
@@ -148,19 +137,7 @@ func TestTokenizerManager(t *testing.T) {
 
 	// Test SGLang engine routing
 	t.Run("SGLang engine", func(t *testing.T) {
-		pod := &datastore.PodInfo{
-			Pod: &v1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "pod-sglang",
-					Namespace: "default",
-				},
-				Status: v1.PodStatus{
-					Phase: v1.PodRunning,
-					PodIP: "10.0.0.11",
-				},
-			},
-		}
-		pod.SetEngineForTest(EngineSGLang)
+		pod := testutil.PodInfoWithEngine("pod-sglang", "default", "10.0.0.11", EngineSGLang)
 
 		tok := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod})
 		if tok == nil {

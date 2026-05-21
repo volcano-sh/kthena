@@ -304,6 +304,14 @@ type PodInfo struct {
 	modelServer sets.Set[types.NamespacedName] // The modelservers this pod belongs to
 }
 
+// NewPodInfo constructs a PodInfo with the given pod and inference engine.
+func NewPodInfo(pod *corev1.Pod, engine string) *PodInfo {
+	return &PodInfo{
+		Pod:    pod,
+		engine: engine,
+	}
+}
+
 // modelRouteInfo stores the mapping between a ModelRoute resource and its associated models.
 // It maintains both the primary model and any LoRA adapters that are configured for this route.
 type modelRouteInfo struct {

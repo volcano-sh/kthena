@@ -18,8 +18,6 @@ package tokenization
 
 import (
 	"context"
-	"fmt"
-	"strings"
 )
 
 type remoteTokenizerImpl struct {
@@ -29,16 +27,17 @@ type remoteTokenizerImpl struct {
 }
 
 func NewRemoteTokenizer(config RemoteTokenizerConfig) (Tokenizer, error) {
+	engine, err := normalizeEngine(config.Engine)
+	if err != nil {
+		return nil, err
+	}
+
 	var adapter engineAdapter
-	switch strings.ToLower(config.Engine) {
+	switch engine {
 	case EngineSGLang:
 		adapter = newSGLangAdapter(config.Model)
 	case EngineVLLM:
 		adapter = newVLLMAdapter(config.Model)
-	case "":
-		return nil, ErrInvalidConfig{Message: "empty engine string"}
-	default:
-		return nil, ErrInvalidConfig{Message: fmt.Sprintf("unsupported engine: %q", config.Engine)}
 	}
 
 	client := newHTTPClient(config.Endpoint)

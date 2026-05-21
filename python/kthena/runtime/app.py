@@ -58,6 +58,20 @@ class AppState:
 TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
 
 logging.basicConfig(level=logging.INFO)
+
+
+def _log_subscriber_task_exception(name: str):
+    def _callback(task: "asyncio.Task") -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logging.getLogger(__name__).error(
+                "%s background task exited with exception: %s", name, exc, exc_info=exc)
+
+    return _callback
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -141,7 +155,8 @@ async def lifespan(app: FastAPI):
                 state.pod_identifier,
                 state.model_name
             )
-            asyncio.create_task(vllm_zmq_subscriber.start())
+            vllm_task = asyncio.create_task(vllm_zmq_subscriber.start())
+            vllm_task.add_done_callback(_log_subscriber_task_exception("vLLM ZMQ subscriber"))
             state.vllm_zmq_subscriber = vllm_zmq_subscriber
             logger.info("vLLM ZMQ subscriber initialized successfully")
         except Exception as e:
@@ -155,7 +170,8 @@ async def lifespan(app: FastAPI):
                 state.pod_identifier,
                 state.model_name
             )
-            asyncio.create_task(sglang_zmq_subscriber.start())
+            sglang_task = asyncio.create_task(sglang_zmq_subscriber.start())
+            sglang_task.add_done_callback(_log_subscriber_task_exception("SGLang ZMQ subscriber"))
             state.sglang_zmq_subscriber = sglang_zmq_subscriber
             logger.info("SGLang ZMQ subscriber initialized successfully")
         except Exception as e:

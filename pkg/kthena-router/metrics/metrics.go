@@ -35,6 +35,7 @@ const (
 	LabelLimitType   = "limit_type"
 	LabelModelRoute  = "model_route"
 	LabelModelServer = "model_server"
+	LabelEngine      = "engine"
 	LabelUserID      = "user_id"
 
 	// Token type values
@@ -82,6 +83,9 @@ type Metrics struct {
 	FairnessQueueInflight             prometheus.GaugeVec
 	FairnessQueuePriorityRefreshTotal prometheus.CounterVec
 	FairnessQueueHeapRebuildTotal     prometheus.CounterVec
+
+	// Tokenizer unsupported engine metrics
+	TokenizerUnsupportedEngineTotal prometheus.CounterVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
@@ -219,6 +223,14 @@ func NewMetrics() *Metrics {
 			},
 			[]string{LabelModel},
 		),
+
+		TokenizerUnsupportedEngineTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_tokenizer_unsupported_engine_total",
+				Help: "Number of tokenizer lookups where no pod had a supported inference engine",
+			},
+			[]string{LabelModel, LabelEngine},
+		),
 	}
 }
 
@@ -331,6 +343,11 @@ func (m *Metrics) DecFairnessQueueInflight(model string) {
 // IncFairnessQueuePriorityRefresh increments the priority refresh counter
 func (m *Metrics) IncFairnessQueuePriorityRefresh(model string) {
 	m.FairnessQueuePriorityRefreshTotal.WithLabelValues(model).Inc()
+}
+
+// RecordTokenizerUnsupportedEngine records a tokenizer failure due to an unsupported inference engine
+func (m *Metrics) RecordTokenizerUnsupportedEngine(model, engine string) {
+	m.TokenizerUnsupportedEngineTotal.WithLabelValues(model, engine).Inc()
 }
 
 // IncFairnessQueueHeapRebuild increments the heap rebuild counter

@@ -39,6 +39,8 @@ type TokenizeInput struct {
 	AddGenerationPrompt bool
 }
 
+// TokenStrings is only populated by vLLM. SGLang's /tokenize response does not
+// include token_strs, so this field will always be nil for SGLang-backed pods.
 type TokenizeResult struct {
 	Count        int      `json:"count"`
 	MaxModelLen  int      `json:"max_model_len"`
@@ -88,9 +90,10 @@ type sglangTokenizeCompletionRequest struct {
 }
 
 type sglangTokenizeChatRequest struct {
-	Model                string                 `json:"model,omitempty"`
-	Messages             []common.Message       `json:"messages"`
-	AddSpecialTokens     *bool                  `json:"add_special_tokens,omitempty"`
+	Model            string           `json:"model,omitempty"`
+	Messages         []common.Message `json:"messages"`
+	AddSpecialTokens *bool            `json:"add_special_tokens,omitempty"`
+	// Reserved — passed through from request when supported.
 	Tools                []interface{}          `json:"tools,omitempty"`
 	ToolChoice           interface{}            `json:"tool_choice,omitempty"`
 	ReasoningEffort      *string                `json:"reasoning_effort,omitempty"`

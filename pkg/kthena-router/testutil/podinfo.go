@@ -14,11 +14,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package datastore
+package testutil
 
-// SetEngineForTest sets the inference engine name for tests.
-func (p *PodInfo) SetEngineForTest(engine string) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	p.engine = engine
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+)
+
+func PodInfoWithEngine(name, namespace, podIP, engine string) *datastore.PodInfo {
+	return datastore.NewPodInfo(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: podIP,
+		},
+	}, engine)
 }

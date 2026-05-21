@@ -195,17 +195,17 @@ class SGLangZMQSubscriber:
                 return
 
             events_count = len(event_batch.events) if event_batch.events else 0
-            logger.info(
+            logger.debug(
                 f"Received SGLang event batch: ts={event_batch.ts}, events_count={events_count}, "
                 f"attn_dp_rank={event_batch.attn_dp_rank}")
 
             if events_count == 0:
-                logger.info("Empty SGLang event batch received")
+                logger.debug("Empty SGLang event batch received")
                 return
 
             for i, event in enumerate(event_batch.events):
                 try:
-                    logger.info(f"Processing SGLang event {i}: type={type(event).__name__}")
+                    logger.debug(f"Processing SGLang event {i}: type={type(event).__name__}")
                     await self._process_event(event, event_batch.ts, pod_identifier, model_name,
                                               event_batch.attn_dp_rank)
                 except (ValueError, TypeError, AttributeError) as e:

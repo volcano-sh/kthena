@@ -41,10 +41,6 @@ spec:
                     --enable-metrics \
                     --kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
                 env:
-                  - name: POD_IP
-                    valueFrom:
-                      fieldRef:
-                        fieldPath: status.podIP
                   - name: NCCL_SOCKET_IFNAME
                     value: eth0
                   - name: NCCL_IB_DISABLE
