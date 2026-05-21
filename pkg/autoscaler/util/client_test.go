@@ -175,13 +175,6 @@ func TestGetTargetLabels(t *testing.T) {
 					Name: "model4",
 					Kind: workload.ModelServingKind.Kind,
 				},
-				MetricEndpoint: workload.MetricEndpoint{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							"app": "router",
-						},
-					},
-				},
 			},
 			wantErr: false,
 			wantNil: false,
@@ -222,7 +215,10 @@ func TestGetTargetLabels(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			selector, err := GetTargetLabels(tt.target)
+			selector, err := GetTargetLabels(tt.target, &workload.PodMetricSource{LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "router"}}})
+			if tt.name != "preserves custom metric labels" {
+				selector, err = GetTargetLabels(tt.target, nil)
+			}
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetTargetLabels() error = %v, wantErr %v", err, tt.wantErr)
@@ -354,7 +350,7 @@ func TestGetMetricPods(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pods, err := GetMetricPods(podLister, tt.namespace, tt.target)
+			pods, err := GetMetricPods(podLister, tt.namespace, tt.target, nil)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetMetricPods() error = %v, wantErr %v", err, tt.wantErr)

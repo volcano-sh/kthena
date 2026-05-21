@@ -122,14 +122,14 @@ func (v *AutoscalingPolicyValidator) validateMetrics(policy *registryv1.Autoscal
 		}
 
 		// Validate metric name uniqueness
-		if _, exists := metricNames[metric.MetricName]; exists {
+		if _, exists := metricNames[metric.Name]; exists {
 			allErrs = append(allErrs, field.Invalid(
-				metricPath.Child("metricName"),
-				metric.MetricName,
-				fmt.Sprintf("duplicate metric name %s is not allowed", metric.MetricName),
+				metricPath.Child("name"),
+				metric.Name,
+				fmt.Sprintf("duplicate metric name %s is not allowed", metric.Name),
 			))
 		}
-		metricNames[metric.MetricName] = struct{}{}
+		metricNames[metric.Name] = struct{}{}
 	}
 
 	return allErrs

@@ -152,6 +152,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
+	externalMetrics := make(algorithm.Metrics)
 	instancesCountSum := int32(0)
 	// Update all model serving instances' metrics
 	for _, param := range optimizer.Meta.Config.Params {
@@ -162,13 +163,16 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		}
 
 		instancesCountSum += currentInstancesCounts[param.Target.TargetRef.Name]
-		currentUnreadyInstancesCount, currentReadyInstancesMetrics, err := collector.UpdateMetrics(ctx, podLister)
+		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
 			continue
 		}
 		unreadyInstancesCount += currentUnreadyInstancesCount
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
+		for metricName, metricValue := range currentExternalMetrics {
+			addMetric(externalMetrics, metricName, metricValue)
+		}
 	}
 	// Get recommended replicas of all model serving instances
 	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
@@ -179,7 +183,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		MetricTargets:         optimizer.Meta.MetricTargets,
 		UnreadyInstancesCount: unreadyInstancesCount,
 		ReadyInstancesMetrics: readyInstancesMetrics,
-		ExternalMetrics:       make(algorithm.Metrics),
+		ExternalMetrics:       externalMetrics,
 	}
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {

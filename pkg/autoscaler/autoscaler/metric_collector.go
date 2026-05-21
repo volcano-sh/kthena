@@ -18,21 +18,24 @@ package autoscaler
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	promapi "github.com/prometheus/client_golang/api"
+	prometheusv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	"github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/datastructure"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	inferControllerUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
-	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,11 +44,10 @@ import (
 )
 
 type MetricCollector struct {
-	PastHistograms  *datastructure.SnapshotSlidingWindow[map[string]HistogramInfo]
-	Target          *v1alpha1.Target
-	Scope           Scope
-	WatchMetricList sets.String
-	MetricTargets   map[string]float64
+	PastHistograms *datastructure.SnapshotSlidingWindow[map[string]HistogramInfo]
+	Target         *v1alpha1.Target
+	Scope          Scope
+	MetricTargets  map[string]float64
 }
 
 func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPolicyBinding, metricTargets map[string]float64) *MetricCollector {
@@ -60,8 +62,7 @@ func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPo
 			Namespace:      namespace,
 			OwnedBindingId: binding.UID,
 		},
-		MetricTargets:   metricTargets,
-		WatchMetricList: util.ExtractKeysToSet(metricTargets),
+		MetricTargets: metricTargets,
 	}
 }
 
@@ -73,12 +74,6 @@ type HistogramInfo struct {
 type Scope struct {
 	Namespace      string
 	OwnedBindingId types.UID
-}
-
-type InstanceInfo struct {
-	IsReady    bool
-	IsFailed   bool
-	MetricsMap algorithm.Metrics
 }
 
 type Generations struct {
@@ -94,153 +89,251 @@ func GetMetricTargets(autoscalePolicy *v1alpha1.AutoscalingPolicy) algorithm.Met
 	}
 
 	for _, metric := range autoscalePolicy.Spec.Metrics {
-		metricTargets[metric.MetricName] = metric.TargetValue.AsFloat64Slow()
+		metricTargets[metric.Name] = metric.TargetValue.AsFloat64Slow()
 	}
 	return metricTargets
 }
 
-func (collector *MetricCollector) UpdateMetrics(ctx context.Context, podLister listerv1.PodLister) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, err error) {
-	// Get pod list which will be invoked api to get metrics
-	unreadyInstancesCount = int32(0)
-	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target)
-	if err != nil {
-		klog.Errorf("list watched pod error: %v in namespace: %s, labels: %v", err, collector.Scope.Namespace, collector.Target.MetricEndpoint)
-		return
-	}
-	if len(pods) == 0 {
-		klog.Errorf("pod list is null")
-		return
-	}
+func (collector *MetricCollector) UpdateMetrics(
+	ctx context.Context,
+	podLister listerv1.PodLister,
+	targetMetricSources map[string]v1alpha1.MetricSource,
+) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, externalMetrics algorithm.Metrics, err error) {
+	readyInstancesMetric = make(algorithm.Metrics)
+	externalMetrics = make(algorithm.Metrics)
 
-	currentHistograms := make(map[string]HistogramInfo)
-	instanceInfo := collector.fetchMetricsFromPods(ctx, pods, &currentHistograms)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isFailed", instanceInfo.IsFailed)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isReady", instanceInfo.IsReady)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.metricsMap", instanceInfo.MetricsMap)
-	if instanceInfo.IsFailed {
-		klog.Warningf("some pod of %s are failed in namespace: %s.", collector.Scope, collector.Scope.Namespace)
-		return
-	}
-
-	if !instanceInfo.IsReady {
-		unreadyInstancesCount++
-		klog.Warningf("some pod of %s are not ready in namespace: %s.", collector.Scope, collector.Scope.Namespace)
-		return
-	}
-	readyInstancesMetric = instanceInfo.MetricsMap
-	collector.PastHistograms.Append(currentHistograms)
-	return
-}
-
-func (collector *MetricCollector) fetchMetricsFromPods(ctx context.Context, pods []*corev1.Pod, currentHistograms *map[string]HistogramInfo) InstanceInfo {
-	instanceInfo := InstanceInfo{true, false, make(algorithm.Metrics)}
 	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
 	if !ok {
 		pastHistograms = make(map[string]HistogramInfo)
 	}
-	klog.InfoS("fetch metrics from pods start")
-	for _, pod := range pods {
-		func() {
-			instanceInfo.IsReady = instanceInfo.IsReady && inferControllerUtils.IsPodRunningAndReady(pod)
-			instanceInfo.IsFailed = instanceInfo.IsFailed || util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod)
+	currentHistograms := make(map[string]HistogramInfo)
 
-			pastValue, ok := pastHistograms[pod.Name]
-			var pastHistogramMap map[string]*histogram.Snapshot
-			if !ok || pod.Status.StartTime == nil || pastValue.PodStartTime == nil || !pod.Status.StartTime.Equal(pastValue.PodStartTime) {
-				pastHistogramMap = make(map[string]*histogram.Snapshot)
-			} else {
-				pastHistogramMap = pastValue.HistogramMap
-			}
+	for metricName := range collector.MetricTargets {
+		source, exists := targetMetricSources[metricName]
+		if !exists {
+			klog.Warningf("metric source missing for metric %s in target %s", metricName, collector.Target.TargetRef.Name)
+			continue
+		}
+		sourceType := source.Type
+		if sourceType == "" {
+			sourceType = v1alpha1.PodMetricSourceType
+		}
 
-			currentHistogramMap := make(map[string]*histogram.Snapshot)
-			ip := pod.Status.PodIP
-			podCtx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
-			defer cancel()
-			url := fmt.Sprintf("http://%s:%d%s", ip, collector.Target.MetricEndpoint.Port, collector.Target.MetricEndpoint.Uri)
-
-			req, _ := http.NewRequestWithContext(podCtx, http.MethodGet, url, nil)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				klog.Errorf("get metric response error: %v", err)
-				return
+		switch sourceType {
+		case v1alpha1.PodMetricSourceType:
+			podSource := source.Pod
+			if podSource == nil {
+				podSource = &v1alpha1.PodMetricSource{}
 			}
-			if resp == nil || !util.IsRequestSuccess(resp.StatusCode) || resp.Body == nil {
-				klog.Errorf("get metric response is invalid")
-				return
+			metricValue, anyUnready, failed, collectErr := collector.collectPodMetric(ctx, podLister, metricName, podSource, pastHistograms, currentHistograms)
+			if collectErr != nil {
+				klog.Warningf("collect pod metric %s failed: %v", metricName, collectErr)
+				continue
 			}
-			defer resp.Body.Close()
-
-			bodyStr, err := io.ReadAll(resp.Body)
-			if err != nil {
-				klog.Errorf("get metrics read response error: %v", err)
-				return
+			if failed {
+				klog.Warningf("collect pod metric %s skipped because pod failed/restarted", metricName)
+				continue
 			}
-			result := string(bodyStr)
-			collector.processPrometheusString(result, pastHistogramMap, currentHistogramMap, instanceInfo.MetricsMap)
-			(*currentHistograms)[pod.Name] = HistogramInfo{
-				PodStartTime: pod.Status.StartTime,
-				HistogramMap: currentHistogramMap,
+			if anyUnready {
+				unreadyInstancesCount = 1
+				continue
 			}
-		}()
+			readyInstancesMetric[metricName] = metricValue
+		case v1alpha1.PrometheusMetricSourceType:
+			if source.Prometheus == nil {
+				klog.Warningf("prometheus source is nil for metric %s", metricName)
+				continue
+			}
+			metricValue, promErr := collector.fetchPrometheusMetric(ctx, source.Prometheus)
+			if promErr != nil {
+				klog.Warningf("collect prometheus metric %s failed: %v", metricName, promErr)
+				continue
+			}
+			externalMetrics[metricName] = metricValue
+		default:
+			klog.Warningf("unknown metric source type %q for metric %s", sourceType, metricName)
+		}
 	}
-	return instanceInfo
+
+	collector.PastHistograms.Append(currentHistograms)
+	return
 }
 
-func (collector *MetricCollector) processPrometheusString(metricStr string, pastHistograms map[string]*histogram.Snapshot, currentHistograms map[string]*histogram.Snapshot, instanceMetricMap algorithm.Metrics) {
+func (collector *MetricCollector) collectPodMetric(
+	ctx context.Context,
+	podLister listerv1.PodLister,
+	metricName string,
+	podSource *v1alpha1.PodMetricSource,
+	pastHistograms map[string]HistogramInfo,
+	currentHistograms map[string]HistogramInfo,
+) (metricValue float64, anyUnready bool, failed bool, err error) {
+	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
+	if err != nil {
+		return 0, false, false, err
+	}
+	if len(pods) == 0 {
+		return 0, false, false, fmt.Errorf("pod list is empty")
+	}
+
+	for _, pod := range pods {
+		if !inferControllerUtils.IsPodRunningAndReady(pod) {
+			anyUnready = true
+		}
+		if util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod) {
+			failed = true
+		}
+	}
+	if failed || anyUnready {
+		return
+	}
+
+	for _, pod := range pods {
+		pastValue, ok := pastHistograms[pod.Name]
+		pastHistogramMap := make(map[string]*histogram.Snapshot)
+		if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
+			pastHistogramMap = pastValue.HistogramMap
+		}
+
+		currentValue := currentHistograms[pod.Name]
+		currentHistogramMap := currentValue.HistogramMap
+		if currentHistogramMap == nil {
+			currentHistogramMap = make(map[string]*histogram.Snapshot)
+		}
+
+		url := collector.buildPodMetricURL(pod, podSource)
+		podCtx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
+		req, reqErr := http.NewRequestWithContext(podCtx, http.MethodGet, url, nil)
+		if reqErr != nil {
+			cancel()
+			return 0, false, false, reqErr
+		}
+		resp, reqErr := http.DefaultClient.Do(req)
+		if reqErr != nil {
+			cancel()
+			return 0, false, false, reqErr
+		}
+		if resp == nil || !util.IsRequestSuccess(resp.StatusCode) || resp.Body == nil {
+			cancel()
+			return 0, false, false, fmt.Errorf("invalid metric response for pod %s", pod.Name)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		cancel()
+		if readErr != nil {
+			return 0, false, false, readErr
+		}
+
+		v, snapshot, found, parseErr := parseSinglePrometheusMetric(string(body), metricName, pastHistogramMap)
+		if parseErr != nil {
+			return 0, false, false, parseErr
+		}
+		if found {
+			metricValue += v
+		}
+		if snapshot != nil {
+			currentHistogramMap[metricName] = snapshot
+		}
+		currentHistograms[pod.Name] = HistogramInfo{
+			PodStartTime: pod.Status.StartTime,
+			HistogramMap: currentHistogramMap,
+		}
+	}
+	return
+}
+
+func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) string {
+	uri := podSource.Uri
+	if uri == "" {
+		uri = "/metrics"
+	}
+	port := podSource.Port
+	if port == 0 {
+		port = 8100
+	}
+	return fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, port, uri)
+}
+
+func parseSinglePrometheusMetric(metricStr string, metricName string, pastHistograms map[string]*histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
 	reader := strings.NewReader(metricStr)
 	decoder := expfmt.NewDecoder(reader, expfmt.NewFormat(expfmt.TypeTextPlain))
 	for {
 		mf := &io_prometheus_client.MetricFamily{}
-		err := decoder.Decode(mf)
-		if err == io.EOF {
+		decodeErr := decoder.Decode(mf)
+		if decodeErr == io.EOF {
 			break
 		}
-		if err != nil {
-			klog.Errorf("error decoding metric: %v", err)
-			break
+		if decodeErr != nil {
+			return 0, nil, false, decodeErr
 		}
-		if len(mf.Metric) < 1 {
-			klog.Errorf("metric is invalid")
-			continue
-		}
-
-		if _, ok := collector.WatchMetricList[mf.GetName()]; !ok {
-			klog.V(4).Infof("metric name: %s is not matched with metricTargets", mf.GetName())
+		if mf.GetName() != metricName || len(mf.Metric) < 1 {
 			continue
 		}
 
 		metric := mf.Metric[0]
 		switch mf.GetType() {
 		case io_prometheus_client.MetricType_COUNTER:
-			addMetric(instanceMetricMap, mf.GetName(), metric.GetCounter().GetValue())
+			return metric.GetCounter().GetValue(), nil, true, nil
 		case io_prometheus_client.MetricType_GAUGE:
-			addMetric(instanceMetricMap, mf.GetName(), metric.GetGauge().GetValue())
+			return metric.GetGauge().GetValue(), nil, true, nil
 		case io_prometheus_client.MetricType_HISTOGRAM:
 			hist := metric.GetHistogram()
 			snapshot := histogram.NewSnapshotOfHistogram(hist)
-			currentHistograms[mf.GetName()] = snapshot
-
-			if pastHistograms == nil {
-				klog.Warning("pastHistograms is nil")
-				continue
+			past := histogram.NewDefaultSnapshot()
+			if pastHistograms != nil {
+				if old, ok := pastHistograms[metricName]; ok {
+					past = old
+				}
 			}
-			past, ok := pastHistograms[mf.GetName()]
-			if !ok {
-				past = histogram.NewDefaultSnapshot()
+			quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
+			if qErr != nil {
+				return 0, snapshot, false, qErr
 			}
-			quantileInDiffMetric, err := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
-			if err == nil {
-				addMetric(instanceMetricMap, mf.GetName(), quantileInDiffMetric)
-			}
+			return quantile, snapshot, true, nil
 		default:
-			klog.InfoS("metric type is out of range", "type", mf.GetType())
+			return 0, nil, false, fmt.Errorf("unsupported metric type %v", mf.GetType())
 		}
 	}
+	return 0, nil, false, nil
+}
 
-	for key := range collector.WatchMetricList {
-		if _, ok := instanceMetricMap[key]; !ok {
-			instanceMetricMap[key] = 0
+func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src *v1alpha1.PrometheusMetricSource) (float64, error) {
+	transport := &http.Transport{}
+	if src.Auth != nil && src.Auth.TLSConfig != nil {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: src.Auth.TLSConfig.InsecureSkipVerify}
+		if src.Auth.TLSConfig.CASecret != nil {
+			klog.Warningf("prometheus CASecret is configured for metric target %s but CA secret loading is not implemented yet", collector.Target.TargetRef.Name)
 		}
+	}
+	if src.Auth != nil && src.Auth.BearerTokenSecret != nil {
+		klog.Warningf("prometheus bearer token secret is configured for metric target %s but secret loading is not implemented yet", collector.Target.TargetRef.Name)
+	}
+
+	client, err := promapi.NewClient(promapi.Config{
+		Address:      src.ServerURL,
+		RoundTripper: transport,
+	})
+	if err != nil {
+		return 0, err
+	}
+	api := prometheusv1.NewAPI(client)
+	result, warnings, err := api.Query(ctx, src.Query, time.Now())
+	if err != nil {
+		return 0, err
+	}
+	for _, warning := range warnings {
+		klog.Warningf("prometheus query warning for %s: %s", collector.Target.TargetRef.Name, warning)
+	}
+
+	switch v := result.(type) {
+	case *model.Scalar:
+		return float64(v.Value), nil
+	case model.Vector:
+		if len(v) != 1 {
+			return 0, fmt.Errorf("prometheus query must return a single sample vector, got %d", len(v))
+		}
+		return float64(v[0].Value), nil
+	default:
+		return 0, fmt.Errorf("unsupported prometheus query result type %T", result)
 	}
 }
 

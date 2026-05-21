@@ -5,7 +5,7 @@ metadata:
     workload.serving.volcano.sh/backend-name: ""
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
-    workload.serving.volcano.sh/revision: 656cd7ccb9
+    workload.serving.volcano.sh/revision: 65ccd5bdff
     workload.serving.volcano.sh/model-uid: randomUID
   name: test-model
   namespace: default
@@ -18,5 +18,5 @@ metadata:
       blockOwnerDeletion: true
 spec:
   metrics:
-    - metricName: "vllm:iteration_tokens_total"
+    - name: "vllm:iteration_tokens_total"
       targetValue: 10

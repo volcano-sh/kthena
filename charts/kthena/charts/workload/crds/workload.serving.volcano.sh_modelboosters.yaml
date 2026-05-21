@@ -175,9 +175,10 @@ spec:
                       description: AutoscalingPolicyMetric defines a metric and its
                         target value for scaling decisions.
                       properties:
-                        metricName:
-                          description: MetricName defines the name of the metric to
-                            monitor for scaling decisions.
+                        name:
+                          description: Name defines the metric key used by the scaling
+                            algorithm.
+                          minLength: 1
                           type: string
                         targetValue:
                           anyOf:
@@ -188,7 +189,7 @@ spec:
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                       required:
-                      - metricName
+                      - name
                       - targetValue
                       type: object
                     minItems: 1

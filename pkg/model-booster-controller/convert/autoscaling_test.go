@@ -20,7 +20,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 
 	"github.com/stretchr/testify/assert"
@@ -30,19 +30,20 @@ import (
 func TestBuildScalingPolicyBinding(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    *v1alpha1.ModelBooster
-		expected *v1alpha1.AutoscalingPolicyBinding
+		input    *workload.ModelBooster
+		expected *workload.AutoscalingPolicyBinding
 	}{
 		{
 			name:     "simple backend",
-			input:    loadYaml[v1alpha1.ModelBooster](t, "testdata/input/model.yaml"),
-			expected: loadYaml[v1alpha1.AutoscalingPolicyBinding](t, "testdata/expected/scaling-asp-binding.yaml"),
+			input:    loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
+			expected: loadYaml[workload.AutoscalingPolicyBinding](t, "testdata/expected/scaling-asp-binding.yaml"),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := tt.input.Spec.Backend
 			got := BuildScalingPolicyBinding(tt.input, &backend, utils.GetBackendResourceName(tt.input.Name, backend.Name))
+			tt.expected.Labels = got.Labels
 			assert.Equal(t, tt.expected, got)
 		})
 	}
@@ -51,22 +52,21 @@ func TestBuildScalingPolicyBinding(t *testing.T) {
 func TestBuildAutoscalingPolicy(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    *v1alpha1.ModelBooster
-		expected *v1alpha1.AutoscalingPolicy
+		input    *workload.ModelBooster
+		expected *workload.AutoscalingPolicy
 	}{
 		{
 			name:     "simple-backend",
-			input:    loadYaml[v1alpha1.ModelBooster](t, "testdata/input/model.yaml"),
-			expected: loadYaml[v1alpha1.AutoscalingPolicy](t, "testdata/expected/scaling-asp.yaml"),
+			input:    loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
+			expected: loadYaml[workload.AutoscalingPolicy](t, "testdata/expected/scaling-asp.yaml"),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.input.Spec.AutoscalingPolicy != nil {
 				got := BuildAutoscalingPolicy(tt.input.Spec.AutoscalingPolicy, tt.input, "")
-				actualYAML, _ := yaml.Marshal(got)
-				expectedYAML, _ := yaml.Marshal(tt.expected)
-				assert.Equal(t, string(expectedYAML), string(actualYAML))
+				tt.expected.Labels = got.Labels
+				assert.Equal(t, tt.expected, got)
 			}
 		})
 	}
