@@ -201,26 +201,36 @@ func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.Pod
 		Name:      pod.Pod.Name,
 	}
 
-	s.podHashesMu.Lock()
+	// Double-check locking: avoid exclusive lock when the entry already exists.
+	s.podHashesMu.RLock()
 	podLRU, exists := s.podHashes[nsName]
+	s.podHashesMu.RUnlock()
 	if !exists {
-		podLRU, _ = NewLRUCache(s.hashCapacity, func(key hashModelKey, value struct{}) {
-			// onEvict callback need to acquire `modelCache.mu.Lock()` as well, so start a goroutine to run it async.
-			go s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
-		})
-		s.podHashes[nsName] = podLRU
+		s.podHashesMu.Lock()
+		podLRU, exists = s.podHashes[nsName]
+		if !exists {
+			podLRU, _ = NewLRUCache(s.hashCapacity, func(key hashModelKey, value struct{}) {
+				// onEvict callback need to acquire `modelCache.mu.Lock()` as well, so start a goroutine to run it async.
+				go s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
+			})
+			s.podHashes[nsName] = podLRU
+		}
+		s.podHashesMu.Unlock()
 	}
-	s.podHashesMu.Unlock()
 
-	// Note there could a be case where Add and Evict happen concurrently.
-	// The modelHash could be deleted, that does not matter much, since the prefix cache is an approximate cache.
-	s.entriesMu.Lock()
+	// Double-check locking for model entries map.
+	s.entriesMu.RLock()
 	modelCache, exists := s.entries[model]
+	s.entriesMu.RUnlock()
 	if !exists {
-		modelCache = newModelHashes()
-		s.entries[model] = modelCache
+		s.entriesMu.Lock()
+		modelCache, exists = s.entries[model]
+		if !exists {
+			modelCache = newModelHashes()
+			s.entries[model] = modelCache
+		}
+		s.entriesMu.Unlock()
 	}
-	s.entriesMu.Unlock()
 
 	// Add hashes from the end to the beginning to avoid
 	// the situation where a long prefix can be matched but a shorter prefix cannot.
