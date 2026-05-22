@@ -100,21 +100,36 @@ type PrometheusMetricSource struct {
 }
 
 // PrometheusAuth configures authentication when connecting to an external Prometheus server.
+//
+// NOTE: This struct describes the intended configuration surface. The runtime
+// does not honor any of these fields yet; they are reserved for a follow-up
+// implementation. Setting them today has no effect on Prometheus requests.
 type PrometheusAuth struct {
 	// BearerTokenSecret references a Secret key whose value is used as bearer token.
+	//
+	// Not yet implemented; reserved for future use.
 	// +optional
 	BearerTokenSecret *corev1.SecretKeySelector `json:"bearerTokenSecret,omitempty"`
 	// TLSConfig controls TLS certificate validation.
+	//
+	// Not yet implemented; reserved for future use.
 	// +optional
 	TLSConfig *PrometheusTLSConfig `json:"tlsConfig,omitempty"`
 }
 
 // PrometheusTLSConfig holds TLS settings for Prometheus HTTPS connections.
+//
+// NOTE: Not yet implemented; reserved for future use. The runtime currently
+// uses default TLS verification regardless of these fields.
 type PrometheusTLSConfig struct {
 	// InsecureSkipVerify disables TLS certificate verification.
+	//
+	// Not yet implemented; reserved for future use.
 	// +optional
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 	// CASecret references a Secret key containing a PEM-encoded CA bundle.
+	//
+	// Not yet implemented; reserved for future use.
 	// +optional
 	CASecret *corev1.SecretKeySelector `json:"caSecret,omitempty"`
 }

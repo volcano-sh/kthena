@@ -170,9 +170,10 @@ spec:
                                           configuration for the Prometheus server.
                                         properties:
                                           bearerTokenSecret:
-                                            description: BearerTokenSecret references
-                                              a Secret key whose value is used as
-                                              bearer token.
+                                            description: |-
+                                              BearerTokenSecret references a Secret key whose value is used as bearer token.
+
+                                              Not yet implemented; reserved for future use.
                                             properties:
                                               key:
                                                 description: The key of the secret
@@ -197,13 +198,16 @@ spec:
                                             type: object
                                             x-kubernetes-map-type: atomic
                                           tlsConfig:
-                                            description: TLSConfig controls TLS certificate
-                                              validation.
+                                            description: |-
+                                              TLSConfig controls TLS certificate validation.
+
+                                              Not yet implemented; reserved for future use.
                                             properties:
                                               caSecret:
-                                                description: CASecret references a
-                                                  Secret key containing a PEM-encoded
-                                                  CA bundle.
+                                                description: |-
+                                                  CASecret references a Secret key containing a PEM-encoded CA bundle.
+
+                                                  Not yet implemented; reserved for future use.
                                                 properties:
                                                   key:
                                                     description: The key of the secret
@@ -228,8 +232,10 @@ spec:
                                                 type: object
                                                 x-kubernetes-map-type: atomic
                                               insecureSkipVerify:
-                                                description: InsecureSkipVerify disables
-                                                  TLS certificate verification.
+                                                description: |-
+                                                  InsecureSkipVerify disables TLS certificate verification.
+
+                                                  Not yet implemented; reserved for future use.
                                                 type: boolean
                                             type: object
                                         type: object
@@ -443,8 +449,10 @@ spec:
                                     configuration for the Prometheus server.
                                   properties:
                                     bearerTokenSecret:
-                                      description: BearerTokenSecret references a
-                                        Secret key whose value is used as bearer token.
+                                      description: |-
+                                        BearerTokenSecret references a Secret key whose value is used as bearer token.
+
+                                        Not yet implemented; reserved for future use.
                                       properties:
                                         key:
                                           description: The key of the secret to select
@@ -468,12 +476,16 @@ spec:
                                       type: object
                                       x-kubernetes-map-type: atomic
                                     tlsConfig:
-                                      description: TLSConfig controls TLS certificate
-                                        validation.
+                                      description: |-
+                                        TLSConfig controls TLS certificate validation.
+
+                                        Not yet implemented; reserved for future use.
                                       properties:
                                         caSecret:
-                                          description: CASecret references a Secret
-                                            key containing a PEM-encoded CA bundle.
+                                          description: |-
+                                            CASecret references a Secret key containing a PEM-encoded CA bundle.
+
+                                            Not yet implemented; reserved for future use.
                                           properties:
                                             key:
                                               description: The key of the secret to
@@ -498,8 +510,10 @@ spec:
                                           type: object
                                           x-kubernetes-map-type: atomic
                                         insecureSkipVerify:
-                                          description: InsecureSkipVerify disables
-                                            TLS certificate verification.
+                                          description: |-
+                                            InsecureSkipVerify disables TLS certificate verification.
+
+                                            Not yet implemented; reserved for future use.
                                           type: boolean
                                       type: object
                                   type: object

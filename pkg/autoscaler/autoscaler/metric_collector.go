@@ -18,7 +18,6 @@ package autoscaler
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -372,16 +371,15 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 }
 
 func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src *v1alpha1.PrometheusMetricSource) (float64, error) {
-	transport := &http.Transport{}
-	if src.Auth != nil && src.Auth.TLSConfig != nil {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: src.Auth.TLSConfig.InsecureSkipVerify}
-		if src.Auth.TLSConfig.CASecret != nil {
-			klog.Warningf("prometheus CASecret is configured for metric target %s but CA secret loading is not implemented yet", collector.Target.TargetRef.Name)
-		}
+	timeout := util.AutoscaleCtxTimeoutSeconds * time.Second
+	transport := &http.Transport{
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: timeout,
 	}
-	if src.Auth != nil && src.Auth.BearerTokenSecret != nil {
-		klog.Warningf("prometheus bearer token secret is configured for metric target %s but secret loading is not implemented yet", collector.Target.TargetRef.Name)
-	}
+	// NOTE: PrometheusMetricSource.Auth (TLS / bearer token) is intentionally
+	// not honored yet. The field semantics are documented on the API types and
+	// will be implemented in a follow-up change.
 
 	client, err := promapi.NewClient(promapi.Config{
 		Address:      src.ServerURL,
@@ -390,8 +388,14 @@ func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src
 	if err != nil {
 		return 0, err
 	}
+
+	// Bound the query so a stuck Prometheus cannot hang the reconcile, even if
+	// the caller did not attach a deadline.
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	api := prometheusv1.NewAPI(client)
-	result, warnings, err := api.Query(ctx, src.Query, time.Now())
+	result, warnings, err := api.Query(queryCtx, src.Query, time.Now())
 	if err != nil {
 		return 0, err
 	}

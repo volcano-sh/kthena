@@ -766,6 +766,9 @@ _Appears in:_
 
 PrometheusTLSConfig holds TLS settings for Prometheus HTTPS connections.
 
+NOTE: Not yet implemented; reserved for future use. The runtime currently
+uses default TLS verification regardless of these fields.
+
 
 
 _Appears in:_
@@ -773,8 +776,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `insecureSkipVerify` _boolean_ | InsecureSkipVerify disables TLS certificate verification. |  |  |
-| `caSecret` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | CASecret references a Secret key containing a PEM-encoded CA bundle. |  |  |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify disables TLS certificate verification.<br />Not yet implemented; reserved for future use. |  |  |
+| `caSecret` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | CASecret references a Secret key containing a PEM-encoded CA bundle.<br />Not yet implemented; reserved for future use. |  |  |
 
 
 #### RecoveryPolicy
