@@ -30,17 +30,18 @@ import (
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	listerv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/klog/v2"
+
 	"github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/datastructure"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	inferControllerUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	listerv1 "k8s.io/client-go/listers/core/v1"
-	"k8s.io/klog/v2"
 )
 
 type MetricCollector struct {
@@ -108,6 +109,10 @@ func (collector *MetricCollector) UpdateMetrics(
 	}
 	currentHistograms := make(map[string]HistogramInfo)
 
+	// Group pod metrics by identical PodMetricSource (uri/port/selector) so we
+	// scrape each pod endpoint once per reconcile and extract every required
+	// metric from the same payload. Prometheus-sourced metrics stay per-metric.
+	podGroups := make(map[string]*podMetricGroup)
 	for metricName := range collector.MetricTargets {
 		source, exists := targetMetricSources[metricName]
 		if !exists {
@@ -125,20 +130,17 @@ func (collector *MetricCollector) UpdateMetrics(
 			if podSource == nil {
 				podSource = &v1alpha1.PodMetricSource{}
 			}
-			metricValue, anyUnready, failed, collectErr := collector.collectPodMetric(ctx, podLister, metricName, podSource, pastHistograms, currentHistograms)
-			if collectErr != nil {
-				klog.Warningf("collect pod metric %s failed: %v", metricName, collectErr)
-				continue
+			scrapeName := podSource.Name
+			if scrapeName == "" {
+				scrapeName = metricName
 			}
-			if failed {
-				klog.Warningf("collect pod metric %s skipped because pod failed/restarted", metricName)
-				continue
+			key := podMetricGroupKey(podSource)
+			g, ok := podGroups[key]
+			if !ok {
+				g = &podMetricGroup{podSource: podSource}
+				podGroups[key] = g
 			}
-			if anyUnready {
-				unreadyInstancesCount = 1
-				continue
-			}
-			readyInstancesMetric[metricName] = metricValue
+			g.specs = append(g.specs, podMetricSpec{policyKey: metricName, scrapeName: scrapeName})
 		case v1alpha1.PrometheusMetricSourceType:
 			if source.Prometheus == nil {
 				klog.Warningf("prometheus source is nil for metric %s", metricName)
@@ -155,24 +157,63 @@ func (collector *MetricCollector) UpdateMetrics(
 		}
 	}
 
+	for _, g := range podGroups {
+		values, anyUnready, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		if collectErr != nil {
+			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
+			continue
+		}
+		if failed {
+			klog.Warningf("collect pod metrics for target %s skipped because pod failed/restarted", collector.Target.TargetRef.Name)
+			continue
+		}
+		if anyUnready {
+			unreadyInstancesCount = 1
+			continue
+		}
+		for policyKey, v := range values {
+			readyInstancesMetric[policyKey] = v
+		}
+	}
+
 	collector.PastHistograms.Append(currentHistograms)
 	return
 }
 
-func (collector *MetricCollector) collectPodMetric(
+// podMetricSpec ties a policy metric key to the metric name exposed by the pod.
+type podMetricSpec struct {
+	policyKey  string
+	scrapeName string
+}
+
+// podMetricGroup is the set of metrics sharing one pod scrape configuration.
+type podMetricGroup struct {
+	podSource *v1alpha1.PodMetricSource
+	specs     []podMetricSpec
+}
+
+// podMetricGroupKey returns a stable key identifying a pod scrape configuration.
+func podMetricGroupKey(s *v1alpha1.PodMetricSource) string {
+	return fmt.Sprintf("%s|%d|%s", s.Uri, s.Port, metav1.FormatLabelSelector(s.LabelSelector))
+}
+
+// collectPodMetricsGroup scrapes each pod in the target group exactly once
+// and extracts every metric required by specs from the same payload.
+func (collector *MetricCollector) collectPodMetricsGroup(
 	ctx context.Context,
 	podLister listerv1.PodLister,
-	metricName string,
 	podSource *v1alpha1.PodMetricSource,
+	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (metricValue float64, anyUnready bool, failed bool, err error) {
+) (values map[string]float64, anyUnready bool, failed bool, err error) {
+	values = make(map[string]float64, len(specs))
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
 	if err != nil {
-		return 0, false, false, err
+		return nil, false, false, err
 	}
 	if len(pods) == 0 {
-		return 0, false, false, fmt.Errorf("pod list is empty")
+		return nil, false, false, fmt.Errorf("pod list is empty")
 	}
 
 	for _, pod := range pods {
@@ -187,9 +228,15 @@ func (collector *MetricCollector) collectPodMetric(
 		return
 	}
 
+	// Multiple policy keys may target the same scrape metric name.
+	wanted := make(map[string][]string, len(specs))
+	for _, s := range specs {
+		wanted[s.scrapeName] = append(wanted[s.scrapeName], s.policyKey)
+	}
+
 	for _, pod := range pods {
 		pastValue, ok := pastHistograms[pod.Name]
-		pastHistogramMap := make(map[string]*histogram.Snapshot)
+		pastHistogramMap := map[string]*histogram.Snapshot{}
 		if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
 			pastHistogramMap = pastValue.HistogramMap
 		}
@@ -200,45 +247,64 @@ func (collector *MetricCollector) collectPodMetric(
 			currentHistogramMap = make(map[string]*histogram.Snapshot)
 		}
 
-		url := collector.buildPodMetricURL(pod, podSource)
-		podCtx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
-		req, reqErr := http.NewRequestWithContext(podCtx, http.MethodGet, url, nil)
-		if reqErr != nil {
-			cancel()
-			return 0, false, false, reqErr
-		}
-		resp, reqErr := http.DefaultClient.Do(req)
-		if reqErr != nil {
-			cancel()
-			return 0, false, false, reqErr
-		}
-		if resp == nil || !util.IsRequestSuccess(resp.StatusCode) || resp.Body == nil {
-			cancel()
-			return 0, false, false, fmt.Errorf("invalid metric response for pod %s", pod.Name)
-		}
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		cancel()
-		if readErr != nil {
-			return 0, false, false, readErr
+		body, scrapeErr := collector.scrapePod(ctx, pod, podSource)
+		if scrapeErr != nil {
+			return nil, false, false, scrapeErr
 		}
 
-		v, snapshot, found, parseErr := parseSinglePrometheusMetric(string(body), metricName, pastHistogramMap)
+		families, parseErr := parsePrometheusFamilies(body, wanted)
 		if parseErr != nil {
-			return 0, false, false, parseErr
+			return nil, false, false, parseErr
 		}
-		if found {
-			metricValue += v
+
+		for scrapeName, policyKeys := range wanted {
+			mf, found := families[scrapeName]
+			if !found {
+				continue
+			}
+			for _, policyKey := range policyKeys {
+				v, snapshot, gotValue, extractErr := extractMetricFromFamily(mf, pastHistogramMap[policyKey])
+				if extractErr != nil {
+					return nil, false, false, extractErr
+				}
+				if gotValue {
+					values[policyKey] += v
+				}
+				if snapshot != nil {
+					currentHistogramMap[policyKey] = snapshot
+				}
+			}
 		}
-		if snapshot != nil {
-			currentHistogramMap[metricName] = snapshot
-		}
+
 		currentHistograms[pod.Name] = HistogramInfo{
 			PodStartTime: pod.Status.StartTime,
 			HistogramMap: currentHistogramMap,
 		}
 	}
 	return
+}
+
+func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) (string, error) {
+	url := collector.buildPodMetricURL(pod, podSource)
+	podCtx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(podCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if !util.IsRequestSuccess(resp.StatusCode) || resp.Body == nil {
+		return "", fmt.Errorf("invalid metric response for pod %s", pod.Name)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) string {
@@ -253,47 +319,56 @@ func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *
 	return fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, port, uri)
 }
 
-func parseSinglePrometheusMetric(metricStr string, metricName string, pastHistograms map[string]*histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
-	reader := strings.NewReader(metricStr)
+// parsePrometheusFamilies decodes a Prometheus text exposition payload once and
+// returns the MetricFamily entries whose names are present in wanted.
+func parsePrometheusFamilies(body string, wanted map[string][]string) (map[string]*io_prometheus_client.MetricFamily, error) {
+	families := make(map[string]*io_prometheus_client.MetricFamily, len(wanted))
+	reader := strings.NewReader(body)
 	decoder := expfmt.NewDecoder(reader, expfmt.NewFormat(expfmt.TypeTextPlain))
 	for {
 		mf := &io_prometheus_client.MetricFamily{}
-		decodeErr := decoder.Decode(mf)
-		if decodeErr == io.EOF {
+		err := decoder.Decode(mf)
+		if err == io.EOF {
 			break
 		}
-		if decodeErr != nil {
-			return 0, nil, false, decodeErr
+		if err != nil {
+			return nil, err
 		}
-		if mf.GetName() != metricName || len(mf.Metric) < 1 {
+		if _, ok := wanted[mf.GetName()]; !ok {
 			continue
 		}
-
-		metric := mf.Metric[0]
-		switch mf.GetType() {
-		case io_prometheus_client.MetricType_COUNTER:
-			return metric.GetCounter().GetValue(), nil, true, nil
-		case io_prometheus_client.MetricType_GAUGE:
-			return metric.GetGauge().GetValue(), nil, true, nil
-		case io_prometheus_client.MetricType_HISTOGRAM:
-			hist := metric.GetHistogram()
-			snapshot := histogram.NewSnapshotOfHistogram(hist)
-			past := histogram.NewDefaultSnapshot()
-			if pastHistograms != nil {
-				if old, ok := pastHistograms[metricName]; ok {
-					past = old
-				}
-			}
-			quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
-			if qErr != nil {
-				return 0, snapshot, false, qErr
-			}
-			return quantile, snapshot, true, nil
-		default:
-			return 0, nil, false, fmt.Errorf("unsupported metric type %v", mf.GetType())
-		}
+		families[mf.GetName()] = mf
 	}
-	return 0, nil, false, nil
+	return families, nil
+}
+
+// extractMetricFromFamily returns the scalar value (and histogram snapshot, when
+// applicable) for the first metric series of mf.
+func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogram *histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
+	if len(mf.Metric) < 1 {
+		return 0, nil, false, nil
+	}
+	metric := mf.Metric[0]
+	switch mf.GetType() {
+	case io_prometheus_client.MetricType_COUNTER:
+		return metric.GetCounter().GetValue(), nil, true, nil
+	case io_prometheus_client.MetricType_GAUGE:
+		return metric.GetGauge().GetValue(), nil, true, nil
+	case io_prometheus_client.MetricType_HISTOGRAM:
+		hist := metric.GetHistogram()
+		snapshot := histogram.NewSnapshotOfHistogram(hist)
+		past := histogram.NewDefaultSnapshot()
+		if pastHistogram != nil {
+			past = pastHistogram
+		}
+		quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
+		if qErr != nil {
+			return 0, snapshot, false, qErr
+		}
+		return quantile, snapshot, true, nil
+	default:
+		return 0, nil, false, fmt.Errorf("unsupported metric type %v", mf.GetType())
+	}
 }
 
 func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src *v1alpha1.PrometheusMetricSource) (float64, error) {
