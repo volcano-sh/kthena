@@ -154,7 +154,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `metricName` _string_ | MetricName defines the name of the metric to monitor for scaling decisions. |  |  |
+| `name` _string_ | Name defines the metric key used by the scaling algorithm. |  | MinLength: 1 <br /> |
 | `targetValue` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#quantity-resource-api)_ | TargetValue defines the target value for the metric that triggers scaling operations. |  |  |
 
 
@@ -332,11 +332,11 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | Annotations is an unstructured key value map stored with a resource that may be<br />set by external tools to store and retrieve arbitrary metadata. They are not<br />queryable and should be preserved when modifying objects.<br />More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations |  |  |
 
 
-#### MetricEndpoint
+#### MetricSource
 
 
 
-MetricEndpoint defines the endpoint configuration for scraping metrics from pods.
+MetricSource is a discriminated union selecting the metric backend.
 
 
 
@@ -345,8 +345,27 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics |  |
-| `port` _integer_ | Port defines the network port where metrics are exposed by the pods. | 8100 |  |
+| `type` _[MetricSourceType](#metricsourcetype)_ | Type selects the metric source backend. | Pod | Enum: [Pod Prometheus] <br /> |
+| `pod` _[PodMetricSource](#podmetricsource)_ | Pod configures direct pod endpoint scraping. |  |  |
+| `prometheus` _[PrometheusMetricSource](#prometheusmetricsource)_ | Prometheus configures an external Prometheus server as the metric source. |  |  |
+
+
+#### MetricSourceType
+
+_Underlying type:_ _string_
+
+MetricSourceType selects the backend from which a metric value is fetched.
+
+_Validation:_
+- Enum: [Pod Prometheus]
+
+_Appears in:_
+- [MetricSource](#metricsource)
+
+| Field | Description |
+| --- | --- |
+| `Pod` |  |
+| `Prometheus` |  |
 
 
 #### ModelBackend
@@ -686,6 +705,24 @@ _Appears in:_
 | `BuiltIn` |  |
 
 
+#### PodMetricSource
+
+
+
+PodMetricSource configures pod-endpoint scraping for a metric.
+
+
+
+_Appears in:_
+- [MetricSource](#metricsource)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the Prometheus metric name matched against labels in the pod's scraped output.<br />Defaults to the policy metric key when omitted. |  |  |
+| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics |  |
+| `port` _integer_ | Port defines the network port where metrics are exposed by the pods. | 8100 |  |
+
+
 #### PodTemplateSpec
 
 
@@ -701,6 +738,43 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `metadata` _[Metadata](#metadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#podspec-v1-core)_ | Specification of the desired behavior of the pod. |  |  |
+
+
+
+
+#### PrometheusMetricSource
+
+
+
+PrometheusMetricSource configures an external Prometheus server as a metric backend.
+
+
+
+_Appears in:_
+- [MetricSource](#metricsource)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `serverURL` _string_ | ServerURL is the base URL of the Prometheus HTTP API server. |  | MinLength: 1 <br /> |
+| `query` _string_ | Query is a PromQL instant-query expression. |  | MinLength: 1 <br /> |
+| `auth` _[PrometheusAuth](#prometheusauth)_ | Auth holds optional authentication configuration for the Prometheus server. |  |  |
+
+
+#### PrometheusTLSConfig
+
+
+
+PrometheusTLSConfig holds TLS settings for Prometheus HTTPS connections.
+
+
+
+_Appears in:_
+- [PrometheusAuth](#prometheusauth)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify disables TLS certificate verification. |  |  |
+| `caSecret` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | CASecret references a Secret key containing a PEM-encoded CA bundle. |  |  |
 
 
 #### RecoveryPolicy
@@ -865,6 +939,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing. |  |  |
 | `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing. |  |  |
-| `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint defines the configuration for scraping metrics from the target pods. |  |  |
+| `metricSources` _object (keys:string, values:[MetricSource](#metricsource))_ | MetricSources declares how to fetch specific metrics for this target.<br />Keys must match AutoscalingPolicy.spec.metrics[].name.<br />Missing keys are treated as missing metrics for that reconcile loop. |  |  |
 
 
