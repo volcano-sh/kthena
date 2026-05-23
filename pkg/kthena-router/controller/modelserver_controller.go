@@ -76,7 +76,7 @@ func NewModelServerController(
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
-) *ModelServerController {
+) (*ModelServerController, error) {
 	modelServerInformer := kthenaInformerFactory.Networking().V1alpha1().ModelServers()
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 
@@ -90,25 +90,32 @@ func NewModelServerController(
 		store:             store,
 	}
 
+	var err error
 	// Register ModelServer event handlers
-	controller.modelServerRegistration, _ = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	controller.modelServerRegistration, err = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueModelServer,
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueueModelServer(new)
 		},
 		DeleteFunc: controller.enqueueModelServer,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add event handler for modelserver controller: %w", err)
+	}
 
 	// Register Pod event handlers
-	controller.podRegistration, _ = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	controller.podRegistration, err = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueuePod,
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueuePod(new)
 		},
 		DeleteFunc: controller.enqueuePod,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add pod event handler for modelserver controller: %w", err)
+	}
 
-	return controller
+	return controller, nil
 }
 
 func (c *ModelServerController) Run(stopCh <-chan struct{}) error {

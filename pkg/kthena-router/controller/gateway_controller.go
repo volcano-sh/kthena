@@ -47,7 +47,7 @@ type GatewayController struct {
 func NewGatewayController(
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
 	store datastore.Store,
-) *GatewayController {
+) (*GatewayController, error) {
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
 
 	controller := &GatewayController{
@@ -75,10 +75,14 @@ func NewGatewayController(
 			DeleteFunc: controller.enqueueGateway,
 		},
 	}
+	var err error
+	controller.registration, err = gatewayInformer.Informer().AddEventHandler(filterHandler)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add event handler for gateway controller: %w", err)
 
-	controller.registration, _ = gatewayInformer.Informer().AddEventHandler(filterHandler)
+	}
+	return controller, nil
 
-	return controller
 }
 
 func (c *GatewayController) Run(stopCh <-chan struct{}) error {

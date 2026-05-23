@@ -49,7 +49,7 @@ type HTTPRouteController struct {
 func NewHTTPRouteController(
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
 	store datastore.Store,
-) *HTTPRouteController {
+) (*HTTPRouteController, error) {
 	httpRouteInformer := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
 
@@ -62,11 +62,15 @@ func NewHTTPRouteController(
 		store:           store,
 	}
 
-	controller.registration, _ = httpRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	var err error
+	controller.registration, err = httpRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueHTTPRoute,
 		UpdateFunc: func(old, new interface{}) { controller.enqueueHTTPRoute(new) },
 		DeleteFunc: controller.enqueueHTTPRoute,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add event handler for httproute controller: %w", err)
+	}
 
 	gatewayFilter := &cache.FilteringResourceEventHandler{
 		FilterFunc: func(obj interface{}) bool {
@@ -84,9 +88,11 @@ func NewHTTPRouteController(
 			},
 		},
 	}
-	_, _ = gatewayInformer.Informer().AddEventHandler(gatewayFilter)
+	if _, err = gatewayInformer.Informer().AddEventHandler(gatewayFilter); err != nil {
+		return nil, fmt.Errorf("failed to add gateway event handler for httproute controller: %w", err)
+	}
 
-	return controller
+	return controller, nil
 }
 
 func (c *HTTPRouteController) Run(stopCh <-chan struct{}) error {
