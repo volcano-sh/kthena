@@ -112,9 +112,9 @@ func NewModelServerController(
 		DeleteFunc: controller.enqueuePod,
 	})
 	if err != nil {
+		controller.modelServerRegistration.Remove()
 		return nil, fmt.Errorf("failed to add pod event handler for modelserver controller: %w", err)
 	}
-
 	return controller, nil
 }
 

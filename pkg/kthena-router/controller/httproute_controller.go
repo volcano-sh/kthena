@@ -89,6 +89,7 @@ func NewHTTPRouteController(
 		},
 	}
 	if _, err = gatewayInformer.Informer().AddEventHandler(gatewayFilter); err != nil {
+		controller.registration.Remove()
 		return nil, fmt.Errorf("failed to add gateway event handler for httproute controller: %w", err)
 	}
 
