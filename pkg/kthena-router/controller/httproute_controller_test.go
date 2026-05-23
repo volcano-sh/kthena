@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -38,7 +39,8 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, store)
+	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)
@@ -118,7 +120,8 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, store)
+	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)
@@ -195,7 +198,8 @@ func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, store)
+	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)

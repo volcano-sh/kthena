@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
@@ -54,7 +55,8 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller, err := NewGatewayController(gatewayInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -141,7 +143,8 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller, err := NewGatewayController(gatewayInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -185,7 +188,8 @@ func TestGatewayController_ErrorHandling(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller, err := NewGatewayController(gatewayInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -209,7 +213,8 @@ func TestGatewayController_WorkQueueProcessing(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	controller := NewGatewayController(gatewayInformerFactory, store)
+	controller, err := NewGatewayController(gatewayInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
