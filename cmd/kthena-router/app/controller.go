@@ -116,14 +116,17 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		)
 
 		if enableGatewayAPIInferenceExtension {
-			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, store)
+			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
 			dynamicClient, err := dynamic.NewForConfig(cfg)
 			if err != nil {
 				klog.Fatalf("Error building dynamic client: %s", err.Error())
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
 			inferencePoolController = controller.NewInferencePoolController(dynamicInformerFactory, store)
-			cacheSyncs = append(cacheSyncs, dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced)
+			cacheSyncs = append(cacheSyncs,
+				kubeInformerFactory.Core().V1().Namespaces().Informer().HasSynced,
+				dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced,
+			)
 			dynamicInformerFactory.Start(stop)
 		}
 		gatewayInformerFactory.Start(stop)
