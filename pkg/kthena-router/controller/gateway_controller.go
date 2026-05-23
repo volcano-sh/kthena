@@ -79,10 +79,8 @@ func NewGatewayController(
 	controller.registration, err = gatewayInformer.Informer().AddEventHandler(filterHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add event handler for gateway controller: %w", err)
-
 	}
 	return controller, nil
-
 }
 
 func (c *GatewayController) Run(stopCh <-chan struct{}) error {
