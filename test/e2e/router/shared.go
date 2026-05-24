@@ -727,9 +727,16 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 			sessionStickySpec(nil,
 				stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader),
 				stickySource(networkingv1alpha1.SessionKeySourceQuery, "sid")))
-		headerOnly := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "precedence"})
-		bothSources := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL+"?sid=query-other", route.Spec.ModelName, map[string]string{sessionStickyHeader: "precedence"})
-		require.Equal(t, headerOnly, bothSources, "header source must win before query source")
+		require.Eventually(t, func() bool {
+			sessionValue := "precedence-" + utils.RandomString(8)
+			pods := make([]string, 0, 8)
+			for i := 0; i < 8; i++ {
+				url := fmt.Sprintf("%s?sid=query-%d-%s", baseURL, i, utils.RandomString(6))
+				content := fmt.Sprintf("%s-%d-source-precedence", utils.RandomString(10), i)
+				pods = append(pods, selectedPodForRequestWithContent(t, testCtx, kthenaNamespace, url, route.Spec.ModelName, content, map[string]string{sessionStickyHeader: sessionValue}))
+			}
+			return distinctPodCount(pods) == 1
+		}, 45*time.Second, time.Second, "header source must win before query source")
 	})
 }
 

@@ -980,6 +980,21 @@ func TestRouterDoLoadbalanceIgnoresSessionHeaderWhenSessionStickyAbsent(t *testi
 	assert.Empty(t, capture.ctx.AffinityScopeKey)
 }
 
+func TestExtractSessionKeyUsesFirstConfiguredSource(t *testing.T) {
+	req, err := http.NewRequest("POST", "/v1/chat/completions?sid=query-session", nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Session-ID", "header-session")
+
+	spec := &aiv1alpha1.SessionSticky{
+		Sources: []aiv1alpha1.SessionKeySource{
+			{Type: aiv1alpha1.SessionKeySourceHeader, Name: "X-Session-ID"},
+			{Type: aiv1alpha1.SessionKeySourceQuery, Name: "sid"},
+		},
+	}
+
+	assert.Equal(t, "header-session", extractSessionKey(req, spec, nil))
+}
+
 func TestRouterDoLoadbalanceRetriesWithAllPodsWhenStickyBoundPodCannotSchedule(t *testing.T) {
 	store := datastore.New()
 	capture := &capturingScheduler{errs: []error{
