@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1049,6 +1050,110 @@ func TestRouterDoLoadbalanceRetriesWithAllPodsWhenStickyBoundPodCannotSchedule(t
 	require.Len(t, capture.podsByCall[1], 2, "retry should use the original full pod list")
 	_, ok := stickyStore.Get("default/mr-1", "session-1")
 	assert.False(t, ok, "failed sticky binding should be deleted")
+}
+
+func TestMemorySessionStickyStoreSetPreservesExistingDifferentPod(t *testing.T) {
+	now := time.Unix(100, 0)
+	stickyStore := newMemorySessionStickyStore()
+	stickyStore.now = func() time.Time {
+		return now
+	}
+
+	routeKey := "default/route"
+	sessionKey := "session-1"
+	pod1 := types.NamespacedName{Namespace: "default", Name: "pod-1"}
+	pod2 := types.NamespacedName{Namespace: "default", Name: "pod-2"}
+
+	stickyStore.Set(routeKey, sessionKey, pod1, time.Minute)
+	stickyStore.Set(routeKey, sessionKey, pod2, time.Minute)
+
+	got, ok := stickyStore.Get(routeKey, sessionKey)
+	require.True(t, ok)
+	assert.Equal(t, pod1, got, "live binding to another pod should not be overwritten")
+
+	now = now.Add(30 * time.Second)
+	stickyStore.Set(routeKey, sessionKey, pod1, 2*time.Minute)
+
+	now = now.Add(45 * time.Second)
+	got, ok = stickyStore.Get(routeKey, sessionKey)
+	require.True(t, ok, "same-pod set should refresh the TTL")
+	assert.Equal(t, pod1, got)
+
+	now = now.Add(2 * time.Minute)
+	stickyStore.Set(routeKey, sessionKey, pod2, time.Minute)
+
+	got, ok = stickyStore.Get(routeKey, sessionKey)
+	require.True(t, ok)
+	assert.Equal(t, pod2, got, "expired binding should be replaced")
+}
+
+func TestProxyRequestReturnsDownstreamCopyError(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"completion_tokens":1}}`))
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	host, portString, err := net.SplitHostPort(backendURL.Host)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portString)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Writer = &failingResponseWriter{
+		ResponseWriter: c.Writer,
+		err:            errors.New("downstream closed"),
+	}
+	c.Request, err = http.NewRequest("POST", backend.URL+"/v1/chat/completions", bytes.NewBufferString("{}"))
+	require.NoError(t, err)
+
+	err = proxyRequest(c, c.Request, host, int32(port), false, nil)
+	require.ErrorContains(t, err, "copy response to downstream failed")
+	require.ErrorContains(t, err, "downstream closed")
+}
+
+func TestProxyRequestReturnsDownstreamStreamWriteError(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {}\n"))
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	host, portString, err := net.SplitHostPort(backendURL.Host)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portString)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Writer = &failingResponseWriter{
+		ResponseWriter: c.Writer,
+		err:            errors.New("stream closed"),
+	}
+	c.Request, err = http.NewRequest("POST", backend.URL+"/v1/chat/completions", bytes.NewBufferString("{}"))
+	require.NoError(t, err)
+
+	err = proxyRequest(c, c.Request, host, int32(port), true, nil)
+	require.ErrorContains(t, err, "write stream response to downstream failed")
+	require.ErrorContains(t, err, "stream closed")
+}
+
+type failingResponseWriter struct {
+	gin.ResponseWriter
+	err error
+}
+
+func (w *failingResponseWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func (w *failingResponseWriter) CloseNotify() <-chan bool {
+	return make(chan bool)
 }
 
 type capturingScheduler struct {

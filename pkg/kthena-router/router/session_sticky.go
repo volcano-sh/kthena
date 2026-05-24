@@ -106,7 +106,15 @@ func (s *memorySessionStickyStore) Set(routeKey, sessionKey string, pod types.Na
 
 	now := s.now()
 	s.cleanupExpiredLocked(now)
-	s.bindings[sessionStoreKey(routeKey, sessionKey)] = sessionBinding{
+	key := sessionStoreKey(routeKey, sessionKey)
+	if existing, ok := s.bindings[key]; ok && existing.expiresAt.After(now) {
+		if existing.pod == pod {
+			existing.expiresAt = now.Add(ttl)
+			s.bindings[key] = existing
+		}
+		return
+	}
+	s.bindings[key] = sessionBinding{
 		pod:       pod,
 		expiresAt: now.Add(ttl),
 	}

@@ -1065,7 +1065,8 @@ func proxyRequest(
 		// Stream response: read and forward each event (line) one by one, and parse usage if present
 		c.Status(resp.StatusCode)
 		reader := bufio.NewReader(resp.Body)
-		c.Stream(func(w io.Writer) bool {
+		var streamErr error
+		clientGone := c.Stream(func(w io.Writer) bool {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
 				// Try to parse usage from this line, assuming it's a data line
@@ -1084,16 +1085,31 @@ func proxyRequest(
 					}
 				}
 				// Forward to downstream
-				_, _ = w.Write(line)
+				n, writeErr := w.Write(line)
+				if writeErr != nil {
+					streamErr = fmt.Errorf("write stream response to downstream failed: %w", writeErr)
+					return false
+				}
+				if n != len(line) {
+					streamErr = fmt.Errorf("write stream response to downstream failed: %w", io.ErrShortWrite)
+					return false
+				}
 			}
 			if err != nil {
 				if err != io.EOF {
 					klog.Errorf("error reading stream body: %v", err)
+					streamErr = fmt.Errorf("read stream response from upstream failed: %w", err)
 				}
 				return false
 			}
 			return true
 		})
+		if streamErr != nil {
+			return streamErr
+		}
+		if clientGone {
+			return fmt.Errorf("downstream client disconnected")
+		}
 	} else {
 		// Non-stream: efficiently stream response while capturing for parsing
 		var buf bytes.Buffer
@@ -1102,7 +1118,7 @@ func proxyRequest(
 		_, err := io.Copy(c.Writer, ttee)
 		if err != nil {
 			klog.Errorf("copy response to downstream failed: %v", err)
-			return nil
+			return fmt.Errorf("copy response to downstream failed: %w", err)
 		}
 
 		// Parse usage if present
