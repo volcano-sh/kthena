@@ -390,44 +390,26 @@ func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeyS
 	}
 }
 
-func restartRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace, deploymentName string) {
-	t.Helper()
-	require.NoError(t, restartRouterPodsE(context.Background(), kubeClient, namespace, deploymentName, defaultScalingTimeout))
-}
-
-func restartRouterPodsE(ctx context.Context, kubeClient kubernetes.Interface, namespace, deploymentName string, timeout time.Duration) error {
-	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: metav1.FormatLabelSelector(deployment.Spec.Selector),
-	})
-	if err != nil {
-		return err
-	}
-	for i := range pods.Items {
-		if err := kubeClient.CoreV1().Pods(namespace).Delete(ctx, pods.Items[i].Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return utils.WaitForDeploymentReadyE(ctx, kubeClient, namespace, deploymentName, timeout)
-}
-
 func stickySource(sourceType networkingv1alpha1.SessionKeySourceType, name string) networkingv1alpha1.SessionKeySource {
 	return networkingv1alpha1.SessionKeySource{Type: sourceType, Name: name}
 }
 
 func selectedPodForRequest(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string) string {
 	t.Helper()
-	requestID := "sticky-" + utils.RandomString(10)
-	if headers == nil {
-		headers = map[string]string{}
-	}
-	headers["x-request-id"] = requestID
+	return selectedPodForRequestWithContent(t, testCtx, kthenaNamespace, url, modelName, "Hello", headers)
+}
 
-	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Hello")}
-	resp := utils.CheckChatCompletionsWithURLAndHeaders(t, url, modelName, messages, headers)
+func selectedPodForRequestWithContent(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName, content string, headers map[string]string) string {
+	t.Helper()
+	requestID := "sticky-" + utils.RandomString(10)
+	requestHeaders := map[string]string{}
+	for key, value := range headers {
+		requestHeaders[key] = value
+	}
+	requestHeaders["x-request-id"] = requestID
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", content)}
+	resp := utils.CheckChatCompletionsWithURLAndHeaders(t, url, modelName, messages, requestHeaders)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	return waitForSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, requestID, 45*time.Second)
@@ -496,19 +478,17 @@ func distinctPodCount(pods []string) int {
 
 func collectSelectedPods(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string, requests int) []string {
 	t.Helper()
-	pods := make([]string, 0, requests)
-	for i := 0; i < requests; i++ {
-		pods = append(pods, selectedPodForRequest(t, testCtx, kthenaNamespace, url, modelName, headers))
-	}
-	return pods
+	return collectSelectedPodsWithContentPrefix(t, testCtx, kthenaNamespace, url, modelName, headers, requests, "Hello")
 }
 
-func freeLocalPort(t *testing.T) string {
+func collectSelectedPodsWithContentPrefix(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string, requests int, contentPrefix string) []string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "Failed to allocate local port")
-	defer listener.Close()
-	return fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	pods := make([]string, 0, requests)
+	for i := 0; i < requests; i++ {
+		content := fmt.Sprintf("%s-%d-%s", utils.RandomString(10), i, contentPrefix)
+		pods = append(pods, selectedPodForRequestWithContent(t, testCtx, kthenaNamespace, url, modelName, content, headers))
+	}
+	return pods
 }
 
 // setupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
@@ -685,13 +665,13 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("E2E-SS-03-NoKeyUsesPlainLoadBalancing", func(t *testing.T) {
 		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
 			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
-		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, nil, 30)
+		pods := collectSelectedPodsWithContentPrefix(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, nil, 30, "missing-sticky-key")
 		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "missing sticky key should not pin all requests")
 	})
 
 	t.Run("E2E-SS-04-AbsentSessionStickyIgnoresHeader", func(t *testing.T) {
 		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace, nil)
-		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "ignored"}, 30)
+		pods := collectSelectedPodsWithContentPrefix(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "ignored"}, 30, "absent-sticky")
 		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "header should not pin when sessionSticky is absent")
 	})
 
@@ -760,7 +740,6 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 		bothSources := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL+"?sid=query-other", route.Spec.ModelName, map[string]string{sessionStickyHeader: "precedence"})
 		require.Equal(t, headerOnly, bothSources, "header source must win before query source")
 	})
-
 }
 
 // TestModelRoutePrefillDecodeDisaggregationShared is a shared test function that can be used by both
