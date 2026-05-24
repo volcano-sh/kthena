@@ -42,6 +42,7 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -961,6 +962,7 @@ func TestRouterDoLoadbalancePopulatesSessionStickyContextForModelRoute(t *testin
 	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions?sid=query-session", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.Header.Set("X-Session-ID", "session-1")
+	c.Set(PromptKey, &common.ChatMessage{Text: "hello"})
 
 	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
 
@@ -1009,6 +1011,7 @@ func TestRouterDoLoadbalanceIgnoresSessionHeaderWhenSessionStickyAbsent(t *testi
 	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.Header.Set("X-Session-ID", "session-1")
+	c.Set(PromptKey, &common.ChatMessage{Text: "hello"})
 
 	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
 
@@ -1077,6 +1080,7 @@ func TestRouterDoLoadbalanceRetriesWithAllPodsWhenStickyBoundPodCannotSchedule(t
 	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.Header.Set("X-Session-ID", "session-1")
+	c.Set(PromptKey, &common.ChatMessage{Text: "hello"})
 
 	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
 

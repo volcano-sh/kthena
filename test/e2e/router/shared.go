@@ -38,6 +38,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	"github.com/volcano-sh/kthena/test/e2e/framework"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -317,6 +318,7 @@ func configureRouterSessionStickyRedis(t *testing.T, kubeClient kubernetes.Inter
 		expectedReplicas = *deployment.Spec.Replicas
 	}
 	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, expectedReplicas, defaultScalingTimeout)
+	refreshDefaultRouterPortForward(t, namespace)
 
 	return func() {
 		restoreCtx := context.Background()
@@ -334,6 +336,7 @@ func configureRouterSessionStickyRedis(t *testing.T, kubeClient kubernetes.Inter
 			return
 		}
 		_ = utils.WaitForDeploymentReadyE(restoreCtx, kubeClient, namespace, deploymentName, defaultScalingTimeout)
+		refreshDefaultRouterPortForward(t, namespace)
 	}
 }
 
@@ -470,6 +473,7 @@ func configureRouterRandomScorePlugin(t *testing.T, kubeClient kubernetes.Interf
 	_, err = kubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
 	require.NoError(t, err, "Failed to configure random router score plugin")
 	restartRouterPods(t, kubeClient, namespace, routerDeploymentName)
+	refreshDefaultRouterPortForward(t, namespace)
 
 	return func() {
 		restoreCtx := context.Background()
@@ -484,7 +488,13 @@ func configureRouterRandomScorePlugin(t *testing.T, kubeClient kubernetes.Interf
 			return
 		}
 		_ = restartRouterPodsE(restoreCtx, kubeClient, namespace, routerDeploymentName, defaultScalingTimeout)
+		refreshDefaultRouterPortForward(t, namespace)
 	}
+}
+
+func refreshDefaultRouterPortForward(t *testing.T, kthenaNamespace string) {
+	t.Helper()
+	require.NoError(t, framework.RestartRouterPortForward(kthenaNamespace), "Failed to refresh router port-forward")
 }
 
 func restartRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace, deploymentName string) {
