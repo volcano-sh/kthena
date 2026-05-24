@@ -156,18 +156,7 @@ func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kth
 		}
 		_, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
 		if err != nil {
-			errStr := err.Error()
-			// CHANGE 1: added EOF, connection reset by peer, no endpoints available.
-			// EOF is the primary failure mode — the router pod accepts the TCP
-			// connection but drops it mid-TLS handshake during partial startup after
-			// TestRouterConfigUpdate restarts the pod. Without EOF here the test
-			// dies instantly with no retry on the most common failure case.
-			if strings.Contains(errStr, "connect: connection refused") ||
-				strings.Contains(errStr, "i/o timeout") ||
-				strings.Contains(errStr, "context deadline exceeded") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "connection reset by peer") ||
-				strings.Contains(errStr, "no endpoints available") {
+			if shouldRetryWebhookError(err) {
 				t.Logf("Router validating webhook not ready yet, retrying: %v", err)
 				return false, nil
 			}
@@ -380,7 +369,9 @@ func shouldRetryWebhookError(err error) bool {
 		strings.Contains(msg, "connection reset by peer") ||
 		strings.Contains(msg, "i/o timeout") ||
 		strings.Contains(msg, "context deadline exceeded") ||
-		strings.Contains(msg, "broken pipe")
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "no endpoints available")
 }
 
 func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeySource) *networkingv1alpha1.SessionSticky {
