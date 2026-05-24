@@ -62,9 +62,6 @@ kthenaRouter:
       address: ""
       # password is optional; outside Helm, REDIS_PASSWORD can provide it directly.
       password: ""
-  # debugBackendPodHeader enables X-Kthena-Backend-Pod on proxied responses for tests/debugging.
-  # Keep disabled for production traffic.
-  debugBackendPodHeader: false
   jwtAuth:
     # enabled allows admission of ModelRoute sessionSticky JWTClaim sources.
     enabled: false

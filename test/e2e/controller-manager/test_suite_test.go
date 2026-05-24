@@ -102,7 +102,7 @@ func waitForWebhookReady(t *testing.T, ctx context.Context, kthenaClient *client
 	t.Helper()
 	t.Log("Waiting for webhook server to accept requests")
 
-	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	waitCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
 	defer cancel()
 
 	err := wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -110,12 +110,11 @@ func waitForWebhookReady(t *testing.T, ctx context.Context, kthenaClient *client
 		probe.Namespace = namespace
 		probe.Name = "webhook-ready-probe-" + utils.RandomString(5)
 
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, 5*time.Second)
-		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(namespace).Create(attemptCtx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
-		attemptCancel()
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
 		if err != nil {
-			if isRetryableWebhookReadinessError(err) {
-				t.Logf("Webhook not ready yet, retrying: %v", err)
+			errStr := err.Error()
+			if strings.Contains(errStr, "connect: connection refused") {
+				t.Logf("Webhook not ready yet (connection refused), retrying: %v", err)
 				return false, nil
 			}
 			return false, err
@@ -124,16 +123,4 @@ func waitForWebhookReady(t *testing.T, ctx context.Context, kthenaClient *client
 		return true, nil
 	})
 	require.NoError(t, err, "Webhook did not become ready in time")
-}
-
-func isRetryableWebhookReadinessError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "failed calling webhook") ||
-		strings.Contains(errStr, "connect: connection refused") ||
-		strings.Contains(errStr, "context deadline exceeded") ||
-		strings.Contains(errStr, "Client.Timeout exceeded") ||
-		strings.Contains(errStr, "broken pipe")
 }

@@ -66,50 +66,9 @@ func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datast
 
 	backend := httptest.NewServer(backendHandler)
 	store := datastore.New()
-	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{}, false)
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{})
 
 	return router, store, backend
-}
-
-func TestRouterProxyBackendPodHeaderIsDebugGated(t *testing.T) {
-	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"id":"response-id"}`)
-	})
-	router, _, backend := setupTestRouter(t, backendHandler)
-	defer backend.Close()
-
-	backendURL, _ := url.Parse(backend.URL)
-	backendPort, _ := strconv.Atoi(backendURL.Port())
-	pod := &datastore.PodInfo{Pod: &corev1.Pod{
-		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
-		Status:     corev1.PodStatus{PodIP: backendURL.Hostname()},
-	}}
-
-	for _, tc := range []struct {
-		name       string
-		enabled    bool
-		wantHeader string
-	}{
-		{name: "disabled", enabled: false, wantHeader: ""},
-		{name: "enabled", enabled: true, wantHeader: "pod-1"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			router.debugBackendPodHeader = tc.enabled
-			w := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(w)
-			req := httptest.NewRequest(http.MethodPost, "http://router.local/v1/chat/completions", nil)
-			c.Request = req
-
-			err := router.proxy(c, req, &framework.Context{
-				ModelServerName: types.NamespacedName{Namespace: "default", Name: "ms-1"},
-				BestPods:        []*datastore.PodInfo{pod},
-			}, false, int32(backendPort), nil)
-
-			require.NoError(t, err)
-			require.Equal(t, tc.wantHeader, w.Header().Get(BackendPodHeader))
-		})
-	}
 }
 
 func TestRouter_HandleHTTPRoute_PathPrefix(t *testing.T) {
@@ -752,7 +711,7 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	backendPort, _ := strconv.Atoi(backendURL.Port())
 
 	store := datastore.New()
-	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{}, false)
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{})
 
 	modelServer := &aiv1alpha1.ModelServer{
 		ObjectMeta: v1.ObjectMeta{Name: "ms-retry", Namespace: "default"},

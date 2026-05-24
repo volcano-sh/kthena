@@ -18,7 +18,6 @@ A Helm chart for deploying Kthena
 | global.certManagementMode | string | `"auto"` | Certificate Management Mode.<br/>  Three mutually exclusive options for managing TLS certificates:<br/>  - `auto`: Webhook servers generate self-signed certificates automatically.<br/>  - `cert-manager`: Use cert-manager to generate and manage certificates (requires cert-manager installation).<br/>  - `manual`: Provide your own certificates via caBundle. |
 | global.webhook.caBundle | string | `""` | CA bundle for webhook server certificates (base64-encoded).<br/> This is ONLY required when `certManagementMode` is set to "manual".<br/> You can generate it with: `cat /path/to/your/ca.crt | base64 | tr -d '\n'`<br/> |
 | networking.enabled | bool | `true` | Enable the networking subchart. |
-| networking.kthenaRouter.debugBackendPodHeader | bool | `false` | Enable X-Kthena-Backend-Pod on proxied responses for tests/debugging. Keep disabled for production traffic. |
 | networking.kthenaRouter.debugPort | int | `15000` | Debug server port for Kthena Router (localhost only). |
 | networking.kthenaRouter.enabled | bool | `true` | Enable Kthena Router. |
 | networking.kthenaRouter.fairness.enabled | bool | `false` | Enable fairness scheduling. |

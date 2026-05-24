@@ -57,8 +57,6 @@ func main() {
 		kubeAPIBurst                       int
 		sessionStickyStoreType             string
 		sessionStickyRedisAddress          string
-		sessionStickyRedisPassword         string
-		debugBackendPodHeader              bool
 	)
 
 	klog.InitFlags(nil)
@@ -86,8 +84,6 @@ func main() {
 	pflag.IntVar(&kubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.StringVar(&sessionStickyStoreType, "session-sticky-store", router.SessionStickyStoreMemory, "Session sticky store backend: memory or redis")
 	pflag.StringVar(&sessionStickyRedisAddress, "session-sticky-redis-address", "", "Redis address for session sticky store when --session-sticky-store=redis")
-	pflag.StringVar(&sessionStickyRedisPassword, "session-sticky-redis-password", "", "Redis password for session sticky store when --session-sticky-store=redis; defaults to REDIS_PASSWORD")
-	pflag.BoolVar(&debugBackendPodHeader, "debug-backend-pod-header", false, "Enable X-Kthena-Backend-Pod response header for tests and debugging")
 	defer klog.Flush()
 	pflag.Parse()
 
@@ -105,10 +101,6 @@ func main() {
 
 	if debugPort <= 0 || debugPort > 65535 {
 		klog.Fatalf("invalid debug port: %d", debugPort)
-	}
-
-	if sessionStickyRedisPassword == "" {
-		sessionStickyRedisPassword = os.Getenv("REDIS_PASSWORD")
 	}
 
 	pflag.CommandLine.VisitAll(func(f *pflag.Flag) {
@@ -139,8 +131,8 @@ func main() {
 	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst, router.SessionStickyStoreConfig{
 		Type:          sessionStickyStoreType,
 		RedisAddress:  sessionStickyRedisAddress,
-		RedisPassword: sessionStickyRedisPassword,
-	}, debugBackendPodHeader).Run(ctx)
+		RedisPassword: os.Getenv("REDIS_PASSWORD"),
+	}).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.
