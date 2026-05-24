@@ -17,6 +17,8 @@ limitations under the License.
 package plugins
 
 import (
+	"math"
+
 	"istio.io/istio/pkg/slices"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
@@ -32,11 +34,14 @@ var _ framework.ScorePlugin = &LeastRequest{}
 var _ framework.FilterPlugin = &LeastRequest{}
 
 type LeastRequest struct {
-	name              string
-	maxWaitingRequest int
+	name               string
+	maxWaitingRequests int
 }
 
 type LeastRequestArgs struct {
+	// MaxWaitingRequests filters out pods whose engine-reported waiting-queue
+	// depth exceeds this value. It captures backpressure that the router cannot
+	// observe directly (e.g. requests queued inside the engine before execution).
 	MaxWaitingRequests int `yaml:"maxWaitingRequests,omitempty"`
 }
 
@@ -45,13 +50,16 @@ func NewLeastRequest(pluginArg runtime.RawExtension) *LeastRequest {
 	if pluginArg.Raw == nil || yaml.Unmarshal(pluginArg.Raw, &leastRequestArgs) != nil {
 		klog.Errorf("Unmarshal LeastRequestArgs error, setting default value")
 		leastRequestArgs = LeastRequestArgs{
-			10,
+			MaxWaitingRequests: 10,
 		}
+	}
+	if leastRequestArgs.MaxWaitingRequests == 0 {
+		leastRequestArgs.MaxWaitingRequests = 10
 	}
 
 	return &LeastRequest{
-		name:              LeastRequestPluginName,
-		maxWaitingRequest: leastRequestArgs.MaxWaitingRequests,
+		name:               LeastRequestPluginName,
+		maxWaitingRequests: leastRequestArgs.MaxWaitingRequests,
 	}
 }
 
@@ -61,7 +69,9 @@ func (l *LeastRequest) Name() string {
 
 func (l *LeastRequest) Filter(ctx *framework.Context, pods []*datastore.PodInfo) []*datastore.PodInfo {
 	return slices.FilterInPlace(pods, func(info *datastore.PodInfo) bool {
-		return info.GetRequestWaitingNum() < float64(l.maxWaitingRequest)
+		// Filter on engine-reported waiting queue: catches backlog the router
+		// cannot observe (requests already inside the engine but not yet running).
+		return info.GetRequestWaitingNum() < float64(l.maxWaitingRequests)
 	})
 }
 
@@ -71,19 +81,29 @@ func (l *LeastRequest) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 		return scoreResults
 	}
 
-	// 1. Calculate the base score (running reqs + 100 * waiting reqs) for each pod
+	// Score formula: base = onFlight + 100 * max(onFlight - running, 0)
+	//
+	//   - onFlight: router-tracked in-flight count, updated with zero delay.
+	//     Acts as a proxy for current pod load and avoids the ~1 s engine-metrics
+	//     poll lag.
+	//   - max(onFlight - running, 0): estimates the number of requests that the
+	//     router has dispatched but the engine has not yet started executing
+	//     (i.e. likely queued inside the engine). Weighted ×100 to strongly
+	//     penalise pods whose queue is building up.
 	baseScores := make(map[*datastore.PodInfo]float64)
 	maxScore := 0.0
 	for _, info := range pods {
-		// The weight of waiting requests is 100. It's a magic number just to significantly lower the score of the pod when there are waiting reqs.
-		base := info.GetRequestRunningNum() + 100*info.GetRequestWaitingNum()
+		// Estimate queued requests as max(onFlight - running, 0). The engine-reported
+		// running count has a poll lag (~1 s), so this may briefly over-count, but
+		// it provides a leading indicator of queue build-up at the pod.
+		base := float64(info.GetOnFlightRequestNum()) + 100*math.Max(float64(info.GetOnFlightRequestNum())-float64(info.GetRequestRunningNum()), 0)
 		baseScores[info] = base
 		if base > maxScore {
 			maxScore = base
 		}
 	}
 
-	// 2. Calculate the score for each pod as a percentage of the max base score
+	// Normalise to [0, 100]: the least-loaded pod gets 100.
 	for _, info := range pods {
 		score := 100.0
 		if maxScore > 0 {

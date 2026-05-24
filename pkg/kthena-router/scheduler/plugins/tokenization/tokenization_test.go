@@ -563,7 +563,7 @@ func TestTokenizerManagerTokenizePrompt(t *testing.T) {
 	t.Run("Empty pods", func(t *testing.T) {
 		prompt := common.ChatMessage{Text: "Hello world"}
 
-		_, err := manager.TokenizePrompt("test-model", prompt, []*datastore.PodInfo{})
+		_, err := manager.TokenizePrompt("test-model", &prompt, []*datastore.PodInfo{})
 		if err == nil {
 			t.Error("Expected error for empty pods")
 		}
@@ -573,7 +573,7 @@ func TestTokenizerManagerTokenizePrompt(t *testing.T) {
 	t.Run("Empty prompt", func(t *testing.T) {
 		prompt := common.ChatMessage{}
 
-		_, err := manager.TokenizePrompt("test-model", prompt, []*datastore.PodInfo{})
+		_, err := manager.TokenizePrompt("test-model", &prompt, []*datastore.PodInfo{})
 		if err == nil {
 			t.Error("Expected error for empty prompt")
 		}

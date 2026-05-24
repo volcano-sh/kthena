@@ -79,7 +79,7 @@ func (s *SGLangConnector) Name() string {
 // prefill to time out and abort with "KVTransferError: Aborted by AbortReq".
 // The decode request carries bootstrap_host = prefillHost so the decode receiver can
 // locate the prefill's bootstrap server; both requests carry the same bootstrap_room.
-func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string) (int, error) {
+func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
 	// Retrieve optional metrics recorder from context.
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
@@ -87,6 +87,10 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 			metricsRecorder = rec
 		}
 	}
+
+	// hooks carries per-phase on-flight counter callbacks for the prefill and
+	// decode pods. For SGLang both phases are concurrent, so both pods are
+	// incr'd before launch and each decr'd individually as their phase finishes.
 
 	// Extract prefill pod IP from "IP:PORT" — the decode receiver uses this to
 	// query the prefill's bootstrap HTTP server.
@@ -135,6 +139,12 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 		metricsRecorder.IncActiveUpstreamRequests()
 		metricsRecorder.IncActiveUpstreamRequests()
 	}
+	if hooks != nil && hooks.IncrPrefill != nil {
+		hooks.IncrPrefill()
+	}
+	if hooks != nil && hooks.IncrDecode != nil {
+		hooks.IncrDecode()
+	}
 
 	// prefillCtx is cancelled if decode fails, which aborts the prefill HTTP
 	// request immediately instead of letting it hang waiting for a bootstrap
@@ -146,14 +156,22 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	prefillCh := make(chan prefillOutcome, 1)
 
 	go func() {
-		prefillCh <- prefillOutcome{
-			err: s.prefill(prefillRequest.WithContext(prefillCtx), prefillAddr),
+		err := s.prefill(prefillRequest.WithContext(prefillCtx), prefillAddr)
+		// Decrement the prefill pod's on-flight counter as soon as prefill finishes,
+		// so the scheduler gets an accurate view even while decode is still running.
+		if hooks != nil && hooks.DecrPrefill != nil {
+			hooks.DecrPrefill()
 		}
+		prefillCh <- prefillOutcome{err: err}
 	}()
 
 	// Run decode in the current goroutine so that streaming writes reach the
 	// gin.Context from the request-handling goroutine.
 	result, decodeErr := s.decode(c, decodeRequest, decodeAddr)
+
+	if hooks != nil && hooks.DecrDecode != nil {
+		hooks.DecrDecode()
+	}
 
 	if decodeErr != nil {
 		// Decode failed: cancel the prefill context so the prefill goroutine is

@@ -58,6 +58,7 @@ import (
 const (
 	// Context keys for gin context
 	GatewayKey = "gatewayKey"
+	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
 )
 
 func getEnvBool(key string, fallback bool) bool {
@@ -319,6 +320,8 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.Set("finishReason", "prompt_parsing")
 			return
 		}
+		// Store parsed prompt to avoid re-parsing in doLoadbalance.
+		c.Set(PromptKey, prompt)
 		promptStr := utils.GetPromptString(prompt)
 
 		// Calculate input tokens for metrics using tokenizer
@@ -476,8 +479,15 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 
 	// Common scheduling logic for both ModelServer and InferencePool
-	prompt, err := utils.ParsePrompt(modelRequest)
-	if err != nil {
+	var prompt *common.ChatMessage
+	if cached, exists := c.Get(PromptKey); exists {
+		var ok bool
+		if prompt, ok = cached.(*common.ChatMessage); !ok {
+			accesslog.SetError(c, "prompt_parsing", "internal error: invalid prompt type")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, "internal error")
+			return
+		}
+	} else {
 		accesslog.SetError(c, "prompt_parsing", "prompt not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
 		return
@@ -653,28 +663,26 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 			}
 			for _, match := range rule.Matches {
 				if match.Path != nil {
-					pathType := match.Path.Type
-					pathValue := match.Path.Value
-					if pathType != nil {
-						switch *pathType {
-						case gatewayv1.PathMatchExact:
-							if c.Request.URL.Path == *pathValue {
-								matched = true
-								break
-							}
-						case gatewayv1.PathMatchPathPrefix:
-							if strings.HasPrefix(c.Request.URL.Path, *pathValue) {
-								matched = true
-								matchedPrefix = *pathValue // Store matched prefix
-								break
-							}
-						case gatewayv1.PathMatchRegularExpression:
-							if regexMatched, err := regexp.MatchString(*pathValue, c.Request.URL.Path); err == nil && regexMatched {
-								matched = true
-								break
-							} else if err != nil {
-								klog.Warningf("Invalid regex pattern '%s' in HTTPRoute %s/%s: %v", *pathValue, route.Namespace, route.Name, err)
-							}
+					pathType := httpPathMatchType(match.Path)
+					pathValue := httpPathMatchValue(match.Path)
+					switch pathType {
+					case gatewayv1.PathMatchExact:
+						if c.Request.URL.Path == pathValue {
+							matched = true
+							break
+						}
+					case gatewayv1.PathMatchPathPrefix:
+						if ok, prefix := matchHTTPPathPrefix(c.Request.URL.Path, pathValue); ok {
+							matched = true
+							matchedPrefix = prefix
+							break
+						}
+					case gatewayv1.PathMatchRegularExpression:
+						if regexMatched, err := regexp.MatchString(pathValue, c.Request.URL.Path); err == nil && regexMatched {
+							matched = true
+							break
+						} else if err != nil {
+							klog.Warningf("Invalid regex pattern '%s' in HTTPRoute %s/%s: %v", pathValue, route.Namespace, route.Name, err)
 						}
 					}
 				} else {
@@ -749,6 +757,28 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	}
 
 	return true, inferencePoolName
+}
+
+func httpPathMatchType(path *gatewayv1.HTTPPathMatch) gatewayv1.PathMatchType {
+	if path.Type == nil {
+		return gatewayv1.PathMatchPathPrefix
+	}
+	return *path.Type
+}
+
+func httpPathMatchValue(path *gatewayv1.HTTPPathMatch) string {
+	if path.Value == nil {
+		return "/"
+	}
+	return *path.Value
+}
+
+func matchHTTPPathPrefix(path, prefix string) (bool, string) {
+	normalizedPrefix := strings.TrimRight(prefix, "/")
+	if normalizedPrefix == "" {
+		return strings.HasPrefix(path, "/"), "/"
+	}
+	return path == normalizedPrefix || strings.HasPrefix(path, normalizedPrefix+"/"), normalizedPrefix
 }
 
 // applyURLRewrite applies HTTPURLRewriteFilter to the request
@@ -842,6 +872,11 @@ func (r *Router) proxy(
 		if r.debugBackendPodHeader {
 			backendPodHeader = pod.Pod.Name
 		}
+		podName := types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}
+
+		// Track this request as in-flight to the chosen pod. This is instant and
+		// feeds the scheduler immediately, avoiding the ~1 s engine-metrics lag.
+		r.store.IncrPodOnFlightRequests(podName)
 
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
@@ -851,6 +886,9 @@ func (r *Router) proxy(
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
+
+		// Request is complete (success or failure) — decrement on-flight counter.
+		r.store.DecrPodOnFlightRequests(podName)
 
 		if err != nil {
 			klog.Errorf(" pod request error: %v", err)
@@ -1195,8 +1233,19 @@ func (r *Router) proxyToPDDisaggregated(
 
 		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 
+		// Build on-flight hooks so the connector can update the per-pod counters
+		// at the precise point each phase starts and ends.
+		prefillPodName := types.NamespacedName{Namespace: ctx.PrefillPods[i].Pod.Namespace, Name: ctx.PrefillPods[i].Pod.Name}
+		decodePodName := types.NamespacedName{Namespace: ctx.DecodePods[i].Pod.Namespace, Name: ctx.DecodePods[i].Pod.Name}
+		hooks := &connectors.OnFlightHooks{
+			IncrPrefill: func() { r.store.IncrPodOnFlightRequests(prefillPodName) },
+			DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillPodName) },
+			IncrDecode:  func() { r.store.IncrPodOnFlightRequests(decodePodName) },
+			DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodePodName) },
+		}
+
 		// Execute the PD disaggregated proxy operation
-		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr)
+		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, hooks)
 
 		if err != nil {
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",

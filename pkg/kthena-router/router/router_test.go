@@ -45,6 +45,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 func TestMain(m *testing.M) {
@@ -106,6 +107,180 @@ func TestRouterProxyBackendPodHeaderIsDebugGated(t *testing.T) {
 
 			require.NoError(t, err)
 			require.Equal(t, tc.wantHeader, w.Header().Get(BackendPodHeader))
+		})
+	}
+}
+
+func TestRouter_HandleHTTPRoute_PathPrefix(t *testing.T) {
+	pathType := gatewayv1.PathMatchPathPrefix
+	kind := gatewayv1.Kind("Gateway")
+	group := gatewayv1.Group("inference.networking.k8s.io")
+	backendKind := gatewayv1.Kind("InferencePool")
+
+	tests := []struct {
+		name           string
+		prefix         string
+		path           string
+		defaultType    bool
+		defaultValue   bool
+		expectedMatch  bool
+		expectedPrefix string
+	}{
+		{
+			name:           "root matches root",
+			prefix:         "/",
+			path:           "/",
+			expectedMatch:  true,
+			expectedPrefix: "/",
+		},
+		{
+			name:           "root matches nested path",
+			prefix:         "/",
+			path:           "/foo/bar",
+			expectedMatch:  true,
+			expectedPrefix: "/",
+		},
+		{
+			name:           "prefix matches exact path",
+			prefix:         "/foo",
+			path:           "/foo",
+			expectedMatch:  true,
+			expectedPrefix: "/foo",
+		},
+		{
+			name:           "prefix matches path with trailing slash",
+			prefix:         "/foo",
+			path:           "/foo/",
+			expectedMatch:  true,
+			expectedPrefix: "/foo",
+		},
+		{
+			name:           "prefix matches nested path element",
+			prefix:         "/foo",
+			path:           "/foo/bar",
+			expectedMatch:  true,
+			expectedPrefix: "/foo",
+		},
+		{
+			name:           "trailing slash prefix matches exact path",
+			prefix:         "/foo/",
+			path:           "/foo",
+			expectedMatch:  true,
+			expectedPrefix: "/foo",
+		},
+		{
+			name:           "trailing slash prefix matches nested path",
+			prefix:         "/foo/",
+			path:           "/foo/bar",
+			expectedMatch:  true,
+			expectedPrefix: "/foo",
+		},
+		{
+			name:          "prefix does not match partial segment",
+			prefix:        "/foo",
+			path:          "/foobar",
+			expectedMatch: false,
+		},
+		{
+			name:          "prefix does not match partial nested segment",
+			prefix:        "/foo",
+			path:          "/foo-bar/baz",
+			expectedMatch: false,
+		},
+		{
+			name:          "prefix with more path elements does not match shorter path",
+			prefix:        "/a/b/c",
+			path:          "/abc",
+			expectedMatch: false,
+		},
+		{
+			name:          "prefix with one path element does not match nested path text",
+			prefix:        "/abc",
+			path:          "/a/b/c",
+			expectedMatch: false,
+		},
+		{
+			name:          "prefix matching is case sensitive",
+			prefix:        "/foo",
+			path:          "/Foo",
+			expectedMatch: false,
+		},
+		{
+			name:           "missing type defaults to path prefix",
+			prefix:         "/foo",
+			path:           "/foo/bar",
+			defaultType:    true,
+			expectedMatch:  true,
+			expectedPrefix: "/foo",
+		},
+		{
+			name:           "missing value defaults to root",
+			path:           "/foo/bar",
+			defaultValue:   true,
+			expectedMatch:  true,
+			expectedPrefix: "/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := datastore.New()
+			router := &Router{store: store}
+			pathMatch := &gatewayv1.HTTPPathMatch{}
+			if !tt.defaultType {
+				pathMatch.Type = &pathType
+			}
+			if !tt.defaultValue {
+				pathMatch.Value = &tt.prefix
+			}
+			route := &gatewayv1.HTTPRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "route", Namespace: "default"},
+				Spec: gatewayv1.HTTPRouteSpec{
+					CommonRouteSpec: gatewayv1.CommonRouteSpec{
+						ParentRefs: []gatewayv1.ParentReference{
+							{
+								Name: "gw",
+								Kind: &kind,
+							},
+						},
+					},
+					Rules: []gatewayv1.HTTPRouteRule{
+						{
+							Matches: []gatewayv1.HTTPRouteMatch{
+								{
+									Path: pathMatch,
+								},
+							},
+							BackendRefs: []gatewayv1.HTTPBackendRef{
+								{
+									BackendRef: gatewayv1.BackendRef{
+										BackendObjectReference: gatewayv1.BackendObjectReference{
+											Group: &group,
+											Kind:  &backendKind,
+											Name:  "pool",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request, _ = http.NewRequest(http.MethodPost, tt.path, nil)
+
+			matched, pool := router.handleHTTPRoute(c, "default/gw")
+			assert.Equal(t, tt.expectedMatch, matched)
+			if !tt.expectedMatch {
+				return
+			}
+			assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pool"}, pool)
+			prefix, exists := c.Get("matchedPrefix")
+			assert.True(t, exists)
+			assert.Equal(t, tt.expectedPrefix, prefix)
 		})
 	}
 }
