@@ -885,6 +885,9 @@ func (r *Router) proxy(
 
 		if err != nil {
 			klog.Errorf(" pod request error: %v", err)
+			if c.Writer.Written() {
+				return err
+			}
 			continue
 		}
 		r.recordSessionStickyBinding(ctx, i)
