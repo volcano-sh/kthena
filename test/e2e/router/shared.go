@@ -505,20 +505,31 @@ func selectedPodFromAccessLogs(logs, requestID string) string {
 		if !strings.Contains(line, requestID) {
 			continue
 		}
-		var entry accessLogLine
-		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.RequestID == requestID {
-			if entry.SelectedPod != "" {
-				selectedPod = entry.SelectedPod
-			}
-			continue
-		}
-		for _, field := range strings.Fields(line) {
-			if strings.HasPrefix(field, "selected_pod=") {
-				selectedPod = strings.TrimPrefix(field, "selected_pod=")
-			}
+		parsedRequestID, parsedSelectedPod := accessLogRequestAndSelectedPod(line)
+		if parsedRequestID == requestID && parsedSelectedPod != "" {
+			selectedPod = parsedSelectedPod
 		}
 	}
 	return selectedPod
+}
+
+func accessLogRequestAndSelectedPod(line string) (string, string) {
+	var entry accessLogLine
+	if err := json.Unmarshal([]byte(line), &entry); err == nil {
+		return entry.RequestID, entry.SelectedPod
+	}
+
+	requestID := ""
+	selectedPod := ""
+	for _, field := range strings.Fields(line) {
+		if strings.HasPrefix(field, "request_id=") {
+			requestID = strings.TrimPrefix(field, "request_id=")
+		}
+		if strings.HasPrefix(field, "selected_pod=") {
+			selectedPod = strings.TrimPrefix(field, "selected_pod=")
+		}
+	}
+	return requestID, selectedPod
 }
 
 func assertSameSessionPod(t *testing.T, pods ...string) {
@@ -923,22 +934,43 @@ func testModelRoutePrefillDecodeDisaggregationSharedWithFixtures(
 	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }
 
-// subsetCanaryBackendCountsFromRouterLogs counts canary traffic to each mock pool using
-// router access logs (selected_pod). Chat response bodies no longer differ when both
-// backends use the same HuggingFace model id without -v1/-v2 suffixes.
-func subsetCanaryBackendCountsFromRouterLogs(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, since *metav1.Time) (v1, v2 int) {
+func subsetCanaryBackendCountsForRequestIDs(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, since *metav1.Time, requestIDs []string) (v1, v2, found int) {
 	t.Helper()
-	routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
-	opts := &corev1.PodLogOptions{}
-	if since != nil {
-		opts.SinceTime = since
+	expected := make(map[string]struct{}, len(requestIDs))
+	for _, requestID := range requestIDs {
+		expected[requestID] = struct{}{}
 	}
-	logs, err := kube.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
-	require.NoError(t, err)
-	s := string(logs)
-	// Pod names are deployment-prefixed: deepseek-r1-1-5b-v1-<rs>-<suffix>
-	return strings.Count(s, "selected_pod=deepseek-r1-1-5b-v1-"),
-		strings.Count(s, "selected_pod=deepseek-r1-1-5b-v2-")
+
+	selectedByRequestID := map[string]string{}
+	require.Eventually(t, func() bool {
+		routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
+		opts := &corev1.PodLogOptions{}
+		if since != nil {
+			opts.SinceTime = since
+		}
+		logs, err := kube.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
+		if err != nil {
+			return false
+		}
+		for _, line := range strings.Split(string(logs), "\n") {
+			requestID, selectedPod := accessLogRequestAndSelectedPod(line)
+			if _, ok := expected[requestID]; !ok || selectedPod == "" {
+				continue
+			}
+			selectedByRequestID[requestID] = selectedPod
+		}
+		return len(selectedByRequestID) >= int(0.85*float64(len(requestIDs)))
+	}, 30*time.Second, time.Second, "expected router access logs to include measured request ids")
+
+	for _, selectedPod := range selectedByRequestID {
+		if strings.HasPrefix(selectedPod, "deepseek-r1-1-5b-v1-") {
+			v1++
+		}
+		if strings.HasPrefix(selectedPod, "deepseek-r1-1-5b-v2-") {
+			v2++
+		}
+	}
+	return v1, v2, len(selectedByRequestID)
 }
 
 // TestModelRouteSubsetShared is a shared test function that can be used by both
@@ -1023,15 +1055,17 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		const totalRequests = 500
 		const sumTolerance = 0.01 // Allow ±1% deviation for floating-point rounding errors
 		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+		requestIDs := make([]string, 0, totalRequests)
 
 		for i := 0; i < totalRequests; i++ {
-			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
+			requestID := "subset-weight-" + utils.RandomString(12)
+			requestIDs = append(requestIDs, requestID)
+			resp := utils.SendChatRequestWithRetryQuiet(t, utils.DefaultRouterURL, modelRoute.Spec.ModelName, messages, map[string]string{"x-request-id": requestID})
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
 		}
 
-		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
-		totalFromLogs := v1Count + v2Count
+		v1Count, v2Count, totalFromLogs := subsetCanaryBackendCountsForRequestIDs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime, requestIDs)
 		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
 			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
 		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
@@ -1093,15 +1127,17 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		// Send multiple requests to verify weight distribution statistics
 		const totalRequests = 500
 		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+		requestIDs := make([]string, 0, totalRequests)
 
 		for i := 0; i < totalRequests; i++ {
-			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
+			requestID := "subset-normalized-" + utils.RandomString(12)
+			requestIDs = append(requestIDs, requestID)
+			resp := utils.SendChatRequestWithRetryQuiet(t, utils.DefaultRouterURL, modelRoute.Spec.ModelName, messages, map[string]string{"x-request-id": requestID})
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
 		}
 
-		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
-		totalFromLogs := v1Count + v2Count
+		v1Count, v2Count, totalFromLogs := subsetCanaryBackendCountsForRequestIDs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime, requestIDs)
 		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
 			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
 		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
