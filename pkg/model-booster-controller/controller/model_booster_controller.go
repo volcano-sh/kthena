@@ -400,6 +400,20 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 		klog.Fatal("Unable to add model server event handler")
 		return nil
 	}
+	_, err = autoscalingPoliciesInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		DeleteFunc: mc.deleteAutoscalingPolicy,
+	})
+	if err != nil {
+		klog.Fatal("Unable to add autoscaling policy event handler")
+		return nil
+	}
+	_, err = autoscalingPolicyBindingsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		DeleteFunc: mc.deleteAutoscalingPolicyBinding,
+	})
+	if err != nil {
+		klog.Fatal("Unable to add autoscaling policy binding event handler")
+		return nil
+	}
 	mc.syncHandler = mc.reconcile
 	mc.loadConfigFromConfigMap()
 	return mc
@@ -450,8 +464,24 @@ func (mc *ModelBoosterController) triggerModel(old any, new any) {
 	}
 }
 
+// unwrapTombstone safely extracts the underlying object from a potential cache.DeletedFinalStateUnknown tombstone.
+func unwrapTombstone(obj any) (any, bool) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+		if obj == nil {
+			return nil, false
+		}
+	}
+	return obj, true
+}
+
 // deleteModelServing is called when a ModelServing is deleted. It will reconcile the ModelBooster. Recreate model serving.
 func (mc *ModelBoosterController) deleteModelServing(obj any) {
+	obj, ok := unwrapTombstone(obj)
+	if !ok {
+		klog.Error("failed to unwrap tombstone when deleteModelServing")
+		return
+	}
 	modelServing, ok := obj.(*workload.ModelServing)
 	if !ok {
 		klog.Error("failed to parse ModelServing when deleteModelServing")
@@ -467,6 +497,11 @@ func (mc *ModelBoosterController) deleteModelServing(obj any) {
 
 // deleteModelRoute is called when a ModelRoute is deleted. It will reconcile the ModelBooster. Recreate model route.
 func (mc *ModelBoosterController) deleteModelRoute(obj any) {
+	obj, ok := unwrapTombstone(obj)
+	if !ok {
+		klog.Error("failed to unwrap tombstone when deleteModelRoute")
+		return
+	}
 	modelRoute, ok := obj.(*networkingv1alpha1.ModelRoute)
 	if !ok {
 		klog.Error("failed to parse ModelRoute when deleteModelRoute")
@@ -482,6 +517,11 @@ func (mc *ModelBoosterController) deleteModelRoute(obj any) {
 
 // deleteModelServer is called when a ModelServer is deleted. It will reconcile the ModelBooster. Recreate model server.
 func (mc *ModelBoosterController) deleteModelServer(obj any) {
+	obj, ok := unwrapTombstone(obj)
+	if !ok {
+		klog.Error("failed to unwrap tombstone when deleteModelServer")
+		return
+	}
 	modelServer, ok := obj.(*networkingv1alpha1.ModelServer)
 	if !ok {
 		klog.Error("failed to parse ModelServer when deleteModelServer")
@@ -490,6 +530,46 @@ func (mc *ModelBoosterController) deleteModelServer(obj any) {
 	klog.V(4).Infof("model server: %s is deleted", klog.KObj(modelServer))
 	if len(modelServer.OwnerReferences) > 0 {
 		if model, err := mc.modelBoosterLister.ModelBoosters(modelServer.Namespace).Get(modelServer.OwnerReferences[0].Name); err == nil {
+			mc.enqueueModelBooster(model)
+		}
+	}
+}
+
+// deleteAutoscalingPolicy is called when an AutoscalingPolicy is deleted. It will reconcile the ModelBooster. Recreate AutoscalingPolicy.
+func (mc *ModelBoosterController) deleteAutoscalingPolicy(obj any) {
+	obj, ok := unwrapTombstone(obj)
+	if !ok {
+		klog.Error("failed to unwrap tombstone when deleteAutoscalingPolicy")
+		return
+	}
+	policy, ok := obj.(*workload.AutoscalingPolicy)
+	if !ok {
+		klog.Error("failed to parse AutoscalingPolicy when deleteAutoscalingPolicy")
+		return
+	}
+	klog.V(4).Infof("autoscaling policy: %s is deleted", klog.KObj(policy))
+	if len(policy.OwnerReferences) > 0 {
+		if model, err := mc.modelBoosterLister.ModelBoosters(policy.Namespace).Get(policy.OwnerReferences[0].Name); err == nil {
+			mc.enqueueModelBooster(model)
+		}
+	}
+}
+
+// deleteAutoscalingPolicyBinding is called when an AutoscalingPolicyBinding is deleted. It will reconcile the ModelBooster. Recreate AutoscalingPolicyBinding.
+func (mc *ModelBoosterController) deleteAutoscalingPolicyBinding(obj any) {
+	obj, ok := unwrapTombstone(obj)
+	if !ok {
+		klog.Error("failed to unwrap tombstone when deleteAutoscalingPolicyBinding")
+		return
+	}
+	binding, ok := obj.(*workload.AutoscalingPolicyBinding)
+	if !ok {
+		klog.Error("failed to parse AutoscalingPolicyBinding when deleteAutoscalingPolicyBinding")
+		return
+	}
+	klog.V(4).Infof("autoscaling policy binding: %s is deleted", klog.KObj(binding))
+	if len(binding.OwnerReferences) > 0 {
+		if model, err := mc.modelBoosterLister.ModelBoosters(binding.Namespace).Get(binding.OwnerReferences[0].Name); err == nil {
 			mc.enqueueModelBooster(model)
 		}
 	}

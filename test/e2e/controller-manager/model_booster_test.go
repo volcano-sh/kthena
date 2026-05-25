@@ -18,6 +18,7 @@ package controller_manager
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -107,6 +108,14 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 	model := createTestModel()
 	model.Name = "self-healing-test-model"
 	model.Spec.Name = "self-healing-test-model"
+	model.Spec.AutoscalingPolicy = &workload.AutoscalingPolicySpec{
+		Metrics: []workload.AutoscalingPolicyMetric{
+			{
+				MetricName:  "concurrency",
+				TargetValue: resource.MustParse("10"),
+			},
+		},
+	}
 
 	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create Model CR")
@@ -132,19 +141,12 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 
 	t.Log("Model is active. Testing self-healing of AutoscalingPolicy...")
 
-	// Find the generated AutoscalingPolicy
-	policies, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).List(ctx, metav1.ListOptions{})
-	require.NoError(t, err)
-	var policyToDelete *workload.AutoscalingPolicy
-	for i := range policies.Items {
-		for _, owner := range policies.Items[i].OwnerReferences {
-			if owner.Name == model.Name {
-				policyToDelete = &policies.Items[i]
-				break
-			}
-		}
-	}
-	require.NotNil(t, policyToDelete, "Expected at least one AutoscalingPolicy to be generated for the model")
+	// The controller contract guarantees the child resource is named: {modelName}-{backendName}
+	expectedChildName := fmt.Sprintf("%s-%s", model.Name, model.Spec.Backend.Name)
+
+	// Fetch the generated AutoscalingPolicy deterministically by name
+	policyToDelete, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
+	require.NoError(t, err, "Expected AutoscalingPolicy to be generated with deterministic name")
 
 	err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Delete(ctx, policyToDelete.Name, metav1.DeleteOptions{})
 	require.NoError(t, err, "Failed to delete AutoscalingPolicy")
@@ -161,19 +163,9 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 
 	t.Log("AutoscalingPolicy was successfully self-healed. Testing ModelServing...")
 
-	// Find the generated ModelServing
-	servings, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).List(ctx, metav1.ListOptions{})
-	require.NoError(t, err)
-	var servingToDelete *workload.ModelServing
-	for i := range servings.Items {
-		for _, owner := range servings.Items[i].OwnerReferences {
-			if owner.Name == model.Name {
-				servingToDelete = &servings.Items[i]
-				break
-			}
-		}
-	}
-	require.NotNil(t, servingToDelete, "Expected at least one ModelServing to be generated for the model")
+	// Fetch the generated ModelServing deterministically by name
+	servingToDelete, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
+	require.NoError(t, err, "Expected ModelServing to be generated with deterministic name")
 
 	err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(ctx, servingToDelete.Name, metav1.DeleteOptions{})
 	require.NoError(t, err, "Failed to delete ModelServing")
