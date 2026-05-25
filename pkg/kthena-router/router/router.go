@@ -524,7 +524,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	sessionBindingApplied := false
 	if sessionKey != "" && routeKey != "" && pdGroup == nil {
 		if boundPod, ok := r.sessionStickyStore.Get(routeKey, sessionKey); ok {
-			if pod, exists := findPodByName(pods, boundPod); exists {
+			if pod, exists := indexPodsByName(pods)[boundPod]; exists {
 				pods = []*datastore.PodInfo{pod}
 				sessionBindingApplied = true
 			} else {
@@ -571,15 +571,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 
 	// Set complete request routing information in access log
-	modelServerFullName := fmt.Sprintf("%s/%s", modelServerName.Namespace, modelServerName.Name)
 	modelRouteName := ""
 	if modelRoute != nil {
 		modelRouteName = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
 		// Set the model route name in context for upstream connections
 		c.Set("modelRouteName", modelRouteName)
 	}
-
-	accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 
 	req := c.Request
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {

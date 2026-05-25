@@ -25,7 +25,9 @@ spec:
           args:
             - --port={{ .Values.kthenaRouter.port }}
             - --debug-port={{ .Values.kthenaRouter.debugPort }}
+            {{- if .Values.kthenaRouter.backendPodHeader.enabled }}
             - --enable-backend-pod-header={{ .Values.kthenaRouter.backendPodHeader.enabled }}
+            {{- end }}
             - --enable-webhook={{ .Values.kthenaRouter.webhook.enabled }}
             - --enable-gateway-api={{ .Values.kthenaRouter.gatewayAPI.enabled }}
             {{- if .Values.kthenaRouter.gatewayAPI.enabled }}
@@ -79,7 +81,11 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
+                  {{- if .Values.kthenaRouter.sessionSticky.redis.password }}
+                  name: kthena-router-session-sticky-redis-secret
+                  {{- else }}
                   name: redis-secret
+                  {{- end }}
                   key: password
                   optional: true
             - name: KTHENA_ROUTER_JWT_AUTH_ENABLED

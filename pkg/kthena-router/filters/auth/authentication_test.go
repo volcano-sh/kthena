@@ -86,6 +86,20 @@ func TestExtractTokenFromHeader(t *testing.T) {
 	}
 }
 
+func TestExtractStringClaimUsesCachedParsedJWT(t *testing.T) {
+	token := jwt.New()
+	assert.NoError(t, token.Set("tenant", "team-a"))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(header, "Bearer already-validated")
+	req = requestWithParsedJWT(req, token)
+
+	authenticator := &JWTAuthenticator{}
+	claim, err := authenticator.ExtractStringClaim(req, "tenant")
+	assert.NoError(t, err)
+	assert.Equal(t, "team-a", claim)
+}
+
 func TestNewJWTAuthenticatorConfig(t *testing.T) {
 	t.Run("nil config", func(t *testing.T) {
 		validator := NewJWTAuthenticator(nil)

@@ -62,6 +62,7 @@ type ModelRouteSpec struct {
 
 // SessionSticky defines how the router extracts a session key and how long
 // the session-to-pod binding remains valid.
+// +kubebuilder:validation:XValidation:rule="has(self.sources) && size(self.sources) > 0",message="sources must be non-empty"
 type SessionSticky struct {
 	// SessionAffinitySeconds is the binding TTL in seconds.
 	// If omitted, the router uses 10800 seconds.

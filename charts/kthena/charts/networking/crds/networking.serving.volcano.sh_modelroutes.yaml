@@ -389,6 +389,9 @@ spec:
                     minItems: 1
                     type: array
                 type: object
+                x-kubernetes-validations:
+                - message: sources must be non-empty
+                  rule: has(self.sources) && size(self.sources) > 0
             required:
             - rules
             type: object

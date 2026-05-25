@@ -111,6 +111,9 @@ func (s *memorySessionStickyStore) Set(routeKey, sessionKey string, pod types.Na
 		if existing.pod == pod {
 			existing.expiresAt = now.Add(ttl)
 			s.bindings[key] = existing
+		} else {
+			klog.V(4).Infof("session sticky binding for route %s session %s already points to another pod; keeping existing binding",
+				routeKey, hashSessionKey(sessionKey))
 		}
 		return
 	}
@@ -153,8 +156,11 @@ func newRedisSessionStickyStore(address, password string) (*redisSessionStickySt
 		return nil, fmt.Errorf("redis address is required")
 	}
 	client := redis.NewClient(&redis.Options{
-		Addr:     address,
-		Password: password,
+		Addr:         address,
+		Password:     password,
+		PoolSize:     32,
+		MinIdleConns: 4,
+		IdleTimeout:  5 * time.Minute,
 	})
 	ctx, cancel := contextWithRedisTimeout()
 	defer cancel()
@@ -235,6 +241,8 @@ func contextWithRedisTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), redisOperationTimeout)
 }
 
+// hashSessionKey keeps raw session material out of in-memory keys, Redis keys,
+// and logs because session keys may come from headers, cookies, or JWT claims.
 func hashSessionKey(sessionKey string) string {
 	sum := sha256.Sum256([]byte(sessionKey))
 	return hex.EncodeToString(sum[:])
@@ -298,14 +306,13 @@ func extractSessionKeyFromSource(req *http.Request, source v1alpha1.SessionKeySo
 	}
 }
 
-func findPodByName(pods []*datastore.PodInfo, pod types.NamespacedName) (*datastore.PodInfo, bool) {
+func indexPodsByName(pods []*datastore.PodInfo) map[types.NamespacedName]*datastore.PodInfo {
+	index := make(map[types.NamespacedName]*datastore.PodInfo, len(pods))
 	for _, candidate := range pods {
 		if candidate == nil || candidate.Pod == nil {
 			continue
 		}
-		if candidate.Pod.Namespace == pod.Namespace && candidate.Pod.Name == pod.Name {
-			return candidate, true
-		}
+		index[types.NamespacedName{Namespace: candidate.Pod.Namespace, Name: candidate.Pod.Name}] = candidate
 	}
-	return nil, false
+	return index
 }

@@ -92,10 +92,10 @@ networking:
       redis:
         # -- Redis address for the router session sticky store. Required when `sessionSticky.store` is `redis`.
         address: ""
-        # -- Optional Redis password for the router session sticky store. Rendered into `redis-secret` and exposed to the router as `REDIS_PASSWORD`; outside Helm, `REDIS_PASSWORD` can provide it directly.
+        # -- Optional Redis password for the router session sticky store. When set, Helm creates `kthena-router-session-sticky-redis-secret` and exposes it as `REDIS_PASSWORD`; outside Helm, `REDIS_PASSWORD` can provide it directly.
         password: ""
     jwtAuth:
-      # -- Allow admission of ModelRoute sessionSticky JWTClaim sources.
+      # -- Allow admission of ModelRoute sessionSticky JWTClaim sources. Changing this value requires a router restart.
       enabled: false
 
 global:

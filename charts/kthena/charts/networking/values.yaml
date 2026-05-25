@@ -63,10 +63,10 @@ kthenaRouter:
     redis:
       # address is required when store is "redis".
       address: ""
-      # password is optional; outside Helm, REDIS_PASSWORD can provide it directly.
+      # password is optional. When set, Helm creates kthena-router-session-sticky-redis-secret and exposes it as REDIS_PASSWORD; outside Helm, REDIS_PASSWORD can provide it directly.
       password: ""
   jwtAuth:
-    # enabled allows admission of ModelRoute sessionSticky JWTClaim sources.
+    # enabled allows admission of ModelRoute sessionSticky JWTClaim sources. Changing this value requires a router restart.
     enabled: false
   # gatewayAPI configuration
   gatewayAPI:

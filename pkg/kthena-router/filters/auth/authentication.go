@@ -41,6 +41,8 @@ const (
 	bearerScheme = "Bearer"
 )
 
+type parsedJWTContextKey struct{}
+
 // extractTokenFromHeader extracts the Bearer token from the Authorization header
 func extractTokenFromHeader(req *http.Request) string {
 	fields := strings.Fields(req.Header.Get(header))
@@ -82,28 +84,6 @@ func (j *JWTAuthenticator) Close() {
 	}
 }
 
-// authenticate validates the token and returns the subject
-func (j *JWTAuthenticator) authenticate(tokenStr string) (string, error) {
-	// Get current JWKS from rotator
-	jwksValue := j.rotator.GetJwks()
-	if jwksValue.Jwks == nil {
-		return "", fmt.Errorf("no JWKS available for token validation")
-	}
-
-	token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(jwksValue.Jwks, jws.WithInferAlgorithmFromKey(true)))
-	if err != nil {
-		return "", fmt.Errorf("failed to parse jwt: %w", err)
-	}
-
-	// Validate the claims in the token
-	if err := j.validateClaims(token, jwksValue); err != nil {
-		return "", fmt.Errorf("failed to validate claims: %w", err)
-	}
-
-	sub, _ := token.Subject()
-	return sub, nil
-}
-
 func (j *JWTAuthenticator) parseAndValidateToken(tokenStr string) (jwt.Token, error) {
 	if j == nil || !j.enabled || j.rotator == nil {
 		return nil, fmt.Errorf("jwt authentication is disabled")
@@ -134,9 +114,13 @@ func (j *JWTAuthenticator) ExtractStringClaim(req *http.Request, claimName strin
 		return "", fmt.Errorf("authorization header missing or empty")
 	}
 
-	token, err := j.parseAndValidateToken(tokenStr)
-	if err != nil {
-		return "", err
+	token, ok := parsedJWTFromRequest(req)
+	if !ok {
+		var err error
+		token, err = j.parseAndValidateToken(tokenStr)
+		if err != nil {
+			return "", err
+		}
 	}
 	var claim string
 	if err := token.Get(claimName, &claim); err != nil || claim == "" {
@@ -327,6 +311,21 @@ func (j *JWTAuthenticator) validateIssuedAt(iat interface{}, now time.Time) erro
 	return nil
 }
 
+func requestWithParsedJWT(req *http.Request, token jwt.Token) *http.Request {
+	if req == nil || token == nil {
+		return req
+	}
+	return req.WithContext(context.WithValue(req.Context(), parsedJWTContextKey{}, token))
+}
+
+func parsedJWTFromRequest(req *http.Request) (jwt.Token, bool) {
+	if req == nil {
+		return nil, false
+	}
+	token, ok := req.Context().Value(parsedJWTContextKey{}).(jwt.Token)
+	return token, ok && token != nil
+}
+
 // ValidateToken validates a JWT token and sets user information in the context
 func (j *JWTAuthenticator) ValidateToken(ctx context.Context, c *gin.Context, token string) error {
 	if !j.enabled {
@@ -337,12 +336,14 @@ func (j *JWTAuthenticator) ValidateToken(ctx context.Context, c *gin.Context, to
 		return fmt.Errorf("authorization header missing or empty")
 	}
 
-	sub, err := j.authenticate(token)
+	parsedToken, err := j.parseAndValidateToken(token)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 
+	sub, _ := parsedToken.Subject()
 	c.Set(common.UserIdKey, sub)
+	c.Request = requestWithParsedJWT(c.Request, parsedToken)
 	return nil
 }
 
@@ -362,12 +363,14 @@ func (j *JWTAuthenticator) Authenticate() gin.HandlerFunc {
 				return
 			}
 
-			sub, err := j.authenticate(token)
+			parsedToken, err := j.parseAndValidateToken(token)
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("Unauthorized: %v", err)})
 				return
 			}
+			sub, _ := parsedToken.Subject()
 			c.Set(common.UserIdKey, sub)
+			c.Request = requestWithParsedJWT(c.Request, parsedToken)
 		}
 		c.Next()
 	}
