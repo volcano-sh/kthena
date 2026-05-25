@@ -40,6 +40,9 @@ networking:
     port: 8080
     # -- Debug server port for Kthena Router (localhost only).
     debugPort: 15000
+    backendPodHeader:
+      # -- Enable X-Kthena-Backend-Pod response header for debug and test traffic.
+      enabled: false
     image:
       # -- Image repository for Kthena Router.
       repository: ghcr.io/volcano-sh/kthena-router

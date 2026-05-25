@@ -1125,7 +1125,7 @@ func TestProxyRequestReturnsDownstreamCopyError(t *testing.T) {
 	c.Request, err = http.NewRequest("POST", backend.URL+"/v1/chat/completions", bytes.NewBufferString("{}"))
 	require.NoError(t, err)
 
-	err = proxyRequest(c, c.Request, host, int32(port), false, nil)
+	err = proxyRequest(c, c.Request, host, int32(port), false, nil, "")
 	require.ErrorContains(t, err, "copy response to downstream failed")
 	require.ErrorContains(t, err, "downstream closed")
 }
@@ -1153,9 +1153,33 @@ func TestProxyRequestReturnsDownstreamStreamWriteError(t *testing.T) {
 	c.Request, err = http.NewRequest("POST", backend.URL+"/v1/chat/completions", bytes.NewBufferString("{}"))
 	require.NoError(t, err)
 
-	err = proxyRequest(c, c.Request, host, int32(port), true, nil)
+	err = proxyRequest(c, c.Request, host, int32(port), true, nil, "")
 	require.ErrorContains(t, err, "write stream response to downstream failed")
 	require.ErrorContains(t, err, "stream closed")
+}
+
+func TestProxyRequestSetsBackendPodHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(BackendPodHeader, "upstream-value")
+		_, _ = w.Write([]byte(`{"usage":{"completion_tokens":1}}`))
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	host, portString, err := net.SplitHostPort(backendURL.Host)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portString)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, err = http.NewRequest("POST", backend.URL+"/v1/chat/completions", bytes.NewBufferString("{}"))
+	require.NoError(t, err)
+
+	err = proxyRequest(c, c.Request, host, int32(port), false, nil, "selected-pod")
+	require.NoError(t, err)
+	assert.Equal(t, "selected-pod", w.Header().Get(BackendPodHeader))
 }
 
 type failingResponseWriter struct {

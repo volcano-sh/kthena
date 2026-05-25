@@ -59,6 +59,8 @@ const (
 	// Context keys for gin context
 	GatewayKey = "gatewayKey"
 	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
+
+	BackendPodHeader = "X-Kthena-Backend-Pod"
 )
 
 func getEnvBool(key string, fallback bool) bool {
@@ -100,10 +102,19 @@ type Router struct {
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 
-	sessionStickyStore sessionStickyStore
+	sessionStickyStore      sessionStickyStore
+	backendPodHeaderEnabled bool
 }
 
-func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig SessionStickyStoreConfig) *Router {
+type Option func(*Router)
+
+func WithBackendPodHeaderEnabled(enabled bool) Option {
+	return func(r *Router) {
+		r.backendPodHeaderEnabled = enabled
+	}
+}
+
+func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig SessionStickyStoreConfig, opts ...Option) *Router {
 	// Create a unified rate limiter for all models
 	loadRateLimiter := ratelimit.NewTokenRateLimiter()
 
@@ -180,6 +191,9 @@ func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConf
 		fairnessTimeout:  parseFairnessTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+	}
+	for _, opt := range opts {
+		opt(router)
 	}
 	router.sessionStickyStore = newSessionStickyStoreFromConfig(sessionStickyConfig)
 	return router
@@ -875,7 +889,11 @@ func (r *Router) proxy(
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, pod.Pod.Status.PodIP, port, stream, onUsage)
+		backendPodHeaderValue := ""
+		if r.backendPodHeaderEnabled {
+			backendPodHeaderValue = pod.Pod.Name
+		}
+		err := proxyRequest(c, req, pod.Pod.Status.PodIP, port, stream, onUsage, backendPodHeaderValue)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
@@ -1049,6 +1067,7 @@ func proxyRequest(
 	port int32,
 	stream bool,
 	onUsage func(u handlers.OpenAIResponse),
+	backendPodHeaderValue string,
 ) error {
 	resp, err := doRequest(req, podIP, port)
 	if err != nil {
@@ -1058,6 +1077,9 @@ func proxyRequest(
 		for _, v := range vv {
 			c.Header(k, v)
 		}
+	}
+	if backendPodHeaderValue != "" {
+		c.Header(BackendPodHeader, backendPodHeaderValue)
 	}
 	defer resp.Body.Close()
 

@@ -41,8 +41,8 @@ const (
 	routerConfigFile        = "/etc/config/routerConfiguration.yaml"
 )
 
-func NewRouter(store datastore.Store, sessionStickyStore router.SessionStickyStoreConfig) *router.Router {
-	return router.NewRouter(store, routerConfigFile, sessionStickyStore)
+func NewRouter(store datastore.Store, sessionStickyStore router.SessionStickyStoreConfig, enableBackendPodHeader bool) *router.Router {
+	return router.NewRouter(store, routerConfigFile, sessionStickyStore, router.WithBackendPodHeaderEnabled(enableBackendPodHeader))
 }
 
 // Starts router

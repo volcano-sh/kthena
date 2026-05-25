@@ -57,6 +57,7 @@ func main() {
 		kubeAPIBurst                       int
 		sessionStickyStoreType             string
 		sessionStickyRedisAddress          string
+		enableBackendPodHeader             bool
 	)
 
 	klog.InitFlags(nil)
@@ -84,6 +85,7 @@ func main() {
 	pflag.IntVar(&kubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.StringVar(&sessionStickyStoreType, "session-sticky-store", router.SessionStickyStoreMemory, "Session sticky store backend: memory or redis")
 	pflag.StringVar(&sessionStickyRedisAddress, "session-sticky-redis-address", "", "Redis address for session sticky store when --session-sticky-store=redis")
+	pflag.BoolVar(&enableBackendPodHeader, "enable-backend-pod-header", false, "Enable X-Kthena-Backend-Pod response header for debug and test traffic")
 	defer klog.Flush()
 	pflag.Parse()
 
@@ -132,7 +134,7 @@ func main() {
 		Type:          sessionStickyStoreType,
 		RedisAddress:  sessionStickyRedisAddress,
 		RedisPassword: os.Getenv("REDIS_PASSWORD"),
-	}).Run(ctx)
+	}, enableBackendPodHeader).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.
