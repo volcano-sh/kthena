@@ -38,6 +38,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	e2eframework "github.com/volcano-sh/kthena/test/e2e/framework"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -374,6 +375,79 @@ func shouldRetryWebhookError(err error) bool {
 		strings.Contains(msg, "no endpoints available")
 }
 
+func configureRouterRandomScorePlugin(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
+	t.Helper()
+	ctx := context.Background()
+	const configMapName = "kthena-router-config"
+	const routerDeploymentName = "kthena-router"
+	const routerConfigKey = "routerConfiguration"
+
+	cm, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router ConfigMap")
+	originalConfigData := cm.Data[routerConfigKey]
+	require.NotEmpty(t, originalConfigData, "Router configuration should not be empty")
+
+	updatedConfig := `scheduler:
+  pluginConfig:
+  - name: least-request
+    args:
+      maxWaitingRequests: 10
+  plugins:
+    Filter:
+      enabled:
+        - least-request
+    Score:
+      enabled:
+        - name: random
+          weight: 1`
+
+	cm.Data[routerConfigKey] = updatedConfig
+	_, err = kubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to configure random router score plugin")
+	require.NoError(t, restartRouterPodsE(ctx, kubeClient, namespace, routerDeploymentName, defaultScalingTimeout), "Failed to restart router with random score plugin")
+	require.NoError(t, e2eframework.RestartRouterPortForward(namespace), "Failed to refresh router port-forward")
+
+	return func() {
+		restoreCtx := context.Background()
+		latestCM, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(restoreCtx, configMapName, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Warning: Failed to get router ConfigMap for restore: %v", err)
+			return
+		}
+		latestCM.Data[routerConfigKey] = originalConfigData
+		if _, err := kubeClient.CoreV1().ConfigMaps(namespace).Update(restoreCtx, latestCM, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore router ConfigMap: %v", err)
+			return
+		}
+		if err := restartRouterPodsE(restoreCtx, kubeClient, namespace, routerDeploymentName, defaultScalingTimeout); err != nil {
+			t.Logf("Warning: Failed to restart router after restoring ConfigMap: %v", err)
+			return
+		}
+		if err := e2eframework.RestartRouterPortForward(namespace); err != nil {
+			t.Logf("Warning: Failed to refresh router port-forward after restoring ConfigMap: %v", err)
+		}
+	}
+}
+
+func restartRouterPodsE(ctx context.Context, kubeClient kubernetes.Interface, namespace, deploymentName string, timeout time.Duration) error {
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: metav1.FormatLabelSelector(deployment.Spec.Selector),
+	})
+	if err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		if err := kubeClient.CoreV1().Pods(namespace).Delete(ctx, pods.Items[i].Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return utils.WaitForDeploymentReadyE(ctx, kubeClient, namespace, deploymentName, timeout)
+}
+
 func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeySource) *networkingv1alpha1.SessionSticky {
 	return &networkingv1alpha1.SessionSticky{
 		SessionAffinitySeconds: seconds,
@@ -632,6 +706,9 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 		t.Skip("session sticky e2e requires kthena namespace to read router access logs")
 	}
 
+	restoreScorePlugins := configureRouterRandomScorePlugin(t, testCtx.KubeClient, kthenaNamespace)
+	t.Cleanup(restoreScorePlugins)
+
 	baseURL := utils.DefaultRouterURL
 
 	t.Run("E2E-SS-01-BasicStickiness", func(t *testing.T) {
@@ -656,13 +733,13 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("E2E-SS-03-NoKeyUsesPlainLoadBalancing", func(t *testing.T) {
 		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
 			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
-		pods := collectSelectedPodsWithContentPrefix(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, nil, 30, "missing-sticky-key")
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, nil, 30)
 		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "missing sticky key should not pin all requests")
 	})
 
 	t.Run("E2E-SS-04-AbsentSessionStickyIgnoresHeader", func(t *testing.T) {
 		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace, nil)
-		pods := collectSelectedPodsWithContentPrefix(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "ignored"}, 30, "absent-sticky")
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "ignored"}, 30)
 		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "header should not pin when sessionSticky is absent")
 	})
 

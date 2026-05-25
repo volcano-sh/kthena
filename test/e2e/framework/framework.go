@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/volcano-sh/kthena/test/e2e/utils"
@@ -30,6 +31,7 @@ import (
 
 var (
 	pfForwarder utils.PortForwarder
+	pfMu        sync.Mutex
 )
 
 // KthenaConfig holds the configuration for installing kthena
@@ -123,9 +125,7 @@ func InstallKthena(cfg *KthenaConfig) error {
 	// Setup port-forward to router service if networking is enabled
 	if cfg.NetworkingEnabled {
 		fmt.Println("Setting up port-forward to router service...")
-		var err error
-		pfForwarder, err = utils.SetupPortForward(cfg.Namespace, "kthena-router", "8080", "80")
-		if err != nil {
+		if err := setupRouterPortForward(cfg.Namespace); err != nil {
 			return fmt.Errorf("failed to setup port-forward: %v", err)
 		}
 		// Note: SetupPortForward already waits for the port-forward to be ready.
@@ -135,15 +135,51 @@ func InstallKthena(cfg *KthenaConfig) error {
 	return nil
 }
 
+// RestartRouterPortForward refreshes the suite-level router port-forward after
+// tests roll the kthena-router pods. The forwarder targets one selected pod, so
+// deleting that pod leaves the fixed DefaultRouterURL unusable until recreated.
+func RestartRouterPortForward(namespace string) error {
+	pfMu.Lock()
+	defer pfMu.Unlock()
+
+	if pfForwarder != nil {
+		pfForwarder.Close()
+		pfForwarder = nil
+	}
+
+	var lastErr error
+	for start := time.Now(); time.Since(start) < 30*time.Second; {
+		if err := setupRouterPortForward(namespace); err != nil {
+			lastErr = err
+			time.Sleep(time.Second)
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("failed to restart router port-forward: %w", lastErr)
+}
+
+func setupRouterPortForward(namespace string) error {
+	pf, err := utils.SetupPortForward(namespace, "kthena-router", "8080", "80")
+	if err != nil {
+		return err
+	}
+	pfForwarder = pf
+	return nil
+}
+
 // UninstallKthena uninstalls kthena via helm
 func UninstallKthena(namespace string) error {
 	fmt.Printf("Uninstalling kthena from namespace %s\n", namespace)
 
 	// Kill the port-forward process if it was started
+	pfMu.Lock()
 	if pfForwarder != nil {
 		fmt.Println("Stopping port-forward process...")
 		pfForwarder.Close()
+		pfForwarder = nil
 	}
+	pfMu.Unlock()
 
 	cmd := exec.Command("helm", "uninstall", "kthena", "--namespace", namespace)
 	cmd.Stdout = os.Stdout
