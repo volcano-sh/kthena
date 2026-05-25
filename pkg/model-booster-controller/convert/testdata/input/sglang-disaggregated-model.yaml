@@ -1,0 +1,39 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: sglang-pd-test
+  namespace: default
+  uid: sglang-pd-uid
+spec:
+  backend:
+    name: backend1
+    type: SGLangDisaggregated
+    modelURI: hf://Qwen/Qwen3-0.6B
+    cacheURI: hostpath:///tmp/test
+    minReplicas: 1
+    maxReplicas: 1
+    workers:
+      - type: prefill
+        image: docker.io/lmsysorg/sglang:latest
+        replicas: 1
+        pods: 1
+        config:
+          served-model-name: "Qwen3-0.6B"
+          mem-fraction-static: "0.85"
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            cpu: "4"
+            memory: 12Gi
+      - type: decode
+        image: docker.io/lmsysorg/sglang:latest
+        replicas: 1
+        pods: 1
+        config:
+          served-model-name: "Qwen3-0.6B"
+          mem-fraction-static: "0.85"
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            cpu: "4"
+            memory: 12Gi

@@ -131,7 +131,7 @@ func TestReplaceEmbeddedPlaceholders(t *testing.T) {
 	}
 }
 
-func TestConvertVLLMArgsFromJson(t *testing.T) {
+func TestConvertEngineArgsFromJson(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    *apiextensionsv1.JSON
@@ -200,7 +200,7 @@ func TestConvertVLLMArgsFromJson(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ConvertVLLMArgsFromJson(tt.input)
+			result, err := ConvertEngineArgsFromJson(tt.input)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {

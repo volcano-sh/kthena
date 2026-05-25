@@ -1,0 +1,47 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: sglang-qwen-06b-pd
+spec:
+  backend:
+    name: "backend1"
+    type: "SGLangDisaggregated"
+    modelURI: "hf://Qwen/Qwen3-0.6B"
+    cacheURI: "hostpath://tmp/cache"
+    minReplicas: 1
+    maxReplicas: 1
+    workers:
+      - type: prefill
+        image: "docker.io/lmsysorg/sglang:latest"
+        replicas: 1
+        pods: 1
+        # kthena injects --disaggregation-mode=prefill and
+        # --disaggregation-transfer-backend=mooncake; override here if needed.
+        config:
+          served-model-name: "Qwen3-0.6B"
+          mem-fraction-static: "0.85"
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            cpu: "4"
+            memory: "12Gi"
+          requests:
+            nvidia.com/gpu: "1"
+            cpu: "2"
+            memory: "12Gi"
+      - type: decode
+        image: "docker.io/lmsysorg/sglang:latest"
+        replicas: 1
+        pods: 1
+        config:
+          served-model-name: "Qwen3-0.6B"
+          mem-fraction-static: "0.85"
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            cpu: "4"
+            memory: "12Gi"
+          requests:
+            nvidia.com/gpu: "1"
+            cpu: "2"
+            memory: "12Gi"

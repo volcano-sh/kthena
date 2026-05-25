@@ -1,0 +1,185 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata: ${MODEL_SERVING_TEMPLATE_METADATA}
+spec:
+  schedulerName: ${SCHEDULER_NAME}
+  replicas: ${BACKEND_REPLICAS}
+  template:
+    restartGracePeriodSeconds: 60
+    gangPolicy:
+      minRoleReplicas:
+        prefill: ${PREFILL_REPLICAS}
+        decode: ${DECODE_REPLICAS}
+    roles:
+      - name: prefill
+        replicas: ${PREFILL_REPLICAS}
+        entryTemplate:
+          metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
+          spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
+            initContainers: ${INIT_CONTAINERS}
+            terminationGracePeriodSeconds: 300
+            volumes: ${VOLUMES}
+            containers:
+              - name: runtime
+                image: ${MODEL_SERVING_RUNTIME_IMAGE}
+                ports:
+                  - containerPort: ${MODEL_SERVING_RUNTIME_PORT}
+                env: ${ENGINE_PREFILL_ENV}
+                envFrom: ${MODEL_DOWNLOAD_ENVFROM}
+                args:
+                  - --port
+                  - ${MODEL_SERVING_RUNTIME_PORT}
+                  - --engine
+                  - ${MODEL_SERVING_RUNTIME_ENGINE}
+                  - --engine-base-url
+                  - ${MODEL_SERVING_RUNTIME_URL}
+                  - --engine-metrics-path
+                  - ${MODEL_SERVING_RUNTIME_METRICS_PATH}
+                  - --pod
+                  - ${MODEL_SERVING_RUNTIME_POD}
+                  - --model
+                  - ${MODEL_NAME}
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: ${MODEL_SERVING_RUNTIME_PORT}
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+              - name: engine
+                image: ${ENGINE_PREFILL_IMAGE}
+                ports:
+                  - containerPort: 30000
+                env: ${ENGINE_PREFILL_ENV}
+                command: ${ENGINE_PREFILL_COMMAND}
+                imagePullPolicy: IfNotPresent
+                resources: ${ENGINE_PREFILL_RESOURCES}
+                volumeMounts: ${VOLUME_MOUNTS}
+                readinessProbe:
+                  initialDelaySeconds: 180
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                livenessProbe:
+                  initialDelaySeconds: 300
+                  periodSeconds: 15
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                lifecycle:
+                  preStop:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - |
+                          # Drain in-flight requests, bounded so it cannot exceed terminationGracePeriodSeconds.
+                          i=0
+                          while [ $i -lt 60 ]; do
+                            METRICS=$(curl -sf http://localhost:30000/metrics 2>/dev/null) || {
+                              echo "Terminating: metrics endpoint unreachable, engine already stopping" >> /proc/1/fd/1
+                              exit 0
+                            }
+                            PENDING=$(echo "$METRICS" | awk '/^sglang:num_running_reqs/ || /^sglang:num_queue_reqs/ {s+=$2} END {printf "%d", s+0}')
+                            if [ "$PENDING" -le 0 ]; then
+                              echo "Terminating: drained, no active or waiting requests" >> /proc/1/fd/1
+                              exit 0
+                            fi
+                            echo "Terminating: $PENDING in-flight requests, waiting" >> /proc/1/fd/1
+                            i=$((i+1))
+                            sleep 5
+                          done
+                          echo "Terminating: drain deadline reached, proceeding" >> /proc/1/fd/1
+        workerReplicas: 0
+        workerTemplate:
+          spec:
+            containers: []
+      - name: decode
+        replicas: ${DECODE_REPLICAS}
+        entryTemplate:
+          metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
+          spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
+            initContainers: ${INIT_CONTAINERS}
+            terminationGracePeriodSeconds: 300
+            volumes: ${VOLUMES}
+            containers:
+              - name: runtime
+                image: ${MODEL_SERVING_RUNTIME_IMAGE}
+                ports:
+                  - containerPort: ${MODEL_SERVING_RUNTIME_PORT}
+                env: ${ENGINE_DECODE_ENV}
+                envFrom: ${MODEL_DOWNLOAD_ENVFROM}
+                args:
+                  - --port
+                  - ${MODEL_SERVING_RUNTIME_PORT}
+                  - --engine
+                  - ${MODEL_SERVING_RUNTIME_ENGINE}
+                  - --engine-base-url
+                  - ${MODEL_SERVING_RUNTIME_URL}
+                  - --engine-metrics-path
+                  - ${MODEL_SERVING_RUNTIME_METRICS_PATH}
+                  - --pod
+                  - ${MODEL_SERVING_RUNTIME_POD}
+                  - --model
+                  - ${MODEL_NAME}
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: ${MODEL_SERVING_RUNTIME_PORT}
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+              - name: engine
+                image: ${ENGINE_DECODE_IMAGE}
+                ports:
+                  - containerPort: 30000
+                env: ${ENGINE_DECODE_ENV}
+                command: ${ENGINE_DECODE_COMMAND}
+                imagePullPolicy: IfNotPresent
+                resources: ${ENGINE_DECODE_RESOURCES}
+                volumeMounts: ${VOLUME_MOUNTS}
+                readinessProbe:
+                  initialDelaySeconds: 180
+                  periodSeconds: 5
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                livenessProbe:
+                  initialDelaySeconds: 300
+                  periodSeconds: 15
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 30000
+                lifecycle:
+                  preStop:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - |
+                          # Drain in-flight requests, bounded so it cannot exceed terminationGracePeriodSeconds.
+                          i=0
+                          while [ $i -lt 60 ]; do
+                            METRICS=$(curl -sf http://localhost:30000/metrics 2>/dev/null) || {
+                              echo "Terminating: metrics endpoint unreachable, engine already stopping" >> /proc/1/fd/1
+                              exit 0
+                            }
+                            PENDING=$(echo "$METRICS" | awk '/^sglang:num_running_reqs/ || /^sglang:num_queue_reqs/ {s+=$2} END {printf "%d", s+0}')
+                            if [ "$PENDING" -le 0 ]; then
+                              echo "Terminating: drained, no active or waiting requests" >> /proc/1/fd/1
+                              exit 0
+                            fi
+                            echo "Terminating: $PENDING in-flight requests, waiting" >> /proc/1/fd/1
+                            i=$((i+1))
+                            sleep 5
+                          done
+                          echo "Terminating: drain deadline reached, proceeding" >> /proc/1/fd/1
+        workerReplicas: 0
+        workerTemplate:
+          spec:
+            containers: []

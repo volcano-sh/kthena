@@ -17,6 +17,7 @@ limitations under the License.
 package controller_manager
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,169 @@ func TestModelCR(t *testing.T) {
 		}
 		return false
 	}, 2*time.Minute, 5*time.Second, "ModelBooster was not deleted")
+}
+
+// TestSGLangModelMaterialization checks that aggregated and disaggregated
+// SGLang ModelBoosters materialize into ModelServings with the correct command,
+// port, env, and disaggregation flags. Pods are not awaited (SGLang needs a GPU).
+func TestSGLangModelMaterialization(t *testing.T) {
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
+	t.Run("Aggregated", func(t *testing.T) {
+		model := createSGLangAggregatedTestModel()
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create SGLang ModelBooster")
+		defer func() {
+			_ = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(ctx, model.Name, metav1.DeleteOptions{})
+		}()
+
+		var serving *workload.ModelServing
+		require.Eventually(t, func() bool {
+			ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, "sglang-agg-backend1", metav1.GetOptions{})
+			if err != nil {
+				t.Logf("get serving: %v", err)
+				return false
+			}
+			serving = ms
+			return true
+		}, 1*time.Minute, 2*time.Second, "ModelServing for SGLang ModelBooster not created in time")
+
+		require.Len(t, serving.Spec.Template.Roles, 1, "aggregated SGLang must have a single role")
+		role := serving.Spec.Template.Roles[0]
+		assert.Equal(t, "leader", role.Name)
+
+		var engine *corev1.Container
+		for i := range role.EntryTemplate.Spec.Containers {
+			if role.EntryTemplate.Spec.Containers[i].Name == "engine" {
+				engine = &role.EntryTemplate.Spec.Containers[i]
+				break
+			}
+		}
+		require.NotNil(t, engine, "engine container must be present")
+		command := strings.Join(engine.Command, " ")
+		assert.Contains(t, command, "sglang.launch_server")
+		assert.Contains(t, command, "--port 30000")
+		assert.Contains(t, command, "--host 0.0.0.0")
+		assert.NotContains(t, command, "$(POD_IP)")
+		assert.NotContains(t, command, "--disaggregation-mode")
+		assert.False(t, hasEnv(engine.Env, "POD_IP"), "POD_IP env is unused once SGLang binds 0.0.0.0")
+	})
+
+	t.Run("Disaggregated", func(t *testing.T) {
+		model := createSGLangDisaggregatedTestModel()
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create SGLangDisaggregated ModelBooster")
+		defer func() {
+			_ = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(ctx, model.Name, metav1.DeleteOptions{})
+		}()
+
+		var serving *workload.ModelServing
+		require.Eventually(t, func() bool {
+			ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, "sglang-pd-backend1", metav1.GetOptions{})
+			if err != nil {
+				t.Logf("get serving: %v", err)
+				return false
+			}
+			serving = ms
+			return true
+		}, 1*time.Minute, 2*time.Second, "ModelServing for SGLangDisaggregated not created in time")
+
+		require.Len(t, serving.Spec.Template.Roles, 2)
+		roleByName := map[string]*workload.Role{}
+		for i := range serving.Spec.Template.Roles {
+			r := &serving.Spec.Template.Roles[i]
+			roleByName[r.Name] = r
+		}
+		for _, expectedRole := range []string{"prefill", "decode"} {
+			r, ok := roleByName[expectedRole]
+			require.True(t, ok, "role %q must exist", expectedRole)
+
+			var engine *corev1.Container
+			for i := range r.EntryTemplate.Spec.Containers {
+				if r.EntryTemplate.Spec.Containers[i].Name == "engine" {
+					engine = &r.EntryTemplate.Spec.Containers[i]
+					break
+				}
+			}
+			require.NotNil(t, engine, "role %q must have an engine container", expectedRole)
+			command := strings.Join(engine.Command, " ")
+			assert.Contains(t, command, "--disaggregation-mode "+expectedRole)
+			assert.Contains(t, command, "--disaggregation-transfer-backend mooncake")
+			assert.Contains(t, command, "--host 0.0.0.0")
+			assert.NotContains(t, command, "$(POD_IP)")
+			assert.False(t, hasEnv(engine.Env, "POD_IP"), "role %q: POD_IP env is unused once SGLang binds 0.0.0.0", expectedRole)
+		}
+	})
+}
+
+func hasEnv(envs []corev1.EnvVar, name string) bool {
+	for _, e := range envs {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func createSGLangAggregatedTestModel() *workload.ModelBooster {
+	config := &apiextensionsv1.JSON{Raw: []byte(`{"served-model-name":"sglang-test"}`)}
+	return &workload.ModelBooster{
+		ObjectMeta: metav1.ObjectMeta{Name: "sglang-agg", Namespace: testNamespace},
+		Spec: workload.ModelBoosterSpec{
+			Name: "sglang-agg",
+			Backend: workload.ModelBackend{
+				Name:        "backend1",
+				Type:        workload.ModelBackendTypeSGLang,
+				ModelURI:    "hf://Qwen/Qwen3-0.6B",
+				CacheURI:    "hostpath:///tmp/cache",
+				MinReplicas: 1,
+				MaxReplicas: 1,
+				Workers: []workload.ModelWorker{
+					{
+						Type:      workload.ModelWorkerTypeServer,
+						Image:     "docker.io/lmsysorg/sglang:latest",
+						Replicas:  1,
+						Pods:      1,
+						Config:    *config,
+						Resources: corev1ResourceRequirements(),
+					},
+				},
+			},
+		},
+	}
+}
+
+func createSGLangDisaggregatedTestModel() *workload.ModelBooster {
+	config := &apiextensionsv1.JSON{Raw: []byte(`{"served-model-name":"sglang-test"}`)}
+	worker := func(t workload.ModelWorkerType) workload.ModelWorker {
+		return workload.ModelWorker{
+			Type:      t,
+			Image:     "docker.io/lmsysorg/sglang:latest",
+			Replicas:  1,
+			Pods:      1,
+			Config:    *config,
+			Resources: corev1ResourceRequirements(),
+		}
+	}
+	return &workload.ModelBooster{
+		ObjectMeta: metav1.ObjectMeta{Name: "sglang-pd", Namespace: testNamespace},
+		Spec: workload.ModelBoosterSpec{
+			Name: "sglang-pd",
+			Backend: workload.ModelBackend{
+				Name:        "backend1",
+				Type:        workload.ModelBackendTypeSGLangDisaggregated,
+				ModelURI:    "hf://Qwen/Qwen3-0.6B",
+				CacheURI:    "hostpath:///tmp/cache",
+				MinReplicas: 1,
+				MaxReplicas: 1,
+				Workers: []workload.ModelWorker{
+					worker(workload.ModelWorkerTypePrefill),
+					worker(workload.ModelWorkerTypeDecode),
+				},
+			},
+		},
+	}
 }
 
 func createValidModelBoosterForWebhookTest() *workload.ModelBooster {

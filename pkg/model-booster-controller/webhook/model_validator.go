@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -81,6 +82,7 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 	allErrs = append(allErrs, validateWorkerImages(model)...)
 	allErrs = append(allErrs, validateAutoScalingPolicyScope(model)...)
 	allErrs = append(allErrs, validateBackendWorkerTypes(model)...)
+	allErrs = append(allErrs, validateSGLangReservedFlags(model)...)
 
 	if len(allErrs) > 0 {
 		// Convert field errors to a formatted multi-line error message
@@ -129,6 +131,18 @@ func validateBackendWorkerTypes(model *registryv1alpha1.ModelBooster) field.Erro
 		}
 	}
 
+	if backend.Type == registryv1alpha1.ModelBackendTypeSGLangDisaggregated {
+		for j, w := range workers {
+			if w.Type != registryv1alpha1.ModelWorkerTypePrefill && w.Type != registryv1alpha1.ModelWorkerTypeDecode {
+				allErrs = append(allErrs, field.Invalid(
+					backendPath.Child("workers").Index(j).Child("type"),
+					w.Type,
+					"If backend type is 'SGLangDisaggregated', all workers must be type 'prefill' or 'decode'",
+				))
+			}
+		}
+	}
+
 	// Rule 3: MindIEDisaggregated -> all workers must be 'prefill', 'decode', 'controller', or 'coordinator'
 	if backend.Type == registryv1alpha1.ModelBackendTypeMindIEDisaggregated {
 		validTypes := map[registryv1alpha1.ModelWorkerType]struct{}{
@@ -143,6 +157,51 @@ func validateBackendWorkerTypes(model *registryv1alpha1.ModelBooster) field.Erro
 					backendPath.Child("workers").Index(j).Child("type"),
 					w.Type,
 					"If backend type is 'MindIEDisaggregated', all workers must be type 'prefill', 'decode', 'controller', or 'coordinator' (not 'server')",
+				))
+			}
+		}
+	}
+	return allErrs
+}
+
+// validateSGLangReservedFlags rejects worker.config keys the converter
+// hard-codes for SGLang: overriding e.g. port leaves the pod silently
+// never-ready since the containerPort/probe/WorkloadPort stay 30000.
+func validateSGLangReservedFlags(model *registryv1alpha1.ModelBooster) field.ErrorList {
+	var allErrs field.ErrorList
+	backend := model.Spec.Backend
+	if backend.Type != registryv1alpha1.ModelBackendTypeSGLang &&
+		backend.Type != registryv1alpha1.ModelBackendTypeSGLangDisaggregated {
+		return allErrs
+	}
+	reserved := map[string]struct{}{
+		"model-path":          {},
+		"host":                {},
+		"port":                {},
+		"enable-metrics":      {},
+		"disaggregation-mode": {},
+	}
+	backendPath := field.NewPath("spec").Child("backend")
+	for j, w := range backend.Workers {
+		if w.Config.Raw == nil {
+			continue
+		}
+		var configMap map[string]interface{}
+		if err := json.Unmarshal(w.Config.Raw, &configMap); err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				backendPath.Child("workers").Index(j).Child("config"),
+				string(w.Config.Raw),
+				fmt.Sprintf("config is not a valid JSON object: %v", err),
+			))
+			continue
+		}
+		for key := range configMap {
+			normalized := strings.ReplaceAll(key, "_", "-")
+			if _, ok := reserved[normalized]; ok {
+				allErrs = append(allErrs, field.Invalid(
+					backendPath.Child("workers").Index(j).Child("config").Key(key),
+					key,
+					fmt.Sprintf("'%s' is managed by kthena for SGLang backends and must not be set in worker.config", key),
 				))
 			}
 		}

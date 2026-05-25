@@ -479,6 +479,8 @@ spec:
                     enum:
                     - vLLM
                     - vLLMDisaggregated
+                    - SGLang
+                    - SGLangDisaggregated
                     type: string
                   workers:
                     description: Workers is the list of workers associated with this
