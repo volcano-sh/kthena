@@ -579,13 +579,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		c.Set("modelRouteName", modelRouteName)
 	}
 
-	if len(ctx.BestPods) > 0 && ctx.BestPods[0].Pod != nil {
-		selectedPod := ctx.BestPods[0].Pod.Name
-		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, selectedPod)
-	} else {
-		// Set routing info even if no pod is selected (for error cases)
-		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
-	}
+	accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 
 	req := c.Request
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
@@ -889,6 +883,7 @@ func (r *Router) proxy(
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
+		accesslog.SetRequestRouting(c, modelRouteName, modelServerName, pod.Pod.Name)
 		backendPodHeaderValue := ""
 		if r.backendPodHeaderEnabled {
 			backendPodHeaderValue = pod.Pod.Name
