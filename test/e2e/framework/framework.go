@@ -18,6 +18,8 @@ package framework
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,9 +150,18 @@ func RestartRouterPortForward(namespace string) error {
 	}
 
 	var lastErr error
-	for start := time.Now(); time.Since(start) < 30*time.Second; {
+	for start := time.Now(); time.Since(start) < time.Minute; {
 		if err := setupRouterPortForward(namespace); err != nil {
 			lastErr = err
+			time.Sleep(time.Second)
+			continue
+		}
+		if err := waitForRouterPortForwardReady(10 * time.Second); err != nil {
+			lastErr = err
+			if pfForwarder != nil {
+				pfForwarder.Close()
+				pfForwarder = nil
+			}
 			time.Sleep(time.Second)
 			continue
 		}
@@ -166,6 +177,28 @@ func setupRouterPortForward(namespace string) error {
 	}
 	pfForwarder = pf
 	return nil
+}
+
+func waitForRouterPortForwardReady(timeout time.Duration) error {
+	client := &http.Client{Timeout: time.Second}
+	url := "http://127.0.0.1:8080/readyz"
+	var lastErr error
+	for start := time.Now(); time.Since(start) < timeout; {
+		resp, err := client.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		}
+		lastErr = fmt.Errorf("%s returned HTTP %d", url, resp.StatusCode)
+		time.Sleep(500 * time.Millisecond)
+	}
+	return lastErr
 }
 
 // UninstallKthena uninstalls kthena via helm
