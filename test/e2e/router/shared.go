@@ -284,7 +284,17 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 			return
 		}
 		deploy.Spec.Replicas = &originalReplicas
-		_, _ = kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{})
+		if _, err := kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore kthena-router replicas: %v", err)
+			return
+		}
+		if err := utils.WaitForDeploymentReadyE(restoreCtx, kubeClient, namespace, deploymentName, defaultScalingTimeout); err != nil {
+			t.Logf("Warning: Failed to wait for restored kthena-router replicas: %v", err)
+			return
+		}
+		if err := e2eframework.RestartRouterPortForward(namespace); err != nil {
+			t.Logf("Warning: Failed to refresh router port-forward after restoring replicas: %v", err)
+		}
 	}
 }
 
@@ -979,16 +989,18 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 			sessionStickySpec(nil,
 				stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader),
 				stickySource(networkingv1alpha1.SessionKeySourceQuery, "sid")))
-		require.Eventually(t, func() bool {
-			sessionValue := "precedence-" + utils.RandomString(8)
-			pods := make([]string, 0, 8)
-			for i := 0; i < 8; i++ {
-				url := fmt.Sprintf("%s?sid=query-%d-%s", baseURL, i, utils.RandomString(6))
-				content := fmt.Sprintf("%s-%d-source-precedence", utils.RandomString(10), i)
-				pods = append(pods, selectedPodForRequestWithContent(t, testCtx, kthenaNamespace, url, route.Spec.ModelName, content, map[string]string{sessionStickyHeader: sessionValue}))
-			}
-			return distinctPodCount(pods) == 1
-		}, 45*time.Second, time.Second, "header source must win before query source")
+		sessionValue := "precedence-" + utils.RandomString(8)
+		firstPod := selectedPodForRequestWithContent(t, testCtx, kthenaNamespace,
+			baseURL+"?sid=query-first-"+utils.RandomString(6),
+			route.Spec.ModelName,
+			"first-source-precedence",
+			map[string]string{sessionStickyHeader: sessionValue})
+		secondPod := selectedPodForRequestWithContent(t, testCtx, kthenaNamespace,
+			baseURL+"?sid=query-second-"+utils.RandomString(6),
+			route.Spec.ModelName,
+			"second-source-precedence",
+			map[string]string{sessionStickyHeader: sessionValue})
+		require.Equal(t, firstPod, secondPod, "header source must win before query source")
 	})
 
 	t.Run("E2E-SS-12-PDTargetBypassesSticky", func(t *testing.T) {
