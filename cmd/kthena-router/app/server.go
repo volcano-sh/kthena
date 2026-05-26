@@ -41,7 +41,7 @@ type Server struct {
 	DebugPort                          int
 	KubeAPIQPS                         float32
 	KubeAPIBurst                       int
-	SessionStickyStore                 router.SessionStickyStoreConfig
+	SessionStickyConfig                 router.SessionStickyStoreConfig
 	EnableBackendPodHeader             bool
 }
 
