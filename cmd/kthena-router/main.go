@@ -39,6 +39,11 @@ import (
 
 const validatingWebhookConfigurationName = "kthena-router-validating-webhook"
 
+type sessionStickyOptions struct {
+	storeType    string
+	redisAddress string
+}
+
 func main() {
 	var (
 		routerPort                         string
@@ -55,9 +60,7 @@ func main() {
 		debugPort                          int
 		kubeAPIQPS                         float32
 		kubeAPIBurst                       int
-		sessionStickyStoreType             string
-		sessionStickyRedisAddress          string
-		enableBackendPodHeader             bool
+		sessionSticky                      sessionStickyOptions
 	)
 
 	klog.InitFlags(nil)
@@ -83,9 +86,8 @@ func main() {
 	pflag.IntVar(&debugPort, "debug-port", 15000, "The port for the debug server (localhost only)")
 	pflag.Float32Var(&kubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&kubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
-	pflag.StringVar(&sessionStickyStoreType, "session-sticky-store", router.SessionStickyStoreMemory, "Session sticky store backend: memory or redis")
-	pflag.StringVar(&sessionStickyRedisAddress, "session-sticky-redis-address", "", "Redis address for session sticky store when --session-sticky-store=redis")
-	pflag.BoolVar(&enableBackendPodHeader, "enable-backend-pod-header", false, "Enable X-Kthena-Backend-Pod response header for debug and test traffic")
+	pflag.StringVar(&sessionSticky.storeType, "session-sticky-store", router.SessionStickyStoreMemory, "Session sticky store backend: memory or redis")
+	pflag.StringVar(&sessionSticky.redisAddress, "session-sticky-redis-address", "", "Redis address for session sticky store when --session-sticky-store=redis")
 	defer klog.Flush()
 	pflag.Parse()
 
@@ -131,10 +133,10 @@ func main() {
 	}
 
 	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst, router.SessionStickyStoreConfig{
-		Type:          sessionStickyStoreType,
-		RedisAddress:  sessionStickyRedisAddress,
+		Type:          sessionSticky.storeType,
+		RedisAddress:  sessionSticky.redisAddress,
 		RedisPassword: os.Getenv("REDIS_PASSWORD"),
-	}, enableBackendPodHeader).Run(ctx)
+	}).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.

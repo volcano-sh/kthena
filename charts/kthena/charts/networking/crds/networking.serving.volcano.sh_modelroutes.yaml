@@ -353,9 +353,10 @@ spec:
                   If omitted, requests are scheduled without session affinity.
                 properties:
                   sessionAffinitySeconds:
+                    default: 600
                     description: |-
                       SessionAffinitySeconds is the binding TTL in seconds.
-                      If omitted, the router uses 10800 seconds.
+                      If omitted, the router uses 600 seconds.
                     format: int32
                     minimum: 1
                     type: integer

@@ -21,35 +21,22 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/auth"
 )
 
-const defaultSessionAffinitySeconds int32 = 10800
+const defaultSessionAffinitySeconds int32 = 600
 const redisOperationTimeout = 2 * time.Second
 const memorySessionStickyCleanupInterval = time.Minute
-const redisSetSessionBindingScript = `
-local current = redis.call("GET", KEYS[1])
-if not current then
-	redis.call("PSETEX", KEYS[1], ARGV[2], ARGV[1])
-	return 1
-end
-if current == ARGV[1] then
-	redis.call("PSETEX", KEYS[1], ARGV[2], ARGV[1])
-	return 1
-end
-return 0
-`
 
 type sessionBinding struct {
 	pod       types.NamespacedName
@@ -65,6 +52,8 @@ type sessionStickyStore interface {
 
 type memorySessionStickyStore struct {
 	mu              sync.Mutex
+	stopOnce        sync.Once
+	stopCh          chan struct{}
 	now             func() time.Time
 	cleanupInterval time.Duration
 	nextCleanup     time.Time
@@ -73,12 +62,15 @@ type memorySessionStickyStore struct {
 
 func newMemorySessionStickyStore() *memorySessionStickyStore {
 	now := time.Now()
-	return &memorySessionStickyStore{
+	store := &memorySessionStickyStore{
+		stopCh:          make(chan struct{}),
 		now:             time.Now,
 		cleanupInterval: memorySessionStickyCleanupInterval,
 		nextCleanup:     now.Add(memorySessionStickyCleanupInterval),
 		bindings:        make(map[string]sessionBinding),
 	}
+	go store.runCleanupLoop()
+	return store
 }
 
 func (s *memorySessionStickyStore) Get(routeKey, sessionKey string) (types.NamespacedName, bool) {
@@ -130,7 +122,29 @@ func (s *memorySessionStickyStore) Delete(routeKey, sessionKey string) {
 }
 
 func (s *memorySessionStickyStore) Close() error {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 	return nil
+}
+
+func (s *memorySessionStickyStore) runCleanupLoop() {
+	ticker := time.NewTicker(memorySessionStickyCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.cleanupExpired()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *memorySessionStickyStore) cleanupExpired() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanupExpiredLocked(s.now())
 }
 
 func (s *memorySessionStickyStore) cleanupExpiredLocked(now time.Time) {
@@ -148,8 +162,6 @@ func (s *memorySessionStickyStore) cleanupExpiredLocked(now time.Time) {
 type redisSessionStickyStore struct {
 	client *redis.Client
 }
-
-var redisSetSessionBinding = redis.NewScript(redisSetSessionBindingScript)
 
 func newRedisSessionStickyStore(address, password string) (*redisSessionStickyStore, error) {
 	if strings.TrimSpace(address) == "" {
@@ -200,14 +212,8 @@ func (s *redisSessionStickyStore) Set(routeKey, sessionKey string, pod types.Nam
 	defer cancel()
 	value := pod.Namespace + "/" + pod.Name
 
-	result, err := redisSetSessionBinding.Run(ctx, s.client, []string{redisSessionStoreKey(routeKey, sessionKey)}, value, ttl.Milliseconds()).Int()
-	if err != nil {
+	if err := s.client.Set(ctx, redisSessionStoreKey(routeKey, sessionKey), value, ttl).Err(); err != nil {
 		klog.Errorf("failed to set session sticky binding in redis: %v", err)
-		return
-	}
-	if result == 0 {
-		klog.V(4).Infof("session sticky binding for route %s session %s already points to another pod; keeping existing binding",
-			routeKey, hashSessionKey(sessionKey))
 	}
 }
 
@@ -266,12 +272,12 @@ func sessionAffinityTTL(spec *v1alpha1.SessionSticky) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func extractSessionKey(req *http.Request, spec *v1alpha1.SessionSticky, authenticator *auth.JWTAuthenticator) string {
-	if req == nil || spec == nil || len(spec.Sources) == 0 {
+func (r *Router) extractSessionKey(c *gin.Context, spec *v1alpha1.SessionSticky) string {
+	if c == nil || c.Request == nil || spec == nil || len(spec.Sources) == 0 {
 		return ""
 	}
 	for _, source := range spec.Sources {
-		value := extractSessionKeyFromSource(req, source, authenticator)
+		value := r.extractSessionKeyFromSource(c, source)
 		if value != "" {
 			return value
 		}
@@ -279,23 +285,23 @@ func extractSessionKey(req *http.Request, spec *v1alpha1.SessionSticky, authenti
 	return ""
 }
 
-func extractSessionKeyFromSource(req *http.Request, source v1alpha1.SessionKeySource, authenticator *auth.JWTAuthenticator) string {
+func (r *Router) extractSessionKeyFromSource(c *gin.Context, source v1alpha1.SessionKeySource) string {
 	switch source.Type {
 	case v1alpha1.SessionKeySourceHeader:
-		return strings.TrimSpace(req.Header.Get(source.Name))
+		return strings.TrimSpace(c.Request.Header.Get(source.Name))
 	case v1alpha1.SessionKeySourceQuery:
-		return strings.TrimSpace(req.URL.Query().Get(source.Name))
+		return strings.TrimSpace(c.Request.URL.Query().Get(source.Name))
 	case v1alpha1.SessionKeySourceCookie:
-		cookie, err := req.Cookie(source.Name)
+		cookie, err := c.Request.Cookie(source.Name)
 		if err != nil {
 			return ""
 		}
 		return strings.TrimSpace(cookie.Value)
 	case v1alpha1.SessionKeySourceJWTClaim:
-		if authenticator == nil {
+		if r == nil || r.authenticator == nil {
 			return ""
 		}
-		value, err := authenticator.ExtractStringClaim(req, source.Name)
+		value, err := r.authenticator.ExtractStringClaim(c, source.Name)
 		if err != nil {
 			klog.V(4).Infof("failed to extract JWT session claim %q: %v", source.Name, err)
 			return ""

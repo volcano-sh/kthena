@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestRedisSessionStickyStoreSetDoesNotOverwriteExistingDifferentPod(t *testing.T) {
+func TestRedisSessionStickyStoreSetRefreshesBinding(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	t.Cleanup(mr.Close)
@@ -39,7 +39,7 @@ func TestRedisSessionStickyStoreSetDoesNotOverwriteExistingDifferentPod(t *testi
 
 	pod, ok := store.Get("default/route", "session")
 	require.True(t, ok)
-	require.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-a"}, pod)
+	require.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-b"}, pod)
 }
 
 func TestRedisSessionStickyStoreSetRefreshesExistingSamePod(t *testing.T) {
@@ -63,6 +63,7 @@ func TestRedisSessionStickyStoreSetRefreshesExistingSamePod(t *testing.T) {
 
 func TestMemorySessionStickyStoreSetDoesNotScanEveryInsert(t *testing.T) {
 	store := newMemorySessionStickyStore()
+	t.Cleanup(func() { _ = store.Close() })
 	now := time.Unix(100, 0)
 	store.now = func() time.Time { return now }
 	store.cleanupInterval = time.Minute
@@ -82,6 +83,7 @@ func TestMemorySessionStickyStoreSetDoesNotScanEveryInsert(t *testing.T) {
 
 func TestMemorySessionStickyStorePeriodicCleanup(t *testing.T) {
 	store := newMemorySessionStickyStore()
+	t.Cleanup(func() { _ = store.Close() })
 	now := time.Unix(100, 0)
 	store.now = func() time.Time { return now }
 	store.cleanupInterval = time.Minute

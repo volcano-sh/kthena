@@ -59,8 +59,6 @@ const (
 	// Context keys for gin context
 	GatewayKey = "gatewayKey"
 	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
-
-	BackendPodHeader = "X-Kthena-Backend-Pod"
 )
 
 func getEnvBool(key string, fallback bool) bool {
@@ -102,19 +100,10 @@ type Router struct {
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 
-	sessionStickyStore      sessionStickyStore
-	backendPodHeaderEnabled bool
+	sessionStickyStore sessionStickyStore
 }
 
-type Option func(*Router)
-
-func WithBackendPodHeaderEnabled(enabled bool) Option {
-	return func(r *Router) {
-		r.backendPodHeaderEnabled = enabled
-	}
-}
-
-func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig SessionStickyStoreConfig, opts ...Option) *Router {
+func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig SessionStickyStoreConfig) *Router {
 	// Create a unified rate limiter for all models
 	loadRateLimiter := ratelimit.NewTokenRateLimiter()
 
@@ -192,9 +181,6 @@ func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConf
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
-	for _, opt := range opts {
-		opt(router)
-	}
 	router.sessionStickyStore = newSessionStickyStoreFromConfig(sessionStickyConfig)
 	return router
 }
@@ -207,24 +193,14 @@ func (r *Router) Close() error {
 	if r.authenticator != nil {
 		r.authenticator.Close()
 	}
-	return errors.Join(
-		closeSessionStickyStore(r.sessionStickyStore),
-		closeAccessLogger(r.accessLogger),
-	)
-}
-
-func closeSessionStickyStore(store sessionStickyStore) error {
-	if store == nil {
-		return nil
+	var errs []error
+	if r.sessionStickyStore != nil {
+		errs = append(errs, r.sessionStickyStore.Close())
 	}
-	return store.Close()
-}
-
-func closeAccessLogger(logger accesslog.AccessLogger) error {
-	if logger == nil {
-		return nil
+	if r.accessLogger != nil {
+		errs = append(errs, r.accessLogger.Close())
 	}
-	return logger.Close()
+	return errors.Join(errs...)
 }
 
 func newSessionStickyStoreFromConfig(config SessionStickyStoreConfig) sessionStickyStore {
@@ -518,11 +494,20 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		pdGroup = modelServer.Spec.WorkloadSelector.PDGroup
 	}
 
-	sessionKey, sessionTTL := r.prepareSessionSticky(c.Request, modelRoute, pdGroup, pods)
 	routeKey := routeSessionKey(modelRoute)
+	var sessionKey string
+	var sessionTTL time.Duration
+	if modelRoute != nil && modelRoute.Spec.SessionSticky != nil {
+		if pdGroup != nil {
+			klog.Warningf("session sticky is configured on ModelRoute %s/%s but PD disaggregation targets are not supported; bypassing sticky routing",
+				modelRoute.Namespace, modelRoute.Name)
+		} else {
+			sessionKey, sessionTTL = r.prepareSessionSticky(c, modelRoute, pods)
+		}
+	}
 	originalPods := pods
 	sessionBindingApplied := false
-	if sessionKey != "" && routeKey != "" && pdGroup == nil {
+	if sessionKey != "" && routeKey != "" {
 		if boundPod, ok := r.sessionStickyStore.Get(routeKey, sessionKey); ok {
 			if pod, exists := indexPodsByName(pods)[boundPod]; exists {
 				pods = []*datastore.PodInfo{pod}
@@ -571,12 +556,18 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 
 	// Set complete request routing information in access log
+	modelServerFullName := fmt.Sprintf("%s/%s", modelServerName.Namespace, modelServerName.Name)
 	modelRouteName := ""
 	if modelRoute != nil {
 		modelRouteName = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
 		// Set the model route name in context for upstream connections
 		c.Set("modelRouteName", modelRouteName)
 	}
+
+	// Set route/server info now and record the selected pod when the request is
+	// actually dispatched. The scheduler may return retry candidates, and the
+	// sticky binding must match the pod that successfully handled the request.
+	accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 
 	req := c.Request
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
@@ -586,19 +577,14 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 }
 
-func (r *Router) prepareSessionSticky(req *http.Request, modelRoute *v1alpha1.ModelRoute, pdGroup *v1alpha1.PDGroup, pods []*datastore.PodInfo) (string, time.Duration) {
+func (r *Router) prepareSessionSticky(c *gin.Context, modelRoute *v1alpha1.ModelRoute, pods []*datastore.PodInfo) (string, time.Duration) {
 	if modelRoute == nil || modelRoute.Spec.SessionSticky == nil {
-		return "", 0
-	}
-	if pdGroup != nil {
-		klog.Warningf("session sticky is configured on ModelRoute %s/%s but PD disaggregation targets are not supported; bypassing sticky routing",
-			modelRoute.Namespace, modelRoute.Name)
 		return "", 0
 	}
 	if len(pods) == 0 {
 		return "", 0
 	}
-	sessionKey := extractSessionKey(req, modelRoute.Spec.SessionSticky, r.authenticator)
+	sessionKey := r.extractSessionKey(c, modelRoute.Spec.SessionSticky)
 	if sessionKey == "" {
 		return "", 0
 	}
@@ -879,13 +865,9 @@ func (r *Router) proxy(
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
-		// Request dispatched to the pod.
 		accesslog.SetRequestRouting(c, modelRouteName, modelServerName, pod.Pod.Name)
-		backendPodHeaderValue := ""
-		if r.backendPodHeaderEnabled {
-			backendPodHeaderValue = pod.Pod.Name
-		}
-		err := proxyRequest(c, req, pod.Pod.Status.PodIP, port, stream, onUsage, backendPodHeaderValue)
+
+		err := proxyRequest(c, req, pod.Pod.Status.PodIP, port, stream, onUsage)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
@@ -1059,7 +1041,6 @@ func proxyRequest(
 	port int32,
 	stream bool,
 	onUsage func(u handlers.OpenAIResponse),
-	backendPodHeaderValue string,
 ) error {
 	resp, err := doRequest(req, podIP, port)
 	if err != nil {
@@ -1069,9 +1050,6 @@ func proxyRequest(
 		for _, v := range vv {
 			c.Header(k, v)
 		}
-	}
-	if backendPodHeaderValue != "" {
-		c.Header(BackendPodHeader, backendPodHeaderValue)
 	}
 	defer resp.Body.Close()
 
@@ -1083,7 +1061,7 @@ func proxyRequest(
 		c.Status(resp.StatusCode)
 		reader := bufio.NewReader(resp.Body)
 		var streamErr error
-		clientGone := c.Stream(func(w io.Writer) bool {
+		c.Stream(func(w io.Writer) bool {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
 				// Try to parse usage from this line, assuming it's a data line
@@ -1102,31 +1080,18 @@ func proxyRequest(
 					}
 				}
 				// Forward to downstream
-				n, writeErr := w.Write(line)
-				if writeErr != nil {
-					streamErr = fmt.Errorf("write stream response to downstream failed: %w", writeErr)
-					return false
-				}
-				if n != len(line) {
-					streamErr = fmt.Errorf("write stream response to downstream failed: %w", io.ErrShortWrite)
-					return false
-				}
+				_, _ = w.Write(line)
 			}
 			if err != nil {
 				if err != io.EOF {
 					klog.Errorf("error reading stream body: %v", err)
-					streamErr = fmt.Errorf("read stream response from upstream failed: %w", err)
+					streamErr = err
 				}
 				return false
 			}
 			return true
 		})
-		if streamErr != nil {
-			return streamErr
-		}
-		if clientGone {
-			return fmt.Errorf("downstream client disconnected")
-		}
+		return streamErr
 	} else {
 		// Non-stream: efficiently stream response while capturing for parsing
 		var buf bytes.Buffer
@@ -1135,7 +1100,7 @@ func proxyRequest(
 		_, err := io.Copy(c.Writer, ttee)
 		if err != nil {
 			klog.Errorf("copy response to downstream failed: %v", err)
-			return fmt.Errorf("copy response to downstream failed: %w", err)
+			return err
 		}
 
 		// Parse usage if present

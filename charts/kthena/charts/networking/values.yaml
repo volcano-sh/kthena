@@ -34,9 +34,6 @@ kthenaRouter:
     requests:
       cpu: 100m
       memory: 128Mi
-  backendPodHeader:
-    # enabled controls whether X-Kthena-Backend-Pod is added to responses for debug and test traffic.
-    enabled: false
   # fairness configuration for request scheduling
   fairness:
     # enabled controls whether fairness scheduling is active

@@ -65,8 +65,9 @@ type ModelRouteSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.sources) && size(self.sources) > 0",message="sources must be non-empty"
 type SessionSticky struct {
 	// SessionAffinitySeconds is the binding TTL in seconds.
-	// If omitted, the router uses 10800 seconds.
+	// If omitted, the router uses 600 seconds.
 	// +optional
+	// +kubebuilder:default=600
 	// +kubebuilder:validation:Minimum=1
 	SessionAffinitySeconds *int32 `json:"sessionAffinitySeconds,omitempty"`
 

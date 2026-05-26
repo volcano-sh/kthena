@@ -90,12 +90,14 @@ func TestExtractStringClaimUsesCachedParsedJWT(t *testing.T) {
 	token := jwt.New()
 	assert.NoError(t, token.Set("tenant", "team-a"))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(header, "Bearer already-validated")
-	req = requestWithParsedJWT(req, token)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	c.Request.Header.Set(header, "Bearer already-validated")
+	setParsedJWT(c, token)
 
 	authenticator := &JWTAuthenticator{}
-	claim, err := authenticator.ExtractStringClaim(req, "tenant")
+	claim, err := authenticator.ExtractStringClaim(c, "tenant")
 	assert.NoError(t, err)
 	assert.Equal(t, "team-a", claim)
 }

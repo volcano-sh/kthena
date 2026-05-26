@@ -175,8 +175,16 @@ func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1
 
 	// Sum pod deletion costs (0 if not set)
 	deletionCost := 0
+	availablePods := 0
 	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		availablePods++
 		deletionCost += c.getPodDeletionCost(pod)
+	}
+	if expectedPods := expectedServingGroupPodCount(ms); expectedPods > 0 && availablePods < expectedPods {
+		priority = PriorityServingGroupCreating
 	}
 
 	_, index := utils.GetParentNameAndOrdinal(groupName)
@@ -187,4 +195,19 @@ func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1
 		DeletionCost: deletionCost,
 		Index:        index,
 	}
+}
+
+func expectedServingGroupPodCount(ms *workloadv1alpha1.ModelServing) int {
+	if ms == nil {
+		return 0
+	}
+	count := 0
+	for _, role := range ms.Spec.Template.Roles {
+		roleReplicas := int32(1)
+		if role.Replicas != nil {
+			roleReplicas = *role.Replicas
+		}
+		count += (1 + int(role.WorkerReplicas)) * int(roleReplicas)
+	}
+	return count
 }

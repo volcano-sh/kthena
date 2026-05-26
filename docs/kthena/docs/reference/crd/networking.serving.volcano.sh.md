@@ -421,7 +421,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is the binding TTL in seconds.<br />If omitted, the router uses 10800 seconds. |  | Minimum: 1 <br /> |
+| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is the binding TTL in seconds.<br />If omitted, the router uses 600 seconds. | 600 | Minimum: 1 <br /> |
 | `sources` _[SessionKeySource](#sessionkeysource) array_ | Sources are evaluated in order; the first non-empty extracted value is used<br />as the session key. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
 
 

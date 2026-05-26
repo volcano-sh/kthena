@@ -41,11 +41,10 @@ type Server struct {
 	DebugPort                          int
 	KubeAPIQPS                         float32
 	KubeAPIBurst                       int
-	SessionStickyConfig                 router.SessionStickyStoreConfig
-	EnableBackendPodHeader             bool
+	SessionStickyConfig                router.SessionStickyStoreConfig
 }
 
-func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int, sessionStickyStore router.SessionStickyStoreConfig, enableBackendPodHeader bool) *Server {
+func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int, sessionStickyStore router.SessionStickyStoreConfig) *Server {
 	return &Server{
 		store:                              nil,
 		EnableTLS:                          enableTLS,
@@ -57,8 +56,7 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		DebugPort:                          debugPort,
 		KubeAPIQPS:                         kubeAPIQPS,
 		KubeAPIBurst:                       kubeAPIBurst,
-		SessionStickyStore:                 sessionStickyStore,
-		EnableBackendPodHeader:             enableBackendPodHeader,
+		SessionStickyConfig:                sessionStickyStore,
 	}
 }
 
@@ -81,7 +79,7 @@ func (s *Server) Run(ctx context.Context) {
 	s.store = store
 
 	// must be run before the controller, because it will register callbacks
-	r := NewRouter(store, s.SessionStickyStore, s.EnableBackendPodHeader)
+	r := NewRouter(store, s.SessionStickyConfig)
 	defer func() {
 		if err := r.Close(); err != nil {
 			klog.Errorf("Failed to close router resources: %v", err)

@@ -25,9 +25,6 @@ spec:
           args:
             - --port={{ .Values.kthenaRouter.port }}
             - --debug-port={{ .Values.kthenaRouter.debugPort }}
-            {{- if .Values.kthenaRouter.backendPodHeader.enabled }}
-            - --enable-backend-pod-header={{ .Values.kthenaRouter.backendPodHeader.enabled }}
-            {{- end }}
             - --enable-webhook={{ .Values.kthenaRouter.webhook.enabled }}
             - --enable-gateway-api={{ .Values.kthenaRouter.gatewayAPI.enabled }}
             {{- if .Values.kthenaRouter.gatewayAPI.enabled }}
