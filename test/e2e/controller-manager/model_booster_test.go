@@ -111,7 +111,7 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 	model.Spec.AutoscalingPolicy = &workload.AutoscalingPolicySpec{
 		Metrics: []workload.AutoscalingPolicyMetric{
 			{
-				MetricName:  "concurrency",
+				Name:        "concurrency",
 				TargetValue: resource.MustParse("10"),
 			},
 		},

@@ -1,0 +1,21 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: podinfo-prom-binding
+  namespace: autoscale-demo
+spec:
+  policyRef:
+    name: podinfo-prom-policy
+  homogeneousTarget:
+    minReplicas: 1
+    maxReplicas: 6
+    target:
+      targetRef:
+        kind: ModelServing
+        name: podinfo-ms
+      metricSources:
+        podinfo_rps:
+          type: Prometheus
+          prometheus:
+            serverURL: http://kube-prometheus-stack-prometheus.test.svc.cluster.local:9090
+            query: sum(rate(http_requests_total{namespace="autoscale-demo"}[2m]))
