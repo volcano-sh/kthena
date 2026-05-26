@@ -1,0 +1,34 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: test-model-disaggregated
+spec:
+  name: test-model-disaggregated
+  backend:
+    name: backend1
+    type: vLLMDisaggregated
+    modelURI: hf://dummy-repo/dummy-model
+    cacheURI: hostpath:///tmp/mock-cache
+    minReplicas: 0
+    maxReplicas: 1
+    workers:
+    - type: prefill
+      image: alpine:3.20
+      replicas: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      config:
+        served-model-name: "test-model-disaggregated"
+        max-model-len: 1024
+    - type: decode
+      image: alpine:3.20
+      replicas: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      config:
+        served-model-name: "test-model-disaggregated"
+        max-model-len: 1024

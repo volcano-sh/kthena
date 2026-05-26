@@ -96,13 +96,14 @@ func TestModelCR(t *testing.T) {
 	require.NotEmpty(t, msRevisionBefore, "ModelServing revision label should be set")
 
 	t.Log("Testing update of ModelBooster")
+	updatedMaxReplicas := model.Spec.Backend.MaxReplicas + 1
 	require.Eventually(t, func() bool {
 		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
 		if err != nil {
 			t.Logf("Get model error: %v", err)
 			return false
 		}
-		m.Spec.Backend.Workers[0].Replicas = 2
+		m.Spec.Backend.MaxReplicas = updatedMaxReplicas
 		_, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Update(ctx, m, metav1.UpdateOptions{})
 		if err != nil {
 			t.Logf("Update model error: %v", err)
@@ -116,10 +117,10 @@ func TestModelCR(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return m.Spec.Backend.Workers[0].Replicas == 2
+		return m.Spec.Backend.MaxReplicas == updatedMaxReplicas
 	}, 2*time.Minute, 5*time.Second, "ModelBooster update was not reflected")
 
-	// ModelServing hashes model.Spec.Backend, so replica changes should mutate the revision label.
+	// ModelServing hashes model.Spec.Backend, so backend changes should mutate the revision label.
 	t.Log("Verifying revision label changed on ModelServing after update")
 	require.Eventually(t, func() bool {
 		updatedMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
@@ -161,6 +162,73 @@ func TestModelCR(t *testing.T) {
 		list, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).List(ctx, listOpts)
 		return err == nil && len(list.Items) == 0
 	}, 2*time.Minute, 5*time.Second, "Orphan ModelRoutes should be garbage-collected")
+}
+
+// TestModelCRDisaggregated verifies that a vLLMDisaggregated ModelBooster is
+// reconciled into the split prefill/decode ModelServing shape.
+func TestModelCRDisaggregated(t *testing.T) {
+	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
+
+	model := utils.LoadYAMLFromFile[workload.ModelBooster](filepath.Join(testDataDir, "ModelBooster-vllm-disaggregated.yaml"))
+	model.Namespace = testNamespace
+
+	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create disaggregated ModelBooster")
+	require.NotNil(t, createdModel)
+	t.Cleanup(func() {
+		if err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(context.Background(), model.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("cleanup: failed to delete ModelBooster %s: %v", model.Name, err)
+		}
+	})
+
+	expectedChildName := mbutils.GetBackendResourceName(model.Name, model.Spec.Backend.Name)
+
+	var modelServing *workload.ModelServing
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		modelServing = ms
+		return true
+	}, 2*time.Minute, 2*time.Second, "Disaggregated ModelServing should be created")
+
+	assertOwnedByModelBooster(t, modelServing.OwnerReferences, createdModel)
+	assertModelBoosterLabels(t, modelServing.Labels, createdModel, model.Spec.Backend.Name)
+	require.Len(t, modelServing.Spec.Template.Roles, 2, "Disaggregated ModelServing should contain prefill and decode roles")
+	assertModelServingRoleNames(t, modelServing, workload.ModelWorkerTypePrefill, workload.ModelWorkerTypeDecode)
+
+	var modelServerLabels map[string]string
+	var modelServerOwnerReferences []metav1.OwnerReference
+	require.Eventually(t, func() bool {
+		modelServer, err := kthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		modelServerOwnerReferences = modelServer.OwnerReferences
+		modelServerLabels = modelServer.Labels
+		return true
+	}, 2*time.Minute, 2*time.Second, "Disaggregated ModelServer should be created")
+	assertOwnedByModelBooster(t, modelServerOwnerReferences, createdModel)
+	assertModelBoosterLabels(t, modelServerLabels, createdModel, model.Spec.Backend.Name)
+
+	err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(ctx, model.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete disaggregated ModelBooster")
+
+	ownerUIDSelector := labels.SelectorFromSet(map[string]string{
+		mbutils.OwnerUIDKey: string(createdModel.UID),
+	})
+	listOpts := metav1.ListOptions{LabelSelector: ownerUIDSelector.String()}
+
+	require.Eventually(t, func() bool {
+		list, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).List(ctx, listOpts)
+		return err == nil && len(list.Items) == 0
+	}, 2*time.Minute, 2*time.Second, "Disaggregated ModelServing should be garbage-collected")
+
+	require.Eventually(t, func() bool {
+		list, err := kthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).List(ctx, listOpts)
+		return err == nil && len(list.Items) == 0
+	}, 2*time.Minute, 2*time.Second, "Disaggregated ModelServer should be garbage-collected")
 }
 
 // TestModelBoosterSelfHealing validates that the controller instantly self-heals deleted child resources.
@@ -307,4 +375,16 @@ func assertModelBoosterLabels(t *testing.T, resourceLabels map[string]string, bo
 	assert.Equal(t, string(booster.UID), resourceLabels[mbutils.OwnerUIDKey], "label model-uid")
 	assert.Equal(t, workload.GroupName, resourceLabels[mbutils.ManageBy], "label managed-by")
 	assert.NotEmpty(t, resourceLabels[mbutils.RevisionLabelKey], "label revision should not be empty")
+}
+
+func assertModelServingRoleNames(t *testing.T, modelServing *workload.ModelServing, expectedRoles ...workload.ModelWorkerType) {
+	t.Helper()
+	actual := make(map[workload.ModelWorkerType]struct{}, len(modelServing.Spec.Template.Roles))
+	for _, role := range modelServing.Spec.Template.Roles {
+		actual[workload.ModelWorkerType(role.Name)] = struct{}{}
+	}
+	for _, expectedRole := range expectedRoles {
+		_, ok := actual[expectedRole]
+		assert.True(t, ok, "ModelServing should contain %s role", expectedRole)
+	}
 }
