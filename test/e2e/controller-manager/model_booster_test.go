@@ -33,7 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-const testDataDir = "test/e2e/controller-manager/testdata"
+const (
+	testDataDir                   = "test/e2e/controller-manager/testdata"
+	modelBoosterTestSchedulerName = "volcano"
+)
 
 // TestModelCR creates a ModelBooster CR from YAML, waits for it to become active,
 // tests chat functionality, verifies generated child resources and ownership,
@@ -96,14 +99,13 @@ func TestModelCR(t *testing.T) {
 	require.NotEmpty(t, msRevisionBefore, "ModelServing revision label should be set")
 
 	t.Log("Testing update of ModelBooster")
-	updatedMaxReplicas := model.Spec.Backend.MaxReplicas + 1
 	require.Eventually(t, func() bool {
 		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
 		if err != nil {
 			t.Logf("Get model error: %v", err)
 			return false
 		}
-		m.Spec.Backend.MaxReplicas = updatedMaxReplicas
+		m.Spec.Backend.SchedulerName = modelBoosterTestSchedulerName
 		_, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Update(ctx, m, metav1.UpdateOptions{})
 		if err != nil {
 			t.Logf("Update model error: %v", err)
@@ -117,7 +119,7 @@ func TestModelCR(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return m.Spec.Backend.MaxReplicas == updatedMaxReplicas
+		return m.Spec.Backend.SchedulerName == modelBoosterTestSchedulerName
 	}, 2*time.Minute, 5*time.Second, "ModelBooster update was not reflected")
 
 	// ModelServing hashes model.Spec.Backend, so backend changes should mutate the revision label.

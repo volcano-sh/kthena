@@ -9,7 +9,7 @@ spec:
     type: vLLMDisaggregated
     modelURI: hf://dummy-repo/dummy-model
     cacheURI: hostpath:///tmp/mock-cache
-    minReplicas: 0
+    minReplicas: 1
     maxReplicas: 1
     workers:
     - type: prefill
