@@ -172,7 +172,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
 		// TODO: External metrics are aggregated with a plain sum across targets.
 		// This is correct for additive metrics (for example queue length), but it
-		// is semantically wrong for ratio metrics such as GPU utilization.0
+		// is semantically wrong for ratio metrics such as GPU utilization.
 		// Introduce per-metric aggregation strategy (sum/avg/max/weighted) in a
 		// follow-up change and apply it here instead of unconditional summation.
 		for metricName, metricValue := range currentExternalMetrics {

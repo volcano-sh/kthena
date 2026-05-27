@@ -18,12 +18,16 @@ limitations under the License.
 
 package v1alpha1
 
+import (
+	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+)
+
 // PrometheusMetricSourceApplyConfiguration represents a declarative configuration of the PrometheusMetricSource type for use
 // with apply.
 type PrometheusMetricSourceApplyConfiguration struct {
-	ServerURL *string                           `json:"serverURL,omitempty"`
-	Query     *string                           `json:"query,omitempty"`
-	Auth      *PrometheusAuthApplyConfiguration `json:"auth,omitempty"`
+	ServerURL *string                          `json:"serverURL,omitempty"`
+	Query     *string                          `json:"query,omitempty"`
+	Auth      *workloadv1alpha1.PrometheusAuth `json:"auth,omitempty"`
 }
 
 // PrometheusMetricSourceApplyConfiguration constructs a declarative configuration of the PrometheusMetricSource type for use with
@@ -51,7 +55,7 @@ func (b *PrometheusMetricSourceApplyConfiguration) WithQuery(value string) *Prom
 // WithAuth sets the Auth field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Auth field is set to the value of the last call.
-func (b *PrometheusMetricSourceApplyConfiguration) WithAuth(value *PrometheusAuthApplyConfiguration) *PrometheusMetricSourceApplyConfiguration {
-	b.Auth = value
+func (b *PrometheusMetricSourceApplyConfiguration) WithAuth(value workloadv1alpha1.PrometheusAuth) *PrometheusMetricSourceApplyConfiguration {
+	b.Auth = &value
 	return b
 }

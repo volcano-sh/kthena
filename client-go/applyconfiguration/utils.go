@@ -130,12 +130,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.PodMetricSourceApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PodTemplateSpec"):
 		return &applyconfigurationworkloadv1alpha1.PodTemplateSpecApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("PrometheusAuth"):
-		return &applyconfigurationworkloadv1alpha1.PrometheusAuthApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PrometheusMetricSource"):
 		return &applyconfigurationworkloadv1alpha1.PrometheusMetricSourceApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("PrometheusTLSConfig"):
-		return &applyconfigurationworkloadv1alpha1.PrometheusTLSConfigApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RollingUpdateConfiguration"):
