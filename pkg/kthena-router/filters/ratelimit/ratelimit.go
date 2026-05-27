@@ -87,8 +87,6 @@ type TokenRateLimiter struct {
 
 	// Redis client for global rate limiting
 	redisClient *redis.Client
-	// Track current Redis address to detect when it changes
-	currentRedisAddr string
 
 	tokenizer tokenizer.Tokenizer
 }
@@ -169,6 +167,23 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 
 	// Determine if we should use global or local rate limiting
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
+
+	// Initialize Redis client if needed (only happens once per pod lifetime)
+	if useGlobal && r.redisClient == nil {
+		r.redisClient = redis.NewClient(&redis.Options{
+			Addr: ratelimit.Global.Redis.Address,
+		})
+
+		// Test connection
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := r.redisClient.Ping(ctx).Err(); err != nil {
+			r.redisClient = nil
+			return fmt.Errorf("failed to connect to redis: %w", err)
+		}
+	}
+
+	// Derive redisAddr for comparison in config change detection
 	redisAddr := ""
 	if useGlobal {
 		redisAddr = ratelimit.Global.Redis.Address
@@ -208,32 +223,6 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 			return true
 		}
 		return false
-	}
-
-	// Handle Redis client updates if backend changed
-	if useGlobal {
-		if r.currentRedisAddr != redisAddr {
-			// Redis address changed - need to reinitialize
-			r.redisClient = redis.NewClient(&redis.Options{
-				Addr: redisAddr,
-			})
-
-			// Test connection
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := r.redisClient.Ping(ctx).Err(); err != nil {
-				r.redisClient = nil
-				r.currentRedisAddr = ""
-				return fmt.Errorf("failed to connect to redis at %s: %w", redisAddr, err)
-			}
-			r.currentRedisAddr = redisAddr
-		}
-	} else {
-		// Switched from global to local - close Redis client
-		if r.redisClient != nil {
-			r.redisClient = nil
-			r.currentRedisAddr = ""
-		}
 	}
 
 	// Process input rate limiter
