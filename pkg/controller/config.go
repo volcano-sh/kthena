@@ -24,4 +24,5 @@ type Config struct {
 	Controllers          map[string]bool
 	KubeAPIQPS           float32
 	KubeAPIBurst         int
+	DebugPort            int
 }

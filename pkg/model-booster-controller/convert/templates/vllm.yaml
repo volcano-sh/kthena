@@ -23,6 +23,7 @@ spec:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${SERVER_AFFINITY}
             initContainers: ${INIT_CONTAINERS}
             terminationGracePeriodSeconds: 300
             volumes: ${VOLUMES}
@@ -91,6 +92,7 @@ spec:
           metadata: ${SERVER_WORKER_TEMPLATE_METADATA}
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${SERVER_AFFINITY}
             volumes: ${VOLUMES}
             initContainers: ${INIT_CONTAINERS}
             containers:

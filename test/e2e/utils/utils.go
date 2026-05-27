@@ -55,6 +55,18 @@ func WaitForModelServingReady(t *testing.T, ctx context.Context, kthenaClient *c
 	require.NoError(t, err, "ModelServing did not become ready")
 }
 
+// WaitForModelServingSpecReplicas waits until ModelServing.spec.replicas equals want.
+func WaitForModelServingSpecReplicas(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace, name string, want int32, timeout time.Duration) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil || ms.Spec.Replicas == nil {
+			return false
+		}
+		return *ms.Spec.Replicas == want
+	}, timeout, 10*time.Second, "ModelServing %s/%s spec.replicas should converge to %d", namespace, name, want)
+}
+
 // IsPodReady checks if a pod is in Running phase and has PodReady condition set to True.
 func IsPodReady(pod corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodRunning {

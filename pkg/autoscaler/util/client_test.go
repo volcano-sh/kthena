@@ -34,38 +34,65 @@ import (
 func TestGetRoleName(t *testing.T) {
 	tests := []struct {
 		name     string
-		refName  string
+		ref      *corev1.ObjectReference
 		wantRole string
 		wantSub  string
 		wantErr  bool
 	}{
 		{
 			name:     "valid role name",
-			refName:  "role/sub",
+			ref:      &corev1.ObjectReference{Name: "role/sub"},
 			wantRole: "role",
 			wantSub:  "sub",
 			wantErr:  false,
 		},
 		{
 			name:     "invalid role name - no separator",
-			refName:  "invalid",
+			ref:      &corev1.ObjectReference{Name: "invalid"},
 			wantRole: "",
 			wantSub:  "",
 			wantErr:  true,
 		},
 		{
-			name:     "valid role name with multiple parts",
-			refName:  "admin/user",
-			wantRole: "admin",
-			wantSub:  "user",
+			name:     "nil target ref",
+			ref:      nil,
+			wantRole: "",
+			wantSub:  "",
 			wantErr:  false,
+		},
+		{
+			name:     "empty target ref name",
+			ref:      &corev1.ObjectReference{},
+			wantRole: "",
+			wantSub:  "",
+			wantErr:  false,
+		},
+		{
+			name:     "invalid role name - empty role",
+			ref:      &corev1.ObjectReference{Name: "/worker"},
+			wantRole: "",
+			wantSub:  "",
+			wantErr:  true,
+		},
+		{
+			name:     "invalid role name - empty sub target",
+			ref:      &corev1.ObjectReference{Name: "role/"},
+			wantRole: "",
+			wantSub:  "",
+			wantErr:  true,
+		},
+		{
+			name:     "invalid role name - too many parts",
+			ref:      &corev1.ObjectReference{Name: "role/sub/extra"},
+			wantRole: "",
+			wantSub:  "",
+			wantErr:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ref := &corev1.ObjectReference{Name: tt.refName}
-			role, sub, err := GetRoleName(ref)
+			role, sub, err := GetRoleName(tt.ref)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetRoleName() error = %v, wantErr %v", err, tt.wantErr)
@@ -86,35 +113,116 @@ func TestGetRoleName(t *testing.T) {
 
 func TestGetTargetLabels(t *testing.T) {
 	tests := []struct {
-		name       string
-		targetName string
-		targetKind string
-		wantErr    bool
-		wantNil    bool
+		name           string
+		target         *workload.Target
+		wantErr        bool
+		wantNil        bool
+		wantMatchLabel map[string]string
 	}{
 		{
-			name:       "valid model serving target",
-			targetName: "model1",
-			targetKind: workload.ModelServingKind.Kind,
-			wantErr:    false,
-			wantNil:    false,
+			name: "valid model serving target",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model1",
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
+			wantErr: false,
+			wantNil: false,
+			wantMatchLabel: map[string]string{
+				workload.ModelServingNameLabelKey: "model1",
+				workload.EntryLabelKey:            Entry,
+			},
 		},
 		{
-			name:       "another valid target",
-			targetName: "model2",
-			targetKind: workload.ModelServingKind.Kind,
-			wantErr:    false,
-			wantNil:    false,
+			name: "defaults empty target kind to model serving",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model2",
+				},
+			},
+			wantErr: false,
+			wantNil: false,
+			wantMatchLabel: map[string]string{
+				workload.ModelServingNameLabelKey: "model2",
+				workload.EntryLabelKey:            Entry,
+			},
+		},
+		{
+			name: "adds role label for role sub target",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model3",
+					Kind: workload.ModelServingKind.Kind,
+				},
+				SubTarget: &workload.SubTarget{
+					Kind: ModelServingRoleKind,
+					Name: "decode",
+				},
+			},
+			wantErr: false,
+			wantNil: false,
+			wantMatchLabel: map[string]string{
+				workload.ModelServingNameLabelKey: "model3",
+				workload.EntryLabelKey:            Entry,
+				workload.RoleLabelKey:             "decode",
+			},
+		},
+		{
+			name: "preserves custom metric labels",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model4",
+					Kind: workload.ModelServingKind.Kind,
+				},
+				MetricEndpoint: workload.MetricEndpoint{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app": "router",
+						},
+					},
+				},
+			},
+			wantErr: false,
+			wantNil: false,
+			wantMatchLabel: map[string]string{
+				"app":                             "router",
+				workload.ModelServingNameLabelKey: "model4",
+				workload.EntryLabelKey:            Entry,
+			},
+		},
+		{
+			name:    "nil target",
+			target:  nil,
+			wantErr: false,
+			wantNil: true,
+		},
+		{
+			name: "empty target name",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
+			wantErr: false,
+			wantNil: true,
+		},
+		{
+			name: "unsupported target kind",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model5",
+					Kind: "Unsupported",
+				},
+			},
+			wantErr: true,
+			wantNil: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			target := &workload.Target{}
-			target.TargetRef.Name = tt.targetName
-			target.TargetRef.Kind = tt.targetKind
-
-			selector, err := GetTargetLabels(target)
+			selector, err := GetTargetLabels(tt.target)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetTargetLabels() error = %v, wantErr %v", err, tt.wantErr)
@@ -123,6 +231,20 @@ func TestGetTargetLabels(t *testing.T) {
 
 			if (selector == nil) != tt.wantNil {
 				t.Errorf("GetTargetLabels() selector nil = %v, wantNil %v", selector == nil, tt.wantNil)
+			}
+
+			if selector == nil {
+				return
+			}
+			for key, wantValue := range tt.wantMatchLabel {
+				gotValue, ok := (*selector).RequiresExactMatch(key)
+				if !ok {
+					t.Errorf("GetTargetLabels() selector missing exact label %q", key)
+					continue
+				}
+				if gotValue != wantValue {
+					t.Errorf("GetTargetLabels() selector label %q = %q, want %q", key, gotValue, wantValue)
+				}
 			}
 		})
 	}
@@ -164,31 +286,66 @@ func TestGetMetricPods(t *testing.T) {
 	tests := []struct {
 		name         string
 		namespace    string
-		targetName   string
+		target       *workload.Target
 		wantPodCount int
 		wantPodNames []string
 		wantErr      bool
 	}{
 		{
-			name:         "pods in default namespace",
-			namespace:    "default",
-			targetName:   "model1",
+			name:      "pods in default namespace",
+			namespace: "default",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model1",
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
 			wantPodCount: 1,
 			wantPodNames: []string{"pod1"},
 			wantErr:      false,
 		},
 		{
-			name:         "pods in other-namespace",
-			namespace:    "other-namespace",
-			targetName:   "model1",
+			name:      "pods in other-namespace",
+			namespace: "other-namespace",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model1",
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
 			wantPodCount: 1,
 			wantPodNames: []string{"pod2"},
 			wantErr:      false,
 		},
 		{
-			name:         "pods in non-existent namespace",
-			namespace:    "non-existent",
-			targetName:   "model1",
+			name:      "pods in non-existent namespace",
+			namespace: "non-existent",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model1",
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
+			wantPodCount: 0,
+			wantPodNames: []string{},
+			wantErr:      false,
+		},
+		{
+			name:         "nil target returns no pods",
+			namespace:    "default",
+			target:       nil,
+			wantPodCount: 0,
+			wantPodNames: []string{},
+			wantErr:      false,
+		},
+		{
+			name:      "empty target name returns no pods",
+			namespace: "default",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
 			wantPodCount: 0,
 			wantPodNames: []string{},
 			wantErr:      false,
@@ -197,11 +354,7 @@ func TestGetMetricPods(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			target := &workload.Target{}
-			target.TargetRef.Name = tt.targetName
-			target.TargetRef.Kind = workload.ModelServingKind.Kind
-
-			pods, err := GetMetricPods(podLister, tt.namespace, target)
+			pods, err := GetMetricPods(podLister, tt.namespace, tt.target)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetMetricPods() error = %v, wantErr %v", err, tt.wantErr)

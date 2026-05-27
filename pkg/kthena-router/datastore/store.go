@@ -48,7 +48,7 @@ import (
 
 var (
 	metricsName = []string{
-		utils.GPUCacheUsage,
+		utils.KVCacheUsage,
 		utils.RequestWaitingNum,
 		utils.RequestRunningNum,
 		utils.TPOT,
@@ -65,6 +65,11 @@ const (
 	// Configuration constants for fairness scheduling
 	defaultQueueQPS = 100
 	uppdateInterval = 1 * time.Second
+
+	// onFlightSyncInterval caps Redis read traffic from SyncOnFlightCounts.
+	// At most one HMGET is issued per interval regardless of request rate;
+	// all other callers use the local atomic values maintained by Incr/Decr.
+	onFlightSyncInterval = 50 * time.Millisecond
 )
 
 // createTokenTracker creates a token tracker with configuration from environment variables
@@ -158,6 +163,15 @@ func WithPodRuntimeInspector(inspector PodRuntimeInspector) Option {
 	}
 }
 
+// WithRedisOnFlightCounter configures the store to maintain globally visible
+// in-flight request counts via Redis, enabling accurate scheduling across
+// multiple router replicas.
+func WithRedisOnFlightCounter(counter OnFlightCounter) Option {
+	return func(s *store) {
+		s.onFlightCounter = counter
+	}
+}
+
 // Store is an interface for storing and retrieving data
 type Store interface {
 	// Add modelServer which are selected by modelServer.Spec.WorkloadSelector
@@ -198,6 +212,22 @@ type Store interface {
 
 	// GetPodInfo returns the pod info for a given pod name (for testing)
 	GetPodInfo(podName types.NamespacedName) *PodInfo
+
+	// SyncOnFlightCounts fetches the current on-flight counts for all tracked
+	// pods from Redis in a single round-trip and updates their local counters.
+	// Call this immediately before scheduling so scores reflect cross-router
+	// traffic. Reads are rate-limited to at most one Redis HMGET per
+	// onFlightSyncInterval; all other callers use the local atomic values that
+	// Incr/Decr keep up to date. No-op when no Redis counter is configured.
+	SyncOnFlightCounts()
+
+	// IncrPodOnFlightRequests atomically increments the in-flight request counter for
+	// the given pod. Must be called just before dispatching a request to the pod.
+	IncrPodOnFlightRequests(podName types.NamespacedName)
+	// DecrPodOnFlightRequests atomically decrements the in-flight request counter for
+	// the given pod. Must be called once the response is received (or the request fails).
+	DecrPodOnFlightRequests(podName types.NamespacedName)
+
 	// GetTokenCount returns the token count for a user and model
 	GetTokenCount(userId, modelName string) (float64, error)
 	// UpdateTokenCount updates token usage for a user and model
@@ -231,7 +261,10 @@ type Store interface {
 	GetHTTPRoute(key string) *gatewayv1.HTTPRoute
 	GetAllHTTPRoutes() []*gatewayv1.HTTPRoute
 	GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
-	GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRoute
+
+	// GetModelNames returns all model names registered via ModelRoutes,
+	// including both base model names and LoRA adapter names.
+	GetModelNames() []string
 
 	// Debug interface methods
 	GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute
@@ -259,6 +292,12 @@ type PodInfo struct {
 	TPOT               float64
 	TTFT               float64
 
+	// onFlightRequestNum tracks requests actively in-flight from the router to this pod.
+	// Updated atomically with zero delay — not subject to the ~1 s engine-metrics poll lag.
+	// When a Redis-backed OnFlightCounter is configured on the store this field is also
+	// kept in sync with the global Redis counter so it reflects cross-router traffic.
+	onFlightRequestNum atomic.Int64
+
 	mutex sync.RWMutex // Protects concurrent access to metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
 	models      sets.Set[string]               // running models. Including base model and lora adapters.
@@ -280,6 +319,16 @@ type modelRouteInfo struct {
 type store struct {
 	modelServer sync.Map // map[types.NamespacedName]*modelServer
 	pods        sync.Map // map[types.NamespacedName]*PodInfo
+
+	// onFlightCounter is optional. When non-nil (Redis-backed), in-flight request
+	// counts are shared across all router replicas via Redis. When nil, only the
+	// local per-PodInfo atomic counter is used (suitable for single-router setups).
+	onFlightCounter OnFlightCounter
+	// lastOnFlightSync is the Unix nanosecond timestamp of the last sync attempt.
+	// Updated before the Redis call (not after) to prevent concurrent goroutines
+	// from all hitting Redis within the same window. Gates SyncOnFlightCounts to
+	// at most one Redis HMGET per onFlightSyncInterval.
+	lastOnFlightSync atomic.Int64
 
 	routeMutex sync.RWMutex
 	// Model routing fields
@@ -428,6 +477,54 @@ func (s *store) Run(ctx context.Context) {
 		}
 	}()
 }
+
+// SyncOnFlightCounts fetches current on-flight counts for all tracked pods from
+// Redis in one HMGET and updates their local atomic counters. Reads are
+// rate-limited by onFlightSyncInterval: at most one goroutine per interval
+// actually hits Redis (via a CAS on lastOnFlightSync); all other callers return
+// immediately and use the local values maintained by IncrPodOnFlightRequests /
+// DecrPodOnFlightRequests.
+func (s *store) SyncOnFlightCounts() {
+	if s.onFlightCounter == nil {
+		return
+	}
+
+	// Rate-gate: skip Redis if we synced recently.
+	now := time.Now().UnixNano()
+	lastSync := s.lastOnFlightSync.Load()
+	if now-lastSync < int64(onFlightSyncInterval) {
+		return
+	}
+	// CAS ensures exactly one goroutine wins the sync slot per interval.
+	// Using the previously loaded lastSync as the expected value prevents multiple
+	// goroutines from all winning the CAS when they observe the same stale timestamp.
+	if !s.lastOnFlightSync.CompareAndSwap(lastSync, now) {
+		return
+	}
+
+	var podNames []types.NamespacedName
+	s.pods.Range(func(k, v any) bool {
+		if nn, ok := k.(types.NamespacedName); ok {
+			podNames = append(podNames, nn)
+		}
+		return true
+	})
+	if len(podNames) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	counts, err := s.onFlightCounter.BatchGet(ctx, podNames)
+	if err != nil {
+		klog.V(4).Infof("SyncOnFlightCounts: Redis batch get failed: %v", err)
+		return
+	}
+	for podName, count := range counts {
+		if value, ok := s.pods.Load(podName); ok {
+			value.(*PodInfo).SetOnFlightRequestNum(count)
+		}
+	}
+}
 func (s *store) GetTokenCount(userID, model string) (float64, error) {
 	return s.tokenTracker.GetTokenCount(userID, model)
 }
@@ -493,6 +590,51 @@ func (s *store) GetPodInfo(podName types.NamespacedName) *PodInfo {
 		return value.(*PodInfo)
 	}
 	return nil
+}
+
+// IncrPodOnFlightRequests increments the in-flight counter for the given pod.
+// When a Redis counter is configured the increment is performed atomically in
+// Redis and the returned global value is stored locally; otherwise the local
+// atomic counter is incremented directly.
+func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) {
+	value, ok := s.pods.Load(podName)
+	if !ok {
+		klog.V(4).Infof("IncrPodOnFlightRequests: pod %s not found in store", podName)
+		return
+	}
+	podInfo := value.(*PodInfo)
+	if s.onFlightCounter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if count, err := s.onFlightCounter.Incr(ctx, podName); err == nil {
+			podInfo.SetOnFlightRequestNum(count)
+			return
+		} else {
+			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, falling back to local counter", podName, err)
+		}
+	}
+	podInfo.IncrOnFlightRequests()
+}
+
+// DecrPodOnFlightRequests decrements the in-flight counter for the given pod.
+func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
+	value, ok := s.pods.Load(podName)
+	if !ok {
+		klog.V(4).Infof("DecrPodOnFlightRequests: pod %s not found in store", podName)
+		return
+	}
+	podInfo := value.(*PodInfo)
+	if s.onFlightCounter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if count, err := s.onFlightCounter.Decr(ctx, podName); err == nil {
+			podInfo.SetOnFlightRequestNum(count)
+			return
+		} else {
+			klog.V(4).Infof("Redis on-flight decr failed for pod %s: %v, falling back to local counter", podName, err)
+		}
+	}
+	podInfo.DecrOnFlightRequests()
 }
 
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
@@ -741,6 +883,14 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 			}
 		}
 		s.pods.Delete(podName)
+		// Remove the pod's Redis counter so stale keys do not accumulate.
+		if s.onFlightCounter != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if err := s.onFlightCounter.Delete(ctx, podName); err != nil {
+				klog.V(4).Infof("failed to delete Redis on-flight counter for pod %s: %v", podName, err)
+			}
+		}
 	}
 
 	s.triggerCallbacks("Pod", EventData{
@@ -1211,7 +1361,7 @@ func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
 	podinfo.mutex.Lock()
 	defer podinfo.mutex.Unlock()
 	updateFuncs := map[string]func(float64){
-		utils.GPUCacheUsage: func(f float64) {
+		utils.KVCacheUsage: func(f float64) {
 			podinfo.GPUCacheUsage = f
 		},
 		utils.RequestWaitingNum: func(f float64) {
@@ -1420,6 +1570,30 @@ func (p *PodInfo) GetRequestRunningNum() float64 {
 	return p.RequestRunningNum
 }
 
+// IncrOnFlightRequests atomically increments the local in-flight counter and
+// returns the new value.
+func (p *PodInfo) IncrOnFlightRequests() int64 {
+	return p.onFlightRequestNum.Add(1)
+}
+
+// DecrOnFlightRequests atomically decrements the local in-flight counter and
+// returns the new value.
+func (p *PodInfo) DecrOnFlightRequests() int64 {
+	return p.onFlightRequestNum.Add(-1)
+}
+
+// SetOnFlightRequestNum atomically stores a new value for the in-flight counter
+// (used to sync the global Redis value into the local field).
+func (p *PodInfo) SetOnFlightRequestNum(v int64) {
+	p.onFlightRequestNum.Store(v)
+}
+
+// GetOnFlightRequestNum returns the current in-flight request count as tracked
+// by this router instance (or globally, if a Redis counter is configured).
+func (p *PodInfo) GetOnFlightRequestNum() int64 {
+	return p.onFlightRequestNum.Load()
+}
+
 // GetTPOT returns the time per output token
 func (p *PodInfo) GetTPOT() float64 {
 	p.mutex.RLock()
@@ -1481,6 +1655,23 @@ func (s *store) GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute {
 		}
 	}
 	return result
+}
+
+// GetModelNames returns all model names registered via ModelRoutes,
+// including both base model names and LoRA adapter names.
+func (s *store) GetModelNames() []string {
+	s.routeMutex.RLock()
+	defer s.routeMutex.RUnlock()
+
+	names := make([]string, 0, len(s.routes)+len(s.loraRoutes))
+	for name := range s.routes {
+		names = append(names, name)
+	}
+	for name := range s.loraRoutes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // GetAllModelServers returns all ModelServers in the store
@@ -1781,32 +1972,6 @@ func (s *store) GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
 		for routeKey := range routeSet {
 			if hr, ok := s.httpRoutes[routeKey]; ok {
 				result = append(result, hr)
-			}
-		}
-	}
-	return result
-}
-
-func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRoute {
-	s.routeMutex.RLock()
-	defer s.routeMutex.RUnlock()
-
-	var result []*aiv1alpha1.ModelRoute
-	if routeSet, exists := s.gatewayModelRoutes[gatewayKey]; exists {
-		for routeKey := range routeSet {
-			// Find the ModelRoute in routes or loraRoutes
-			if info, ok := s.routeInfo[routeKey]; ok {
-				// Try to find from primary model routes
-				if info.model != "" {
-					if routes, exists := s.routes[info.model]; exists {
-						for _, route := range routes {
-							if route.Namespace+"/"+route.Name == routeKey {
-								result = append(result, route)
-								break
-							}
-						}
-					}
-				}
 			}
 		}
 	}

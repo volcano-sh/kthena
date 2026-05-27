@@ -1,0 +1,32 @@
+# AutoscalingPolicy for policy lifecycle e2e. Very large targetValue makes desired replicas 1
+# (metric_collector sums sglang:token_usage across entry pods; see model-serving fixture comment).
+# Scale-up phase: policy Update in autoscaling_test.go sets small target (100m).
+
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicy
+metadata:
+  name: autoscale-policy-lifecycle-pol
+spec:
+  tolerancePercent: 50
+  metrics:
+    - metricName: sglang:token_usage
+      targetValue: "1000000000000000"
+  behavior:
+    scaleDown:
+      period: 5s
+      stabilizationWindow: 0s
+      instances: 10
+      percent: 100
+      selectPolicy: Or
+    scaleUp:
+      stablePolicy:
+        period: 5s
+        stabilizationWindow: 0s
+        instances: 10
+        percent: 100
+        selectPolicy: Or
+      panicPolicy:
+        period: 1s
+        percent: 1000
+        panicThresholdPercent: 200
+        panicModeHold: 0s

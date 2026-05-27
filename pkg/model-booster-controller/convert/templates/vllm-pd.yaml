@@ -17,6 +17,7 @@ spec:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${PREFILL_AFFINITY}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime
@@ -71,6 +72,7 @@ spec:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${DECODE_AFFINITY}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime

@@ -49,11 +49,15 @@ type MetricCollector struct {
 }
 
 func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPolicyBinding, metricTargets map[string]float64) *MetricCollector {
+	namespace := target.TargetRef.Namespace
+	if namespace == "" {
+		namespace = binding.Namespace
+	}
 	return &MetricCollector{
 		PastHistograms: datastructure.NewSnapshotSlidingWindow[map[string]HistogramInfo](util.SecondToTimestamp(util.SloQuantileSlidingWindowSeconds), util.SecondToTimestamp(util.SloQuantileDataKeepSeconds)),
 		Target:         target,
 		Scope: Scope{
-			Namespace:      binding.Namespace,
+			Namespace:      namespace,
 			OwnedBindingId: binding.UID,
 		},
 		MetricTargets:   metricTargets,
@@ -193,7 +197,7 @@ func (collector *MetricCollector) processPrometheusString(metricStr string, past
 		}
 		if err != nil {
 			klog.Errorf("error decoding metric: %v", err)
-			continue
+			break
 		}
 		if len(mf.Metric) < 1 {
 			klog.Errorf("metric is invalid")

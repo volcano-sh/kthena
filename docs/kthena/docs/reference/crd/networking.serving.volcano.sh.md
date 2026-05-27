@@ -170,7 +170,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `modelName` _string_ | `model` in the LLM request, it could be a base model name, lora adapter name or even<br />a virtual model name. This field is used to match scenarios other than model adapter name and<br />this field could be empty, but it and  `ModelAdapters` can't both be empty. |  |  |
+| `modelName` _string_ | `model` in the LLM request, it could be a base model name, lora adapter name or even<br />a virtual model name. This field is used to match scenarios other than model adapter name and<br />this field could be empty, but it and `ModelAdapters` can't both be empty. |  |  |
 | `loraAdapters` _string array_ | `model` in the LLM request could be lora adapter name,<br />here is a list of Lora Adapter Names to match. |  | MaxItems: 10 <br /> |
 | `parentRefs` _ParentReference array_ | ParentRefs references the Gateways that this ModelRoute should be attached to.<br />If empty, the ModelRoute will be attached to all Gateways in the same namespace. |  |  |
 | `rules` _[Rule](#rule) array_ | An ordered list of route rules for LLM traffic. The first rule<br />matching an incoming request will be used.<br />If no rule is matched, an HTTP 404 status code MUST be returned. |  | MaxItems: 16 <br /> |

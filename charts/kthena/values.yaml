@@ -9,6 +9,8 @@ workload:
       tag: latest
       # -- Image pull policy for the Controller Manager.
       pullPolicy: IfNotPresent
+    # -- Debug server port for Controller Manager (set 0 to disable).
+    debugPort: 0
     downloaderImage:
       # -- Image repository for the Downloader.
       repository: ghcr.io/volcano-sh/downloader

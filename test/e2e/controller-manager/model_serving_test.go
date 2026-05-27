@@ -2280,3 +2280,109 @@ func TestModelServingBinPackScaleDownCombined(t *testing.T) {
 
 	t.Log("Bin pack scale down combined test passed successfully")
 }
+
+// TestModelServingStatusAwarePriorityScaleDownServingGroup verifies that when one ServingGroup is
+// not ready (pod deleted under default RoleRecreate), scale-down prefers removing that group before healthy groups.
+func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	modelServing := createBasicModelServing("test-status-sg-priority", 4, 0)
+	t.Log("Creating ModelServing with 4 servingGroup replicas for status-aware scale down test")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)
+
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.NotEmpty(t, podList.Items, "Expected pods before simulating disruption")
+
+	targetPod := podList.Items[0]
+	unhealthyGroup := targetPod.Labels[workload.GroupNameLabelKey]
+	require.NotEmpty(t, unhealthyGroup, "Pod should have GroupName label")
+
+	t.Logf("Deleting pod %s in serving group %s to leave that group not ready", targetPod.Name, unhealthyGroup)
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete pod")
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing before scale down")
+	scaleDownMS := initialMS.DeepCopy()
+	scaleDownMS.Spec.Replicas = ptr.To(int32(3))
+
+	t.Log("Scaling down ModelServing from 4 to 3 servingGroups (expect disrupted group to be removed first)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to scale down ModelServing")
+
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+
+	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods after scale down")
+
+	for _, pod := range finalPods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		assert.NotEqual(t, unhealthyGroup, pod.Labels[workload.GroupNameLabelKey],
+			"Running pods should not belong to the disrupted serving group after status-aware scale down")
+	}
+	t.Log("Status-aware priority scale down ServingGroup test passed successfully")
+}
+
+// TestModelServingStatusAwarePriorityScaleDownRole verifies that when one role replica is not ready,
+// role scale-down prefers removing that replica before healthy ones.
+func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const initialRoleReplicas = int32(4)
+
+	modelServing := createBasicModelServing("test-status-role-priority", 1, initialRoleReplicas)
+	t.Log("Creating ModelServing with role replicas=4 for status-aware role scale down test")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
+
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods")
+	require.NotEmpty(t, podList.Items, "Expected pods before simulating disruption")
+
+	targetPod := podList.Items[0]
+	unhealthyRoleID := targetPod.Labels[workload.RoleIDKey]
+	require.NotEmpty(t, unhealthyRoleID, "Pod should have role id label")
+
+	t.Logf("Deleting pod %s (role id %s) to leave that role replica not ready", targetPod.Name, unhealthyRoleID)
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete pod")
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing before scale down")
+	scaleDownMS := initialMS.DeepCopy()
+	scaleDownMS.Spec.Template.Roles[0].Replicas = ptr.To(int32(3))
+
+	t.Log("Scaling down role from 4 to 3 replicas (expect disrupted replica to be removed first)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to scale down role")
+
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
+
+	finalPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods after scale down")
+
+	for _, pod := range finalPods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		assert.NotEqual(t, unhealthyRoleID, pod.Labels[workload.RoleIDKey],
+			"Running pods should not keep the disrupted role id after status-aware scale down")
+	}
+	t.Log("Status-aware priority scale down Role test passed successfully")
+}

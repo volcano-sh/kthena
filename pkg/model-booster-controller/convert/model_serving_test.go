@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/env"
 	corev1 "k8s.io/api/core/v1"
@@ -200,6 +201,66 @@ func TestCreateModelServingResources(t *testing.T) {
 				for _, role := range got.Spec.Template.Roles {
 					assert.Nil(t, role.EntryTemplate.Spec.RuntimeClassName,
 						"role %s entryTemplate should have nil runtimeClassName", role.Name)
+				}
+			},
+		},
+		{
+			name:  "vLLM with affinity",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model-with-affinity.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					affinity := role.EntryTemplate.Spec.Affinity
+					assert.NotNil(t, affinity.NodeAffinity, "role %s entryTemplate should have nodeAffinity", role.Name)
+					req := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+					assert.NotNil(t, req, "role %s entryTemplate should have requiredDuringSchedulingIgnoredDuringExecution", role.Name)
+					assert.Len(t, req.NodeSelectorTerms, 1)
+					assert.Equal(t, "gpu-type", req.NodeSelectorTerms[0].MatchExpressions[0].Key)
+					if role.WorkerReplicas > 0 {
+						workerAffinity := role.WorkerTemplate.Spec.Affinity
+						assert.NotNil(t, workerAffinity.NodeAffinity, "role %s workerTemplate should have nodeAffinity", role.Name)
+					}
+				}
+			},
+		},
+		{
+			name:  "PD disaggregated with different affinities per role",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-with-affinity.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				require.Len(t, got.Spec.Template.Roles, 2)
+				prefillRole := got.Spec.Template.Roles[0]
+				decodeRole := got.Spec.Template.Roles[1]
+
+				// prefill: only nodeAffinity
+				prefillAffinity := prefillRole.EntryTemplate.Spec.Affinity
+				assert.NotNil(t, prefillAffinity.NodeAffinity, "prefill should have nodeAffinity")
+				assert.Nil(t, prefillAffinity.PodAntiAffinity, "prefill should not have podAntiAffinity")
+				prefillReq := prefillAffinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+				assert.Equal(t, "a100", prefillReq.NodeSelectorTerms[0].MatchExpressions[0].Values[0])
+
+				// decode: nodeAffinity + podAntiAffinity
+				decodeAffinity := decodeRole.EntryTemplate.Spec.Affinity
+				assert.NotNil(t, decodeAffinity.NodeAffinity, "decode should have nodeAffinity")
+				assert.NotNil(t, decodeAffinity.PodAntiAffinity, "decode should have podAntiAffinity")
+				decodeReq := decodeAffinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+				assert.Equal(t, "h100", decodeReq.NodeSelectorTerms[0].MatchExpressions[0].Values[0])
+				assert.Len(t, decodeAffinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution, 1)
+			},
+		},
+		{
+			name:  "vLLM without affinity renders empty affinity",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					affinity := role.EntryTemplate.Spec.Affinity
+					assert.NotNil(t, affinity, "role %s entryTemplate should have non-nil (empty) affinity when unset", role.Name)
+					assert.Nil(t, affinity.NodeAffinity, "role %s entryTemplate should have nil NodeAffinity", role.Name)
+					assert.Nil(t, affinity.PodAffinity, "role %s entryTemplate should have nil PodAffinity", role.Name)
+					assert.Nil(t, affinity.PodAntiAffinity, "role %s entryTemplate should have nil PodAntiAffinity", role.Name)
+					if role.WorkerReplicas > 0 {
+						workerAffinity := role.WorkerTemplate.Spec.Affinity
+						assert.NotNil(t, workerAffinity, "role %s workerTemplate should have non-nil (empty) affinity when unset", role.Name)
+						assert.Nil(t, workerAffinity.NodeAffinity, "role %s workerTemplate should have nil NodeAffinity", role.Name)
+					}
 				}
 			},
 		},

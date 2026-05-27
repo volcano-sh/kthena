@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	networking "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	registry "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -69,6 +70,118 @@ func TestBuildModelServer(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestGetKvConnectorSpec(t *testing.T) {
+	tests := []struct {
+		name         string
+		workers      []registry.ModelWorker
+		expected     *networking.KVConnectorSpec
+		expectErrMsg string
+	}{
+		{
+			name: "prefill worker with Mooncake connector",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+			},
+			expected: &networking.KVConnectorSpec{Type: networking.ConnectorTypeMoonCake},
+		},
+		{
+			name: "decode worker with NIXL connector",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypeDecode,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+			},
+			expected: &networking.KVConnectorSpec{Type: networking.ConnectorTypeNIXL},
+		},
+		{
+			name: "server worker is ignored",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypeServer,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"MooncakeConnector\"}"}`),
+					},
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "unknown connector type is ignored",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"UnknownConnector\"}"}`),
+					},
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "missing connector field is ignored",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "malformed nested kv-transfer-config returns error",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{"}`),
+					},
+				},
+			},
+			expectErrMsg: "failed to get kv_connector for worker prefill",
+		},
+		{
+			name: "malformed worker config returns error",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{`),
+					},
+				},
+			},
+			expectErrMsg: "failed to get kv-transfer-config for worker prefill",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := getKvConnectorSpec(registry.ModelBackend{
+				Name:    "test-backend",
+				Workers: tt.workers,
+			})
+			if tt.expectErrMsg != "" {
+				if assert.Error(t, err) {
+					assert.Contains(t, err.Error(), tt.expectErrMsg)
+				}
+				return
+			}
+
+			assert.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
 		})
 	}

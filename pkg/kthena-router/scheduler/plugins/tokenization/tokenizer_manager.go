@@ -89,7 +89,7 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 // TokenizePrompt tokenizes a prompt (text or chat messages) and returns uint32 tokens
 func (m *TokenizerManager) TokenizePrompt(
 	model string,
-	prompt common.ChatMessage,
+	prompt *common.ChatMessage,
 	pods []*datastore.PodInfo,
 ) ([]uint32, error) {
 	tokenizer := m.GetTokenizer(model, pods)

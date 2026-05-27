@@ -28,7 +28,7 @@ import (
 // Context stores information which maybe useful in Filter or Score plugins.
 type Context struct {
 	Model  string
-	Prompt common.ChatMessage
+	Prompt *common.ChatMessage
 
 	Hashes []uint64
 

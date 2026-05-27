@@ -45,7 +45,7 @@ type LeastLatencyArgs struct {
 
 func NewLeastLatency(pluginArg runtime.RawExtension) *LeastLatency {
 	var leastLatencyArgs LeastLatencyArgs
-	if yaml.Unmarshal(pluginArg.Raw, &leastLatencyArgs) != nil {
+	if pluginArg.Raw == nil || yaml.Unmarshal(pluginArg.Raw, &leastLatencyArgs) != nil {
 		klog.Errorf("Unmarshal LeastLatencyArgs error, setting default value")
 		leastLatencyArgs = LeastLatencyArgs{
 			0.5,

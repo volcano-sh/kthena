@@ -11,6 +11,8 @@ metadata:
   namespace: demo
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1
+      blockOwnerDeletion: true
+      controller: true
       kind: ModelBooster
       name: ds-r1-qwen-7b-pd
       uid: randomUID
@@ -33,6 +35,7 @@ spec:
               workload.serving.volcano.sh/model-uid: randomUID
               workload.serving.volcano.sh/revision: 5466fdf45
           spec:
+            affinity: {}
             containers:
               - args:
                   - --port
@@ -202,6 +205,7 @@ spec:
               workload.serving.volcano.sh/model-uid: randomUID
               workload.serving.volcano.sh/revision: 5466fdf45
           spec:
+            affinity: {}
             containers:
               - args:
                   - --port

@@ -11,6 +11,8 @@ metadata:
   namespace: default
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1
+      blockOwnerDeletion: true
+      controller: true
       kind: ModelBooster
       name: test-model
       uid: randomUID
@@ -32,6 +34,7 @@ spec:
               workload.serving.volcano.sh/model-uid: randomUID
               workload.serving.volcano.sh/revision: 59b8b55cc4
           spec:
+            affinity: {}
             containers:
               - args:
                   - --port
@@ -215,6 +218,7 @@ spec:
               workload.serving.volcano.sh/model-uid: randomUID
               workload.serving.volcano.sh/revision: 59b8b55cc4
           spec:
+            affinity: {}
             containers:
               - command:
                   - bash

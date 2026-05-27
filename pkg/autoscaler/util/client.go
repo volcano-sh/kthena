@@ -51,6 +51,9 @@ func GetMetricPods(lister listerv1.PodLister, namespace string, target *workload
 	if err != nil {
 		return nil, err
 	}
+	if selector == nil {
+		return nil, nil
+	}
 	if podList, err := lister.Pods(namespace).List(*selector); err != nil {
 		return nil, err
 	} else {

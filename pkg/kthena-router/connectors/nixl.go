@@ -51,7 +51,7 @@ func (n *NIXLConnector) Name() string {
 }
 
 // Proxy executes the complete prefill-decode flow using NIXL for high-performance KV transfer
-func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string) (int, error) {
+func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
 	// Get metrics recorder from context
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
@@ -66,41 +66,52 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	decodeBody := cloneReqBody(reqBody)
 	n.decodeRequestBody = addTokenUsage(c, decodeBody)
 
-	// Start prefill phase metrics and increment upstream request
+	// --- Prefill phase ---
 	if metricsRecorder != nil {
 		metricsRecorder.StartPrefillPhase()
 		metricsRecorder.IncActiveUpstreamRequests()
+	}
+	if hooks != nil && hooks.IncrPrefill != nil {
+		hooks.IncrPrefill()
 	}
 
 	// 1. send prefill request
 	kvTransferParams, err := n.prefill(n.prefillRequest, prefillAddr)
 
-	// End prefill phase metrics and handle upstream requests
+	if hooks != nil && hooks.DecrPrefill != nil {
+		hooks.DecrPrefill()
+	}
 	if metricsRecorder != nil {
-		statusCode := "200" // Default status code for successful prefill
+		statusCode := "200"
 		if err != nil {
 			statusCode = "500"
 		}
 		metricsRecorder.FinishPrefillPhase(statusCode)
 		metricsRecorder.DecActiveUpstreamRequests()
-
-		if err == nil {
-			metricsRecorder.StartDecodePhase()
-			metricsRecorder.IncActiveUpstreamRequests()
-		}
 	}
 
 	if err != nil {
 		return 0, err
 	}
 
+	// --- Decode phase ---
+	if metricsRecorder != nil {
+		metricsRecorder.StartDecodePhase()
+		metricsRecorder.IncActiveUpstreamRequests()
+	}
+	if hooks != nil && hooks.IncrDecode != nil {
+		hooks.IncrDecode()
+	}
+
 	// 2. send decode request
 	decodeReq := n.buildDecodeRequest(c, n.decodeRequestBody, kvTransferParams)
 	result, decodeErr := n.decode(c, decodeReq, decodeAddr)
 
-	// End decode phase metrics and decrement upstream request
+	if hooks != nil && hooks.DecrDecode != nil {
+		hooks.DecrDecode()
+	}
 	if metricsRecorder != nil {
-		statusCode := "200" // Default status code, will be updated by response
+		statusCode := "200"
 		if decodeErr != nil {
 			statusCode = "500"
 		}
