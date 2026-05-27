@@ -862,6 +862,19 @@ func (c *ModelServingController) syncRoleWithinServingGroups(ctx context.Context
 	return nil
 }
 
+// countActiveRoles returns the number of roles that are not in RoleDeleting status.
+// Roles in RoleDeleting state have their pods still terminating in the cluster and
+// must not count toward the current active replica count for scaling decisions.
+func countActiveRoles(roleList []datastore.Role) int {
+	count := 0
+	for _, r := range roleList {
+		if r.Status != datastore.RoleDeleting {
+			count++
+		}
+	}
+	return count
+}
+
 // scaleDownRoles handles Role scaling down with two-level priority-based selection:
 // 1. Primary: Not-ready roles (Creating, NotFound) are deleted first
 // 2. Secondary: Among roles with same status, lower deletion cost = delete first
@@ -921,8 +934,14 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 		startingIndex = ordinal + 1
 	}
 
+	// Count only active (non-Deleting) roles to determine how many new roles to create.
+	// roleList may contain RoleDeleting entries whose pods are still terminating;
+	// those slots are already accounted for via startingIndex (index conflict avoidance),
+	// but must not reduce the number of new roles we need to create.
+	activeCount := countActiveRoles(roleList)
+
 	// Calculate how many new Roles we need to create
-	toCreate := expectedCount - len(roleList)
+	toCreate := expectedCount - activeCount
 
 	// Role needs to scale up, and the ServingGroup status needs to be set to Scaling
 	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupScaling)
@@ -995,12 +1014,19 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		}
 	}
 
+	// Count active (non-Deleting) roles for scale-up/down decisions.
+	// RoleDeleting entries represent roles whose pods are still terminating; they must
+	// not count toward the "current" replica count, otherwise a user changing Replicas
+	// 1→2 while a previous pod is still in Terminating state would see len(roleList)==2
+	// which equals expectedCount==2, causing scale-up to be silently skipped.
+	activeRoleCount := countActiveRoles(roleList)
+
 	// Determine whether it is a scale-up or scale-down scenario
-	if len(roleList) < expectedCount {
-		klog.V(2).Infof("manageRoleReplicas: scaling UP role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
+	if activeRoleCount < expectedCount {
+		klog.V(2).Infof("manageRoleReplicas: scaling UP role %s in ServingGroup %s: active=%d, total=%d, expected=%d", targetRole.Name, groupName, activeRoleCount, len(roleList), expectedCount)
 		c.scaleUpRoles(ctx, ms, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, newRevision)
-	} else if len(roleList) > expectedCount {
-		klog.V(2).Infof("manageRoleReplicas: scaling DOWN role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
+	} else if activeRoleCount > expectedCount {
+		klog.V(2).Infof("manageRoleReplicas: scaling DOWN role %s in ServingGroup %s: active=%d, total=%d, expected=%d", targetRole.Name, groupName, activeRoleCount, len(roleList), expectedCount)
 		c.scaleDownRoles(ctx, ms, groupName, targetRole, roleList, expectedCount)
 	}
 }
