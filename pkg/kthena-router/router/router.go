@@ -52,6 +52,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -73,15 +74,11 @@ func getEnvBool(key string, fallback bool) bool {
 var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
 
 const (
-	SessionStickyStoreMemory = "memory"
-	SessionStickyStoreRedis  = "redis"
+	SessionStickyStoreMemory = sessionsticky.StoreMemory
+	SessionStickyStoreRedis  = sessionsticky.StoreRedis
 )
 
-type SessionStickyStoreConfig struct {
-	Type          string
-	RedisAddress  string
-	RedisPassword string
-}
+type SessionStickyStoreConfig = sessionsticky.StoreConfig
 
 type Router struct {
 	scheduler       scheduler.Scheduler
@@ -100,7 +97,7 @@ type Router struct {
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 
-	sessionStickyStore sessionStickyStore
+	sessionStickyStore sessionsticky.Store
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig SessionStickyStoreConfig) *Router {
@@ -203,24 +200,12 @@ func (r *Router) Close() error {
 	return errors.Join(errs...)
 }
 
-func newSessionStickyStoreFromConfig(config SessionStickyStoreConfig) sessionStickyStore {
-	storeType := strings.ToLower(strings.TrimSpace(config.Type))
-	if storeType == "" {
-		storeType = SessionStickyStoreMemory
+func newSessionStickyStoreFromConfig(config SessionStickyStoreConfig) sessionsticky.Store {
+	store, err := sessionsticky.NewStore(config)
+	if err != nil {
+		klog.Fatalf("failed to initialize session sticky store: %v", err)
 	}
-	switch storeType {
-	case SessionStickyStoreMemory:
-		return newMemorySessionStickyStore()
-	case SessionStickyStoreRedis:
-		store, err := newRedisSessionStickyStore(config.RedisAddress, config.RedisPassword)
-		if err != nil {
-			klog.Fatalf("failed to initialize redis session sticky store: %v", err)
-		}
-		return store
-	default:
-		klog.Fatalf("invalid session sticky store type %q", config.Type)
-	}
-	return newMemorySessionStickyStore()
+	return store
 }
 
 const defaultFairnessTimeout = 60 * time.Second
@@ -494,28 +479,26 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		pdGroup = modelServer.Spec.WorkloadSelector.PDGroup
 	}
 
-	routeKey := routeSessionKey(modelRoute)
+	routeKey := sessionsticky.RouteKey(modelRoute)
 	var sessionKey string
 	var sessionTTL time.Duration
-	if modelRoute != nil && modelRoute.Spec.SessionSticky != nil {
+	var stickyPod types.NamespacedName
+	if modelRoute != nil && modelRoute.Spec.SessionSticky != nil && r.sessionStickyStore != nil {
 		if pdGroup != nil {
 			klog.Warningf("session sticky is configured on ModelRoute %s/%s but PD disaggregation targets are not supported; bypassing sticky routing",
 				modelRoute.Namespace, modelRoute.Name)
 		} else {
 			sessionKey, sessionTTL = r.prepareSessionSticky(c, modelRoute, pods)
-		}
-	}
-	originalPods := pods
-	sessionBindingApplied := false
-	if sessionKey != "" && routeKey != "" {
-		if boundPod, ok := r.sessionStickyStore.Get(routeKey, sessionKey); ok {
-			if pod, exists := indexPodsByName(pods)[boundPod]; exists {
-				pods = []*datastore.PodInfo{pod}
-				sessionBindingApplied = true
-			} else {
-				klog.Infof("session sticky binding for route %s session %s points to unavailable pod %s/%s; deleting binding",
-					routeKey, hashSessionKey(sessionKey), boundPod.Namespace, boundPod.Name)
-				r.sessionStickyStore.Delete(routeKey, sessionKey)
+			if sessionKey != "" && routeKey != "" {
+				if boundPod, ok := r.sessionStickyStore.Get(routeKey, sessionKey); ok {
+					if _, exists := sessionsticky.IndexPodsByName(pods)[boundPod]; exists {
+						stickyPod = boundPod
+					} else {
+						klog.Infof("session sticky binding for route %s session %s points to unavailable pod %s/%s; deleting binding",
+							routeKey, sessionsticky.HashSessionKey(sessionKey), boundPod.Namespace, boundPod.Name)
+						r.sessionStickyStore.Delete(routeKey, sessionKey)
+					}
+				}
 			}
 		}
 	}
@@ -534,25 +517,19 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		ModelServerName:    modelServerName,
 		PDGroup:            pdGroup,
 		MetricsRecorder:    metricsRecorder,
+		StickyPodName:      stickyPod,
 	}
 
 	err = r.scheduler.Schedule(ctx, pods)
 	if err != nil {
-		if sessionBindingApplied {
-			klog.Infof("session sticky binding for route %s session %s could not be scheduled: %v; deleting binding and retrying",
-				routeKey, hashSessionKey(sessionKey), err)
-			r.sessionStickyStore.Delete(routeKey, sessionKey)
-			ctx.BestPods = nil
-			ctx.DecodePods = nil
-			ctx.PrefillPods = nil
-			// Keep the session fields on retry so a successful schedule refreshes the binding.
-			err = r.scheduler.Schedule(ctx, originalPods)
-		}
-	}
-	if err != nil {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
 		return
+	}
+	if stickyPod.Name != "" && ctx.StickyPodName.Name == "" {
+		klog.Infof("session sticky binding for route %s session %s points to a filtered pod; deleting binding",
+			routeKey, sessionsticky.HashSessionKey(sessionKey))
+		r.sessionStickyStore.Delete(routeKey, sessionKey)
 	}
 
 	// Set complete request routing information in access log
@@ -584,11 +561,11 @@ func (r *Router) prepareSessionSticky(c *gin.Context, modelRoute *v1alpha1.Model
 	if len(pods) == 0 {
 		return "", 0
 	}
-	sessionKey := r.extractSessionKey(c, modelRoute.Spec.SessionSticky)
+	sessionKey := sessionsticky.ExtractKey(c, modelRoute.Spec.SessionSticky, r.authenticator)
 	if sessionKey == "" {
 		return "", 0
 	}
-	return sessionKey, sessionAffinityTTL(modelRoute.Spec.SessionSticky)
+	return sessionKey, sessionsticky.TTL(modelRoute.Spec.SessionSticky)
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {

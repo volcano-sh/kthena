@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package router
+package sessionsticky
 
 import (
 	"testing"
@@ -25,12 +25,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestRedisSessionStickyStoreSetRefreshesBinding(t *testing.T) {
+func TestRedisStoreSetRefreshesBinding(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	t.Cleanup(mr.Close)
 
-	store, err := newRedisSessionStickyStore(mr.Addr(), "")
+	store, err := NewRedisStore(mr.Addr(), "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
@@ -42,12 +42,12 @@ func TestRedisSessionStickyStoreSetRefreshesBinding(t *testing.T) {
 	require.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-b"}, pod)
 }
 
-func TestRedisSessionStickyStoreSetRefreshesExistingSamePod(t *testing.T) {
+func TestRedisStoreSetRefreshesExistingSamePod(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	t.Cleanup(mr.Close)
 
-	store, err := newRedisSessionStickyStore(mr.Addr(), "")
+	store, err := NewRedisStore(mr.Addr(), "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
@@ -61,15 +61,15 @@ func TestRedisSessionStickyStoreSetRefreshesExistingSamePod(t *testing.T) {
 	require.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-a"}, pod)
 }
 
-func TestMemorySessionStickyStoreSetDoesNotScanEveryInsert(t *testing.T) {
-	store := newMemorySessionStickyStore()
+func TestMemoryStoreSetDoesNotScanEveryInsert(t *testing.T) {
+	store := NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 	now := time.Unix(100, 0)
 	store.now = func() time.Time { return now }
 	store.cleanupInterval = time.Minute
 	store.nextCleanup = now.Add(time.Minute)
 
-	expiredKey := sessionStoreKey("route", "expired")
+	expiredKey := storeKey("route", "expired")
 	store.bindings[expiredKey] = sessionBinding{
 		pod:       types.NamespacedName{Namespace: "default", Name: "old"},
 		expiresAt: now.Add(-time.Second),
@@ -78,18 +78,18 @@ func TestMemorySessionStickyStoreSetDoesNotScanEveryInsert(t *testing.T) {
 	store.Set("route", "new", types.NamespacedName{Namespace: "default", Name: "new"}, time.Minute)
 
 	require.Contains(t, store.bindings, expiredKey, "expired entries should be cleaned lazily, not on every Set")
-	require.Contains(t, store.bindings, sessionStoreKey("route", "new"))
+	require.Contains(t, store.bindings, storeKey("route", "new"))
 }
 
-func TestMemorySessionStickyStorePeriodicCleanup(t *testing.T) {
-	store := newMemorySessionStickyStore()
+func TestMemoryStorePeriodicCleanup(t *testing.T) {
+	store := NewMemoryStore()
 	t.Cleanup(func() { _ = store.Close() })
 	now := time.Unix(100, 0)
 	store.now = func() time.Time { return now }
 	store.cleanupInterval = time.Minute
 	store.nextCleanup = now
 
-	expiredKey := sessionStoreKey("route", "expired")
+	expiredKey := storeKey("route", "expired")
 	store.bindings[expiredKey] = sessionBinding{
 		pod:       types.NamespacedName{Namespace: "default", Name: "old"},
 		expiresAt: now.Add(-time.Second),
@@ -98,6 +98,42 @@ func TestMemorySessionStickyStorePeriodicCleanup(t *testing.T) {
 	store.Set("route", "new", types.NamespacedName{Namespace: "default", Name: "new"}, time.Minute)
 
 	require.NotContains(t, store.bindings, expiredKey)
-	require.Contains(t, store.bindings, sessionStoreKey("route", "new"))
+	require.Contains(t, store.bindings, storeKey("route", "new"))
 	require.Equal(t, now.Add(time.Minute), store.nextCleanup)
+}
+
+func TestMemoryStoreSetPreservesExistingDifferentPod(t *testing.T) {
+	now := time.Unix(100, 0)
+	store := NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+	store.now = func() time.Time {
+		return now
+	}
+
+	routeKey := "default/route"
+	sessionKey := "session-1"
+	pod1 := types.NamespacedName{Namespace: "default", Name: "pod-1"}
+	pod2 := types.NamespacedName{Namespace: "default", Name: "pod-2"}
+
+	store.Set(routeKey, sessionKey, pod1, time.Minute)
+	store.Set(routeKey, sessionKey, pod2, time.Minute)
+
+	got, ok := store.Get(routeKey, sessionKey)
+	require.True(t, ok)
+	require.Equal(t, pod1, got, "live binding to another pod should not be overwritten")
+
+	now = now.Add(30 * time.Second)
+	store.Set(routeKey, sessionKey, pod1, 2*time.Minute)
+
+	now = now.Add(45 * time.Second)
+	got, ok = store.Get(routeKey, sessionKey)
+	require.True(t, ok, "same-pod set should refresh the TTL")
+	require.Equal(t, pod1, got)
+
+	now = now.Add(2 * time.Minute)
+	store.Set(routeKey, sessionKey, pod2, time.Minute)
+
+	got, ok = store.Get(routeKey, sessionKey)
+	require.True(t, ok)
+	require.Equal(t, pod2, got, "expired binding should be replaced")
 }

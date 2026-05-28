@@ -46,6 +46,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -880,7 +881,7 @@ func TestRouterDoLoadbalancePopulatesSessionStickyContextForModelRoute(t *testin
 	router := &Router{
 		store:              store,
 		scheduler:          capture,
-		sessionStickyStore: newMemorySessionStickyStore(),
+		sessionStickyStore: sessionsticky.NewMemoryStore(),
 	}
 
 	ttl := int32(30)
@@ -937,7 +938,7 @@ func TestRouterDoLoadbalanceIgnoresSessionHeaderWhenSessionStickyAbsent(t *testi
 	router := &Router{
 		store:              store,
 		scheduler:          capture,
-		sessionStickyStore: newMemorySessionStickyStore(),
+		sessionStickyStore: sessionsticky.NewMemoryStore(),
 	}
 
 	modelServer := &aiv1alpha1.ModelServer{
@@ -994,16 +995,13 @@ func TestExtractSessionKeyUsesFirstConfiguredSource(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, "header-session", (&Router{}).extractSessionKey(c, spec))
+	assert.Equal(t, "header-session", sessionsticky.ExtractKey(c, spec, nil))
 }
 
-func TestRouterDoLoadbalanceRetriesWithAllPodsWhenStickyBoundPodCannotSchedule(t *testing.T) {
+func TestRouterDoLoadbalancePassesStickyPodHintToScheduler(t *testing.T) {
 	store := datastore.New()
-	capture := &capturingScheduler{errs: []error{
-		errors.New("pinned pod filtered"),
-		errors.New("stop after retry"),
-	}}
-	stickyStore := newMemorySessionStickyStore()
+	capture := &capturingScheduler{err: errors.New("stop after capture")}
+	stickyStore := sessionsticky.NewMemoryStore()
 	router := &Router{
 		store:              store,
 		scheduler:          capture,
@@ -1061,47 +1059,10 @@ func TestRouterDoLoadbalanceRetriesWithAllPodsWhenStickyBoundPodCannotSchedule(t
 
 	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
 
-	require.Len(t, capture.podsByCall, 2)
-	require.Len(t, capture.podsByCall[0], 1, "first scheduling attempt should use the bound pod")
-	assert.Equal(t, "pod-1", capture.podsByCall[0][0].Pod.Name)
-	require.Len(t, capture.podsByCall[1], 2, "retry should use the original full pod list")
-	_, ok := stickyStore.Get("default/mr-1", "session-1")
-	assert.False(t, ok, "failed sticky binding should be deleted")
-}
-
-func TestMemorySessionStickyStoreSetPreservesExistingDifferentPod(t *testing.T) {
-	now := time.Unix(100, 0)
-	stickyStore := newMemorySessionStickyStore()
-	stickyStore.now = func() time.Time {
-		return now
-	}
-
-	routeKey := "default/route"
-	sessionKey := "session-1"
-	pod1 := types.NamespacedName{Namespace: "default", Name: "pod-1"}
-	pod2 := types.NamespacedName{Namespace: "default", Name: "pod-2"}
-
-	stickyStore.Set(routeKey, sessionKey, pod1, time.Minute)
-	stickyStore.Set(routeKey, sessionKey, pod2, time.Minute)
-
-	got, ok := stickyStore.Get(routeKey, sessionKey)
-	require.True(t, ok)
-	assert.Equal(t, pod1, got, "live binding to another pod should not be overwritten")
-
-	now = now.Add(30 * time.Second)
-	stickyStore.Set(routeKey, sessionKey, pod1, 2*time.Minute)
-
-	now = now.Add(45 * time.Second)
-	got, ok = stickyStore.Get(routeKey, sessionKey)
-	require.True(t, ok, "same-pod set should refresh the TTL")
-	assert.Equal(t, pod1, got)
-
-	now = now.Add(2 * time.Minute)
-	stickyStore.Set(routeKey, sessionKey, pod2, time.Minute)
-
-	got, ok = stickyStore.Get(routeKey, sessionKey)
-	require.True(t, ok)
-	assert.Equal(t, pod2, got, "expired binding should be replaced")
+	require.NotNil(t, capture.ctx)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-1"}, capture.ctx.StickyPodName)
+	require.Len(t, capture.podsByCall, 1)
+	require.Len(t, capture.podsByCall[0], 2, "router should pass the full pod list and let scheduler apply the sticky hint")
 }
 
 type capturingScheduler struct {

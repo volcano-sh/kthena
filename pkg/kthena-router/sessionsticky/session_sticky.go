@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package router
+package sessionsticky
 
 import (
 	"context"
@@ -34,23 +34,38 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
+const (
+	StoreMemory = "memory"
+	StoreRedis  = "redis"
+)
+
 const defaultSessionAffinitySeconds int32 = 600
 const redisOperationTimeout = 2 * time.Second
-const memorySessionStickyCleanupInterval = time.Minute
+const memoryCleanupInterval = time.Minute
 
-type sessionBinding struct {
-	pod       types.NamespacedName
-	expiresAt time.Time
+type StoreConfig struct {
+	Type          string
+	RedisAddress  string
+	RedisPassword string
 }
 
-type sessionStickyStore interface {
+type Store interface {
 	Get(routeKey, sessionKey string) (types.NamespacedName, bool)
 	Set(routeKey, sessionKey string, pod types.NamespacedName, ttl time.Duration)
 	Delete(routeKey, sessionKey string)
 	Close() error
 }
 
-type memorySessionStickyStore struct {
+type ClaimExtractor interface {
+	ExtractStringClaim(c *gin.Context, claimName string) (string, error)
+}
+
+type sessionBinding struct {
+	pod       types.NamespacedName
+	expiresAt time.Time
+}
+
+type MemoryStore struct {
 	mu              sync.Mutex
 	stopOnce        sync.Once
 	stopCh          chan struct{}
@@ -60,24 +75,39 @@ type memorySessionStickyStore struct {
 	bindings        map[string]sessionBinding
 }
 
-func newMemorySessionStickyStore() *memorySessionStickyStore {
+func NewStore(config StoreConfig) (Store, error) {
+	storeType := strings.ToLower(strings.TrimSpace(config.Type))
+	if storeType == "" {
+		storeType = StoreMemory
+	}
+	switch storeType {
+	case StoreMemory:
+		return NewMemoryStore(), nil
+	case StoreRedis:
+		return NewRedisStore(config.RedisAddress, config.RedisPassword)
+	default:
+		return nil, fmt.Errorf("invalid session sticky store type %q", config.Type)
+	}
+}
+
+func NewMemoryStore() *MemoryStore {
 	now := time.Now()
-	store := &memorySessionStickyStore{
+	store := &MemoryStore{
 		stopCh:          make(chan struct{}),
 		now:             time.Now,
-		cleanupInterval: memorySessionStickyCleanupInterval,
-		nextCleanup:     now.Add(memorySessionStickyCleanupInterval),
+		cleanupInterval: memoryCleanupInterval,
+		nextCleanup:     now.Add(memoryCleanupInterval),
 		bindings:        make(map[string]sessionBinding),
 	}
 	go store.runCleanupLoop()
 	return store
 }
 
-func (s *memorySessionStickyStore) Get(routeKey, sessionKey string) (types.NamespacedName, bool) {
+func (s *MemoryStore) Get(routeKey, sessionKey string) (types.NamespacedName, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := sessionStoreKey(routeKey, sessionKey)
+	key := storeKey(routeKey, sessionKey)
 	binding, ok := s.bindings[key]
 	if !ok {
 		return types.NamespacedName{}, false
@@ -89,7 +119,7 @@ func (s *memorySessionStickyStore) Get(routeKey, sessionKey string) (types.Names
 	return binding.pod, true
 }
 
-func (s *memorySessionStickyStore) Set(routeKey, sessionKey string, pod types.NamespacedName, ttl time.Duration) {
+func (s *MemoryStore) Set(routeKey, sessionKey string, pod types.NamespacedName, ttl time.Duration) {
 	if routeKey == "" || sessionKey == "" || pod.Name == "" || ttl <= 0 {
 		return
 	}
@@ -98,14 +128,14 @@ func (s *memorySessionStickyStore) Set(routeKey, sessionKey string, pod types.Na
 
 	now := s.now()
 	s.cleanupExpiredLocked(now)
-	key := sessionStoreKey(routeKey, sessionKey)
+	key := storeKey(routeKey, sessionKey)
 	if existing, ok := s.bindings[key]; ok && existing.expiresAt.After(now) {
 		if existing.pod == pod {
 			existing.expiresAt = now.Add(ttl)
 			s.bindings[key] = existing
 		} else {
 			klog.V(4).Infof("session sticky binding for route %s session %s already points to another pod; keeping existing binding",
-				routeKey, hashSessionKey(sessionKey))
+				routeKey, HashSessionKey(sessionKey))
 		}
 		return
 	}
@@ -115,21 +145,21 @@ func (s *memorySessionStickyStore) Set(routeKey, sessionKey string, pod types.Na
 	}
 }
 
-func (s *memorySessionStickyStore) Delete(routeKey, sessionKey string) {
+func (s *MemoryStore) Delete(routeKey, sessionKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.bindings, sessionStoreKey(routeKey, sessionKey))
+	delete(s.bindings, storeKey(routeKey, sessionKey))
 }
 
-func (s *memorySessionStickyStore) Close() error {
+func (s *MemoryStore) Close() error {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
 	return nil
 }
 
-func (s *memorySessionStickyStore) runCleanupLoop() {
-	ticker := time.NewTicker(memorySessionStickyCleanupInterval)
+func (s *MemoryStore) runCleanupLoop() {
+	ticker := time.NewTicker(memoryCleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -141,13 +171,13 @@ func (s *memorySessionStickyStore) runCleanupLoop() {
 	}
 }
 
-func (s *memorySessionStickyStore) cleanupExpired() {
+func (s *MemoryStore) cleanupExpired() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupExpiredLocked(s.now())
 }
 
-func (s *memorySessionStickyStore) cleanupExpiredLocked(now time.Time) {
+func (s *MemoryStore) cleanupExpiredLocked(now time.Time) {
 	if s.cleanupInterval <= 0 || now.Before(s.nextCleanup) {
 		return
 	}
@@ -159,11 +189,11 @@ func (s *memorySessionStickyStore) cleanupExpiredLocked(now time.Time) {
 	s.nextCleanup = now.Add(s.cleanupInterval)
 }
 
-type redisSessionStickyStore struct {
+type RedisStore struct {
 	client *redis.Client
 }
 
-func newRedisSessionStickyStore(address, password string) (*redisSessionStickyStore, error) {
+func NewRedisStore(address, password string) (*RedisStore, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, fmt.Errorf("redis address is required")
 	}
@@ -180,16 +210,16 @@ func newRedisSessionStickyStore(address, password string) (*redisSessionStickySt
 		_ = client.Close()
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
 	}
-	return &redisSessionStickyStore{client: client}, nil
+	return &RedisStore{client: client}, nil
 }
 
-func (s *redisSessionStickyStore) Get(routeKey, sessionKey string) (types.NamespacedName, bool) {
+func (s *RedisStore) Get(routeKey, sessionKey string) (types.NamespacedName, bool) {
 	if s == nil || s.client == nil {
 		return types.NamespacedName{}, false
 	}
 	ctx, cancel := contextWithRedisTimeout()
 	defer cancel()
-	value, err := s.client.Get(ctx, redisSessionStoreKey(routeKey, sessionKey)).Result()
+	value, err := s.client.Get(ctx, redisStoreKey(routeKey, sessionKey)).Result()
 	if err == redis.Nil {
 		return types.NamespacedName{}, false
 	}
@@ -204,7 +234,7 @@ func (s *redisSessionStickyStore) Get(routeKey, sessionKey string) (types.Namesp
 	return types.NamespacedName{Namespace: namespace, Name: name}, true
 }
 
-func (s *redisSessionStickyStore) Set(routeKey, sessionKey string, pod types.NamespacedName, ttl time.Duration) {
+func (s *RedisStore) Set(routeKey, sessionKey string, pod types.NamespacedName, ttl time.Duration) {
 	if s == nil || s.client == nil || routeKey == "" || sessionKey == "" || pod.Name == "" || ttl <= 0 {
 		return
 	}
@@ -212,56 +242,56 @@ func (s *redisSessionStickyStore) Set(routeKey, sessionKey string, pod types.Nam
 	defer cancel()
 	value := pod.Namespace + "/" + pod.Name
 
-	if err := s.client.Set(ctx, redisSessionStoreKey(routeKey, sessionKey), value, ttl).Err(); err != nil {
+	if err := s.client.Set(ctx, redisStoreKey(routeKey, sessionKey), value, ttl).Err(); err != nil {
 		klog.Errorf("failed to set session sticky binding in redis: %v", err)
 	}
 }
 
-func (s *redisSessionStickyStore) Delete(routeKey, sessionKey string) {
+func (s *RedisStore) Delete(routeKey, sessionKey string) {
 	if s == nil || s.client == nil {
 		return
 	}
 	ctx, cancel := contextWithRedisTimeout()
 	defer cancel()
-	if err := s.client.Del(ctx, redisSessionStoreKey(routeKey, sessionKey)).Err(); err != nil {
+	if err := s.client.Del(ctx, redisStoreKey(routeKey, sessionKey)).Err(); err != nil {
 		klog.Errorf("failed to delete session sticky binding from redis: %v", err)
 	}
 }
 
-func (s *redisSessionStickyStore) Close() error {
+func (s *RedisStore) Close() error {
 	if s == nil || s.client == nil {
 		return nil
 	}
 	return s.client.Close()
 }
 
-func sessionStoreKey(routeKey, sessionKey string) string {
-	return routeKey + "\x00" + hashSessionKey(sessionKey)
+func storeKey(routeKey, sessionKey string) string {
+	return routeKey + "\x00" + HashSessionKey(sessionKey)
 }
 
-func redisSessionStoreKey(routeKey, sessionKey string) string {
-	return "kthena:router:sessionsticky:" + routeKey + ":" + hashSessionKey(sessionKey)
+func redisStoreKey(routeKey, sessionKey string) string {
+	return "kthena:router:sessionsticky:" + routeKey + ":" + HashSessionKey(sessionKey)
 }
 
 func contextWithRedisTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), redisOperationTimeout)
 }
 
-// hashSessionKey keeps raw session material out of in-memory keys, Redis keys,
+// HashSessionKey keeps raw session material out of in-memory keys, Redis keys,
 // and logs because session keys may come from headers, cookies, or JWT claims.
-func hashSessionKey(sessionKey string) string {
+func HashSessionKey(sessionKey string) string {
 	sum := sha256.Sum256([]byte(sessionKey))
 	return hex.EncodeToString(sum[:])
 }
 
-func routeSessionKey(route *v1alpha1.ModelRoute) string {
+func RouteKey(route *v1alpha1.ModelRoute) string {
 	if route == nil {
 		return ""
 	}
 	return route.Namespace + "/" + route.Name
 }
 
-func sessionAffinityTTL(spec *v1alpha1.SessionSticky) time.Duration {
+func TTL(spec *v1alpha1.SessionSticky) time.Duration {
 	seconds := defaultSessionAffinitySeconds
 	if spec != nil && spec.SessionAffinitySeconds != nil {
 		seconds = *spec.SessionAffinitySeconds
@@ -272,12 +302,12 @@ func sessionAffinityTTL(spec *v1alpha1.SessionSticky) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func (r *Router) extractSessionKey(c *gin.Context, spec *v1alpha1.SessionSticky) string {
+func ExtractKey(c *gin.Context, spec *v1alpha1.SessionSticky, extractor ClaimExtractor) string {
 	if c == nil || c.Request == nil || spec == nil || len(spec.Sources) == 0 {
 		return ""
 	}
 	for _, source := range spec.Sources {
-		value := r.extractSessionKeyFromSource(c, source)
+		value := extractFromSource(c, source, extractor)
 		if value != "" {
 			return value
 		}
@@ -285,7 +315,7 @@ func (r *Router) extractSessionKey(c *gin.Context, spec *v1alpha1.SessionSticky)
 	return ""
 }
 
-func (r *Router) extractSessionKeyFromSource(c *gin.Context, source v1alpha1.SessionKeySource) string {
+func extractFromSource(c *gin.Context, source v1alpha1.SessionKeySource, extractor ClaimExtractor) string {
 	switch source.Type {
 	case v1alpha1.SessionKeySourceHeader:
 		return strings.TrimSpace(c.Request.Header.Get(source.Name))
@@ -298,10 +328,10 @@ func (r *Router) extractSessionKeyFromSource(c *gin.Context, source v1alpha1.Ses
 		}
 		return strings.TrimSpace(cookie.Value)
 	case v1alpha1.SessionKeySourceJWTClaim:
-		if r == nil || r.authenticator == nil {
+		if extractor == nil {
 			return ""
 		}
-		value, err := r.authenticator.ExtractStringClaim(c, source.Name)
+		value, err := extractor.ExtractStringClaim(c, source.Name)
 		if err != nil {
 			klog.V(4).Infof("failed to extract JWT session claim %q: %v", source.Name, err)
 			return ""
@@ -312,7 +342,7 @@ func (r *Router) extractSessionKeyFromSource(c *gin.Context, source v1alpha1.Ses
 	}
 }
 
-func indexPodsByName(pods []*datastore.PodInfo) map[types.NamespacedName]*datastore.PodInfo {
+func IndexPodsByName(pods []*datastore.PodInfo) map[types.NamespacedName]*datastore.PodInfo {
 	index := make(map[types.NamespacedName]*datastore.PodInfo, len(pods))
 	for _, candidate := range pods {
 		if candidate == nil || candidate.Pod == nil {

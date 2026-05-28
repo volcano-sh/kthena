@@ -37,6 +37,7 @@ type Context struct {
 	SessionKey         string
 	AffinityScopeKey   string
 	SessionAffinityTTL time.Duration
+	StickyPodName      types.NamespacedName
 
 	// ModelServer information for efficient PDGroup scheduling
 	ModelServerName types.NamespacedName

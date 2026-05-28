@@ -132,6 +132,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		return err
 	}
 
+	if ctx.PDGroup == nil && ctx.StickyPodName.Name != "" {
+		if stickyPod := findStickyPod(pods, ctx.StickyPodName); stickyPod != nil {
+			pods = []*datastore.PodInfo{stickyPod}
+		} else {
+			ctx.StickyPodName = types.NamespacedName{}
+		}
+	}
+
 	if ctx.PDGroup != nil {
 		// Use optimized PDGroup scheduling with pre-categorized pods from store
 		klog.V(4).Info("Using optimized PD disaggregated scheduling")
@@ -188,6 +196,18 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	scores := s.RunScorePlugins(pods, ctx)
 	ctx.BestPods = TopNPodInfos(scores, topN)
 
+	return nil
+}
+
+func findStickyPod(pods []*datastore.PodInfo, stickyPod types.NamespacedName) *datastore.PodInfo {
+	for _, pod := range pods {
+		if pod == nil || pod.Pod == nil {
+			continue
+		}
+		if pod.Pod.Namespace == stickyPod.Namespace && pod.Pod.Name == stickyPod.Name {
+			return pod
+		}
+	}
 	return nil
 }
 
