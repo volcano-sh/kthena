@@ -735,6 +735,13 @@ func (in *ModelWorker) DeepCopyInto(out *ModelWorker) {
 	*out = *in
 	in.Resources.DeepCopyInto(&out.Resources)
 	in.Affinity.DeepCopyInto(&out.Affinity)
+	if in.Tolerations != nil {
+		in, out := &in.Tolerations, &out.Tolerations
+		*out = make([]corev1.Toleration, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	in.Config.DeepCopyInto(&out.Config)
 }
 

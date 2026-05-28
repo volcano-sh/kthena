@@ -24,6 +24,7 @@ spec:
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
             affinity: ${SERVER_AFFINITY}
+            tolerations: ${SERVER_TOLERATIONS}
             initContainers: ${INIT_CONTAINERS}
             terminationGracePeriodSeconds: 300
             volumes: ${VOLUMES}
@@ -93,6 +94,7 @@ spec:
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
             affinity: ${SERVER_AFFINITY}
+            tolerations: ${SERVER_TOLERATIONS}
             volumes: ${VOLUMES}
             initContainers: ${INIT_CONTAINERS}
             containers:

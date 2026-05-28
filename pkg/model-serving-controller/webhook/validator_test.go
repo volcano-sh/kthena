@@ -556,7 +556,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("replicas"),
 					int32PtrNil(),
-					"replicas must be a positive integer",
+					"replicas must be a non-negative integer",
 				),
 			},
 		},
@@ -589,7 +589,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("replicas"),
 					int32Ptr(-1),
-					"replicas must be a positive integer",
+					"replicas must be a non-negative integer",
 				),
 			},
 		},
@@ -622,7 +622,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("replicas"),
 					int32Ptr(-1),
-					"role replicas must be a positive integer",
+					"role replicas must be a non-negative integer",
 				),
 			},
 		},
@@ -655,7 +655,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("replicas"),
 					int32PtrNil(),
-					"role replicas must be a positive integer",
+					"role replicas must be a non-negative integer",
 				),
 			},
 		},

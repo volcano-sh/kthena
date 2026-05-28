@@ -9,7 +9,7 @@ Kthena Router provides sophisticated traffic routing capabilities that enable in
 - **ModelServer**: Defines backend inference service instances with their associated pods, models, and traffic policies. It uses **workloadSelector.matchLabels** to select which pods belong to it (pods must match all given labels); this applies to every ModelServer.
 - **ModelRoute**: Defines routing rules based on request characteristics such as model name, LoRA adapters, HTTP headers, and weight distribution
 
-For a detailed definition of the ModelServer and ModelRoute CRs, please refer to the [ModelRoute and ModelRoute Reference](../reference/crd/networking.serving.volcano.sh.md) pages.
+For a detailed definition of the ModelServer and ModelRoute CRs, please refer to the [ModelServer and ModelRoute Reference](../reference/crd/networking.serving.volcano.sh.md) pages.
 
 The router supports various routing strategies, from simple model-based forwarding to complex weighted distribution, header-based routing, and PD-Disaggregated (Prefill/Decode) routing. This flexibility allows for advanced deployment patterns including canary releases, A/B testing, load balancing across heterogeneous model deployments, and PD-Disaggregated inference for lower latency and better resource utilization.
 

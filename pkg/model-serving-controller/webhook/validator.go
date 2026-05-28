@@ -181,7 +181,7 @@ func validatorReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 		allErrs = append(allErrs, field.Invalid(
 			field.NewPath("spec").Child("replicas"),
 			ms.Spec.Replicas,
-			"replicas must be a positive integer",
+			"replicas must be a non-negative integer",
 		))
 	}
 
@@ -199,7 +199,7 @@ func validatorReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 			allErrs = append(allErrs, field.Invalid(
 				field.NewPath("spec").Child("template").Child("roles").Index(i).Child("replicas"),
 				role.Replicas,
-				"role replicas must be a positive integer",
+				"role replicas must be a non-negative integer",
 			))
 		}
 	}

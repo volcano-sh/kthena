@@ -18,6 +18,7 @@ spec:
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
             affinity: ${PREFILL_AFFINITY}
+            tolerations: ${PREFILL_TOLERATIONS}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime
@@ -73,6 +74,7 @@ spec:
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
             affinity: ${DECODE_AFFINITY}
+            tolerations: ${DECODE_TOLERATIONS}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime

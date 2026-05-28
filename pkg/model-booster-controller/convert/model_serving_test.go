@@ -264,6 +264,77 @@ func TestCreateModelServingResources(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:  "vLLM with tolerations",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model-with-nodeselector-tolerations.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Len(t, role.EntryTemplate.Spec.Tolerations, 2,
+						"role %s entryTemplate should have 2 tolerations", role.Name)
+					assert.Equal(t, "nvidia.com/gpu", role.EntryTemplate.Spec.Tolerations[0].Key)
+					assert.Equal(t, corev1.TolerationOpExists, role.EntryTemplate.Spec.Tolerations[0].Operator)
+					assert.Equal(t, corev1.TaintEffectNoSchedule, role.EntryTemplate.Spec.Tolerations[0].Effect)
+					assert.Equal(t, "dedicated", role.EntryTemplate.Spec.Tolerations[1].Key)
+					assert.Equal(t, "inference", role.EntryTemplate.Spec.Tolerations[1].Value)
+					assert.Equal(t, corev1.TaintEffectNoSchedule, role.EntryTemplate.Spec.Tolerations[1].Effect)
+					if role.WorkerReplicas > 0 {
+						assert.Len(t, role.WorkerTemplate.Spec.Tolerations, 2,
+							"role %s workerTemplate should have 2 tolerations", role.Name)
+						assert.Equal(t, "nvidia.com/gpu", role.WorkerTemplate.Spec.Tolerations[0].Key)
+						assert.Equal(t, corev1.TolerationOpExists, role.WorkerTemplate.Spec.Tolerations[0].Operator)
+						assert.Equal(t, corev1.TaintEffectNoSchedule, role.WorkerTemplate.Spec.Tolerations[0].Effect)
+						assert.Equal(t, "dedicated", role.WorkerTemplate.Spec.Tolerations[1].Key)
+						assert.Equal(t, "inference", role.WorkerTemplate.Spec.Tolerations[1].Value)
+						assert.Equal(t, corev1.TaintEffectNoSchedule, role.WorkerTemplate.Spec.Tolerations[1].Effect)
+					}
+				}
+			},
+		},
+		{
+			name:  "vLLM without tolerations is nil",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				for _, role := range got.Spec.Template.Roles {
+					assert.Nil(t, role.EntryTemplate.Spec.Tolerations,
+						"role %s entryTemplate should have nil tolerations", role.Name)
+					assert.Nil(t, role.WorkerTemplate.Spec.Tolerations,
+						"role %s workerTemplate should have nil tolerations", role.Name)
+				}
+			},
+		},
+		{
+			name:  "PD disaggregated with tolerations",
+			input: loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-with-nodeselector-tolerations.yaml"),
+			checkFn: func(t *testing.T, got *workload.ModelServing) {
+				rolesByName := map[string]workload.Role{}
+				for _, role := range got.Spec.Template.Roles {
+					rolesByName[role.Name] = role
+				}
+				// prefill role
+				prefill, ok := rolesByName["prefill"]
+				assert.True(t, ok, "prefill role should exist")
+				assert.Len(t, prefill.EntryTemplate.Spec.Tolerations, 1)
+				assert.Equal(t, "nvidia.com/gpu", prefill.EntryTemplate.Spec.Tolerations[0].Key)
+				if prefill.WorkerReplicas > 0 {
+					assert.Len(t, prefill.WorkerTemplate.Spec.Tolerations, 1)
+					assert.Equal(t, "nvidia.com/gpu", prefill.WorkerTemplate.Spec.Tolerations[0].Key)
+				}
+				// decode role
+				decode, ok := rolesByName["decode"]
+				assert.True(t, ok, "decode role should exist")
+				assert.Len(t, decode.EntryTemplate.Spec.Tolerations, 2)
+				assert.Equal(t, "dedicated", decode.EntryTemplate.Spec.Tolerations[1].Key)
+				assert.Equal(t, "inference", decode.EntryTemplate.Spec.Tolerations[1].Value)
+				assert.Equal(t, corev1.TaintEffectPreferNoSchedule, decode.EntryTemplate.Spec.Tolerations[1].Effect)
+				if decode.WorkerReplicas > 0 {
+					assert.Len(t, decode.WorkerTemplate.Spec.Tolerations, 2)
+					assert.Equal(t, "nvidia.com/gpu", decode.WorkerTemplate.Spec.Tolerations[0].Key)
+					assert.Equal(t, "dedicated", decode.WorkerTemplate.Spec.Tolerations[1].Key)
+					assert.Equal(t, "inference", decode.WorkerTemplate.Spec.Tolerations[1].Value)
+					assert.Equal(t, corev1.TaintEffectPreferNoSchedule, decode.WorkerTemplate.Spec.Tolerations[1].Effect)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
