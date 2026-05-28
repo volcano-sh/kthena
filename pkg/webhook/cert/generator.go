@@ -35,6 +35,8 @@ const (
 	RSAKeySize = 2048
 	// CertValidityYears is the number of years the certificate is valid
 	CertValidityYears = 10
+	// CertSerialNumberBits is the entropy used for generated certificate serial numbers.
+	CertSerialNumberBits = 128
 )
 
 // CertBundle contains the certificate, key, and CA certificate
@@ -61,8 +63,12 @@ func GenerateSelfSignedCertificate(dnsNames []string) (*CertBundle, error) {
 		return nil, fmt.Errorf("failed to generate CA key: %w", err)
 	}
 
+	caSerialNumber, err := generateSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate CA serial number: %w", err)
+	}
 	caTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber: caSerialNumber,
 		Subject: pkix.Name{
 			CommonName:   "kthena-webhook-ca",
 			Organization: []string{"Volcano"},
@@ -85,8 +91,12 @@ func GenerateSelfSignedCertificate(dnsNames []string) (*CertBundle, error) {
 		return nil, fmt.Errorf("failed to generate server key: %w", err)
 	}
 
+	serverSerialNumber, err := generateSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate server serial number: %w", err)
+	}
 	serverTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
+		SerialNumber: serverSerialNumber,
 		Subject: pkix.Name{
 			CommonName:   dnsNames[0],
 			Organization: []string{"Volcano"},
@@ -137,4 +147,9 @@ func GenerateSelfSignedCertificate(dnsNames []string) (*CertBundle, error) {
 		KeyPEM:  serverKeyPEM.Bytes(),
 		CAPEM:   caCertPEM.Bytes(),
 	}, nil
+}
+
+func generateSerialNumber() (*big.Int, error) {
+	limit := new(big.Int).Lsh(big.NewInt(1), CertSerialNumberBits)
+	return rand.Int(rand.Reader, limit)
 }
