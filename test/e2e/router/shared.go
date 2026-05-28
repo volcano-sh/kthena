@@ -943,6 +943,10 @@ func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.Rout
 	})
 
 	t.Run("E2E-SS-09-MultiReplicaRedisStore", func(t *testing.T) {
+		t.Cleanup(func() {
+			require.NoError(t, e2eframework.RestartRouterPortForward(kthenaNamespace), "Failed to refresh router port-forward after Redis sticky test cleanup")
+		})
+
 		redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
 		t.Cleanup(redisCleanup)
 
