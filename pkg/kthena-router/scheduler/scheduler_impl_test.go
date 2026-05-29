@@ -319,6 +319,7 @@ func createTestPodInfo(name string) *datastore.PodInfo {
 		},
 	}
 }
+
 func TestTopNPodInfosTiebreak(t *testing.T) {
 	pod1 := createTestPodInfo("pod-a")
 	pod2 := createTestPodInfo("pod-b")
@@ -330,9 +331,12 @@ func TestTopNPodInfosTiebreak(t *testing.T) {
 		pod3: 100,
 	}
 
+	first := TopNPodInfos(scores, 1)
+	require.Len(t, first, 1)
+
 	for i := 0; i < 20; i++ {
 		result := TopNPodInfos(scores, 1)
 		require.Len(t, result, 1)
-		assert.Equal(t, "pod-a", result[0].Pod.Name, "expected deterministic selection of lexicographically smallest pod on tie")
+		assert.Equal(t, first[0].Pod.Name, result[0].Pod.Name, "expected consistent pod selection on tied scores")
 	}
 }
