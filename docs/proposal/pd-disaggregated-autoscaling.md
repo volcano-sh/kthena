@@ -59,7 +59,7 @@ Scaling these two stages independently is essential for cost-efficient serving. 
 
 #### Non-Goals
 
-- Controller implementation and reconciliation loop design (covered separately).
+- Full controller implementation (work allocation, queue management, metric scraping internals) is covered separately. This proposal defines the user-visible **contract** the controller must honor: phase ordering, conflict resolution, and status surface.
 - Multi-ModelServing (heterogeneous hardware) P/D scaling — that remains in `HeterogeneousTarget`.
 
 ### Proposal
@@ -89,8 +89,10 @@ As an existing user with an `AutoscalingPolicy` and one or more `AutoscalingPoli
 | Breaking change: removes `AutoscalingPolicyBinding` CRD | Both CRDs are alpha-level. Provide a migration guide and conversion tooling. The merged API is strictly simpler. |
 | Breaking change for users currently using `SubTarget` | `SubTarget` was alpha-level and only used for P/D roles — the replacement `DisaggregatedTarget` is strictly more capable. |
 | Loss of policy reuse across bindings | In practice policies are rarely shared. If reuse is needed, users can use templating tools (Helm, Kustomize). The UX win of a single resource outweighs the theoretical reuse loss. |
-| Ratio enforcement may conflict with per-role min/max bounds | Webhook validates that `ratioRange` is achievable given the min/max replica bounds at admission time. |
-| Increased controller complexity | Ratio enforcement is a bounded constraint-satisfaction problem; design details are deferred to the controller proposal. |
+| Ratio enforcement may conflict with per-role min/max bounds (static infeasibility) | Webhook validates that `ratioRange` is achievable given the min/max replica bounds at admission time. |
+| Per-role scaling decisions diverge (prefill wants up, decode wants down) and cannot be satisfied independently under `ratioRange` (dynamic divergence) | The controller resolves divergence deterministically with an **up-only** rule: ratio enforcement may only scale a role up relative to its standalone-desired count, never force a scale-down. See "Conflict Resolution and Coordination Semantics." |
+| Up-only ratio enforcement may temporarily over-provision the lagging role | Eventual scale-down still occurs once both roles' standalone-desired counts drop; ratio enforcement only suppresses *premature* scale-down driven by divergent metrics, not eventual scale-down on sustained load reduction. |
+| Coordination semantics are surprising to operators | The controller contract specifies a single deterministic rule (up-only ratio enforcement) with worked examples. Status conditions and events make every coordination decision auditable. |
 
 ### Design Details
 
@@ -188,6 +190,10 @@ type DisaggregatedTarget struct {
 	// Example: minRatio=0.25, maxRatio=1.0 means for every decode replica,
 	// there should be between 0.25 and 1.0 prefill replicas (i.e., P:D
 	// ranges from 1:4 to 1:1).
+	//
+	// See "Conflict Resolution and Coordination Semantics" in the proposal
+	// for the exact rule used when standalone-desired prefill/decode counts
+	// violate this range.
 	//
 	// +optional
 	RatioRange *PDRatioRange `json:"ratioRange,omitempty"`
@@ -375,6 +381,25 @@ spec:
     maxReplicas: 10
 ```
 
+##### Observed status (illustrative)
+
+```yaml
+status:
+  disaggregatedScaling:
+    prefillCurrentReplicas: 4
+    prefillDesiredReplicas: 4
+    decodeCurrentReplicas: 4
+    decodeDesiredReplicas: 4
+    currentRatio: "1"
+    lastScaleTime: "2026-05-28T12:00:00Z"
+    lastRatioAdjustmentTime: "2026-05-28T12:00:00Z"
+  conditions:
+    - type: ScalingActive
+      status: "True"
+    - type: RatioWithinRange
+      status: "True"
+```
+
 #### Validation Rules (Webhook)
 
 | Rule | Scope |
@@ -388,14 +413,76 @@ spec:
 | If `ratioRange` is set, `minRatio <= maxRatio`. | `PDRatioRange` (CEL) |
 | If `ratioRange` is set, the ratio range must be achievable: `prefill.minReplicas / decode.maxReplicas >= minRatio` **and** `prefill.maxReplicas / decode.minReplicas <= maxRatio` (when `decode.minReplicas > 0`). | `DisaggregatedTarget` |
 
+#### Status
+
+`AutoscalingPolicyStatus` exposes the following fields when `disaggregatedTarget` is set:
+
+```go
+type DisaggregatedScalingStatus struct {
+    PrefillCurrentReplicas  int32             `json:"prefillCurrentReplicas"`
+    PrefillDesiredReplicas  int32             `json:"prefillDesiredReplicas"`
+    DecodeCurrentReplicas   int32             `json:"decodeCurrentReplicas"`
+    DecodeDesiredReplicas   int32             `json:"decodeDesiredReplicas"`
+    CurrentRatio            resource.Quantity `json:"currentRatio,omitempty"`
+    LastScaleTime           *metav1.Time      `json:"lastScaleTime,omitempty"`
+    LastRatioAdjustmentTime *metav1.Time      `json:"lastRatioAdjustmentTime,omitempty"`
+}
+```
+
+The split between `LastScaleTime` and `LastRatioAdjustmentTime` lets operators distinguish metric-driven scaling from ratio-driven adjustments.
+
+The following standard conditions are reported on `AutoscalingPolicyStatus`:
+
+| Condition | Meaning |
+|---|---|
+| `ScalingActive` | `True` when both roles produced a valid recommendation this cycle. |
+| `AbleToScale` | `True` when the controller can patch the referenced ModelServing. |
+| `RatioWithinRange` | `True` when `currentRatio ∈ ratioRange`. Present only when `ratioRange` is set. |
+| `RatioInfeasible` | `True` when ratio enforcement has no solution under current `min/maxReplicas` (see "Conflict Resolution and Coordination Semantics"). |
+
 #### Scaling Semantics (Controller Contract)
 
 > **Note**: Controller implementation is out of scope for this proposal. These semantics define the contract the controller must honor.
 
-1. **Independent metric evaluation**: The controller evaluates metrics independently for prefill and decode, producing a desired replica count for each role. If a role defines its own `metrics`, those are used; otherwise the controller falls back to the top-level `spec.metrics`.
-2. **Per-role clamping**: Each desired count is clamped to `[minReplicas, maxReplicas]` of the corresponding role.
-3. **Ratio enforcement**: If `ratioRange` is configured, after clamping, the controller adjusts replica counts to satisfy `minRatio <= P/D <= maxRatio`. The adjustment strategy (e.g., scale up the lagging side vs. scale down the leading side) is a controller implementation detail.
-4. **Atomic patch**: The controller patches both `spec.template.roles[prefillIndex].replicas` and `spec.template.roles[decodeIndex].replicas` in a single ModelServing update to avoid intermediate states that violate the ratio.
+The controller honors the following phase ordering on each reconcile of an `AutoscalingPolicy` with a `DisaggregatedTarget`. Phases 1–5 are applied independently per role; phase 6 is the only coordination phase.
+
+1. **Metric collection (per role).** If a role's metrics are unavailable, the controller freezes both roles at their current replica counts and sets `ScalingActive=False`.
+2. **Independent desired computation.** Each role's desired replicas are computed from its own metrics (`spec.disaggregatedTarget.{prefill,decode}.metrics`, falling back to `spec.metrics`).
+3. **Tolerance, stabilization, and behavior (per role).** `tolerancePercent`, stabilization windows, and `behavior` rate-limits are applied independently per role, in this order.
+4. **Per-role clamping.** Each desired count is clamped to `[minReplicas, maxReplicas]` of the corresponding role.
+5. **Ratio coordination.** If `ratioRange` is configured, the controller adjusts the pair to satisfy `minRatio ≤ P/D ≤ maxRatio` using the rule in "Conflict Resolution and Coordination Semantics" below.
+6. **Atomic patch.** Prefill and decode `replicas` are updated in a single ModelServing patch to avoid intermediate states that violate the ratio.
+
+#### Conflict Resolution and Coordination Semantics
+
+Because prefill and decode evaluate metrics independently, their per-role desired counts may diverge — e.g., prefill signals scale-up while decode signals scale-down. When the resulting pair `(P*, D*)` falls outside `ratioRange`, the controller resolves the conflict with a single deterministic rule.
+
+**v1 rule — ratio enforcement is up-only.**
+
+Let `(P*, D*)` be the per-role clamped desired counts produced by phases 1–4. The controller chooses `(P', D')` as the point that:
+
+- lies in the feasible region (`P' ∈ [Pmin, Pmax]`, `D' ∈ [Dmin, Dmax]`, `minRatio ≤ P'/D' ≤ maxRatio`),
+- satisfies `P' ≥ P*` **and** `D' ≥ D*` (ratio enforcement may only scale up),
+- minimizes `(P' - P*) + (D' - D*)`.
+
+Ratio enforcement therefore never forces a role to scale down. When the standalone-desired pair violates `ratioRange`, the controller grows the lagging role rather than shrinking the leading one. This preserves the property that the chosen replica count for each role is always greater than or equal to its standalone decision — consistent with the broader Kubernetes autoscaling principle of preferring temporary over-provisioning to under-provisioning.
+
+**Infeasibility.** If the lagging role cannot grow without exceeding its `maxReplicas`, the controller does not patch. It holds at current replicas, sets `RatioInfeasible=True` on the status, and emits a `Warning` event. The controller does not breach `maxReplicas` to satisfy `ratioRange`; `maxReplicas` is treated as a hard capacity ceiling.
+
+**Metric-failure policy.** If either role's metrics cannot be collected, the controller freezes both roles and surfaces `ScalingActive=False` with reason `<Role>MetricsUnavailable`. Skipping ratio enforcement on partial data is intentionally not supported in v1.
+
+**Determinism guarantees.** Given a fixed `(spec, ModelServing state, metric samples, recommendation history)` the output `(P', D')` is uniquely defined. The chosen pair is monotone in metrics (higher load never produces a smaller chosen pair), and ratio enforcement never decreases either role's replica count relative to its standalone-desired.
+
+**Worked examples.**
+
+| Scenario | Current (P,D) | Standalone (P*, D*) | `ratioRange` | Result (P', D') |
+|---|---|---|---|---|
+| Both within range | (2, 8) | (4, 4) | [0.25, 1.0] | (4, 4) |
+| Decode wanted to shrink; ratio absorbs it | (2, 8) | (4, 2) | [0.25, 1.0] | (4, 4) |
+| Symmetric scale-up under-shoots ratio | (4, 4) | (6, 5) | [0.25, 1.0] | (6, 6) |
+| Infeasible — decode at `maxReplicas` | (2, 3), Dmax=3 | (4, 2) | [0.25, 1.0] | held at (2, 3), `RatioInfeasible=True` |
+
+A future revision may introduce a `ratioEnforcementPolicy` enum (e.g., `PreferUp` / `PreferDown` / `Bidirectional`) to opt into alternate strategies; v1 behavior corresponds to `PreferUp` and remains the default.
 
 #### Migration
 
@@ -473,15 +560,13 @@ driver with a hysteresis no-action zone.
 
 ### Open Questions
 
-- **Status surface.** Should `AutoscalingPolicyStatus` expose `currentRatio`
-  and a `RatioWithinRange` condition for `DisaggregatedTarget`, or is this a
-  follow-up concern?
+- **Status surface.** *Resolved: see "Status" subsection.*
+- **Ratio enforcement strategy selection.** *Resolved: v1 uses the up-only rule
+  defined in "Conflict Resolution and Coordination Semantics." A
+  `ratioEnforcementPolicy` enum may be added in a future revision.*
 - **Per-role `tolerancePercent`.** Currently tolerance is policy-wide. Some
   workloads may want different deadbands for prefill vs decode.
-- **Ratio enforcement strategy selection.** Step 3 of the controller contract
-  is intentionally unspecified. Do we want the API to ever expose a hint
-  (e.g., "prefer scaling up" vs "prefer scaling down" when the ratio drifts),
-  or keep that strictly controller-side?
-- **Defaulting `ratioRange`.** Should omitting `ratioRange` be the literal
-  "no coordination" semantics, or should we ship an opinionated default
-  (e.g., `0.1`–`1.0`) once we have production data?
+- **Defaulting `ratioRange`.** Current behavior is "omitted = no coordination."
+  A small opinionated default (e.g., `0.1`–`1.0`) is a candidate once
+  production data exists, but is deferred — defaults are easier to add than to
+  remove.
