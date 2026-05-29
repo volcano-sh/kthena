@@ -117,6 +117,29 @@ func TestTopNPodInfosOrdering(t *testing.T) {
 	assert.Equal(t, "pod1", result[2].Pod.Name)
 }
 
+// TestTopNPodInfosEqualScores verifies that pods with equal scores are ordered
+// deterministically by pod name, preserving cache affinity across calls.
+func TestTopNPodInfosEqualScores(t *testing.T) {
+	podA := createTestPodInfo("pod-a")
+	podB := createTestPodInfo("pod-b")
+	podC := createTestPodInfo("pod-c")
+
+	scores := map[*datastore.PodInfo]int{
+		podA: 100,
+		podB: 100,
+		podC: 100,
+	}
+
+	// Run multiple times to confirm determinism despite map iteration order.
+	for i := 0; i < 20; i++ {
+		result := TopNPodInfos(scores, 3)
+		require.Equal(t, 3, len(result))
+		assert.Equal(t, "pod-a", result[0].Pod.Name, "iteration %d", i)
+		assert.Equal(t, "pod-b", result[1].Pod.Name, "iteration %d", i)
+		assert.Equal(t, "pod-c", result[2].Pod.Name, "iteration %d", i)
+	}
+}
+
 // TestSchedulePDGroup uses table-driven tests to validate PD scheduling behavior.
 // It covers both graceful degradation (no prefill pods) and the happy path (valid prefill pod).
 func TestSchedulePDGroup(t *testing.T) {
