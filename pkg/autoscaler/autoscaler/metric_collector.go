@@ -411,19 +411,34 @@ func parsePrometheusFamilies(body string, wanted map[string][]string) (map[strin
 }
 
 // extractMetricFromFamily returns the scalar value (and histogram snapshot, when
-// applicable) for the first metric series of mf.
+// applicable) for mf. For COUNTER and GAUGE families it aggregates every metric
+// series, so samples that differ only by labels are summed rather than dropped.
 func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogram *histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
 	if len(mf.Metric) < 1 {
 		return 0, nil, false, nil
 	}
-	metric := mf.Metric[0]
 	switch mf.GetType() {
 	case io_prometheus_client.MetricType_COUNTER:
-		return metric.GetCounter().GetValue(), nil, true, nil
+		// A MetricFamily may contain multiple samples that differ only by
+		// labels (e.g. requests_total{status="success"} and
+		// requests_total{status="error"}). Sum all of them so the watched
+		// value is not undercounted.
+		var sum float64
+		for _, metric := range mf.Metric {
+			sum += metric.GetCounter().GetValue()
+		}
+		return sum, nil, true, nil
 	case io_prometheus_client.MetricType_GAUGE:
-		return metric.GetGauge().GetValue(), nil, true, nil
+		// Aggregate all label samples in the family, mirroring COUNTER.
+		var sum float64
+		for _, metric := range mf.Metric {
+			sum += metric.GetGauge().GetValue()
+		}
+		return sum, nil, true, nil
 	case io_prometheus_client.MetricType_HISTOGRAM:
-		hist := metric.GetHistogram()
+		// HISTOGRAM handling is intentionally unchanged: only the first series
+		// is used (issue #1063 is scoped to COUNTER/GAUGE).
+		hist := mf.Metric[0].GetHistogram()
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
 		if pastHistogram != nil {
