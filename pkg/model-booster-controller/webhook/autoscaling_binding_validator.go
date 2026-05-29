@@ -91,6 +91,7 @@ func (v *AutoscalingBindingValidator) validateAutoscalingBinding(asp_binding *wo
 	allErrs = append(allErrs, validateOptimizeAndScalingPolicyExistence(asp_binding)...)
 	allErrs = append(allErrs, v.validateAutoscalingPolicyExistence(ctx, asp_binding)...)
 	allErrs = append(allErrs, validateBindingTargetKind(asp_binding)...)
+	allErrs = append(allErrs, validateCoordination(asp_binding)...)
 
 	if len(allErrs) > 0 {
 		// Convert field errors to a formatted multi-line error message
@@ -161,5 +162,45 @@ func validateBindingTargetKind(asp_binding *workloadv1alpha1.AutoscalingPolicyBi
 		}
 	}
 
+	return allErrs
+}
+
+// validateCoordination checks the optional coordination block on
+// HeterogeneousTarget. Default behavior (nil / "Off") is unrestricted.
+func validateCoordination(asp_binding *workloadv1alpha1.AutoscalingPolicyBinding) field.ErrorList {
+	var allErrs field.ErrorList
+	if asp_binding.Spec.HeterogeneousTarget == nil || asp_binding.Spec.HeterogeneousTarget.Coordination == nil {
+		return allErrs
+	}
+	coordPath := field.NewPath("spec").Child("heterogeneousTarget").Child("coordination")
+	coord := asp_binding.Spec.HeterogeneousTarget.Coordination
+	switch coord.Mode {
+	case "", workloadv1alpha1.CoordinationModeOff, workloadv1alpha1.CoordinationModePreferred:
+	default:
+		allErrs = append(allErrs, field.Invalid(coordPath.Child("mode"), coord.Mode, "must be one of Off, Preferred"))
+	}
+
+	// Build the set of valid role names from existing params so we can flag typos.
+	validNames := make(map[string]struct{}, len(asp_binding.Spec.HeterogeneousTarget.Params))
+	for _, p := range asp_binding.Spec.HeterogeneousTarget.Params {
+		validNames[p.Target.TargetRef.Name] = struct{}{}
+	}
+
+	ratioPath := coordPath.Child("preferredRatio")
+	for name, r := range coord.PreferredRatio {
+		entry := ratioPath.Key(name)
+		if r.Min < 0 || r.Min > 100 {
+			allErrs = append(allErrs, field.Invalid(entry.Child("min"), r.Min, "must be between 0 and 100"))
+		}
+		if r.Max < 0 || r.Max > 100 {
+			allErrs = append(allErrs, field.Invalid(entry.Child("max"), r.Max, "must be between 0 and 100"))
+		}
+		if r.Min > r.Max {
+			allErrs = append(allErrs, field.Invalid(entry, r, "min must be <= max"))
+		}
+		if _, ok := validNames[name]; !ok {
+			allErrs = append(allErrs, field.Invalid(entry, name, "must match a heterogeneousTarget.params[].target.targetRef.name"))
+		}
+	}
 	return allErrs
 }

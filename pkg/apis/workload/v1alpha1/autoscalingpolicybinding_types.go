@@ -82,6 +82,50 @@ type HeterogeneousTarget struct {
 	// +kubebuilder:default=200
 	// +optional
 	CostExpansionRatePercent int32 `json:"costExpansionRatePercent,omitempty"`
+	// Coordination optionally enables soft prefill/decode (or other role-based)
+	// coordination when distributing replicas across params. When unset or set
+	// to "Off", behavior is exactly the existing cost-based allocation.
+	// +optional
+	Coordination *Coordination `json:"coordination,omitempty"`
+}
+
+// CoordinationMode controls whether the optimizer biases replica allocation
+// using pressure signals and a preferred ratio across params.
+// +kubebuilder:validation:Enum=Off;Preferred
+type CoordinationMode string
+
+const (
+	// CoordinationModeOff disables coordination; the optimizer keeps its
+	// existing cost-based behavior.
+	CoordinationModeOff CoordinationMode = "Off"
+	// CoordinationModePreferred enables a soft-band coordination that blends
+	// cost and pressure shares and clips into the configured ratio.
+	CoordinationModePreferred CoordinationMode = "Preferred"
+)
+
+// Coordination configures soft coordination between roles (e.g. prefill/decode)
+// when allocating replicas across HeterogeneousTarget params.
+type Coordination struct {
+	// Mode toggles coordination. Defaults to "Off".
+	// +kubebuilder:default=Off
+	// +optional
+	Mode CoordinationMode `json:"mode,omitempty"`
+
+	// PreferredRatio defines a soft per-role share band as a percentage of the
+	// total replicas, keyed by the param's target name (e.g. "prefill",
+	// "decode"). Roles without an entry are unconstrained.
+	// +optional
+	PreferredRatio map[string]RoleRange `json:"preferredRatio,omitempty"`
+}
+
+// RoleRange is an inclusive percent share band, where 0 <= Min <= Max <= 100.
+type RoleRange struct {
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	Min int32 `json:"min"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	Max int32 `json:"max"`
 }
 
 // Target defines a ModelServing deployment that can be monitored and scaled.
