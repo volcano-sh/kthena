@@ -265,7 +265,7 @@ func TopNPodInfos(m map[*datastore.PodInfo]int, n int) []*datastore.PodInfo {
 		if list[i].score != list[j].score {
 			return list[i].score > list[j].score
 		}
-		return list[i].pod.Pod.Name < list[j].pod.Pod.Name
+		return podKey(list[i].pod) < podKey(list[j].pod)
 	})
 
 	res := []*datastore.PodInfo{}
@@ -277,4 +277,13 @@ func TopNPodInfos(m map[*datastore.PodInfo]int, n int) []*datastore.PodInfo {
 	}
 
 	return res
+}
+
+// podKey returns a namespace/name string for deterministic sorting.
+// Returns empty string if the PodInfo or its Pod is nil.
+func podKey(p *datastore.PodInfo) string {
+	if p == nil || p.Pod == nil {
+		return ""
+	}
+	return p.Pod.Namespace + "/" + p.Pod.Name
 }
