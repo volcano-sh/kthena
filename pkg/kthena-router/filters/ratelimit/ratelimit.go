@@ -137,7 +137,7 @@ func (r *TokenRateLimiter) RecordOutputTokens(model string, tokenCount int) {
 }
 
 // AddOrUpdateLimiter adds or updates rate limiter for a model
-func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkingv1alpha1.RateLimit) error {
+func (r *TokenRateLimiter) AddOrUpdateLimiter(limiterKey string, ratelimit *networkingv1alpha1.RateLimit) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
@@ -161,10 +161,10 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 
 		// Create global rate limiters
 		if ratelimit.InputTokensPerUnit != nil {
-			r.inputLimiter[model] = NewGlobalRateLimiter(
+			r.inputLimiter[limiterKey] = NewGlobalRateLimiter(
 				r.redisClient,
 				"kthena:ratelimit",
-				model,
+				limiterKey,
 				"input",
 				*ratelimit.InputTokensPerUnit,
 				ratelimit.Unit,
@@ -172,10 +172,10 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
-			r.outputLimiter[model] = NewGlobalRateLimiter(
+			r.outputLimiter[limiterKey] = NewGlobalRateLimiter(
 				r.redisClient,
 				"kthena:ratelimit",
-				model,
+				limiterKey,
 				"output",
 				*ratelimit.OutputTokensPerUnit,
 				ratelimit.Unit,
@@ -186,14 +186,14 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 		duration := getTimeUnitDuration(ratelimit.Unit)
 
 		if ratelimit.InputTokensPerUnit != nil {
-			r.inputLimiter[model] = NewLocalLimiter(
+			r.inputLimiter[limiterKey] = NewLocalLimiter(
 				rate.Limit(float64(*ratelimit.InputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.InputTokensPerUnit),
 			)
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
-			r.outputLimiter[model] = NewLocalLimiter(
+			r.outputLimiter[limiterKey] = NewLocalLimiter(
 				rate.Limit(float64(*ratelimit.OutputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.OutputTokensPerUnit),
 			)
@@ -204,12 +204,12 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 }
 
 // DeleteLimiter deletes rate limiter for a model
-func (r *TokenRateLimiter) DeleteLimiter(model string) {
+func (r *TokenRateLimiter) DeleteLimiter(limiterKey string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	delete(r.inputLimiter, model)
-	delete(r.outputLimiter, model)
+	delete(r.inputLimiter, limiterKey)
+	delete(r.outputLimiter, limiterKey)
 }
 
 func getTimeUnitDuration(unit networkingv1alpha1.RateLimitUnit) time.Duration {
