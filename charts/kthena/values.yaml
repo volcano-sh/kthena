@@ -83,6 +83,11 @@ networking:
       # -- Enable Gateway API Inference Extension features.<br/>
       # Requires `gatewayAPI.enabled` to be true.
       inferenceExtension: false
+<<<<<<< HEAD
+=======
+    # The router will drain all in-flight requests before forcefully closing connections.
+    terminationGracePeriodSeconds: 330
+>>>>>>> 49cced6d (updated the gracefull shutown to see the current request count instead of terminating after 30sec)
 
 global:
   # -- Certificate Management Mode.<br/>

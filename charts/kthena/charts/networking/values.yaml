@@ -34,6 +34,11 @@ kthenaRouter:
     requests:
       cpu: 100m
       memory: 128Mi
+<<<<<<< HEAD
+=======
+  # The router will drain all in-flight requests before forcefully closing connections
+  terminationGracePeriodSeconds: 330
+>>>>>>> 49cced6d (updated the gracefull shutown to see the current request count instead of terminating after 30sec)
   # fairness configuration for request scheduling
   fairness:
     # enabled controls whether fairness scheduling is active

@@ -114,6 +114,13 @@ spec:
               {{- end }}
             initialDelaySeconds: 1
             periodSeconds: 5
+<<<<<<< HEAD
+=======
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+>>>>>>> 49cced6d (updated the gracefull shutown to see the current request count instead of terminating after 30sec)
           volumeMounts:
           - name: scheduler-config
             mountPath: /etc/config/routerConfiguration.yaml
@@ -144,3 +151,7 @@ spec:
             optional: true
         {{- end }}
       serviceAccountName: kthena-router
+<<<<<<< HEAD
+=======
+      terminationGracePeriodSeconds: 330
+>>>>>>> 49cced6d (updated the gracefull shutown to see the current request count instead of terminating after 30sec)

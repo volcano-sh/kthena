@@ -157,7 +157,11 @@ func (s *Server) startDebugServer(ctx context.Context, store datastore.Store) {
 
 	go func() {
 		<-ctx.Done()
+<<<<<<< HEAD
 		// graceful shutdown
+=======
+		// graceful shutdown with timeout as it does not handle real traffic
+>>>>>>> 49cced6d (updated the gracefull shutown to see the current request count instead of terminating after 30sec)
 		klog.Info("Shutting down debug HTTP server ...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 		defer cancel()
@@ -200,8 +204,14 @@ type listenerConfig struct {
 	tlsKeyFile    string
 	tlsMissingMsg string
 	// Default-server mode: health, metrics, /v1.
+<<<<<<< HEAD
 	defaultRouter *router.Router
 	readyCheck    func() bool
+=======
+	defaultRouter  *router.Router
+	readyCheck     func() bool
+	activeRequests func() int64
+>>>>>>> 49cced6d (updated the gracefull shutown to see the current request count instead of terminating after 30sec)
 	// Gateway mode (non-nil => use gateway branch).
 	gateway          *listenerGatewayConfig
 	startLog         string
