@@ -261,8 +261,11 @@ func TopNPodInfos(m map[*datastore.PodInfo]int, n int) []*datastore.PodInfo {
 		list = append(list, podInfoWithValue{pod: k, score: v})
 	}
 
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].score > list[j].score
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].score != list[j].score {
+			return list[i].score > list[j].score
+		}
+		return list[i].pod.Pod.Name < list[j].pod.Pod.Name
 	})
 
 	res := []*datastore.PodInfo{}
