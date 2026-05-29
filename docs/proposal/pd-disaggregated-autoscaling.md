@@ -18,7 +18,7 @@ creation-date: 2026-05-20
 This proposal redesigns the autoscaling API with two goals:
 
 1. **Merge `AutoscalingPolicyBinding` into `AutoscalingPolicy`** — today users must create two resources (policy + binding) and cross-reference them. Merging eliminates the indirection, avoids duplicating metric definitions across objects, and gives users a single resource that fully describes "what to scale, on what signal, and how."
-2. **Add first-class `DisaggregatedTarget`** — replace the generic `SubTarget` mechanism with a purpose-built structure for coordinated Prefill/Decode scaling, including independent per-role metrics, replica bounds, and a P/D ratio range constraint.
+2. **Add first-class `DisaggregatedTarget`** — replace the generic `SubTarget` mechanism with a purpose-built structure for coordinated Prefill/Decode scaling, including independent per-role metric sources, replica bounds, and a P/D ratio range constraint.
 
 The `AutoscalingPolicyBinding` CRD and the `SubTarget` type are removed.
 
@@ -54,7 +54,7 @@ Scaling these two stages independently is essential for cost-efficient serving. 
 - Provide a single `AutoscalingPolicy` resource that drives coordinated P/D scaling for one ModelServing.
 - Allow independent `minReplicas` / `maxReplicas` per role to set per-stage capacity boundaries.
 - Introduce a `ratioRange` constraint so the controller can enforce a healthy P/D ratio.
-- Support per-role metrics and metric endpoints (prefill and decode may scale on different signals and expose metrics on different ports/paths).
+- Support per-role metric sources aligned with the [Prometheus metric source proposal](./autoscaling-prometheus-metric-source.md): each role declares its own `metricSources` map (Pod or Prometheus per key), letting prefill and decode scale on different signals fetched from different backends without duplicating threshold definitions.
 - Remove the `AutoscalingPolicyBinding` CRD and the generic `SubTarget` type.
 
 #### Non-Goals
@@ -74,9 +74,9 @@ As an ML platform operator, I want to define the complete autoscaling configurat
 
 As an ML platform operator, I deploy a vLLM disaggregated model with prefill and decode roles. I want the autoscaler to scale prefill replicas between 1–8 and decode replicas between 2–16, while always maintaining a P:D ratio between 1:1 and 1:4. This means if I have 2 prefill replicas, the decode replicas must be between 2 and 8.
 
-##### Story 3: Per-role metrics and endpoints
+##### Story 3: Per-role metric sources
 
-As a platform engineer, my prefill pods should scale based on `num_requests_waiting` (targeting 5) scraped on port 8100, while decode pods should scale based on `gpu_kv_cache_usage_percent` (targeting 80%) on port 9100. I need to configure both the scaling metrics and scraping endpoints for each role independently, all in one place.
+As a platform engineer, my prefill pods should scale on `num_requests_waiting` (targeting 5), scraped directly from prefill pods, while decode pods should scale on `gpu_kv_cache_usage_percent` (targeting 80%), fetched from an external Prometheus server that aggregates DCGM data. The policy declares both algorithm keys and their thresholds; each role's `metricSources` declares how its values are fetched.
 
 ##### Story 4: Migration from Policy + Binding
 
@@ -86,6 +86,7 @@ As an existing user with an `AutoscalingPolicy` and one or more `AutoscalingPoli
 
 | Risk | Mitigation |
 |------|------------|
+| Divergence from the Prometheus metric source proposal | This proposal adopts the `MetricSources` model from [`autoscaling-prometheus-metric-source.md`](./autoscaling-prometheus-metric-source.md) verbatim: `MetricEndpoint` is removed, and each role uses `metricSources map[string]MetricSource`. No conflicting source concepts are introduced. |
 | Breaking change: removes `AutoscalingPolicyBinding` CRD | Both CRDs are alpha-level. Provide a migration guide and conversion tooling. The merged API is strictly simpler. |
 | Breaking change for users currently using `SubTarget` | `SubTarget` was alpha-level and only used for P/D roles — the replacement `DisaggregatedTarget` is strictly more capable. |
 | Loss of policy reuse across bindings | In practice policies are rarely shared. If reuse is needed, users can use templating tools (Helm, Kustomize). The UX win of a single resource outweighs the theoretical reuse loss. |
@@ -102,9 +103,10 @@ As an existing user with an `AutoscalingPolicy` and one or more `AutoscalingPoli
 |--------|-------------|
 | Delete `AutoscalingPolicyBinding` CRD | All target/binding fields move into `AutoscalingPolicy`. |
 | Delete `SubTarget` type | Replaced by `DisaggregatedTarget`. |
-| Expand `AutoscalingPolicySpec` | Add target fields (`homogeneousTarget`, `heterogeneousTarget`, `disaggregatedTarget`) directly. Metrics become the default; per-role metrics can override them. |
+| Expand `AutoscalingPolicySpec` | Add target fields (`homogeneousTarget`, `heterogeneousTarget`, `disaggregatedTarget`) directly. `spec.metrics[]` remains the single algorithm-key list for the policy. |
 | Add `DisaggregatedTarget` | New first-class P/D scaling type with `Prefill`, `Decode`, and `RatioRange`. |
-| Simplify `Target` | Remove `SubTarget` field. |
+| Simplify `Target` | Remove `SubTarget` field. Adopt `MetricSources` from the Prometheus metric source proposal in place of `MetricEndpoint`. |
+| `RoleScalingParam` adopts `MetricSources` | Per-role metric sources use the same `map[string]MetricSource` shape as `Target.MetricSources`. No per-role metric or threshold fields. |
 
 ##### 1. Merged `AutoscalingPolicy`
 
@@ -112,9 +114,10 @@ As an existing user with an `AutoscalingPolicy` and one or more `AutoscalingPoli
 // AutoscalingPolicySpec defines the desired state of AutoscalingPolicy.
 // +kubebuilder:validation:XValidation:rule="[has(self.heterogeneousTarget), has(self.homogeneousTarget), has(self.disaggregatedTarget)].filter(x, x).size() == 1",message="Exactly one of heterogeneousTarget, homogeneousTarget, or disaggregatedTarget must be set."
 type AutoscalingPolicySpec struct {
-	// Metrics defines the default list of metrics used to evaluate scaling decisions.
-	// For HomogeneousTarget and HeterogeneousTarget these are the metrics used directly.
-	// For DisaggregatedTarget these serve as the fallback when a role does not specify its own metrics.
+	// Metrics is the single list of algorithm keys and thresholds for this policy.
+	// For HomogeneousTarget and HeterogeneousTarget, the target's MetricSources
+	// declares how each key is fetched. For DisaggregatedTarget, each role's
+	// MetricSources picks the subset of keys that role scales on.
 	// +kubebuilder:validation:MinItems=1
 	Metrics []AutoscalingPolicyMetric `json:"metrics"`
 
@@ -151,16 +154,19 @@ type AutoscalingPolicySpec struct {
 
 ##### 2. Remove `SubTarget` and simplify `Target`
 
-Delete the `SubTarget` struct. `Target` is simplified to:
+Delete the `SubTarget` struct. `Target` is reshaped per the [Prometheus metric source proposal](./autoscaling-prometheus-metric-source.md): `MetricEndpoint` is removed and replaced by a `MetricSources` map.
 
 ```go
 // Target defines a ModelServing deployment that can be monitored and scaled.
 type Target struct {
 	// TargetRef references the target object to be monitored and scaled.
 	TargetRef corev1.ObjectReference `json:"targetRef"`
-	// MetricEndpoint defines the configuration for scraping metrics from the target pods.
+	// MetricSources declares how to fetch each metric for this target.
+	// Keys must match AutoscalingPolicy.spec.metrics[].name.
+	// See the Prometheus metric source proposal for the MetricSource union
+	// (Pod | Prometheus).
 	// +optional
-	MetricEndpoint MetricEndpoint `json:"metricEndpoint,omitempty"`
+	MetricSources map[string]MetricSource `json:"metricSources,omitempty"`
 }
 ```
 
@@ -218,18 +224,21 @@ type RoleScalingParam struct {
 	// +kubebuilder:validation:Maximum=1000000
 	MaxReplicas int32 `json:"maxReplicas"`
 
-	// Metrics overrides the policy-level metrics for this specific role.
-	// This allows prefill and decode roles to scale on different signals
-	// (e.g., prefill on queue depth, decode on KV cache utilization).
-	// If not set, the top-level spec.metrics are used.
+	// MetricSources declares how to fetch each metric for this role.
+	// Keys must match entries in AutoscalingPolicy.spec.metrics[].name.
+	// Only metrics whose key appears here are evaluated for this role.
+	//
+	// Prefill and decode roles typically declare disjoint or partially
+	// overlapping source maps — e.g., prefill scales on a queue-depth
+	// signal scraped from prefill pods, decode scales on a KV-cache
+	// signal fetched from Prometheus. A role with no entries does not
+	// scale on metrics and stays at MinReplicas.
+	//
+	// See the Prometheus metric source proposal for the MetricSource
+	// union (Pod | Prometheus).
+	//
 	// +optional
-	// +kubebuilder:validation:MinItems=1
-	Metrics []AutoscalingPolicyMetric `json:"metrics,omitempty"`
-
-	// MetricEndpoint defines the configuration for scraping metrics from
-	// pods of this role. If not specified, the controller uses defaults.
-	// +optional
-	MetricEndpoint *MetricEndpoint `json:"metricEndpoint,omitempty"`
+	MetricSources map[string]MetricSource `json:"metricSources,omitempty"`
 }
 
 // PDRatioRange defines the acceptable range for the prefill-to-decode ratio.
@@ -267,6 +276,8 @@ type HomogeneousTarget struct {
 
 The entire `AutoscalingPolicyBinding`, `AutoscalingPolicyBindingSpec`, `AutoscalingPolicyBindingStatus`, and `AutoscalingPolicyBindingList` types are removed. The `policyRef` indirection is eliminated.
 
+**Coordination with the Prometheus metric source proposal.** PR 931 places the `MetricSource`, `PodMetricSource`, `PrometheusMetricSource`, `PrometheusAuth`, and `PrometheusTLSConfig` types in `autoscalingpolicybinding_types.go`, and surfaces the `MetricsFetchReady` condition on `AutoscalingPolicyBindingStatus`. When this proposal removes `AutoscalingPolicyBinding`, those types move to `autoscalingpolicy_types.go` and the condition moves to `AutoscalingPolicyStatus`. This is a pure file relocation driven by the binding/policy merge; no semantic change to PR 931's design.
+
 #### Full YAML Examples
 
 ##### Disaggregated P/D scaling (single resource)
@@ -279,10 +290,13 @@ metadata:
   namespace: default
 spec:
   tolerancePercent: 10
-  # Default metrics — used as fallback when a role doesn't specify its own
+  # Policy declares every algorithm key and its threshold.
+  # Each role's metricSources picks the subset of keys it scales on.
   metrics:
-    - metricName: pending_requests
+    - name: num_requests_waiting
       targetValue: "5"
+    - name: gpu_kv_cache_usage_percent
+      targetValue: "80"
   behavior:
     scaleUp:
       stablePolicy:
@@ -306,22 +320,21 @@ spec:
       roleName: prefill
       minReplicas: 1
       maxReplicas: 8
-      metrics:                           # override default metrics for prefill
-        - metricName: num_requests_waiting
-          targetValue: "5"
-      metricEndpoint:
-        uri: /metrics
-        port: 8100
+      metricSources:
+        num_requests_waiting:
+          type: Pod
+          pod:
+            name: vllm:num_requests_waiting
     decode:
       roleName: decode
       minReplicas: 2
       maxReplicas: 16
-      metrics:                           # override default metrics for decode
-        - metricName: gpu_kv_cache_usage_percent
-          targetValue: "80"
-      metricEndpoint:
-        uri: /metrics
-        port: 9100
+      metricSources:
+        gpu_kv_cache_usage_percent:
+          type: Prometheus
+          prometheus:
+            serverURL: "http://prometheus.monitoring.svc.cluster.local:9090"
+            query: 'avg(DCGM_FI_DEV_FB_USED{serving="llm-vllm-disagg",role="decode"}) / avg(DCGM_FI_DEV_FB_TOTAL{serving="llm-vllm-disagg",role="decode"}) * 100'
     ratioRange:
       minRatio: "0.25"                   # P:D >= 1:4
       maxRatio: "1"                       # P:D <= 1:1
@@ -339,7 +352,7 @@ metadata:
 spec:
   tolerancePercent: 10
   metrics:
-    - metricName: pending_requests
+    - name: pending_requests
       targetValue: "5"
   behavior: { ... }
 ---
@@ -369,7 +382,7 @@ metadata:
 spec:
   tolerancePercent: 10
   metrics:
-    - metricName: pending_requests
+    - name: pending_requests
       targetValue: "5"
   behavior: { ... }
   homogeneousTarget:
@@ -377,6 +390,11 @@ spec:
       targetRef:
         kind: ModelServing
         name: my-model
+      metricSources:
+        pending_requests:
+          type: Pod
+          pod:
+            name: pending_requests   # optional; defaults to the policy key
     minReplicas: 1
     maxReplicas: 10
 ```
@@ -412,6 +430,9 @@ status:
 | `minReplicas <= maxReplicas` for both prefill and decode. | `RoleScalingParam` |
 | If `ratioRange` is set, `minRatio <= maxRatio`. | `PDRatioRange` (CEL) |
 | If `ratioRange` is set, the ratio range must be achievable: `prefill.minReplicas / decode.maxReplicas >= minRatio` **and** `prefill.maxReplicas / decode.minReplicas <= maxRatio` (when `decode.minReplicas > 0`). | `DisaggregatedTarget` |
+| For every key `k` in `prefill.metricSources` or `decode.metricSources`, an entry with `name: k` must exist in `spec.metrics`. | `DisaggregatedTarget` |
+| At least one of `prefill.metricSources` or `decode.metricSources` must be non-empty (otherwise neither role scales on metrics). | `DisaggregatedTarget` |
+| The union of `prefill.metricSources` keys and `decode.metricSources` keys must equal the set of `spec.metrics[].name`. Every declared policy key is sourced by at least one role; no orphan keys. (PD-shape of the Prometheus metric source proposal's "each policy metric key must have a corresponding source entry" rule.) | `DisaggregatedTarget` |
 
 #### Status
 
@@ -435,7 +456,8 @@ The following standard conditions are reported on `AutoscalingPolicyStatus`:
 
 | Condition | Meaning |
 |---|---|
-| `ScalingActive` | `True` when both roles produced a valid recommendation this cycle. |
+| `MetricsFetchReady` | Per the [Prometheus metric source proposal](./autoscaling-prometheus-metric-source.md). `False` when any role's metric fetch failed; `Reason`/`Message` identify the failing role and metric key (e.g. `Reason=PrometheusQueryFailed`, `Message="decode/gpu_kv_cache_usage_percent"`). |
+| `ScalingActive` | `True` when both roles produced a valid recommendation this cycle. Implies `MetricsFetchReady=True`. |
 | `AbleToScale` | `True` when the controller can patch the referenced ModelServing. |
 | `RatioWithinRange` | `True` when `currentRatio ∈ ratioRange`. Present only when `ratioRange` is set. |
 | `RatioInfeasible` | `True` when ratio enforcement has no solution under current `min/maxReplicas` (see "Conflict Resolution and Coordination Semantics"). |
@@ -446,8 +468,8 @@ The following standard conditions are reported on `AutoscalingPolicyStatus`:
 
 The controller honors the following phase ordering on each reconcile of an `AutoscalingPolicy` with a `DisaggregatedTarget`. Phases 1–5 are applied independently per role; phase 6 is the only coordination phase.
 
-1. **Metric collection (per role).** If a role's metrics are unavailable, the controller freezes both roles at their current replica counts and sets `ScalingActive=False`.
-2. **Independent desired computation.** Each role's desired replicas are computed from its own metrics (`spec.disaggregatedTarget.{prefill,decode}.metrics`, falling back to `spec.metrics`).
+1. **Metric collection (per role).** If a role's metrics are unavailable, the controller freezes both roles at their current replica counts and sets `MetricsFetchReady=False` (and therefore `ScalingActive=False`).
+2. **Independent desired computation.** Each role's desired replicas are computed using the metrics named in `spec.metrics[]` for which the role declares a source in its `metricSources` map. Values are fetched per the source type (`Pod` or `Prometheus`) defined in the Prometheus metric source proposal. A role with no `metricSources` entries does not scale on metrics and stays at `minReplicas`.
 3. **Tolerance, stabilization, and behavior (per role).** `tolerancePercent`, stabilization windows, and `behavior` rate-limits are applied independently per role, in this order.
 4. **Per-role clamping.** Each desired count is clamped to `[minReplicas, maxReplicas]` of the corresponding role.
 5. **Ratio coordination.** If `ratioRange` is configured, the controller adjusts the pair to satisfy `minRatio ≤ P/D ≤ maxRatio` using the rule in "Conflict Resolution and Coordination Semantics" below.
@@ -499,8 +521,8 @@ A future revision may introduce a `ratioEnforcementPolicy` enum (e.g., `PreferUp
 | Before (policy + two bindings with SubTarget) | After (single policy) |
 |---|---|
 | Policy: metrics + behavior | `spec.metrics` + `spec.behavior` (same policy) |
-| Binding A: `homogeneousTarget.target.subTargets: {kind: Role, name: prefill}` | `spec.disaggregatedTarget.prefill.roleName: prefill` |
-| Binding B: `homogeneousTarget.target.subTargets: {kind: Role, name: decode}` | `spec.disaggregatedTarget.decode.roleName: decode` |
+| Binding A: `homogeneousTarget.target.subTargets: {kind: Role, name: prefill}` + `metricEndpoint` | `spec.disaggregatedTarget.prefill.roleName: prefill` + `prefill.metricSources` (Pod or Prometheus, per the Prometheus metric source proposal) |
+| Binding B: `homogeneousTarget.target.subTargets: {kind: Role, name: decode}` + `metricEndpoint` | `spec.disaggregatedTarget.decode.roleName: decode` + `decode.metricSources` |
 | 3 resources, no ratio coordination | 1 resource, `ratioRange` provides coordination |
 
 ### Alternatives
@@ -564,9 +586,14 @@ driver with a hysteresis no-action zone.
 - **Ratio enforcement strategy selection.** *Resolved: v1 uses the up-only rule
   defined in "Conflict Resolution and Coordination Semantics." A
   `ratioEnforcementPolicy` enum may be added in a future revision.*
-- **Per-role `tolerancePercent`.** Currently tolerance is policy-wide. Some
-  workloads may want different deadbands for prefill vs decode.
+- ~~Per-role `tolerancePercent`~~ — *resolved: per-role tuning is expressed via
+  distinct policy-level metric keys with distinct thresholds, consistent with
+  the "policy = what, target = how" model.*
 - **Defaulting `ratioRange`.** Current behavior is "omitted = no coordination."
   A small opinionated default (e.g., `0.1`–`1.0`) is a candidate once
   production data exists, but is deferred — defaults are easier to add than to
   remove.
+- **Empty `metricSources` on a role.** Current text says the role stays at
+  `minReplicas` if no sources are declared. Should this be an admission error
+  instead, or is a no-op scaling role a useful state (e.g., during incremental
+  rollouts where decode is temporarily pinned)?
