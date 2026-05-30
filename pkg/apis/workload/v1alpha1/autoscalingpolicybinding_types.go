@@ -63,7 +63,7 @@ type HomogeneousTarget struct {
 	// Target defines the object to be monitored and scaled.
 	Target Target `json:"target,omitempty"`
 	// MinReplicas defines the minimum number of replicas to maintain.
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000000
 	MinReplicas int32 `json:"minReplicas"`
 	// MaxReplicas defines the maximum number of replicas allowed.

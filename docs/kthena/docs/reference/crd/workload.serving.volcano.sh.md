@@ -311,7 +311,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `target` _[Target](#target)_ | Target defines the object to be monitored and scaled. |  |  |
-| `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas to maintain. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
+| `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas to maintain. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 | `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas allowed. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 
 
