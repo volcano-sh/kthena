@@ -306,39 +306,24 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 	go func() {
 		<-ctx.Done()
 		klog.Info(cfg.shutdownStartLog)
-
-		// Graceful drain: close listeners immediately and wait for in-flight
-		// requests to complete. We initiate Shutdown first so the server stops
-		// accepting new connections (including Keep-Alive) and then monitor
-		// progress concurrently.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainMaxWaitTime)
 		defer cancel()
 
-		shutdownDone := make(chan error, 1)
-		go func() {
-			err := srv.Shutdown(shutdownCtx)
-			shutdownDone <- err
-		}()
-
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-
-	drainLoop:
-		for {
-			select {
-			case err := <-shutdownDone:
-				if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-					cfg.logShutdownErr(err)
-				}
-				break drainLoop
-			case <-ticker.C:
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				remaining := cfg.activeRequests()
+				klog.Warningf("Drain timeout exceeded after %.0fs: %d requests still inflight, force-closing",
+					drainMaxWaitTime.Seconds(), remaining)
+				srv.Close()
+			} else {
+				cfg.logShutdownErr(err)
 			}
 		}
+
 		if cfg.shutdownDoneLog != "" {
 			klog.Info(cfg.shutdownDoneLog)
 		}
 	}()
-
 	return srv
 }
 
