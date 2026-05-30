@@ -114,10 +114,6 @@ spec:
               {{- end }}
             initialDelaySeconds: 1
             periodSeconds: 5
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sleep", "5"]
           volumeMounts:
           - name: scheduler-config
             mountPath: /etc/config/routerConfiguration.yaml
