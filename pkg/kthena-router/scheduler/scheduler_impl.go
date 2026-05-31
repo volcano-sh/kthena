@@ -163,14 +163,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		validPairs := 0
 
 		for i, decodePod := range ctx.DecodePods {
+			decodePodName := decodePod.GetPodNamespacedName()
+			if decodePodName.Name == "" {
+				continue
+			}
 			// Get prefill pods for the same PD group as the decode pod (O(1) lookup)
-			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName,
-				types.NamespacedName{
-					Namespace: decodePod.Pod.Namespace,
-					Name:      decodePod.Pod.Name,
-				})
+			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName, decodePodName)
 			if err != nil || len(selectedPods) == 0 {
-				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", klog.KObj(decodePod.Pod), "error", err)
+				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", decodePodName, "error", err)
 				continue
 			}
 
@@ -179,7 +179,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			bestPrefillPod := TopNPodInfos(scores, 1)
 			if len(bestPrefillPod) == 0 {
 				klog.V(4).InfoS("no valid prefill pods after scoring, skipping",
-					"decode instance", klog.KObj(decodePod.Pod))
+					"decode instance", decodePodName)
 				continue
 			}
 			prefillPods[i] = bestPrefillPod[0]
@@ -201,10 +201,11 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 
 func findStickyPod(pods []*datastore.PodInfo, stickyPod types.NamespacedName) *datastore.PodInfo {
 	for _, pod := range pods {
-		if pod == nil || pod.Pod == nil {
+		if pod == nil {
 			continue
 		}
-		if pod.Pod.Namespace == stickyPod.Namespace && pod.Pod.Name == stickyPod.Name {
+		podName := pod.GetPodNamespacedName()
+		if podName == stickyPod {
 			return pod
 		}
 	}
@@ -246,8 +247,8 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 
 		klog.V(4).Infof("ScorePlugin: %s", scorePlugin.plugin.Name())
 		for k, v := range scores {
-			if k.Pod != nil {
-				klog.V(4).Infof("Pod: %s/%s, Score: %d", k.Pod.Namespace, k.Pod.Name, v)
+			if podName := k.GetPodNamespacedName(); podName.Name != "" {
+				klog.V(4).Infof("Pod: %s/%s, Score: %d", podName.Namespace, podName.Name, v)
 			}
 			if _, ok := res[k]; !ok {
 				res[k] = v * scorePlugin.weight
@@ -260,8 +261,8 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 	if klog.V(4).Enabled() {
 		klog.Info("Final Pod Scores:")
 		for k, v := range res {
-			if k.Pod != nil {
-				klog.Infof("  Pod: %s/%s, Final Score: %d", k.Pod.Namespace, k.Pod.Name, v)
+			if podName := k.GetPodNamespacedName(); podName.Name != "" {
+				klog.Infof("  Pod: %s/%s, Final Score: %d", podName.Namespace, podName.Name, v)
 			}
 		}
 	}

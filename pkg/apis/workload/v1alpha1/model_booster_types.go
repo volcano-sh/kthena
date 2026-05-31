@@ -145,6 +145,10 @@ type ModelWorker struct {
 	// Affinity specifies the affinity rules for scheduling the worker pods.
 	// +optional
 	Affinity corev1.Affinity `json:"affinity,omitempty"`
+	// Tolerations specifies the tolerations for scheduling the worker pods.
+	// +optional
+	// +listType=atomic
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 	// Config contains worker-specific configuration in JSON format.
 	// You can find vLLM config here https://docs.vllm.ai/en/stable/configuration/engine_args.html
 	// +optional

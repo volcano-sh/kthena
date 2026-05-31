@@ -1,0 +1,29 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicy
+metadata:
+  name: podinfo-prom-policy
+  namespace: autoscale-demo
+spec:
+  tolerancePercent: 10
+  metrics:
+    - name: podinfo_rps
+      targetValue: "0.5"
+  behavior:
+    scaleDown:
+      period: 15s
+      stabilizationWindow: 30s
+      instances: 1
+      percent: 100
+      selectPolicy: Or
+    scaleUp:
+      stablePolicy:
+        period: 15s
+        stabilizationWindow: 0s
+        instances: 2
+        percent: 100
+        selectPolicy: Or
+      panicPolicy:
+        period: 5s
+        percent: 200
+        panicThresholdPercent: 200
+        panicModeHold: 30s

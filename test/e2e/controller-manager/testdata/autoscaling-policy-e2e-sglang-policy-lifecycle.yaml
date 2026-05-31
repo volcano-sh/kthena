@@ -9,7 +9,7 @@ metadata:
 spec:
   tolerancePercent: 50
   metrics:
-    - metricName: sglang:token_usage
+    - name: sglang:token_usage
       targetValue: "1000000000000000"
   behavior:
     scaleDown:

@@ -27,6 +27,7 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/testutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -73,8 +74,10 @@ func TestIntToByteArray(t *testing.T) {
 // Test TokenizerManager
 func TestTokenizerManager(t *testing.T) {
 	config := TokenizerManagerConfig{
-		EnableVLLMRemote: true,
-		EndpointTemplate: "http://%s:8000",
+		EndpointTemplates: map[string]string{
+			EngineVLLM:   "http://%s:8000",
+			EngineSGLang: "http://%s:30000",
+		},
 	}
 
 	manager := NewTokenizerManager(config)
@@ -120,6 +123,26 @@ func TestTokenizerManager(t *testing.T) {
 		// Note: The actual implementation may return a tokenizer even without annotation
 		// This test verifies the behavior doesn't panic
 		t.Logf("GetTokenizer returned: %v", result)
+	})
+
+	// Test vLLM engine routing
+	t.Run("vLLM engine", func(t *testing.T) {
+		pod := testutil.PodInfoWithEngine("pod-vllm", "default", "10.0.0.10", EngineVLLM)
+
+		tok := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod})
+		if tok == nil {
+			t.Fatal("Expected non-nil tokenizer for vLLM pod")
+		}
+	})
+
+	// Test SGLang engine routing
+	t.Run("SGLang engine", func(t *testing.T) {
+		pod := testutil.PodInfoWithEngine("pod-sglang", "default", "10.0.0.11", EngineSGLang)
+
+		tok := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod})
+		if tok == nil {
+			t.Fatal("Expected non-nil tokenizer for SGLang pod")
+		}
 	})
 }
 
@@ -243,6 +266,225 @@ func TestVLLMAdapter(t *testing.T) {
 	})
 }
 
+// Test SGLang adapter
+func TestSGLangAdapter(t *testing.T) {
+	adapter := newSGLangAdapter("test-model")
+
+	if adapter.GetTokenizePath() != "/tokenize" {
+		t.Errorf("Expected tokenize path '/tokenize', got %q", adapter.GetTokenizePath())
+	}
+
+	t.Run("Completion request", func(t *testing.T) {
+		input := TokenizeInput{
+			Type:             CompletionInput,
+			Text:             "Hello world",
+			AddSpecialTokens: true,
+		}
+
+		result, err := adapter.PrepareTokenizeRequest(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		req, ok := result.(*sglangTokenizeCompletionRequest)
+		if !ok {
+			t.Fatalf("Expected *sglangTokenizeCompletionRequest, got %T", result)
+		}
+		if req.Model != "test-model" {
+			t.Errorf("Expected model 'test-model', got %s", req.Model)
+		}
+		if req.Prompt != "Hello world" {
+			t.Errorf("Expected prompt 'Hello world', got %s", req.Prompt)
+		}
+		if req.AddSpecialTokens == nil || *req.AddSpecialTokens != true {
+			t.Errorf("Expected AddSpecialTokens=true, got %v", req.AddSpecialTokens)
+		}
+
+		// SGLang must not receive vLLM-only fields. Marshal and confirm.
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("Failed to marshal: %v", err)
+		}
+		var generic map[string]interface{}
+		if err := json.Unmarshal(data, &generic); err != nil {
+			t.Fatalf("Failed to unmarshal: %v", err)
+		}
+		for _, banned := range []string{"return_token_strs", "add_generation_prompt"} {
+			if _, present := generic[banned]; present {
+				t.Errorf("SGLang completion request must not include %q", banned)
+			}
+		}
+	})
+
+	t.Run("Chat request", func(t *testing.T) {
+		input := TokenizeInput{
+			Type: ChatInput,
+			Messages: []common.Message{
+				{Role: "user", Content: "Hello"},
+			},
+			AddSpecialTokens:    false,
+			AddGenerationPrompt: true, // ignored for SGLang
+			ReturnTokenStrings:  true, // ignored for SGLang
+		}
+
+		result, err := adapter.PrepareTokenizeRequest(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		req, ok := result.(*sglangTokenizeChatRequest)
+		if !ok {
+			t.Fatalf("Expected *sglangTokenizeChatRequest, got %T", result)
+		}
+		if req.Model != "test-model" {
+			t.Errorf("Expected model 'test-model', got %s", req.Model)
+		}
+		if len(req.Messages) != 1 {
+			t.Errorf("Expected 1 message, got %d", len(req.Messages))
+		}
+		if req.AddSpecialTokens == nil || *req.AddSpecialTokens != false {
+			t.Errorf("Expected AddSpecialTokens=false, got %v", req.AddSpecialTokens)
+		}
+
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("Failed to marshal: %v", err)
+		}
+		var generic map[string]interface{}
+		if err := json.Unmarshal(data, &generic); err != nil {
+			t.Fatalf("Failed to unmarshal: %v", err)
+		}
+		for _, banned := range []string{"return_token_strs", "add_generation_prompt"} {
+			if _, present := generic[banned]; present {
+				t.Errorf("SGLang chat request must not include %q", banned)
+			}
+		}
+	})
+
+	t.Run("Parse response", func(t *testing.T) {
+		jsonData := `{"count":3,"max_model_len":2048,"tokens":[1,2,3]}`
+
+		result, err := adapter.ParseTokenizeResponse([]byte(jsonData))
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if result.Count != 3 {
+			t.Errorf("Expected count 3, got %d", result.Count)
+		}
+		if result.MaxModelLen != 2048 {
+			t.Errorf("Expected max_model_len 2048, got %d", result.MaxModelLen)
+		}
+		if len(result.Tokens) != 3 {
+			t.Errorf("Expected 3 tokens, got %d", len(result.Tokens))
+		}
+		if len(result.TokenStrings) != 0 {
+			t.Errorf("Expected no token strings for SGLang, got %v", result.TokenStrings)
+		}
+	})
+}
+
+// Test normalizeEngine mapping used by the TokenizerManager to route pods
+// by their inference engine.
+func TestNormalizeEngine(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+		wantErr  bool
+	}{
+		{"vLLM", EngineVLLM, false},
+		{"vllm", EngineVLLM, false},
+		{"VLLM", EngineVLLM, false},
+		{"SGLang", EngineSGLang, false},
+		{"sglang", EngineSGLang, false},
+		{"SGLANG", EngineSGLang, false},
+		{"", "", true},
+		{"unknown", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := normalizeEngine(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("normalizeEngine(%q) expected error, got nil", tt.input)
+				}
+				if _, ok := err.(ErrInvalidConfig); !ok {
+					t.Fatalf("normalizeEngine(%q) expected ErrInvalidConfig, got %T: %v", tt.input, err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeEngine(%q) unexpected error: %v", tt.input, err)
+			}
+			if got != tt.expected {
+				t.Errorf("normalizeEngine(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+// Verifies that NewRemoteTokenizer dispatches to the right adapter based on
+// the Engine field of RemoteTokenizerConfig.
+func TestNewRemoteTokenizerEngineDispatch(t *testing.T) {
+	type adapterKind int
+	const (
+		wantVLLM adapterKind = iota
+		wantSGLang
+		wantError
+	)
+
+	tests := []struct {
+		name   string
+		engine string
+		want   adapterKind
+	}{
+		{name: "vllm explicit", engine: "vllm", want: wantVLLM},
+		{name: "vllm uppercase", engine: "VLLM", want: wantVLLM},
+		{name: "default (empty)", engine: "", want: wantError},
+		{name: "sglang", engine: "sglang", want: wantSGLang},
+		{name: "sglang mixed case", engine: "SGLang", want: wantSGLang},
+		{name: "unsupported", engine: "tgi", want: wantError},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tok, err := NewRemoteTokenizer(RemoteTokenizerConfig{
+				Engine:   tc.engine,
+				Endpoint: "http://localhost:1",
+				Model:    "m",
+			})
+			if tc.want == wantError {
+				if err == nil {
+					t.Fatalf("expected error for engine %q, got nil", tc.engine)
+				}
+				if _, ok := err.(ErrInvalidConfig); !ok {
+					t.Errorf("expected ErrInvalidConfig, got %T: %v", err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			impl, ok := tok.(*remoteTokenizerImpl)
+			if !ok {
+				t.Fatalf("unexpected tokenizer type %T", tok)
+			}
+
+			switch tc.want {
+			case wantVLLM:
+				if _, ok := impl.adapter.(*vllmAdapter); !ok {
+					t.Errorf("expected *vllmAdapter, got %T", impl.adapter)
+				}
+			case wantSGLang:
+				if _, ok := impl.adapter.(*sglangAdapter); !ok {
+					t.Errorf("expected *sglangAdapter, got %T", impl.adapter)
+				}
+			}
+		})
+	}
+}
+
 // Test remote tokenizer creation and basic functionality
 func TestRemoteTokenizerCreation(t *testing.T) {
 	// Test valid configuration
@@ -262,7 +504,7 @@ func TestRemoteTokenizerCreation(t *testing.T) {
 		}
 	})
 
-	// Test unsupported engine
+	// Test unsupported engine returns ErrInvalidConfig
 	t.Run("Unsupported engine", func(t *testing.T) {
 		config := RemoteTokenizerConfig{
 			Engine:   "unsupported",
@@ -270,9 +512,15 @@ func TestRemoteTokenizerCreation(t *testing.T) {
 		}
 
 		tokenizer, err := NewRemoteTokenizer(config)
-		// The actual implementation may not validate engine type at creation time
-		// Just verify it doesn't panic
-		t.Logf("NewRemoteTokenizer with unsupported engine: tokenizer=%v, err=%v", tokenizer != nil, err)
+		if err == nil {
+			t.Fatal("Expected error for unsupported engine")
+		}
+		if tokenizer != nil {
+			t.Errorf("Expected nil tokenizer on error, got %v", tokenizer)
+		}
+		if _, ok := err.(ErrInvalidConfig); !ok {
+			t.Errorf("Expected ErrInvalidConfig, got %T: %v", err, err)
+		}
 	})
 
 	// Test empty endpoint
@@ -334,6 +582,70 @@ func TestRemoteTokenizerWithMockServer(t *testing.T) {
 			t.Errorf("Expected %d bytes, got %d", expectedLen, len(result))
 		}
 	})
+}
+
+// Test remote tokenizer end-to-end against an SGLang mock server.
+func TestRemoteTokenizerSGLangMockServer(t *testing.T) {
+	var capturedPath string
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		response := map[string]interface{}{
+			"count":         3,
+			"max_model_len": 2048,
+			"tokens":        []int{1, 2, 3},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	config := RemoteTokenizerConfig{
+		Engine:           EngineSGLang,
+		Endpoint:         server.URL,
+		Model:            "test-model",
+		AddSpecialTokens: true,
+	}
+
+	tokenizer, err := NewRemoteTokenizer(config)
+	if err != nil {
+		t.Fatalf("Failed to create tokenizer: %v", err)
+	}
+
+	result, err := tokenizer.TokenizeInputText("Hello world test")
+	if err != nil {
+		t.Fatalf("TokenizeInputText failed: %v", err)
+	}
+
+	if capturedPath != "/tokenize" {
+		t.Errorf("Expected request path '/tokenize', got %q", capturedPath)
+	}
+
+	if capturedBody["prompt"] != "Hello world test" {
+		t.Errorf("Expected prompt 'Hello world test', got %v", capturedBody["prompt"])
+	}
+	if capturedBody["model"] != "test-model" {
+		t.Errorf("Expected model 'test-model', got %v", capturedBody["model"])
+	}
+	if capturedBody["add_special_tokens"] != true {
+		t.Errorf("Expected add_special_tokens=true, got %v", capturedBody["add_special_tokens"])
+	}
+	for _, banned := range []string{"return_token_strs", "add_generation_prompt"} {
+		if _, present := capturedBody[banned]; present {
+			t.Errorf("SGLang request must not include %q, got body=%v", banned, capturedBody)
+		}
+	}
+
+	expectedLen := 3 * 4
+	if len(result) != expectedLen {
+		t.Errorf("Expected %d bytes, got %d", expectedLen, len(result))
+	}
 }
 
 // Test error scenarios
@@ -550,8 +862,7 @@ func BenchmarkTokenizeInputText(b *testing.B) {
 // Test TokenizerManager.TokenizePrompt
 func TestTokenizerManagerTokenizePrompt(t *testing.T) {
 	config := TokenizerManagerConfig{
-		EnableVLLMRemote: true,
-		EndpointTemplate: "http://%s:8000",
+		EndpointTemplates: map[string]string{EngineVLLM: "http://%s:8000"},
 	}
 
 	manager := NewTokenizerManager(config)

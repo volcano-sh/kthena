@@ -131,7 +131,7 @@ func createAutoscalingPolicyWithNegativeTarget() *workload.AutoscalingPolicy {
 			TolerancePercent: 10,
 			Metrics: []workload.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("-100m"),
 				},
 			},
@@ -149,11 +149,11 @@ func createInvalidAutoscalingPolicy() *workload.AutoscalingPolicy {
 			TolerancePercent: 10,
 			Metrics: []workload.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("100m"),
 				},
 				{
-					MetricName:  "cpu", // duplicate metric name
+					Name:        "cpu", // duplicate metric name
 					TargetValue: resource.MustParse("200m"),
 				},
 			},
@@ -172,7 +172,7 @@ func createAutoscalingPolicyWithEmptyBehavior() *workload.AutoscalingPolicy {
 			TolerancePercent: 10,
 			Metrics: []workload.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("100m"),
 				},
 			},

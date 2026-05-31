@@ -830,10 +830,14 @@ func (r *Router) proxy(
 	for i := 0; i < len(ctx.BestPods); i++ {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		pod := ctx.BestPods[i]
-		if pod == nil || pod.Pod == nil {
+		if pod == nil {
 			continue
 		}
-		podName := types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}
+		podObj := pod.GetPod()
+		if podObj == nil {
+			continue
+		}
+		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
 
 		// Track this request as in-flight to the chosen pod. This is instant and
 		// feeds the scheduler immediately, avoiding the ~1 s engine-metrics lag.
@@ -842,9 +846,9 @@ func (r *Router) proxy(
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
-		accesslog.SetRequestRouting(c, modelRouteName, modelServerName, pod.Pod.Name)
-
-		err := proxyRequest(c, req, pod.Pod.Status.PodIP, port, stream, onUsage)
+		// Request dispatched to the pod.
+		accesslog.SetRequestRouting(c, modelRouteName, modelServerName, podObj.Name)
+		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, onUsage)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
@@ -876,13 +880,14 @@ func (r *Router) recordSessionStickyBinding(ctx *framework.Context, index int) {
 		return
 	}
 	pod := ctx.BestPods[index]
-	if pod == nil || pod.Pod == nil {
+	if pod == nil {
 		return
 	}
-	r.sessionStickyStore.Set(ctx.AffinityScopeKey, ctx.SessionKey, types.NamespacedName{
-		Namespace: pod.Pod.Namespace,
-		Name:      pod.Pod.Name,
-	}, ctx.SessionAffinityTTL)
+	podName := pod.GetPodNamespacedName()
+	if podName.Name == "" {
+		return
+	}
+	r.sessionStickyStore.Set(ctx.AffinityScopeKey, ctx.SessionKey, podName, ctx.SessionAffinityTTL)
 }
 
 func (r *Router) proxyModelEndpoint(
@@ -1190,17 +1195,19 @@ func (r *Router) proxyToPDDisaggregated(
 		if ctx.PrefillPods[i] == nil || ctx.DecodePods[i] == nil {
 			continue
 		}
+		prefillPod := ctx.PrefillPods[i].GetPod()
+		decodePod := ctx.DecodePods[i].GetPod()
 
 		// Build addresses for prefill and decode pods
-		prefillAddr := net.JoinHostPort(ctx.PrefillPods[i].Pod.Status.PodIP, strconv.Itoa(int(port)))
-		decodeAddr := net.JoinHostPort(ctx.DecodePods[i].Pod.Status.PodIP, strconv.Itoa(int(port)))
+		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
+		decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(port)))
 
 		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 
 		// Build on-flight hooks so the connector can update the per-pod counters
 		// at the precise point each phase starts and ends.
-		prefillPodName := types.NamespacedName{Namespace: ctx.PrefillPods[i].Pod.Namespace, Name: ctx.PrefillPods[i].Pod.Name}
-		decodePodName := types.NamespacedName{Namespace: ctx.DecodePods[i].Pod.Namespace, Name: ctx.DecodePods[i].Pod.Name}
+		prefillPodName := types.NamespacedName{Namespace: prefillPod.Namespace, Name: prefillPod.Name}
+		decodePodName := types.NamespacedName{Namespace: decodePod.Namespace, Name: decodePod.Name}
 		hooks := &connectors.OnFlightHooks{
 			IncrPrefill: func() { r.store.IncrPodOnFlightRequests(prefillPodName) },
 			DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillPodName) },
@@ -1213,7 +1220,7 @@ func (r *Router) proxyToPDDisaggregated(
 
 		if err != nil {
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",
-				ctx.PrefillPods[i].Pod.Name, ctx.DecodePods[i].Pod.Name, err)
+				prefillPod.Name, decodePod.Name, err)
 			continue
 		}
 
@@ -1231,7 +1238,7 @@ func (r *Router) proxyToPDDisaggregated(
 		r.scheduler.RunPostHooks(ctx, i)
 
 		klog.V(4).Infof("kv connector run successful for prefill pod %s, decode pod %s, output tokens: %d",
-			ctx.PrefillPods[i].Pod.Name, ctx.DecodePods[i].Pod.Name, outputTokens)
+			prefillPod.Name, decodePod.Name, outputTokens)
 
 		return nil
 	}

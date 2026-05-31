@@ -53,6 +53,10 @@ func ParseMetricsURL(url string) (map[string]*dto.MetricFamily, error) {
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch metrics from %s: HTTP %d", url, resp.StatusCode)
+	}
+
 	parser := expfmt.NewTextParser(model.UTF8Validation)
 	allMetrics, err := parser.TextToMetricFamilies(resp.Body)
 	if err != nil {

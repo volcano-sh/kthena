@@ -345,10 +345,14 @@ func extractFromSource(c *gin.Context, source v1alpha1.SessionKeySource, extract
 func IndexPodsByName(pods []*datastore.PodInfo) map[types.NamespacedName]*datastore.PodInfo {
 	index := make(map[types.NamespacedName]*datastore.PodInfo, len(pods))
 	for _, candidate := range pods {
-		if candidate == nil || candidate.Pod == nil {
+		if candidate == nil {
 			continue
 		}
-		index[types.NamespacedName{Namespace: candidate.Pod.Namespace, Name: candidate.Pod.Name}] = candidate
+		podName := candidate.GetPodNamespacedName()
+		if podName.Name == "" {
+			continue
+		}
+		index[podName] = candidate
 	}
 	return index
 }

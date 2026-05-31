@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -166,10 +167,15 @@ func isTokenUsageEnabled(modelRequest map[string]interface{}) bool {
 	return false
 }
 
-// isStreamingResponse checks if the response is a streaming response
+// isStreamingResponse checks if the response is a streaming response.
+// It uses mime.ParseMediaType so that parameters such as charset are ignored,
+// e.g. "text/event-stream; charset=utf-8" is correctly recognised as streaming.
 func isStreamingResponse(resp *http.Response) bool {
-	contentType := resp.Header.Get("Content-Type")
-	return contentType == "text/event-stream" || contentType == "application/x-ndjson"
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	return mediaType == "text/event-stream" || mediaType == "application/x-ndjson"
 }
 
 // handleStreamingResponse handles streaming responses

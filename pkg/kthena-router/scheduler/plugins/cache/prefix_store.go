@@ -151,10 +151,7 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 	// pods in the scheduling candidate pool are returned.
 	candidatePods := sets.New[types.NamespacedName]()
 	for _, pod := range pods {
-		candidatePods.Insert(types.NamespacedName{
-			Namespace: pod.Pod.Namespace,
-			Name:      pod.Pod.Name,
-		})
+		candidatePods.Insert(pod.GetPodNamespacedName())
 	}
 
 	matches := make(map[types.NamespacedName]int, s.topK)
@@ -196,10 +193,7 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 
 // Add adds new hash->pod mappings to cache, using LRU for eviction
 func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.PodInfo) {
-	nsName := types.NamespacedName{
-		Namespace: pod.Pod.Namespace,
-		Name:      pod.Pod.Name,
-	}
+	nsName := pod.GetPodNamespacedName()
 
 	s.podHashesMu.Lock()
 	podLRU, exists := s.podHashes[nsName]

@@ -1336,14 +1336,13 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
 	// pod is already in the grace period and does not need to be processed for the time being.
-	_, exists := c.graceMap.Load(utils.GetNamespaceName(errPod))
+	key := utils.GetNamespaceName(errPod)
 	now := time.Now()
-	if exists {
-		klog.V(4).Infof("Pod %v failed, waiting for grace time", utils.GetNamespaceName(errPod))
+	_, loaded := c.graceMap.LoadOrStore(key, now)
+	if loaded {
+		klog.V(4).Infof("Pod %v already in grace period", key)
 		return nil
 	}
-	// add pod to the grace period map
-	c.graceMap.Store(utils.GetNamespaceName(errPod), now)
 	c.store.DeleteRunningPodFromServingGroup(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,

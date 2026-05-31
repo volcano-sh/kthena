@@ -14,6 +14,10 @@ spec:
       targetRef:
         kind: ModelServing
         name: autoscale-policy-lifecycle-ms
-      metricEndpoint:
-        port: 30000
-        uri: /metrics
+      metricSources:
+        sglang:token_usage:
+          type: Pod
+          pod:
+            name: sglang:token_usage
+            port: 30000
+            uri: /metrics
