@@ -40,17 +40,17 @@ spec:
             type: object
           spec:
             description: "AutoscalingPolicyBindingSpec defines the desired state of
-              AutoscalingPolicyBinding.\n\nExactly one of HeterogeneousTarget or HomogeneousTarget
-              must be set:\n  - HomogeneousTarget   -> scale a single ModelServing
-              by metric targets.\n  - HeterogeneousTarget -> optimize replica distribution
-              across several\n    ModelServing groups with different hardware/cost.\n\nExample
-              (homogeneous, metric-based scaling):\n\n\tspec:\n\t  policyRef:\n\t
-              \   name: podinfo-prom-policy\n\t  homogeneousTarget:\n\t    minReplicas:
-              1\n\t    maxReplicas: 6\n\t    target:\n\t      targetRef:\n\t        kind:
-              ModelServing\n\t        name: podinfo-ms\n\t      metricSources:\n\t
-              \       podinfo_rps:\n\t          type: Prometheus\n\t          prometheus:\n\t
-              \           serverURL: http://prometheus.monitoring.svc:9090\n\t            query:
-              sum(rate(http_requests_total[2m]))"
+              AutoscalingPolicyBinding.\n\nExactly one target must be set:\n  - HomogeneousTarget
+              \    -> scale a single ModelServing by metric targets.\n  - HeterogeneousTarget
+              \  -> optimize replica distribution across several\n    ModelServing
+              groups with different hardware/cost.\n  - PDDisaggregatedTarget -> coordinate
+              prefill/decode disaggregated\n    ModelServing roles.\n\nExample (homogeneous,
+              metric-based scaling):\n\n\tspec:\n\t  policyRef:\n\t    name: podinfo-prom-policy\n\t
+              \ homogeneousTarget:\n\t    minReplicas: 1\n\t    maxReplicas: 6\n\t
+              \   target:\n\t      targetRef:\n\t        kind: ModelServing\n\t        name:
+              podinfo-ms\n\t      metricSources:\n\t        podinfo_rps:\n\t          type:
+              Prometheus\n\t          prometheus:\n\t            serverURL: http://prometheus.monitoring.svc:9090\n\t
+              \           query: sum(rate(http_requests_total[2m]))"
             properties:
               heterogeneousTarget:
                 description: |-
@@ -569,9 +569,9 @@ spec:
                         properties:
                           labelSelector:
                             description: |-
-                              LabelSelector defines additional label-based filtering for pods that expose metric endpoints.
-                              For example: Ray Leader Pods expose metrics but worker pods don't, so use `ray.io/ray-node-type: 'raylet'`.
-                              When targetRef kind is `ModelServing` or `ModelServing/Role`, `modelserving.volcano.sh/entry: 'true'` is added by default.
+                              LabelSelector defines additional filtering for pods exposing this metric.
+                              Only pods matching both the target and this selector are scraped, e.g.
+                              matchLabels with role=decode to scrape only the decode role's pods.
                             properties:
                               matchExpressions:
                                 description: matchExpressions is a list of label selector
@@ -616,18 +616,18 @@ spec:
                                 type: object
                             type: object
                             x-kubernetes-map-type: atomic
-                          port:
-                            default: 8100
-                            description: Port defines the network port where metrics
-                              are exposed by the pods.
-                            format: int32
-                            type: integer
                           name:
                             description: |-
                               Name is the Prometheus metric name matched against labels in the pod's scraped output.
                               Defaults to the policy metric key when omitted.
                               For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
                             type: string
+                          port:
+                            default: 8100
+                            description: Port defines the network port where metrics
+                              are exposed by the pods (e.g., 8000).
+                            format: int32
+                            type: integer
                           uri:
                             default: /metrics
                             description: Uri defines the HTTP path where metrics are
@@ -687,9 +687,9 @@ spec:
                         properties:
                           labelSelector:
                             description: |-
-                              LabelSelector defines additional label-based filtering for pods that expose metric endpoints.
-                              For example: Ray Leader Pods expose metrics but worker pods don't, so use `ray.io/ray-node-type: 'raylet'`.
-                              When targetRef kind is `ModelServing` or `ModelServing/Role`, `modelserving.volcano.sh/entry: 'true'` is added by default.
+                              LabelSelector defines additional filtering for pods exposing this metric.
+                              Only pods matching both the target and this selector are scraped, e.g.
+                              matchLabels with role=decode to scrape only the decode role's pods.
                             properties:
                               matchExpressions:
                                 description: matchExpressions is a list of label selector
@@ -734,18 +734,18 @@ spec:
                                 type: object
                             type: object
                             x-kubernetes-map-type: atomic
-                          port:
-                            default: 8100
-                            description: Port defines the network port where metrics
-                              are exposed by the pods.
-                            format: int32
-                            type: integer
                           name:
                             description: |-
                               Name is the Prometheus metric name matched against labels in the pod's scraped output.
                               Defaults to the policy metric key when omitted.
                               For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
                             type: string
+                          port:
+                            default: 8100
+                            description: Port defines the network port where metrics
+                              are exposed by the pods (e.g., 8000).
+                            format: int32
+                            type: integer
                           uri:
                             default: /metrics
                             description: Uri defines the HTTP path where metrics are
@@ -800,26 +800,6 @@ spec:
             description: AutoscalingPolicyBindingStatus defines the observed state
               of AutoscalingPolicyBinding.
             properties:
-              pdScalingStatus:
-                description: PDScalingStatus reflects the last reconciled state for
-                  PD disaggregated autoscaling.
-                properties:
-                  decodeReplicas:
-                    format: int32
-                    type: integer
-                  effectiveRatio:
-                    type: string
-                  lastScaleTime:
-                    format: date-time
-                    type: string
-                  prefillReplicas:
-                    format: int32
-                    type: integer
-                required:
-                - decodeReplicas
-                - effectiveRatio
-                - prefillReplicas
-                type: object
               conditions:
                 description: Conditions represents the latest available observations
                   of binding state.
@@ -881,6 +861,26 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              pdScalingStatus:
+                description: PDScalingStatus reflects the last reconciled state for
+                  PD disaggregated autoscaling.
+                properties:
+                  decodeReplicas:
+                    format: int32
+                    type: integer
+                  effectiveRatio:
+                    type: string
+                  lastScaleTime:
+                    format: date-time
+                    type: string
+                  prefillReplicas:
+                    format: int32
+                    type: integer
+                required:
+                - decodeReplicas
+                - effectiveRatio
+                - prefillReplicas
+                type: object
             type: object
         type: object
     served: true

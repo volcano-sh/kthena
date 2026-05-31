@@ -99,10 +99,12 @@ AutoscalingPolicyBindingList contains a list of AutoscalingPolicyBinding objects
 
 AutoscalingPolicyBindingSpec defines the desired state of AutoscalingPolicyBinding.
 
-Exactly one of HeterogeneousTarget or HomogeneousTarget must be set:
-  - HomogeneousTarget   -> scale a single ModelServing by metric targets.
-  - HeterogeneousTarget -> optimize replica distribution across several
+Exactly one target must be set:
+  - HomogeneousTarget     -> scale a single ModelServing by metric targets.
+  - HeterogeneousTarget   -> optimize replica distribution across several
     ModelServing groups with different hardware/cost.
+  - PDDisaggregatedTarget -> coordinate prefill/decode disaggregated
+    ModelServing roles.
 
 Example (homogeneous, metric-based scaling):
 
@@ -442,7 +444,6 @@ Example (read the metric from an external Prometheus server):
 
 
 _Appears in:_
-- [PDRoleTarget](#pdroletarget)
 - [Target](#target)
 
 | Field | Description | Default | Validation |
@@ -888,6 +889,7 @@ The resulting scrape URL would look like: http://10.1.2.3:8000/metrics
 
 _Appears in:_
 - [MetricSource](#metricsource)
+- [PDRoleTarget](#pdroletarget)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1126,4 +1128,5 @@ _Appears in:_
 | `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing.<br />Example: kind=ModelServing, name=podinfo-ms. |  |  |
 | `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing.<br />Example: kind=Role, name=decode to scale only the decode role. |  |  |
 | `metricSources` _object (keys:string, values:[MetricSource](#metricsource))_ | MetricSources declares how to fetch specific metrics for this target.<br />Keys must match AutoscalingPolicy.spec.metrics[].name.<br />Missing keys are treated as missing metrics for that reconcile loop.<br />For example, a key "podinfo_rps" here must correspond to a metric named<br />"podinfo_rps" in the referenced AutoscalingPolicy. |  |  |
+
 
