@@ -37,8 +37,9 @@ import (
 
 // JWT token extraction constants
 const (
-	header       = "Authorization"
-	bearerScheme = "Bearer"
+	header                 = "Authorization"
+	bearerScheme           = "Bearer"
+	parsedJWTGinContextKey = "parsedJWT"
 )
 
 // extractTokenFromHeader extracts the Bearer token from the Authorization header
@@ -82,26 +83,49 @@ func (j *JWTAuthenticator) Close() {
 	}
 }
 
-// authenticate validates the token and returns the subject
-func (j *JWTAuthenticator) authenticate(tokenStr string) (string, error) {
-	// Get current JWKS from rotator
+func (j *JWTAuthenticator) parseAndValidateToken(tokenStr string) (jwt.Token, error) {
+	if j == nil || !j.enabled || j.rotator == nil {
+		return nil, fmt.Errorf("jwt authentication is disabled")
+	}
 	jwksValue := j.rotator.GetJwks()
 	if jwksValue.Jwks == nil {
-		return "", fmt.Errorf("no JWKS available for token validation")
+		return nil, fmt.Errorf("no JWKS available for token validation")
 	}
 
 	token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(jwksValue.Jwks, jws.WithInferAlgorithmFromKey(true)))
 	if err != nil {
-		return "", fmt.Errorf("failed to parse jwt: %w", err)
+		return nil, fmt.Errorf("failed to parse jwt: %w", err)
 	}
-
-	// Validate the claims in the token
 	if err := j.validateClaims(token, jwksValue); err != nil {
-		return "", fmt.Errorf("failed to validate claims: %w", err)
+		return nil, fmt.Errorf("failed to validate claims: %w", err)
+	}
+	return token, nil
+}
+
+// ExtractStringClaim validates the bearer token on the request and returns a
+// string claim value. Missing, non-string, or invalid claims return an error.
+func (j *JWTAuthenticator) ExtractStringClaim(c *gin.Context, claimName string) (string, error) {
+	if c == nil || c.Request == nil {
+		return "", fmt.Errorf("gin context or request is nil")
+	}
+	tokenStr := extractTokenFromHeader(c.Request)
+	if tokenStr == "" {
+		return "", fmt.Errorf("authorization header missing or empty")
 	}
 
-	sub, _ := token.Subject()
-	return sub, nil
+	token, ok := parsedJWTFromContext(c)
+	if !ok {
+		var err error
+		token, err = j.parseAndValidateToken(tokenStr)
+		if err != nil {
+			return "", err
+		}
+	}
+	var claim string
+	if err := token.Get(claimName, &claim); err != nil || claim == "" {
+		return "", fmt.Errorf("claim %q missing or empty", claimName)
+	}
+	return claim, nil
 }
 
 func (j *JWTAuthenticator) validateClaims(token jwt.Token, jwks *Jwks) error {
@@ -286,6 +310,33 @@ func (j *JWTAuthenticator) validateIssuedAt(iat interface{}, now time.Time) erro
 	return nil
 }
 
+func parsedJWTFromContext(c *gin.Context) (jwt.Token, bool) {
+	if c == nil {
+		return nil, false
+	}
+	token, ok := c.Get(parsedJWTGinContextKey)
+	if !ok {
+		return nil, false
+	}
+	parsed, ok := token.(jwt.Token)
+	return parsed, ok && parsed != nil
+}
+
+func setParsedJWT(c *gin.Context, token jwt.Token) {
+	if c == nil || token == nil {
+		return
+	}
+	c.Set(parsedJWTGinContextKey, token)
+}
+
+func getSubject(token jwt.Token) string {
+	if token == nil {
+		return ""
+	}
+	sub, _ := token.Subject()
+	return sub
+}
+
 // ValidateToken validates a JWT token and sets user information in the context
 func (j *JWTAuthenticator) ValidateToken(ctx context.Context, c *gin.Context, token string) error {
 	if !j.enabled {
@@ -296,12 +347,13 @@ func (j *JWTAuthenticator) ValidateToken(ctx context.Context, c *gin.Context, to
 		return fmt.Errorf("authorization header missing or empty")
 	}
 
-	sub, err := j.authenticate(token)
+	parsedToken, err := j.parseAndValidateToken(token)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 
-	c.Set(common.UserIdKey, sub)
+	c.Set(common.UserIdKey, getSubject(parsedToken))
+	setParsedJWT(c, parsedToken)
 	return nil
 }
 
@@ -321,12 +373,13 @@ func (j *JWTAuthenticator) Authenticate() gin.HandlerFunc {
 				return
 			}
 
-			sub, err := j.authenticate(token)
+			parsedToken, err := j.parseAndValidateToken(token)
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("Unauthorized: %v", err)})
 				return
 			}
-			c.Set(common.UserIdKey, sub)
+			c.Set(common.UserIdKey, getSubject(parsedToken))
+			setParsedJWT(c, parsedToken)
 		}
 		c.Next()
 	}

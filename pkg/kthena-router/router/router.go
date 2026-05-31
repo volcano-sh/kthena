@@ -52,6 +52,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -72,6 +73,13 @@ func getEnvBool(key string, fallback bool) bool {
 
 var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
 
+const (
+	SessionStickyStoreMemory = sessionsticky.StoreMemory
+	SessionStickyStoreRedis  = sessionsticky.StoreRedis
+)
+
+type SessionStickyStoreConfig = sessionsticky.StoreConfig
+
 type Router struct {
 	scheduler       scheduler.Scheduler
 	authenticator   *auth.JWTAuthenticator
@@ -88,9 +96,11 @@ type Router struct {
 	fairnessTimeout  time.Duration
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
+
+	sessionStickyStore sessionsticky.Store
 }
 
-func NewRouter(store datastore.Store, routerConfigPath string) *Router {
+func NewRouter(store datastore.Store, routerConfigPath string, sessionStickyConfig SessionStickyStoreConfig) *Router {
 	// Create a unified rate limiter for all models
 	loadRateLimiter := ratelimit.NewTokenRateLimiter()
 
@@ -155,7 +165,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
 
-	return &Router{
+	router := &Router{
 		store:            store,
 		scheduler:        scheduler.NewScheduler(store, routerConfig),
 		authenticator:    auth.NewJWTAuthenticator(routerConfig),
@@ -168,6 +178,34 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
+	router.sessionStickyStore = newSessionStickyStoreFromConfig(sessionStickyConfig)
+	return router
+}
+
+// Close releases resources owned by the router.
+func (r *Router) Close() error {
+	if r == nil {
+		return nil
+	}
+	if r.authenticator != nil {
+		r.authenticator.Close()
+	}
+	var errs []error
+	if r.sessionStickyStore != nil {
+		errs = append(errs, r.sessionStickyStore.Close())
+	}
+	if r.accessLogger != nil {
+		errs = append(errs, r.accessLogger.Close())
+	}
+	return errors.Join(errs...)
+}
+
+func newSessionStickyStoreFromConfig(config SessionStickyStoreConfig) sessionsticky.Store {
+	store, err := sessionsticky.NewStore(config)
+	if err != nil {
+		klog.Fatalf("failed to initialize session sticky store: %v", err)
+	}
+	return store
 }
 
 const defaultFairnessTimeout = 60 * time.Second
@@ -441,12 +479,45 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		pdGroup = modelServer.Spec.WorkloadSelector.PDGroup
 	}
 
+	routeKey := sessionsticky.RouteKey(modelRoute)
+	var sessionKey string
+	var sessionTTL time.Duration
+	var stickyPod types.NamespacedName
+	if modelRoute != nil && modelRoute.Spec.SessionSticky != nil && r.sessionStickyStore != nil {
+		if pdGroup != nil {
+			klog.Warningf("session sticky is configured on ModelRoute %s/%s but PD disaggregation targets are not supported; bypassing sticky routing",
+				modelRoute.Namespace, modelRoute.Name)
+		} else {
+			sessionKey, sessionTTL = r.prepareSessionSticky(c, modelRoute, pods)
+			if sessionKey != "" && routeKey != "" {
+				if boundPod, ok := r.sessionStickyStore.Get(routeKey, sessionKey); ok {
+					if _, exists := sessionsticky.IndexPodsByName(pods)[boundPod]; exists {
+						stickyPod = boundPod
+					} else {
+						klog.Infof("session sticky binding for route %s session %s points to unavailable pod %s/%s; deleting binding",
+							routeKey, sessionsticky.HashSessionKey(sessionKey), boundPod.Namespace, boundPod.Name)
+						r.sessionStickyStore.Delete(routeKey, sessionKey)
+					}
+				}
+			}
+		}
+	}
+
+	affinityScopeKey := ""
+	if sessionKey != "" {
+		affinityScopeKey = routeKey
+	}
+
 	ctx := &framework.Context{
-		Model:           modelName,
-		Prompt:          prompt,
-		ModelServerName: modelServerName,
-		PDGroup:         pdGroup,
-		MetricsRecorder: metricsRecorder,
+		Model:              modelName,
+		Prompt:             prompt,
+		SessionKey:         sessionKey,
+		AffinityScopeKey:   affinityScopeKey,
+		SessionAffinityTTL: sessionTTL,
+		ModelServerName:    modelServerName,
+		PDGroup:            pdGroup,
+		MetricsRecorder:    metricsRecorder,
+		StickyPodName:      stickyPod,
 	}
 
 	err = r.scheduler.Schedule(ctx, pods)
@@ -454,6 +525,11 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
 		return
+	}
+	if stickyPod.Name != "" && ctx.StickyPodName.Name == "" {
+		klog.Infof("session sticky binding for route %s session %s points to a filtered pod; deleting binding",
+			routeKey, sessionsticky.HashSessionKey(sessionKey))
+		r.sessionStickyStore.Delete(routeKey, sessionKey)
 	}
 
 	// Set complete request routing information in access log
@@ -465,13 +541,10 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		c.Set("modelRouteName", modelRouteName)
 	}
 
-	if len(ctx.BestPods) > 0 {
-		selectedPod := ctx.BestPods[0].GetPodNamespacedName().Name
-		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, selectedPod)
-	} else {
-		// Set routing info even if no pod is selected (for error cases)
-		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
-	}
+	// Set route/server info now and record the selected pod when the request is
+	// actually dispatched. The scheduler may return retry candidates, and the
+	// sticky binding must match the pod that successfully handled the request.
+	accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 
 	req := c.Request
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
@@ -479,6 +552,20 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		accesslog.SetError(c, "proxy", "request processing failed")
 		c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
 	}
+}
+
+func (r *Router) prepareSessionSticky(c *gin.Context, modelRoute *v1alpha1.ModelRoute, pods []*datastore.PodInfo) (string, time.Duration) {
+	if modelRoute == nil || modelRoute.Spec.SessionSticky == nil {
+		return "", 0
+	}
+	if len(pods) == 0 {
+		return "", 0
+	}
+	sessionKey := sessionsticky.ExtractKey(c, modelRoute.Spec.SessionSticky, r.authenticator)
+	if sessionKey == "" {
+		return "", 0
+	}
+	return sessionKey, sessionsticky.TTL(modelRoute.Spec.SessionSticky)
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
@@ -743,7 +830,13 @@ func (r *Router) proxy(
 	for i := 0; i < len(ctx.BestPods); i++ {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		pod := ctx.BestPods[i]
+		if pod == nil {
+			continue
+		}
 		podObj := pod.GetPod()
+		if podObj == nil {
+			continue
+		}
 		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
 
 		// Track this request as in-flight to the chosen pod. This is instant and
@@ -754,6 +847,7 @@ func (r *Router) proxy(
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
+		accesslog.SetRequestRouting(c, modelRouteName, modelServerName, podObj.Name)
 		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, onUsage)
 
 		// Decrement upstream request count when request completes
@@ -769,12 +863,31 @@ func (r *Router) proxy(
 			}
 			continue
 		}
+		r.recordSessionStickyBinding(ctx, i)
 		// record in prefix cache
 		r.scheduler.RunPostHooks(ctx, i)
 		return nil
 	}
 	c.AbortWithStatusJSON(http.StatusNotFound, "request to all pods failed")
 	return fmt.Errorf("request to all pods failed")
+}
+
+func (r *Router) recordSessionStickyBinding(ctx *framework.Context, index int) {
+	if r.sessionStickyStore == nil || ctx == nil || ctx.SessionKey == "" || ctx.AffinityScopeKey == "" || ctx.SessionAffinityTTL <= 0 {
+		return
+	}
+	if index < 0 || index >= len(ctx.BestPods) {
+		return
+	}
+	pod := ctx.BestPods[index]
+	if pod == nil {
+		return
+	}
+	podName := pod.GetPodNamespacedName()
+	if podName.Name == "" {
+		return
+	}
+	r.sessionStickyStore.Set(ctx.AffinityScopeKey, ctx.SessionKey, podName, ctx.SessionAffinityTTL)
 }
 
 func (r *Router) proxyModelEndpoint(

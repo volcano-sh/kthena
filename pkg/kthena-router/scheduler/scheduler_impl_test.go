@@ -270,6 +270,44 @@ func TestScheduleNonPDGroupWithEmptyScores(t *testing.T) {
 	})
 }
 
+func TestScheduleUsesStickyPodHint(t *testing.T) {
+	scheduler := &SchedulerImpl{
+		scorePlugins: []*scorePlugin{{plugin: fixedScorePlugin{}, weight: 1}},
+	}
+	pods := []*datastore.PodInfo{
+		createTestPodInfo("pod-a"),
+		createTestPodInfo("pod-b"),
+	}
+	ctx := &framework.Context{
+		Prompt:        &common.ChatMessage{},
+		StickyPodName: types.NamespacedName{Namespace: "default", Name: "pod-b"},
+	}
+
+	require.NoError(t, scheduler.Schedule(ctx, pods))
+	require.Len(t, ctx.BestPods, 1)
+	require.NotNil(t, ctx.BestPods[0].Pod)
+	assert.Equal(t, "pod-b", ctx.BestPods[0].Pod.Name)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-b"}, ctx.StickyPodName)
+}
+
+func TestScheduleClearsMissingStickyPodHint(t *testing.T) {
+	scheduler := &SchedulerImpl{
+		scorePlugins: []*scorePlugin{{plugin: fixedScorePlugin{}, weight: 1}},
+	}
+	pods := []*datastore.PodInfo{
+		createTestPodInfo("pod-a"),
+		createTestPodInfo("pod-b"),
+	}
+	ctx := &framework.Context{
+		Prompt:        &common.ChatMessage{},
+		StickyPodName: types.NamespacedName{Namespace: "default", Name: "missing"},
+	}
+
+	require.NoError(t, scheduler.Schedule(ctx, pods))
+	assert.Empty(t, ctx.StickyPodName)
+	require.Len(t, ctx.BestPods, 2)
+}
+
 // TestRunScorePluginsEdgeCases uses table-driven tests to validate RunScorePlugins
 // handles empty and nil pods gracefully without panicking.
 func TestRunScorePluginsEdgeCases(t *testing.T) {
@@ -318,4 +356,18 @@ func createTestPodInfo(name string) *datastore.PodInfo {
 			},
 		},
 	}
+}
+
+type fixedScorePlugin struct{}
+
+func (fixedScorePlugin) Name() string {
+	return "fixed"
+}
+
+func (fixedScorePlugin) Score(_ *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
+	scores := make(map[*datastore.PodInfo]int, len(pods))
+	for i, pod := range pods {
+		scores[pod] = 100 - i
+	}
+	return scores
 }

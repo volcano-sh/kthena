@@ -86,6 +86,22 @@ func TestExtractTokenFromHeader(t *testing.T) {
 	}
 }
 
+func TestExtractStringClaimUsesCachedParsedJWT(t *testing.T) {
+	token := jwt.New()
+	assert.NoError(t, token.Set("tenant", "team-a"))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	c.Request.Header.Set(header, "Bearer already-validated")
+	setParsedJWT(c, token)
+
+	authenticator := &JWTAuthenticator{}
+	claim, err := authenticator.ExtractStringClaim(c, "tenant")
+	assert.NoError(t, err)
+	assert.Equal(t, "team-a", claim)
+}
+
 func TestNewJWTAuthenticatorConfig(t *testing.T) {
 	t.Run("nil config", func(t *testing.T) {
 		validator := NewJWTAuthenticator(nil)

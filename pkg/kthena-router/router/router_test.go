@@ -19,6 +19,7 @@ package router
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,9 +29,11 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,8 +42,11 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -61,7 +67,7 @@ func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datast
 
 	backend := httptest.NewServer(backendHandler)
 	store := datastore.New()
-	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{})
 
 	return router, store, backend
 }
@@ -706,7 +712,7 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	backendPort, _ := strconv.Atoi(backendURL.Port())
 
 	store := datastore.New()
-	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", SessionStickyStoreConfig{})
 
 	modelServer := &aiv1alpha1.ModelServer{
 		ObjectMeta: v1.ObjectMeta{Name: "ms-retry", Namespace: "default"},
@@ -868,3 +874,212 @@ func parseBool(str string) (bool, error) {
 	}
 	return false, &strconv.NumError{Func: "ParseBool", Num: str, Err: strconv.ErrSyntax}
 }
+
+func TestRouterDoLoadbalancePopulatesSessionStickyContextForModelRoute(t *testing.T) {
+	store := datastore.New()
+	capture := &capturingScheduler{err: errors.New("stop after capture")}
+	router := &Router{
+		store:              store,
+		scheduler:          capture,
+		sessionStickyStore: sessionsticky.NewMemoryStore(),
+	}
+
+	ttl := int32(30)
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: 8080},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model",
+			SessionSticky: &aiv1alpha1.SessionSticky{
+				SessionAffinitySeconds: &ttl,
+				Sources: []aiv1alpha1.SessionKeySource{
+					{Type: aiv1alpha1.SessionKeySourceQuery, Name: "sid"},
+					{Type: aiv1alpha1.SessionKeySourceHeader, Name: "X-Session-ID"},
+				},
+			},
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-1"}},
+			}},
+		},
+	}
+
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, sets.New(types.NamespacedName{Name: "pod-1", Namespace: "default"})))
+	require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions?sid=query-session", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Session-ID", "session-1")
+	c.Set(PromptKey, &common.ChatMessage{Text: "hello"})
+
+	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
+
+	require.NotNil(t, capture.ctx)
+	assert.Equal(t, "query-session", capture.ctx.SessionKey)
+	assert.Equal(t, "default/mr-1", capture.ctx.AffinityScopeKey)
+	assert.Equal(t, 30*time.Second, capture.ctx.SessionAffinityTTL)
+}
+
+func TestRouterDoLoadbalanceIgnoresSessionHeaderWhenSessionStickyAbsent(t *testing.T) {
+	store := datastore.New()
+	capture := &capturingScheduler{err: errors.New("stop after capture")}
+	router := &Router{
+		store:              store,
+		scheduler:          capture,
+		sessionStickyStore: sessionsticky.NewMemoryStore(),
+	}
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: 8080},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model",
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-1"}},
+			}},
+		},
+	}
+
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, sets.New(types.NamespacedName{Name: "pod-1", Namespace: "default"})))
+	require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Session-ID", "session-1")
+	c.Set(PromptKey, &common.ChatMessage{Text: "hello"})
+
+	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
+
+	require.NotNil(t, capture.ctx)
+	assert.Empty(t, capture.ctx.SessionKey)
+	assert.Empty(t, capture.ctx.AffinityScopeKey)
+}
+
+func TestExtractSessionKeyUsesFirstConfiguredSource(t *testing.T) {
+	req, err := http.NewRequest("POST", "/v1/chat/completions?sid=query-session", nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Session-ID", "header-session")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	spec := &aiv1alpha1.SessionSticky{
+		Sources: []aiv1alpha1.SessionKeySource{
+			{Type: aiv1alpha1.SessionKeySourceHeader, Name: "X-Session-ID"},
+			{Type: aiv1alpha1.SessionKeySourceQuery, Name: "sid"},
+		},
+	}
+
+	assert.Equal(t, "header-session", sessionsticky.ExtractKey(c, spec, nil))
+}
+
+func TestRouterDoLoadbalancePassesStickyPodHintToScheduler(t *testing.T) {
+	store := datastore.New()
+	capture := &capturingScheduler{err: errors.New("stop after capture")}
+	stickyStore := sessionsticky.NewMemoryStore()
+	router := &Router{
+		store:              store,
+		scheduler:          capture,
+		sessionStickyStore: stickyStore,
+	}
+
+	ttl := int32(30)
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: 8080},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.1", Phase: corev1.PodRunning},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.2", Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-1", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model",
+			SessionSticky: &aiv1alpha1.SessionSticky{
+				SessionAffinitySeconds: &ttl,
+				Sources: []aiv1alpha1.SessionKeySource{
+					{Type: aiv1alpha1.SessionKeySourceHeader, Name: "X-Session-ID"},
+				},
+			},
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-1"}},
+			}},
+		},
+	}
+
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, sets.New(
+		types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		types.NamespacedName{Name: "pod-2", Namespace: "default"},
+	)))
+	require.NoError(t, store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+
+	stickyStore.Set("default/mr-1", "session-1", types.NamespacedName{Namespace: "default", Name: "pod-1"}, time.Minute)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model","prompt":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Session-ID", "session-1")
+	c.Set(PromptKey, &common.ChatMessage{Text: "hello"})
+
+	router.doLoadbalance(c, ModelRequest{"model": "test-model", "prompt": "hello"})
+
+	require.NotNil(t, capture.ctx)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pod-1"}, capture.ctx.StickyPodName)
+	require.Len(t, capture.podsByCall, 1)
+	require.Len(t, capture.podsByCall[0], 2, "router should pass the full pod list and let scheduler apply the sticky hint")
+}
+
+type capturingScheduler struct {
+	ctx        *framework.Context
+	err        error
+	errs       []error
+	podsByCall [][]*datastore.PodInfo
+}
+
+func (c *capturingScheduler) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
+	cloned := *ctx
+	c.ctx = &cloned
+	c.podsByCall = append(c.podsByCall, append([]*datastore.PodInfo(nil), pods...))
+	if len(c.errs) >= len(c.podsByCall) {
+		return c.errs[len(c.podsByCall)-1]
+	}
+	return c.err
+}
+
+func (c *capturingScheduler) RunPostHooks(ctx *framework.Context, index int) {}

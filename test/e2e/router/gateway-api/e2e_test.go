@@ -331,3 +331,8 @@ func TestDuplicateModelName(t *testing.T) {
 func TestRouterConfigUpdate(t *testing.T) {
 	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
+
+// TestModelRouteSessionSticky covers route-level session sticky behavior through Gateway API.
+func TestModelRouteSessionSticky(t *testing.T) {
+	router.TestModelRouteSessionStickyShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}

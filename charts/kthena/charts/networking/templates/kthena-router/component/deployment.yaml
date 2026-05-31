@@ -43,6 +43,10 @@ spec:
           {{- if .Values.kthenaRouter.kubeAPIBurst }}
             - --kube-api-burst={{ .Values.kthenaRouter.kubeAPIBurst }}
           {{- end }}
+            - --session-sticky-store={{ .Values.kthenaRouter.sessionSticky.store }}
+          {{- if eq .Values.kthenaRouter.sessionSticky.store "redis" }}
+            - --session-sticky-redis-address={{ required "kthenaRouter.sessionSticky.redis.address is required when kthenaRouter.sessionSticky.store is redis" .Values.kthenaRouter.sessionSticky.redis.address }}
+          {{- end }}
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
             - --tls-cert=/etc/router-tls/tls.crt
             - --tls-key=/etc/router-tls/tls.key
@@ -74,9 +78,15 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
+                  {{- if .Values.kthenaRouter.sessionSticky.redis.password }}
+                  name: kthena-router-session-sticky-redis-secret
+                  {{- else }}
                   name: redis-secret
+                  {{- end }}
                   key: password
                   optional: true
+            - name: KTHENA_ROUTER_JWT_AUTH_ENABLED
+              value: {{ .Values.kthenaRouter.jwtAuth.enabled | quote }}
             # Fairness scheduling configuration
             - name: ENABLE_FAIRNESS_SCHEDULING
               value: {{ .Values.kthenaRouter.fairness.enabled | quote }}

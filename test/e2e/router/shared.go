@@ -18,11 +18,13 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +39,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	e2eframework "github.com/volcano-sh/kthena/test/e2e/framework"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -56,6 +59,7 @@ import (
 const (
 	defaultMetricsURL     = "http://127.0.0.1:8080/metrics"
 	defaultScalingTimeout = 3 * time.Minute
+	sessionStickyHeader   = "X-Session-ID"
 
 	modelServingVLLMPDDisaggregationFixture   = "ModelServing-ds1.5b-pd-disaggregation.yaml"
 	modelServerVLLMPDDisaggregationFixture    = "ModelServer-ds1.5b-pd-disaggregation.yaml"
@@ -69,6 +73,15 @@ type pdDisaggregationFixtures struct {
 	modelServing string
 	modelServer  string
 	modelRoute   string
+}
+
+type accessLogLine struct {
+	ModelName   string `json:"model_name"`
+	ModelRoute  string `json:"model_route"`
+	ModelServer string `json:"model_server"`
+	SelectedPod string `json:"selected_pod"`
+	RequestID   string `json:"request_id"`
+	StatusCode  int    `json:"status_code"`
 }
 
 func getCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
@@ -145,18 +158,7 @@ func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kth
 		}
 		_, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
 		if err != nil {
-			errStr := err.Error()
-			// CHANGE 1: added EOF, connection reset by peer, no endpoints available.
-			// EOF is the primary failure mode — the router pod accepts the TCP
-			// connection but drops it mid-TLS handshake during partial startup after
-			// TestRouterConfigUpdate restarts the pod. Without EOF here the test
-			// dies instantly with no retry on the most common failure case.
-			if strings.Contains(errStr, "connect: connection refused") ||
-				strings.Contains(errStr, "i/o timeout") ||
-				strings.Contains(errStr, "context deadline exceeded") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "connection reset by peer") ||
-				strings.Contains(errStr, "no endpoints available") {
+			if shouldRetryWebhookError(err) {
 				t.Logf("Router validating webhook not ready yet, retrying: %v", err)
 				return false, nil
 			}
@@ -258,9 +260,15 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 	}
 	if originalReplicas != replicas {
 		t.Logf("Scaling kthena-router from %d to %d replicas", originalReplicas, replicas)
-		deployment.Spec.Replicas = &replicas
-		_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to scale kthena-router deployment")
+		require.Eventually(t, func() bool {
+			latest, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			latest.Spec.Replicas = &replicas
+			_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, latest, metav1.UpdateOptions{})
+			return err == nil
+		}, time.Minute, 2*time.Second, "Failed to scale kthena-router deployment")
 	}
 
 	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, replicas, defaultScalingTimeout)
@@ -276,8 +284,431 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 			return
 		}
 		deploy.Spec.Replicas = &originalReplicas
-		_, _ = kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{})
+		if _, err := kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, deploy, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore kthena-router replicas: %v", err)
+			return
+		}
+		if err := utils.WaitForDeploymentReadyE(restoreCtx, kubeClient, namespace, deploymentName, defaultScalingTimeout); err != nil {
+			t.Logf("Warning: Failed to wait for restored kthena-router replicas: %v", err)
+			return
+		}
+		if err := e2eframework.RestartRouterPortForward(namespace); err != nil {
+			t.Logf("Warning: Failed to refresh router port-forward after restoring replicas: %v", err)
+		}
 	}
+}
+
+func configureRouterSessionStickyRedisStore(t *testing.T, kubeClient kubernetes.Interface, namespace, redisAddress string) func() {
+	t.Helper()
+	ctx := context.Background()
+	const deploymentName = "kthena-router"
+
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get kthena-router deployment")
+	originalTemplate := deployment.Spec.Template.DeepCopy()
+
+	require.NotEmpty(t, deployment.Spec.Template.Spec.Containers, "kthena-router deployment should have a container")
+	args := deployment.Spec.Template.Spec.Containers[0].Args
+	args = upsertArg(args, "--session-sticky-store=", "--session-sticky-store=redis")
+	args = upsertArg(args, "--session-sticky-redis-address=", "--session-sticky-redis-address="+redisAddress)
+	deployment.Spec.Template.Spec.Containers[0].Args = args
+
+	_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to enable Redis session sticky store")
+	require.NoError(t, restartRouterPodsE(ctx, kubeClient, namespace, deploymentName, defaultScalingTimeout), "Failed to restart router with Redis session sticky store")
+	require.NoError(t, e2eframework.RestartRouterPortForward(namespace), "Failed to refresh router port-forward")
+
+	return func() {
+		restoreCtx := context.Background()
+		latest, err := kubeClient.AppsV1().Deployments(namespace).Get(restoreCtx, deploymentName, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Warning: Failed to get kthena-router deployment for restore: %v", err)
+			return
+		}
+		latest.Spec.Template = *originalTemplate
+		if _, err := kubeClient.AppsV1().Deployments(namespace).Update(restoreCtx, latest, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore kthena-router deployment: %v", err)
+			return
+		}
+		if err := restartRouterPodsE(restoreCtx, kubeClient, namespace, deploymentName, defaultScalingTimeout); err != nil {
+			t.Logf("Warning: Failed to wait for restored kthena-router deployment: %v", err)
+			return
+		}
+		if err := e2eframework.RestartRouterPortForward(namespace); err != nil {
+			t.Logf("Warning: Failed to refresh router port-forward after restoring deployment: %v", err)
+		}
+	}
+}
+
+func upsertArg(args []string, prefix, value string) []string {
+	for i, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			args[i] = value
+			return args
+		}
+	}
+	return append(args, value)
+}
+
+func setupRouterPodPortForward(t *testing.T, namespace, podName string) (string, func()) {
+	t.Helper()
+	localPort := freeLocalPort(t)
+	pf, err := utils.SetupPortForwardToPod(namespace, podName, localPort, "8080")
+	require.NoError(t, err, "Failed to port-forward to router pod %s", podName)
+	return "http://127.0.0.1:" + localPort + "/v1/chat/completions", pf.Close
+}
+
+func freeLocalPort(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "Failed to allocate a free local port")
+	defer listener.Close()
+	return strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+}
+
+func createSessionStickyModelRoute(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string, sticky *networkingv1alpha1.SessionSticky) *networkingv1alpha1.ModelRoute {
+	t.Helper()
+	ctx := context.Background()
+
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
+	suffix := utils.RandomString(5)
+	modelRoute.Name = "session-sticky-" + suffix
+	modelRoute.Namespace = testNamespace
+	modelRoute.Spec.ModelName = "session-sticky-" + suffix
+	modelRoute.Spec.SessionSticky = sticky
+	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+	createdModelRoute, err := createModelRouteWithWebhookRetry(ctx, testCtx, testNamespace, modelRoute, 2*time.Minute)
+	require.NoError(t, err, "Failed to create session sticky ModelRoute")
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "ready")}
+	utils.WaitForChatModelReady(t, utils.DefaultRouterURL, createdModelRoute.Spec.ModelName, messages, 2*time.Minute)
+	return createdModelRoute
+}
+
+func createSessionStickyPDModelRoute(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) *networkingv1alpha1.ModelRoute {
+	t.Helper()
+	ctx := context.Background()
+
+	modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing](filepath.Join(routercontext.TestDataDir, modelServingVLLMPDDisaggregationFixture))
+	modelServing.Namespace = testNamespace
+	createdModelServing, err := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create PD ModelServing")
+	t.Cleanup(func() {
+		_ = testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(context.Background(), createdModelServing.Name, metav1.DeleteOptions{})
+	})
+	utils.WaitForModelServingReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelServing.Name)
+
+	modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, modelServerVLLMPDDisaggregationFixture))
+	modelServer.Namespace = testNamespace
+	createdModelServer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create PD ModelServer")
+	t.Cleanup(func() {
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(context.Background(), createdModelServer.Name, metav1.DeleteOptions{})
+	})
+
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, modelRouteVLLMPDDisaggregationFixture))
+	modelRoute.Namespace = testNamespace
+	modelRoute.Spec.SessionSticky = sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader))
+	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+	createdModelRoute, err := createModelRouteWithWebhookRetry(ctx, testCtx, testNamespace, modelRoute, 2*time.Minute)
+	require.NoError(t, err, "Failed to create PD session sticky ModelRoute")
+	t.Cleanup(func() {
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), createdModelRoute.Name, metav1.DeleteOptions{})
+	})
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "ready")}
+	utils.WaitForChatModelReady(t, utils.DefaultRouterURL, createdModelRoute.Spec.ModelName, messages, 2*time.Minute)
+	return createdModelRoute
+}
+
+func createModelRouteWithWebhookRetry(ctx context.Context, testCtx *routercontext.RouterTestContext, namespace string, modelRoute *networkingv1alpha1.ModelRoute, timeout time.Duration) (*networkingv1alpha1.ModelRoute, error) {
+	var created *networkingv1alpha1.ModelRoute
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		var err error
+		created, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		if err == nil {
+			return true, nil
+		}
+		if shouldRetryWebhookError(err) {
+			return false, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func waitForModelRouteValidationError(ctx context.Context, testCtx *routercontext.RouterTestContext, namespace string, modelRoute *networkingv1alpha1.ModelRoute, timeout time.Duration) error {
+	var lastErr error
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		created, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		if err == nil {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Delete(context.Background(), created.Name, metav1.DeleteOptions{})
+			return false, fmt.Errorf("expected ModelRoute validation to reject %s/%s, but create succeeded", namespace, modelRoute.Name)
+		}
+		lastErr = err
+		if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return true, nil
+		}
+		if shouldRetryWebhookError(err) {
+			return false, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		if lastErr != nil {
+			return fmt.Errorf("expected Invalid or BadRequest, last error: %w", lastErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func shouldRetryWebhookError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return apierrors.IsInternalError(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		strings.Contains(msg, "failed calling webhook") ||
+		strings.Contains(msg, "connect: connection refused") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "no endpoints available")
+}
+
+func configureRouterRandomScorePlugin(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
+	t.Helper()
+	ctx := context.Background()
+	const configMapName = "kthena-router-config"
+	const routerDeploymentName = "kthena-router"
+	const routerConfigKey = "routerConfiguration"
+
+	cm, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get router ConfigMap")
+	originalConfigData := cm.Data[routerConfigKey]
+	require.NotEmpty(t, originalConfigData, "Router configuration should not be empty")
+
+	updatedConfig := `scheduler:
+  pluginConfig:
+  - name: least-request
+    args:
+      maxWaitingRequests: 10
+  plugins:
+    Filter:
+      enabled:
+        - least-request
+    Score:
+      enabled:
+        - name: random
+          weight: 1`
+
+	cm.Data[routerConfigKey] = updatedConfig
+	_, err = kubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to configure random router score plugin")
+	require.NoError(t, restartRouterPodsE(ctx, kubeClient, namespace, routerDeploymentName, defaultScalingTimeout), "Failed to restart router with random score plugin")
+	require.NoError(t, e2eframework.RestartRouterPortForward(namespace), "Failed to refresh router port-forward")
+
+	return func() {
+		restoreCtx := context.Background()
+		latestCM, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(restoreCtx, configMapName, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Warning: Failed to get router ConfigMap for restore: %v", err)
+			return
+		}
+		latestCM.Data[routerConfigKey] = originalConfigData
+		if _, err := kubeClient.CoreV1().ConfigMaps(namespace).Update(restoreCtx, latestCM, metav1.UpdateOptions{}); err != nil {
+			t.Logf("Warning: Failed to restore router ConfigMap: %v", err)
+			return
+		}
+		if err := restartRouterPodsE(restoreCtx, kubeClient, namespace, routerDeploymentName, defaultScalingTimeout); err != nil {
+			t.Logf("Warning: Failed to restart router after restoring ConfigMap: %v", err)
+			return
+		}
+		if err := e2eframework.RestartRouterPortForward(namespace); err != nil {
+			t.Logf("Warning: Failed to refresh router port-forward after restoring ConfigMap: %v", err)
+		}
+	}
+}
+
+func restartRouterPodsE(ctx context.Context, kubeClient kubernetes.Interface, namespace, deploymentName string, timeout time.Duration) error {
+	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: metav1.FormatLabelSelector(deployment.Spec.Selector),
+	})
+	if err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		if err := kubeClient.CoreV1().Pods(namespace).Delete(ctx, pods.Items[i].Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return utils.WaitForDeploymentReadyE(ctx, kubeClient, namespace, deploymentName, timeout)
+}
+
+func sessionStickySpec(seconds *int32, sources ...networkingv1alpha1.SessionKeySource) *networkingv1alpha1.SessionSticky {
+	return &networkingv1alpha1.SessionSticky{
+		SessionAffinitySeconds: seconds,
+		Sources:                sources,
+	}
+}
+
+func stickySource(sourceType networkingv1alpha1.SessionKeySourceType, name string) networkingv1alpha1.SessionKeySource {
+	return networkingv1alpha1.SessionKeySource{Type: sourceType, Name: name}
+}
+
+func selectedPodForRequest(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string) string {
+	t.Helper()
+	return selectedPodForRequestWithContent(t, testCtx, kthenaNamespace, url, modelName, "Hello", headers)
+}
+
+func selectedPodForRequestWithContent(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName, content string, headers map[string]string) string {
+	t.Helper()
+	requestID := "sticky-" + utils.RandomString(10)
+	requestHeaders := map[string]string{}
+	for key, value := range headers {
+		requestHeaders[key] = value
+	}
+	requestHeaders["x-request-id"] = requestID
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", content)}
+	resp := utils.CheckChatCompletionsWithURLAndHeaders(t, url, modelName, messages, requestHeaders)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	return waitForSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, requestID, 45*time.Second)
+}
+
+func waitForSelectedPodInRouterLogs(t *testing.T, kubeClient kubernetes.Interface, namespace, requestID string, timeout time.Duration) string {
+	t.Helper()
+	var selectedPod string
+	require.Eventually(t, func() bool {
+		for _, pod := range utils.GetReadyRouterPods(t, kubeClient, namespace) {
+			logs, err := kubeClient.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Do(context.Background()).Raw()
+			if err != nil {
+				continue
+			}
+			if parsed := selectedPodFromAccessLogs(string(logs), requestID); parsed != "" {
+				selectedPod = parsed
+				return true
+			}
+		}
+		return false
+	}, timeout, time.Second, "router access logs did not include request id %s", requestID)
+	return selectedPod
+}
+
+func waitForRouterLogsContain(t *testing.T, kubeClient kubernetes.Interface, namespace string, since *metav1.Time, substrings []string, timeout time.Duration) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, pod := range utils.GetReadyRouterPods(t, kubeClient, namespace) {
+			opts := &corev1.PodLogOptions{}
+			if since != nil {
+				opts.SinceTime = since
+			}
+			logs, err := kubeClient.CoreV1().Pods(namespace).GetLogs(pod.Name, opts).Do(context.Background()).Raw()
+			if err != nil {
+				continue
+			}
+			logText := string(logs)
+			matched := true
+			for _, substring := range substrings {
+				if !strings.Contains(logText, substring) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+		return false
+	}, timeout, time.Second, "router logs did not contain %v", substrings)
+}
+
+func selectedPodFromAccessLogs(logs, requestID string) string {
+	selectedPod := ""
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, requestID) {
+			continue
+		}
+		parsedRequestID, parsedSelectedPod := accessLogRequestAndSelectedPod(line)
+		if parsedRequestID == requestID && parsedSelectedPod != "" {
+			selectedPod = parsedSelectedPod
+		}
+	}
+	return selectedPod
+}
+
+func accessLogRequestAndSelectedPod(line string) (string, string) {
+	var entry accessLogLine
+	if err := json.Unmarshal([]byte(line), &entry); err == nil {
+		return entry.RequestID, entry.SelectedPod
+	}
+
+	requestID := ""
+	selectedPod := ""
+	for _, field := range strings.Fields(line) {
+		if strings.HasPrefix(field, "request_id=") {
+			requestID = strings.TrimPrefix(field, "request_id=")
+		}
+		if strings.HasPrefix(field, "selected_pod=") {
+			selectedPod = strings.TrimPrefix(field, "selected_pod=")
+		}
+	}
+	return requestID, selectedPod
+}
+
+func assertSameSessionPod(t *testing.T, pods ...string) {
+	t.Helper()
+	require.NotEmpty(t, pods)
+	first := pods[0]
+	require.NotEmpty(t, first)
+	for _, pod := range pods[1:] {
+		require.Equal(t, first, pod, "same session key should stay on one pod")
+	}
+}
+
+func distinctPodCount(pods []string) int {
+	seen := map[string]struct{}{}
+	for _, pod := range pods {
+		if pod != "" {
+			seen[pod] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func collectSelectedPods(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string, requests int) []string {
+	t.Helper()
+	return collectSelectedPodsWithContentPrefix(t, testCtx, kthenaNamespace, url, modelName, headers, requests, "Hello")
+}
+
+func collectSelectedPodsWithContentPrefix(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, url, modelName string, headers map[string]string, requests int, contentPrefix string) []string {
+	t.Helper()
+	pods := make([]string, 0, requests)
+	for i := 0; i < requests; i++ {
+		content := fmt.Sprintf("%s-%d-%s", utils.RandomString(10), i, contentPrefix)
+		pods = append(pods, selectedPodForRequestWithContent(t, testCtx, kthenaNamespace, url, modelName, content, headers))
+	}
+	return pods
 }
 
 // setupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
@@ -422,6 +853,177 @@ func TestModelRouteMultiModelsShared(t *testing.T, testCtx *routercontext.Router
 	})
 }
 
+// TestModelRouteSessionStickyShared covers the proposal-defined e2e scenarios for
+// ModelRoute.spec.sessionSticky. The assertions use router access logs because the
+// shared mock backend returns model text, not the serving Pod identity.
+func TestModelRouteSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	if kthenaNamespace == "" {
+		t.Skip("session sticky e2e requires kthena namespace to read router access logs")
+	}
+
+	restoreScorePlugins := configureRouterRandomScorePlugin(t, testCtx.KubeClient, kthenaNamespace)
+	t.Cleanup(restoreScorePlugins)
+
+	baseURL := utils.DefaultRouterURL
+
+	t.Run("E2E-SS-01-BasicStickiness", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "basic"}, 5)
+		assertSameSessionPod(t, pods...)
+	})
+
+	t.Run("E2E-SS-02-Isolation", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		first := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "first"})
+		second := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "second"})
+		firstAgain := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "first"})
+		secondAgain := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "second"})
+		require.NotEmpty(t, second)
+		require.Equal(t, first, firstAgain, "returning to the first key must keep the first binding")
+		require.Equal(t, second, secondAgain, "returning to the second key must keep the second binding")
+	})
+
+	t.Run("E2E-SS-03-NoKeyUsesPlainLoadBalancing", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, nil, 30)
+		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "missing sticky key should not pin all requests")
+	})
+
+	t.Run("E2E-SS-04-AbsentSessionStickyIgnoresHeader", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace, nil)
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{sessionStickyHeader: "ignored"}, 30)
+		require.GreaterOrEqual(t, distinctPodCount(pods), 2, "header should not pin when sessionSticky is absent")
+	})
+
+	t.Run("E2E-SS-05-QuerySource", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceQuery, "sid")))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL+"?sid=query-key", route.Spec.ModelName, nil, 5)
+		assertSameSessionPod(t, pods...)
+	})
+
+	t.Run("E2E-SS-06-CookieSource", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceCookie, "sid")))
+		pods := collectSelectedPods(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, map[string]string{"Cookie": "sid=cookie-key"}, 5)
+		assertSameSessionPod(t, pods...)
+	})
+
+	t.Run("E2E-SS-07-TTLExpiresAndAllowsRebinding", func(t *testing.T) {
+		ttl := int32(1)
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(&ttl, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		headers := map[string]string{sessionStickyHeader: "short-ttl"}
+		beforeA := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		beforeB := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.Equal(t, beforeA, beforeB, "session should stay bound before TTL expires")
+		time.Sleep(2 * time.Second)
+		after := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.NotEmpty(t, after, "request after TTL expiry should be served")
+	})
+
+	t.Run("E2E-SS-08-FailoverDeletedPod", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		headers := map[string]string{sessionStickyHeader: "failover"}
+		originalPod := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.NotEmpty(t, originalPod)
+		err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Delete(context.Background(), originalPod, metav1.DeleteOptions{})
+		require.NoError(t, err, "Failed to delete sticky backend pod")
+		require.Eventually(t, func() bool {
+			_, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Get(context.Background(), originalPod, metav1.GetOptions{})
+			return apierrors.IsNotFound(err)
+		}, 2*time.Minute, 2*time.Second, "deleted pod should leave the endpoint set")
+		utils.WaitForDeploymentReady(t, context.Background(), testCtx.KubeClient, testNamespace, routercontext.Deployment1_5bName, 3, 3*time.Minute)
+		newPod := selectedPodForRequest(t, testCtx, kthenaNamespace, baseURL, route.Spec.ModelName, headers)
+		require.NotEqual(t, originalPod, newPod, "sticky binding should fail over away from deleted pod")
+	})
+
+	t.Run("E2E-SS-09-MultiReplicaRedisStore", func(t *testing.T) {
+		t.Cleanup(func() {
+			require.NoError(t, e2eframework.RestartRouterPortForward(kthenaNamespace), "Failed to refresh router port-forward after Redis sticky test cleanup")
+		})
+
+		redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
+		t.Cleanup(redisCleanup)
+
+		redisAddress := fmt.Sprintf("redis-server.%s.svc.cluster.local:6379", kthenaNamespace)
+		restoreRedisStore := configureRouterSessionStickyRedisStore(t, testCtx.KubeClient, kthenaNamespace, redisAddress)
+		t.Cleanup(restoreRedisStore)
+
+		scaleCleanup := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 2)
+		t.Cleanup(scaleCleanup)
+
+		routerPods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+		require.GreaterOrEqual(t, len(routerPods), 2, "Redis sticky test needs at least two router pods")
+		firstRouterURL, closeFirstRouter := setupRouterPodPortForward(t, kthenaNamespace, routerPods[0].Name)
+		t.Cleanup(closeFirstRouter)
+		secondRouterURL, closeSecondRouter := setupRouterPodPortForward(t, kthenaNamespace, routerPods[1].Name)
+		t.Cleanup(closeSecondRouter)
+
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil, stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader)))
+		headers := map[string]string{sessionStickyHeader: "redis-shared-session"}
+
+		firstPod := selectedPodForRequest(t, testCtx, kthenaNamespace, firstRouterURL, route.Spec.ModelName, headers)
+		secondRouterPod := selectedPodForRequest(t, testCtx, kthenaNamespace, secondRouterURL, route.Spec.ModelName, headers)
+		firstRouterAgainPod := selectedPodForRequest(t, testCtx, kthenaNamespace, firstRouterURL, route.Spec.ModelName, headers)
+
+		require.Equal(t, firstPod, secondRouterPod, "same session key should use the Redis binding across router replicas")
+		require.Equal(t, firstPod, firstRouterAgainPod, "Redis binding should remain stable after crossing router replicas")
+	})
+
+	t.Run("E2E-SS-10-AdmissionRejectsEmptySources", func(t *testing.T) {
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
+		modelRoute.Name = "session-sticky-invalid-" + utils.RandomString(5)
+		modelRoute.Namespace = testNamespace
+		modelRoute.Spec.ModelName = "session-sticky-invalid-" + utils.RandomString(5)
+		modelRoute.Spec.SessionSticky = &networkingv1alpha1.SessionSticky{}
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+		require.NoError(t, waitForModelRouteValidationError(context.Background(), testCtx, testNamespace, modelRoute, 2*time.Minute),
+			"empty sources should be rejected")
+	})
+
+	t.Run("E2E-SS-11-SourcePrecedence", func(t *testing.T) {
+		route := createSessionStickyModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+			sessionStickySpec(nil,
+				stickySource(networkingv1alpha1.SessionKeySourceHeader, sessionStickyHeader),
+				stickySource(networkingv1alpha1.SessionKeySourceQuery, "sid")))
+		sessionValue := "precedence-" + utils.RandomString(8)
+		firstPod := selectedPodForRequestWithContent(t, testCtx, kthenaNamespace,
+			baseURL+"?sid=query-first-"+utils.RandomString(6),
+			route.Spec.ModelName,
+			"first-source-precedence",
+			map[string]string{sessionStickyHeader: sessionValue})
+		secondPod := selectedPodForRequestWithContent(t, testCtx, kthenaNamespace,
+			baseURL+"?sid=query-second-"+utils.RandomString(6),
+			route.Spec.ModelName,
+			"second-source-precedence",
+			map[string]string{sessionStickyHeader: sessionValue})
+		require.Equal(t, firstPod, secondPod, "header source must win before query source")
+	})
+
+	t.Run("E2E-SS-12-PDTargetBypassesSticky", func(t *testing.T) {
+		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+		route := createSessionStickyPDModelRoute(t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace)
+
+		messages := []utils.ChatMessage{utils.NewChatMessage("user", "pd sticky bypass")}
+		resp := utils.CheckChatCompletionsWithHeaders(t, route.Spec.ModelName, messages, map[string]string{sessionStickyHeader: "pd-session"})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.NotEmpty(t, resp.Body)
+
+		waitForRouterLogsContain(t, testCtx.KubeClient, kthenaNamespace, &sinceTime, []string{
+			"session sticky is configured on ModelRoute",
+			route.Namespace + "/" + route.Name,
+			"PD disaggregation targets are not supported; bypassing sticky routing",
+		}, 45*time.Second)
+	})
+}
+
 // TestModelRoutePrefillDecodeDisaggregationShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
@@ -528,22 +1130,43 @@ func testModelRoutePrefillDecodeDisaggregationSharedWithFixtures(
 	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }
 
-// subsetCanaryBackendCountsFromRouterLogs counts canary traffic to each mock pool using
-// router access logs (selected_pod). Chat response bodies no longer differ when both
-// backends use the same HuggingFace model id without -v1/-v2 suffixes.
-func subsetCanaryBackendCountsFromRouterLogs(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, since *metav1.Time) (v1, v2 int) {
+func subsetCanaryBackendCountsForRequestIDs(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, since *metav1.Time, requestIDs []string) (v1, v2, found int) {
 	t.Helper()
-	routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
-	opts := &corev1.PodLogOptions{}
-	if since != nil {
-		opts.SinceTime = since
+	expected := make(map[string]struct{}, len(requestIDs))
+	for _, requestID := range requestIDs {
+		expected[requestID] = struct{}{}
 	}
-	logs, err := kube.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
-	require.NoError(t, err)
-	s := string(logs)
-	// Pod names are deployment-prefixed: deepseek-r1-1-5b-v1-<rs>-<suffix>
-	return strings.Count(s, "selected_pod=deepseek-r1-1-5b-v1-"),
-		strings.Count(s, "selected_pod=deepseek-r1-1-5b-v2-")
+
+	selectedByRequestID := map[string]string{}
+	require.Eventually(t, func() bool {
+		routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
+		opts := &corev1.PodLogOptions{}
+		if since != nil {
+			opts.SinceTime = since
+		}
+		logs, err := kube.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
+		if err != nil {
+			return false
+		}
+		for _, line := range strings.Split(string(logs), "\n") {
+			requestID, selectedPod := accessLogRequestAndSelectedPod(line)
+			if _, ok := expected[requestID]; !ok || selectedPod == "" {
+				continue
+			}
+			selectedByRequestID[requestID] = selectedPod
+		}
+		return len(selectedByRequestID) >= int(0.85*float64(len(requestIDs)))
+	}, 30*time.Second, time.Second, "expected router access logs to include measured request ids")
+
+	for _, selectedPod := range selectedByRequestID {
+		if strings.HasPrefix(selectedPod, "deepseek-r1-1-5b-v1-") {
+			v1++
+		}
+		if strings.HasPrefix(selectedPod, "deepseek-r1-1-5b-v2-") {
+			v2++
+		}
+	}
+	return v1, v2, len(selectedByRequestID)
 }
 
 // TestModelRouteSubsetShared is a shared test function that can be used by both
@@ -628,15 +1251,17 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		const totalRequests = 500
 		const sumTolerance = 0.01 // Allow ±1% deviation for floating-point rounding errors
 		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+		requestIDs := make([]string, 0, totalRequests)
 
 		for i := 0; i < totalRequests; i++ {
-			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
+			requestID := "subset-weight-" + utils.RandomString(12)
+			requestIDs = append(requestIDs, requestID)
+			resp := utils.SendChatRequestWithRetryQuiet(t, utils.DefaultRouterURL, modelRoute.Spec.ModelName, messages, map[string]string{"x-request-id": requestID})
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
 		}
 
-		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
-		totalFromLogs := v1Count + v2Count
+		v1Count, v2Count, totalFromLogs := subsetCanaryBackendCountsForRequestIDs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime, requestIDs)
 		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
 			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
 		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
@@ -698,15 +1323,17 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		// Send multiple requests to verify weight distribution statistics
 		const totalRequests = 500
 		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+		requestIDs := make([]string, 0, totalRequests)
 
 		for i := 0; i < totalRequests; i++ {
-			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
+			requestID := "subset-normalized-" + utils.RandomString(12)
+			requestIDs = append(requestIDs, requestID)
+			resp := utils.SendChatRequestWithRetryQuiet(t, utils.DefaultRouterURL, modelRoute.Spec.ModelName, messages, map[string]string{"x-request-id": requestID})
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
 		}
 
-		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
-		totalFromLogs := v1Count + v2Count
+		v1Count, v2Count, totalFromLogs := subsetCanaryBackendCountsForRequestIDs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime, requestIDs)
 		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
 			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
 		require.Greater(t, v1Count, 0, "canary v1 should receive some traffic")
@@ -764,18 +1391,25 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	standardMessage := []utils.ChatMessage{
 		utils.NewChatMessage("user", "hello world"),
 	}
+	buildLocalRateLimitRoute := func(testName string) *networkingv1alpha1.ModelRoute {
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
+		suffix := utils.RandomString(5)
+		modelRoute.Name = testName + "-" + suffix
+		modelRoute.Namespace = testNamespace
+		modelRoute.Spec.ModelName = testName + "-" + suffix
+		if modelRoute.Spec.RateLimit != nil {
+			// Only test input rate limit unless the subtest explicitly enables output limiting.
+			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		return modelRoute
+	}
 
 	// Test 1: Verify input token rate limit enforcement
 	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 1: Verifying input token rate limit")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
-		if modelRoute.Spec.RateLimit != nil {
-			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-input")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -822,13 +1456,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitWindowAccuracy", func(t *testing.T) {
 		t.Log("Test 2: Verifying rate limit window accuracy...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
-		if modelRoute.Spec.RateLimit != nil {
-			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-window")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -849,7 +1477,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		for i := 0; i < quotaRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			resp.Body.Close()
-			assert.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed", i+1)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "Request %d should succeed", i+1)
 		}
 
 		// Verify rate limit is active
@@ -885,13 +1513,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitResetMechanism", func(t *testing.T) {
 		t.Log("Test 3: Verifying rate limit reset mechanism...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		// Only test input rate limit; remove output limit to avoid 429 "output token rate limit exceeded"
-		if modelRoute.Spec.RateLimit != nil {
-			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
-		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-reset")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -949,9 +1571,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
 
-		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
-		modelRoute.Namespace = testNamespace
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		modelRoute := buildLocalRateLimitRoute("deepseek-rate-limit-output")
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")

@@ -2830,9 +2830,30 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 		expectedCount          int
 		groupStatuses          map[int]datastore.ServingGroupStatus // Index -> Status
 		podDeletionCosts       map[int]int                          // Index -> DeletionCost
+		omitPods               map[int]bool                         // Index -> omit pod from informer to simulate a disrupted group
 		expectedRemainingNames []string
 		description            string
 	}{
+		{
+			name:            "deletes running group with missing pod before healthy groups",
+			existingIndices: []int{0, 1, 2, 3},
+			expectedCount:   3,
+			groupStatuses: map[int]datastore.ServingGroupStatus{
+				0: datastore.ServingGroupRunning, // Store may still be running when pod deletion is observed first
+				1: datastore.ServingGroupRunning,
+				2: datastore.ServingGroupRunning,
+				3: datastore.ServingGroupRunning,
+			},
+			podDeletionCosts: map[int]int{
+				0: 1000,
+				1: 0,
+				2: 0,
+				3: 0,
+			},
+			omitPods:               map[int]bool{0: true},
+			expectedRemainingNames: []string{"1", "2", "3"},
+			description:            "Groups missing expected pods should be treated as not ready before deletion cost",
+		},
 		{
 			name:            "deletes groups that are still creating before running groups",
 			existingIndices: []int{0, 1, 2, 3},
@@ -3008,6 +3029,10 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, "test-revision")
 				if status, exists := tt.groupStatuses[ordinal]; exists {
 					controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, status)
+				}
+
+				if tt.omitPods[ordinal] {
+					continue
 				}
 
 				// Create a mock pod for each group with deletion cost annotation

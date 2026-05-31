@@ -21,6 +21,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,11 +36,13 @@ import (
 )
 
 const timeout = 30 * time.Second
+const jwtAuthEnabledEnv = "KTHENA_ROUTER_JWT_AUTH_ENABLED"
 
 // KthenaRouterValidator handles validation of ModelRoute and ModelServer resources.
 type KthenaRouterValidator struct {
-	httpServer *http.Server
-	kubeClient kubernetes.Interface
+	httpServer     *http.Server
+	kubeClient     kubernetes.Interface
+	jwtAuthEnabled bool
 }
 
 // NewKthenaRouterValidator creates a new KthenaRouterValidator.
@@ -53,9 +57,23 @@ func NewKthenaRouterValidator(kubeClient kubernetes.Interface, port int) *Kthena
 	}
 
 	return &KthenaRouterValidator{
-		httpServer: server,
-		kubeClient: kubeClient,
+		httpServer:     server,
+		kubeClient:     kubeClient,
+		jwtAuthEnabled: routerJWTAuthEnabled(),
 	}
+}
+
+func routerJWTAuthEnabled() bool {
+	value, ok := os.LookupEnv(jwtAuthEnabledEnv)
+	if !ok {
+		return false
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		klog.Warningf("invalid %s value %q; JWTClaim admission validation will be disabled", jwtAuthEnabledEnv, value)
+		return false
+	}
+	return enabled
 }
 
 func (v *KthenaRouterValidator) Run(ctx context.Context, tlsCertFile, tlsPrivateKey string) {
@@ -167,6 +185,38 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 	for i, lora := range modelRoute.Spec.LoraAdapters {
 		if lora == "" {
 			allErrs = append(allErrs, field.Invalid(specField.Child("loraAdapters").Index(i), lora, "lora adapter name cannot be an empty string"))
+		}
+	}
+
+	if sessionSticky := modelRoute.Spec.SessionSticky; sessionSticky != nil {
+		sessionStickyField := specField.Child("sessionSticky")
+		if len(sessionSticky.Sources) == 0 {
+			allErrs = append(allErrs, field.Required(sessionStickyField.Child("sources"), "sources must be non-empty when sessionSticky is set"))
+		}
+		if sessionSticky.SessionAffinitySeconds != nil && *sessionSticky.SessionAffinitySeconds < 1 {
+			allErrs = append(allErrs, field.Invalid(sessionStickyField.Child("sessionAffinitySeconds"), *sessionSticky.SessionAffinitySeconds, "sessionAffinitySeconds must be at least 1"))
+		}
+		for i, source := range sessionSticky.Sources {
+			sourceField := sessionStickyField.Child("sources").Index(i)
+			switch source.Type {
+			case networkingv1alpha1.SessionKeySourceHeader,
+				networkingv1alpha1.SessionKeySourceQuery,
+				networkingv1alpha1.SessionKeySourceCookie,
+				networkingv1alpha1.SessionKeySourceJWTClaim:
+			default:
+				allErrs = append(allErrs, field.NotSupported(sourceField.Child("type"), source.Type, []string{
+					string(networkingv1alpha1.SessionKeySourceHeader),
+					string(networkingv1alpha1.SessionKeySourceQuery),
+					string(networkingv1alpha1.SessionKeySourceCookie),
+					string(networkingv1alpha1.SessionKeySourceJWTClaim),
+				}))
+			}
+			if source.Name == "" {
+				allErrs = append(allErrs, field.Required(sourceField.Child("name"), "source name must be non-empty"))
+			}
+			if source.Type == networkingv1alpha1.SessionKeySourceJWTClaim && !v.jwtAuthEnabled {
+				allErrs = append(allErrs, field.Invalid(sourceField.Child("type"), source.Type, "JWTClaim session key source requires JWT authentication to be enabled"))
+			}
 		}
 	}
 

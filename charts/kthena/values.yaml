@@ -83,6 +83,17 @@ networking:
       # -- Enable Gateway API Inference Extension features.<br/>
       # Requires `gatewayAPI.enabled` to be true.
       inferenceExtension: false
+    sessionSticky:
+      # -- Router session sticky store backend. Use `memory` for single-router state or `redis` to share bindings across replicas.
+      store: "memory"
+      redis:
+        # -- Redis address for the router session sticky store. Required when `sessionSticky.store` is `redis`.
+        address: ""
+        # -- Optional Redis password for the router session sticky store. When set, Helm creates `kthena-router-session-sticky-redis-secret` and exposes it as `REDIS_PASSWORD`; outside Helm, `REDIS_PASSWORD` can provide it directly.
+        password: ""
+    jwtAuth:
+      # -- Allow admission of ModelRoute sessionSticky JWTClaim sources. Changing this value requires a router restart.
+      enabled: false
 
 global:
   # -- Certificate Management Mode.<br/>

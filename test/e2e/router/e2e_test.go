@@ -110,6 +110,11 @@ func TestModelRouteMultiModels(t *testing.T) {
 	TestModelRouteMultiModelsShared(t, testCtx, testNamespace, false, "")
 }
 
+// TestModelRouteSessionSticky covers route-level session sticky behavior from the proposal.
+func TestModelRouteSessionSticky(t *testing.T) {
+	TestModelRouteSessionStickyShared(t, testCtx, testNamespace, false, kthenaNamespace)
+}
+
 // TestModelRoutePrefillDecodeDisaggregation tests PD disaggregation with ModelServing, ModelServer, and ModelRoute.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {

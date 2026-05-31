@@ -60,7 +60,7 @@ Kubernetes Service `sessionAffinity: ClientIP` only keys on **source IP** and do
 
 2. **Session-to-Pod mapping**  
    The mapping is **`session_key` → Pod name** (the name of the Kubernetes Pod selected as upstream). Key derivation for shared stores: includes route identity and a **hash of the session key** so raw session material does not appear in the key.  
-   The **pluggable store** (in-memory **vs** **Redis**) is selected by **router runtime flags** (see **Router process configuration** below): in-memory is suitable for single-replica or dev; Redis shares state across **infer-gateway** replicas. The stored value is Pod name; per-request **TTL refresh** uses each route’s **`sessionAffinitySeconds`** (default **10800** when unset in spec).
+   The **pluggable store** (in-memory **vs** **Redis**) is selected by **router runtime flags** (see **Router process configuration** below): in-memory is suitable for single-replica or dev; Redis shares state across **infer-gateway** replicas. The stored value is Pod name; per-request **TTL refresh** uses each route’s **`sessionAffinitySeconds`** (default **600** when unset in spec).
 
 3. **TTL refresh**  
    The store exposes **Get**, **Set**, and **Delete**. There is no separate **RefreshTTL** RPC: after each successful backend choice for a request that has a non-empty session key, the router **Set**s the mapping again with the **full configured TTL**, which refreshes expiry on Redis and in-memory backends.
@@ -86,7 +86,7 @@ In Go/OpenAPI terms, **`sessionSticky` is a pointer to `SessionSticky`** (JSON *
 
 | Field | Purpose |
 |-------|---------|
-| `sessionAffinitySeconds` | TTL for the binding; optional, default **10800**; minimum **1** when set. |
+| `sessionAffinitySeconds` | TTL for the binding; optional, default **600**; minimum **1** when set. |
 | `sources` | Ordered list (max **16**) of **`SessionKeySource`**: **`type`** (`Header`, `Query`, `Cookie`, `JWTClaim`) and **`name`** (header name, query key, cookie name, or claim name). **Required and non-empty when `sessionSticky` is non-nil** (enforced by validation). |
 
 Root spec: **`SessionSticky`** is a sibling of **`Rules`** / **`RateLimit`** on **`ModelRouteSpec`**.
@@ -104,7 +104,7 @@ type ModelRouteSpec struct {
 
 // SessionSticky — only per-route extraction + TTL; store backend is not here.
 type SessionSticky struct {
-	// SessionAffinitySeconds is binding TTL in seconds (default 10800 when unset).
+	// SessionAffinitySeconds is binding TTL in seconds (default 600 when unset).
 	SessionAffinitySeconds *int32              `json:"sessionAffinitySeconds,omitempty"`
 	// Sources are evaluated in order with OR semantics:
 	// the first non-empty extracted value becomes the session key.
@@ -166,7 +166,6 @@ Lookup semantics: **Header** names are case-insensitive per HTTP; **Cookie** nam
 #### Observability
 
 - **Logs**: session sticky store errors, failover when mapped Pod is not in endpoints, Redis connection issues.
-- **Response header (test/debug only)**: **`X-Kthena-Backend-Pod`** is disabled by default and may be enabled only via an explicit router debug flag for e2e/tests; it must remain off for production traffic.
 
 ### Test plan
 
@@ -176,7 +175,7 @@ Lookup semantics: **Header** names are case-insensitive per HTTP; **Cookie** nam
 - In-memory store **Set** / **Get** with TTL.
 
 #### End-to-end acceptance (`test/e2e/router/`)
-It should be noted that the relevant scoring plugins need to be disabled for the related e2e tests. E2E cases that assert backend identity assume the router test/debug flag for `X-Kthena-Backend-Pod` is enabled in test environments only.
+It should be noted that the relevant scoring plugins need to be disabled for the related e2e tests. E2E cases that assert backend identity use router access logs.
 
 | ID | Scenario | Expected outcome |
 |----|----------|------------------|
