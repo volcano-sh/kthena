@@ -21,10 +21,10 @@ package v1alpha1
 // PDRoleTargetApplyConfiguration represents a declarative configuration of the PDRoleTarget type for use
 // with apply.
 type PDRoleTargetApplyConfiguration struct {
-	RoleName       *string                           `json:"roleName,omitempty"`
-	MetricEndpoint *MetricEndpointApplyConfiguration `json:"metricEndpoint,omitempty"`
-	MinReplicas    *int32                            `json:"minReplicas,omitempty"`
-	MaxReplicas    *int32                            `json:"maxReplicas,omitempty"`
+	RoleName       *string                            `json:"roleName,omitempty"`
+	MetricEndpoint *PodMetricSourceApplyConfiguration `json:"metricEndpoint,omitempty"`
+	MinReplicas    *int32                             `json:"minReplicas,omitempty"`
+	MaxReplicas    *int32                             `json:"maxReplicas,omitempty"`
 }
 
 // PDRoleTargetApplyConfiguration constructs a declarative configuration of the PDRoleTarget type for use with
@@ -44,7 +44,7 @@ func (b *PDRoleTargetApplyConfiguration) WithRoleName(value string) *PDRoleTarge
 // WithMetricEndpoint sets the MetricEndpoint field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the MetricEndpoint field is set to the value of the last call.
-func (b *PDRoleTargetApplyConfiguration) WithMetricEndpoint(value *MetricEndpointApplyConfiguration) *PDRoleTargetApplyConfiguration {
+func (b *PDRoleTargetApplyConfiguration) WithMetricEndpoint(value *PodMetricSourceApplyConfiguration) *PDRoleTargetApplyConfiguration {
 	b.MetricEndpoint = value
 	return b
 }

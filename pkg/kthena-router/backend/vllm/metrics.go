@@ -17,8 +17,6 @@ limitations under the License.
 package vllm
 
 import (
-	"fmt"
-
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 
@@ -27,30 +25,30 @@ import (
 )
 
 var (
-	GPUCacheUsage     = "vllm:gpu_cache_usage_perc"
+	KVCacheUsage      = "vllm:kv_cache_usage_perc"
 	RequestWaitingNum = "vllm:num_requests_waiting"
 	RequestRunningNum = "vllm:num_requests_running"
-	TPOT              = "vllm:time_per_output_token_seconds"
+	ITL               = "vllm:inter_token_latency_seconds"
 	TTFT              = "vllm:time_to_first_token_seconds"
 )
 
 var (
 	CounterAndGaugeMetrics = []string{
-		GPUCacheUsage,
+		KVCacheUsage,
 		RequestWaitingNum,
 		RequestRunningNum,
 	}
 
 	HistogramMetrics = []string{
-		TPOT,
+		ITL,
 		TTFT,
 	}
 
 	mapOfMetricsName = map[string]string{
-		GPUCacheUsage:     utils.GPUCacheUsage,
+		KVCacheUsage:      utils.KVCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
 		RequestRunningNum: utils.RequestRunningNum,
-		TPOT:              utils.TPOT,
+		ITL:               utils.TPOT,
 		TTFT:              utils.TTFT,
 	}
 )
@@ -69,7 +67,7 @@ func NewVllmEngine() *vllmEngine {
 }
 
 func (engine *vllmEngine) GetPodMetrics(pod *corev1.Pod) (map[string]*dto.MetricFamily, error) {
-	url := fmt.Sprintf("http://%s:%d/metrics", pod.Status.PodIP, engine.MetricPort)
+	url := metrics.PodEndpointURL(pod.Status.PodIP, engine.MetricPort, "/metrics")
 	allMetrics, err := metrics.ParseMetricsURL(url)
 	if err != nil {
 		return nil, err

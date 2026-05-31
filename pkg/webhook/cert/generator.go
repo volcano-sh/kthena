@@ -61,8 +61,13 @@ func GenerateSelfSignedCertificate(dnsNames []string) (*CertBundle, error) {
 		return nil, fmt.Errorf("failed to generate CA key: %w", err)
 	}
 
+	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate CA serial number: %w", err)
+	}
+
 	caTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber: caSerial,
 		Subject: pkix.Name{
 			CommonName:   "kthena-webhook-ca",
 			Organization: []string{"Volcano"},
@@ -85,8 +90,13 @@ func GenerateSelfSignedCertificate(dnsNames []string) (*CertBundle, error) {
 		return nil, fmt.Errorf("failed to generate server key: %w", err)
 	}
 
+	serverSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate server serial number: %w", err)
+	}
+
 	serverTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
+		SerialNumber: serverSerial,
 		Subject: pkix.Name{
 			CommonName:   dnsNames[0],
 			Organization: []string{"Volcano"},

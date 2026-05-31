@@ -23,12 +23,15 @@ spec:
     maxReplicas: 1
     minReplicas: 0
     target:
+      metricSources:
+        vllm:iteration_tokens_total:
+          pod:
+            labelSelector:
+              matchLabels:
+                modelserving.volcano.sh/role: leader
+            name: vllm:iteration_tokens_total
+          type: Pod
       targetRef:
         kind: ModelServing
         name: test-model-backend1
-      metricEndpoint:
-        labelSelector:
-          matchLabels:
-            modelserving.volcano.sh/role: leader
-
 

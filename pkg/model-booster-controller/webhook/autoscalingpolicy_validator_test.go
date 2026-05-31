@@ -49,11 +49,11 @@ func TestValidateAutoscalingPolicy_ErrorFormatting(t *testing.T) {
 			TolerancePercent: 101, // This should trigger error: tolerance percent must be between 0 and 100
 			Metrics: []registryv1.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("0"), // This should trigger error: target value must be greater than 0
 				},
 				{
-					MetricName:  "cpu", // This should trigger error: duplicate metric name
+					Name:        "cpu", // This should trigger error: duplicate metric name
 					TargetValue: resource.MustParse("80"),
 				},
 			},
@@ -123,11 +123,11 @@ func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 			TolerancePercent: 10,
 			Metrics: []registryv1.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("80"),
 				},
 				{
-					MetricName:  "memory",
+					Name:        "memory",
 					TargetValue: resource.MustParse("75"),
 				},
 			},
@@ -178,7 +178,7 @@ func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 			TolerancePercent: 10,
 			Metrics: []registryv1.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("80"),
 				},
 			},

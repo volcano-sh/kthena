@@ -42,8 +42,6 @@ var (
 	kthenaNamespace string
 )
 
-const testDataDir = "test/e2e/router/testdata"
-
 // TestMain runs setup and cleanup for all tests in this package.
 func TestMain(m *testing.M) {
 	testNamespace = "kthena-e2e-gateway-" + utils.RandomString(5)
@@ -120,6 +118,12 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	router.TestModelRoutePrefillDecodeDisaggregationShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
+// TestModelRouteSglangPrefillDecodeDisaggregation tests SGLang PD disaggregation with ModelServing, ModelServer, and ModelRoute.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestModelRouteSglangPrefillDecodeDisaggregation(t *testing.T) {
+	router.TestModelRouteSglangPrefillDecodeDisaggregationShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
 // TestModelRouteSubset tests ModelRoute with subset routing.
 // This test runs the shared test function with Gateway API enabled (with ParentRefs).
 func TestModelRouteSubset(t *testing.T) {
@@ -176,7 +180,7 @@ func TestDuplicateModelName(t *testing.T) {
 
 	// 1. Deploy ModelRouteSimple.yaml with parentRefs to default Gateway
 	t.Log("Deploying ModelRouteSimple binding to default Gateway...")
-	modelRoute1 := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteSimple.yaml"))
+	modelRoute1 := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteSimple.yaml"))
 	modelRoute1.Namespace = testNamespace
 	modelRoute1.Name = "deepseek-simple-default"
 
@@ -205,7 +209,7 @@ func TestDuplicateModelName(t *testing.T) {
 
 	// 2. Create custom Gateway with port 8081
 	t.Log("Creating custom Gateway with port 8081...")
-	customGateway := utils.LoadYAMLFromFile[gatewayv1.Gateway](filepath.Join(testDataDir, "Gateway.yaml"))
+	customGateway := utils.LoadYAMLFromFile[gatewayv1.Gateway](filepath.Join(routercontext.TestDataDir, "Gateway.yaml"))
 	customGateway.Namespace = kthenaNamespace
 	customGateway.Name = "kthena-gateway-custom"
 	customGateway.Spec.Listeners[0].Port = gatewayv1.PortNumber(8081)
@@ -319,4 +323,11 @@ func TestDuplicateModelName(t *testing.T) {
 	assert.Contains(t, response2.Body, "DeepSeek-R1-Distill-Qwen-7B", "Response should indicate 7B model")
 
 	t.Log("Test completed successfully: same modelName routes to different models via different ports")
+}
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestRouterConfigUpdate(t *testing.T) {
+	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }

@@ -16,6 +16,9 @@ spec:
         entryTemplate:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${PREFILL_AFFINITY}
+            tolerations: ${PREFILL_TOLERATIONS}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime
@@ -69,6 +72,9 @@ spec:
         entryTemplate:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
+            runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${DECODE_AFFINITY}
+            tolerations: ${DECODE_TOLERATIONS}
             initContainers: ${INIT_CONTAINERS}
             containers:
               - name: runtime

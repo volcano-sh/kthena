@@ -29,6 +29,8 @@ Examples:
 * [kthena](kthena.md)	 - Kthena CLI for managing AI inference workloads
 * [kthena describe autoscaling-policy](kthena_describe_autoscaling-policy.md)	 - Show detailed information about an autoscaling policy
 * [kthena describe model-booster](kthena_describe_model-booster.md)	 - Show detailed information about a model booster
+* [kthena describe model-route](kthena_describe_model-route.md)	 - Show detailed information about a model route
+* [kthena describe model-server](kthena_describe_model-server.md)	 - Show detailed information about a model server
 * [kthena describe model-serving](kthena_describe_model-serving.md)	 - Show detailed information about a model serving workload
 * [kthena describe template](kthena_describe_template.md)	 - Show detailed information about a template
 

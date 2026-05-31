@@ -3,6 +3,7 @@ slug: gateway-api-support
 title: Kthena Router Supports Gateway API and Inference Extension
 authors: [YaoZengzeng]
 tags: []
+date: 2025-12-16
 ---
 
 # Kthena Router Supports Gateway API and Inference Extension

@@ -15,29 +15,34 @@ const FeatureList: FeatureItem[] = [
     Svg: require('@site/static/img/homepage/kthena-feature-1.svg').default,
     description: (
       <>
-        Kthena is designed from the ground up to be Kubernetes-native, providing
-        seamless integration with your existing K8s infrastructure.
+        Declarative CRDs for end-to-end AI inference lifecycle management.
+        Gang scheduling, network-topology-aware placement, and Volcano
+        integration bring enterprise-grade orchestration to your existing
+        K8s infrastructure.
       </>
     ),
   },
   {
-    title: 'Intelligent Scaling',
+    title: 'Intelligent Routing',
     Svg: require('@site/static/img/homepage/kthena-feature-2.svg').default,
     description: (
       <>
-        Focus on your AI models while Kthena handles intelligent auto-scaling
-        and routing. Deploy models with confidence knowing they&apos;ll scale
-        efficiently.
+        Request-level scheduling with pluggable scoring plugins—least latency,
+        KV-cache awareness, prefix-cache matching, and LoRA affinity routing.
+        Per-model fair queuing and token-based rate limiting ensure optimal
+        throughput for every model.
       </>
     ),
   },
   {
-    title: 'Multi-Model Serving',
+    title: 'Hierarchical PD Disaggregation Orchestration',
     Svg: require('@site/static/img/homepage/kthena-feature-3.svg').default,
     description: (
       <>
-        Serve multiple AI models simultaneously with advanced model management
-        capabilities. Kthena supports diverse model formats and frameworks.
+        Separate prefill and decode phases into independently scalable serving
+        groups. Prefill nodes maximize compute throughput while decode nodes
+        optimize for low latency, enabling fine-grained GPU utilization and
+        flexible scaling ratios.
       </>
     ),
   },

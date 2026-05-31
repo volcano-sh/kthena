@@ -27,9 +27,6 @@ spec:
             # specify the model name to mock
             - name: MODEL_NAME
               value: "meta-llama/Llama-3.1-8B-Instruct"
-          command:
-            - python3
-            - app.py
 ---
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelRoute

@@ -47,9 +47,9 @@ type PDDisaggregatedScalingMeta struct {
 
 func NewPDDisaggregatedAutoscaler(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) *PDDisaggregatedAutoscaler {
 	pdTarget := binding.Spec.PDDisaggregatedTarget
-	prefillTarget := buildPDRoleMetricTarget(pdTarget, pdTarget.PrefillRole)
-	decodeTarget := buildPDRoleMetricTarget(pdTarget, pdTarget.DecodeRole)
 	metricTargets := GetMetricTargets(autoscalePolicy)
+	prefillTarget := buildPDRoleMetricTarget(pdTarget, pdTarget.PrefillRole, metricTargets)
+	decodeTarget := buildPDRoleMetricTarget(pdTarget, pdTarget.DecodeRole, metricTargets)
 
 	return &PDDisaggregatedAutoscaler{
 		PrefillCollector: NewMetricCollector(prefillTarget, binding, metricTargets),
@@ -73,16 +73,17 @@ func (autoscaler *PDDisaggregatedAutoscaler) NeedUpdate(autoscalePolicy *workloa
 }
 
 func (autoscaler *PDDisaggregatedAutoscaler) Scale(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentPrefillReplicas int32, currentDecodeReplicas int32) (int32, int32, string, error) {
-	prefillUnready, prefillMetrics, err := autoscaler.PrefillCollector.UpdateMetrics(ctx, podLister)
+	prefillUnready, prefillMetrics, prefillExternalMetrics, err := autoscaler.PrefillCollector.UpdateMetrics(ctx, podLister, autoscaler.Meta.PrefillTarget.MetricSources)
 	if err != nil {
 		return -1, -1, "", err
 	}
-	decodeUnready, decodeMetrics, err := autoscaler.DecodeCollector.UpdateMetrics(ctx, podLister)
+	decodeUnready, decodeMetrics, decodeExternalMetrics, err := autoscaler.DecodeCollector.UpdateMetrics(ctx, podLister, autoscaler.Meta.DecodeTarget.MetricSources)
 	if err != nil {
 		return -1, -1, "", err
 	}
 
 	combinedMetrics := mergeMetrics(prefillMetrics, decodeMetrics)
+	combinedExternalMetrics := mergeMetrics(prefillExternalMetrics, decodeExternalMetrics)
 	currentTotal := currentPrefillReplicas + currentDecodeReplicas
 	minTotal := autoscaler.Meta.Config.PrefillRole.MinReplicas + autoscaler.Meta.Config.DecodeRole.MinReplicas
 	maxTotal := autoscaler.Meta.Config.PrefillRole.MaxReplicas + autoscaler.Meta.Config.DecodeRole.MaxReplicas
@@ -95,7 +96,7 @@ func (autoscaler *PDDisaggregatedAutoscaler) Scale(ctx context.Context, podListe
 		MetricTargets:         autoscaler.PrefillCollector.MetricTargets,
 		UnreadyInstancesCount: prefillUnready + decodeUnready,
 		ReadyInstancesMetrics: []algorithm.Metrics{combinedMetrics},
-		ExternalMetrics:       make(algorithm.Metrics),
+		ExternalMetrics:       combinedExternalMetrics,
 	}
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {
@@ -139,13 +140,21 @@ func (autoscaler *PDDisaggregatedAutoscaler) Scale(ctx context.Context, podListe
 	return prefillReplicas, decodeReplicas, effectiveRatio, nil
 }
 
-func buildPDRoleMetricTarget(pdTarget *workload.PDDisaggregatedTarget, role workload.PDRoleTarget) *workload.Target {
+func buildPDRoleMetricTarget(pdTarget *workload.PDDisaggregatedTarget, role workload.PDRoleTarget, metricTargets algorithm.Metrics) *workload.Target {
 	metricEndpoint := role.MetricEndpoint
 	if metricEndpoint.Uri == "" {
 		metricEndpoint.Uri = "/metrics"
 	}
 	if metricEndpoint.Port == 0 {
 		metricEndpoint.Port = 8100
+	}
+	metricSources := make(map[string]workload.MetricSource, len(metricTargets))
+	for metricName := range metricTargets {
+		podSource := metricEndpoint
+		metricSources[metricName] = workload.MetricSource{
+			Type: workload.PodMetricSourceType,
+			Pod:  &podSource,
+		}
 	}
 	return &workload.Target{
 		TargetRef: corev1.ObjectReference{
@@ -156,7 +165,7 @@ func buildPDRoleMetricTarget(pdTarget *workload.PDDisaggregatedTarget, role work
 			Kind: util.ModelServingRoleKind,
 			Name: role.RoleName,
 		},
-		MetricEndpoint: metricEndpoint,
+		MetricSources: metricSources,
 	}
 }
 

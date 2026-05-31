@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Request handler can be used to handle inference request, by reading the model name, and do ratelimt for input tokens.
+// Request handlers parse the model name from an inference request body so downstream components can apply rate limits for input tokens.
 package handlers
 
 import (
@@ -24,8 +24,8 @@ import (
 	"net/http"
 )
 
-// Import openai-go instead of defining our own struct
-// OenAI have different kind of interfaces which use different kind of request and response body
+// OpenAI-compatible APIs can use different request body shapes.
+// Define a minimal local struct here because this handler only needs the model field.
 type OpenAIRequestBody struct {
 	Model string `json:"model"`
 	_     interface{}

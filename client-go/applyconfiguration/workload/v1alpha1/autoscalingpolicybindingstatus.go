@@ -18,10 +18,15 @@ limitations under the License.
 
 package v1alpha1
 
+import (
+	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+)
+
 // AutoscalingPolicyBindingStatusApplyConfiguration represents a declarative configuration of the AutoscalingPolicyBindingStatus type for use
 // with apply.
 type AutoscalingPolicyBindingStatusApplyConfiguration struct {
 	PDScalingStatus *PDScalingStatusApplyConfiguration `json:"pdScalingStatus,omitempty"`
+	Conditions      []v1.ConditionApplyConfiguration   `json:"conditions,omitempty"`
 }
 
 // AutoscalingPolicyBindingStatusApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyBindingStatus type for use with
@@ -35,5 +40,18 @@ func AutoscalingPolicyBindingStatus() *AutoscalingPolicyBindingStatusApplyConfig
 // If called multiple times, the PDScalingStatus field is set to the value of the last call.
 func (b *AutoscalingPolicyBindingStatusApplyConfiguration) WithPDScalingStatus(value *PDScalingStatusApplyConfiguration) *AutoscalingPolicyBindingStatusApplyConfiguration {
 	b.PDScalingStatus = value
+	return b
+}
+
+// WithConditions adds the given value to the Conditions field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Conditions field.
+func (b *AutoscalingPolicyBindingStatusApplyConfiguration) WithConditions(values ...*v1.ConditionApplyConfiguration) *AutoscalingPolicyBindingStatusApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithConditions")
+		}
+		b.Conditions = append(b.Conditions, *values[i])
+	}
 	return b
 }

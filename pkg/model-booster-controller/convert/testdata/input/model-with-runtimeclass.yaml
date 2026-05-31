@@ -1,0 +1,22 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: test-model
+  namespace: default
+  uid: randomUID
+spec:
+  backend:
+    name: backend1
+    type: vLLM
+    modelURI: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend
+    cacheURI: hostpath:///tmp/test
+    runtimeClassName: nvidia
+    minReplicas: 1
+    maxReplicas: 1
+    workers:
+      - image: vllm-server:latest
+        pods: 1
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        type: server

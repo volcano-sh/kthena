@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,6 +130,18 @@ func (s *Server) startDebugServer(ctx context.Context, store datastore.Store) {
 		debugGroup.GET("/namespaces/:namespace/gateways/:name", debugHandler.GetGateway)
 		debugGroup.GET("/namespaces/:namespace/httproutes/:name", debugHandler.GetHTTPRoute)
 		debugGroup.GET("/namespaces/:namespace/inferencepools/:name", debugHandler.GetInferencePool)
+	}
+
+	// Pprof endpoints for performance profiling
+	pprofGroup := engine.Group("/debug/pprof")
+	{
+		pprofGroup.GET("/", gin.WrapF(pprof.Index))
+		pprofGroup.GET("/profile", gin.WrapF(pprof.Profile))
+		pprofGroup.GET("/goroutine", gin.WrapF(pprof.Handler("goroutine").ServeHTTP))
+		pprofGroup.GET("/heap", gin.WrapF(pprof.Handler("heap").ServeHTTP))
+		pprofGroup.GET("/allocs", gin.WrapF(pprof.Handler("allocs").ServeHTTP))
+		pprofGroup.GET("/block", gin.WrapF(pprof.Handler("block").ServeHTTP))
+		pprofGroup.GET("/mutex", gin.WrapF(pprof.Handler("mutex").ServeHTTP))
 	}
 
 	server := &http.Server{

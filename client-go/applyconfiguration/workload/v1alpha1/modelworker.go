@@ -27,13 +27,14 @@ import (
 // ModelWorkerApplyConfiguration represents a declarative configuration of the ModelWorker type for use
 // with apply.
 type ModelWorkerApplyConfiguration struct {
-	Type      *workloadv1alpha1.ModelWorkerType `json:"type,omitempty"`
-	Image     *string                           `json:"image,omitempty"`
-	Replicas  *int32                            `json:"replicas,omitempty"`
-	Pods      *int32                            `json:"pods,omitempty"`
-	Resources *v1.ResourceRequirements          `json:"resources,omitempty"`
-	Affinity  *v1.Affinity                      `json:"affinity,omitempty"`
-	Config    *apiextensionsv1.JSON             `json:"config,omitempty"`
+	Type        *workloadv1alpha1.ModelWorkerType `json:"type,omitempty"`
+	Image       *string                           `json:"image,omitempty"`
+	Replicas    *int32                            `json:"replicas,omitempty"`
+	Pods        *int32                            `json:"pods,omitempty"`
+	Resources   *v1.ResourceRequirements          `json:"resources,omitempty"`
+	Affinity    *v1.Affinity                      `json:"affinity,omitempty"`
+	Tolerations []v1.Toleration                   `json:"tolerations,omitempty"`
+	Config      *apiextensionsv1.JSON             `json:"config,omitempty"`
 }
 
 // ModelWorkerApplyConfiguration constructs a declarative configuration of the ModelWorker type for use with
@@ -87,6 +88,16 @@ func (b *ModelWorkerApplyConfiguration) WithResources(value v1.ResourceRequireme
 // If called multiple times, the Affinity field is set to the value of the last call.
 func (b *ModelWorkerApplyConfiguration) WithAffinity(value v1.Affinity) *ModelWorkerApplyConfiguration {
 	b.Affinity = &value
+	return b
+}
+
+// WithTolerations adds the given value to the Tolerations field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Tolerations field.
+func (b *ModelWorkerApplyConfiguration) WithTolerations(values ...v1.Toleration) *ModelWorkerApplyConfiguration {
+	for i := range values {
+		b.Tolerations = append(b.Tolerations, values[i])
+	}
 	return b
 }
 

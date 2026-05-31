@@ -128,7 +128,7 @@ func TestPrefixCacheScore(t *testing.T) {
 
 		ctx := &framework.Context{
 			Model:  "test-model",
-			Prompt: common.ChatMessage{Text: prompt},
+			Prompt: &common.ChatMessage{Text: prompt},
 		}
 		scores := plugin.Score(ctx, []*datastore.PodInfo{pod1, pod2, pod3})
 
@@ -168,7 +168,7 @@ func TestPrefixCacheScore(t *testing.T) {
 		pod := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
 		ctx := &framework.Context{
 			Model:  "test-model",
-			Prompt: common.ChatMessage{}, // empty – no Text, no Messages
+			Prompt: &common.ChatMessage{}, // empty – no Text, no Messages
 		}
 		scores := plugin.Score(ctx, []*datastore.PodInfo{pod})
 		if scores != nil {
@@ -214,7 +214,7 @@ func TestNewPrefixCacheRespectsTopKMatches(t *testing.T) {
 
 	ctx := &framework.Context{
 		Model:  "test-model",
-		Prompt: common.ChatMessage{Text: prompt},
+		Prompt: &common.ChatMessage{Text: prompt},
 	}
 	scores := plugin.Score(ctx, []*datastore.PodInfo{pod1, pod2})
 

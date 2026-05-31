@@ -78,6 +78,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'user-guide/router-routing',
             'user-guide/config-router',
+            'user-guide/kvcache-aware',
             'user-guide/fairness-scheduling',
             'user-guide/rate-limit',
             "user-guide/gateway-api-support",
@@ -111,7 +112,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'General',
-      items: ['general/cert-manager', 'general/faq', 'general/prometheus', 'general/data-parallel-deployment'],
+      items: ['general/cert-manager', 'general/faq', 'general/data-parallel-deployment'],
     },
     {
       type: 'category',

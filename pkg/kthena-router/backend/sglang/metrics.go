@@ -17,8 +17,6 @@ limitations under the License.
 package sglang
 
 import (
-	"fmt"
-
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 
@@ -28,7 +26,7 @@ import (
 )
 
 var (
-	GPUCacheUsage     = "sglang:token_usage"
+	KVCacheUsage      = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
 	RequestRunningNum = "sglang:num_running_reqs"
 	TPOT              = "sglang:time_per_output_token_seconds"
@@ -37,7 +35,7 @@ var (
 
 var (
 	CounterAndGaugeMetrics = []string{
-		GPUCacheUsage,
+		KVCacheUsage,
 		RequestWaitingNum,
 		RequestRunningNum,
 	}
@@ -48,7 +46,7 @@ var (
 	}
 
 	mapOfMetricsName = map[string]string{
-		GPUCacheUsage:     utils.GPUCacheUsage,
+		KVCacheUsage:      utils.KVCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
 		RequestRunningNum: utils.RequestRunningNum,
 		TPOT:              utils.TPOT,
@@ -70,7 +68,7 @@ func NewSglangEngine() *sglangEngine {
 }
 
 func (engine *sglangEngine) GetPodMetrics(pod *corev1.Pod) (map[string]*dto.MetricFamily, error) {
-	url := fmt.Sprintf("http://%s:%d/metrics", pod.Status.PodIP, engine.MetricPort)
+	url := metrics.PodEndpointURL(pod.Status.PodIP, engine.MetricPort, "/metrics")
 	allMetrics, err := metrics.ParseMetricsURL(url)
 	if err != nil {
 		return nil, err

@@ -102,8 +102,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.HomogeneousTargetApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Metadata"):
 		return &applyconfigurationworkloadv1alpha1.MetadataApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("MetricEndpoint"):
-		return &applyconfigurationworkloadv1alpha1.MetricEndpointApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("MetricSource"):
+		return &applyconfigurationworkloadv1alpha1.MetricSourceApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelBackend"):
 		return &applyconfigurationworkloadv1alpha1.ModelBackendApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelBooster"):
@@ -132,8 +132,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.PluginScopeApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PluginSpec"):
 		return &applyconfigurationworkloadv1alpha1.PluginSpecApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("PodMetricSource"):
+		return &applyconfigurationworkloadv1alpha1.PodMetricSourceApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PodTemplateSpec"):
 		return &applyconfigurationworkloadv1alpha1.PodTemplateSpecApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("PrometheusMetricSource"):
+		return &applyconfigurationworkloadv1alpha1.PrometheusMetricSourceApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RollingUpdateConfiguration"):

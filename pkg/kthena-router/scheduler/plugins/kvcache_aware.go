@@ -56,16 +56,26 @@ const (
 
 	// defaultBlockSizeToHash is the default number of tokens per block for hashing
 	// Each token sequence is divided into blocks of this size before generating hashes
-	defaultBlockSizeToHash = 128
+	defaultBlockSizeToHash = 16
 
 	// defaultMaxBlocksToMatch is the default maximum number of blocks to process for scoring
 	// Limits the number of blocks to prevent excessive Redis queries and processing time
 	defaultMaxBlocksToMatch = 128
+
+	// defaultVLLMTokenizerPort is the upstream-default port for the vLLM
+	defaultVLLMTokenizerPort = 8000
+
+	// defaultSGLangTokenizerPort is the upstream-default port for sglang
+	defaultSGLangTokenizerPort = 30000
 )
 
 type KVCacheAwareArgs struct {
 	BlockSizeToHash  int `yaml:"blockSizeToHash,omitempty"`
 	MaxBlocksToMatch int `yaml:"maxBlocksToMatch,omitempty"`
+	// VLLMTokenizerPort overrides the default vLLM tokenizer port (8000).
+	VLLMTokenizerPort int `yaml:"vllmTokenizerPort,omitempty"`
+	// SGLangTokenizerPort overrides the default SGLang tokenizer port (30000).
+	SGLangTokenizerPort int `yaml:"sglangTokenizerPort,omitempty"`
 }
 
 type KVCacheAware struct {
@@ -105,6 +115,8 @@ func (b KVCacheAwareBlock) String(prefix string) string {
 }
 
 func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
+	klog.Infof("KVCacheAware: initializing plugin, raw args length=%d", len(pluginArg.Raw))
+
 	var args KVCacheAwareArgs
 	if len(pluginArg.Raw) > 0 {
 		if err := yaml.Unmarshal(pluginArg.Raw, &args); err != nil {
@@ -121,13 +133,32 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		maxBlocksToMatch = defaultMaxBlocksToMatch
 	}
 
+	vllmPort := args.VLLMTokenizerPort
+	if vllmPort <= 0 {
+		vllmPort = defaultVLLMTokenizerPort
+	}
+	sglangPort := args.SGLangTokenizerPort
+	if sglangPort <= 0 {
+		sglangPort = defaultSGLangTokenizerPort
+	}
+
+	klog.Infof("KVCacheAware: config blockSizeToHash=%d, maxBlocksToMatch=%d, vllmTokenizerPort=%d, sglangTokenizerPort=%d",
+		blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort)
+
 	managerConfig := tokenization.TokenizerManagerConfig{
-		EnableVLLMRemote: true,
-		EndpointTemplate: "http://%s:8000",
+		EndpointTemplates: map[string]string{
+			tokenization.EngineVLLM:   fmt.Sprintf("http://%%s:%d", vllmPort),
+			tokenization.EngineSGLang: fmt.Sprintf("http://%%s:%d", sglangPort),
+		},
 	}
 	manager := tokenization.NewTokenizerManager(managerConfig)
 
 	redisClient := utils.TryGetRedisClient()
+	if redisClient == nil {
+		klog.Warningf("KVCacheAware: Redis client is nil — kvcache-aware scoring will not work")
+	} else {
+		klog.Infof("KVCacheAware: Redis client initialized successfully")
+	}
 
 	return &KVCacheAware{
 		name:             KVCacheAwarePluginName,
@@ -151,43 +182,63 @@ func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods [
 }
 
 func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
-	scoreResults := make(map[*datastore.PodInfo]int)
-
-	for _, pod := range pods {
-		scoreResults[pod] = 0
+	scoreStart := time.Now()
+	if ctx == nil || ctx.Prompt == nil {
+		klog.V(4).Infof("KVCacheAware.Score: early return - nil context or prompt")
+		return nil
 	}
 
+	podNames := make([]string, 0, len(pods))
+	for _, p := range pods {
+		podNames = append(podNames, p.GetPodNamespacedName().Name)
+	}
+	klog.V(4).Infof("KVCacheAware.Score: called for model=%q, pods=%v, promptTextLen=%d, messagesLen=%d",
+		ctx.Model, podNames, len(ctx.Prompt.Text), len(ctx.Prompt.Messages))
+
 	if (ctx.Prompt.Text == "" && len(ctx.Prompt.Messages) == 0) || ctx.Model == "" {
-		return scoreResults
+		klog.V(4).Infof("KVCacheAware.Score: early return — empty prompt or model (model=%q, textLen=%d, messagesLen=%d)",
+			ctx.Model, len(ctx.Prompt.Text), len(ctx.Prompt.Messages))
+		return nil
 	}
 
 	start := time.Now()
 	tokens, err := t.normalizeAndTokenizePrompt(ctx, pods)
 	tokenizerDuration := time.Since(start)
-	klog.V(4).Infof("Tokenizer processing time: %v", tokenizerDuration)
+	klog.V(4).Infof("KVCacheAware.Score: tokenization took %v, tokens=%d, err=%v", tokenizerDuration, len(tokens), err)
 
 	if err != nil || len(tokens) == 0 {
-		return scoreResults
+		klog.V(4).Infof("KVCacheAware.Score: early return — tokenization failed or empty (err=%v, tokens=%d)", err, len(tokens))
+		return nil
 	}
 
 	blockHashes := t.processor.TokensToBlockHashes(tokens, t.maxBlocksToMatch)
+	klog.V(4).Infof("KVCacheAware.Score: generated %d block hashes from %d tokens (blockSize=%d)",
+		len(blockHashes), len(tokens), t.processor.blockSize)
 	if len(blockHashes) == 0 {
-		return scoreResults
+		klog.V(4).Infof("KVCacheAware.Score: early return — no block hashes generated")
+		return nil
 	}
 
+	redisStart := time.Now()
 	blockToPods, err := t.queryRedisForBlocks(blockHashes, ctx.Model)
+	redisDuration := time.Since(redisStart)
 	if err != nil {
-		return scoreResults
+		klog.Warningf("KVCacheAware.Score: Redis query failed after %v: %v", redisDuration, err)
+		return nil
 	}
+	klog.V(4).Infof("KVCacheAware.Score: Redis query took %v, blocksWithHits=%d/%d",
+		redisDuration, len(blockToPods), len(blockHashes))
 
 	podScores := t.calculatePodScores(blockHashes, blockToPods)
-
+	scoreResults := make(map[*datastore.PodInfo]int, len(podScores))
 	for _, pod := range pods {
-		podName := pod.Pod.Name
+		podName := pod.GetPodNamespacedName().Name
 		if score, exists := podScores[podName]; exists {
 			scoreResults[pod] = score
 		}
 	}
+
+	klog.V(4).Infof("KVCacheAware.Score: completed in %v, finalScores=%v", time.Since(scoreStart), podScores)
 	return scoreResults
 }
 
@@ -200,21 +251,31 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 	blockToPods := make(map[uint64][]string)
 
 	if t.redisClient == nil {
+		klog.Warningf("KVCacheAware.queryRedis: redis client is nil, cannot query")
 		return blockToPods, fmt.Errorf("redis client not initialized")
 	}
 
+	klog.V(2).Infof("KVCacheAware.queryRedis: querying %d block hashes for model=%q", len(blockHashes), modelName)
+
 	pipe := t.redisClient.Pipeline()
 	cmds := make([]*redis.StringSliceCmd, len(blockHashes))
+	keys := make([]string, len(blockHashes))
 
 	// Build pipeline commands for batch Redis query
 	for i, hash := range blockHashes {
 		block := KVCacheAwareBlock{ModelName: modelName, ChunkHash: hash}
 		key := block.String(t.keyPrefix)
+		keys[i] = key
 		cmds[i] = pipe.HKeys(ctx, key)
+	}
+
+	if len(keys) > 0 {
+		klog.V(2).Infof("KVCacheAware.queryRedis: sample keys [0]=%s, [last]=%s", keys[0], keys[len(keys)-1])
 	}
 
 	_, err := pipe.Exec(ctx)
 	if err != nil {
+		klog.Warningf("KVCacheAware.queryRedis: pipeline exec failed: %v", err)
 		return nil, err
 	}
 
@@ -225,6 +286,8 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 			continue
 		}
 
+		klog.V(2).Infof("KVCacheAware.queryRedis: block[%d] hash=%d key=%s matched pods=%v", i, blockHashes[i], keys[i], pods)
+
 		podNames := make([]string, 0, len(pods))
 		for _, pod := range pods {
 			// Redis field is pod identifier (e.g., "pod-name.namespace")
@@ -234,6 +297,7 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 		blockToPods[blockHashes[i]] = podNames
 	}
 
+	klog.V(4).Infof("KVCacheAware.queryRedis: total blocks with hits: %d/%d", len(blockToPods), len(blockHashes))
 	return blockToPods, nil
 }
 
@@ -248,14 +312,18 @@ func (t *KVCacheAware) calculatePodScores(blockHashes []uint64, blockToPods map[
 	podScores := make(map[string]int)
 
 	if len(blockHashes) == 0 {
-		klog.Infof("KVCacheAware: No block hashes to process")
+		klog.V(4).Infof("KVCacheAware.calculateScores: no block hashes to process")
 		return podScores
 	}
 
 	firstBlockPods, exists := blockToPods[blockHashes[0]]
 	if !exists || len(firstBlockPods) == 0 {
+		klog.V(4).Infof("KVCacheAware.calculateScores: first block hash=%d has no cached pods — all scores 0", blockHashes[0])
 		return podScores
 	}
+
+	klog.V(4).Infof("KVCacheAware.calculateScores: first block matched pods=%v, starting prefix matching across %d blocks",
+		firstBlockPods, len(blockHashes))
 
 	activePods := make(map[string]bool, len(firstBlockPods))
 	for _, podName := range firstBlockPods {
@@ -263,13 +331,16 @@ func (t *KVCacheAware) calculatePodScores(blockHashes []uint64, blockToPods map[
 		podScores[podName] = 1
 	}
 
+	lastMatchedBlock := 0
 	for i := 1; i < len(blockHashes); i++ {
 		if len(activePods) == 0 {
+			klog.V(4).Infof("KVCacheAware.calculateScores: no active pods left at block %d", i)
 			break
 		}
 
 		blockPods, exists := blockToPods[blockHashes[i]]
 		if !exists || len(blockPods) == 0 {
+			klog.V(4).Infof("KVCacheAware.calculateScores: block[%d] hash=%d has no cached pods, stopping", i, blockHashes[i])
 			break
 		}
 
@@ -282,17 +353,23 @@ func (t *KVCacheAware) calculatePodScores(blockHashes []uint64, blockToPods map[
 		}
 
 		if len(nextActivePods) == 0 {
+			klog.V(4).Infof("KVCacheAware.calculateScores: no pod survived intersection at block %d", i)
 			break
 		}
 
+		lastMatchedBlock = i
 		activePods = nextActivePods
 	}
 
 	totalBlocks := len(blockHashes)
+	klog.V(4).Infof("KVCacheAware.calculateScores: prefix matching ended at block %d/%d, scoring %d pods",
+		lastMatchedBlock+1, totalBlocks, len(podScores))
+
 	for podName, matchLen := range podScores {
 		score := int((float64(matchLen) / float64(totalBlocks)) * 100)
 		podScores[podName] = score
-		klog.V(4).Infof("KVCacheAware Pod %s: matched %d/%d blocks, score: %d", podName, matchLen, totalBlocks, score)
+		klog.V(4).Infof("KVCacheAware.calculateScores: pod=%s matched=%d/%d blocks, score=%d",
+			podName, matchLen, totalBlocks, score)
 	}
 
 	return podScores
@@ -300,11 +377,15 @@ func (t *KVCacheAware) calculatePodScores(blockHashes []uint64, blockToPods map[
 
 func (tbp *TokenBlockProcessor) TokensToBlockHashes(tokens []uint32, maxBlocks int) []uint64 {
 	if len(tokens) == 0 {
+		klog.V(4).Infof("KVCacheAware.TokensToBlockHashes: no tokens provided")
 		return nil
 	}
 
 	chunks := tbp.chunkTokens(tokens, maxBlocks)
-	return tbp.computeBlockHashes(chunks)
+	hashes := tbp.computeBlockHashes(chunks)
+	klog.V(4).Infof("KVCacheAware.TokensToBlockHashes: %d tokens -> %d chunks -> %d hashes (blockSize=%d, maxBlocks=%d)",
+		len(tokens), len(chunks), len(hashes), tbp.blockSize, maxBlocks)
+	return hashes
 }
 
 // computeStandardizedHash generates a consistent hash for token sequences using SHA-256
