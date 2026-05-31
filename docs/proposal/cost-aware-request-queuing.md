@@ -1,5 +1,5 @@
 ---
-title: Cost-Aware Request Queuing and Token-Budget Admission Control in Kthena Router
+title: Cost-Aware Scheduling Plugin for Kthena Router
 authors:
 - "@JagjeevanAK"
 reviewers:
@@ -12,210 +12,276 @@ approvers:
 creation-date: 2026-04-26
 ---
 
-## Cost-Aware Request Queuing and Token-Budget Admission Control in Kthena Router
+## Cost-Aware Scheduling Plugin for Kthena Router
 
 ### Summary
 
-This proposal introduces a token-cost-aware admission control layer in `kthena-router` so routing decisions and queuing behavior reflect actual request cost, not only request count. Today, pod selection is dominated by request-count signals (for example, `running + 100 * waiting` in `least-request`), which is not robust for mixed workloads where one request may be 64x or more expensive than another. This mismatch can admit expensive requests into already constrained pods, trigger KV-cache pressure/OOM, and inflate tail latency.
+This proposal introduces a `cost-aware` scheduler plugin for `kthena-router`.
+The plugin scores candidate backend pods using estimated token cost instead of
+only request count. It is intended to improve performance for mixed workloads
+where one request can be much more expensive than another because of long input,
+large requested output, or both.
 
-The proposal adds token-budget-based admission at router level:
-1. Estimate request token cost before dispatch (with safe fallbacks).
-2. Track pod in-flight token reservations.
-3. Admit only when at least one candidate pod has enough token headroom.
-4. Reconcile estimates with actual usage on response.
-5. Keep compatibility with existing request queuing and configuration style.
+This revision intentionally does **not** add a second router queue. Existing
+request ordering remains unchanged:
 
-This design is intentionally incremental: operators can deploy it in observe-only mode first, then soft enforcement, then strict admission once confidence is high.
+1. If fairness scheduling is enabled, the existing fairness path decides request
+   order.
+2. After a request is ready to be routed, the router estimates its token cost.
+3. The scheduler runs normal filter and score plugins.
+4. The new `cost-aware` score plugin prefers pods with more token headroom.
+5. The router proxies to the selected pod and tracks estimated in-flight token
+   pressure until the request finishes.
+
+This keeps the feature scoped to performance scheduling. Fairness remains a
+separate policy concern.
 
 ### Motivation
 
-Current scheduler and queue behavior can misrepresent real load:
+The current `least-request` plugin uses request-count signals such as:
+
+```text
+RequestRunningNum + 100 * RequestWaitingNum
+```
+
+That is simple and useful, but it treats a short chat request and a long-context
+generation request as similar units of load. In practice they can have very
+different effects on prefill time, decode time, KV-cache growth, and tail
+latency.
+
+This mismatch creates several problems:
 
 1. **Pod score mismatch under mixed costs**  
-   A pod handling 2 long-context requests may be effectively saturated while a pod handling 8 short requests is not. Request count alone cannot express this.
+   A pod with two long-context requests can be more loaded than a pod with many
+   short requests. Request count alone cannot represent that.
 
-2. **Head-of-line blocking under mixed costs**
-   FIFO/count-driven queue release can admit large requests that block capacity for multiple smaller requests, harming interactive latency.
+2. **Performance regression for small requests**
+   Short interactive requests can be routed to pods already occupied by large
+   token budgets, increasing p95/p99 latency.
 
-3. **KV cache and memory pressure**  
-   Requests with large prompt and generation budgets can rapidly consume decode/prefill memory. Without admission guardrails, pressure is discovered too late.
+3. **KV-cache pressure**
+   Large prompt plus large output budgets can consume much more KV-cache than
+   request-count based scheduling expects.
 
-4. **Limited operational predictability**  
-   Operators currently tune QPS or concurrent-count limits, but these knobs are only indirect proxies for real resource usage.
+4. **Limited operator control**
+   Operators can tune QPS or concurrent request counts, but those knobs are only
+   indirect proxies for token-level resource pressure.
 
-#### Goals
+### Goals
 
-1. Introduce **token-budget admission control** per model queue and pod.
-2. Support **router-side queuing** when all candidate pods exceed budget.
-3. Use **request token-cost estimates pre-dispatch**, then reconcile with actual usage.
-4. Keep token-budget admission separate from fairness policy:
-   - fairness decides request ordering when enabled.
-   - token-budget admission decides when and which backend can accept the dequeued request.
-   - timeout/cancel semantics remain request-scoped.
-5. Provide strong observability for:
-   - estimated vs actual token deltas
-   - budget utilization
-   - queue delay and rejection reasons
-6. Preserve backward compatibility and safe rollout controls.
+1. Add a `cost-aware` scheduler plugin that can be enabled and weighted like
+   existing score plugins.
+2. Estimate both input and output token cost before scheduling.
+3. Track per-pod in-flight token pressure and reconcile it with actual usage
+   when available.
+4. Keep the feature independent from fairness priority calculation.
+5. Avoid introducing another router queue in the initial design.
+6. Provide clear observability for estimate quality and token pressure.
+7. Support observe-only rollout before operators use the score in production.
 
-#### Non-Goals
+### Non-Goals
 
-1. Build a globally consistent cross-router coordinator in this phase.
-2. Guarantee perfect request cost prediction for all models/vendors.
-3. Replace all scheduler plugins or remove `least-request`.
-4. Couple admission logic to vendor-specific engine internals.
-5. Enforce hard tenant quotas or billing in this proposal.
+1. Replace the existing fairness queue or define new fairness policy.
+2. Add a new router-side queue for token-budget admission in v1.
+3. Guarantee exact output length prediction.
+4. Build a globally consistent multi-router coordinator in the first step.
+5. Enforce tenant quotas or billing policy.
 
 ### Proposal
 
-Introduce a **Token-Budget Admission Controller** in router request flow:
+Add a new scheduler score plugin named `cost-aware`.
 
-1. Request enters router and passes authentication/rate-limit checks.
-2. Router estimates request cost in token units.
-3. Scheduler determines candidate pods (existing path).
-4. Admission controller checks each candidate pod's available token headroom.
-5. If fit exists, reserve tokens on selected pod and dispatch request.
-6. If no fit exists, keep the request waiting in the router queue and wake it when budget may be available.
-7. On response usage event, reconcile reservation with actual usage and release budget.
-8. On timeout/cancel/error, release reservation deterministically.
+At a high level:
 
-#### User Stories (Optional)
+1. The router parses the request and estimates:
+   - prompt tokens,
+   - output token budget,
+   - weighted total request cost.
+2. The estimate is stored in scheduler context.
+3. The scheduler runs existing filter plugins.
+4. `cost-aware` scores every candidate pod by projected token pressure:
 
-##### Story 1
+```text
+projected_tokens = current_pod_inflight_tokens + estimated_request_tokens
+projected_utilization = projected_tokens / effective_pod_budget_tokens
+score = clamp(100 * (1 - projected_utilization), 0, 100)
+```
 
-As a platform operator running mixed workloads (chat + long-context generation), I want admission to consider token cost so long requests do not overwhelm pods and degrade p99 latency.
+5. The existing weighted score combiner chooses the best pod using all enabled
+   plugins.
+6. When the request is dispatched, the router records an estimated in-flight
+   token reservation for that pod.
+7. When the request completes, the router reconciles the reservation with
+   OpenAI-compatible usage fields if available, then releases the reservation.
 
-##### Story 2
+The plugin can initially run in observe-only mode, where it records metrics but
+does not affect pod selection.
 
-As a tenant with bursty short prompts, I want smaller requests to continue flowing when a few heavy requests arrive, instead of being blocked behind them due to count-only scheduling.
+### Request Workflow
 
-##### Story 3
+The key workflow is after any existing fairness decision has already happened:
 
-As an SRE, I want metrics that explain queuing decisions (`admitted`, `queued_budget_exceeded`, `rejected_timeout`) and estimate error (`estimated_vs_actual`) so I can tune limits safely.
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant R as Router
+  participant F as Existing Fairness Path
+  participant S as Scheduler
+  participant P as cost-aware Plugin
+  participant B as Backend Pod
 
-##### Story 4
+  C->>R: Request
+  R->>F: Existing request ordering, if enabled
+  F-->>R: Request is ready to route
+  R->>R: Estimate prompt tokens and output budget
+  R->>S: Schedule with request cost in context
+  S->>P: Score candidate pods by projected token pressure
+  P-->>S: Pod scores
+  S-->>R: Best pod list
+  R->>R: Add estimated in-flight tokens for chosen pod
+  R->>B: Proxy request
+  B-->>R: Response, optionally with usage
+  R->>R: Reconcile estimate with actual usage if present
+  R->>R: Release pod in-flight token reservation
+  R-->>C: Response
+```
 
-As a maintainer, I want this feature to be opt-in with compatibility fallback so existing clusters can upgrade without behavior breakage.
-
-#### Notes/Constraints/Caveats (Optional)
-
-1. **Estimator uncertainty is expected.**  
-   The design explicitly supports conservative estimates and post-response reconciliation.
-
-2. **Streaming usage events may arrive late.**  
-   Release logic must be robust even when usage is only available at stream tail.
-
-3. **In-memory accounting is per router instance.**  
-   In multi-replica router deployments, state is local unless future shared-state mode is enabled. v1 mitigates this with `routerBudgetDivisor` so each router uses a conservative slice of the pod budget.
-
-4. **Routing scope remains model-local in v1.**  
-   This proposal does not attempt cross-model pooled budgets.
-
-#### Risks and Mitigations
-
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Cost estimator underestimates large requests | Over-admission, memory pressure | Safety factor, minimum reservation floor, strict-mode guardrails |
-| Estimator overestimates | Unnecessary queue delay | Reconciliation + dynamic calibration metrics |
-| Budget leak on error path | Permanent reduced capacity | Single-owner reservation lifecycle with defer-based release |
-| Queue starvation of large requests | Performance regression | Signal-based wakeups + max-wait promotion |
-| Increased routing overhead | Router latency | O(1) accounting structures, bounded queue ops, targeted metrics |
-| Multi-router inconsistency | Over-admission, memory pressure | Per-router budget divisor in v1 + future Redis-backed shared budget mode |
+There is no separate `cost-aware` queue in this proposal. If fairness scheduling
+is enabled, it remains the only request-ordering queue. If fairness is disabled,
+the plugin simply affects backend selection.
 
 ### Design Details
 
-#### 1. Current State Summary
+#### 1. Existing Router Integration Points
 
-Relevant existing behavior in codebase:
+Relevant existing behavior:
 
-1. Scheduler `least-request` scoring uses:
-   - `base = RequestRunningNum + 100 * RequestWaitingNum`
-2. Fairness queue already supports:
-   - queue timeout (`FAIRNESS_QUEUE_TIMEOUT`)
-   - request cancel propagation
-   - optional semaphore mode (`FAIRNESS_MAX_CONCURRENT`)
-   - weighted priority (`FAIRNESS_PRIORITY_TOKEN_WEIGHT`, `FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT`)
-3. Token tracker exists:
-   - sliding window (`FAIRNESS_WINDOW_SIZE`; in-code fallback default 5m when unset; Helm chart default 1h when fairness is enabled; valid 1m to 1h)
-   - input/output weights (`FAIRNESS_INPUT_TOKEN_WEIGHT`, `FAIRNESS_OUTPUT_TOKEN_WEIGHT`)
-4. Router already parses usage and updates user-model token stats from response usage fields.
+1. The router already parses OpenAI-compatible request bodies.
+2. The scheduler framework supports pluggable score plugins.
+3. `least-request` already scores pods from runtime request metrics.
+4. The router already captures usage from responses and updates token stats.
+5. `FAIRNESS_WINDOW_SIZE` has an in-code fallback default of 5m when unset; the
+   Helm chart default is 1h when fairness is enabled.
 
-This proposal uses these primitives as integration points, but the new
-admission decision is a performance and resource-safety check, not a fairness
-priority redesign.
+The new plugin uses these as integration points. It does not change the meaning
+of fairness priority weights.
 
-#### 2. High-Level Architecture
+#### 2. Request Cost Estimate
 
-```mermaid
-flowchart TD
-  A[Incoming Request] --> B[Parse + Auth + RateLimit]
-  B --> C[Estimate Token Cost]
-  C --> D[Schedule Candidate Pods]
-  D --> E{Any pod has token headroom?}
-  E -->|Yes| F[Reserve tokens on chosen pod]
-  F --> G[Dispatch to backend]
-  G --> H[Receive usage]
-  H --> I[Reconcile estimated vs actual]
-  I --> J[Release reservation]
-  E -->|No| K[Wait in router queue]
-  K --> L[Re-attempt admission on release signal or fallback timer]
-  L --> E
-```
-
-#### 3. Core Components
-
-##### 3.1 TokenCostEstimator
-
-Computes a conservative token-cost estimate for incoming request:
+The estimate includes both input and output tokens:
 
 ```text
 estimated_prompt_tokens = tokenizer(prompt/messages)
-estimated_output_tokens = requested output token budget
-estimated_total = input_weight * estimated_prompt_tokens +
-                  output_weight * estimated_output_tokens
+estimated_output_tokens = output_budget(request, model, history)
+
+estimated_request_tokens =
+  input_weight * estimated_prompt_tokens +
+  output_weight * estimated_output_tokens
+
 reservation_tokens = clamp(
-  ceil(estimated_total * safety_factor),
+  ceil(estimated_request_tokens * safety_factor),
   min_reservation_tokens,
   max_reservation_tokens,
 )
 ```
 
-Where:
-1. `estimated_prompt_tokens`:
-   - Primary: tokenizer estimate from prompt/messages using the existing router
-     tokenizer path.
-   - Fallback: `utf8.RuneCountInString(prompt) / 4.0`, matching the existing
-     tokenizer estimator behavior and avoiding byte-length overestimation for
-     non-ASCII prompts.
-2. `estimated_output_tokens`:
-   - Prefer explicit request fields in OpenAI-compatible order:
-     `max_completion_tokens`, then `max_tokens`.
-   - If neither field is present, use a configurable per-model default output
-     budget. If no model-specific default exists, fall back to
-     `defaultOutputTokens`.
-   - Invalid, negative, NaN, or infinite values are treated as missing.
-3. Apply safety controls:
-   - input and output are both included because short prompts can generate long
-     outputs and long prompts can request short outputs.
-   - `input_weight` and `output_weight` make the estimate tunable for different
-     resource profiles. Input tokens mostly affect prefill and initial KV-cache
-     allocation; requested output budget mainly affects decode duration and KV
-     growth.
-   - `reservation_tokens = ceil(estimated_total * safety_factor)`
-   - lower bound (`min_reservation_tokens`)
-   - upper bound clamp (`max_reservation_tokens`)
+Input and output are both needed because:
 
-Estimator modes:
-1. **Conservative** (default): higher safety factor.
-2. **Balanced**: moderate factor.
-3. **Observe-only**: no admission enforcement, metrics only.
+1. short input can request long output,
+2. long input can request short output,
+3. prefill and decode have different performance profiles,
+4. KV-cache grows with total sequence length.
 
-##### 3.2 PodTokenBudgetTracker
+##### 2.1 Prompt Token Estimate
 
-Maintains per-pod budget state:
+Prompt estimate order:
+
+1. Use the existing router tokenizer path when available.
+2. Fall back to `utf8.RuneCountInString(prompt) / 4.0`, matching the existing
+   tokenizer estimator behavior and avoiding byte-length overestimation for
+   non-ASCII text.
+3. Emit a metric label showing whether the estimate came from tokenizer or
+   fallback.
+
+##### 2.2 Output Token Estimate
+
+Output length is the hardest part. Other serving systems generally avoid trying
+to predict the semantic stopping point exactly:
+
+1. vLLM exposes `SamplingParams.max_tokens` as the maximum number of output
+   tokens and its scheduler works incrementally against token budgets and
+   `request.max_tokens`, rather than predicting the final completion length up
+   front.
+2. TensorRT-LLM's scheduler uses runtime limits such as `max_batch_size`,
+   `max_num_tokens`, and sequence-length configuration to decide what can be
+   scheduled efficiently. Its documentation also notes that KV-cache grows as
+   tokens are generated.
+3. OpenAI-compatible APIs expose output caps such as `max_completion_tokens` or
+   `max_tokens`; SGLang exposes `max_new_tokens` in sampling parameters.
+4. Recent token-budget routing research uses request budget classification and
+   online calibration from observed usage instead of claiming exact output
+   prediction.
+
+Based on this, Kthena should treat output estimation as a conservative budget,
+not a precise prediction.
+
+Recommended order:
+
+1. If the request sets an explicit output cap, use it:
+   - `max_completion_tokens`
+   - `max_tokens`
+   - `max_new_tokens`
+   - `max_output_tokens`
+2. Clamp the cap by remaining model context when model context is known:
+
+```text
+context_remaining = max_model_context_tokens - estimated_prompt_tokens
+estimated_output_tokens = min(requested_output_cap, context_remaining)
+```
+
+3. If the request omits an output cap, use model or route configuration:
+   - per-model `defaultOutputTokens`,
+   - per-route `defaultOutputTokens`,
+   - global `defaultOutputTokens`.
+4. After enough traffic is observed, allow an optional rolling quantile fallback:
+
+```text
+estimated_output_tokens =
+  max(configured_default_output_tokens,
+      rolling_p95_completion_tokens_by_model_route)
+```
+
+5. If no history exists, use the configured default and label the estimate
+   confidence as `default`.
+
+This answers the precision concern directly: explicit client limits are the
+strongest signal; otherwise the plugin uses conservative configured defaults and
+learns from actual completion lengths over time.
+
+##### 2.3 Multiple Choices and Streaming
+
+If `n > 1`, output estimate should multiply by `n` because the backend may
+generate multiple completions:
+
+```text
+estimated_output_tokens *= max(1, n)
+```
+
+For streaming responses:
+
+1. Keep the estimated reservation until the stream ends.
+2. If final usage arrives, reconcile with `completion_tokens` or `total_tokens`.
+3. If final usage never arrives, release the estimate and emit
+   `usage_missing{streaming="true"}`.
+4. If the client disconnects mid-stream, release the estimate and emit
+   `stream_cancelled_before_usage`.
+
+#### 3. Cost-Aware Score Plugin
+
+The plugin state tracks in-flight token pressure by pod:
 
 ```go
-type PodBudgetState struct {
+type PodTokenPressure struct {
     PodKey           string
     Model            string
     BudgetTokens     int64
@@ -225,376 +291,385 @@ type PodBudgetState struct {
 }
 ```
 
-The implementation must make reservation operations atomic. The proposed v1
-approach is a sharded tracker:
+The plugin must make reservation operations concurrency-safe:
 
-1. A top-level shard map routes each `podKey` to one lock shard.
-2. Every `TryReserve`, `Release`, `Reconcile`, and `Utilization` operation for
-   a pod runs while holding that shard lock.
-3. Each active reservation is tracked by `reservationID` so releases are
-   idempotent and reconcile can compare estimated and actual cost.
-4. `ReservedInflight` is never read or written outside the lock. If the
-   implementation later uses atomics, the compare-and-reserve operation still
-   must be a single atomic CAS loop so two goroutines cannot over-admit.
+1. Use sharded locks keyed by `podKey`, or a single per-pod lock.
+2. `Reserve`, `Release`, `Reconcile`, and `Utilization` run while holding the
+   relevant lock.
+3. Each in-flight request has a `reservationID`.
+4. `Release` is idempotent by `reservationID`.
+5. If an atomic implementation is chosen later, reserve must use a CAS loop so
+   two goroutines cannot corrupt the in-flight token count.
 
-Accounting operations:
-1. `TryReserve(pod, cost) -> bool`
-2. `Release(pod, reservationID)`
-3. `Reconcile(pod, reservationID, actualCost)` (adjust delta)
-4. `Utilization(pod) = ReservedInflight / BudgetTokens`
-
-##### 3.3 Admission Queue Manager
-
-Adds budget checks after normal queue ordering:
-
-1. Queue remains per model.
-2. If fairness scheduling is enabled, the fairness queue decides which request
-   is ready to attempt admission. If fairness is disabled, the existing router
-   queue order is preserved.
-3. After a request is dequeued, the scheduler produces candidate pods and the
-   admission controller picks the first candidate with enough token headroom.
-4. If no candidate fits, the request waits for an admission wake event without
-   changing fairness priority.
-5. Timeout/cancel follows existing request-scoped context semantics.
-
-Wait and retry behavior:
-
-1. The primary retry path is signal-based: `Release` and capacity-affecting pod
-   updates notify waiters for the relevant model/pod candidates.
-2. Wakeups should be bounded. A release should notify the relevant model queue
-   and let the queue manager attempt admission for the oldest eligible entries,
-   rather than waking every queued request for every pod.
-3. A fallback timer exists only to recover from missed signals or pod state
-   drift. It should be coarse, for example 500ms to 1s, not a 10ms polling
-   loop.
-4. To avoid starvation, a request that has waited longer than
-   `starvationPromotionAfter` is promoted to the next admission attempt before
-   newer requests. `maxBudgetQueueWait` remains the hard timeout. This is a
-   bounded wait rule, not an unbounded age score competing with token-sized
-   priority values.
-
-##### 3.4 Reservation Lifecycle and Safety
-
-Each admitted request receives `reservationID` and release handler:
-
-1. Reserve before proxy dispatch.
-2. On every terminal path (success/error/cancel/timeout): release.
-3. If usage is available: reconcile before release.
-4. Double-release is guarded by `sync.Once` on the request-side handle and by
-   reservationID idempotency in the tracker.
-
-#### 4. Request Lifecycle (Detailed)
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant R as Router
-  participant Q as Router Queue
-  participant B as Budget Tracker
-  participant P as Pod
-
-  C->>R: Request
-  R->>R: Estimate token cost
-  R->>Q: Enqueue/attempt admission
-  Q->>B: TryReserve(candidate pod, est_cost)
-  alt reserve success
-    Q-->>R: Admit + reservation handle
-    R->>P: Proxy request
-    P-->>R: Response + usage
-    R->>B: Reconcile(reservation, actual)
-    R->>B: Release(reservation)
-    R-->>C: Response
-  else reserve fail
-    Q-->>R: Wait (queued)
-    Note over Q,B: Wake on release signal/fallback timer/cancel
-  end
-```
-
-#### 5. Token Estimation Strategy
-
-This proposal defines three strategies and selects hybrid by default:
-
-1. **Actual-only strategy**
-   - Reserve fixed default, rely on actual usage later.
-   - Pros: simple.
-   - Cons: weak pre-dispatch protection.
-
-2. **Pre-request estimate strategy**
-   - Estimate from prompt + request limits.
-   - Pros: proactive admission quality.
-   - Cons: estimation error risk.
-
-3. **Hybrid strategy (recommended)**
-   - Pre-request estimate for admission.
-   - Post-response reconciliation for correction.
-   - Tracks estimator error metrics to support tuning.
-
-#### 6. Scheduler Integration
-
-Two compatible integration options:
-
-1. **New score plugin (recommended)**
-   - `token-budget-aware` plugin with clear separation.
-   - Can be composed in scheduler profile.
-   - Scores candidate pods by token-budget headroom and recent reservation
-     pressure without changing `least-request` semantics.
-
-2. **Extend `least-request` plugin**
-   - Add optional token-aware score term:
-     - lower utilization -> higher score
-   - Preserve existing behavior when disabled.
-
-Initial recommendation: add a new `token-budget-aware` score plugin. This keeps
-the performance-scheduling behavior independent from existing request-count
-heuristics and makes it easier to disable or tune without changing
-`least-request`.
-
-#### 7. Configuration
-
-Keep configuration style consistent with existing fairness settings under:
-`networking.kthenaRouter.fairness.*`
-
-Proposed additions:
-
-| Helm value | Env var | Default | Description |
-|---|---|---|---|
-| `fairness.tokenBudget.enabled` | `FAIRNESS_TOKEN_BUDGET_ENABLED` | `false` | Enable token-budget admission |
-| `fairness.tokenBudget.podBudgetTokens` | `FAIRNESS_POD_TOKEN_BUDGET` | `262144` | Per-pod token budget |
-| `fairness.tokenBudget.routerBudgetDivisor` | `FAIRNESS_TOKEN_BUDGET_ROUTER_DIVISOR` | `1` | Divide local per-pod budget by expected router replicas |
-| `fairness.tokenBudget.estimationMode` | `FAIRNESS_COST_ESTIMATION_MODE` | `hybrid` | `observe`,`conservative`,`balanced`,`hybrid` |
-| `fairness.tokenBudget.safetyFactor` | `FAIRNESS_COST_SAFETY_FACTOR` | `1.2` | Multiplicative safety factor |
-| `fairness.tokenBudget.defaultOutputTokens` | `FAIRNESS_DEFAULT_OUTPUT_TOKENS` | `1024` | Output budget when request and model config omit a limit |
-| `fairness.tokenBudget.minReservationTokens` | `FAIRNESS_MIN_RESERVATION_TOKENS` | `64` | Minimum reservation |
-| `fairness.tokenBudget.maxReservationTokens` | `FAIRNESS_MAX_RESERVATION_TOKENS` | `32768` | Max reservation clamp |
-| `fairness.tokenBudget.queueRetryInterval` | `FAIRNESS_ADMISSION_RETRY_INTERVAL` | `1s` | Fallback retry interval when no wake signal arrives |
-| `fairness.tokenBudget.maxBudgetQueueWait` | `FAIRNESS_BUDGET_QUEUE_TIMEOUT` | `60s` | Max wait for token-budget admission before timeout |
-| `fairness.tokenBudget.starvationPromotionAfter` | `FAIRNESS_BUDGET_STARVATION_PROMOTION_AFTER` | `30s` | Promote long-waiting budget-blocked requests |
-
-Validation rules:
-1. Budget > 0
-2. Safety factor >= 1.0
-3. `routerBudgetDivisor >= 1`
-4. `maxReservation >= minReservation`
-5. Retry interval in sensible bounds (e.g., 500ms-10s)
-
-`FAIRNESS_BUDGET_QUEUE_TIMEOUT` is intentionally separate from the existing
-`FAIRNESS_QUEUE_TIMEOUT`. The existing variable controls fairness queue wait
-behavior; budget admission can need a different timeout because it is waiting
-for pod memory/token headroom, not fairness order.
-
-##### 7.1 Pod Budget Sizing
-
-`podBudgetTokens` should be tuned per model, hardware shape, and engine. The
-default `262144` is only a conservative starting point for observe/soft mode,
-not a universal safe value.
-
-Operators should size the budget from available KV-cache capacity:
+Score formula:
 
 ```text
-usableKVBytes = gpuKVCacheBytes * targetUtilization
-bytesPerToken ~= 2 * layers * hiddenSize * bytesPerElement / tensorParallelSize
-podBudgetTokens ~= floor(usableKVBytes / bytesPerToken)
+effective_budget = floor(podBudgetTokens / routerBudgetDivisor)
+current_pressure = ReservedInflight / effective_budget
+projected_pressure =
+  (ReservedInflight + request.reservation_tokens) / effective_budget
+
+score = 100 * (1 - projected_pressure)
+score = clamp(score, 0, 100)
 ```
 
-The exact formula varies by engine, attention implementation, quantization, and
-parallelism. For production, operators should prefer engine-reported KV-cache
-capacity or benchmarked safe concurrency over the static default. The proposal
-therefore recommends:
+The plugin should expose two modes:
 
-1. start in observe mode and compare estimated reservations with OOM/latency
-   behavior,
-2. set model-specific `podBudgetTokens` from engine capacity or load tests,
-3. keep a safety margin for router replicas, speculative decoding, LoRA/cache
-   overhead, and non-request memory.
+1. `observe`: compute scores and metrics but return neutral scores.
+2. `score`: return cost-aware scores and participate in normal weighted
+   scheduling.
 
-##### 7.2 Multi-Router Behavior
+An optional later `filter` mode can reject pods whose projected pressure is over
+`maxProjectedUtilization`, but that should be a follow-up because it changes
+failure behavior. The initial proposal is score-only.
 
-In v1 the tracker is local to each router process. With `N` router replicas,
-unadjusted local accounting could admit up to `N * podBudgetTokens` against the
-same backend pod. To avoid presenting local accounting as globally strict, v1
-must support `routerBudgetDivisor`:
+#### 4. Interaction With Existing Plugins
+
+The plugin composes with existing scheduler profiles:
+
+```yaml
+scheduler:
+  pluginConfig:
+  - name: least-request
+    args:
+      maxWaitingRequests: 10
+  - name: cost-aware
+    args:
+      mode: score
+      podBudgetTokens: 262144
+      routerBudgetDivisor: 1
+      inputWeight: 1.0
+      outputWeight: 1.0
+      safetyFactor: 1.2
+      defaultOutputTokens: 1024
+      minReservationTokens: 64
+      maxReservationTokens: 32768
+      outputQuantile: 0.95
+  plugins:
+    Score:
+      enabled:
+      - name: least-request
+        weight: 1
+      - name: cost-aware
+        weight: 1
+```
+
+Recommended behavior:
+
+1. Keep `least-request` enabled by default.
+2. Add `cost-aware` with low or equal weight after observe-only validation.
+3. Tune `podBudgetTokens`, `inputWeight`, and `outputWeight` per model family.
+4. Do not mix this with `random`, matching the existing scheduler rule that
+   removes random when meaningful score plugins are enabled.
+
+#### 5. Configuration
+
+Configure the feature as a scheduler plugin, not under fairness-specific
+settings.
+
+| Plugin arg | Default | Description |
+|---|---|---|
+| `mode` | `observe` | `observe` or `score` |
+| `podBudgetTokens` | `262144` | Per-pod token pressure budget |
+| `routerBudgetDivisor` | `1` | Divide local budget by expected router replicas |
+| `inputWeight` | `1.0` | Weight for prompt/prefill tokens |
+| `outputWeight` | `1.0` | Weight for output/decode tokens |
+| `safetyFactor` | `1.2` | Conservative multiplier |
+| `defaultOutputTokens` | `1024` | Output budget when request omits an output cap |
+| `minReservationTokens` | `64` | Minimum request reservation |
+| `maxReservationTokens` | `32768` | Maximum request reservation |
+| `outputQuantile` | `0.95` | Rolling completion-token quantile used when available |
+| `maxHistoryEntries` | `10000` | Bound memory used by rolling output history |
+
+Validation:
+
+1. `podBudgetTokens > 0`
+2. `routerBudgetDivisor >= 1`
+3. `inputWeight >= 0`
+4. `outputWeight >= 0`
+5. `inputWeight + outputWeight > 0`
+6. `safetyFactor >= 1.0`
+7. `maxReservationTokens >= minReservationTokens`
+8. `0 < outputQuantile < 1`
+
+#### 6. Pod Budget Sizing
+
+`podBudgetTokens` is workload and hardware dependent. The default `262144` is
+only a starting point for observe mode, not a universal safe value.
+
+Operators should prefer backend-reported KV-cache capacity or load-test data.
+When that is unavailable, a rough sizing model is:
 
 ```text
-effectiveLocalPodBudget = floor(podBudgetTokens / routerBudgetDivisor)
+usable_kv_bytes = gpu_kv_cache_bytes * target_utilization
+bytes_per_token ~= 2 * layers * hidden_size * bytes_per_element / tensor_parallel_size
+podBudgetTokens ~= floor(usable_kv_bytes / bytes_per_token)
+```
+
+The exact value depends on engine implementation, quantization, parallelism,
+LoRA overhead, speculative decoding, and non-request memory. The recommended
+rollout is:
+
+1. start in `observe` mode,
+2. compare estimated pressure with latency and OOM signals,
+3. set model-specific budgets from measurements,
+4. then enable `score` mode.
+
+#### 7. Multi-Router Behavior
+
+In v1, in-flight token pressure is local to each router process. With `N`
+router replicas, local-only tracking can understate total pod pressure.
+
+Mitigation in v1:
+
+```text
+effective_pod_budget = floor(podBudgetTokens / routerBudgetDivisor)
 ```
 
 Operators should set `routerBudgetDivisor` to the expected number of active
-router replicas when using local enforcement. This is conservative when traffic
-is uneven, but it is safer than over-admitting. A shared-state tracker
-(Redis/etcd or backend-reported live KV usage) remains the preferred follow-up
-for strict multi-router correctness.
+router replicas when using score mode. This is conservative when traffic is
+uneven, but safer than assuming one router owns the full pod budget.
 
-#### 8. API and Data-Contract Considerations
+Future work should evaluate a shared tracker using Redis or backend-reported
+live KV-cache usage. That is a correctness improvement for multi-router strict
+budgeting, but it is not required for the score-only first step.
 
-No external API breaking changes are required.
+#### 8. Response Usage and Reconciliation
 
-Internal additions:
-1. Extend request metadata in queue entries:
-   - estimated cost
-   - reservation id
-   - admission attempts
-2. Extend metrics labels/reasons for admission outcomes.
-3. Optional scheduler plugin args for token-aware scoring.
+When usage is available, prefer OpenAI-compatible fields:
 
-Backend usage fields:
-1. Prefer existing OpenAI-compatible usage (`prompt_tokens`, `completion_tokens`, `total_tokens`).
-2. If usage unavailable:
-   - release by estimate
-   - emit `usage_missing` metric
-   - keep estimator-error metrics labeled as `unknown` rather than treating the
-     estimate as accurate usage
+1. `prompt_tokens`
+2. `completion_tokens`
+3. `total_tokens`
 
-#### 9. Failure Handling and Edge Cases
+Reconciliation:
 
-1. **Client disconnect while queued**: remove/skip queued entry via request context cancellation.
-2. **Client disconnect after reserve**: release reservation immediately.
-3. **Proxy error with no usage**: release estimate, mark reconcile status `unknown`.
-4. **Streaming usage only at end**: retain the reservation estimate until the
-   final SSE chunk. If final usage arrives, reconcile before release.
-5. **Streaming engine never returns usage**: release by estimate, emit
-   `usage_missing{streaming="true"}`, and exclude the request from
-   estimated-vs-actual error calculations.
-6. **Client disconnects mid-stream**: release by the current reservation
-   estimate because no final usage can be trusted. Emit
-   `stream_cancelled_before_usage` so operators can see how often this path is
-   used.
-7. **Queue timeout**: release if reserved, return 504.
-8. **Pod disappears after reserve**: force release and retry scheduling.
-9. **Negative reconcile delta** (actual < estimate): immediate credit-back.
-10. **Positive delta exceeding remaining headroom**: allow bounded temporary over-commit and emit alert metric.
-11. **Estimator unavailable**: fallback to conservative default reservation.
-12. **Admission flapping**: debounce wake signals and cap reinsert loops.
+```text
+actual_cost =
+  inputWeight * actual_prompt_tokens +
+  outputWeight * actual_completion_tokens
+
+delta = actual_cost - reserved_tokens
+```
+
+The tracker records estimate error metrics and releases the reservation. If only
+`total_tokens` is present, use it as a lower-fidelity actual value and label the
+source as `total_only`.
+
+If usage is unavailable, release by estimate and label reconciliation status as
+`usage_missing`. Do not treat the estimate as an actual value for calibration.
+
+#### 9. Failure Handling
+
+1. **Proxy error with no usage**: release estimate and mark reconciliation
+   status `unknown`.
+2. **Client disconnect after dispatch**: release estimate.
+3. **Streaming final usage missing**: release estimate and emit
+   `usage_missing{streaming="true"}`.
+4. **Client disconnects mid-stream**: release estimate and emit
+   `stream_cancelled_before_usage`.
+5. **Pod disappears after scoring but before dispatch**: release any reservation
+   and retry the normal scheduler path.
+6. **Router restarts**: local in-flight token state is lost. This is acceptable
+   for score-only mode and should be documented for future strict modes.
 
 #### 10. Observability
 
-Add metrics:
+Metrics:
 
-1. `kthena_router_token_budget_reserved{model,pod}`
-2. `kthena_router_token_budget_utilization{model,pod}`
-3. `kthena_router_admission_total{model,result}` where result in:
-   - `admitted`
-   - `queued_budget_exceeded`
-   - `rejected_timeout`
-   - `rejected_cancelled`
-4. `kthena_router_cost_estimate_tokens{model,type}` with type in:
-   - `estimated`
-   - `actual`
-5. `kthena_router_cost_estimation_error_ratio{model}`
-6. `kthena_router_admission_queue_wait_seconds{model,user_id}`
+1. `kthena_router_cost_aware_estimated_tokens{model,route,type,source}`
+   - `type`: `prompt`, `output`, `total`
+   - `source`: `tokenizer`, `rune_fallback`, `explicit_cap`, `default`, `history`
+2. `kthena_router_cost_aware_actual_tokens{model,route,type,source}`
+3. `kthena_router_cost_aware_estimation_error_ratio{model,route}`
+4. `kthena_router_cost_aware_pod_reserved_tokens{model,pod}`
+5. `kthena_router_cost_aware_pod_projected_utilization{model,pod}`
+6. `kthena_router_cost_aware_score{model,pod}`
+7. `kthena_router_cost_aware_reconcile_total{model,result}`
+   - `result`: `actual`, `total_only`, `usage_missing`, `cancelled`
 
-Operational dashboards:
-1. estimate error trend
-2. budget utilization heatmap by pod
-3. queue wait p50/p95/p99
-4. admission outcome rates
+Dashboard views:
+
+1. per-pod projected utilization heatmap,
+2. estimate vs actual completion tokens by model/route,
+3. score distribution by plugin,
+4. p95/p99 latency before and after enabling score mode.
 
 #### 11. Rollout Plan
 
-1. **Phase 0: Observe-only**
-   - compute estimates and hypothetical decisions
-   - do not block admissions
-2. **Phase 1: Soft enforcement**
-   - enforce budgets with conservative values
-   - alert-only on estimator drift
-3. **Phase 2: Full enforcement**
-   - strict admission + tuned safety factor
-4. **Phase 3: Optimization**
-   - refine model-specific defaults
-   - evaluate optional shared-state mode
+1. **Phase 0: Metrics only**
+   - add estimator,
+   - record estimate and actual usage,
+   - do not add scheduler plugin weight.
+2. **Phase 1: Observe plugin**
+   - enable `cost-aware` in `observe` mode,
+   - emit what score would have been,
+   - compare with selected pod and latency.
+3. **Phase 2: Score mode**
+   - enable `mode: score`,
+   - start with low plugin weight,
+   - tune per model.
+4. **Phase 3: Shared pressure state**
+   - evaluate Redis or backend-reported KV-cache usage for multi-router
+     correctness.
+5. **Phase 4: Optional filter mode**
+   - consider hard projected-utilization filtering only if maintainers agree
+     that routing failures or existing queue retries should be part of the
+     behavior.
 
 Rollback:
-1. Toggle `FAIRNESS_TOKEN_BUDGET_ENABLED=false`
-2. Existing fairness and request-count behavior continues unchanged.
 
-#### Test Plan
+1. Remove `cost-aware` from scheduler score plugins or set `mode: observe`.
+2. Existing `least-request`, `kvcache-aware`, fairness, and routing behavior
+   continue unchanged.
 
-1. **Unit tests**
-   - estimator correctness across prompt shapes
-   - rune-count fallback for non-ASCII prompts
-   - input/output budget combination and missing-output fallback
-   - budget reserve/release/reconcile invariants
-   - concurrent `TryReserve` calls cannot exceed effective pod budget
-   - signal-based wake behavior with coarse fallback timer
-   - cancellation/timeout release correctness
+### Test Plan
 
-2. **Integration tests**
-   - mixed workload (short + long requests) across multiple pods
-   - verify no budget leaks across failures/retries
-   - verify compatibility with fairness disabled and enabled modes
-   - multi-router local divisor behavior under two or more router replicas
+#### Unit Tests
 
-3. **Performance tests**
-   - compare p95/p99 latency under mixed-cost load
-   - throughput under observe-only vs enforcement modes
-   - admission overhead on router CPU and lock contention
+1. Prompt estimate uses tokenizer when available.
+2. Prompt fallback uses rune count, not byte length.
+3. Output estimate uses explicit caps in priority order.
+4. Output estimate clamps by remaining model context.
+5. Missing output cap uses configured default and then rolling p95 when enough
+   history exists.
+6. `n > 1` multiplies estimated output budget.
+7. Concurrent reservation/release cannot corrupt per-pod token pressure.
+8. Double release by reservation ID is idempotent.
+9. Score stays in `[0, 100]`.
+10. Observe mode returns neutral scores while emitting metrics.
 
-4. **Resilience/chaos tests**
-   - router restart during in-flight requests
-   - pod churn while queue backlog exists
-   - streaming cancellation storms
+#### Integration Tests
 
-Success criteria:
-1. reduced OOM incidents under mixed traffic
-2. improved p99 latency stability
-3. bounded estimator error after tuning
-4. zero reservation leaks in stress tests
+1. Mixed short and long requests route long requests away from token-heavy pods.
+2. `cost-aware` composes with `least-request`.
+3. Streaming with final usage reconciles actual completion tokens.
+4. Streaming without final usage releases estimates and labels usage missing.
+5. Multi-router divisor changes effective local pod budget.
+
+#### Performance Tests
+
+1. Compare p95/p99 latency under mixed workloads before and after enabling
+   `cost-aware`.
+2. Measure scheduler overhead with many candidate pods.
+3. Measure lock contention under high concurrency.
 
 ### Alternatives
 
-1. **Keep request-count model with different constants**
-   - Pros: simplest.
-   - Cons: still blind to cost variance; only shifts failure points.
+1. **Extend `least-request` directly**
+   - Pros: fewer plugins.
+   - Cons: mixes request-count and token-cost semantics; harder to disable.
 
-2. **Backend-only queuing/admission**
-   - Pros: backend has deeper runtime context.
-   - Cons: router still sends bursts blindly; less central policy control.
+2. **Add a new router queue**
+   - Pros: could defer requests until token budget is available.
+   - Cons: maintainers prefer keeping this as scheduling, not a second queue.
+     This proposal does not choose this path.
 
-3. **Prompt-only token estimation without reconciliation**
-   - Pros: low complexity.
-   - Cons: poor for generation-heavy requests; drift accumulates.
+3. **Prompt-only scoring**
+   - Pros: simple.
+   - Cons: misses short-input long-output requests.
 
-4. **Global Redis-backed token budget coordinator (immediate)**
-   - Pros: consistent across router replicas.
-   - Cons: higher complexity and failure modes; local enforcement with
-     `routerBudgetDivisor` is a simpler first step.
+4. **Backend-only scheduling**
+   - Pros: backend has accurate runtime state.
+   - Cons: router still sends traffic without considering token pressure across
+     candidates.
 
-5. **Strict per-user quotas instead of budget admission**
-   - Pros: policy simplicity.
-   - Cons: does not solve pod saturation from heterogeneous request cost.
+5. **Immediate shared-state strict budget**
+   - Pros: stronger multi-router correctness.
+   - Cons: more complexity and more failure modes than needed for an initial
+     score plugin.
 
-Recommended path: hybrid estimation + local pod budget admission with
-`routerBudgetDivisor` first, then optional shared-state enhancement.
+Recommended path: implement `cost-aware` as a separate score plugin with hybrid
+input/output estimation, observe it first, then enable scoring with conservative
+weights.
 
----
+### Research Notes
 
-### Appendix A: Example Helm Values
+This proposal uses the following external behavior as design input:
+
+1. vLLM documents `max_tokens` as the maximum number of tokens to generate per
+   output sequence and its scheduler checks `request.max_tokens` while
+   scheduling incrementally:
+   https://docs.vllm.ai/en/latest/api/vllm/sampling_params.html
+   https://docs.vllm.ai/en/latest/api/vllm/v1/core/sched/scheduler/
+2. TensorRT-LLM documents that `max_batch_size` and `max_num_tokens` drive
+   scheduler decisions and that generated tokens grow KV-cache over time:
+   https://nvidia.github.io/TensorRT-LLM/performance/performance-tuning-guide/tuning-max-batch-size-and-max-num-tokens.html
+   https://nvidia.github.io/TensorRT-LLM/features/paged-attention-ifb-scheduler.html
+3. OpenAI-compatible APIs expose output token caps such as
+   `max_completion_tokens` and `max_tokens`:
+   https://platform.openai.com/docs/api-reference/chat/create
+4. SGLang exposes `max_new_tokens` as the generation cap in sampling parameters:
+   https://sgl-project.github.io/basic_usage/sampling_params.html
+5. Recent token-budget routing research proposes routing by estimated total
+   token budget and online calibration from observed usage:
+   https://arxiv.org/abs/2604.08075
+
+The common lesson is that output length is uncertain. The practical signal is
+the requested output cap when present, followed by conservative defaults and
+online calibration from actual usage.
+
+### Appendix A: Example Scheduler Configuration
 
 ```yaml
-networking:
-  kthenaRouter:
-    fairness:
-      enabled: true
-      windowSize: "5m"
-      inputTokenWeight: 1.0
-      outputTokenWeight: 2.0
-      tokenBudget:
-        enabled: true
-        podBudgetTokens: 262144
-        routerBudgetDivisor: 1
-        estimationMode: hybrid
-        safetyFactor: 1.2
-        defaultOutputTokens: 1024
-        minReservationTokens: 64
-        maxReservationTokens: 32768
-        queueRetryInterval: "1s"
-        maxBudgetQueueWait: "60s"
-        starvationPromotionAfter: "30s"
+scheduler:
+  pluginConfig:
+  - name: least-request
+    args:
+      maxWaitingRequests: 10
+  - name: cost-aware
+    args:
+      mode: observe
+      podBudgetTokens: 262144
+      routerBudgetDivisor: 1
+      inputWeight: 1.0
+      outputWeight: 1.0
+      safetyFactor: 1.2
+      defaultOutputTokens: 1024
+      minReservationTokens: 64
+      maxReservationTokens: 32768
+      outputQuantile: 0.95
+  plugins:
+    Score:
+      enabled:
+      - name: least-request
+        weight: 1
+      - name: cost-aware
+        weight: 1
 ```
 
-### Appendix B: Open Questions for Review
+### Appendix B: Review Feedback Mapping
 
-1. Should initial budget defaults be static or model-size-aware?
-2. Should `starvationPromotionAfter` be fixed per queue or derived from queue wait SLO?
-3. Should we support per-model override values in first implementation?
-4. Which shared-state backend should be preferred after local enforcement:
-   Redis, etcd, or backend-reported live KV usage?
+This revision addresses the maintainer review in
+https://github.com/volcano-sh/kthena/pull/928#issuecomment-4340678029 as
+follows:
+
+1. **Author-as-reviewer**: reviewers are now `@hzxuzhonghu` and
+   `@YaoZengzeng`; the author is not listed as reviewer.
+2. **Concurrency story**: per-pod token pressure uses sharded or per-pod locking,
+   idempotent reservation IDs, and locked reserve/release/reconcile operations.
+3. **Timer retry thundering herd**: removed from v1. There is no new
+   token-budget queue and therefore no 10ms polling loop.
+4. **`FAIRNESS_QUEUE_TIMEOUT` conflict**: removed from v1. The plugin is
+   configured as a scheduler plugin, not as a fairness queue extension.
+5. **Streaming and missing usage**: streaming final-usage, missing-usage, and
+   client-disconnect paths are explicitly handled.
+6. **`podBudgetTokens: 262144` justification**: documented as observe-mode
+   starting point only, with a KV-cache sizing formula and load-test guidance.
+7. **Multi-router state**: v1 documents local-only pressure and adds
+   `routerBudgetDivisor`; shared state is a follow-up.
+8. **Large-request starvation**: removed the queue priority formula entirely.
+   The initial design is score-only, so it does not introduce a new queue where
+   large requests can be starved by an age/cost priority formula.
+
+Other inline review comments are handled as follows:
+
+1. **No extra router queue**: the revised design is a scheduler plugin and keeps
+   existing request ordering.
+2. **Fairness separation**: fairness decides request ordering; `cost-aware`
+   decides backend preference for performance.
+3. **Output estimate detail**: explicit caps first, configured defaults second,
+   rolling actual-completion quantile third.
+4. **Rune-count fallback**: prompt fallback uses `utf8.RuneCountInString`.
+5. **New score plugin preference**: the recommended path is a separate
+   `cost-aware` score plugin, not a `least-request` rewrite.
