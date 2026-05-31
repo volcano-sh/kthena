@@ -16,7 +16,8 @@ creation-date: 2026-04-26
 
 ### Summary
 
-This proposal introduces a `cost-aware` scheduler plugin for `kthena-router`.
+This proposal introduces and the initial implementation adds a `cost-aware`
+scheduler plugin for `kthena-router`.
 The plugin scores candidate backend pods using estimated token cost instead of
 only request count. It is intended to improve performance for mixed workloads
 where one request can be much more expensive than another because of long input,
@@ -194,14 +195,21 @@ Input and output are both needed because:
 
 ##### 2.1 Prompt Token Estimate
 
-Prompt estimate order:
+The first implementation estimates prompt tokens from request bytes and a
+per-model EMA of observed bytes per prompt token:
 
-1. Use the existing router tokenizer path when available.
-2. Fall back to `utf8.RuneCountInString(prompt) / 4.0`, matching the existing
-   tokenizer estimator behavior and avoiding byte-length overestimation for
-   non-ASCII text.
-3. Emit a metric label showing whether the estimate came from tokenizer or
-   fallback.
+```text
+estimated_prompt_tokens = ceil(prompt_bytes / bytes_per_token_ema)
+bytes_per_token_ema = ema(observed_prompt_bytes / actual_prompt_tokens)
+```
+
+When no history exists for the model, `defaultBytesPerToken` is used. The EMA is
+updated after responses that include OpenAI-compatible `prompt_tokens` usage.
+This keeps the first version lightweight and matches the token-budget direction
+from https://github.com/volcano-sh/kthena/issues/907#issuecomment-4585562101.
+
+Future implementations can replace the byte/EMA estimator with a model tokenizer
+when tokenization is available in the scheduling path.
 
 ##### 2.2 Output Token Estimate
 
@@ -344,6 +352,8 @@ scheduler:
       defaultOutputTokens: 1024
       minReservationTokens: 64
       maxReservationTokens: 32768
+      emaAlpha: 0.2
+      defaultBytesPerToken: 4.0
       outputQuantile: 0.95
   plugins:
     Score:
@@ -378,7 +388,9 @@ settings.
 | `defaultOutputTokens` | `1024` | Output budget when request omits an output cap |
 | `minReservationTokens` | `64` | Minimum request reservation |
 | `maxReservationTokens` | `32768` | Maximum request reservation |
-| `outputQuantile` | `0.95` | Rolling completion-token quantile used when available |
+| `emaAlpha` | `0.2` | EMA smoothing factor for observed bytes per prompt token |
+| `defaultBytesPerToken` | `4.0` | Prompt estimate fallback before EMA history exists |
+| `outputQuantile` | `0.95` | Future rolling completion-token quantile used when available |
 | `maxHistoryEntries` | `10000` | Bound memory used by rolling output history |
 
 Validation:
@@ -390,7 +402,9 @@ Validation:
 5. `inputWeight + outputWeight > 0`
 6. `safetyFactor >= 1.0`
 7. `maxReservationTokens >= minReservationTokens`
-8. `0 < outputQuantile < 1`
+8. `0 < emaAlpha <= 1`
+9. `defaultBytesPerToken > 0`
+10. `0 < outputQuantile < 1`
 
 #### 6. Pod Budget Sizing
 
@@ -479,7 +493,7 @@ Metrics:
 
 1. `kthena_router_cost_aware_estimated_tokens{model,route,type,source}`
    - `type`: `prompt`, `output`, `total`
-   - `source`: `tokenizer`, `rune_fallback`, `explicit_cap`, `default`, `history`
+   - `source`: `bytes_ema`, `explicit_cap`, `default`, `history`
 2. `kthena_router_cost_aware_actual_tokens{model,route,type,source}`
 3. `kthena_router_cost_aware_estimation_error_ratio{model,route}`
 4. `kthena_router_cost_aware_pod_reserved_tokens{model,pod}`
@@ -527,8 +541,8 @@ Rollback:
 
 #### Unit Tests
 
-1. Prompt estimate uses tokenizer when available.
-2. Prompt fallback uses rune count, not byte length.
+1. Prompt estimate uses default bytes per token when no EMA history exists.
+2. Prompt estimate updates bytes per token from response usage with EMA.
 3. Output estimate uses explicit caps in priority order.
 4. Output estimate clamps by remaining model context.
 5. Missing output cap uses configured default and then rolling p95 when enough
@@ -628,6 +642,8 @@ scheduler:
       defaultOutputTokens: 1024
       minReservationTokens: 64
       maxReservationTokens: 32768
+      emaAlpha: 0.2
+      defaultBytesPerToken: 4.0
       outputQuantile: 0.95
   plugins:
     Score:
@@ -670,6 +686,7 @@ Other inline review comments are handled as follows:
    decides backend preference for performance.
 3. **Output estimate detail**: explicit caps first, configured defaults second,
    rolling actual-completion quantile third.
-4. **Rune-count fallback**: prompt fallback uses `utf8.RuneCountInString`.
+4. **Prompt estimator**: the implementation uses a per-model EMA of observed
+   bytes per token, with `defaultBytesPerToken` as the cold-start fallback.
 5. **New score plugin preference**: the recommended path is a separate
    `cost-aware` score plugin, not a `least-request` rewrite.

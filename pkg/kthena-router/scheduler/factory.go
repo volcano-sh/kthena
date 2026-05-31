@@ -85,6 +85,9 @@ func registerDefaultPlugins(registry *PluginRegistry) {
 	registry.registerScorePlugin(plugins.KVCacheAwarePluginName, func(args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewKVCacheAware(args)
 	})
+	registry.registerScorePlugin(plugins.CostAwarePluginName, func(args runtime.RawExtension) framework.ScorePlugin {
+		return plugins.NewCostAware(args)
+	})
 	// filterPlugin
 	registry.registerFilterPlugin(plugins.LeastRequestPluginName, func(args runtime.RawExtension) framework.FilterPlugin {
 		return plugins.NewLeastRequest(args)

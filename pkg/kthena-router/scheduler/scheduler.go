@@ -24,5 +24,7 @@ import (
 
 type Scheduler interface {
 	Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error
+	Reserve(ctx *framework.Context, pod *datastore.PodInfo) []*framework.Reservation
+	Finish(ctx *framework.Context, reservations []*framework.Reservation, usage *framework.TokenUsage)
 	RunPostHooks(ctx *framework.Context, index int)
 }

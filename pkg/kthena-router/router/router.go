@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -426,6 +427,8 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	ctx := &framework.Context{
 		Model:           modelName,
 		Prompt:          prompt,
+		RequestBody:     modelRequest,
+		RequestID:       c.Request.Header.Get("x-request-id"),
 		ModelServerName: modelServerName,
 		PDGroup:         pdGroup,
 		MetricsRecorder: metricsRecorder,
@@ -690,11 +693,32 @@ func (r *Router) proxy(
 	}
 
 	for i := 0; i < len(ctx.BestPods); i++ {
+		reservations := r.scheduler.Reserve(ctx, ctx.BestPods[i])
+		var finishOnce sync.Once
+		finishReservation := func(usage *framework.TokenUsage) {
+			finishOnce.Do(func() {
+				r.scheduler.Finish(ctx, reservations, usage)
+			})
+		}
+		wrappedOnUsage := func(resp handlers.OpenAIResponse) {
+			if onUsage != nil {
+				onUsage(resp)
+			}
+			if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 || resp.Usage.TotalTokens > 0 {
+				finishReservation(&framework.TokenUsage{
+					PromptTokens:     int64(resp.Usage.PromptTokens),
+					CompletionTokens: int64(resp.Usage.CompletionTokens),
+					TotalTokens:      int64(resp.Usage.TotalTokens),
+				})
+			}
+		}
+
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, ctx.BestPods[i].Pod.Status.PodIP, port, stream, onUsage)
+		err := proxyRequest(c, req, ctx.BestPods[i].Pod.Status.PodIP, port, stream, wrappedOnUsage)
+		finishReservation(nil)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
@@ -979,6 +1003,8 @@ func (r *Router) proxyToPDDisaggregated(
 		if ctx.PrefillPods[i] == nil || ctx.DecodePods[i] == nil {
 			continue
 		}
+		reservations := r.scheduler.Reserve(ctx, ctx.PrefillPods[i])
+		reservations = append(reservations, r.scheduler.Reserve(ctx, ctx.DecodePods[i])...)
 
 		// Build addresses for prefill and decode pods
 		prefillAddr := fmt.Sprintf("%s:%d", ctx.PrefillPods[i].Pod.Status.PodIP, port)
@@ -990,6 +1016,7 @@ func (r *Router) proxyToPDDisaggregated(
 		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr)
 
 		if err != nil {
+			r.scheduler.Finish(ctx, reservations, nil)
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",
 				ctx.PrefillPods[i].Pod.Name, ctx.DecodePods[i].Pod.Name, err)
 			continue
@@ -1003,6 +1030,11 @@ func (r *Router) proxyToPDDisaggregated(
 		// Record output token metrics
 		if metricsRecorder != nil {
 			metricsRecorder.RecordOutputTokens(outputTokens)
+		}
+		if outputTokens > 0 {
+			r.scheduler.Finish(ctx, reservations, &framework.TokenUsage{CompletionTokens: int64(outputTokens)})
+		} else {
+			r.scheduler.Finish(ctx, reservations, nil)
 		}
 
 		// Record successful operation in cache

@@ -222,6 +222,49 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 	return res
 }
 
+func (s *SchedulerImpl) Reserve(ctx *framework.Context, pod *datastore.PodInfo) []*framework.Reservation {
+	var reservations []*framework.Reservation
+	for _, scorePlugin := range s.scorePlugins {
+		reservationPlugin, ok := scorePlugin.plugin.(framework.ReservationPlugin)
+		if !ok {
+			continue
+		}
+		reservation := reservationPlugin.Reserve(ctx, pod)
+		if reservation != nil {
+			reservations = append(reservations, reservation)
+		}
+	}
+	return reservations
+}
+
+func (s *SchedulerImpl) Finish(ctx *framework.Context, reservations []*framework.Reservation, usage *framework.TokenUsage) {
+	if len(reservations) == 0 {
+		for _, scorePlugin := range s.scorePlugins {
+			reservationPlugin, ok := scorePlugin.plugin.(framework.ReservationPlugin)
+			if !ok {
+				continue
+			}
+			reservationPlugin.Finish(ctx, nil, usage)
+		}
+		return
+	}
+	for _, reservation := range reservations {
+		if reservation == nil {
+			continue
+		}
+		for _, scorePlugin := range s.scorePlugins {
+			if scorePlugin.plugin.Name() != reservation.PluginName {
+				continue
+			}
+			reservationPlugin, ok := scorePlugin.plugin.(framework.ReservationPlugin)
+			if !ok {
+				continue
+			}
+			reservationPlugin.Finish(ctx, reservation, usage)
+		}
+	}
+}
+
 func (s *SchedulerImpl) RunPostHooks(ctx *framework.Context, index int) {
 	for _, hook := range s.postScheduleHooks {
 		hook.PostSchedule(ctx, index)
