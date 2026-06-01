@@ -110,6 +110,52 @@ func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bo
 	return true
 }
 
+// rolloutRestartDeployment triggers a rolling restart of a deployment by patching
+// the pod template with a restartedAt annotation — equivalent to `kubectl rollout restart`.
+// Unlike deleting pods, a rolling update ensures new pods are Ready before old ones
+// terminate, so the webhook endpoint is never fully unavailable.
+// It waits for the rollout to fully complete: all new replicas updated, ready, and
+// available, and old replicas terminated.
+func rolloutRestartDeployment(ctx context.Context, kubeClient kubernetes.Interface, namespace, name string, timeout time.Duration) error {
+	deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get deployment %s/%s: %w", namespace, name, err)
+	}
+	if deploy.Spec.Template.Annotations == nil {
+		deploy.Spec.Template.Annotations = make(map[string]string)
+	}
+	deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+	updated, err := kubeClient.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("update deployment %s/%s: %w", namespace, name, err)
+	}
+
+	// Wait for the rollout to fully complete: all new-generation replicas must be
+	// updated, ready, available, and the old ReplicaSet must be scaled down.
+	targetGeneration := updated.Generation
+	err = wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		d, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		if d.Status.ObservedGeneration < targetGeneration {
+			return false, nil
+		}
+		desired := int32(1)
+		if d.Spec.Replicas != nil {
+			desired = *d.Spec.Replicas
+		}
+		return d.Status.UpdatedReplicas == desired &&
+			d.Status.ReadyReplicas == desired &&
+			d.Status.AvailableReplicas == desired &&
+			d.Status.Replicas == desired, nil
+	})
+	if err != nil {
+		return fmt.Errorf("rollout of deployment %s/%s did not complete within %v: %w", namespace, name, timeout, err)
+	}
+	return nil
+}
+
 // WaitForKthenaRouterValidatingWebhook polls until a DryRun ModelRoute create reaches the
 // validating webhook (avoids flaky tests while cert-manager / deployment finishes).
 //
@@ -1730,15 +1776,6 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	originalConfigData := cm.Data[routerConfigKey]
 	require.NotEmpty(t, originalConfigData, "Router configuration should not be empty")
 
-	// Derive the pod label selector and expected replicas from the router deployment.
-	routerDeploy, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routerDeploymentName, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get router deployment")
-	routerPodSelector := metav1.FormatLabelSelector(routerDeploy.Spec.Selector)
-	expectedReplicas := int32(1)
-	if routerDeploy.Spec.Replicas != nil {
-		expectedReplicas = *routerDeploy.Spec.Replicas
-	}
-
 	// Register cleanup to restore original ConfigMap, restart router, and
 	// re-establish port-forward for subsequent tests.
 	t.Cleanup(func() {
@@ -1756,20 +1793,13 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 			return
 		}
 
-		// Delete router pods so the deployment controller recreates them with the restored config.
-		pods, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(cleanupCtx, metav1.ListOptions{
-			LabelSelector: routerPodSelector,
-		})
-		if err != nil {
-			t.Logf("Warning: Failed to list router pods for cleanup: %v", err)
-			return
+		// Rollout restart the router deployment so the deployment controller creates
+		// new pods with the restored config via a rolling update. This keeps the
+		// webhook endpoint available throughout the restart (new pods become Ready
+		// before old ones terminate), preventing flaky webhook errors in subsequent tests.
+		if err := rolloutRestartDeployment(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout); err != nil {
+			t.Logf("Warning: Failed to rollout restart router deployment: %v", err)
 		}
-		for i := range pods.Items {
-			_ = testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(cleanupCtx, pods.Items[i].Name, metav1.DeleteOptions{})
-		}
-
-		// Wait for the router to become ready with the restored config.
-		_ = utils.WaitForDeploymentReadyE(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout)
 	})
 
 	// Update the ConfigMap with a new scheduler configuration:
@@ -1797,38 +1827,12 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	_, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, cm, metav1.UpdateOptions{})
 	require.NoError(t, err, "Failed to update router ConfigMap")
 
-	// Record pre-restart pod names to confirm they get replaced.
-	preRestartPods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
-	preRestartPodNames := make(map[string]bool, len(preRestartPods))
-	for _, pod := range preRestartPods {
-		preRestartPodNames[pod.Name] = true
-	}
-
-	// Delete router pods so the deployment controller recreates them with the updated config.
-	t.Log("Deleting router pods to trigger restart...")
-	for _, pod := range preRestartPods {
-		err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-		require.NoError(t, err, "Failed to delete router pod %s", pod.Name)
-	}
-
-	// Wait for pre-restart pods to be replaced by new ones.
-	require.Eventually(t, func() bool {
-		pods, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: routerPodSelector,
-		})
-		if err != nil {
-			return false
-		}
-		for _, pod := range pods.Items {
-			if preRestartPodNames[pod.Name] {
-				return false
-			}
-		}
-		return len(pods.Items) > 0
-	}, defaultScalingTimeout, 2*time.Second, "Pre-restart pods should be replaced")
-
-	// Wait for the deployment to be ready with the new pods.
-	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, defaultScalingTimeout)
+	// Trigger a rollout restart so the deployment controller creates new pods with
+	// the updated config via a rolling update. This keeps the webhook endpoint
+	// available throughout the restart and waits for the rollout to fully complete.
+	t.Log("Triggering rollout restart of router deployment...")
+	err = rolloutRestartDeployment(ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout)
+	require.NoError(t, err, "Failed to rollout restart router deployment")
 	t.Log("Router deployment is ready after restart")
 
 	// Set up port-forward to the restarted router on a dynamically selected local port
