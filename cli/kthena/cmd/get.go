@@ -91,10 +91,11 @@ If NAME is provided, only models containing the specified name will be displayed
 
 // getModelServingsCmd represents the get model-servings command
 var getModelServingsCmd = &cobra.Command{
-	Use:     "model-servings",
+	Use:     "model-servings [NAME]",
 	Aliases: []string{"ms", "model-serving"},
 	Short:   "List model serving workloads",
-	Long:    `List ModelServing resources in the cluster.`,
+	Long:    `List ModelServing resources in the cluster. Optionally filter by name.`,
+	Args:    cobra.MaximumNArgs(1),
 	RunE:    runGetModelServings,
 }
 
@@ -363,11 +364,29 @@ func runGetModelServings(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list ModelServings: %v", err)
 	}
 
-	if len(modelServingList.Items) == 0 {
-		if getAllNamespaces {
-			fmt.Println("No ModelServings found across all namespaces.")
+	// Get name filter if provided
+	var nameFilter string
+	if len(args) > 0 {
+		nameFilter = args[0]
+	}
+
+	// Count matching items first
+	matchCount := 0
+	for _, ms := range modelServingList.Items {
+		if nameFilter == "" || strings.Contains(strings.ToLower(ms.Name), strings.ToLower(nameFilter)) {
+			matchCount++
+		}
+	}
+
+	if matchCount == 0 {
+		if nameFilter != "" {
+			fmt.Printf("No ModelServings found matching '%s'.\n", nameFilter)
 		} else {
-			fmt.Printf("No ModelServings found in namespace %s.\n", namespace)
+			if getAllNamespaces {
+				fmt.Println("No ModelServings found across all namespaces.")
+			} else {
+				fmt.Printf("No ModelServings found in namespace %s.\n", namespace)
+			}
 		}
 		return nil
 	}
@@ -380,18 +399,46 @@ func runGetModelServings(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(w, "NAME\tREADY\tSTATUS\tAGE")
 	}
 
-	// Print ModelServings
+	// Print matching ModelServings
 	for _, ms := range modelServingList.Items {
-		age := time.Since(ms.CreationTimestamp.Time).Truncate(time.Second)
-		ready := fmt.Sprintf("%d/%d", ms.Status.AvailableReplicas, ms.Status.Replicas)
-		status := getModelServingStatus(ms.Status.Conditions)
-		if getAllNamespaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ms.Namespace, ms.Name, ready, status, age)
-		} else {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", ms.Name, ready, status, age)
+		if nameFilter == "" || strings.Contains(strings.ToLower(ms.Name), strings.ToLower(nameFilter)) {
+			age := time.Since(ms.CreationTimestamp.Time).Truncate(time.Second)
+			ready := fmt.Sprintf("%d/%d", ms.Status.AvailableReplicas, ms.Status.Replicas)
+			status := getModelServingStatus(ms.Status.Conditions)
+			if getAllNamespaces {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ms.Namespace, ms.Name, ready, status, age)
+			} else {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", ms.Name, ready, status, age)
+			}
 		}
 	}
 	return w.Flush()
+}
+
+func getAutoscalingPolicyBindingTarget(binding workload.AutoscalingPolicyBinding) string {
+	if binding.Spec.HomogeneousTarget != nil {
+		return binding.Spec.HomogeneousTarget.Target.TargetRef.Name
+	}
+	if binding.Spec.HeterogeneousTarget != nil {
+		var names []string
+		for _, p := range binding.Spec.HeterogeneousTarget.Params {
+			if p.Target.TargetRef.Name != "" {
+				names = append(names, p.Target.TargetRef.Name)
+			}
+		}
+		if len(names) > 0 {
+			return strings.Join(names, ",")
+		}
+	}
+	return "<none>"
+}
+
+func getAutoscalingPolicyBindingMinMax(binding workload.AutoscalingPolicyBinding) (string, string) {
+	if binding.Spec.HomogeneousTarget != nil {
+		return fmt.Sprintf("%d", binding.Spec.HomogeneousTarget.MinReplicas),
+			fmt.Sprintf("%d", binding.Spec.HomogeneousTarget.MaxReplicas)
+	}
+	return "-", "-"
 }
 
 func runGetAutoscalingPolicies(cmd *cobra.Command, args []string) error {
@@ -420,18 +467,20 @@ func runGetAutoscalingPolicies(cmd *cobra.Command, args []string) error {
 	// Print header
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	if getAllNamespaces {
-		fmt.Fprintln(w, "NAMESPACE\tNAME\tAGE")
+		fmt.Fprintln(w, "NAMESPACE\tNAME\tMETRICS\tTOLERANCE\tAGE")
 	} else {
-		fmt.Fprintln(w, "NAME\tAGE")
+		fmt.Fprintln(w, "NAME\tMETRICS\tTOLERANCE\tAGE")
 	}
 
 	// Print AutoscalingPolicies
 	for _, policy := range policies.Items {
 		age := time.Since(policy.CreationTimestamp.Time).Truncate(time.Second)
+		metrics := len(policy.Spec.Metrics)
+		tolerance := fmt.Sprintf("%d%%", policy.Spec.TolerancePercent)
 		if getAllNamespaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", policy.Namespace, policy.Name, age)
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", policy.Namespace, policy.Name, metrics, tolerance, age)
 		} else {
-			fmt.Fprintf(w, "%s\t%s\n", policy.Name, age)
+			fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", policy.Name, metrics, tolerance, age)
 		}
 	}
 
