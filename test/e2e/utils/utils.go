@@ -47,10 +47,6 @@ func WaitForModelServingReady(t *testing.T, ctx context.Context, kthenaClient *c
 		defer cancel()
 		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Get(getCtx, name, metav1.GetOptions{})
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) {
-				t.Logf("Timeout getting ModelServing %s, retrying: %v", name, err)
-				return false, nil
-			}
 			t.Logf("Error getting ModelServing %s, retrying: %v", name, err)
 			return false, nil
 		}
