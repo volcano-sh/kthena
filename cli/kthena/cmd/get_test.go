@@ -229,6 +229,15 @@ func TestGetAutoscalingPolicyBindingTarget(t *testing.T) {
 			expected: "my-serving",
 		},
 		{
+			name: "HomogeneousTargetEmptyName",
+			binding: workload.AutoscalingPolicyBinding{
+				Spec: workload.AutoscalingPolicyBindingSpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{},
+				},
+			},
+			expected: "<none>",
+		},
+		{
 			name: "HeterogeneousTarget",
 			binding: workload.AutoscalingPolicyBinding{
 				Spec: workload.AutoscalingPolicyBindingSpec{
