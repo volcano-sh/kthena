@@ -1,11 +1,11 @@
-# Registry Webhook
+# ModelBooster Webhook
 
-The registry webhook is a Kubernetes admission controller that provides validation and mutation capabilities for Model resources in the Kthena system. It consists of two main components: a validating webhook and a mutating webhook.
+The ModelBooster webhook is a Kubernetes admission controller that provides validation and mutation for ModelBooster autoscaling resources in Kthena. It runs as part of the controller-manager webhook server and includes validating and mutating handlers.
 
 ## Validation Rules
 
-### Model Resource Validation
-The validation webhook enforces the following rules for Model resources:
+### ModelBooster Resource Validation
+The validation webhook enforces the following rules for ModelBooster resources:
 
 #### Backend Worker Type Validation
 
@@ -44,6 +44,12 @@ The validation webhook enforces the following rules for Model resources:
 #### ScalingConfig and OptimizerConfig Validation
 - Among ScalingConfig and OptimizerConfig, exactly one of them must be configured, and it is not allowed to configure neither or both.
 
+### Autoscaling Policy Resource Validation
+
+- Ensures metric target values are positive
+- Rejects duplicate metric names
+- Validates scale up and scale down policy periods
+
 ## Default Values (Mutator Webhook)
 
 The mutating webhook applies the following default values when certain conditions are met:
@@ -60,9 +66,12 @@ These defaults are only applied when the model has an autoscaling policy referen
 ### Endpoints
 
 - **Validation**:
-    - `/validate-registry-volcano-sh-v1alpha1-model`
-    - `/validate-registry-volcano-sh-v1alpha1-autoscalingpolicybinding`
-- **Mutation**: `/mutate-registry-volcano-sh-v1alpha1-model`
+    - `/validate/modelbooster`
+    - `/validate/autoscalingpolicy`
+    - `/validate/autoscalingpolicybinding`
+- **Mutation**:
+    - `/mutate/modelbooster`
+    - `/mutate/autoscalingpolicy`
 - **Health Check**: `/healthz`
 
 ### Default Settings
@@ -79,9 +88,9 @@ These defaults are only applied when the model has an autoscaling policy referen
 
 To add new validation rules to the validation webhook:
 
-1. **Create a new validation function** in `pkg/registry-webhook/handlers/validator.go`:
+1. **Create a new validation function** in `pkg/model-booster-controller/webhook/model_validator.go` or the resource-specific validator:
    ```go
-   func validateNewRule(model *workloadv1alpha1.Model) field.ErrorList {
+   func validateNewRule(model *registryv1alpha1.ModelBooster) field.ErrorList {
        var allErrs field.ErrorList
        // Add your validation logic here
        // Use field.Invalid() to create validation errors
@@ -91,22 +100,22 @@ To add new validation rules to the validation webhook:
 
 2. **Add the validation function** to the `validateModel` method:
    ```go
-   func (v *ModelValidator) validateModel(model *workloadv1alpha1.Model) (bool, string) {
+   func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bool, string) {
        // ... existing code ...
        allErrs = append(allErrs, validateNewRule(model)...)
        // ... rest of the method ...
    }
    ```
 
-3. **Write tests** in `pkg/registry-webhook/handlers/validator_test.go` to cover your new validation logic.
+3. **Write tests** in `pkg/model-booster-controller/webhook/model_validator_test.go` to cover your new validation logic.
 
 ### Adding New Default Values
 
 To add new default values to the mutating webhook:
 
-1. **Modify the `mutateModel` function** in `pkg/registry-webhook/handlers/mutator.go`:
+1. **Modify the `mutateModel` function** in `pkg/model-booster-controller/webhook/model_mutator.go`:
    ```go
-   func (m *ModelMutator) mutateModel(model *workloadv1alpha1.Model) {
+   func (m *ModelMutator) mutateModel(model *registryv1alpha1.ModelBooster) {
        // ... existing code ...
        
        // Add your new default value logic
@@ -116,17 +125,17 @@ To add new default values to the mutating webhook:
    }
    ```
 
-2. **Write tests** in `pkg/registry-webhook/handlers/mutator_test.go` to verify your mutation logic.
+2. **Write tests** in `pkg/model-booster-controller/webhook/model_mutator_test.go` to verify your mutation logic.
 
 ### Adding Support for New Resources
 
 To extend the webhooks to support additional resource types:
 
 1. **Create new handler functions** following the pattern in `validator.go` and `mutator.go`
-2. **Register new endpoints** in `pkg/registry-webhook/server/server.go`:
+2. **Register new endpoints** in `cmd/kthena-controller-manager/main.go`:
    ```go
-   mux.HandleFunc("/validate-registry-volcano-sh-v1alpha1-newresource", newResourceValidator.Handle)
-   mux.HandleFunc("/mutate-registry-volcano-sh-v1alpha1-newresource", newResourceMutator.Handle)
+   mux.HandleFunc("/validate/newresource", newResourceValidator.Handle)
+   mux.HandleFunc("/mutate/newresource", newResourceMutator.Handle)
    ```
 3. **Update webhook configurations** in the Helm charts to include the new resource types
 4. **Add corresponding tests** for the new resource handlers
@@ -145,7 +154,7 @@ To extend the webhooks to support additional resource types:
 Run the existing tests to ensure your changes don't break existing functionality:
 
 ```bash
-go test ./pkg/registry-webhook/handlers/...
+go test ./pkg/model-booster-controller/webhook/...
 ```
 
-For integration testing, you can deploy the webhook to a test cluster and verify the behavior with actual Model resources.
+For integration testing, you can deploy the webhook to a test cluster and verify the behavior with actual ModelBooster resources.

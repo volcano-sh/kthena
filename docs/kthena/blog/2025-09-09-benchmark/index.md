@@ -209,7 +209,7 @@ A standardized benchmarking environment was built using the **DeepSeek-R1-Distil
 **Table 1: Experimental Environment Configuration**
 
 | Parameter              | Value                                   |
-|:-----------------------|:----------------------------------------|
+| :--------------------- | :-------------------------------------- |
 | Model                  | deepseek-ai/DeepSeek-R1-Distill-Qwen-7B |
 | Block size             | 128                                     |
 | Max model length       | 32,768                                  |
@@ -227,36 +227,36 @@ A standardized benchmarking environment was built using the **DeepSeek-R1-Distil
 
 **Table 2: Performance Metrics – Long Prompt**
 
-| Plugin Configuration         | Runs | Success Rate (%) | Throughput (req/s) | Latency (s) | TTFT (s) |
-|:-----------------------------|:----:|:----------------:|:------------------:|:-----------:|:--------:|
-| Least Request + KVCacheAware |   3  |       100.0      |      **32.22**     |   **9.22** | **0.57** |
-| Least Request + Prefix Cache |   3  |       100.0      |        23.87       |    12.47    |   0.83   |
-| Random                       |   3  |       100.0      |        11.81       |    25.23    |   2.15   |
-| Least Request                |   3  |       100.0      |        9.86        |    30.13    |   12.46  |
-| GPU Usage                    |   3  |       100.0      |        9.56        |    30.92    |   13.14  |
-| Least Latency                |   3  |       100.0      |        9.47        |    31.44    |   11.07  |
+| Plugin Configuration         | Runs  | Success Rate (%) | Throughput (req/s) | Latency (s) | TTFT (s) |
+| :--------------------------- | :---: | :--------------: | :----------------: | :---------: | :------: |
+| Least Request + KVCacheAware |   3   |      100.0       |     **32.22**      |  **9.22**   | **0.57** |
+| Least Request + Prefix Cache |   3   |      100.0       |       23.87        |    12.47    |   0.83   |
+| Random                       |   3   |      100.0       |       11.81        |    25.23    |   2.15   |
+| Least Request                |   3   |      100.0       |        9.86        |    30.13    |  12.46   |
+| GPU Usage                    |   3   |      100.0       |        9.56        |    30.92    |  13.14   |
+| Least Latency                |   3   |      100.0       |        9.47        |    31.44    |  11.07   |
 
 ### 4.3 Short System Prompt Scenario (256 tokens)
 
 **Table 3: Performance Metrics – Short Prompt**
 
-| Plugin Configuration         | Runs | Success Rate (%) | Throughput (req/s) | Latency (s) | TTFT (s) |
-|:-----------------------------|:----:|:----------------:|:------------------:|:-----------:|:--------:|
-| Least Request + Prefix Cache |   3  |       100.0      |        8.30        |    35.84    |   11.00  |
-| Random                       |   3  |       100.0      |        8.21        |    36.25    |   4.54   |
-| Least Request + KVCacheAware |   3  |       100.0      |        8.08        |    36.67    |   12.19  |
-| Least Request                |   3  |       100.0      |        7.98        |    37.27    |   13.88  |
-| GPU Usage                    |   3  |       100.0      |        7.77        |    38.15    |   15.03  |
-| Least Latency                |   3  |       100.0      |        7.09        |    41.91    |   15.46  |
+| Plugin Configuration         | Runs  | Success Rate (%) | Throughput (req/s) | Latency (s) | TTFT (s) |
+| :--------------------------- | :---: | :--------------: | :----------------: | :---------: | :------: |
+| Least Request + Prefix Cache |   3   |      100.0       |        8.30        |    35.84    |  11.00   |
+| Random                       |   3   |      100.0       |        8.21        |    36.25    |   4.54   |
+| Least Request + KVCacheAware |   3   |      100.0       |        8.08        |    36.67    |  12.19   |
+| Least Request                |   3   |      100.0       |        7.98        |    37.27    |  13.88   |
+| GPU Usage                    |   3   |      100.0       |        7.77        |    38.15    |  15.03   |
+| Least Latency                |   3   |      100.0       |        7.09        |    41.91    |  15.46   |
 
 ### 4.4 Visualization of Improvements
 
 **Table 4: Performance Gains vs. Baseline (Random Plugin)**
 
 | Plugin Configuration         | Throughput Gain | TTFT Improvement | Latency Reduction |
-|:-----------------------------|:---------------:|:----------------:|:-----------------:|
-| Least Request + KVCacheAware |    **+173%**    |    **-73.5%**    |     **-63.5%**    |
-| Least Request + Prefix Cache |      +102%      |      -61.4%      |       -50.6%      |
+| :--------------------------- | :-------------: | :--------------: | :---------------: |
+| Least Request + KVCacheAware |    **+173%**    |    **-73.5%**    |    **-63.5%**     |
+| Least Request + Prefix Cache |      +102%      |      -61.4%      |      -50.6%       |
 
 The **KVCacheAware combination strategy** shows **significant superiority** in long prefix scenarios, especially for throughput and TTFT metrics.
 

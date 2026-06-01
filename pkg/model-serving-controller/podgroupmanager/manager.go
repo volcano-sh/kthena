@@ -302,12 +302,7 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		podGroup.Spec.Queue = queue
 	}
 
-	if ms.Spec.Template.NetworkTopology != nil {
-		// set NetworkTopology if configured in ModelServing
-		if ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
-			podGroup.Spec.NetworkTopology = ms.Spec.Template.NetworkTopology.GroupPolicy
-		}
-	}
+	syncPodGroupNetworkTopology(ms, &podGroup.Spec)
 
 	if m.hasSubGroupPolicy.Load() {
 		podGroup = appendSubGroupPolicy(ms, podGroup, minRoleMember)
@@ -405,7 +400,20 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 	})
 
-	// TODO: optimize by get from the cache
+	if podGroupLister := m.GetPodGroupLister(); podGroupLister != nil {
+		podGroups, err := podGroupLister.PodGroups(ms.Namespace).List(selector)
+		if err != nil {
+			return nil, err
+		}
+
+		result := make(map[string]*schedulingv1beta1.PodGroup, len(podGroups))
+		for _, pg := range podGroups {
+			result[pg.Name] = pg
+		}
+
+		return result, nil
+	}
+
 	podGroupList, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector.String(),
 	})
@@ -413,7 +421,7 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 		return nil, err
 	}
 
-	result := make(map[string]*schedulingv1beta1.PodGroup)
+	result := make(map[string]*schedulingv1beta1.PodGroup, len(podGroupList.Items))
 	for i := range podGroupList.Items {
 		pg := &podGroupList.Items[i]
 		result[pg.Name] = pg
@@ -441,6 +449,8 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 		// Sync queue name from ModelServing annotations if configured.
 		// When the queue annotation is removed (or set to empty) queue field is set to empty string.
 		updated.Spec.Queue = extractQueueName(ms)
+
+		syncPodGroupNetworkTopology(ms, &updated.Spec)
 
 		// Apply network topology policy
 		if m.hasSubGroupPolicy.Load() {
@@ -584,6 +594,16 @@ func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
 		}
 	}
 	return false
+}
+
+// syncPodGroupNetworkTopology sets or clears PodGroup group-level NetworkTopology
+// from ModelServing spec.template.networkTopology.groupPolicy.
+func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedulingv1beta1.PodGroupSpec) {
+	if ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
+		spec.NetworkTopology = ms.Spec.Template.NetworkTopology.GroupPolicy
+		return
+	}
+	spec.NetworkTopology = nil
 }
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {

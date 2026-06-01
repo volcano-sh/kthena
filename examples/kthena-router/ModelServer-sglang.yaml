@@ -9,7 +9,7 @@ spec:
       app: sglang-mock
   workloadPort:
     port: 30000
-  model: "meta-llama/Llama-3.1-8B-Instruct"
+  model: "Qwen/Qwen3-8B"
   inferenceEngine: "SGLang"
   trafficPolicy:
     timeout: 10s

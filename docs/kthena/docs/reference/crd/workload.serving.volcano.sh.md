@@ -99,6 +99,30 @@ AutoscalingPolicyBindingList contains a list of AutoscalingPolicyBinding objects
 
 AutoscalingPolicyBindingSpec defines the desired state of AutoscalingPolicyBinding.
 
+Exactly one of HeterogeneousTarget or HomogeneousTarget must be set:
+  - HomogeneousTarget   -> scale a single ModelServing by metric targets.
+  - HeterogeneousTarget -> optimize replica distribution across several
+    ModelServing groups with different hardware/cost.
+
+Example (homogeneous, metric-based scaling):
+
+	spec:
+	  policyRef:
+	    name: podinfo-prom-policy
+	  homogeneousTarget:
+	    minReplicas: 1
+	    maxReplicas: 6
+	    target:
+	      targetRef:
+	        kind: ModelServing
+	        name: podinfo-ms
+	      metricSources:
+	        podinfo_rps:
+	          type: Prometheus
+	          prometheus:
+	            serverURL: http://prometheus.monitoring.svc:9090
+	            query: sum(rate(http_requests_total[2m]))
+
 
 
 _Appears in:_
@@ -154,7 +178,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `metricName` _string_ | MetricName defines the name of the metric to monitor for scaling decisions. |  |  |
+| `name` _string_ | Name defines the metric key used by the scaling algorithm. |  | MinLength: 1 <br /> |
 | `targetValue` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#quantity-resource-api)_ | TargetValue defines the target value for the metric that triggers scaling operations. |  |  |
 
 
@@ -267,6 +291,30 @@ _Appears in:_
 
 HeterogeneousTarget defines the configuration for optimization-based autoscaling across multiple deployments.
 
+It distributes replicas across several ModelServing groups with different
+hardware (and therefore different Cost) to satisfy the overall demand at the
+lowest cost. Each group is described by one entry in Params.
+
+Example (split capacity between an H100 group and a cheaper A100 group):
+
+	heterogeneousTarget:
+	  costExpansionRatePercent: 200
+	  params:
+	    - cost: 100
+	      minReplicas: 0
+	      maxReplicas: 4
+	      target:
+	        targetRef:
+	          kind: ModelServing
+	          name: llama-h100
+	    - cost: 60
+	      minReplicas: 1
+	      maxReplicas: 8
+	      target:
+	        targetRef:
+	          kind: ModelServing
+	          name: llama-a100
+
 
 
 _Appears in:_
@@ -275,7 +323,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `params` _[HeterogeneousTargetParam](#heterogeneoustargetparam) array_ | Params defines the configuration parameters for multiple ModelServing groups to be optimized. |  | MinItems: 1 <br /> |
-| `costExpansionRatePercent` _integer_ | CostExpansionRatePercent defines the percentage rate at which the cost expands during optimization calculations. | 200 | Minimum: 0 <br /> |
+| `costExpansionRatePercent` _integer_ | CostExpansionRatePercent defines the percentage rate at which the cost expands during optimization calculations.<br />For example, 200 allows the optimizer to spend up to 2x the minimal cost to<br />meet performance targets before refusing to scale further. | 200 | Minimum: 0 <br /> |
 
 
 #### HeterogeneousTargetParam
@@ -283,6 +331,16 @@ _Appears in:_
 
 
 HeterogeneousTargetParam defines the configuration parameters for a specific deployment type in heterogeneous scaling.
+
+Example (one expensive H100 group within a HeterogeneousTarget):
+
+	cost: 100
+	minReplicas: 0
+	maxReplicas: 4
+	target:
+	  targetRef:
+	    kind: ModelServing
+	    name: llama-h100
 
 
 
@@ -292,7 +350,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `target` _[Target](#target)_ | Target defines the scaling instance configuration for this deployment type. |  |  |
-| `cost` _integer_ | Cost defines the relative cost factor used in optimization calculations.<br />This factor balances performance requirements against deployment costs. |  | Minimum: 0 <br /> |
+| `cost` _integer_ | Cost defines the relative cost factor used in optimization calculations.<br />This factor balances performance requirements against deployment costs.<br />Values are relative across params, e.g. 100 for an H100 group and 60 for a<br />cheaper A100 group makes the optimizer prefer A100 replicas when adequate. |  | Minimum: 0 <br /> |
 | `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas to maintain for this deployment type. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
 | `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas allowed for this deployment type. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 
@@ -303,6 +361,22 @@ _Appears in:_
 
 HomogeneousTarget defines the configuration for traditional metric-based autoscaling of a single deployment.
 
+Example (scale podinfo-ms between 1 and 6 replicas based on RPS):
+
+	homogeneousTarget:
+	  minReplicas: 1
+	  maxReplicas: 6
+	  target:
+	    targetRef:
+	      kind: ModelServing
+	      name: podinfo-ms
+	    metricSources:
+	      podinfo_rps:
+	        type: Prometheus
+	        prometheus:
+	          serverURL: http://prometheus.monitoring.svc:9090
+	          query: sum(rate(http_requests_total[2m]))
+
 
 
 _Appears in:_
@@ -311,8 +385,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `target` _[Target](#target)_ | Target defines the object to be monitored and scaled. |  |  |
-| `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas to maintain. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
-| `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas allowed. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
+| `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas to maintain (e.g., 1). |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
+| `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas allowed (e.g., 6). |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 
 
 #### Metadata
@@ -332,11 +406,34 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | Annotations is an unstructured key value map stored with a resource that may be<br />set by external tools to store and retrieve arbitrary metadata. They are not<br />queryable and should be preserved when modifying objects.<br />More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations |  |  |
 
 
-#### MetricEndpoint
+#### MetricSource
 
 
 
-MetricEndpoint defines the endpoint configuration for scraping metrics from pods.
+MetricSource is a discriminated union selecting the metric backend.
+
+Exactly one backend config must be provided and it must match Type:
+  - Type: Pod        -> set the pod field only.
+  - Type: Prometheus -> set the prometheus field only.
+
+Example (scrape the metric directly from each pod's /metrics endpoint):
+
+	metricSources:
+	  gpu_cache_usage:
+	    type: Pod
+	    pod:
+	      name: vllm:gpu_cache_usage_perc
+	      uri: /metrics
+	      port: 8000
+
+Example (read the metric from an external Prometheus server):
+
+	metricSources:
+	  http_rps:
+	    type: Prometheus
+	    prometheus:
+	      serverURL: http://prometheus.monitoring.svc:9090
+	      query: sum(rate(http_requests_total[2m]))
 
 
 
@@ -345,8 +442,27 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics |  |
-| `port` _integer_ | Port defines the network port where metrics are exposed by the pods. | 8100 |  |
+| `type` _[MetricSourceType](#metricsourcetype)_ | Type selects the metric source backend. | Pod | Enum: [Pod Prometheus] <br /> |
+| `pod` _[PodMetricSource](#podmetricsource)_ | Pod configures direct pod endpoint scraping. |  |  |
+| `prometheus` _[PrometheusMetricSource](#prometheusmetricsource)_ | Prometheus configures an external Prometheus server as the metric source. |  |  |
+
+
+#### MetricSourceType
+
+_Underlying type:_ _string_
+
+MetricSourceType selects the backend from which a metric value is fetched.
+
+_Validation:_
+- Enum: [Pod Prometheus]
+
+_Appears in:_
+- [MetricSource](#metricsource)
+
+| Field | Description |
+| --- | --- |
+| `Pod` |  |
+| `Prometheus` |  |
 
 
 #### ModelBackend
@@ -367,11 +483,12 @@ _Appears in:_
 | `modelURI` _string_ | ModelURI is the URI where you download the model. Support hf://, s3://, pvc://, ms://. |  | Pattern: `^(hf://\|s3://\|pvc://\|ms://).+` <br /> |
 | `cacheURI` _string_ | CacheURI is the URI where the downloaded model stored. Support hostpath://, pvc://. |  | Pattern: `^(hostpath://\|pvc://).+` <br /> |
 | `envFrom` _[EnvFromSource](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#envfromsource-v1-core) array_ | List of sources to populate environment variables in the container.<br />The keys defined within a source must be a C_IDENTIFIER. All invalid keys<br />will be reported as an event when the container is starting. When a key exists in multiple<br />sources, the value associated with the last source will take precedence.<br />Values defined by an Env with a duplicate key will take precedence.<br />Cannot be updated. |  |  |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#envvar-v1-core) array_ | List of environment variables to set in the container.<br />Supported names:<br />"ENDPOINT": When you download model from s3, you have to specify it.<br />"RUNTIME_URL": default is http://localhost:8000<br />"RUNTIME_PORT": default is 8100<br />"RUNTIME_METRICS_PATH": default is /metrics<br />"HF_ENDPOINT":The url of hugging face. Default is https://huggingface.co/<br />Cannot be updated. |  |  |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#envvar-v1-core) array_ | List of environment variables to set in the container.<br />Supported names:<br />"ENDPOINT": When you download model from s3, you have to specify it.<br />"RUNTIME_URL": default is http://localhost:8000<br />"RUNTIME_PORT": default is 8100<br />"RUNTIME_METRICS_PATH": default is /metrics<br />"HF_ENDPOINT":The url of hugging face. Default is https://huggingface.co/<br />"KTHENA_SKIP_ENGINE_DEPENDENCY_INSTALL": default is false. When set to true, skip startup-time pip install of engine connector dependencies.<br />Cannot be updated. |  |  |
 | `minReplicas` _integer_ | MinReplicas is the minimum number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
 | `maxReplicas` _integer_ | MaxReplicas is the maximum number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
 | `workers` _[ModelWorker](#modelworker) array_ | Workers is the list of workers associated with this backend. |  | MaxItems: 1000 <br />MinItems: 1 <br /> |
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing for this backend. |  |  |
+| `runtimeClassName` _string_ | RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,<br />which should be used to run pods generated for this backend. |  |  |
 
 
 #### ModelBackendType
@@ -570,6 +687,7 @@ _Appears in:_
 | `pods` _integer_ | Pods is the number of pods for the worker. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#resourcerequirements-v1-core)_ | Resources specifies the resource requirements for the worker. |  |  |
 | `affinity` _[Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#affinity-v1-core)_ | Affinity specifies the affinity rules for scheduling the worker pods. |  |  |
+| `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#toleration-v1-core) array_ | Tolerations specifies the tolerations for scheduling the worker pods. |  |  |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#json-v1-apiextensions-k8s-io)_ | Config contains worker-specific configuration in JSON format.<br />You can find vLLM config here https://docs.vllm.ai/en/stable/configuration/engine_args.html |  |  |
 
 
@@ -684,6 +802,39 @@ _Appears in:_
 | `BuiltIn` |  |
 
 
+#### PodMetricSource
+
+
+
+PodMetricSource configures pod-endpoint scraping for a metric.
+
+For each matching Pod, metrics are scraped from the constructed access link and extracted from Prometheus’s text output
+for the metric family identified by Name.
+
+Example (the pod exposes "vllm:num_requests_waiting" on :8000/metrics):
+
+	pod:
+	  name: vllm:num_requests_waiting
+	  uri: /metrics
+	  port: 8000
+	  labelSelector:
+	    matchLabels:
+	      role: decode
+
+The resulting scrape URL would look like: http://10.1.2.3:8000/metrics
+
+
+
+_Appears in:_
+- [MetricSource](#metricsource)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the Prometheus metric name matched against labels in the pod's scraped output.<br />Defaults to the policy metric key when omitted.<br />For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series. |  |  |
+| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics |  |
+| `port` _integer_ | Port defines the network port where metrics are exposed by the pods (e.g., 8000). | 8100 |  |
+
+
 #### PodTemplateSpec
 
 
@@ -699,6 +850,37 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `metadata` _[Metadata](#metadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#podspec-v1-core)_ | Specification of the desired behavior of the pod. |  |  |
+
+
+
+
+#### PrometheusMetricSource
+
+
+
+PrometheusMetricSource configures an external Prometheus server as a metric backend.
+
+The Query is executed as an instant query and must return a single scalar or a
+single-sample vector; the resulting value drives the scaling decision.
+
+Example:
+
+	prometheus:
+	  serverURL: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+	  query: sum(rate(http_requests_total[2m]))
+
+
+
+_Appears in:_
+- [MetricSource](#metricsource)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `serverURL` _string_ | ServerURL is the base URL of the Prometheus HTTP API server.<br />Example: "http://prometheus.monitoring.svc:9090". |  | Format: uri <br />MinLength: 1 <br /> |
+| `query` _string_ | Query is a PromQL instant-query expression. It must evaluate to a single<br />scalar or a one-element vector, e.g. "avg(rate(vllm:request_latency[1m]))".<br />More Query details refer to https://prometheus.io/docs/prometheus/latest/querying/basics |  | MinLength: 1 <br /> |
+| `auth` _[PrometheusAuth](#prometheusauth)_ | Auth holds optional authentication configuration for the Prometheus server. |  |  |
+
+
 
 
 #### RecoveryPolicy
@@ -834,7 +1016,10 @@ _Appears in:_
 
 
 
+SubTarget identifies a sub-component of a target to scale independently,
+for example a specific Role inside a ModelServing.
 
+Example: kind=Role, name=decode.
 
 
 
@@ -843,8 +1028,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `kind` _string_ |  |  |  |
-| `name` _string_ |  |  |  |
+| `kind` _string_ | Kind is the sub-target kind. Currently supported: "Role". |  |  |
+| `name` _string_ | Name is the sub-target name, e.g. the role name "decode" or "prefill". |  |  |
 
 
 #### Target
@@ -852,6 +1037,22 @@ _Appears in:_
 
 
 Target defines a ModelServing deployment that can be monitored and scaled.
+
+Example:
+
+	target:
+	  targetRef:
+	    kind: ModelServing
+	    name: podinfo-ms
+	  subTargets:
+	    kind: Role
+	    name: decode
+	  metricSources:
+	    podinfo_rps:
+	      type: Prometheus
+	      prometheus:
+	        serverURL: http://prometheus.monitoring.svc:9090
+	        query: sum(rate(http_requests_total[2m]))
 
 
 
@@ -861,8 +1062,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing. |  |  |
-| `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing. |  |  |
-| `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint defines the configuration for scraping metrics from the target pods. |  |  |
+| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing.<br />Example: kind=ModelServing, name=podinfo-ms. |  |  |
+| `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing.<br />Example: kind=Role, name=decode to scale only the decode role. |  |  |
+| `metricSources` _object (keys:string, values:[MetricSource](#metricsource))_ | MetricSources declares how to fetch specific metrics for this target.<br />Keys must match AutoscalingPolicy.spec.metrics[].name.<br />Missing keys are treated as missing metrics for that reconcile loop.<br />For example, a key "podinfo_rps" here must correspond to a metric named<br />"podinfo_rps" in the referenced AutoscalingPolicy. |  |  |
 
 

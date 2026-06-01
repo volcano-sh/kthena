@@ -1,0 +1,30 @@
+# ModelServing for controller-manager autoscale e2e (binding lifecycle).
+# Same mocker/token_usage assumptions as model-serving-sglang-mocker-policy-lifecycle.yaml.
+
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: autoscale-binding-lifecycle-ms
+spec:
+  replicas: 5
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    rollingUpdateConfiguration:
+      maxUnavailable: 2
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+                imagePullPolicy: IfNotPresent
+                ports:
+                  - name: metrics
+                    containerPort: 30000
+                env:
+                  - name: MODEL_NAME
+                    value: "Qwen/Qwen3-8B"
+        workerReplicas: 0

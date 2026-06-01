@@ -28,7 +28,7 @@ import (
 // Context stores information which maybe useful in Filter or Score plugins.
 type Context struct {
 	Model  string
-	Prompt common.ChatMessage
+	Prompt *common.ChatMessage
 	// RequestBody is the parsed OpenAI-compatible request. Scheduler plugins may
 	// inspect generation caps such as max_tokens before routing.
 	RequestBody map[string]interface{}

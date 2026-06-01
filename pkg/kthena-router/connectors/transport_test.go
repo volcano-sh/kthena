@@ -185,6 +185,16 @@ func TestIsStreamingResponse(t *testing.T) {
 			expected:    true,
 		},
 		{
+			name:        "text/event-stream with charset",
+			contentType: "text/event-stream; charset=utf-8",
+			expected:    true,
+		},
+		{
+			name:        "application/x-ndjson with charset",
+			contentType: "application/x-ndjson; charset=utf-8",
+			expected:    true,
+		},
+		{
 			name:        "application/json",
 			contentType: "application/json",
 			expected:    false,

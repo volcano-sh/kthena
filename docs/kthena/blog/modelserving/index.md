@@ -3,6 +3,7 @@ slug: modelserving-blog-post
 title: A Deep Dive of the Kthena's ModelServing
 authors: [LiZhenCheng9527]
 tags: []
+date: 2025-10-14
 ---
 
 # A Deep Dive of the Kthena's ModelServing

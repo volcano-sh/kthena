@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -58,6 +59,7 @@ import (
 const (
 	// Context keys for gin context
 	GatewayKey = "gatewayKey"
+	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
 )
 
 func getEnvBool(key string, fallback bool) bool {
@@ -204,6 +206,13 @@ type ModelRequest map[string]interface{}
 
 func (r *Router) HandlerFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Handle /v1/models endpoint (OpenAI-compatible model listing)
+		if c.Request.Method == http.MethodGet &&
+			(c.Request.URL.Path == "/v1/models" || c.Request.URL.Path == "/models") {
+			r.ListModels(c)
+			return
+		}
+
 		// Step 1: Parse and validate request
 		modelRequest, err := ParseModelRequest(c)
 		if err != nil {
@@ -246,6 +255,8 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.Set("finishReason", "prompt_parsing")
 			return
 		}
+		// Store parsed prompt to avoid re-parsing in doLoadbalance.
+		c.Set(PromptKey, prompt)
 		promptStr := utils.GetPromptString(prompt)
 
 		// Calculate input tokens for metrics using tokenizer
@@ -403,8 +414,15 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 
 	// Common scheduling logic for both ModelServer and InferencePool
-	prompt, err := utils.ParsePrompt(modelRequest)
-	if err != nil {
+	var prompt *common.ChatMessage
+	if cached, exists := c.Get(PromptKey); exists {
+		var ok bool
+		if prompt, ok = cached.(*common.ChatMessage); !ok {
+			accesslog.SetError(c, "prompt_parsing", "internal error: invalid prompt type")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, "internal error")
+			return
+		}
+	} else {
 		accesslog.SetError(c, "prompt_parsing", "prompt not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
 		return
@@ -450,8 +468,8 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		c.Set("modelRouteName", modelRouteName)
 	}
 
-	if len(ctx.BestPods) > 0 && ctx.BestPods[0].Pod != nil {
-		selectedPod := ctx.BestPods[0].Pod.Name
+	if len(ctx.BestPods) > 0 {
+		selectedPod := ctx.BestPods[0].GetPodNamespacedName().Name
 		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, selectedPod)
 	} else {
 		// Set routing info even if no pod is selected (for error cases)
@@ -479,7 +497,7 @@ func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 	}
 
 	modelName, ok := modelRequest["model"].(string)
-	if !ok {
+	if !ok || strings.TrimSpace(modelName) == "" {
 		c.AbortWithStatusJSON(http.StatusNotFound, "model not found")
 		return nil, fmt.Errorf("model not found")
 	}
@@ -526,28 +544,26 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 			}
 			for _, match := range rule.Matches {
 				if match.Path != nil {
-					pathType := match.Path.Type
-					pathValue := match.Path.Value
-					if pathType != nil {
-						switch *pathType {
-						case gatewayv1.PathMatchExact:
-							if c.Request.URL.Path == *pathValue {
-								matched = true
-								break
-							}
-						case gatewayv1.PathMatchPathPrefix:
-							if strings.HasPrefix(c.Request.URL.Path, *pathValue) {
-								matched = true
-								matchedPrefix = *pathValue // Store matched prefix
-								break
-							}
-						case gatewayv1.PathMatchRegularExpression:
-							if regexMatched, err := regexp.MatchString(*pathValue, c.Request.URL.Path); err == nil && regexMatched {
-								matched = true
-								break
-							} else if err != nil {
-								klog.Warningf("Invalid regex pattern '%s' in HTTPRoute %s/%s: %v", *pathValue, route.Namespace, route.Name, err)
-							}
+					pathType := httpPathMatchType(match.Path)
+					pathValue := httpPathMatchValue(match.Path)
+					switch pathType {
+					case gatewayv1.PathMatchExact:
+						if c.Request.URL.Path == pathValue {
+							matched = true
+							break
+						}
+					case gatewayv1.PathMatchPathPrefix:
+						if ok, prefix := matchHTTPPathPrefix(c.Request.URL.Path, pathValue); ok {
+							matched = true
+							matchedPrefix = prefix
+							break
+						}
+					case gatewayv1.PathMatchRegularExpression:
+						if regexMatched, err := regexp.MatchString(pathValue, c.Request.URL.Path); err == nil && regexMatched {
+							matched = true
+							break
+						} else if err != nil {
+							klog.Warningf("Invalid regex pattern '%s' in HTTPRoute %s/%s: %v", pathValue, route.Namespace, route.Name, err)
 						}
 					}
 				} else {
@@ -624,6 +640,28 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	return true, inferencePoolName
 }
 
+func httpPathMatchType(path *gatewayv1.HTTPPathMatch) gatewayv1.PathMatchType {
+	if path.Type == nil {
+		return gatewayv1.PathMatchPathPrefix
+	}
+	return *path.Type
+}
+
+func httpPathMatchValue(path *gatewayv1.HTTPPathMatch) string {
+	if path.Value == nil {
+		return "/"
+	}
+	return *path.Value
+}
+
+func matchHTTPPathPrefix(path, prefix string) (bool, string) {
+	normalizedPrefix := strings.TrimRight(prefix, "/")
+	if normalizedPrefix == "" {
+		return strings.HasPrefix(path, "/"), "/"
+	}
+	return path == normalizedPrefix || strings.HasPrefix(path, normalizedPrefix+"/"), normalizedPrefix
+}
+
 // applyURLRewrite applies HTTPURLRewriteFilter to the request
 func (r *Router) applyURLRewrite(c *gin.Context, urlRewrite *gatewayv1.HTTPURLRewriteFilter) {
 	// Apply hostname rewrite
@@ -692,7 +730,29 @@ func (r *Router) proxy(
 		}
 	}
 
+	// Capture body bytes once so each retry attempt gets a fresh reader.
+	// transport.RoundTrip drains req.Body on every call, so reusing the same
+	// request across loop iterations sends an empty body to subsequent pods.
+	var bodyBytes []byte
+	if req.Body != nil {
+		b, err := io.ReadAll(req.Body)
+		req.Body.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read request body: %w", err)
+		}
+		bodyBytes = b
+	}
+
 	for i := 0; i < len(ctx.BestPods); i++ {
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		pod := ctx.BestPods[i]
+		podObj := pod.GetPod()
+		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
+
+		// Track this request as in-flight to the chosen pod. This is instant and
+		// feeds the scheduler immediately, avoiding the ~1 s engine-metrics lag.
+		r.store.IncrPodOnFlightRequests(podName)
+
 		reservations := r.scheduler.Reserve(ctx, ctx.BestPods[i])
 		var finishOnce sync.Once
 		finishReservation := func(usage *framework.TokenUsage) {
@@ -717,14 +777,20 @@ func (r *Router) proxy(
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, ctx.BestPods[i].Pod.Status.PodIP, port, stream, wrappedOnUsage)
+		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, wrappedOnUsage)
 		finishReservation(nil)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
 
+		// Request is complete (success or failure) — decrement on-flight counter.
+		r.store.DecrPodOnFlightRequests(podName)
+
 		if err != nil {
 			klog.Errorf(" pod request error: %v", err)
+			if c.Writer.Written() {
+				return err
+			}
 			continue
 		}
 		// record in prefix cache
@@ -819,6 +885,39 @@ func (r *Router) GetModelServer(modelName string, req *http.Request) (*v1alpha1.
 	return modelServer, nil
 }
 
+type modelObject struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+type modelsResponse struct {
+	Object string        `json:"object"`
+	Data   []modelObject `json:"data"`
+}
+
+// ListModels implements the OpenAI-compatible GET /v1/models endpoint.
+// It returns all model names registered via ModelRoutes.
+func (r *Router) ListModels(c *gin.Context) {
+	modelNames := r.store.GetModelNames()
+
+	data := make([]modelObject, 0, len(modelNames))
+	for _, name := range modelNames {
+		data = append(data, modelObject{
+			ID:      name,
+			Object:  "model",
+			Created: 0,
+			OwnedBy: "kthena",
+		})
+	}
+
+	c.JSON(http.StatusOK, modelsResponse{
+		Object: "list",
+		Data:   data,
+	})
+}
+
 func (r *Router) Auth() gin.HandlerFunc {
 	return r.authenticator.Authenticate()
 }
@@ -854,6 +953,7 @@ func proxyRequest(
 		// Stream response: read and forward each event (line) one by one, and parse usage if present
 		c.Status(resp.StatusCode)
 		reader := bufio.NewReader(resp.Body)
+		var streamErr error
 		c.Stream(func(w io.Writer) bool {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
@@ -878,11 +978,13 @@ func proxyRequest(
 			if err != nil {
 				if err != io.EOF {
 					klog.Errorf("error reading stream body: %v", err)
+					streamErr = err
 				}
 				return false
 			}
 			return true
 		})
+		return streamErr
 	} else {
 		// Non-stream: efficiently stream response while capturing for parsing
 		var buf bytes.Buffer
@@ -891,7 +993,7 @@ func proxyRequest(
 		_, err := io.Copy(c.Writer, ttee)
 		if err != nil {
 			klog.Errorf("copy response to downstream failed: %v", err)
-			return nil
+			return err
 		}
 
 		// Parse usage if present
@@ -913,7 +1015,7 @@ func doRequest(
 	port int32,
 ) (*http.Response, error) {
 	// step 1: change request URL to prefill pod URL.
-	req.URL.Host = fmt.Sprintf("%s:%d", podIP, port)
+	req.URL.Host = net.JoinHostPort(podIP, strconv.Itoa(int(port)))
 
 	// step 2: use http.Transport to do request to prefill pod.
 	transport := http.DefaultTransport
@@ -922,6 +1024,7 @@ func doRequest(
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
 		return nil, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
 	}
 	return resp, nil
@@ -1003,22 +1106,35 @@ func (r *Router) proxyToPDDisaggregated(
 		if ctx.PrefillPods[i] == nil || ctx.DecodePods[i] == nil {
 			continue
 		}
+		prefillPod := ctx.PrefillPods[i].GetPod()
+		decodePod := ctx.DecodePods[i].GetPod()
 		reservations := r.scheduler.Reserve(ctx, ctx.PrefillPods[i])
 		reservations = append(reservations, r.scheduler.Reserve(ctx, ctx.DecodePods[i])...)
 
 		// Build addresses for prefill and decode pods
-		prefillAddr := fmt.Sprintf("%s:%d", ctx.PrefillPods[i].Pod.Status.PodIP, port)
-		decodeAddr := fmt.Sprintf("%s:%d", ctx.DecodePods[i].Pod.Status.PodIP, port)
+		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
+		decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(port)))
 
 		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 
+		// Build on-flight hooks so the connector can update the per-pod counters
+		// at the precise point each phase starts and ends.
+		prefillPodName := types.NamespacedName{Namespace: prefillPod.Namespace, Name: prefillPod.Name}
+		decodePodName := types.NamespacedName{Namespace: decodePod.Namespace, Name: decodePod.Name}
+		hooks := &connectors.OnFlightHooks{
+			IncrPrefill: func() { r.store.IncrPodOnFlightRequests(prefillPodName) },
+			DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillPodName) },
+			IncrDecode:  func() { r.store.IncrPodOnFlightRequests(decodePodName) },
+			DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodePodName) },
+		}
+
 		// Execute the PD disaggregated proxy operation
-		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr)
+		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, hooks)
 
 		if err != nil {
 			r.scheduler.Finish(ctx, reservations, nil)
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",
-				ctx.PrefillPods[i].Pod.Name, ctx.DecodePods[i].Pod.Name, err)
+				prefillPod.Name, decodePod.Name, err)
 			continue
 		}
 
@@ -1041,7 +1157,7 @@ func (r *Router) proxyToPDDisaggregated(
 		r.scheduler.RunPostHooks(ctx, i)
 
 		klog.V(4).Infof("kv connector run successful for prefill pod %s, decode pod %s, output tokens: %d",
-			ctx.PrefillPods[i].Pod.Name, ctx.DecodePods[i].Pod.Name, outputTokens)
+			prefillPod.Name, decodePod.Name, outputTokens)
 
 		return nil
 	}

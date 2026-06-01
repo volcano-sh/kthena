@@ -17,47 +17,115 @@ limitations under the License.
 package utils
 
 import (
-	"reflect"
 	"testing"
 
-	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/stretchr/testify/assert"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestReplaceEmbeddedPlaceholders(t *testing.T) {
-	values := map[string]interface{}{
-		"key1": "value1",
-		"key2": 123,
-		"key3": true,
-		"key4": []string{"a", "b"},
-	}
-
 	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantErr bool
+		name     string
+		input    string
+		values   map[string]interface{}
+		expected string
+		wantErr  bool
 	}{
-		{"replace string", "hello ${key1}", "hello value1", false},
-		{"replace int", "count ${key2}", "count 123", false},
-		{"replace bool", "is_true ${key3}", "is_true true", false},
-		{"replace list", "list ${key4}", `list ["a","b"]`, false},
-		{"key not found", "missing ${key5}", "", true},
-		{"no placeholder", "plain text", "plain text", false},
-		{"unclosed placeholder", "hello ${key1", "", true},
+		{
+			// this verifies that a string with no placeholders is returned unchanged
+			name:     "NoPlaceholders",
+			input:    "hello world",
+			values:   map[string]interface{}{},
+			expected: "hello world",
+		},
+		{
+			// this verifies that a single string placeholder is replaced correctly
+			name:  "SingleStringPlaceholder",
+			input: "hello ${name}",
+			values: map[string]interface{}{
+				"name": "world",
+			},
+			expected: "hello world",
+		},
+		{
+			// this verifies that multiple placeholders in one string are all replaced
+			name:  "MultiplePlaceholders",
+			input: "${greeting} ${name}",
+			values: map[string]interface{}{
+				"greeting": "hello",
+				"name":     "world",
+			},
+			expected: "hello world",
+		},
+		{
+			// this verifies that integer values are converted to string correctly
+			name:  "IntegerPlaceholder",
+			input: "port: ${port}",
+			values: map[string]interface{}{
+				"port": 8080,
+			},
+			expected: "port: 8080",
+		},
+		{
+			// verifies that boolean values are converted to string correctly
+			name:  "BooleanPlaceholder",
+			input: "enabled: ${enabled}",
+			values: map[string]interface{}{
+				"enabled": true,
+			},
+			expected: "enabled: true",
+		},
+		{
+			// verifies that a missing key returns an error
+			name:    "MissingKey",
+			input:   "hello ${missing}",
+			values:  map[string]interface{}{},
+			wantErr: true,
+		},
+		{
+			// verifies that an unclosed placeholder returns an error
+			name:    "UnclosedPlaceholder",
+			input:   "hello ${name",
+			values:  map[string]interface{}{"name": "world"},
+			wantErr: true,
+		},
+		{
+			// verifies that a placeholder at the start of the string is replaced
+			name:  "PlaceholderAtStart",
+			input: "${prefix}-suffix",
+			values: map[string]interface{}{
+				"prefix": "my",
+			},
+			expected: "my-suffix",
+		},
+		{
+			// verifies that a placeholder at the end of the string is replaced
+			name:  "PlaceholderAtEnd",
+			input: "prefix-${suffix}",
+			values: map[string]interface{}{
+				"suffix": "end",
+			},
+			expected: "prefix-end",
+		},
+		{
+			// verifies that a JSON object value is marshaled and embedded correctly
+			name:  "JSONObjectPlaceholder",
+			input: "config: ${cfg}",
+			values: map[string]interface{}{
+				"cfg": map[string]interface{}{"key": "val"},
+			},
+			expected: `config: {"key":"val"}`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ReplaceEmbeddedPlaceholders(tt.input, &values)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ReplaceEmbeddedPlaceholders() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("ReplaceEmbeddedPlaceholders() got = %v, want %v", got, tt.want)
+			result, err := ReplaceEmbeddedPlaceholders(tt.input, &tt.values)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
 			}
 		})
 	}
@@ -65,137 +133,202 @@ func TestReplaceEmbeddedPlaceholders(t *testing.T) {
 
 func TestConvertVLLMArgsFromJson(t *testing.T) {
 	tests := []struct {
-		name    string
-		json    string
-		want    []string
-		wantErr bool
+		name     string
+		input    *apiextensionsv1.JSON
+		expected []string
+		wantErr  bool
 	}{
 		{
-			name:    "valid config",
-			json:    `{"model": "test-model", "gpu_memory_utilization": 0.9, "trust_remote_code": true}`,
-			want:    []string{"--gpu-memory-utilization", "0.9", "--model", "test-model", "--trust-remote-code", "true"},
-			wantErr: false,
+			// verifies that nil config returns an empty slice without error
+			name:     "NilConfig",
+			input:    nil,
+			expected: []string{},
 		},
 		{
-			name:    "empty config",
-			json:    `{}`,
-			want:    []string{},
-			wantErr: false,
+			// verifies that a config with nil Raw returns an empty slice
+			name:     "NilRaw",
+			input:    &apiextensionsv1.JSON{Raw: nil},
+			expected: []string{},
 		},
 		{
-			name:    "nil config",
-			json:    "",
-			want:    []string{},
-			wantErr: false,
+			// verifies that a single string arg is converted to --key value format
+			name: "SingleStringArg",
+			input: &apiextensionsv1.JSON{
+				Raw: []byte(`{"model": "deepseek-r1"}`),
+			},
+			expected: []string{"--model", "deepseek-r1"},
 		},
 		{
-			name:    "invalid json",
-			json:    `{invalid}`,
-			want:    nil,
+			// verifies that a boolean true arg is converted correctly
+			name: "BooleanArgTrue",
+			input: &apiextensionsv1.JSON{
+				Raw: []byte(`{"trust_remote_code": true}`),
+			},
+			expected: []string{"--trust-remote-code", "true"},
+		},
+		{
+			// verifies that a boolean false arg is converted correctly
+			name: "BooleanArgFalse",
+			input: &apiextensionsv1.JSON{
+				Raw: []byte(`{"trust_remote_code": false}`),
+			},
+			expected: []string{"--trust-remote-code", "false"},
+		},
+		{
+			// verifies that multiple args are sorted alphabetically for determinism
+			name: "MultipleArgsSorted",
+			input: &apiextensionsv1.JSON{
+				Raw: []byte(`{"model": "deepseek", "dtype": "float16"}`),
+			},
+			expected: []string{"--dtype", "float16", "--model", "deepseek"},
+		},
+		{
+			// verifies that underscores in keys are converted to dashes
+			name: "UnderscoreConvertedToDash",
+			input: &apiextensionsv1.JSON{
+				Raw: []byte(`{"max_model_len": "4096"}`),
+			},
+			expected: []string{"--max-model-len", "4096"},
+		},
+		{
+			// verifies that invalid JSON returns an error
+			name:    "InvalidJSON",
+			input:   &apiextensionsv1.JSON{Raw: []byte(`invalid`)},
 			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var config *apiextensionsv1.JSON
-			if tt.json != "" {
-				config = &apiextensionsv1.JSON{Raw: []byte(tt.json)}
-			}
-			got, err := ConvertVLLMArgsFromJson(config)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ConvertVLLMArgsFromJson() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("ConvertVLLMArgsFromJson() got = %v, want %v", got, tt.want)
+			result, err := ConvertVLLMArgsFromJson(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
 			}
 		})
 	}
 }
 
 func TestReplacePlaceholders(t *testing.T) {
-	values := map[string]interface{}{
-		"key1": "value1",
-		"key2": map[string]interface{}{"inner": "val"},
-	}
-
 	tests := []struct {
-		name    string
-		data    interface{}
-		want    interface{}
-		wantErr bool
+		name     string
+		data     interface{}
+		values   map[string]interface{}
+		expected interface{}
+		wantErr  bool
 	}{
 		{
-			name: "full string placeholder",
-			data: "${key1}",
-			want: "value1",
+			// verifies that an exact placeholder string is replaced with its value
+			name:     "StringExactPlaceholder",
+			data:     "${name}",
+			values:   map[string]interface{}{"name": "kthena"},
+			expected: "kthena",
 		},
 		{
-			name: "nested placeholder",
-			data: "${key2}",
-			want: map[string]interface{}{"inner": "val"},
+			// verifies that an embedded placeholder within a string is replaced
+			name:     "StringEmbeddedPlaceholder",
+			data:     "hello-${name}",
+			values:   map[string]interface{}{"name": "world"},
+			expected: "hello-world",
 		},
 		{
-			name: "embedded placeholder",
-			data: "prefix ${key1} suffix",
-			want: "prefix value1 suffix",
+			// verifies that placeholders within a map are replaced recursively
+			name: "MapWithPlaceholders",
+			data: map[string]interface{}{
+				"model": "${model_name}",
+				"port":  "${port}",
+			},
+			values: map[string]interface{}{
+				"model_name": "deepseek",
+				"port":       float64(8080),
+			},
+			expected: map[string]interface{}{
+				"model": "deepseek",
+				"port":  float64(8080),
+			},
 		},
 		{
-			name: "map with placeholder",
-			data: map[string]interface{}{"a": "${key1}"},
-			want: map[string]interface{}{"a": "value1"},
+			// verifies that placeholders within a slice are replaced recursively
+			name: "SliceWithPlaceholders",
+			data: []interface{}{"${a}", "${b}"},
+			values: map[string]interface{}{
+				"a": "foo",
+				"b": "bar",
+			},
+			expected: []interface{}{"foo", "bar"},
 		},
 		{
-			name: "slice with placeholder",
-			data: []interface{}{"${key1}", "literal"},
-			want: []interface{}{"value1", "literal"},
+			// verifies that a missing placeholder key returns an error
+			name:    "MissingPlaceholder",
+			data:    "${missing}",
+			values:  map[string]interface{}{},
+			wantErr: true,
+		},
+		{
+			// verifies that a plain string with no placeholders is returned unchanged
+			name:     "NoPlaceholder",
+			data:     "plain string",
+			values:   map[string]interface{}{},
+			expected: "plain string",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data := tt.data
-			err := ReplacePlaceholders(&data, &values)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ReplacePlaceholders() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(data, tt.want) {
-				t.Errorf("ReplacePlaceholders() got = %v, want %v", data, tt.want)
+			err := ReplacePlaceholders(&data, &tt.values)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, data)
 			}
 		})
 	}
 }
 
 func TestGetBackendResourceName(t *testing.T) {
-	if got := GetBackendResourceName("model", "backend"); got != "model-backend" {
-		t.Errorf("GetBackendResourceName() = %v, want model-backend", got)
+	tests := []struct {
+		name        string
+		modelName   string
+		backendName string
+		expected    string
+	}{
+		{
+			// verifies that model and backend names are joined with a dash
+			name:        "WithBackendName",
+			modelName:   "my-model",
+			backendName: "vllm",
+			expected:    "my-model-vllm",
+		},
+		{
+			// verifies that an empty backend name returns just the model name
+			name:        "EmptyBackendName",
+			modelName:   "my-model",
+			backendName: "",
+			expected:    "my-model",
+		},
 	}
-	if got := GetBackendResourceName("model", ""); got != "model" {
-		t.Errorf("GetBackendResourceName() with empty backend = %v, want model", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetBackendResourceName(tt.modelName, tt.backendName)
+			assert.Equal(t, tt.expected, result)
+		})
 	}
 }
 
 func TestGetModelControllerLabels(t *testing.T) {
-	model := &workload.ModelBooster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-model",
-			UID:  types.UID("test-uid"),
-		},
-	}
+	// verifies that GetModelControllerLabels returns the correct label map
+	// with all expected keys populated from the model and backend info.
+	model := makeTestModelBooster("test-model", "test-uid")
+	labels := GetModelControllerLabels(model, "vllm", "v1")
 
-	got := GetModelControllerLabels(model, "test-backend", "v1")
-
-	expected := map[string]string{
-		ModelNameLabelKey:   "test-model",
-		BackendNameLabelKey: "test-backend",
-		ManageBy:            workload.GroupName,
-		RevisionLabelKey:    "v1",
-		OwnerUIDKey:         "test-uid",
-	}
-
-	if !reflect.DeepEqual(got, expected) {
-		t.Errorf("GetModelControllerLabels() = %v, want %v", got, expected)
-	}
+	assert.Equal(t, "test-model", labels[ModelNameLabelKey])
+	assert.Equal(t, "vllm", labels[BackendNameLabelKey])
+	assert.Equal(t, "v1", labels[RevisionLabelKey])
+	assert.Equal(t, "test-uid", labels[OwnerUIDKey])
+	assert.Equal(t, "workload.serving.volcano.sh", labels[ManageBy])
 }

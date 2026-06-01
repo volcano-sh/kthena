@@ -138,11 +138,11 @@ servingGroupScore = \sum_{i=1}^{m} roleScore_{i}
 
 #### Pod Sequence Number Handling
 
-The current `modelServing` pods operate similarly to `statefulSet`. During scaling, they are processed in ascending order by sequence number. However, in the binpack scale-down process, this processing logic is disrupted. However, during binpack scale-down operations, or when selecting `ServingGroups` or `Roles` for deletion based on scores, the target may not necessarily be the object with the highest serial number. This can disrupt the previously established processing logic.
+The current `modelServing` pods operate similarly to `statefulSet`. During scaling, they are processed in ascending order by sequence number. However, during binpack scale-down operations, or when selecting `ServingGroups` or `Roles` for deletion based on scores, the target may not necessarily be the object with the highest serial number. This can disrupt the previously established processing logic.
 
 To ensure maximum compatibility with existing logic, we have implemented this approach.
 
-The logic behind scaling down is as described above. During the scaling up process, the ModelServing Controller will locates the largest index and then creates replicas incrementally.
+The logic behind scaling down is as described above. During the scaling up process, the ModelServing Controller will locate the largest index and then create replicas incrementally.
 
 For example:
 
@@ -165,10 +165,10 @@ However, after enabling binpack support, we cannot determine which `servingGroup
 
 **ServingGroup:**
 
-Handling `ServingGroup` is relatively straightforward. Since `ServingGroup` and `PodGroup` maintain a one-to-one correspondence, once the `ServingGroup` scale-down is complete, you can simply delete the corresponding `PodGroup`. The normal `podGroup manager` processing occurs before the `ServingGroup` scale-down operation. During this podGroup manager processing, when the existing `ServingGroup` count exceeds the expected `ServingGroup` replicas, all existing podGroups are updated to ensure correct podGroup behavior if role scaling occur at the same time.
+Handling `ServingGroup` is relatively straightforward. Since `ServingGroup` and `PodGroup` maintain a one-to-one correspondence, once the `ServingGroup` scale-down is complete, you can simply delete the corresponding `PodGroup`. The normal `podGroup manager` processing occurs before the `ServingGroup` scale-down operation. During this podGroup manager processing, when the existing `ServingGroup` count exceeds the expected `ServingGroup` replicas, all existing podGroups are updated to ensure correct podGroup behavior if role scaling occurs at the same time.
 
 ```go
-// Get the exist ServingGroups
+// Get the existing ServingGroups
 servingGroupList, err := m.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
 
 // Changes to the PodGroup will not affect Pods that have already been deployed.
@@ -206,13 +206,13 @@ Role replicas are represented by `MinTaskMember` within `PodGroup`. Since we can
 // During scaling operations, podGroup does not affect scaling policies.
 // Under the binpack scaling strategy, it is unknown which role replicas will be deleted.
 // Therefore, no action is taken during scaling.
-// PodGroup will updated after the role completes scaling down.
+// PodGroup will be updated after the role completes scaling down.
 if len(roleList) > expectReplicas {
     continue
 }
 ```
 
-After each pod deletion completes, a `reconcile` will occurs. Therefore, once all pods requiring deletion within the cluster have been removed, the `len(roleList)` will match the `expectedReplicas`. Then update the MinTaskMember for the corresponding PodGroup. The logic for obtaining the RoleName is consistent with the previous logic for obtaining the ServingGroupName.
+After each pod deletion completes, a `reconcile` will occur. Therefore, once all pods requiring deletion within the cluster have been removed, the `len(roleList)` will match the `expectedReplicas`. Then, update the MinTaskMember for the corresponding PodGroup. The logic for obtaining the RoleName is consistent with the previous logic for obtaining the ServingGroupName.
 
 #### Test Plan
 

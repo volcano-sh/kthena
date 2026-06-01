@@ -98,7 +98,7 @@ func TestCostAwareOutputCapPriorityAndChoices(t *testing.T) {
 	}`)})
 	ctx := &framework.Context{
 		Model:  "test-model",
-		Prompt: common.ChatMessage{Text: "12345678"},
+		Prompt: &common.ChatMessage{Text: "12345678"},
 		RequestBody: map[string]interface{}{
 			"max_tokens":            float64(20),
 			"max_completion_tokens": float64(11),
@@ -126,7 +126,7 @@ func TestCostAwareBytesPerTokenEMA(t *testing.T) {
 	pod := testCostAwarePod("default", "pod-1")
 	ctx := &framework.Context{
 		Model:       "test-model",
-		Prompt:      common.ChatMessage{Text: "12345678"},
+		Prompt:      &common.ChatMessage{Text: "12345678"},
 		RequestBody: map[string]interface{}{"max_tokens": float64(1)},
 		RequestID:   "req-ema-1",
 	}
@@ -140,7 +140,7 @@ func TestCostAwareBytesPerTokenEMA(t *testing.T) {
 
 	ctx = &framework.Context{
 		Model:       "test-model",
-		Prompt:      common.ChatMessage{Text: "12345678"},
+		Prompt:      &common.ChatMessage{Text: "12345678"},
 		RequestBody: map[string]interface{}{"max_tokens": float64(1)},
 		RequestID:   "req-ema-2",
 	}
@@ -161,7 +161,7 @@ func TestCostAwareEMAUpdatesWithoutReservation(t *testing.T) {
 	pod := testCostAwarePod("default", "pod-1")
 	ctx := &framework.Context{
 		Model:       "test-model",
-		Prompt:      common.ChatMessage{Text: "12345678"},
+		Prompt:      &common.ChatMessage{Text: "12345678"},
 		RequestBody: map[string]interface{}{"max_tokens": float64(1)},
 	}
 
@@ -170,7 +170,7 @@ func TestCostAwareEMAUpdatesWithoutReservation(t *testing.T) {
 
 	ctx = &framework.Context{
 		Model:       "test-model",
-		Prompt:      common.ChatMessage{Text: "12345678"},
+		Prompt:      &common.ChatMessage{Text: "12345678"},
 		RequestBody: map[string]interface{}{"max_tokens": float64(1)},
 	}
 	plugin.Score(ctx, []*datastore.PodInfo{pod})
@@ -210,7 +210,7 @@ func TestCostAwareConcurrentReleaseIsIdempotent(t *testing.T) {
 func testCostAwareContext() *framework.Context {
 	return &framework.Context{
 		Model:  "test-model",
-		Prompt: common.ChatMessage{Text: "12345678"},
+		Prompt: &common.ChatMessage{Text: "12345678"},
 		RequestBody: map[string]interface{}{
 			"max_tokens": float64(18),
 		},

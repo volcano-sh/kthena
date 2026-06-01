@@ -25,7 +25,4 @@ spec:
             # specify the model name to mock
             - name: MODEL_NAME
               value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-          command:
-            - python3
-            - app.py
 

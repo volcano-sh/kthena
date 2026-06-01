@@ -41,8 +41,9 @@ type AutoscalingPolicySpec struct {
 
 // AutoscalingPolicyMetric defines a metric and its target value for scaling decisions.
 type AutoscalingPolicyMetric struct {
-	// MetricName defines the name of the metric to monitor for scaling decisions.
-	MetricName string `json:"metricName"`
+	// Name defines the metric key used by the scaling algorithm.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 	// TargetValue defines the target value for the metric that triggers scaling operations.
 	TargetValue resource.Quantity `json:"targetValue"`
 }

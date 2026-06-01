@@ -83,7 +83,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-logs-${{ matrix.category }}
+          name: e2e-logs-${{ matrix.category }}-${{ github.run_id }}
           path: /tmp/kind-logs/
           retention-days: 7
           if-no-files-found: warn

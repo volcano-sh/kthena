@@ -17,9 +17,9 @@ limitations under the License.
 package utils
 
 import (
-	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -27,84 +27,156 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func TestTryGetField(t *testing.T) {
-	config := []byte(`{"key1": "value1", "key2": 123, "key3": true}`)
+func makeTestModelBooster(name, uid string) *workloadv1alpha1.ModelBooster {
+	return &workloadv1alpha1.ModelBooster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			UID:  types.UID(uid),
+		},
+	}
+}
 
+func TestTryGetField(t *testing.T) {
 	tests := []struct {
-		name    string
-		key     string
-		want    interface{}
-		wantErr bool
+		name     string
+		config   []byte
+		key      string
+		expected interface{}
+		wantErr  bool
 	}{
-		{"exists string", "key1", "value1", false},
-		{"exists number", "key2", float64(123), false},
-		{"exists bool", "key3", true, false},
-		{"not exists", "key4", nil, false},
-		{"invalid json", "key1", nil, true},
+		{
+			// this verifies retrieval of an existing string field
+			name:     "ExistingStringField",
+			config:   []byte(`{"model": "deepseek-r1"}`),
+			key:      "model",
+			expected: "deepseek-r1",
+		},
+		{
+			// this verifies that a missing key returns nil without error
+			name:     "MissingField",
+			config:   []byte(`{"model": "deepseek-r1"}`),
+			key:      "missing",
+			expected: nil,
+		},
+		{
+			// verifies retrieval of a numeric field as float64
+			name:     "ExistingNumberField",
+			config:   []byte(`{"port": 8080}`),
+			key:      "port",
+			expected: float64(8080),
+		},
+		{
+			// verifies that malformed JSON returns an error
+			name:    "InvalidJSON",
+			config:  []byte(`invalid`),
+			key:     "model",
+			wantErr: true,
+		},
+		{
+			// verifies retrieval of a boolean field
+			name:     "ExistingBoolField",
+			config:   []byte(`{"enabled": true}`),
+			key:      "enabled",
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conf := config
-			if tt.name == "invalid json" {
-				conf = []byte(`{invalid}`)
-			}
-			got, err := TryGetField(conf, tt.key)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("TryGetField() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("TryGetField() got = %v, want %v", got, tt.want)
+			result, err := TryGetField(tt.config, tt.key)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
 			}
 		})
 	}
 }
 
 func TestGetDeviceNum(t *testing.T) {
-	worker := &workloadv1alpha1.ModelWorker{
-		Resources: corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{
-				"nvidia.com/gpu":         resource.MustParse("2"),
-				"huawei.com/ascend-1980": resource.MustParse("4"),
-				"cpu":                    resource.MustParse("1"),
+	tests := []struct {
+		name     string
+		worker   *workloadv1alpha1.ModelWorker
+		expected int64
+	}{
+		{
+			// verifies that a single nvidia GPU limit is counted correctly
+			name: "SingleNvidiaGPU",
+			worker: &workloadv1alpha1.ModelWorker{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu": resource.MustParse("2"),
+					},
+				},
 			},
+			expected: 2,
+		},
+		{
+			// verifies that a single ascend NPU limit is counted correctly
+			name: "SingleAscendNPU",
+			worker: &workloadv1alpha1.ModelWorker{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"huawei.com/ascend-1980": resource.MustParse("4"),
+					},
+				},
+			},
+			expected: 4,
+		},
+		{
+			// verifies that multiple XPU types are summed together
+			name: "MultipleXPUs",
+			worker: &workloadv1alpha1.ModelWorker{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu":         resource.MustParse("2"),
+						"huawei.com/ascend-1980": resource.MustParse("2"),
+					},
+				},
+			},
+			expected: 4,
+		},
+		{
+			// verifies that a worker with no limits returns 0
+			name: "NoLimits",
+			worker: &workloadv1alpha1.ModelWorker{
+				Resources: corev1.ResourceRequirements{},
+			},
+			expected: 0,
+		},
+		{
+			// verifies that non-XPU resources like CPU and memory are ignored
+			name: "NoXPUResources",
+			worker: &workloadv1alpha1.ModelWorker{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"cpu":    resource.MustParse("4"),
+						"memory": resource.MustParse("8Gi"),
+					},
+				},
+			},
+			expected: 0,
 		},
 	}
 
-	expected := int64(6)
-	if got := GetDeviceNum(worker); got != expected {
-		t.Errorf("GetDeviceNum() = %v, want %v", got, expected)
-	}
-
-	workerNoLimits := &workloadv1alpha1.ModelWorker{
-		Resources: corev1.ResourceRequirements{},
-	}
-	if got := GetDeviceNum(workerNoLimits); got != 0 {
-		t.Errorf("GetDeviceNum() with no limits = %v, want 0", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetDeviceNum(tt.worker)
+			assert.Equal(t, tt.expected, result)
+		})
 	}
 }
 
 func TestNewModelOwnerRef(t *testing.T) {
-	model := &workloadv1alpha1.ModelBooster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-model",
-			UID:  types.UID("test-uid"),
-		},
-	}
+	// verifies that NewModelOwnerRef returns an OwnerReference with all
+	// fields correctly populated from the ModelBooster object.
+	model := makeTestModelBooster("test-model", "test-uid-123")
+	ref := NewModelOwnerRef(model)
 
-	got := NewModelOwnerRef(model)
-
-	if got.Name != model.Name {
-		t.Errorf("NewModelOwnerRef() Name = %v, want %v", got.Name, model.Name)
-	}
-	if got.UID != model.UID {
-		t.Errorf("NewModelOwnerRef() UID = %v, want %v", got.UID, model.UID)
-	}
-	if got.Kind != workloadv1alpha1.ModelKind.Kind {
-		t.Errorf("NewModelOwnerRef() Kind = %v, want %v", got.Kind, workloadv1alpha1.ModelKind.Kind)
-	}
-	if *got.Controller != true {
-		t.Errorf("NewModelOwnerRef() Controller = %v, want true", *got.Controller)
-	}
+	assert.Equal(t, "test-model", ref.Name)
+	assert.Equal(t, types.UID("test-uid-123"), ref.UID)
+	assert.Equal(t, workloadv1alpha1.ModelKind.Kind, ref.Kind)
+	assert.True(t, *ref.Controller)
+	assert.True(t, *ref.BlockOwnerDeletion)
 }

@@ -4,99 +4,140 @@ import requestPipeline from '../assets/diagrams/architecture/request_pipeline.sv
 
 # Architecture Overview
 
-Kthena is a Kubernetes-native AI serving platform built on a **two-plane architecture** designed for scalability, observability, and efficiency. The system separates **control plane operations** and **data plane execution** into distinct architectural planes.
-
-## High-Level Architecture
-
-The platform comprises two primary planes:
-
-- **Control Plane**: Kthena's model-aware brain. It coordinates models, routes, and servers; validates and stages changes; applies rollout/rollback logic with safety guardrails; and surfaces status/health for clear visibility—focused on model lifecycle and traffic safety rather than cluster mechanics.
-- **Data Plane**: Kthena's runtime path. The Kthena Router authenticates requests, enforces rate limits and fairness, and uses a pluggable, model-aware Scheduler (e.g., LoRA affinity, KV/GPU cache and latency plugins) to pick the best replica. Role-based **Prefill/Decode** replica groups enable disaggregation and independent scaling for lower latency, higher throughput, and better cost.
+Kthena follows a **two-plane architecture** that cleanly separates *what you declare* from *how requests flow*. The **Control Plane** reconciles your CRDs into a running system; the **Data Plane** routes every inference request through a model-aware pipeline to the right pod at the right time.
 
 <LightboxImage src={architectureOverview} alt="Architecture Overview"/>
 
-## Core Components
+---
 
-### 1. **Custom Resource Definitions (CRDs)**
+## Control Plane — Declarative Model Lifecycle
 
-Kthena extends Kubernetes with custom resources that provide declarative configuration for AI inference workloads:
+The Control Plane is Kthena's model-aware brain. You describe intent through CRDs; controllers continuously reconcile that intent into live resources with safety guardrails, rollout logic, and status visibility.
 
-- **ModelBooster** – A high-level, opinionated API that captures model specifications and cascades creation/update/deletion of related resources (ModelRoute, ModelServer, ModelServing, autoscaling artifacts) to deliver a one-stop model deployment experience.
-- **ModelRoute** – Declares routing intent and traffic control: matches by `modelName`, `loraAdapters`, and HTTP attributes (path, headers); supports rule-based routing with weights, canary/A–B strategies, and optional token-based `rateLimit`s.
-- **ModelServer** – Defines service exposure and traffic policy for backend inference pods: specifies the model and inference framework/engine, discovers pods via `workloadSelector` (including role-aware groupings such as Prefill/Decode), and applies traffic policies (retries, timeouts, connection settings) for healthy endpoint publication.
-- **ModelServing** – Manages inference workloads as `ServingGroup`s with role-based replicas (e.g., Prefill/Decode), supporting configurable entry/worker Pod `template`s, `recoveryPolicy`, topology- and gang-aware scheduling, rolling upgrades, and a dedicated `scheduler`.
-- **AutoScalingPolicy** – Specifies autoscaling rules: metric endpoints and triggers (CPU, memory, custom), target thresholds, and scaling behaviors (up/down rates, stabilization and panic windows) for automated replica management.
-- **AutoScalingPolicyBinding** – Attaches policies to target ModelServing workloads, supporting two modes: **scalingConfiguration** for metric-driven scaling of a single target and **optimizerConfiguration** for cost-aware distribution across heterogeneous instance types and engines (e.g., H100/A100).
+### Custom Resource Definitions (CRDs)
 
-Platform operators manage these CRDs declaratively, and Control Plane controllers continuously reconcile them into runtime resources.
+Kthena extends Kubernetes with a layered CRD model. A single high-level resource cascades into fine-grained primitives — so you can operate at whichever abstraction level fits your workflow.
 
-### 2. **Control Plane**
+```
+ModelBooster  (one-stop deployment API)
+ ├── ModelRoute        – routing rules, canary weights, rate limits
+ ├── ModelServer       – service exposure, traffic policy, endpoint discovery
+ ├── ModelServing      – replica topology: ServingGroups × Roles (Prefill / Decode)
+ ├── AutoScalingPolicy – metric triggers, scaling behaviors, panic mode
+ └── AutoScalingPolicyBinding – attach policies to workloads, cost-aware optimization
+```
 
-The Control Plane ensures that declarative configurations are realized into operational resources through continuous reconciliation of CRDs into runtime resources.
+| CRD | Purpose |
+|---|---|
+| **ModelBooster** | High-level, opinionated API. Captures model specs and cascades create/update/delete of all downstream resources — one resource to deploy, one resource to manage. |
+| **ModelRoute** | Declares routing intent: match by `modelName`, `loraAdapters`, path, or headers. Supports weighted traffic splits, canary/A-B strategies, and token-based `rateLimit`s. |
+| **ModelServer** | Defines service exposure and traffic policy for inference pods. Discovers backends via `workloadSelector` (including role-aware Prefill/Decode groupings) and applies retries, timeouts, and connection settings. |
+| **ModelServing** | Manages inference workloads as `ServingGroup`s with role-based replicas. Supports entry/worker pod templates, `recoveryPolicy`, topology- and gang-aware scheduling, rolling upgrades, and a dedicated scheduler. |
+| **AutoScalingPolicy** | Specifies metric endpoints and triggers (CPU, memory, custom), target thresholds, and scaling behaviors — including panic windows for traffic spikes and stabilization windows to prevent flapping. |
+| **AutoScalingPolicyBinding** | Binds policies to `ModelServing` targets in two modes: **scalingConfiguration** for metric-driven replica management, and **optimizerConfiguration** for cost-aware distribution across heterogeneous instance types (e.g., H100 + A100). |
 
-#### **Controllers**
+### Controllers
 
-- **Model Booster Controller** – Reconciles `ModelBooster` resources into downstream primitives (`ModelRoute`, `ModelServer`, `ModelServing`, `AutoScalingPolicy`, `AutoScalingPolicyBinding`) and maintains overall model lifecycle and status. It propagates updates and orchestrates cascaded create/update/delete to keep derived resources consistent.
-- **Model Serving Controller** – Manages `ModelServing` workloads including `ServingGroup`s and role-based replicas (e.g., Prefill/Decode). It handles topology- and gang-aware placement, fault recovery, and rolling upgrades, and reconciles entry/worker Pod templates and services for each role.
-- **Autoscaler Controller** – Evaluates runtime metrics against `AutoScalingPolicy` targets and computes desired replica counts for bound workloads. It supports homogeneous scaling (stable/panic modes) and heterogeneous optimization via `AutoScalingPolicyBinding`, adjusting replicas and instance mix to meet SLOs and cost goals.
+Three controllers reconcile the CRDs above into runtime resources:
 
-### 3. **Data Plane**
+| Controller | Responsibility |
+|---|---|
+| **Model Booster Controller** | Reconciles `ModelBooster` → downstream primitives. Propagates updates and orchestrates cascaded lifecycle operations to keep every derived resource consistent. |
+| **Model Serving Controller** | Manages `ServingGroup`s and role-based replicas. Handles topology- and gang-aware placement, fault recovery, rolling upgrades, and entry/worker pod template reconciliation per role. |
+| **Autoscaler Controller** | Evaluates runtime metrics against `AutoScalingPolicy` targets, computes desired replica counts, and — via `AutoScalingPolicyBinding` — adjusts instance mix across heterogeneous hardware to meet SLOs and cost goals. Supports both stable and panic scaling modes. |
 
-The Data Plane executes inference workloads and handles request processing through the Router and Scheduler, using optimized, role-based pod architectures that support both homogeneous and heterogeneous scaling strategies.
+---
 
-#### **Kthena Router**
+## Data Plane — Request-Level Intelligent Routing
 
-The Kthena Router processes user requests through a comprehensive pipeline that ensures security, fairness, and optimal resource utilization:
+The Data Plane is Kthena's runtime path. Every inference request flows through the **Kthena Router**, which applies security, fairness, and model-aware scheduling before dispatching to the optimal inference pod.
 
-##### **Request Pipeline**
+### Request Pipeline
 
 <div style={{ textAlign: 'center' }}>
     <LightboxImage src={requestPipeline} alt="Request Processing Pipeline" />
 </div>
 
-The request pipeline orchestrates the flow of user requests through the following stages:
+Each request traverses six stages in order:
 
-*   **Authentication & Authorization** – Validates user identity and permissions
-*   **Rate Limiting** – Enforces request throughput limits to prevent system overload
-*   **Fairness Scheduling** – Implements queuing mechanisms and fair resource allocation
-*   **Scheduling** – Selects optimal pods using filter and score plugins for intelligent request routing.
-    <details>
-        <summary><b>Scheduler (Router Component Details)</b></summary>
-        <p>The Kthena Router includes a pluggable Scheduler that plays a crucial role in the "Scheduling" stage of the request pipeline. It employs <b>advanced scheduling plugins</b> to optimize request routing and resource utilization:</p>
-        ###### Filter Plugins:
-        <ul>
-            <li><i>Least Requests</i> – Filters pods based on current request load</li>
-            <li><i>LoRA Affinity</i> – Ensures requests requiring specific LoRA adapters are routed to compatible pods</li>
-        </ul>
-        ###### Score Plugins:
-        <ul>
-            <li><i>KV Cache Aware</i> – Optimizes routing based on key-value cache availability and utilization</li>
-            <li><i>Least Latency</i> – Minimizes Time to First Token (TTFT) and Time Per Output Token (TPOT)</li>
-            <li><i>Prefix Cache</i> – Leverages shared prefix caching for improved performance</li>
-            <li><i>GPU Cache</i> – Considers GPU memory cache status for optimal routing</li>
-        </ul>
-        <p>It seamlessly integrates with the Kthena Router's Load Balancing and Fairness Scheduling components to ensure optimal request distribution.</p>
-    </details>
+| Stage | What Happens |
+|---|---|
+| **1. Authentication & Authorization** | Validates identity and permissions before any work is done. |
+| **2. Rate Limiting** | Enforces per-model and per-tenant throughput limits — token-based, not just request-based — to prevent monopolization. |
+| **3. Fairness Scheduling** | Per-model fair queuing ensures one model's traffic spike cannot starve others sharing the same fleet. |
+| **4. Scheduling** | The core intelligence layer. A pluggable scheduler runs **filter → score → select** and selects a set of candidate pods (details below). |
+| **5. Load Balancing** | Final routing to candidate backend instances with retry policy supported. |
+| **6. Proxy** | Dispatches the request to the selected inference pod and streams the response back. |
 
-*   **Load Balancing** – Routes requests to optimal backend instances based on health and capacity
-*   **Proxy** – Dispatches requests to appropriate data plane inference groups
+### Pluggable Scheduler
 
+The scheduler at Stage 5 is the heart of Kthena's intelligent routing. It mirrors the Kubernetes scheduler's filter/score pattern but operates at the *request* level, running in microseconds rather than milliseconds.
 
-#### **Inference Pods**
+**Filter Plugins** (eliminate ineligible pods):
 
-Inference workloads are organized into **Groups** containing **multiple Replicas**. Each replica can assume specialized **roles** to optimize different phases of the inference process:
+| Plugin | Logic |
+|---|---|
+| **Least Requests** | Drops pods that exceed a configurable active-request threshold. |
+| **LoRA Affinity** | Excludes pods that don't have the required LoRA adapter loaded. |
 
-**Role-Based Architecture:**
-- **Prefill Role** – Handles prompt initialization and context processing
-- **Decode Role** – Manages incremental token generation and output streaming
+**Score Plugins** (rank remaining pods, weighted):
 
-**Pod Components:**
-Each replica deployment may include the following components:
+| Plugin | Optimizes For |
+|---|---|
+| **Least Requests** | Prefers pods with the fewest active in-flight requests to minimize queuing delay. |
+| **Least Latency** | Minimizes TTFT (Time-to-First-Token) and TPOT (Time-Per-Output-Token) based on recent observations. |
+| **KV Cache Aware** | Favors pods with most available KV-cache hit to maximize cache utilization and reduce recomputation overhead. |
+| **Prefix Cache** | Matches the request's prompt prefix against cached prefixes across pods to maximize cache hits. |
+| **GPU Cache** | Considers GPU memory utilization to avoid requests preemption. |
 
-- **Entry Pod** – Provides ingress endpoints for role-specific requests
-- **Worker Pod(s)** – Execute actual model inference computations
-- **Downloader** – Universal model/artifact fetcher supporting Hugging Face, S3/OBS, and PVC sources with concurrent downloads, file-based locking, and flexible configuration
-- **Runtime Agent** – Sidecar service that proxies and standardizes engine metrics (vLLM/SGLang), exposes LoRA adapter lifecycle APIs (download/load/unload), and provides a model download endpoint
-- **LLM Engines** – Integrates with specialized backends (e.g., **vLLM**, **SGLang**)
+**PD-Aware Scheduling:** When the request targets a disaggregated PD group, the scheduler first scores decode pods, then pairs each with a compatible prefill pod in the same group — ensuring KV-cache locality and minimal data transfer.
 
-This architecture enables **Prefill/Decode Disaggregation (PD mode)**, allowing independent scaling of different inference stages for optimal resource utilization and performance.
+---
+
+## Inference Pod Architecture
+
+Inference workloads are organized into **ServingGroups**, each containing multiple replicas. Replicas assume specialized **roles** to separate the two fundamentally different workloads of LLM inference.
+
+### Role-Based Disaggregation
+
+```
+ModelServing
+ └── ServingGroup (instance 1 … N)
+      ├── Prefill Role    → optimize for compute throughput
+      │    ├── Entry Pod   (ingress)
+      │    └── Worker Pods (parallel prompt processing)
+      └── Decode Role     → optimize for low latency
+           ├── Entry Pod   (ingress)
+           └── Worker Pods (incremental token generation)
+```
+
+| Role | Workload Profile | Scaling Strategy |
+|---|---|---|
+| **Prefill** | Compute-heavy prompt initialization and context encoding | Scale for throughput — batch multiple prompts per GPU |
+| **Decode** | Memory-bound, latency-sensitive token-by-token generation | Scale for latency — minimize queue depth per pod |
+
+Independent replica counts per role (e.g., 2 prefill : 4 decode) let you match hardware to workload characteristics without over-provisioning either stage.
+
+### Pod Components
+
+Each replica deployment may include:
+
+| Component | Purpose |
+|---|---|
+| **Entry Pod** | Provides ingress endpoints for role-specific requests. |
+| **Worker Pod(s)** | Execute model inference computations (tensor-parallel across workers for large models). |
+| **Downloader** | Universal model/artifact fetcher — supports HuggingFace, ModelScope, S3/OBS, and PVC sources with concurrent downloads and file-based locking. |
+| **Runtime Agent** | Sidecar that proxies and standardizes engine metrics (vLLM / SGLang), exposes LoRA adapter lifecycle APIs (download / load / unload), handles KV cache events for PD disaggregation, and provides a model download endpoint. |
+| **LLM Engine** | The actual inference backend — **vLLM**, **SGLang**, or other supported engines. |
+
+### KV Cache Transfer
+
+In Prefill-Decode Disaggregation mode, KV cache state must flow from prefill pods to decode pods. Kthena supports three connector backends:
+
+| Connector | Trade-off |
+|---|---|
+| **LMCache** | In-memory, lowest latency, same-node or RDMA |
+| **MoonCake** | Distributed, cross-node, fault-tolerant |
+| **NIXL** | Lightweight, NCCL-based, GPU-direct |
+
+The choice is transparent to the application — the Runtime Agent and KV Cache connector handle transfer automatically.

@@ -47,7 +47,7 @@ func TestParsePrompt(t *testing.T) {
 	tests := []struct {
 		name    string
 		body    map[string]interface{}
-		want    common.ChatMessage
+		want    *common.ChatMessage
 		wantErr bool
 	}{
 		{
@@ -55,7 +55,7 @@ func TestParsePrompt(t *testing.T) {
 			body: map[string]interface{}{
 				"prompt": "hello",
 			},
-			want: common.ChatMessage{
+			want: &common.ChatMessage{
 				Text: "hello",
 			},
 			wantErr: false,
@@ -65,7 +65,7 @@ func TestParsePrompt(t *testing.T) {
 			body: map[string]interface{}{
 				"prompt": 123,
 			},
-			want:    common.ChatMessage{},
+			want:    nil,
 			wantErr: true,
 		},
 		{
@@ -82,7 +82,7 @@ func TestParsePrompt(t *testing.T) {
 					},
 				},
 			},
-			want: common.ChatMessage{
+			want: &common.ChatMessage{
 				Messages: []common.Message{
 					{Role: "user", Content: "hi"},
 					{Role: "assistant", Content: "hello"},
@@ -95,7 +95,7 @@ func TestParsePrompt(t *testing.T) {
 			body: map[string]interface{}{
 				"messages": "not a list",
 			},
-			want:    common.ChatMessage{},
+			want:    nil,
 			wantErr: true,
 		},
 		{
@@ -103,7 +103,7 @@ func TestParsePrompt(t *testing.T) {
 			body: map[string]interface{}{
 				"foo": "bar",
 			},
-			want:    common.ChatMessage{},
+			want:    nil,
 			wantErr: true,
 		},
 	}
@@ -154,7 +154,7 @@ func TestGetPromptString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := GetPromptString(tt.chatMessage); got != tt.want {
+			if got := GetPromptString(&tt.chatMessage); got != tt.want {
 				t.Errorf("GetPromptString() = %v, want %v", got, tt.want)
 			}
 		})

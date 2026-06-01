@@ -116,6 +116,12 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	TestModelRoutePrefillDecodeDisaggregationShared(t, testCtx, testNamespace, false, "")
 }
 
+// TestModelRouteSglangPrefillDecodeDisaggregation tests SGLang PD disaggregation with ModelServing, ModelServer, and ModelRoute.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestModelRouteSglangPrefillDecodeDisaggregation(t *testing.T) {
+	TestModelRouteSglangPrefillDecodeDisaggregationShared(t, testCtx, testNamespace, false, "")
+}
+
 // TestModelRouteSubset tests ModelRoute with subset routing.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteSubset(t *testing.T) {
@@ -162,4 +168,11 @@ func TestRateLimitMetrics(t *testing.T) {
 // from the sglang-mock deployment.
 func TestSglangMetrics(t *testing.T) {
 	TestSglangMetricsShared(t, testCtx, testNamespace)
+}
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestRouterConfigUpdate(t *testing.T) {
+	TestRouterConfigUpdateShared(t, testCtx, testNamespace, false, kthenaNamespace)
 }

@@ -74,10 +74,9 @@ import (
 	"fmt"
 
 	"github.com/cespare/xxhash"
-	"github.com/stretchr/testify/assert/yaml"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/yaml"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -176,7 +175,7 @@ func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) m
 	totalHashes := len(hashes)
 	scoreResults := make(map[*datastore.PodInfo]int, len(pods))
 	for _, pod := range pods {
-		nsName := types.NamespacedName{Namespace: pod.Pod.Namespace, Name: pod.Pod.Name}
+		nsName := pod.GetPodNamespacedName()
 		if matchLen, ok := matchByName[nsName]; ok {
 			scoreResults[pod] = int((float64(matchLen) / float64(totalHashes)) * 100)
 		} else {

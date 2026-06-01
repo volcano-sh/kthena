@@ -61,7 +61,7 @@ func (h *HTTPConnector) decode(c *gin.Context, req *http.Request, decodeAddr str
 }
 
 // Proxy executes the complete prefill-decode flow for HTTP connector
-func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string) (int, error) {
+func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
 	// Get metrics recorder from context
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
@@ -70,48 +70,55 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		}
 	}
 
-	if h.decodeRequest == nil {
-		h.decodeRequest = BuildDecodeRequest(c, c.Request, reqBody)
-	}
+	decodeBody := cloneReqBody(reqBody)
+	h.decodeRequest = BuildDecodeRequest(c, c.Request, decodeBody)
 
-	// build prefillRequest after decodeRequest, because prefillRequest needs to delete stream and stream_options
-	// and modify the max_tokens
-	if h.prefillRequest == nil {
-		h.prefillRequest = buildPrefillRequest(c.Request, reqBody)
-	}
+	prefillBody := cloneReqBody(reqBody)
+	h.prefillRequest = buildPrefillRequest(c.Request, prefillBody)
 
-	// Start prefill phase metrics and increment upstream request
+	// --- Prefill phase ---
 	if metricsRecorder != nil {
 		metricsRecorder.StartPrefillPhase()
 		metricsRecorder.IncActiveUpstreamRequests()
 	}
+	if hooks != nil && hooks.IncrPrefill != nil {
+		hooks.IncrPrefill()
+	}
 
 	err := h.prefill(h.prefillRequest, prefillAddr)
 
-	// End prefill phase metrics and handle upstream requests
+	if hooks != nil && hooks.DecrPrefill != nil {
+		hooks.DecrPrefill()
+	}
 	if metricsRecorder != nil {
-		statusCode := "200" // Default status code for successful prefill
+		statusCode := "200"
 		if err != nil {
 			statusCode = "500"
 		}
 		metricsRecorder.FinishPrefillPhase(statusCode)
 		metricsRecorder.DecActiveUpstreamRequests()
-
-		if err == nil {
-			metricsRecorder.StartDecodePhase()
-			metricsRecorder.IncActiveUpstreamRequests()
-		}
 	}
 
 	if err != nil {
 		return 0, err
 	}
 
+	// --- Decode phase ---
+	if metricsRecorder != nil {
+		metricsRecorder.StartDecodePhase()
+		metricsRecorder.IncActiveUpstreamRequests()
+	}
+	if hooks != nil && hooks.IncrDecode != nil {
+		hooks.IncrDecode()
+	}
+
 	result, decodeErr := h.decode(c, h.decodeRequest, decodeAddr)
 
-	// End decode phase metrics and decrement upstream request
+	if hooks != nil && hooks.DecrDecode != nil {
+		hooks.DecrDecode()
+	}
 	if metricsRecorder != nil {
-		statusCode := "200" // Default status code, will be updated by response
+		statusCode := "200"
 		if decodeErr != nil {
 			statusCode = "500"
 		}

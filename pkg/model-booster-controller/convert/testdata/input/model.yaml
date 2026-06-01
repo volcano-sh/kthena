@@ -7,7 +7,7 @@ metadata:
 spec:
   autoscalingPolicy:
     metrics:
-      - metricName: "vllm:iteration_tokens_total"
+      - name: "vllm:iteration_tokens_total"
         targetValue: 10
   backend:
     name: backend1

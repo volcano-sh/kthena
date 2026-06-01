@@ -1,0 +1,41 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: test-model
+  namespace: default
+  uid: randomUID
+spec:
+  backend:
+    name: backend1
+    type: vLLMDisaggregated
+    modelURI: s3://aios_models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+    cacheURI: hostpath:///tmp/test
+    minReplicas: 1
+    maxReplicas: 1
+    workers:
+      - type: prefill
+        image: vllm-prefill:latest
+        pods: 1
+        replicas: 1
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+      - type: decode
+        image: vllm-decode:latest
+        pods: 1
+        replicas: 1
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          - key: dedicated
+            operator: Equal
+            value: inference
+            effect: PreferNoSchedule

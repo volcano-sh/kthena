@@ -22,24 +22,33 @@ import (
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
-// MetricEndpointApplyConfiguration represents a declarative configuration of the MetricEndpoint type for use
+// PodMetricSourceApplyConfiguration represents a declarative configuration of the PodMetricSource type for use
 // with apply.
-type MetricEndpointApplyConfiguration struct {
+type PodMetricSourceApplyConfiguration struct {
+	Name          *string                             `json:"name,omitempty"`
 	Uri           *string                             `json:"uri,omitempty"`
 	Port          *int32                              `json:"port,omitempty"`
 	LabelSelector *v1.LabelSelectorApplyConfiguration `json:"labelSelector,omitempty"`
 }
 
-// MetricEndpointApplyConfiguration constructs a declarative configuration of the MetricEndpoint type for use with
+// PodMetricSourceApplyConfiguration constructs a declarative configuration of the PodMetricSource type for use with
 // apply.
-func MetricEndpoint() *MetricEndpointApplyConfiguration {
-	return &MetricEndpointApplyConfiguration{}
+func PodMetricSource() *PodMetricSourceApplyConfiguration {
+	return &PodMetricSourceApplyConfiguration{}
+}
+
+// WithName sets the Name field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Name field is set to the value of the last call.
+func (b *PodMetricSourceApplyConfiguration) WithName(value string) *PodMetricSourceApplyConfiguration {
+	b.Name = &value
+	return b
 }
 
 // WithUri sets the Uri field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Uri field is set to the value of the last call.
-func (b *MetricEndpointApplyConfiguration) WithUri(value string) *MetricEndpointApplyConfiguration {
+func (b *PodMetricSourceApplyConfiguration) WithUri(value string) *PodMetricSourceApplyConfiguration {
 	b.Uri = &value
 	return b
 }
@@ -47,7 +56,7 @@ func (b *MetricEndpointApplyConfiguration) WithUri(value string) *MetricEndpoint
 // WithPort sets the Port field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Port field is set to the value of the last call.
-func (b *MetricEndpointApplyConfiguration) WithPort(value int32) *MetricEndpointApplyConfiguration {
+func (b *PodMetricSourceApplyConfiguration) WithPort(value int32) *PodMetricSourceApplyConfiguration {
 	b.Port = &value
 	return b
 }
@@ -55,7 +64,7 @@ func (b *MetricEndpointApplyConfiguration) WithPort(value int32) *MetricEndpoint
 // WithLabelSelector sets the LabelSelector field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the LabelSelector field is set to the value of the last call.
-func (b *MetricEndpointApplyConfiguration) WithLabelSelector(value *v1.LabelSelectorApplyConfiguration) *MetricEndpointApplyConfiguration {
+func (b *PodMetricSourceApplyConfiguration) WithLabelSelector(value *v1.LabelSelectorApplyConfiguration) *PodMetricSourceApplyConfiguration {
 	b.LabelSelector = value
 	return b
 }

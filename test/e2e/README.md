@@ -30,6 +30,29 @@ The tests create a Kind cluster with the following characteristics:
 - **Kubernetes Version**: v1.31.0
 - **Test Namespace**: `dev`
 
+## CI Behavior
+
+The GitHub Actions E2E workflow runs the same category targets in parallel by using a matrix:
+
+| CI Job | Make Target | Cluster Name |
+|--------|-------------|--------------|
+| `E2E (controller-manager)` | `make test-e2e-controller-manager` | `kthena-controller-manager` |
+| `E2E (router)` | `make test-e2e-router` | `kthena-router` |
+| `E2E (gateway-api)` | `make test-e2e-gateway-api` | `kthena-gateway-api` |
+| `E2E (gateway-inference-extension)` | `make test-e2e-gateway-inference-extension` | `kthena-gateway-inference-extension` |
+
+The workflow only runs for pull requests that touch runtime, chart, test, or E2E workflow paths. Documentation-only changes outside those paths should not trigger this workflow.
+
+Each category installs only the external CRDs it needs:
+
+| Category | Additional CRDs |
+|----------|-----------------|
+| `controller-manager` | LeaderWorkerSet |
+| `router` | None |
+| `gateway-api` | Gateway API |
+| `gateway-inference-extension` | Gateway API and Gateway API Inference Extension |
+| `all` | Gateway API, Gateway API Inference Extension, and LeaderWorkerSet |
+
 ## Running the Tests
 
 ### Run All Tests (Legacy)
@@ -57,6 +80,17 @@ make test-e2e-gateway-inference-extension
 # Cleanup after any test
 make test-e2e-cleanup
 ```
+
+### Reproduce a CI Category Locally
+
+To reproduce one CI matrix entry locally, use the same cluster name pattern as the workflow:
+
+```bash
+CLUSTER_NAME=kthena-gateway-api make test-e2e-gateway-api
+CLUSTER_NAME=kthena-gateway-api make test-e2e-cleanup
+```
+
+Replace `gateway-api` with the category that failed in CI.
 
 ### Environment Variables
 
@@ -87,4 +121,25 @@ For example, to run the controller manager webhook tests:
 
 ```bash
 go test -v ./test/e2e/controller-manager/ -run TestWebhook
+```
+
+## Troubleshooting
+
+### One CI Category Failed
+
+A failure in one matrix category does not always mean the pull request changed that component. First check whether the PR touched one of the E2E workflow trigger paths, then inspect the failing category logs and uploaded `e2e-logs-*` artifact.
+
+Common first checks:
+
+- Confirm the failing test package from the last `FAIL` line.
+- Check whether the test reached cleanup; cleanup logs usually appear after the package failure.
+- If only one category failed and the PR does not touch that area, rerun the failed job before changing code.
+- For Gateway API failures, confirm the Gateway API CRDs were installed successfully during `setup.sh`.
+
+### Cleanup Left a Cluster Behind
+
+If a local run exits before cleanup, remove the category cluster directly:
+
+```bash
+kind delete cluster --name kthena-gateway-api
 ```

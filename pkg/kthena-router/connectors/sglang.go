@@ -48,11 +48,7 @@ const ConnectorTypeSGLang v1alpha1.KVConnectorType = "sglang"
 //
 //	https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler.py
 type SGLangConnector struct {
-	prefillRequest  *http.Request
-	decodeRequest   *http.Request
-	bootstrapRoom   int64
-	lastPrefillAddr string
-	lastDecodeAddr  string
+	bootstrapRoom int64
 }
 
 // NewSGLangConnector creates a new SGLang connector with a unique bootstrap room id.
@@ -83,7 +79,7 @@ func (s *SGLangConnector) Name() string {
 // prefill to time out and abort with "KVTransferError: Aborted by AbortReq".
 // The decode request carries bootstrap_host = prefillHost so the decode receiver can
 // locate the prefill's bootstrap server; both requests carry the same bootstrap_room.
-func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string) (int, error) {
+func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
 	// Retrieve optional metrics recorder from context.
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
@@ -91,6 +87,10 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 			metricsRecorder = rec
 		}
 	}
+
+	// hooks carries per-phase on-flight counter callbacks for the prefill and
+	// decode pods. For SGLang both phases are concurrent, so both pods are
+	// incr'd before launch and each decr'd individually as their phase finishes.
 
 	// Extract prefill pod IP from "IP:PORT" — the decode receiver uses this to
 	// query the prefill's bootstrap HTTP server.
@@ -105,30 +105,28 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	// Build the decode request first (before preparePrefillBody mutates reqBody).
 	// bootstrap_host = prefillHost so the decode receiver can find the prefill's
 	// bootstrap server and exchange ZMQ metadata.
-	if s.decodeRequest == nil || s.lastDecodeAddr != decodeAddr || s.lastPrefillAddr != prefillAddr {
-		decodeBody := cloneReqBody(reqBody)
-		decodeBody = addTokenUsage(c, decodeBody)
-		decodeBody["bootstrap_room"] = s.bootstrapRoom
-		decodeBody["bootstrap_host"] = prefillHost
-		s.decodeRequest, err = buildRequest(c.Request, decodeBody)
-		if err != nil {
-			return http.StatusInternalServerError, err
-		}
-		s.lastDecodeAddr = decodeAddr
+	//
+	// Both requests are rebuilt on every Proxy call: the request body is a
+	// one-shot bytes.Buffer wrapped in io.NopCloser, so it cannot be retried
+	// against a different upstream pod by the router's PD retry loop.
+	decodeBody := cloneReqBody(reqBody)
+	decodeBody = addTokenUsage(c, decodeBody)
+	decodeBody["bootstrap_room"] = s.bootstrapRoom
+	decodeBody["bootstrap_host"] = prefillHost
+	decodeRequest, err := buildRequest(c.Request, decodeBody)
+	if err != nil {
+		return http.StatusInternalServerError, err
 	}
 
 	// Build the prefill request: strip streaming, cap max_tokens, add bootstrap_room.
 	// The prefill sender uses bootstrap_room to track the ZMQ metadata sent by the
 	// decode receiver; it does not need bootstrap_host.
-	if s.prefillRequest == nil || s.lastPrefillAddr != prefillAddr {
-		prefillBody := cloneReqBody(reqBody)
-		preparePrefillBody(prefillBody)
-		prefillBody["bootstrap_room"] = s.bootstrapRoom
-		s.prefillRequest, err = buildRequest(req, prefillBody)
-		if err != nil {
-			return http.StatusInternalServerError, err
-		}
-		s.lastPrefillAddr = prefillAddr
+	prefillBody := cloneReqBody(reqBody)
+	preparePrefillBody(prefillBody)
+	prefillBody["bootstrap_room"] = s.bootstrapRoom
+	prefillRequest, err := buildRequest(req, prefillBody)
+	if err != nil {
+		return http.StatusInternalServerError, err
 	}
 
 	// --- Launch prefill and decode concurrently ---
@@ -141,6 +139,12 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 		metricsRecorder.IncActiveUpstreamRequests()
 		metricsRecorder.IncActiveUpstreamRequests()
 	}
+	if hooks != nil && hooks.IncrPrefill != nil {
+		hooks.IncrPrefill()
+	}
+	if hooks != nil && hooks.IncrDecode != nil {
+		hooks.IncrDecode()
+	}
 
 	// prefillCtx is cancelled if decode fails, which aborts the prefill HTTP
 	// request immediately instead of letting it hang waiting for a bootstrap
@@ -152,14 +156,22 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	prefillCh := make(chan prefillOutcome, 1)
 
 	go func() {
-		prefillCh <- prefillOutcome{
-			err: s.prefill(s.prefillRequest.WithContext(prefillCtx), prefillAddr),
+		err := s.prefill(prefillRequest.WithContext(prefillCtx), prefillAddr)
+		// Decrement the prefill pod's on-flight counter as soon as prefill finishes,
+		// so the scheduler gets an accurate view even while decode is still running.
+		if hooks != nil && hooks.DecrPrefill != nil {
+			hooks.DecrPrefill()
 		}
+		prefillCh <- prefillOutcome{err: err}
 	}()
 
 	// Run decode in the current goroutine so that streaming writes reach the
 	// gin.Context from the request-handling goroutine.
-	result, decodeErr := s.decode(c, s.decodeRequest, decodeAddr)
+	result, decodeErr := s.decode(c, decodeRequest, decodeAddr)
+
+	if hooks != nil && hooks.DecrDecode != nil {
+		hooks.DecrDecode()
+	}
 
 	if decodeErr != nil {
 		// Decode failed: cancel the prefill context so the prefill goroutine is

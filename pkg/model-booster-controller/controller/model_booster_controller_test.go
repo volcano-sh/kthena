@@ -43,6 +43,7 @@ func TestReconcile(t *testing.T) {
 	assert.NotNil(t, controller)
 	// Start controller
 	go controller.Run(ctx, 1)
+	assert.True(t, waitForControllerCacheSync(controller), "controller informers did not sync")
 	// Load test data
 	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
 
@@ -219,6 +220,19 @@ func loadYaml[T any](t *testing.T, path string) *T {
 		t.Fatalf("Failed to unmarshal YAML: %v", err)
 	}
 	return &expected
+}
+
+// waitForControllerCacheSync waits until the informers started by Run() have completed initial sync.
+func waitForControllerCacheSync(controller *ModelBoosterController) bool {
+	return waitForCondition(func() bool {
+		return controller.modelsInformer.HasSynced() &&
+			controller.modelServingInformer.HasSynced() &&
+			controller.autoscalingPoliciesInformer.HasSynced() &&
+			controller.autoscalingPolicyBindingsInformer.HasSynced() &&
+			controller.podsInformer.HasSynced() &&
+			controller.modelServersInformer.HasSynced() &&
+			controller.modelRoutesInformer.HasSynced()
+	})
 }
 
 // waitForCondition repeatedly checks a condition function until it returns true or a timeout occurs.
