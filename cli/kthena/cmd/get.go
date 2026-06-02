@@ -439,6 +439,14 @@ func getAutoscalingPolicyBindingMinMax(binding workload.AutoscalingPolicyBinding
 		return fmt.Sprintf("%d", binding.Spec.HomogeneousTarget.MinReplicas),
 			fmt.Sprintf("%d", binding.Spec.HomogeneousTarget.MaxReplicas)
 	}
+	if binding.Spec.HeterogeneousTarget != nil {
+		var totalMin, totalMax int32
+		for _, p := range binding.Spec.HeterogeneousTarget.Params {
+			totalMin += p.MinReplicas
+			totalMax += p.MaxReplicas
+		}
+		return fmt.Sprintf("%d", totalMin), fmt.Sprintf("%d", totalMax)
+	}
 	return "-", "-"
 }
 

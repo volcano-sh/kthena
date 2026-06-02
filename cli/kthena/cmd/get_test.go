@@ -289,11 +289,16 @@ func TestGetAutoscalingPolicyBindingMinMax(t *testing.T) {
 			name: "HeterogeneousTarget",
 			binding: workload.AutoscalingPolicyBinding{
 				Spec: workload.AutoscalingPolicyBindingSpec{
-					HeterogeneousTarget: &workload.HeterogeneousTarget{},
+					HeterogeneousTarget: &workload.HeterogeneousTarget{
+						Params: []workload.HeterogeneousTargetParam{
+							{MinReplicas: 1, MaxReplicas: 5},
+							{MinReplicas: 2, MaxReplicas: 10},
+						},
+					},
 				},
 			},
-			expectedMin: "-",
-			expectedMax: "-",
+			expectedMin: "3",
+			expectedMax: "15",
 		},
 	}
 	for _, tt := range tests {
