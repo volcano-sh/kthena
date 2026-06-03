@@ -124,17 +124,26 @@ func deployModelRouteFromFile(t *testing.T, ctx context.Context, kthena *clients
 func deploySlowLatencyMockStack(t *testing.T, kube kubernetes.Interface, namespace string) {
 	t.Helper()
 	ctx := context.Background()
+	name := plugincontext.SlowMockDeploymentName
+
+	// Recreate so a prior test or rollout cannot leave two ready slow pods (different ReplicaSets).
+	_ = kube.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	require.Eventually(t, func() bool {
+		_, err := kube.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, 2*time.Minute, 2*time.Second, "slow mock deployment should be deleted before recreate")
 
 	deployment := utils.LoadYAMLFromFile[appsv1.Deployment](filepath.Join(plugincontext.TestDataDir, "LLM-Mock-plugins-slow.yaml"))
 	deployment.Namespace = namespace
 	_, err := kube.AppsV1().Deployments(namespace).Create(ctx, deployment, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		require.NoError(t, err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		_ = kube.AppsV1().Deployments(namespace).Delete(context.Background(), plugincontext.SlowMockDeploymentName, metav1.DeleteOptions{})
+		_ = kube.AppsV1().Deployments(namespace).Delete(context.Background(), name, metav1.DeleteOptions{})
 	})
-	utils.WaitForDeploymentReady(t, ctx, kube, namespace, plugincontext.SlowMockDeploymentName, 1, 5*time.Minute)
+	utils.WaitForDeploymentReady(t, ctx, kube, namespace, name, 1, 5*time.Minute)
+	require.Eventually(t, func() bool {
+		return len(listReadyPodsByApp(t, kube, namespace, plugincontext.SlowMockAppLabel)) == 1
+	}, 2*time.Minute, 2*time.Second, "expected exactly one ready slow mock pod")
 }
 
 func listReadyPodsByApp(t *testing.T, kube kubernetes.Interface, namespace, appLabel string) []corev1.Pod {
