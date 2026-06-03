@@ -98,7 +98,7 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 }
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
-func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
+func (r *TokenRateLimiter) RateLimit(limiterKey, prompt string) error {
 	// Estimate input tokens
 	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
 	if err != nil {
@@ -107,8 +107,8 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 	}
 
 	r.mutex.RLock()
-	inputLimiter, hasInputLimit := r.inputLimiter[model]
-	outputLimiter, hasOutputLimit := r.outputLimiter[model]
+	inputLimiter, hasInputLimit := r.inputLimiter[limiterKey]
+	outputLimiter, hasOutputLimit := r.outputLimiter[limiterKey]
 	r.mutex.RUnlock()
 
 	// Check input token rate limit
@@ -126,9 +126,9 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 }
 
 // RecordOutputTokens records the actual output tokens consumed after response generation
-func (r *TokenRateLimiter) RecordOutputTokens(model string, tokenCount int) {
+func (r *TokenRateLimiter) RecordOutputTokens(limiterKey string, tokenCount int) {
 	r.mutex.RLock()
-	outputLimiter, exists := r.outputLimiter[model]
+	outputLimiter, exists := r.outputLimiter[limiterKey]
 	r.mutex.RUnlock()
 
 	if exists {

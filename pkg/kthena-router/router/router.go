@@ -121,16 +121,20 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
 				return
 			}
-			klog.Infof("add or update rate limit for model %s", data.ModelName)
+			// Use namespace/routename as the rate limit key
+			routeKey := fmt.Sprintf("%s/%s", data.ModelRoute.Namespace, data.ModelRoute.Name)
+			klog.Infof("add or update rate limit for route %s", routeKey)
 
-			// Configure the unified rate limiter for this model
-			if err := loadRateLimiter.AddOrUpdateLimiter(data.ModelName, data.ModelRoute.Spec.RateLimit); err != nil {
-				klog.Errorf("failed to configure rate limiter for model %s: %v", data.ModelName, err)
+			// Configure the unified rate limiter for this route
+			if err := loadRateLimiter.AddOrUpdateLimiter(routeKey, data.ModelRoute.Spec.RateLimit); err != nil {
+				klog.Errorf("failed to configure rate limiter for route %s: %v", routeKey, err)
 			}
 
 		case datastore.EventDelete:
-			klog.Infof("delete rate limit for model %s", data.ModelName)
-			loadRateLimiter.DeleteLimiter(data.ModelName)
+			// Use namespace/routename as the rate limit key
+			routeKey := fmt.Sprintf("%s/%s", data.ModelRoute.Namespace, data.ModelRoute.Name)
+			klog.Infof("delete rate limit for route %s", routeKey)
+			loadRateLimiter.DeleteLimiter(routeKey)
 		}
 	})
 
@@ -292,8 +296,18 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
-		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
+		// Get gateway key and match ModelRoute to extract route key for rate limiting
+		gatewayKey := c.GetString(GatewayKey)
+
+		// Match ModelRoute to get the route key. Require ModelRoute match only.
+		_, _, modelRoute, _ := r.store.MatchModelServer(modelName, c.Request, gatewayKey)
+
+		rateLimitKey := fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
+		// store rateLimitKey in context for later output-token recording
+		c.Set("rateLimitKey", rateLimitKey)
+
+		// Apply rate limiting using the route key
+		if err := r.loadRateLimiter.RateLimit(rateLimitKey, promptStr); err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string
@@ -325,7 +339,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.Request.Header.Set("x-request-id", requestID)
 		}
 
-		// Store metrics recorder in context for use in other functions
+		// Store metrics recorder  in context for use in other functions
 		c.Set("metricsRecorder", metricsRecorder)
 
 		// step 3.1: direct load balancing when neither fairness scheduling nor
@@ -729,9 +743,11 @@ func (r *Router) proxyModelEndpoint(
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
-			// Record output tokens for rate limiting
+			// Record output tokens for rate limiting using the route key
 			if r.loadRateLimiter != nil {
-				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
+				if rateLimitKeyVal, ok := c.Get("rateLimitKey"); ok {
+					r.loadRateLimiter.RecordOutputTokens(rateLimitKeyVal.(string), resp.Usage.CompletionTokens)
+				}
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
@@ -1033,7 +1049,9 @@ func (r *Router) proxyToPDDisaggregated(
 
 		// Record output tokens for rate limiting
 		if outputTokens > 0 && r.loadRateLimiter != nil {
-			r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens)
+			if rateLimitKeyVal, ok := c.Get("rateLimitKey"); ok {
+				r.loadRateLimiter.RecordOutputTokens(rateLimitKeyVal.(string), outputTokens)
+			}
 		}
 
 		// Record output token metrics
