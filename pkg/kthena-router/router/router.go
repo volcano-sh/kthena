@@ -116,13 +116,16 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	tokenizerInstance := tokenizer.NewSimpleEstimateTokenizer()
 
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
+		routeKey := fmt.Sprintf("%s/%s",
+			data.ModelRoute.Namespace,
+			data.ModelRoute.Name,
+		)
 		switch data.EventType {
 		case datastore.EventAdd, datastore.EventUpdate:
 			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
 				return
 			}
 			// Use namespace/routename as the rate limit key
-			routeKey := fmt.Sprintf("%s/%s", data.ModelRoute.Namespace, data.ModelRoute.Name)
 			klog.Infof("add or update rate limit for route %s", routeKey)
 
 			// Configure the unified rate limiter for this route
@@ -132,7 +135,6 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 
 		case datastore.EventDelete:
 			// Use namespace/routename as the rate limit key
-			routeKey := fmt.Sprintf("%s/%s", data.ModelRoute.Namespace, data.ModelRoute.Name)
 			klog.Infof("delete rate limit for route %s", routeKey)
 			loadRateLimiter.DeleteLimiter(routeKey)
 		}
@@ -301,7 +303,10 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Match ModelRoute to get the route key. Require ModelRoute match only.
 		_, _, modelRoute, _ := r.store.MatchModelServer(modelName, c.Request, gatewayKey)
-
+		if err != nil || modelRoute == nil {
+			c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
+			return
+		}
 		rateLimitKey := fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
 		// store rateLimitKey in context for later output-token recording
 		c.Set("rateLimitKey", rateLimitKey)
