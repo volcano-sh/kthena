@@ -301,16 +301,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Get gateway key and match ModelRoute to extract route key for rate limiting
 		gatewayKey := c.GetString(GatewayKey)
 
-		// Match ModelRoute to get the route key. Require ModelRoute match only.
-		rateLimitKey, err := r.store.GetRateLimitKey(modelName, c.Request, gatewayKey)
-
-		if err != nil || modelRoute == nil {
-			c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
-			return
-		}
-		rateLimitKey := fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
-		// store rateLimitKey in context for later output-token recording
-		c.Set("rateLimitKey", rateLimitKey)
+		rateLimitKey := gatewayKey
 
 		// Apply rate limiting using the route key
 		if err := r.loadRateLimiter.RateLimit(rateLimitKey, promptStr); err != nil {
