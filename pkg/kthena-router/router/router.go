@@ -284,7 +284,8 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		gatewayKey := c.GetString(GatewayKey)
 
 		// Match ModelRoute to get the route key. Require ModelRoute match only.
-		_, _, modelRoute, _ := r.store.MatchModelServer(modelName, c.Request, gatewayKey)
+		rateLimitKey, err := r.store.GetRateLimitKey(modelName, c.Request, gatewayKey)
+
 		if err != nil || modelRoute == nil {
 			c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
 			return
