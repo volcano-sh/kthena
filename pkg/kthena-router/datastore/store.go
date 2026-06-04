@@ -481,9 +481,9 @@ func createFairnessQueueConfig() FairnessQueueConfig {
 }
 
 // createSessionBoostQueueConfigFromEnv returns a SessionBoostQueueConfig if
-// SESSION_BOOST_ENABLED=true, or nil if the standalone session boost queue is disabled.
+// ENABLE_SESSION_BOOST=true, or nil if the standalone session boost queue is disabled.
 func createSessionBoostQueueConfigFromEnv() *SessionBoostQueueConfig {
-	v := os.Getenv("SESSION_BOOST_ENABLED")
+	v := os.Getenv("ENABLE_SESSION_BOOST")
 	if v == "" {
 		return nil
 	}
