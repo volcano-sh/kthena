@@ -783,7 +783,7 @@ func (r *Router) proxy(
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
 
-		// Request is complete (success or failure) — decrement on-flight counter.
+		// Request is complete (success or failure) - decrement on-flight counter.
 		r.store.DecrPodOnFlightRequests(podName)
 
 		if err != nil {
@@ -959,7 +959,7 @@ func proxyRequest(
 			if len(line) > 0 {
 				// Try to parse usage from this line, assuming it's a data line
 				parsed := handlers.ParseStreamRespForUsage(string(line))
-				if parsed.Usage.CompletionTokens > 0 {
+				if hasUsage(parsed.Usage) {
 					klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 
 					// Always call onUsage callback to record output tokens
@@ -998,7 +998,7 @@ func proxyRequest(
 
 		// Parse usage if present
 		parsed, _ := handlers.ParseOpenAIResponseBody(buf.Bytes())
-		if parsed != nil && parsed.Usage.CompletionTokens > 0 {
+		if parsed != nil && hasUsage(parsed.Usage) {
 			klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 			if onUsage != nil {
 				onUsage(*parsed)
@@ -1007,6 +1007,10 @@ func proxyRequest(
 	}
 
 	return nil
+}
+
+func hasUsage(usage handlers.Usage) bool {
+	return usage.PromptTokens > 0 || usage.CompletionTokens > 0 || usage.TotalTokens > 0
 }
 
 func doRequest(

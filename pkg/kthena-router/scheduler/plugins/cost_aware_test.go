@@ -207,6 +207,32 @@ func TestCostAwareConcurrentReleaseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCostAwareIdempotentReserveReturnsStoredTokens(t *testing.T) {
+	plugin := NewCostAware(runtime.RawExtension{Raw: []byte(`{
+		"mode": "score",
+		"podBudgetTokens": 1000,
+		"safetyFactor": 1,
+		"minReservationTokens": 1,
+		"maxReservationTokens": 1000
+	}`)})
+	pod := testCostAwarePod("default", "pod-1")
+	ctx := testCostAwareContext()
+
+	reservation := plugin.Reserve(ctx, pod)
+	if reservation == nil {
+		t.Fatal("expected reservation")
+	}
+
+	ctx.RequestCost.ReservationTokens = reservation.Tokens + 100
+	repeated := plugin.Reserve(ctx, pod)
+	if repeated == nil {
+		t.Fatal("expected repeated reservation")
+	}
+	if repeated.Tokens != reservation.Tokens {
+		t.Fatalf("expected repeated reservation to return stored tokens %d, got %d", reservation.Tokens, repeated.Tokens)
+	}
+}
+
 func testCostAwareContext() *framework.Context {
 	return &framework.Context{
 		Model:  "test-model",

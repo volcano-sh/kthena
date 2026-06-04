@@ -199,12 +199,12 @@ func (c *CostAware) Reserve(ctx *framework.Context, pod *datastore.PodInfo) *fra
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	pressure := c.getPodPressureLocked(podKey)
-	if _, exists := pressure.reservations[reservationID]; exists {
+	if tokens, exists := pressure.reservations[reservationID]; exists {
 		return &framework.Reservation{
 			PluginName:    c.name,
 			PodKey:        podKey,
 			ReservationID: reservationID,
-			Tokens:        estimate.ReservationTokens,
+			Tokens:        tokens,
 		}
 	}
 	pressure.reservedInflight += estimate.ReservationTokens

@@ -264,29 +264,32 @@ func (s *SchedulerImpl) Reserve(ctx *framework.Context, pod *datastore.PodInfo) 
 }
 
 func (s *SchedulerImpl) Finish(ctx *framework.Context, reservations []*framework.Reservation, usage *framework.TokenUsage) {
-	if len(reservations) == 0 {
-		for _, scorePlugin := range s.scorePlugins {
-			reservationPlugin, ok := scorePlugin.plugin.(framework.ReservationPlugin)
-			if !ok {
-				continue
-			}
-			reservationPlugin.Finish(ctx, nil, usage)
-		}
-		return
-	}
+	reservationsByPlugin := make(map[string][]*framework.Reservation)
 	for _, reservation := range reservations {
 		if reservation == nil {
 			continue
 		}
-		for _, scorePlugin := range s.scorePlugins {
-			if scorePlugin.plugin.Name() != reservation.PluginName {
-				continue
+		reservationsByPlugin[reservation.PluginName] = append(reservationsByPlugin[reservation.PluginName], reservation)
+	}
+
+	for _, scorePlugin := range s.scorePlugins {
+		reservationPlugin, ok := scorePlugin.plugin.(framework.ReservationPlugin)
+		if !ok {
+			continue
+		}
+
+		pluginReservations := reservationsByPlugin[scorePlugin.plugin.Name()]
+		if len(pluginReservations) == 0 {
+			reservationPlugin.Finish(ctx, nil, usage)
+			continue
+		}
+
+		for i, reservation := range pluginReservations {
+			usageForCall := usage
+			if i > 0 {
+				usageForCall = nil
 			}
-			reservationPlugin, ok := scorePlugin.plugin.(framework.ReservationPlugin)
-			if !ok {
-				continue
-			}
-			reservationPlugin.Finish(ctx, reservation, usage)
+			reservationPlugin.Finish(ctx, reservation, usageForCall)
 		}
 	}
 }

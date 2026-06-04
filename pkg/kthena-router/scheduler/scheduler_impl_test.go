@@ -305,6 +305,29 @@ func TestRunScorePluginsEdgeCases(t *testing.T) {
 	}
 }
 
+func TestFinishCallsReservationPluginsOnceForUsage(t *testing.T) {
+	pluginWithReservations := &finishRecorderPlugin{name: "with-reservations"}
+	pluginWithoutReservations := &finishRecorderPlugin{name: "without-reservations"}
+	scheduler := &SchedulerImpl{
+		scorePlugins: []*scorePlugin{
+			{plugin: pluginWithReservations, weight: 1},
+			{plugin: pluginWithoutReservations, weight: 1},
+		},
+	}
+	usage := &framework.TokenUsage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8}
+	reservations := []*framework.Reservation{
+		{PluginName: "with-reservations", ReservationID: "reservation-1"},
+		{PluginName: "with-reservations", ReservationID: "reservation-2"},
+	}
+
+	scheduler.Finish(&framework.Context{}, reservations, usage)
+
+	assert.Equal(t, []string{"reservation-1", "reservation-2"}, pluginWithReservations.reservationIDs)
+	assert.Equal(t, 1, pluginWithReservations.usageCalls)
+	assert.Equal(t, []string{"<nil>"}, pluginWithoutReservations.reservationIDs)
+	assert.Equal(t, 1, pluginWithoutReservations.usageCalls)
+}
+
 // Helper function to create test PodInfo
 func createTestPodInfo(name string) *datastore.PodInfo {
 	return &datastore.PodInfo{
@@ -317,5 +340,38 @@ func createTestPodInfo(name string) *datastore.PodInfo {
 				PodIP: "10.0.0.1",
 			},
 		},
+	}
+}
+
+type finishRecorderPlugin struct {
+	name           string
+	reservationIDs []string
+	usageCalls     int
+}
+
+func (p *finishRecorderPlugin) Name() string {
+	return p.name
+}
+
+func (p *finishRecorderPlugin) Score(_ *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
+	scores := make(map[*datastore.PodInfo]int, len(pods))
+	for _, pod := range pods {
+		scores[pod] = 100
+	}
+	return scores
+}
+
+func (p *finishRecorderPlugin) Reserve(_ *framework.Context, _ *datastore.PodInfo) *framework.Reservation {
+	return nil
+}
+
+func (p *finishRecorderPlugin) Finish(_ *framework.Context, reservation *framework.Reservation, usage *framework.TokenUsage) {
+	if reservation == nil {
+		p.reservationIDs = append(p.reservationIDs, "<nil>")
+	} else {
+		p.reservationIDs = append(p.reservationIDs, reservation.ReservationID)
+	}
+	if usage != nil {
+		p.usageCalls++
 	}
 }
