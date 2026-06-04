@@ -83,8 +83,11 @@ networking:
       # -- Enable Gateway API Inference Extension features.<br/>
       # Requires `gatewayAPI.enabled` to be true.
       inferenceExtension: false
-    # The router will drain all in-flight requests before forcefully closing connections.
+    # -- The router will drain all in-flight requests before forcefully closing connections.
     terminationGracePeriodSeconds: 330
+    # -- Drain timeout for kthena-router graceful shutdown.
+    # -- This should be less than terminationGracePeriodSeconds.
+    drainTimeout: 5m
 
 global:
   # -- Certificate Management Mode.<br/>

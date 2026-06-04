@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -72,11 +73,13 @@ type Metrics struct {
 	RateLimitExceeded prometheus.CounterVec
 
 	// Request and scheduling metrics
-	ActiveRequests           prometheus.Gauge
-	ActiveDownstreamRequests prometheus.GaugeVec
-	ActiveUpstreamRequests   prometheus.GaugeVec
-	FairnessQueueSize        prometheus.GaugeVec
-	FairnessQueueDuration    prometheus.HistogramVec
+	activeRequests               atomic.Int64
+	ActiveRequests               prometheus.GaugeFunc
+	RequestsBlockedByTermination prometheus.Counter
+	ActiveDownstreamRequests     prometheus.GaugeVec
+	ActiveUpstreamRequests       prometheus.GaugeVec
+	FairnessQueueSize            prometheus.GaugeVec
+	FairnessQueueDuration        prometheus.HistogramVec
 
 	// Fairness queue detailed metrics
 	FairnessQueueCancelledTotal       prometheus.CounterVec
@@ -91,7 +94,7 @@ type Metrics struct {
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
 func NewMetrics() *Metrics {
-	return &Metrics{
+	m := &Metrics{
 		RequestsTotal: *promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "kthena_router_requests_total",
@@ -152,12 +155,6 @@ func NewMetrics() *Metrics {
 			[]string{LabelModel, LabelLimitType, LabelPath},
 		),
 
-		ActiveRequests: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "kthena_router_active_requests",
-				Help: "Current number of active requests being handled by the router",
-			},
-		),
 
 		ActiveDownstreamRequests: *promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -240,6 +237,25 @@ func NewMetrics() *Metrics {
 			[]string{LabelModel, LabelEngine},
 		),
 	}
+
+	m.ActiveRequests = promauto.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "kthena_router_active_requests",
+			Help: "Current number of active requests being handled by the router",
+		},
+		func() float64 {
+			return float64(m.activeRequests.Load())
+		},
+	)
+
+	m.RequestsBlockedByTermination = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "kthena_router_requests_blocked_by_termination_total",
+			Help: "Total number of in-flight requests that were blocked/force-closed due to router termination",
+		},
+	)
+
+	return m
 }
 
 // RecordRequest records a completed request with all relevant metrics
@@ -280,17 +296,29 @@ func (m *Metrics) RecordSchedulerPluginDuration(model, pluginName, pluginType st
 
 // SetActiveRequests sets the current number of active router requests.
 func (m *Metrics) SetActiveRequests(count float64) {
-	m.ActiveRequests.Set(count)
+	m.activeRequests.Store(int64(count))
 }
 
-// IncActiveRequests increments the active requests gauge by 1.
+// IncActiveRequests increments the active request count by 1.
 func (m *Metrics) IncActiveRequests() {
-	m.ActiveRequests.Inc()
+	m.activeRequests.Add(1)
 }
 
-// DecActiveRequests decrements the active requests gauge by 1.
+// DecActiveRequests decrements the active request count by 1.
 func (m *Metrics) DecActiveRequests() {
-	m.ActiveRequests.Dec()
+	m.activeRequests.Add(-1)
+}
+
+// ActiveRequestsCount returns the current value of the active requests atomic counter.
+func (m *Metrics) ActiveRequestsCount() int64 {
+	return m.activeRequests.Load()
+}
+
+// AddRequestsBlockedByTermination adds the count to the requests blocked by termination counter.
+func (m *Metrics) AddRequestsBlockedByTermination(count float64) {
+	if count > 0 {
+		m.RequestsBlockedByTermination.Add(count)
+	}
 }
 
 // SetActiveDownstreamRequests sets the current number of active downstream requests

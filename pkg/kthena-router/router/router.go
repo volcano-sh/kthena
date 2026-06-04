@@ -31,7 +31,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -80,8 +79,7 @@ type Router struct {
 	loadRateLimiter *ratelimit.TokenRateLimiter
 	accessLogger    accesslog.AccessLogger
 	metrics         *metrics.Metrics
-	tokenizer       tokenizer.Tokenizer
-	activeRequests  atomic.Int64
+	tokenizer        tokenizer.Tokenizer
 
 	// KV Connector management
 	connectorFactory *connectors.Factory
@@ -94,7 +92,7 @@ type Router struct {
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
 func (r *Router) ActiveRequestCount() int64 {
-	return r.activeRequests.Load()
+	return r.metrics.ActiveRequestsCount()
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -212,12 +210,8 @@ type ModelRequest map[string]interface{}
 
 func (r *Router) HandlerFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		r.activeRequests.Add(1)
 		r.metrics.IncActiveRequests()
-		defer func() {
-			r.activeRequests.Add(-1)
-			r.metrics.DecActiveRequests()
-		}()
+		defer r.metrics.DecActiveRequests()
 
 		// Handle /v1/models endpoint (OpenAI-compatible model listing)
 		if c.Request.Method == http.MethodGet &&

@@ -34,13 +34,11 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/debug"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/router"
 )
 
 const (
-	// drainMaxWaitTime is the maximum time to wait for requests to drain before forcing shutdown
-	// Increased from 15s to 5min to allow long-running LLM inference requests to complete gracefully
-	drainMaxWaitTime = 5 * time.Minute
 	routerConfigFile = "/etc/config/routerConfiguration.yaml"
 )
 
@@ -94,6 +92,7 @@ func (s *Server) startRouter(ctx context.Context, router *router.Router, store d
 			defaultRouter:    router,
 			readyCheck:       s.HasSynced,
 			activeRequests:   router.ActiveRequestCount,
+			drainTimeout:     s.drainTimeout,
 			startLog:         fmt.Sprintf("Starting default server on port %s", s.Port),
 			shutdownStartLog: "Shutting down default HTTP server ...",
 			shutdownDoneLog:  "Default HTTP server exited",
@@ -162,7 +161,7 @@ func (s *Server) startDebugServer(ctx context.Context, store datastore.Store) {
 		<-ctx.Done()
 		// graceful shutdown with timeout to allow ongoing debug requests to complete
 		klog.Info("Shutting down debug HTTP server ...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			klog.Errorf("Debug server shutdown failed: %v", err)
@@ -206,6 +205,7 @@ type listenerConfig struct {
 	defaultRouter  *router.Router
 	readyCheck     func() bool
 	activeRequests func() int64
+	drainTimeout   time.Duration
 	// Gateway mode (non-nil => use gateway branch).
 	gateway          *listenerGatewayConfig
 	startLog         string
@@ -306,14 +306,20 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 	go func() {
 		<-ctx.Done()
 		klog.Info(cfg.shutdownStartLog)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainMaxWaitTime)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.drainTimeout)
 		defer cancel()
 
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
-				remaining := cfg.activeRequests()
-				klog.Warningf("Drain timeout exceeded after %.0fs: %d requests still inflight, force-closing",
-					drainMaxWaitTime.Seconds(), remaining)
+				var remaining int64
+				if cfg.activeRequests != nil {
+					remaining = cfg.activeRequests()
+				}
+				klog.Warningf("Drain timeout exceeded after %vs: %d requests still inflight, force-closing",
+					cfg.drainTimeout.Seconds(), remaining)
+				if remaining > 0 {
+					metrics.DefaultMetrics.AddRequestsBlockedByTermination(float64(remaining))
+				}
 				srv.Close()
 			} else {
 				cfg.logShutdownErr(err)
@@ -518,10 +524,11 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 			tlsKeyFile:       tlsKeyFile,
 			tlsMissingMsg:    fmt.Sprintf("TLS enabled but cert or key file not specified for port %d", port),
 			gateway:          &listenerGatewayConfig{lm: lm, port: port},
+			activeRequests:   lm.router.ActiveRequestCount,
+			drainTimeout:     lm.server.drainTimeout,
 			startLog:         fmt.Sprintf("Starting Gateway listener server on port %d", port),
 			shutdownStartLog: fmt.Sprintf("Shutting down Gateway listener server on port %d ...", port),
 			shutdownDoneLog:  "",
-			activeRequests:   lm.router.ActiveRequestCount,
 			logShutdownErr: func(err error) {
 				klog.Errorf("Gateway listener server on port %d shutdown failed: %v", port, err)
 			},

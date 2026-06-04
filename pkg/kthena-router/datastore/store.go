@@ -1099,7 +1099,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	s.triggerCallbacks("ModelRoute", EventData{
 		EventType:  EventDelete,
 		ModelName:  modelName,
-		ModelRoute: nil,
+		ModelRoute: deletedRoute,
 	})
 	return nil
 }
@@ -1783,6 +1783,7 @@ func (s *store) GetAllPods() map[types.NamespacedName]*PodInfo {
 	return result
 }
 
+
 // GetModelRoute returns a specific ModelRoute by namespacedName
 func (s *store) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute {
 	s.routeMutex.RLock()
@@ -2059,3 +2060,4 @@ func (s *store) GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
 	}
 	return result
 }
+
