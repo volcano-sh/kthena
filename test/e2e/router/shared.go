@@ -114,9 +114,9 @@ func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bo
 // validating webhook (avoids flaky tests while cert-manager / deployment finishes).
 //
 // The validating webhook is served by the kthena-router pod itself, not a separate
-// deployment. TestRouterConfigUpdate deliberately restarts the kthena-router pod before
-// this test runs. Kubernetes can mark the pod Ready before the webhook handler is fully
-// initialised, so we retry all transient connection errors until the webhook is stable.
+// deployment. TestRouterConfigUpdate restarts the kthena-router pod before later
+// tests run. Kubernetes can mark the pod Ready before the webhook path accepts
+// requests, so retry transient admission-call failures until the webhook is stable.
 func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace string) {
 	t.Helper()
 	t.Log("Waiting for kthena-router validating webhook to accept requests")
@@ -145,18 +145,7 @@ func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kth
 		}
 		_, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
 		if err != nil {
-			errStr := err.Error()
-			// CHANGE 1: added EOF, connection reset by peer, no endpoints available.
-			// EOF is the primary failure mode — the router pod accepts the TCP
-			// connection but drops it mid-TLS handshake during partial startup after
-			// TestRouterConfigUpdate restarts the pod. Without EOF here the test
-			// dies instantly with no retry on the most common failure case.
-			if strings.Contains(errStr, "connect: connection refused") ||
-				strings.Contains(errStr, "i/o timeout") ||
-				strings.Contains(errStr, "context deadline exceeded") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "connection reset by peer") ||
-				strings.Contains(errStr, "no endpoints available") {
+			if isTransientRouterWebhookError(err) {
 				t.Logf("Router validating webhook not ready yet, retrying: %v", err)
 				return false, nil
 			}
@@ -165,6 +154,18 @@ func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kth
 		return true, nil
 	})
 	require.NoError(t, err, "kthena-router validating webhook did not become ready in time")
+}
+
+func isTransientRouterWebhookError(err error) bool {
+	errStr := err.Error()
+	return strings.Contains(errStr, "failed calling webhook") ||
+		strings.Contains(errStr, "connect: connection refused") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "context deadline exceeded") ||
+		strings.Contains(errStr, "Client.Timeout exceeded while awaiting headers") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "no endpoints available")
 }
 
 func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
@@ -627,7 +628,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		// Use more requests to reduce randomness impact
 		const totalRequests = 500
 		const sumTolerance = 0.01 // Allow ±1% deviation for floating-point rounding errors
-		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+		baselineV1Count, baselineV2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, nil)
 
 		for i := 0; i < totalRequests; i++ {
 			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
@@ -635,7 +636,9 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 			assert.NotEmpty(t, resp.Body)
 		}
 
-		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
+		currentV1Count, currentV2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, nil)
+		v1Count := currentV1Count - baselineV1Count
+		v2Count := currentV2Count - baselineV2Count
 		totalFromLogs := v1Count + v2Count
 		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
 			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)
@@ -697,7 +700,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		// Verify requests still work and verify the normalized weight distribution (50:30 = 5/8:3/8)
 		// Send multiple requests to verify weight distribution statistics
 		const totalRequests = 500
-		sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+		baselineV1Count, baselineV2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, nil)
 
 		for i := 0; i < totalRequests; i++ {
 			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
@@ -705,7 +708,9 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 			assert.NotEmpty(t, resp.Body)
 		}
 
-		v1Count, v2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, &sinceTime)
+		currentV1Count, currentV2Count := subsetCanaryBackendCountsFromRouterLogs(t, testCtx.KubeClient, kthenaNamespace, nil)
+		v1Count := currentV1Count - baselineV1Count
+		v2Count := currentV2Count - baselineV2Count
 		totalFromLogs := v1Count + v2Count
 		require.GreaterOrEqual(t, totalFromLogs, int(0.85*float64(totalRequests)),
 			"expected router access logs to cover most requests (got %d lines, v1=%d v2=%d)", totalFromLogs, v1Count, v2Count)

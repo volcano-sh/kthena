@@ -28,9 +28,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-//
-// The validating webhook is served by the kthena-router pod itself, not a separate// deployment. TestRouter
-
 // TestKthenaRouterValidatingWebhook ensures the networking chart's ValidatingWebhookConfiguration
 // targets the real API group and the router webhook rejects invalid ModelRoute specs.
 // Invalid case uses an empty string in loraAdapters (CRD CEL allows non-empty list; webhook rejects item).
