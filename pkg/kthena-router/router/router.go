@@ -298,9 +298,6 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
-		// Get gateway key and match ModelRoute to extract route key for rate limiting
-		gatewayKey := c.GetString(GatewayKey)
-
 		requestID := uuid.New().String()
 		if c.Request.Header.Get("x-request-id") == "" {
 			c.Request.Header.Set("x-request-id", requestID)
