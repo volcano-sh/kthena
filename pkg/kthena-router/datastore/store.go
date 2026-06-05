@@ -40,11 +40,10 @@ import (
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 var (
@@ -299,7 +298,7 @@ type PodInfo struct {
 	// kept in sync with the global Redis counter so it reflects cross-router traffic.
 	onFlightRequestNum atomic.Int64
 
-	mutex sync.RWMutex // Protects concurrent access to Pod, engine, metrics, models and modelServer fields
+	mutex sync.RWMutex // Protects concurrent access to metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
 	models      sets.Set[string]               // running models. Including base model and lora adapters.
 	modelServer sets.Set[types.NamespacedName] // The modelservers this pod belongs to
@@ -472,10 +471,10 @@ func parseMetricsScrapeInterval() time.Duration {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
 		} else {
-			klog.Warningf("Invalid %s: %q, using default %v", metricsScrapeIntervalEnv, v, uppdateInterval)
+			klog.Warningf("Invalid %s: %q, using default %v", metricsScrapeIntervalEnv, v, defaultMetricsScrapeInterval)
 		}
 	}
-	return uppdateInterval
+	return defaultMetricsScrapeInterval
 }
 
 func (s *store) Run(ctx context.Context) {
@@ -823,17 +822,20 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		oldPodInfo := value.(*PodInfo)
 		oldModelServers := oldPodInfo.GetModelServers()
 		// Handle the case where the pod no longer belongs to some model servers
-		oldPodLabels := oldPodInfo.GetPodLabels()
 		for msName := range oldModelServers.Difference(newModelServers) {
 			if value, ok := s.modelServer.Load(msName); ok {
 				ms := value.(*modelServer)
 				ms.deletePod(podName)
 				// Remove from PDGroup categorizations
-				ms.removePodFromPDGroups(podName, oldPodLabels)
+				ms.removePodFromPDGroups(podName, oldPodInfo.Pod.Labels)
 			}
 		}
 
-		oldPodInfo.UpdatePod(pod, engine, newModelServers)
+		oldPodInfo.mutex.Lock()
+		oldPodInfo.Pod = pod
+		oldPodInfo.engine = engine
+		oldPodInfo.modelServer = newModelServers
+		oldPodInfo.mutex.Unlock()
 		return nil
 	}
 
@@ -870,8 +872,8 @@ func (s *store) AppendModelServerToPod(pod *corev1.Pod, modelServers []*aiv1alph
 		if !podInfo.HasModelServer(modelServerName) {
 			podInfo.AddModelServer(modelServerName)
 			// NOTE: even if a pod belongs to multiple model servers, the backend should be the same
-			if podInfo.GetEngine() == "" {
-				podInfo.SetEngine(string(ms.Spec.InferenceEngine))
+			if podInfo.engine == "" {
+				podInfo.engine = string(ms.Spec.InferenceEngine)
 			}
 
 			// Update modelServer object to include this pod
@@ -892,13 +894,12 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 	if value, ok := s.pods.Load(podName); ok {
 		pod := value.(*PodInfo)
 		modelServers := pod.GetModelServers()
-		podLabels := pod.GetPodLabels()
 		for modelServerName := range modelServers {
 			if value, ok := s.modelServer.Load(modelServerName); ok {
 				ms := value.(*modelServer)
 				ms.deletePod(podName)
 				// Remove from PDGroup categorizations
-				ms.removePodFromPDGroups(podName, podLabels)
+				ms.removePodFromPDGroups(podName, pod.Pod.Labels)
 			} else {
 				klog.V(4).Infof("model server %s not found for pod %s, maybe already deleted", modelServerName, podName)
 			}
@@ -1337,19 +1338,13 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 }
 
 func (s *store) updatePodMetrics(pod *PodInfo) {
-	engine := pod.GetEngine()
-	if engine == "" {
+	if pod.engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
-		return
-	}
-	podObj := pod.GetPod()
-	if podObj == nil {
-		klog.V(2).Info("failed to find pod")
 		return
 	}
 
 	previousHistogram := getPreviousHistogram(pod)
-	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, previousHistogram)
+	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(pod.engine, pod.Pod, previousHistogram)
 	if gaugeMetrics != nil {
 		updateGaugeMetricsInfo(pod, gaugeMetrics)
 	}
@@ -1359,20 +1354,14 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) {
-	engine := podInfo.GetEngine()
-	if engine == "" {
+	if podInfo.engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
 		return
 	}
-	podObj := podInfo.GetPod()
-	if podObj == nil {
-		klog.V(2).Info("failed to find pod")
-		return
-	}
 
-	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj)
+	models, err := s.getPodRuntimeInspector().GetPodModels(podInfo.engine, podInfo.Pod)
 	if err != nil {
-		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
+		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podInfo.Pod.GetNamespace(), podInfo.Pod.GetName(), err)
 		return
 	}
 
@@ -1380,9 +1369,6 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 }
 
 func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
-	podinfo.mutex.RLock()
-	defer podinfo.mutex.RUnlock()
-
 	previousHistogram := make(map[string]*dto.Histogram)
 	if podinfo.TimePerOutputToken != nil {
 		previousHistogram[utils.TPOT] = podinfo.TimePerOutputToken
@@ -1468,43 +1454,7 @@ func (s *store) triggerCallbacks(kind string, data EventData) {
 	}
 }
 
-// PodInfo methods for thread-safe access to mutable fields
-
-// GetPod returns the current pod pointer. The returned object must be treated as read-only.
-func (p *PodInfo) GetPod() *corev1.Pod {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	return p.Pod
-}
-
-// GetPodLabels returns the current pod labels. The returned map must be treated as read-only.
-func (p *PodInfo) GetPodLabels() map[string]string {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	if p.Pod == nil || len(p.Pod.Labels) == 0 {
-		return nil
-	}
-	return p.Pod.Labels
-}
-
-// GetPodNamespacedName returns the current pod namespace/name.
-func (p *PodInfo) GetPodNamespacedName() types.NamespacedName {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	if p.Pod == nil {
-		return types.NamespacedName{}
-	}
-	return types.NamespacedName{Namespace: p.Pod.Namespace, Name: p.Pod.Name}
-}
-
-// UpdatePod replaces pod metadata tracked by PodInfo while preserving runtime metrics and models.
-func (p *PodInfo) UpdatePod(pod *corev1.Pod, engine string, modelServers sets.Set[types.NamespacedName]) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	p.Pod = pod
-	p.engine = engine
-	p.modelServer = modelServers
-}
+// PodInfo methods for thread-safe access to models and modelServer fields
 
 // GetModels returns a copy of the models set
 func (p *PodInfo) GetModels() sets.Set[string] {
@@ -1618,16 +1568,7 @@ func (p *PodInfo) GetModelServersList() []types.NamespacedName {
 
 // GetEngine returns the inference engine name
 func (p *PodInfo) GetEngine() string {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
 	return p.engine
-}
-
-// SetEngine updates the inference engine name.
-func (p *PodInfo) SetEngine(engine string) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	p.engine = engine
 }
 
 // GetGPUCacheUsage returns the GPU cache usage
@@ -1965,8 +1906,7 @@ func (s *store) GetPodsByInferencePool(name types.NamespacedName) ([]*PodInfo, e
 	var pods []*PodInfo
 	s.pods.Range(func(key, value interface{}) bool {
 		podInfo := value.(*PodInfo)
-		pod := podInfo.GetPod()
-		if pod != nil && pod.Namespace == name.Namespace && selector.Matches(labels.Set(podInfo.GetPodLabels())) {
+		if podInfo.Pod.Namespace == name.Namespace && selector.Matches(labels.Set(podInfo.Pod.Labels)) {
 			pods = append(pods, podInfo)
 		}
 		return true
