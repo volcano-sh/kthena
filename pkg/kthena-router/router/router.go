@@ -301,36 +301,6 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Get gateway key and match ModelRoute to extract route key for rate limiting
 		gatewayKey := c.GetString(GatewayKey)
 
-		rateLimitKey := gatewayKey
-
-		// Apply rate limiting using the route key
-		if err := r.loadRateLimiter.RateLimit(rateLimitKey, promptStr); err != nil {
-			var errorMsg string
-			var errorType string
-			var tokenType string
-			switch err.(type) {
-			case *ratelimit.InputRateLimitExceededError:
-				errorMsg = "input token rate limit exceeded"
-				errorType = "input_rate_limit"
-				tokenType = metrics.LimitTypeInputTokens
-			case *ratelimit.OutputRateLimitExceededError:
-				errorMsg = "output token rate limit exceeded"
-				errorType = "output_rate_limit"
-				tokenType = metrics.LimitTypeOutputTokens
-			default:
-				errorMsg = "token usage exceeds rate limit"
-				errorType = "rate_limit"
-				tokenType = metrics.LimitTypeRequests
-			}
-			accesslog.SetError(c, errorType, errorMsg)
-
-			// Record rate limit exceeded
-			metricsRecorder.RecordRateLimitExceeded(tokenType)
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
-			c.Set("finishReason", "rate_limit")
-			return
-		}
-
 		requestID := uuid.New().String()
 		if c.Request.Header.Get("x-request-id") == "" {
 			c.Request.Header.Set("x-request-id", requestID)
@@ -351,7 +321,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName); err != nil {
 			accesslog.SetError(c, "scheduling", err.Error())
 			c.Set("finishReason", "scheduling")
-			return
+			return 
 		}
 	}
 }
@@ -385,6 +355,20 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		accesslog.SetError(c, "model_server_matching", fmt.Sprintf("can't find corresponding model server: %v", err))
 	}
 
+	// Apply rate limiting NOW that we have modelRoute
+	if prompt, exists := c.Get(PromptKey); exists {
+		if p, ok := prompt.(*common.ChatMessage); ok {
+			promptStr := utils.GetPromptString(p)
+			if metricsRecorder, exists := c.Get("metricsRecorder"); exists {
+				if rec, ok := metricsRecorder.(*metrics.RequestMetricsRecorder); ok {
+					if err := r.applyRateLimit(c, modelRoute, modelName, promptStr, rec); err != nil {
+						return  // Response already written by applyRateLimit
+					}
+				}
+			}
+		}
+	}
+	
 	if err == nil && strings.HasPrefix(c.Request.URL.Path, "/v1/") {
 		// Regular ModelServer request
 		// step 3: Find pods and model server details
@@ -1159,4 +1143,57 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in fairness queue")
 		return fmt.Errorf("client disconnected while waiting in fairness queue")
 	}
+}
+
+// applyRateLimit enforces rate limiting based on route identity
+// For ModelRoute paths: uses namespace/routeName (route-scoped)
+// For HTTPRoute paths: uses modelName (model-scoped)
+func (r *Router) applyRateLimit(
+	c *gin.Context,
+	modelRoute *v1alpha1.ModelRoute,
+	modelName string,
+	promptStr string,
+	metricsRecorder *metrics.RequestMetricsRecorder,
+) error {
+	// Determine rate limit key
+	var rateLimitKey string
+	
+	if modelRoute != nil {
+		// ModelRoute path: use route-scoped limit (fixes isolation bug)
+		rateLimitKey = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
+	} else {
+		// HTTPRoute or fallback: use model-scoped
+		rateLimitKey = modelName
+	}
+	
+	// Apply rate limiting
+	if err := r.loadRateLimiter.RateLimit(rateLimitKey, promptStr); err != nil {
+		var errorMsg string
+		var errorType string
+		var tokenType string
+		
+		switch err.(type) {
+		case *ratelimit.InputRateLimitExceededError:
+			errorMsg = "input token rate limit exceeded"
+			errorType = "input_rate_limit"
+			tokenType = metrics.LimitTypeInputTokens
+		case *ratelimit.OutputRateLimitExceededError:
+			errorMsg = "output token rate limit exceeded"
+			errorType = "output_rate_limit"
+			tokenType = metrics.LimitTypeOutputTokens
+		default:
+			errorMsg = "token usage exceeds rate limit"
+			errorType = "rate_limit"
+			tokenType = metrics.LimitTypeRequests
+		}
+		
+		accesslog.SetError(c, errorType, errorMsg)
+		metricsRecorder.RecordRateLimitExceeded(tokenType)
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
+		c.Set("finishReason", "rate_limit")
+		
+		return err
+	}
+	
+	return nil
 }
