@@ -29,6 +29,11 @@ import (
 type Context struct {
 	Model  string
 	Prompt *common.ChatMessage
+	// RequestBody is the parsed OpenAI-compatible request. Scheduler plugins may
+	// inspect generation caps such as max_tokens before routing.
+	RequestBody map[string]interface{}
+	RequestID   string
+	RequestCost *RequestCostEstimate
 
 	Hashes []uint64
 
@@ -46,11 +51,39 @@ type Context struct {
 	MetricsRecorder *metrics.RequestMetricsRecorder
 }
 
+type RequestCostEstimate struct {
+	Model             string
+	PromptBytes       int64
+	PromptTokens      int64
+	OutputTokens      int64
+	EstimatedTokens   int64
+	ReservationTokens int64
+	BytesPerToken     float64
+}
+
+type TokenUsage struct {
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+}
+
+type Reservation struct {
+	PluginName    string
+	PodKey        string
+	ReservationID string
+	Tokens        int64
+}
+
 type ScorePlugin interface {
 	Name() string
 	// Score is a method that is used to rank pods that have passed the filter plugins.
 	// Note each plugin should generate score for a pod within [0, 100]
 	Score(ctx *Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int
+}
+
+type ReservationPlugin interface {
+	Reserve(ctx *Context, pod *datastore.PodInfo) *Reservation
+	Finish(ctx *Context, reservation *Reservation, usage *TokenUsage)
 }
 
 type FilterPlugin interface {

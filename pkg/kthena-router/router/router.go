@@ -31,6 +31,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -444,6 +445,8 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	ctx := &framework.Context{
 		Model:           modelName,
 		Prompt:          prompt,
+		RequestBody:     modelRequest,
+		RequestID:       c.Request.Header.Get("x-request-id"),
 		ModelServerName: modelServerName,
 		PDGroup:         pdGroup,
 		MetricsRecorder: metricsRecorder,
@@ -750,16 +753,37 @@ func (r *Router) proxy(
 		// feeds the scheduler immediately, avoiding the ~1 s engine-metrics lag.
 		r.store.IncrPodOnFlightRequests(podName)
 
+		reservations := r.scheduler.Reserve(ctx, ctx.BestPods[i])
+		var finishOnce sync.Once
+		finishReservation := func(usage *framework.TokenUsage) {
+			finishOnce.Do(func() {
+				r.scheduler.Finish(ctx, reservations, usage)
+			})
+		}
+		wrappedOnUsage := func(resp handlers.OpenAIResponse) {
+			if onUsage != nil {
+				onUsage(resp)
+			}
+			if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 || resp.Usage.TotalTokens > 0 {
+				finishReservation(&framework.TokenUsage{
+					PromptTokens:     int64(resp.Usage.PromptTokens),
+					CompletionTokens: int64(resp.Usage.CompletionTokens),
+					TotalTokens:      int64(resp.Usage.TotalTokens),
+				})
+			}
+		}
+
 		// Increment upstream request count with both modelServer and modelRoute
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, onUsage)
+		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, wrappedOnUsage)
+		finishReservation(nil)
 
 		// Decrement upstream request count when request completes
 		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
 
-		// Request is complete (success or failure) — decrement on-flight counter.
+		// Request is complete (success or failure) - decrement on-flight counter.
 		r.store.DecrPodOnFlightRequests(podName)
 
 		if err != nil {
@@ -932,7 +956,7 @@ func proxyRequest(
 			if len(line) > 0 {
 				// Try to parse usage from this line, assuming it's a data line
 				parsed := handlers.ParseStreamRespForUsage(string(line))
-				if parsed.Usage.CompletionTokens > 0 {
+				if hasUsage(parsed.Usage) {
 					klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 
 					// Always call onUsage callback to record output tokens
@@ -971,7 +995,7 @@ func proxyRequest(
 
 		// Parse usage if present
 		parsed, _ := handlers.ParseOpenAIResponseBody(buf.Bytes())
-		if parsed != nil && parsed.Usage.CompletionTokens > 0 {
+		if parsed != nil && hasUsage(parsed.Usage) {
 			klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 			if onUsage != nil {
 				onUsage(*parsed)
@@ -980,6 +1004,10 @@ func proxyRequest(
 	}
 
 	return nil
+}
+
+func hasUsage(usage handlers.Usage) bool {
+	return usage.PromptTokens > 0 || usage.CompletionTokens > 0 || usage.TotalTokens > 0
 }
 
 func doRequest(
@@ -1081,6 +1109,8 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 		prefillPod := ctx.PrefillPods[i].GetPod()
 		decodePod := ctx.DecodePods[i].GetPod()
+		reservations := r.scheduler.Reserve(ctx, ctx.PrefillPods[i])
+		reservations = append(reservations, r.scheduler.Reserve(ctx, ctx.DecodePods[i])...)
 
 		// Build addresses for prefill and decode pods
 		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
@@ -1103,6 +1133,7 @@ func (r *Router) proxyToPDDisaggregated(
 		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, hooks)
 
 		if err != nil {
+			r.scheduler.Finish(ctx, reservations, nil)
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",
 				prefillPod.Name, decodePod.Name, err)
 			continue
@@ -1116,6 +1147,11 @@ func (r *Router) proxyToPDDisaggregated(
 		// Record output token metrics
 		if metricsRecorder != nil {
 			metricsRecorder.RecordOutputTokens(outputTokens)
+		}
+		if outputTokens > 0 {
+			r.scheduler.Finish(ctx, reservations, &framework.TokenUsage{CompletionTokens: int64(outputTokens)})
+		} else {
+			r.scheduler.Finish(ctx, reservations, nil)
 		}
 
 		// Record successful operation in cache

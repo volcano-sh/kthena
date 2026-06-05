@@ -53,6 +53,7 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		plugins.RandomPluginName,
 		plugins.PrefixCachePluginName,
 		plugins.KVCacheAwarePluginName,
+		plugins.CostAwarePluginName,
 	}
 
 	for _, pluginName := range expectedScorePlugins {
