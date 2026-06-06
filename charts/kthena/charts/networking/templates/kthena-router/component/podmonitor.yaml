@@ -1,0 +1,34 @@
+{{- if .Values.kthenaRouter.metrics.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kthena-inference
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-inference
+    release: prometheus
+    {{- include "kthena.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchExpressions:
+      - key: modelserving.volcano.sh/name
+        operator: Exists
+      - key: modelserving.volcano.sh/group-name
+        operator: Exists
+      - key: modelserving.volcano.sh/role
+        operator: Exists
+      - key: modelserving.volcano.sh/entry
+        operator: In
+        values:
+          - "true"
+  podMetricsEndpoints:
+    - targetPort: 8000
+      path: /metrics
+      interval: {{ .Values.kthenaRouter.metrics.podMonitor.interval }}
+    - targetPort: 30000
+      path: /metrics
+      interval: {{ .Values.kthenaRouter.metrics.podMonitor.interval }}
+{{- end }}

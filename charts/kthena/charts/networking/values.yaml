@@ -66,6 +66,36 @@ kthenaRouter:
   # kubeAPIBurst is the burst to use while talking with kubernetes apiserver
   # If 0 or not specified, uses default value (10)
   kubeAPIBurst: 0
+  # metrics configuration for Prometheus monitoring
+  metrics:
+    serviceMonitor:
+      # enabled creates a ServiceMonitor for kthena-router (requires Prometheus Operator)
+      enabled: false
+      # interval is the scrape interval for the ServiceMonitor
+      interval: 15s
+    podMonitor:
+      # enabled creates a PodMonitor for inference pods (requires Prometheus Operator)
+      enabled: false
+      # interval is the scrape interval for the PodMonitor
+      interval: 15s
+  # autoscaling configuration for KEDA-based inference scaling
+  autoscaling:
+    # enabled creates a KEDA ScaledObject (requires KEDA)
+    enabled: false
+    # scaleTargetName is the name of the Deployment to scale
+    scaleTargetName: ""
+    # prometheusAddress is the Prometheus server URL
+    prometheusAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+    # query is the PromQL query used for scaling decisions
+    query: sum(kthena_router_active_downstream_requests)
+    # threshold is the per-pod metric value that triggers scaling
+    threshold: 5
+    # cooldownPeriod is seconds to wait before scaling down after last trigger
+    cooldownPeriod: 30
+    # minReplicas is the minimum number of inference replicas
+    minReplicas: 1
+    # maxReplicas is the maximum number of inference replicas
+    maxReplicas: 10
 
 webhook:
   enabled: true

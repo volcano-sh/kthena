@@ -1,0 +1,22 @@
+{{- if .Values.kthenaRouter.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kthena-router
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-router
+    release: prometheus
+    {{- include "kthena.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: kthena-router
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.kthenaRouter.metrics.serviceMonitor.interval }}
+{{- end }}
