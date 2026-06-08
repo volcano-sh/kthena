@@ -172,6 +172,37 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 				"maxUnavailable cannot be 0"))
 		}
 	}
+
+	// Validate roleMaxUnavailable field.
+	roleMaxUnavailable := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.RoleMaxUnavailable
+	if roleMaxUnavailable != nil {
+		roleMaxUnavailablePath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("roleMaxUnavailable")
+		allErrs = append(allErrs, validateIntOrPercent(roleMaxUnavailable, roleMaxUnavailablePath)...)
+
+		// roleMaxUnavailable only takes effect for RoleRollingUpdate.
+		if ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate {
+			allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable,
+				fmt.Sprintf("roleMaxUnavailable can only be set when rolloutStrategy.type is %s", workloadv1alpha1.RoleRollingUpdate)))
+		}
+
+		// roleMaxUnavailable, scaled against the expected Role replicas of a ServingGroup, cannot be 0.
+		expectedRoleCount := 0
+		for _, role := range ms.Spec.Template.Roles {
+			replicas := int32(1)
+			if role.Replicas != nil {
+				replicas = *role.Replicas
+			}
+			expectedRoleCount += int(replicas)
+		}
+		if expectedRoleCount > 0 {
+			roleMaxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(roleMaxUnavailable, expectedRoleCount, false)
+			if err != nil {
+				allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, fmt.Sprintf("invalid roleMaxUnavailable: %v", err)))
+			} else if roleMaxUnavailableValue == 0 {
+				allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, "roleMaxUnavailable cannot be 0"))
+			}
+		}
+	}
 	return allErrs
 }
 

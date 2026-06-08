@@ -601,6 +601,26 @@ func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
 }
 
+// RoleMaxUnavailableUnlimited is the sentinel returned by GetRoleMaxUnavailable when
+// roleMaxUnavailable is not configured, meaning all outdated Role replicas within a
+// ServingGroup can be recreated at once (previous behavior).
+const RoleMaxUnavailableUnlimited = -1
+
+// GetRoleMaxUnavailable returns the maximum number of outdated Role replicas that can be
+// simultaneously unavailable within a single ServingGroup during a RoleRollingUpdate.
+// expectedRoleCount is the total number of expected Role replicas in a ServingGroup
+// (sum of role.Replicas across all roles) and is used as the base for percentage values.
+// When roleMaxUnavailable is unset, it returns RoleMaxUnavailableUnlimited.
+func GetRoleMaxUnavailable(ms *workloadv1alpha1.ModelServing, expectedRoleCount int) (int, error) {
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil ||
+		ms.Spec.RolloutStrategy.RollingUpdateConfiguration.RoleMaxUnavailable == nil {
+		return RoleMaxUnavailableUnlimited, nil
+	}
+	roleMaxUnavailable := *ms.Spec.RolloutStrategy.RollingUpdateConfiguration.RoleMaxUnavailable
+	// Calculate roleMaxUnavailable as absolute numbers, rounding down for percentages.
+	return intstr.GetScaledValueFromIntOrPercent(&roleMaxUnavailable, expectedRoleCount, false)
+}
+
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
 	copy := RemoveRoleReplicasForRoleTemplateHash(role)
 	return Revision(copy)

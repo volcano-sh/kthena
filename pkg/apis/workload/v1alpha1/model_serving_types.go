@@ -179,6 +179,18 @@ type RollingUpdateConfiguration struct {
 	// +kubebuilder:validation:XIntOrString
 	// +optional
 	Partition *intstr.IntOrString `json:"partition,omitempty"`
+
+	// RoleMaxUnavailable bounds the number of outdated Role replicas that can be
+	// simultaneously unavailable within a single ServingGroup during a Role rolling update.
+	// It only takes effect when rolloutStrategy.type is RoleRollingUpdate.
+	// Value can be an absolute number (ex: 2) or a percentage of the total expected Role
+	// replicas in a ServingGroup (ex: 50%). Absolute number is calculated from percentage
+	// by rounding down. This can not be 0.
+	// When unset, all outdated Role replicas in a ServingGroup are recreated at once,
+	// which preserves the previous behavior.
+	// +kubebuilder:validation:XIntOrString
+	// +optional
+	RoleMaxUnavailable *intstr.IntOrString `json:"roleMaxUnavailable,omitempty"`
 }
 
 type ModelServingConditionType string

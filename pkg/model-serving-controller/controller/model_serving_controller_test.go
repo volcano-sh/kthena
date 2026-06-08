@@ -6747,442 +6747,197 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 	}
 }
 
-func TestFindOutdatedRolesInServingGroups(t *testing.T) {
+// roleInstanceFixture describes a Role replica to seed into the store (and optionally the pod
+// informer) for RoleRollingUpdate tests.
+type roleInstanceFixture struct {
+	roleName string
+	roleID   string
+	outdated bool // when true, the stored roleTemplateHash differs from the new spec
+	ready    bool // when true, a running+ready entry pod is added to the informer
+	deleting bool // when true, the role is marked as Deleting in the store
+	missing  bool // when true, the instance is NOT created in the store (simulates a missing replica)
+}
+
+func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
-	newRevision := "new-revision-hash"
-	oldRevision := "old-revision-hash"
+	groupName := "test-ms-0"
+	revision := "rev-new"
+	outdatedHash := "outdated-hash"
+
+	// Two roles: decode with 4 replicas and prefill with 1 replica => expectedRoleCount = 5.
+	newMS := func(roleMaxUnavailable *intstr.IntOrString) *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: ptr.To[int32](1),
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+					Type: workloadv1alpha1.RoleRollingUpdate,
+					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+						RoleMaxUnavailable: roleMaxUnavailable,
+					},
+				},
+				Template: workloadv1alpha1.ServingGroup{
+					Roles: []workloadv1alpha1.Role{
+						{
+							Name:     "decode",
+							Replicas: ptr.To[int32](4),
+							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
+							},
+						},
+						{
+							Name:     "prefill",
+							Replicas: ptr.To[int32](1),
+							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
 
 	tests := []struct {
-		description              string
-		servingGroups            []datastore.ServingGroup
-		msRoles                  []workloadv1alpha1.Role
-		storeRoles               map[string]map[string][]datastore.Role // sg.Name -> roleName -> roles
-		expectedOutdatedRoleMap  map[string][]string                    // sg.Name -> outdated role names
-		expectServingGroupUpdate map[string]bool                        // sg.Name -> should revision be updated
+		name               string
+		roleMaxUnavailable *intstr.IntOrString
+		instances          []roleInstanceFixture
+		expectedDeletions  int
 	}{
 		{
-			description: "role with same revision as spec - should not be outdated",
-			servingGroups: []datastore.ServingGroup{
-				{Name: "test-ms-0", Status: datastore.ServingGroupRunning, Revision: oldRevision},
+			name:               "unset deletes all outdated replicas at once",
+			roleMaxUnavailable: nil,
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-2", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-3", outdated: true, ready: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			msRoles: []workloadv1alpha1.Role{
-				{
-					Name:     "prefill",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-			},
-			storeRoles: map[string]map[string][]datastore.Role{
-				"test-ms-0": {
-					"prefill": {
-						{
-							Name:   "prefill-0",
-							Status: datastore.RoleRunning,
-						},
-					},
-				},
-			},
-			expectedOutdatedRoleMap: map[string][]string{
-				// No outdated roles
-			},
-			expectServingGroupUpdate: map[string]bool{
-				"test-ms-0": true, // Should update revision
-			},
+			expectedDeletions: 4,
 		},
 		{
-			description: "role with different revision - should be outdated",
-			servingGroups: []datastore.ServingGroup{
-				{Name: "test-ms-0", Status: datastore.ServingGroupRunning, Revision: oldRevision},
+			name:               "bounded by roleMaxUnavailable when all ready",
+			roleMaxUnavailable: ptr.To(intstr.FromInt(3)),
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-2", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-3", outdated: true, ready: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			msRoles: []workloadv1alpha1.Role{
-				{
-					Name:     "prefill",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-			},
-			storeRoles: map[string]map[string][]datastore.Role{
-				"test-ms-0": {
-					"prefill": {
-						{
-							Name:             "prefill-0",
-							Status:           datastore.RoleRunning,
-							RoleTemplateHash: "outdated-role-revision-hash", // Different from calculated revision
-						},
-					},
-				},
-			},
-			expectedOutdatedRoleMap: map[string][]string{
-				"test-ms-0": {"prefill"}, // prefill is outdated
-			},
-			expectServingGroupUpdate: map[string]bool{
-				"test-ms-0": false, // Should not update revision since has outdated roles
-			},
+			expectedDeletions: 3,
 		},
 		{
-			description: "role in deleting state with different revision - should not be outdated",
-			servingGroups: []datastore.ServingGroup{
-				{Name: "test-ms-0", Status: datastore.ServingGroupRunning, Revision: oldRevision},
+			name:               "budget reduced by an unready outdated replica",
+			roleMaxUnavailable: ptr.To(intstr.FromInt(3)),
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-2", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-3", outdated: true, ready: false},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			msRoles: []workloadv1alpha1.Role{
-				{
-					Name:     "prefill",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-			},
-			storeRoles: map[string]map[string][]datastore.Role{
-				"test-ms-0": {
-					"prefill": {
-						{
-							Name:             "prefill-0",
-							Status:           datastore.RoleDeleting, // Deleting, so don't count as outdated
-							RoleTemplateHash: "outdated-role-revision-hash",
-						},
-					},
-				},
-			},
-			expectedOutdatedRoleMap: map[string][]string{
-				// No outdated roles since role is already deleting
-			},
-			expectServingGroupUpdate: map[string]bool{
-				"test-ms-0": true, // Should update revision since deleting role doesn't count as outdated
-			},
+			// unavailable=1 (decode-3 not ready) => budget=3-1=2, only ready outdated are deletable.
+			expectedDeletions: 2,
 		},
 		{
-			description: "role exists in store but not in spec - should be outdated",
-			servingGroups: []datastore.ServingGroup{
-				{Name: "test-ms-0", Status: datastore.ServingGroupRunning, Revision: oldRevision},
+			name:               "budget reduced by missing replicas",
+			roleMaxUnavailable: ptr.To(intstr.FromInt(3)),
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-2", missing: true},
+				{roleName: "decode", roleID: "decode-3", missing: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			msRoles: []workloadv1alpha1.Role{
-				{
-					Name:     "prefill",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-			},
-			storeRoles: map[string]map[string][]datastore.Role{
-				"test-ms-0": {
-					"prefill": {
-						{
-							Name:   "prefill-0",
-							Status: datastore.RoleRunning,
-						},
-					},
-					"deprecated_role": {
-						{
-							Name:   "deprecated_role-0",
-							Status: datastore.RoleRunning,
-						},
-					},
-				},
-			},
-			expectedOutdatedRoleMap: map[string][]string{
-				"test-ms-0": {"deprecated_role"}, // deprecated_role should be outdated
-			},
-			expectServingGroupUpdate: map[string]bool{
-				"test-ms-0": false, // Should not update revision since has outdated roles
-			},
+			// 2 decode replicas missing => unavailable=2 => budget=3-2=1.
+			expectedDeletions: 1,
 		},
 		{
-			description: "multiple outdated roles with different revisions",
-			servingGroups: []datastore.ServingGroup{
-				{Name: "test-ms-0", Status: datastore.ServingGroupRunning, Revision: oldRevision},
+			name:               "no budget while a new replica is still spinning up",
+			roleMaxUnavailable: ptr.To(intstr.FromInt(1)),
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-2", outdated: true, ready: true},
+				// decode-3 is up-to-date but not yet ready (just recreated).
+				{roleName: "decode", roleID: "decode-3", outdated: false, ready: false},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			msRoles: []workloadv1alpha1.Role{
-				{
-					Name:     "prefill",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-				{
-					Name:     "decode",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-			},
-			storeRoles: map[string]map[string][]datastore.Role{
-				"test-ms-0": {
-					"prefill": {
-						{
-							Name:             "prefill-0",
-							Status:           datastore.RoleRunning,
-							RoleTemplateHash: "outdated-prefill-revision", // outdated
-						},
-					},
-					"decode": {
-						{
-							Name:             "decode-0",
-							Status:           datastore.RoleRunning,
-							RoleTemplateHash: "outdated-decode-revision", // outdated
-						},
-					},
-				},
-			},
-			expectedOutdatedRoleMap: map[string][]string{
-				"test-ms-0": {"prefill", "decode"}, // both outdated
-			},
-			expectServingGroupUpdate: map[string]bool{
-				"test-ms-0": false,
-			},
-		},
-		{
-			description: "multiple serving groups with different states",
-			servingGroups: []datastore.ServingGroup{
-				{Name: "test-ms-0", Status: datastore.ServingGroupRunning, Revision: oldRevision},
-				{Name: "test-ms-1", Status: datastore.ServingGroupRunning, Revision: oldRevision},
-				{Name: "test-ms-2", Status: datastore.ServingGroupRunning, Revision: oldRevision},
-			},
-			msRoles: []workloadv1alpha1.Role{
-				{
-					Name:     "prefill",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-			},
-			storeRoles: map[string]map[string][]datastore.Role{
-				"test-ms-0": {
-					"prefill": {
-						{
-							Name:   "prefill-0",
-							Status: datastore.RoleRunning,
-						},
-					},
-				},
-				"test-ms-1": {
-					"prefill": {
-						{
-							Name:             "prefill-0",
-							Status:           datastore.RoleRunning,
-							RoleTemplateHash: "outdated-revision", // outdated
-						},
-					},
-				},
-				"test-ms-2": {
-					"prefill": {
-						{
-							Name:   "prefill-0",
-							Status: datastore.RoleRunning,
-						},
-					},
-				},
-			},
-			expectedOutdatedRoleMap: map[string][]string{
-				"test-ms-1": {"prefill"}, // only test-ms-1 has outdated role
-			},
-			expectServingGroupUpdate: map[string]bool{
-				"test-ms-0": true,  // no outdated
-				"test-ms-1": false, // has outdated
-				"test-ms-2": true,  // no outdated
-			},
-		},
-		{
-			description: "empty store roles",
-			servingGroups: []datastore.ServingGroup{
-				{Name: "test-ms-0", Status: datastore.ServingGroupRunning, Revision: oldRevision},
-			},
-			msRoles: []workloadv1alpha1.Role{
-				{
-					Name:     "prefill",
-					Replicas: ptr.To[int32](1),
-					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "container", Image: "nginx"}},
-						},
-					},
-				},
-			},
-			storeRoles: map[string]map[string][]datastore.Role{
-				"test-ms-0": {}, // no roles in store
-			},
-			expectedOutdatedRoleMap: map[string][]string{
-				// No outdated roles since there are no roles in store to be outdated
-			},
-			expectServingGroupUpdate: map[string]bool{
-				"test-ms-0": true, // Should update revision
-			},
+			// unavailable=1 (decode-3 not ready), roleMaxUnavailable=1 => budget=0.
+			expectedDeletions: 0,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.description, func(t *testing.T) {
-			// Create ModelServing with roles
-			ms := &workloadv1alpha1.ModelServing{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: ns,
-					Name:      msName,
-				},
-				Spec: workloadv1alpha1.ModelServingSpec{
-					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
-						Roles: tt.msRoles,
-					},
-				},
-			}
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			modelServingClient := kthenafake.NewSimpleClientset()
+			apiextensionsClient := apiextfake.NewSimpleClientset()
 
-			// Calculate expected role template hashes from ModelServing spec
-			expectedRoleTemplateHashes := make(map[string]string)
+			controller, err := NewModelServingController(kubeClient, modelServingClient, nil, apiextensionsClient)
+			require.NoError(t, err)
+			controller.store = datastore.New()
+
+			ms := newMS(tt.roleMaxUnavailable)
+			nsn := utils.GetNamespaceName(ms)
+			controller.store.AddServingGroup(nsn, 0, revision)
+
+			upToDateHashByRole := map[string]string{}
 			for _, role := range ms.Spec.Template.Roles {
-				copy := utils.RemoveRoleReplicasForRoleTemplateHash(role)
-				roleTemplateHash := utils.Revision(copy)
-				expectedRoleTemplateHashes[role.Name] = roleTemplateHash
+				upToDateHashByRole[role.Name] = utils.CalRoleTemplateHash(role)
 			}
 
-			// Create fake store
-			store := datastore.New()
-
-			// Setup store with serving groups and roles
-			for _, sg := range tt.servingGroups {
-				store.AddServingGroup(types.NamespacedName{Namespace: ns, Name: msName}, 0, sg.Revision)
-				_ = store.UpdateServingGroupStatus(
-					types.NamespacedName{Namespace: ns, Name: msName},
-					sg.Name,
-					sg.Status,
-				)
-			}
-
-			// Setup store with roles - use expected role revisions
-			for sgName, roleMap := range tt.storeRoles {
-				for roleName, roles := range roleMap {
-					for _, role := range roles {
-						// If roleTemplateHash is not set (empty), use the calculated expected revision
-						roleTemplateHashToUse := role.RoleTemplateHash
-						if roleTemplateHashToUse == "" {
-							roleTemplateHashToUse = expectedRoleTemplateHashes[roleName]
-						}
-
-						store.AddRole(
-							types.NamespacedName{Namespace: ns, Name: msName},
-							sgName,
-							roleName,
-							role.Name,
-							oldRevision,
-							roleTemplateHashToUse,
-						)
-						_ = store.UpdateRoleStatus(
-							types.NamespacedName{Namespace: ns, Name: msName},
-							sgName,
-							roleName,
-							role.Name,
-							role.Status,
-						)
+			podIndexer := controller.podsInformer.GetIndexer()
+			for _, inst := range tt.instances {
+				if !inst.missing {
+					hash := upToDateHashByRole[inst.roleName]
+					if inst.outdated {
+						hash = outdatedHash
 					}
+					controller.store.AddRole(nsn, groupName, inst.roleName, inst.roleID, revision, hash)
+					status := datastore.RoleRunning
+					if inst.deleting {
+						status = datastore.RoleDeleting
+					}
+					require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, inst.roleName, inst.roleID, status))
+				}
+				if inst.ready {
+					pod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace: ns,
+							Name:      fmt.Sprintf("%s-%s-entry", groupName, inst.roleID),
+							Labels: map[string]string{
+								workloadv1alpha1.ModelServingNameLabelKey: msName,
+								workloadv1alpha1.GroupNameLabelKey:        groupName,
+								workloadv1alpha1.RoleLabelKey:             inst.roleName,
+								workloadv1alpha1.RoleIDKey:                inst.roleID,
+							},
+						},
+						Status: corev1.PodStatus{
+							Phase:      corev1.PodRunning,
+							Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+						},
+					}
+					require.NoError(t, podIndexer.Add(pod))
 				}
 			}
 
-			// Create controller
-			controller := &ModelServingController{
-				store: store,
-			}
+			servingGroups := []datastore.ServingGroup{{Name: groupName, Revision: revision, Status: datastore.ServingGroupRunning}}
+			_, err = controller.deleteOutdatedRolesForRoleRollingUpdate(context.Background(), ms, 1, servingGroups, revision)
+			require.NoError(t, err)
 
-			// Call the function
-			result := controller.findOutdatedRolesInServingGroups(ms, tt.servingGroups, newRevision)
-
-			// Verify outdated roles map
-			// Compare keys first
-			assert.Equal(t, len(tt.expectedOutdatedRoleMap), len(result),
-				"Outdated roles map should have same number of serving groups for test case: %s", tt.description)
-
-			// Then compare the outdated role names for each serving group using ElementsMatch
-			for sgName, expectedRoleNames := range tt.expectedOutdatedRoleMap {
-				actualRoleNames, exists := result[sgName]
-				assert.True(t, exists, "ServingGroup %s should exist in outdated roles map", sgName)
-				assert.ElementsMatch(t, expectedRoleNames, actualRoleNames,
-					"Outdated role names for ServingGroup %s should match (order-independent) for test case: %s",
-					sgName, tt.description)
-			}
-
-			// Verify serving group revision updates
-			for sgName, shouldUpdate := range tt.expectServingGroupUpdate {
-				if shouldUpdate {
-					// Check that revision was updated
-					latestRevision, ok := store.GetServingGroupRevision(
-						types.NamespacedName{Namespace: ns, Name: msName},
-						sgName,
-					)
-					assert.True(t, ok, "ServingGroup %s revision should be updated", sgName)
-					assert.Equal(t, newRevision, latestRevision,
-						"ServingGroup %s revision should be updated to %s, but got %s", sgName, newRevision, latestRevision)
-				} else {
-					// Check that revision was NOT updated
-					latestRevision, ok := store.GetServingGroupRevision(
-						types.NamespacedName{Namespace: ns, Name: msName},
-						sgName,
-					)
-					assert.True(t, ok, "ServingGroup %s should exist", sgName)
-					assert.Equal(t, oldRevision, latestRevision,
-						"ServingGroup %s revision should NOT be updated, but got %s", sgName, latestRevision)
+			deletions := 0
+			for _, action := range kubeClient.Actions() {
+				if action.Matches("delete-collection", "pods") {
+					deletions++
 				}
 			}
+			assert.Equal(t, tt.expectedDeletions, deletions, "unexpected number of deleted Role replicas")
 		})
 	}
-}
-
-func TestFindOutdatedRolesInServingGroups_LegacyMissingRoleTemplateHash(t *testing.T) {
-	ns := "default"
-	msName := "test-ms"
-	revision := "same-revision"
-	roleName := "prefill"
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
-			Name:      msName,
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
-				Roles: []workloadv1alpha1.Role{
-					{
-						Name:     roleName,
-						Replicas: ptr.To[int32](1),
-						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	store := datastore.New()
-	nsn := types.NamespacedName{Namespace: ns, Name: msName}
-	store.AddServingGroup(nsn, 0, revision)
-	store.AddRole(nsn, "test-ms-0", roleName, "prefill-0", revision, "")
-
-	controller := &ModelServingController{store: store}
-	result := controller.findOutdatedRolesInServingGroups(ms, []datastore.ServingGroup{{Name: "test-ms-0", Revision: revision, Status: datastore.ServingGroupRunning}}, revision)
-
-	assert.Empty(t, result, "legacy role with missing roleTemplateHash should not be treated as outdated by default")
 }
 
 func TestResolveRoleTemplateHashForComparison_FromControllerRevision(t *testing.T) {

@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -475,6 +476,87 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition"),
 					&intstr.IntOrString{Type: intstr.String, StrVal: "110%"},
 					"must be a valid percent value (0-100)",
+				),
+			},
+		},
+		{
+			name: "valid roleMaxUnavailable with RoleRollingUpdate",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.RoleRollingUpdate,
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable:     &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+								RoleMaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+							},
+						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "decode", Replicas: ptr.To[int32](4)},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "roleMaxUnavailable set with non-RoleRollingUpdate type",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.ServingGroupRollingUpdate,
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable:     &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+								RoleMaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+							},
+						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "decode", Replicas: ptr.To[int32](4)},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("roleMaxUnavailable"),
+					&intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+					fmt.Sprintf("roleMaxUnavailable can only be set when rolloutStrategy.type is %s", workloadv1alpha1.RoleRollingUpdate),
+				),
+			},
+		},
+		{
+			name: "roleMaxUnavailable is zero",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.RoleRollingUpdate,
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable:     &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+								RoleMaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+							},
+						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "decode", Replicas: ptr.To[int32](4)},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("roleMaxUnavailable"),
+					&intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+					"roleMaxUnavailable cannot be 0",
 				),
 			},
 		},

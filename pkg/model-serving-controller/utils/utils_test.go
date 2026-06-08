@@ -303,3 +303,104 @@ func TestGetMaxUnavailable(t *testing.T) {
 		})
 	}
 }
+
+func TestGetRoleMaxUnavailable(t *testing.T) {
+	tests := []struct {
+		name              string
+		modelServing      *workloadv1alpha1.ModelServing
+		expectedRoleCount int
+		expectedResult    int
+		expectError       bool
+	}{
+		{
+			name: "unset - no rollout strategy returns unlimited",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+				},
+			},
+			expectedRoleCount: 5,
+			expectedResult:    RoleMaxUnavailableUnlimited,
+			expectError:       false,
+		},
+		{
+			name: "unset - rolling update config without roleMaxUnavailable returns unlimited",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type:                       workloadv1alpha1.RoleRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{},
+					},
+				},
+			},
+			expectedRoleCount: 5,
+			expectedResult:    RoleMaxUnavailableUnlimited,
+			expectError:       false,
+		},
+		{
+			name: "absolute value 3",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.RoleRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							RoleMaxUnavailable: ptr.To(intstr.FromInt(3)),
+						},
+					},
+				},
+			},
+			expectedRoleCount: 5,
+			expectedResult:    3,
+			expectError:       false,
+		},
+		{
+			name: "percentage 50% of 5 rounds down to 2",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.RoleRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							RoleMaxUnavailable: ptr.To(intstr.FromString("50%")),
+						},
+					},
+				},
+			},
+			expectedRoleCount: 5,
+			expectedResult:    2,
+			expectError:       false,
+		},
+		{
+			name: "percentage 100% of 4 equals 4",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.RoleRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							RoleMaxUnavailable: ptr.To(intstr.FromString("100%")),
+						},
+					},
+				},
+			},
+			expectedRoleCount: 4,
+			expectedResult:    4,
+			expectError:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := GetRoleMaxUnavailable(tt.modelServing, tt.expectedRoleCount)
+
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedResult, result)
+			}
+		})
+	}
+}
