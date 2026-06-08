@@ -6940,6 +6940,218 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 	}
 }
 
+func TestCollectGroupRoleUpdateState(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	newRevision := "rev-new"
+	oldRevision := "rev-old"
+	outdatedHash := "outdated-hash"
+
+	// Two roles: decode with 4 replicas and prefill with 1 replica => expectedRoleCount = 5.
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "decode",
+						Replicas: ptr.To[int32](4),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
+						},
+					},
+					{
+						Name:     "prefill",
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name                     string
+		instances                []roleInstanceFixture
+		expectedRoleCount        int
+		expectedUnavailableCount int
+		expectedOutdated         []roleInstanceRef
+		expectRevisionAdvanced   bool
+	}{
+		{
+			name: "all up-to-date and ready advances revision",
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", ready: true},
+				{roleName: "decode", roleID: "decode-1", ready: true},
+				{roleName: "decode", roleID: "decode-2", ready: true},
+				{roleName: "decode", roleID: "decode-3", ready: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
+			},
+			expectedRoleCount:        5,
+			expectedUnavailableCount: 0,
+			expectedOutdated:         nil,
+			expectRevisionAdvanced:   true,
+		},
+		{
+			name: "outdated-but-ready replicas are not unavailable and block revision advance",
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-2", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-3", outdated: true, ready: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
+			},
+			expectedRoleCount:        5,
+			expectedUnavailableCount: 0,
+			// Sorted by role name asc, then ordinal desc.
+			expectedOutdated: []roleInstanceRef{
+				{roleName: "decode", roleID: "decode-3", ready: true},
+				{roleName: "decode", roleID: "decode-2", ready: true},
+				{roleName: "decode", roleID: "decode-1", ready: true},
+				{roleName: "decode", roleID: "decode-0", ready: true},
+			},
+			expectRevisionAdvanced: false,
+		},
+		{
+			name: "not-ready outdated replica counts as unavailable",
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: false},
+				{roleName: "decode", roleID: "decode-2", ready: true},
+				{roleName: "decode", roleID: "decode-3", ready: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
+			},
+			expectedRoleCount:        5,
+			expectedUnavailableCount: 1,
+			expectedOutdated: []roleInstanceRef{
+				{roleName: "decode", roleID: "decode-1", ready: false},
+				{roleName: "decode", roleID: "decode-0", ready: true},
+			},
+			expectRevisionAdvanced: false,
+		},
+		{
+			name: "missing replicas count as unavailable",
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", ready: true},
+				{roleName: "decode", roleID: "decode-1", ready: true},
+				{roleName: "decode", roleID: "decode-2", missing: true},
+				{roleName: "decode", roleID: "decode-3", missing: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
+			},
+			expectedRoleCount:        5,
+			expectedUnavailableCount: 2,
+			expectedOutdated:         nil,
+			expectRevisionAdvanced:   false,
+		},
+		{
+			name: "deleting replica is unavailable and not selected as outdated",
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, deleting: true},
+				{roleName: "decode", roleID: "decode-1", ready: true},
+				{roleName: "decode", roleID: "decode-2", ready: true},
+				{roleName: "decode", roleID: "decode-3", ready: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
+			},
+			expectedRoleCount:        5,
+			expectedUnavailableCount: 1,
+			expectedOutdated:         nil,
+			expectRevisionAdvanced:   false,
+		},
+		{
+			name: "role removed from spec drains entirely",
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", ready: true},
+				{roleName: "decode", roleID: "decode-1", ready: true},
+				{roleName: "decode", roleID: "decode-2", ready: true},
+				{roleName: "decode", roleID: "decode-3", ready: true},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
+				// sidecar is not present in the new spec; it must be drained regardless of hash/readiness.
+				{roleName: "sidecar", roleID: "sidecar-0"},
+			},
+			expectedRoleCount:        5,
+			expectedUnavailableCount: 0,
+			expectedOutdated: []roleInstanceRef{
+				{roleName: "sidecar", roleID: "sidecar-0", ready: true},
+			},
+			expectRevisionAdvanced: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			modelServingClient := kthenafake.NewSimpleClientset()
+			apiextensionsClient := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, modelServingClient, nil, apiextensionsClient)
+			require.NoError(t, err)
+			controller.store = datastore.New()
+
+			nsn := utils.GetNamespaceName(ms)
+			controller.store.AddServingGroup(nsn, 0, oldRevision)
+
+			upToDateHashByRole := map[string]string{}
+			for _, role := range ms.Spec.Template.Roles {
+				upToDateHashByRole[role.Name] = utils.CalRoleTemplateHash(role)
+			}
+
+			podIndexer := controller.podsInformer.GetIndexer()
+			for _, inst := range tt.instances {
+				if !inst.missing {
+					hash := upToDateHashByRole[inst.roleName]
+					if inst.outdated {
+						hash = outdatedHash
+					}
+					controller.store.AddRole(nsn, groupName, inst.roleName, inst.roleID, oldRevision, hash)
+					status := datastore.RoleRunning
+					if inst.deleting {
+						status = datastore.RoleDeleting
+					}
+					require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, inst.roleName, inst.roleID, status))
+				}
+				if inst.ready {
+					pod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace: ns,
+							Name:      fmt.Sprintf("%s-%s-entry", groupName, inst.roleID),
+							Labels: map[string]string{
+								workloadv1alpha1.ModelServingNameLabelKey: msName,
+								workloadv1alpha1.GroupNameLabelKey:        groupName,
+								workloadv1alpha1.RoleLabelKey:             inst.roleName,
+								workloadv1alpha1.RoleIDKey:                inst.roleID,
+							},
+						},
+						Status: corev1.PodStatus{
+							Phase:      corev1.PodRunning,
+							Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+						},
+					}
+					require.NoError(t, podIndexer.Add(pod))
+				}
+			}
+
+			sg := datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning}
+			expectedRoleCount, unavailableCount, outdated := controller.collectGroupRoleUpdateState(ms, sg, newRevision)
+
+			assert.Equal(t, tt.expectedRoleCount, expectedRoleCount, "unexpected expectedRoleCount")
+			assert.Equal(t, tt.expectedUnavailableCount, unavailableCount, "unexpected unavailableCount")
+			assert.Equal(t, tt.expectedOutdated, outdated, "unexpected outdated replicas")
+
+			storedRevision, ok := controller.store.GetServingGroupRevision(nsn, groupName)
+			require.True(t, ok, "serving group revision should be present in the store")
+			if tt.expectRevisionAdvanced {
+				assert.Equal(t, newRevision, storedRevision, "stored revision should be advanced to the new revision")
+			} else {
+				assert.Equal(t, oldRevision, storedRevision, "stored revision should NOT be advanced")
+			}
+		})
+	}
+}
+
 func TestResolveRoleTemplateHashForComparison_FromControllerRevision(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
