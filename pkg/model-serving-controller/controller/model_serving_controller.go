@@ -1286,28 +1286,27 @@ func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
 
 		// Select the outdated Role replicas to delete in this reconcile.
 		// When roleMaxUnavailable is unset, recreate all outdated replicas at once.
-		// Otherwise, only delete currently-ready outdated replicas, and only up to the remaining
-		// unavailability budget (roleMaxUnavailable - already unavailable). Missing, deleting and
-		// not-yet-ready replicas are all counted in unavailableCount, so the budget naturally
-		// gates the rollout until newly created replicas become ready.
+		// Otherwise:
+		//   - Unready outdated replicas are already counted in unavailableCount, so recreating
+		//     them does not increase unavailability. They are always deleted, even when the budget
+		//     is exhausted, to avoid stalling the rollout on pods that are Running but never become
+		//     Ready (such pods do not trigger failure handling and can stay unready indefinitely).
+		//   - Ready outdated replicas are still serving, so deleting one increases unavailability.
+		//     They are only deleted up to the remaining budget (roleMaxUnavailable - already
+		//     unavailable), which gates the rollout until newly created replicas become ready.
 		var toDelete []roleInstanceRef
 		if roleMaxUnavailable == utils.RoleMaxUnavailableUnlimited {
 			toDelete = outdated
 		} else {
 			budget := roleMaxUnavailable - unavailableCount
-			if budget <= 0 {
-				klog.V(4).Infof("No outdated Role replicas can be updated in ServingGroup %s: roleMaxUnavailable=%d, unavailable=%d",
-					sg.Name, roleMaxUnavailable, unavailableCount)
-				continue
-			}
 			for _, inst := range outdated {
-				if !inst.ready {
-					continue
+				if inst.ready {
+					if budget <= 0 {
+						continue
+					}
+					budget--
 				}
 				toDelete = append(toDelete, inst)
-				if len(toDelete) >= budget {
-					break
-				}
 			}
 		}
 

@@ -6830,7 +6830,7 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 			expectedDeletions: 3,
 		},
 		{
-			name:               "budget reduced by an unready outdated replica",
+			name:               "unready outdated replica is always deletable in addition to the budget",
 			roleMaxUnavailable: ptr.To(intstr.FromInt(3)),
 			instances: []roleInstanceFixture{
 				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
@@ -6839,7 +6839,23 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 				{roleName: "decode", roleID: "decode-3", outdated: true, ready: false},
 				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			// unavailable=1 (decode-3 not ready) => budget=3-1=2, only ready outdated are deletable.
+			// unavailable=1 (decode-3 not ready) => budget=3-1=2 ready replicas, plus the unready
+			// outdated decode-3 which is always recreated (it does not increase unavailability).
+			expectedDeletions: 3,
+		},
+		{
+			name:               "unready outdated replicas are deleted even when budget is exhausted",
+			roleMaxUnavailable: ptr.To(intstr.FromInt(2)),
+			instances: []roleInstanceFixture{
+				{roleName: "decode", roleID: "decode-0", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-1", outdated: true, ready: true},
+				{roleName: "decode", roleID: "decode-2", outdated: true, ready: false},
+				{roleName: "decode", roleID: "decode-3", outdated: true, ready: false},
+				{roleName: "prefill", roleID: "prefill-0", ready: true},
+			},
+			// unavailable=2 (decode-2, decode-3 not ready) => budget=2-2=0, so no ready replica is
+			// deletable, but the two unready outdated replicas must still be recreated to avoid
+			// stalling the rollout on pods that are Running but never become Ready.
 			expectedDeletions: 2,
 		},
 		{
