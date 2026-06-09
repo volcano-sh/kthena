@@ -6956,6 +6956,122 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 	}
 }
 
+// TestDeleteOutdatedRolesForRoleRollingUpdate_GroupBudget verifies the group-level disruption
+// budget: a group that is already unavailable (in-progress RoleRollingUpdate, status != Running)
+// must keep advancing its role rollout even when maxScaleDown is exhausted (<= 0), while a
+// fully-available (Running) group must not be disrupted once the budget is gone.
+func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	revision := "rev-new"
+	outdatedHash := "outdated-hash"
+
+	newMS := func() *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: ptr.To[int32](1),
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+					Type: workloadv1alpha1.RoleRollingUpdate,
+					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+						RoleMaxUnavailable: ptr.To(intstr.FromInt(2)),
+					},
+				},
+				Template: workloadv1alpha1.ServingGroup{
+					Roles: []workloadv1alpha1.Role{
+						{
+							Name:     "decode",
+							Replicas: ptr.To[int32](4),
+							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name              string
+		groupStatus       datastore.ServingGroupStatus
+		maxScaleDown      int
+		expectedDeletions int
+	}{
+		{
+			name:              "in-progress group continues even when budget is exhausted",
+			groupStatus:       datastore.ServingGroupCreating,
+			maxScaleDown:      0,
+			expectedDeletions: 2, // bounded by roleMaxUnavailable, not blocked by maxScaleDown
+		},
+		{
+			name:              "available group is gated when budget is exhausted",
+			groupStatus:       datastore.ServingGroupRunning,
+			maxScaleDown:      0,
+			expectedDeletions: 0, // disrupting a fresh Running group requires budget
+		},
+		{
+			name:              "available group is disrupted when budget remains",
+			groupStatus:       datastore.ServingGroupRunning,
+			maxScaleDown:      1,
+			expectedDeletions: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			modelServingClient := kthenafake.NewSimpleClientset()
+			apiextensionsClient := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, modelServingClient, nil, apiextensionsClient)
+			require.NoError(t, err)
+			controller.store = datastore.New()
+
+			ms := newMS()
+			nsn := utils.GetNamespaceName(ms)
+			controller.store.AddServingGroup(nsn, 0, revision)
+
+			podIndexer := controller.podsInformer.GetIndexer()
+			for i := 0; i < 4; i++ {
+				roleID := fmt.Sprintf("decode-%d", i)
+				controller.store.AddRole(nsn, groupName, "decode", roleID, revision, outdatedHash)
+				require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "decode", roleID, datastore.RoleRunning))
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: ns,
+						Name:      fmt.Sprintf("%s-%s-entry", groupName, roleID),
+						Labels: map[string]string{
+							workloadv1alpha1.ModelServingNameLabelKey: msName,
+							workloadv1alpha1.GroupNameLabelKey:        groupName,
+							workloadv1alpha1.RoleLabelKey:             "decode",
+							workloadv1alpha1.RoleIDKey:                roleID,
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase:      corev1.PodRunning,
+						Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+					},
+				}
+				require.NoError(t, podIndexer.Add(pod))
+			}
+
+			servingGroups := []datastore.ServingGroup{{Name: groupName, Revision: revision, Status: tt.groupStatus}}
+			_, err = controller.deleteOutdatedRolesForRoleRollingUpdate(context.Background(), ms, tt.maxScaleDown, servingGroups, revision)
+			require.NoError(t, err)
+
+			deletions := 0
+			for _, action := range kubeClient.Actions() {
+				if action.Matches("delete-collection", "pods") {
+					deletions++
+				}
+			}
+			assert.Equal(t, tt.expectedDeletions, deletions, "unexpected number of deleted Role replicas")
+		})
+	}
+}
+
 func TestCollectGroupRoleUpdateState(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"

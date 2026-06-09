@@ -1176,7 +1176,17 @@ func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *wo
 	//   in a further step.
 	minAvailable := int(*ms.Spec.Replicas) - maxUnavailable
 	maxScaleDown := len(servingGroupList) - minAvailable - newServingGroupUnavailableCount
-	if maxScaleDown <= 0 {
+
+	// For RoleRollingUpdate we must keep driving the rollout even when maxScaleDown <= 0: a group
+	// whose roles are partway through an update is already unavailable, and deleteOutdatedResources
+	// ForRollingUpdate allows such in-progress groups to continue regardless of the group-level
+	// budget. Returning early here would strand a group that, for example, became momentarily
+	// unavailable after a freshly-finished group dropped out of Running and pushed maxScaleDown to
+	// 0. For ServingGroupRollingUpdate the deletion path does nothing when maxScaleDown <= 0, so the
+	// early return is preserved as an optimization.
+	isRoleRollingUpdate := ms.Spec.RolloutStrategy != nil &&
+		ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
+	if maxScaleDown <= 0 && !isRoleRollingUpdate {
 		klog.V(4).Infof("No ServingGroups can be updated for ModelServing %s/%s: maxScaleDown=%d",
 			ms.Namespace, ms.Name, maxScaleDown)
 		return nil
@@ -1250,8 +1260,15 @@ type roleInstanceRef struct {
 // deleteOutdatedRolesForRoleRollingUpdate deletes outdated Roles for `RoleRollingUpdate`.
 //
 // Two levels of concurrency control are enforced:
-//   - Group level: at most maxScaleDown ServingGroups are touched in a single reconcile,
-//     mirroring the ServingGroup-level maxUnavailable budget computed in manageRollingUpdate.
+//   - Group level: at most maxScaleDown ServingGroups may be newly disrupted in a single
+//     reconcile, mirroring the ServingGroup-level maxUnavailable budget computed in
+//     manageRollingUpdate. A group that is already unavailable (an in-progress RoleRollingUpdate,
+//     i.e. its status is not Running) has already consumed a disruption slot, so it is always
+//     allowed to continue its rollout regardless of the remaining budget; otherwise an exhausted
+//     budget (for example after a freshly-finished group is momentarily not Running) would stall
+//     a group partway through its role update. Continuing an already-unavailable group does not
+//     increase the number of unavailable groups. Only fully-available (Running) groups consume
+//     the budget, since starting to disrupt them newly reduces availability.
 //   - Role level: within each touched ServingGroup, at most roleMaxUnavailable outdated Role
 //     replicas may be unavailable at once. When roleMaxUnavailable is unset, all outdated Role
 //     replicas in the group are recreated at once (previous behavior).
@@ -1263,19 +1280,43 @@ func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
 	revision string,
 ) (int, error) {
 	updateCount := 0
+	// budget is the remaining group-level disruption allowance for this reconcile. allOutdatedGroups
+	// orders not-Running (in-progress) groups last, so the end-to-start walk visits them before the
+	// fully-available groups and lets them reserve their disruption slots first.
+	budget := maxScaleDown
 
 	// Iterate from end to start to delete largest ordinals first.
-	// collectGroupRoleUpdateState advances the stored revision for any group that is already
-	// fully up to date, so we keep visiting every group even after the maxScaleDown budget is
-	// exhausted to let settled groups finish their rollout.
 	for i := len(allOutdatedGroups) - 1; i >= 0; i-- {
 		sg := allOutdatedGroups[i]
 
+		// Inspect the group first: collectGroupRoleUpdateState also advances the stored revision of
+		// any group that has already fully rolled out, so we must keep visiting every group even
+		// after the budget is exhausted to let settled groups finish their rollout.
 		expectedRoleCount, unavailableCount, outdated := c.collectGroupRoleUpdateState(ms, sg, revision)
-		if len(outdated) == 0 {
+
+		// A fully-settled group (no outdated replicas and nothing unavailable) is already on the
+		// new revision and fully available: it neither needs work nor occupies a disruption slot, so
+		// it must NOT consume the group-level budget. Consuming budget here would let a group that
+		// just finished its rollout in this same pass starve the next outdated group, stalling the
+		// rollout until an unrelated event triggers another reconcile.
+		if len(outdated) == 0 && unavailableCount == 0 {
 			continue
 		}
-		if updateCount >= maxScaleDown {
+
+		// At this point the group is either being disrupted (has outdated replicas to delete) or is
+		// already unavailable (in-progress rollout). A fully-available (Running) group is only newly
+		// disrupted while budget remains, because touching it reduces availability. A group that is
+		// already unavailable (in-progress, status != Running) has already consumed a disruption
+		// slot, so it always continues its rollout even when the budget is exhausted. Either way the
+		// group draws down the budget so fully-available groups are not disrupted beyond maxUnavailable.
+		if sg.Status == datastore.ServingGroupRunning && budget <= 0 {
+			continue
+		}
+		budget--
+
+		if len(outdated) == 0 {
+			// In-progress group whose outdated replicas are all mid-deletion: it occupies a
+			// disruption slot (budget already drawn down) but has nothing new to delete this pass.
 			continue
 		}
 
