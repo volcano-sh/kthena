@@ -194,7 +194,14 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 			}
 			expectedRoleCount += int(replicas)
 		}
-		if expectedRoleCount > 0 {
+		if expectedRoleCount == 0 {
+			// With zero expected role replicas, any percent value scales to 0 and should be rejected.
+			if roleMaxUnavailable.Type == intstr.String {
+				allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, "roleMaxUnavailable cannot be a percent when expected role replicas is 0"))
+			} else if roleMaxUnavailable.IntValue() == 0 {
+				allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, "roleMaxUnavailable cannot be 0"))
+			}
+		} else {
 			roleMaxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(roleMaxUnavailable, expectedRoleCount, false)
 			if err != nil {
 				allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, fmt.Sprintf("invalid roleMaxUnavailable: %v", err)))

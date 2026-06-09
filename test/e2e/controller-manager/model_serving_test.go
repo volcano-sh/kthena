@@ -2368,6 +2368,16 @@ func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 
 	modelServing := createBasicModelServing("test-binpack-sg-scaledown", 4, 0)
 	t.Log("Creating ModelServing with 4 servingGroup replicas for bin pack scale down test")
+
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)
 
