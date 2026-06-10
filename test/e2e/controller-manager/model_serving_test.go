@@ -2010,30 +2010,32 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	// Monitor the role-based rolling update to ensure only prefill role pods are replaced
 	t.Log("Monitoring role-based rolling update to ensure only prefill role pods are replaced while decode role pods remain")
 
-	// It is possible that the ‘modelServing Ready’ check completed before the change in the modelServing status,
-	// causing subsequent checks to fail. Therefore, the checks have been retried.
-	// This has improved the robustness of the end-to-end tests.
+	// Poll until the rollout has FULLY converged before asserting. In a RoleRollingUpdate the two
+	// ServingGroups roll one at a time, so AvailableReplicas briefly returns to 2 after the first
+	// group finishes and before the second group starts. Sampling status during that transient
+	// would observe AvailableReplicas==1 once the second group begins. The convergence condition
+	// therefore requires every prefill pod to be updated AND ready, the decode pods to be
+	// preserved, and the status to report a completed rollout (UpdatedReplicas == AvailableReplicas
+	// == replicas). Only then are the hard assertions evaluated, once, below.
+	prefillPodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=prefill", modelServing.Name)
+
 	require.Eventually(t, func() bool {
-		// Wait for the rolling update to complete
-		utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
-
-		// Get final state
 		finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
-		require.NoError(t, err, "Failed to get final ModelServing")
-		assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
-		assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
-
-		// Verify that the prefill role image has been updated
-		prefillRoleUpdated := false
-		for _, role := range finalMS.Spec.Template.Roles {
-			if role.Name == "prefill" && role.EntryTemplate.Spec.Containers[0].Image == "nginx:alpine" {
-				prefillRoleUpdated = true
-				break
-			}
+		if err != nil {
+			t.Logf("Failed to get ModelServing: %v", err)
+			return false
 		}
-		assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
 
-		prefillPodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=prefill", modelServing.Name)
+		// The rollout is complete only when every group is updated to the new revision and available.
+		if finalMS.Status.UpdatedReplicas != replicas {
+			t.Logf("Rollout not complete yet: UpdatedReplicas=%d, want %d", finalMS.Status.UpdatedReplicas, replicas)
+			return false
+		}
+		if finalMS.Status.AvailableReplicas != replicas {
+			t.Logf("Rollout not complete yet: AvailableReplicas=%d, want %d", finalMS.Status.AvailableReplicas, replicas)
+			return false
+		}
+
 		prefillPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: prefillPodLabelSelector,
 		})
@@ -2041,17 +2043,19 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 			t.Logf("Failed to list prefill pods: %v", err)
 			return false
 		}
-
-		// Check if all prefill pods have the updated image
+		// Every prefill pod must carry the new image AND be ready, so a freshly-created but not-yet
+		// ready replica of the last group does not look like a finished rollout.
 		for _, pod := range prefillPodList.Items {
 			if pod.Spec.Containers[0].Image != "nginx:alpine" {
 				t.Logf("Prefill pod %s still has image %s, expecting nginx:alpine", pod.Name, pod.Spec.Containers[0].Image)
 				return false
 			}
+			if !utils.IsPodReady(pod) {
+				t.Logf("Prefill pod %s is not ready yet", pod.Name)
+				return false
+			}
 		}
 
-		// Check if all prefill pods have the updated image
-		decodePodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=decode", modelServing.Name)
 		decodePodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: decodePodLabelSelector,
 		})
@@ -2059,14 +2063,12 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 			t.Logf("Failed to list decode pods: %v", err)
 			return false
 		}
-
-		// Check if all decode pods still have the original image
+		// Decode pods must keep their original image and identity (not replaced by the rollout).
 		for _, pod := range decodePodList.Items {
 			if pod.Spec.Containers[0].Image != nginxImage {
 				t.Logf("Decode pod %s has image %s, expecting original image %s", pod.Name, pod.Spec.Containers[0].Image, nginxImage)
 				return false
 			}
-
 			uid, exist := decodePodsUID[pod.Name]
 			if !exist || string(pod.UID) != uid {
 				t.Logf("Decode pod %s has been replaced", pod.Name)
@@ -2075,7 +2077,22 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 		}
 
 		return true
-	}, 2*time.Minute, 1*time.Second)
+	}, 5*time.Minute, 2*time.Second, "role-based rolling update did not converge")
+
+	// The rollout has fully converged; assert the final state once.
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get final ModelServing")
+	assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
+	assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
+
+	prefillRoleUpdated := false
+	for _, role := range finalMS.Spec.Template.Roles {
+		if role.Name == "prefill" && role.EntryTemplate.Spec.Containers[0].Image == "nginx:alpine" {
+			prefillRoleUpdated = true
+			break
+		}
+	}
+	assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
 
 	t.Log("ModelServing role-based rolling update test passed successfully")
 }
@@ -2106,15 +2123,13 @@ func TestModelServingRoleRollingUpdateRoleMaxUnavailable(t *testing.T) {
 			RecoveryPolicy: workload.RoleRecreate,
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.RoleRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					RoleMaxUnavailable: ptr.To(intstr.FromInt(roleMaxUnavailable)),
-				},
 			},
 			Template: workload.ServingGroup{
 				Roles: []workload.Role{
 					{
-						Name:     "decode",
-						Replicas: ptr.To[int32](decodeReplicas),
+						Name:               "decode",
+						Replicas:           ptr.To[int32](decodeReplicas),
+						RoleMaxUnavailable: ptr.To(intstr.FromInt(roleMaxUnavailable)),
 						EntryTemplate: workload.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{
@@ -2228,15 +2243,14 @@ func TestModelServingRoleRollingUpdateRoleMaxUnavailableMultiRole(t *testing.T) 
 
 	replicas := int32(1)
 	prefillRole := createRole("prefill", prefillReplicas, 0)
+	// roleMaxUnavailable is per-role; bound only the prefill role being updated.
+	prefillRole.RoleMaxUnavailable = ptr.To(intstr.FromInt(roleMaxUnavailable))
 	decodeRole := createRole("decode", decodeReplicas, 0)
 	modelServing := createBasicModelServing(
 		"test-role-max-unavailable-multi", replicas, 0, prefillRole, decodeRole)
 	modelServing.Spec.RecoveryPolicy = workload.RoleRecreate
 	modelServing.Spec.RolloutStrategy = &workload.RolloutStrategy{
 		Type: workload.RoleRollingUpdate,
-		RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-			RoleMaxUnavailable: ptr.To(intstr.FromInt(roleMaxUnavailable)),
-		},
 	}
 
 	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)

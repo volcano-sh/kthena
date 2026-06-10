@@ -25,9 +25,8 @@ import (
 // RollingUpdateConfigurationApplyConfiguration represents a declarative configuration of the RollingUpdateConfiguration type for use
 // with apply.
 type RollingUpdateConfigurationApplyConfiguration struct {
-	MaxUnavailable     *intstr.IntOrString `json:"maxUnavailable,omitempty"`
-	Partition          *intstr.IntOrString `json:"partition,omitempty"`
-	RoleMaxUnavailable *intstr.IntOrString `json:"roleMaxUnavailable,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+	Partition      *intstr.IntOrString `json:"partition,omitempty"`
 }
 
 // RollingUpdateConfigurationApplyConfiguration constructs a declarative configuration of the RollingUpdateConfiguration type for use with
@@ -49,13 +48,5 @@ func (b *RollingUpdateConfigurationApplyConfiguration) WithMaxUnavailable(value 
 // If called multiple times, the Partition field is set to the value of the last call.
 func (b *RollingUpdateConfigurationApplyConfiguration) WithPartition(value intstr.IntOrString) *RollingUpdateConfigurationApplyConfiguration {
 	b.Partition = &value
-	return b
-}
-
-// WithRoleMaxUnavailable sets the RoleMaxUnavailable field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the RoleMaxUnavailable field is set to the value of the last call.
-func (b *RollingUpdateConfigurationApplyConfiguration) WithRoleMaxUnavailable(value intstr.IntOrString) *RollingUpdateConfigurationApplyConfiguration {
-	b.RoleMaxUnavailable = &value
 	return b
 }

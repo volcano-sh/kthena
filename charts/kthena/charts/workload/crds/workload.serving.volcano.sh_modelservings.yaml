@@ -134,20 +134,6 @@ spec:
                           Absolute number is calculated from percentage by rounding up.
                           The default value is 0.
                         x-kubernetes-int-or-string: true
-                      roleMaxUnavailable:
-                        anyOf:
-                        - type: integer
-                        - type: string
-                        description: |-
-                          RoleMaxUnavailable bounds the number of outdated Role replicas that can be
-                          simultaneously unavailable within a single ServingGroup during a Role rolling update.
-                          It only takes effect when rolloutStrategy.type is RoleRollingUpdate.
-                          Value can be an absolute number (ex: 2) or a percentage of the total expected Role
-                          replicas in a ServingGroup (ex: 50%). Absolute number is calculated from percentage
-                          by rounding down. This can not be 0.
-                          When unset, all outdated Role replicas in a ServingGroup are recreated at once,
-                          which preserves the previous behavior.
-                        x-kubernetes-int-or-string: true
                     type: object
                   type:
                     default: ServingGroupRollingUpdate
@@ -155,6 +141,17 @@ spec:
                       Type defines the rollout strategy. Supported values are
                       "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
                       it defaults to "ServingGroupRollingUpdate".
+                      In ModelServing, the status of a role affects the status of the serving group.
+                      Consequently, RoleRollingUpdate is a more granular form of RollingUpdate than ServingGroupRollingUpdate.
+                      "ServingGroupRollingUpdate" will delete all outdated ServingGroups and then recreate the ServingGroups
+                      for the new version. This is done to facilitate the upgrade.
+                      Use `MaxUnavailable` to control the number of unavailable ServingGroups during an rolling update.
+                      Use `RoleMaxUnavailable` to control the number of unavailable Roles during an rolling update.
+                      NOTE: `RoleMaxUnavailable` is only allowed to set in `RoleRollingUpdate` strategy.
+                      And `RoleMaxUnavailable` `RoleMaxUnavailable` field is located under the Role(servinggroup_types.go)
+
+                      "RoleRollingUpdate" removes outdated roles from the outdated ServingGroup.
+                      It then recreates new version of the roles to implement the rolling update.
                     enum:
                     - ServingGroupRollingUpdate
                     - RoleRollingUpdate
@@ -8906,6 +8903,19 @@ spec:
                             Default to 1.
                           format: int32
                           type: integer
+                        roleMaxUnavailable:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: |-
+                            RoleMaxUnavailable bounds the number of this Role's outdated replicas that can be
+                            simultaneously unavailable within a single ServingGroup during a Role rolling update.
+                            It only takes effect when rolloutStrategy.type is RoleRollingUpdate.
+                            Value can be an absolute number (ex: 2) or a percentage of this Role's replicas (ex: 50%).
+                            Absolute number is calculated from percentage by rounding down. This can not be 0.
+                            When unset, all of this Role's outdated replicas in a ServingGroup are recreated at once,
+                            which preserves the previous behavior.
+                          x-kubernetes-int-or-string: true
                         workerReplicas:
                           description: |-
                             WorkerReplicas defines the number for the worker pod of a role.

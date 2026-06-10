@@ -602,23 +602,24 @@ func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 }
 
 // RoleMaxUnavailableUnlimited is the sentinel returned by GetRoleMaxUnavailable when
-// roleMaxUnavailable is not configured, meaning all outdated Role replicas within a
-// ServingGroup can be recreated at once (previous behavior).
+// roleMaxUnavailable is not configured for a Role, meaning all of that Role's outdated
+// replicas within a ServingGroup can be recreated at once (previous behavior).
 const RoleMaxUnavailableUnlimited = -1
 
-// GetRoleMaxUnavailable returns the maximum number of outdated Role replicas that can be
-// simultaneously unavailable within a single ServingGroup during a RoleRollingUpdate.
-// expectedRoleCount is the total number of expected Role replicas in a ServingGroup
-// (sum of role.Replicas across all roles) and is used as the base for percentage values.
-// When roleMaxUnavailable is unset, it returns RoleMaxUnavailableUnlimited.
-func GetRoleMaxUnavailable(ms *workloadv1alpha1.ModelServing, expectedRoleCount int) (int, error) {
-	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil ||
-		ms.Spec.RolloutStrategy.RollingUpdateConfiguration.RoleMaxUnavailable == nil {
+// GetRoleMaxUnavailable returns the maximum number of the given Role's outdated replicas that can
+// be simultaneously unavailable within a single ServingGroup during a RoleRollingUpdate. The Role's
+// own replicas count is used as the base for percentage values. When role.RoleMaxUnavailable is
+// unset, it returns RoleMaxUnavailableUnlimited.
+func GetRoleMaxUnavailable(role workloadv1alpha1.Role) (int, error) {
+	if role.RoleMaxUnavailable == nil {
 		return RoleMaxUnavailableUnlimited, nil
 	}
-	roleMaxUnavailable := *ms.Spec.RolloutStrategy.RollingUpdateConfiguration.RoleMaxUnavailable
+	roleReplicas := 1
+	if role.Replicas != nil {
+		roleReplicas = int(*role.Replicas)
+	}
 	// Calculate roleMaxUnavailable as absolute numbers, rounding down for percentages.
-	return intstr.GetScaledValueFromIntOrPercent(&roleMaxUnavailable, expectedRoleCount, false)
+	return intstr.GetScaledValueFromIntOrPercent(role.RoleMaxUnavailable, roleReplicas, false)
 }
 
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {

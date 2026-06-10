@@ -1177,7 +1177,7 @@ func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *wo
 	minAvailable := int(*ms.Spec.Replicas) - maxUnavailable
 	maxScaleDown := len(servingGroupList) - minAvailable - newServingGroupUnavailableCount
 
-	// For RoleRollingUpdate we must keep driving the rollout even when maxScaleDown <= 0: a group
+	// For RoleRollingUpdate we must keep driving the rollout even when maxScaleDown == 0: a group
 	// whose roles are partway through an update is already unavailable, and deleteOutdatedResources
 	// ForRollingUpdate allows such in-progress groups to continue regardless of the group-level
 	// budget. Returning early here would strand a group that, for example, became momentarily
@@ -1257,21 +1257,31 @@ type roleInstanceRef struct {
 	ready bool
 }
 
+// groupPlan caches a group's inspection from the first pass so the second pass can act on it
+// without re-running collectGroupRoleUpdateState (which also advances settled groups' revision).
+type groupPlan struct {
+	sg            datastore.ServingGroup
+	states        []roleUpdateState
+	totalOutdated int
+	started       bool
+}
+
 // deleteOutdatedRolesForRoleRollingUpdate deletes outdated Roles for `RoleRollingUpdate`.
 //
 // Two levels of concurrency control are enforced:
-//   - Group level: at most maxScaleDown ServingGroups may be newly disrupted in a single
-//     reconcile, mirroring the ServingGroup-level maxUnavailable budget computed in
-//     manageRollingUpdate. A group that is already unavailable (an in-progress RoleRollingUpdate,
-//     i.e. its status is not Running) has already consumed a disruption slot, so it is always
-//     allowed to continue its rollout regardless of the remaining budget; otherwise an exhausted
-//     budget (for example after a freshly-finished group is momentarily not Running) would stall
-//     a group partway through its role update. Continuing an already-unavailable group does not
-//     increase the number of unavailable groups. Only fully-available (Running) groups consume
-//     the budget, since starting to disrupt them newly reduces availability.
-//   - Role level: within each touched ServingGroup, at most roleMaxUnavailable outdated Role
-//     replicas may be unavailable at once. When roleMaxUnavailable is unset, all outdated Role
-//     replicas in the group are recreated at once (previous behavior).
+//   - Group level: only groups whose rollout has truly started (a role is mid-update: a replica is
+//     being deleted, or new- and old-revision replicas of the same role coexist) count against the
+//     ServingGroup-level maxUnavailable budget, and such groups must always be allowed to finish
+//     their rollout regardless of the remaining budget. The remaining budget
+//     (maxScaleDown - in-progress groups) bounds how many additional, still-fully-available groups
+//     may begin their rollout this reconcile. A group that is merely outdated but not yet touched is
+//     gated by that budget even when its cached ServingGroup status is momentarily not Running, so a
+//     stale cache or a pre-existing failure can no longer disrupt more groups than maxUnavailable.
+//   - Role level: within each touched ServingGroup, each Role independently bounds how many of its
+//     own outdated replicas may be unavailable at once via that Role's roleMaxUnavailable (the base
+//     for a percentage is the Role's replicas, so roles with different replica counts can roll at
+//     different speeds). When a Role's roleMaxUnavailable is unset, all of that Role's outdated
+//     replicas are recreated at once (previous behavior).
 func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
@@ -1279,73 +1289,90 @@ func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
 	allOutdatedGroups []datastore.ServingGroup,
 	revision string,
 ) (int, error) {
-	updateCount := 0
-	// budget is the remaining group-level disruption allowance for this reconcile. allOutdatedGroups
-	// orders not-Running (in-progress) groups last, so the end-to-start walk visits them before the
-	// fully-available groups and lets them reserve their disruption slots first.
-	budget := maxScaleDown
-
-	// Iterate from end to start to delete largest ordinals first.
+	// First pass: inspect every outdated group exactly once and classify it. collectGroupRoleUpdateState
+	// advances the stored revision of any group that has already fully rolled out, so every group must
+	// be visited. Only groups whose rollout has truly started are counted as in-progress: they already
+	// occupy a disruption slot against maxUnavailable and must be allowed to finish.
+	var plans []groupPlan
+	inProgressCount := 0
+	// Iterate from end to start so the largest ordinals are planned (and later deleted) first.
 	for i := len(allOutdatedGroups) - 1; i >= 0; i-- {
 		sg := allOutdatedGroups[i]
-
-		// Inspect the group first: collectGroupRoleUpdateState also advances the stored revision of
-		// any group that has already fully rolled out, so we must keep visiting every group even
-		// after the budget is exhausted to let settled groups finish their rollout.
-		expectedRoleCount, unavailableCount, outdated := c.collectGroupRoleUpdateState(ms, sg, revision)
-
-		// A fully-settled group (no outdated replicas and nothing unavailable) is already on the
-		// new revision and fully available: it neither needs work nor occupies a disruption slot, so
-		// it must NOT consume the group-level budget. Consuming budget here would let a group that
-		// just finished its rollout in this same pass starve the next outdated group, stalling the
-		// rollout until an unrelated event triggers another reconcile.
-		if len(outdated) == 0 && unavailableCount == 0 {
-			continue
-		}
-
-		// At this point the group is either being disrupted (has outdated replicas to delete) or is
-		// already unavailable (in-progress rollout). A fully-available (Running) group is only newly
-		// disrupted while budget remains, because touching it reduces availability. A group that is
-		// already unavailable (in-progress, status != Running) has already consumed a disruption
-		// slot, so it always continues its rollout even when the budget is exhausted. Either way the
-		// group draws down the budget so fully-available groups are not disrupted beyond maxUnavailable.
-		if sg.Status == datastore.ServingGroupRunning && budget <= 0 {
-			continue
-		}
-		budget--
-
-		if len(outdated) == 0 {
-			// In-progress group whose outdated replicas are all mid-deletion: it occupies a
-			// disruption slot (budget already drawn down) but has nothing new to delete this pass.
-			continue
-		}
-
-		roleMaxUnavailable, err := utils.GetRoleMaxUnavailable(ms, expectedRoleCount)
+		states, totalUnavailable, started, err := c.collectGroupRoleUpdateState(ms, sg, revision)
 		if err != nil {
-			return updateCount, fmt.Errorf("failed to calculate roleMaxUnavailable: %v", err)
+			return 0, err
+		}
+		totalOutdated := 0
+		for j := range states {
+			totalOutdated += len(states[j].outdated)
 		}
 
-		// Select the outdated Role replicas to delete in this reconcile.
-		// When roleMaxUnavailable is unset, recreate all outdated replicas at once.
-		// Otherwise:
-		//   - Unready outdated replicas are already counted in unavailableCount, so recreating
-		//     them does not increase unavailability. They are always deleted, even when the budget
-		//     is exhausted, to avoid stalling the rollout on pods that are Running but never become
-		//     Ready (such pods do not trigger failure handling and can stay unready indefinitely).
-		//   - Ready outdated replicas are still serving, so deleting one increases unavailability.
-		//     They are only deleted up to the remaining budget (roleMaxUnavailable - already
-		//     unavailable), which gates the rollout until newly created replicas become ready.
+		// A fully-settled group (no outdated replicas and nothing unavailable) is already on the new
+		// revision and fully available: it neither needs work nor occupies a disruption slot.
+		if totalOutdated == 0 && totalUnavailable == 0 {
+			continue
+		}
+
+		if started {
+			inProgressCount++
+		}
+		plans = append(plans, groupPlan{sg: sg, states: states, totalOutdated: totalOutdated, started: started})
+	}
+
+	// In-progress groups already consumed their disruption slots, so the remaining budget bounds how
+	// many additional, still-fully-available groups may begin their rollout this reconcile.
+	budget := maxScaleDown - inProgressCount
+
+	updateCount := 0
+	// plans is already ordered from largest ordinal to smallest because the first pass walked
+	// allOutdatedGroups end-to-start.
+	for idx := range plans {
+		p := &plans[idx]
+
+		// An already-started group must finish its rollout, so it always continues regardless of the
+		// remaining budget (it was already accounted for via inProgressCount). A not-yet-started group
+		// newly reduces availability, so it may only begin while budget remains.
+		if !p.started {
+			if budget <= 0 {
+				continue
+			}
+			budget--
+		}
+
+		if p.totalOutdated == 0 {
+			// In-progress group whose outdated replicas are all mid-deletion: nothing new to delete.
+			continue
+		}
+
+		// Select the outdated Role replicas to delete this reconcile, applying each Role's own
+		// roleMaxUnavailable budget independently.
+		//   - When a Role's roleMaxUnavailable is unset, recreate all of its outdated replicas at once.
+		//   - Otherwise:
+		//     - Unready outdated replicas are already counted in the role's unavailableCount, so
+		//       recreating them does not increase unavailability. They are always deleted, even when
+		//       the role budget is exhausted, to avoid stalling the rollout on pods that are Running
+		//       but never become Ready (such pods do not trigger failure handling and can stay unready
+		//       indefinitely).
+		//     - Ready outdated replicas are still serving, so deleting one increases unavailability.
+		//       They are only deleted up to the role's remaining budget (roleMaxUnavailable - already
+		//       unavailable), which gates the rollout until newly created replicas become ready.
 		var toDelete []roleInstanceRef
-		if roleMaxUnavailable == utils.RoleMaxUnavailableUnlimited {
-			toDelete = outdated
-		} else {
-			budget := roleMaxUnavailable - unavailableCount
-			for _, inst := range outdated {
+		for j := range p.states {
+			st := &p.states[j]
+			if len(st.outdated) == 0 {
+				continue
+			}
+			if st.roleMaxUnavailable == utils.RoleMaxUnavailableUnlimited {
+				toDelete = append(toDelete, st.outdated...)
+				continue
+			}
+			roleBudget := st.roleMaxUnavailable - st.unavailableCount
+			for _, inst := range st.outdated {
 				if inst.ready {
-					if budget <= 0 {
+					if roleBudget <= 0 {
 						continue
 					}
-					budget--
+					roleBudget--
 				}
 				toDelete = append(toDelete, inst)
 			}
@@ -1355,8 +1382,8 @@ func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
 			continue
 		}
 		for _, inst := range toDelete {
-			klog.V(2).Infof("Role %s/%s in ServingGroup %s will be terminated for update", inst.roleName, inst.roleID, sg.Name)
-			c.DeleteRole(ctx, ms, sg.Name, inst.roleName, inst.roleID)
+			klog.V(2).Infof("Role %s/%s in ServingGroup %s will be terminated for update", inst.roleName, inst.roleID, p.sg.Name)
+			c.DeleteRole(ctx, ms, p.sg.Name, inst.roleName, inst.roleID)
 		}
 		updateCount++
 	}
@@ -1364,41 +1391,73 @@ func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
 	return updateCount, nil
 }
 
-// collectGroupRoleUpdateState inspects a single ServingGroup and returns the data needed to
+// roleUpdateState captures the per-Role bookkeeping needed to bound a RoleRollingUpdate within a
+// single ServingGroup.
+type roleUpdateState struct {
+	roleName string
+	// roleMaxUnavailable is the maximum number of THIS role's outdated replicas that may be
+	// unavailable at once; RoleMaxUnavailableUnlimited when the role does not set it.
+	roleMaxUnavailable int
+	// unavailableCount is the number of THIS role's replicas currently unavailable (being deleted,
+	// not yet ready, or missing).
+	unavailableCount int
+	// outdated holds THIS role's outdated replicas, sorted by descending ordinal for deterministic
+	// deletion.
+	outdated []roleInstanceRef
+}
+
+// collectGroupRoleUpdateState inspects a single ServingGroup and returns per-Role data needed to
 // drive a bounded RoleRollingUpdate:
-//   - expectedRoleCount: sum of role.Replicas across all roles in the new spec; used as the base
-//     for percentage roleMaxUnavailable values.
-//   - unavailableCount: number of Role replicas that are currently unavailable, i.e. missing
-//     (current < expected), being deleted, or not yet ready. Outdated-but-ready replicas are
-//     still serving and are NOT counted as unavailable.
-//   - outdated: outdated Role replicas (template hash differs from the new spec, or whose role
-//     was removed from the spec), each annotated with its readiness, sorted by role name then by
-//     descending ordinal for deterministic deletion.
+//   - states: one entry per Role that has outdated replicas or is currently unavailable. Each entry
+//     carries that Role's roleMaxUnavailable (percentage base = the Role's own replicas), its
+//     unavailable replica count (missing, being deleted, or not yet ready), and its outdated
+//     replicas (template hash differs from the new spec, or the role was removed from the spec),
+//     each annotated with readiness and sorted by descending ordinal. Entries are sorted by role
+//     name for deterministic processing.
+//   - totalUnavailable: sum of unavailable replicas across all roles in the group.
+//   - rolloutStarted: whether this group's rollout to the new spec has already begun, i.e. at least
+//     one role is mid-update (a replica is being deleted, or new- and old-revision replicas of the
+//     same role coexist). A group that is merely outdated but still fully available (no role touched
+//     yet) reports false, even when its cached ServingGroup status is momentarily not Running.
 //
-// As a side effect, when the group is fully settled (no outdated replicas and nothing
-// unavailable) its stored revision is advanced to revision so it is no longer treated as
-// outdated on subsequent reconciles.
+// As a side effect, when the group is fully settled (no outdated replicas and nothing unavailable)
+// its stored revision is advanced to revision so it is no longer treated as outdated on subsequent
+// reconciles.
 func (c *ModelServingController) collectGroupRoleUpdateState(
 	ms *workloadv1alpha1.ModelServing,
 	sg datastore.ServingGroup,
 	revision string,
-) (expectedRoleCount, unavailableCount int, outdated []roleInstanceRef) {
+) (states []roleUpdateState, totalUnavailable int, rolloutStarted bool, err error) {
+	roleSpecByName := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
 	expectedReplicasByRole := make(map[string]int, len(ms.Spec.Template.Roles))
 	expectedHashByRole := make(map[string]string, len(ms.Spec.Template.Roles))
 	for _, role := range ms.Spec.Template.Roles {
-		replicas := int(*role.Replicas)
+		replicas := 1
+		if role.Replicas != nil {
+			replicas = int(*role.Replicas)
+		}
+		roleSpecByName[role.Name] = role
 		expectedReplicasByRole[role.Name] = replicas
-		expectedRoleCount += replicas
 		expectedHashByRole[role.Name] = utils.CalRoleTemplateHash(role)
 	}
 
 	allRoles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), sg.Name)
 	if err != nil {
 		klog.Errorf("failed to get all roles for ServingGroup %s: %v", sg.Name, err)
-		return expectedRoleCount, 0, nil
+		return nil, 0, false, nil
 	}
 
+	unavailableByRole := make(map[string]int)
+	outdatedByRole := make(map[string][]roleInstanceRef)
 	existingByRole := make(map[string]int, len(allRoles))
+	// deletingByRole/newRevisionByRole drive rolloutStarted detection: a role is mid-update when it
+	// has an outdated replica being deleted (its template hash differs from the expected one, or the
+	// role was removed from the spec), or has at least one new-revision replica coexisting with an
+	// outdated one. Counting new-revision replicas per role (rather than per group) avoids treating an
+	// unchanged role as progress when another role is merely drained on removal.
+	deletingByRole := make(map[string]bool)
+	newRevisionByRole := make(map[string]int)
+
 	for roleName, instances := range allRoles {
 		expectedHash, inSpec := expectedHashByRole[roleName]
 		for roleID, role := range instances {
@@ -1406,13 +1465,23 @@ func (c *ModelServingController) collectGroupRoleUpdateState(
 
 			// Replicas already being deleted are unavailable; do not reselect them.
 			if role.Status == datastore.RoleDeleting {
-				unavailableCount++
+				unavailableByRole[roleName]++
+				// A deletion only signals a rollout-in-progress when it is the rollout itself that is
+				// draining this replica: either the role was removed from the spec, or its template
+				// hash differs from the expected one. A replica deleting for an unrelated reason
+				// (e.g. failure recovery of an already up-to-date role) must NOT mark the group as
+				// mid-update, otherwise it would wrongly bypass the group-level maxUnavailable budget.
+				if !inSpec {
+					deletingByRole[roleName] = true
+				} else if observedHash, ok := c.resolveRoleTemplateHashForComparison(ms, sg, roleName, *role); ok && observedHash != expectedHash {
+					deletingByRole[roleName] = true
+				}
 				continue
 			}
 
 			// A role no longer present in the new spec must drain entirely.
 			if !inSpec {
-				outdated = append(outdated, roleInstanceRef{roleName: roleName, roleID: roleID, ready: true})
+				outdatedByRole[roleName] = append(outdatedByRole[roleName], roleInstanceRef{roleName: roleName, roleID: roleID, ready: true})
 				continue
 			}
 
@@ -1422,7 +1491,7 @@ func (c *ModelServingController) collectGroupRoleUpdateState(
 			}
 			isReady := readyErr == nil && ready
 			if !isReady {
-				unavailableCount++
+				unavailableByRole[roleName]++
 			}
 
 			observedHash, ok := c.resolveRoleTemplateHashForComparison(ms, sg, roleName, *role)
@@ -1431,39 +1500,83 @@ func (c *ModelServingController) collectGroupRoleUpdateState(
 				continue
 			}
 			if observedHash != expectedHash {
-				outdated = append(outdated, roleInstanceRef{roleName: roleName, roleID: roleID, ready: isReady})
+				outdatedByRole[roleName] = append(outdatedByRole[roleName], roleInstanceRef{roleName: roleName, roleID: roleID, ready: isReady})
+			} else {
+				newRevisionByRole[roleName]++
 			}
 		}
 	}
 
-	// Count missing replicas of in-spec roles (current < expected) as unavailable, so that an
-	// under-provisioned role shrinks the deletion budget just like an unready one.
+	// Count missing replicas of in-spec roles (current < expected) as unavailable for that role, so
+	// that an under-provisioned role shrinks its own deletion budget just like an unready one.
 	for roleName, want := range expectedReplicasByRole {
 		if have := existingByRole[roleName]; have < want {
-			unavailableCount += want - have
+			unavailableByRole[roleName] += want - have
 		}
 	}
 
-	slices.SortFunc(outdated, func(a, b roleInstanceRef) int {
-		if a.roleName != b.roleName {
-			return cmp.Compare(a.roleName, b.roleName)
+	// Collect every role that has outdated replicas or is currently unavailable, then emit a
+	// deterministic, per-role state list sorted by role name.
+	roleNameSet := make(map[string]struct{})
+	for roleName := range outdatedByRole {
+		roleNameSet[roleName] = struct{}{}
+	}
+	for roleName := range unavailableByRole {
+		roleNameSet[roleName] = struct{}{}
+	}
+	sortedRoleNames := make([]string, 0, len(roleNameSet))
+	for roleName := range roleNameSet {
+		sortedRoleNames = append(sortedRoleNames, roleName)
+	}
+	slices.Sort(sortedRoleNames)
+
+	totalOutdated := 0
+	for _, roleName := range sortedRoleNames {
+		outdated := outdatedByRole[roleName]
+		slices.SortFunc(outdated, func(a, b roleInstanceRef) int {
+			_, ai := utils.GetParentNameAndOrdinal(a.roleID)
+			_, bi := utils.GetParentNameAndOrdinal(b.roleID)
+			return cmp.Compare(bi, ai)
+		})
+
+		// A role is mid-update when one of its replicas is being deleted, or when a new-revision
+		// replica already coexists with an outdated one. Either marks the whole group's rollout as
+		// started, so it must be allowed to finish and it already occupies a disruption slot.
+		if deletingByRole[roleName] || (newRevisionByRole[roleName] > 0 && len(outdated) > 0) {
+			rolloutStarted = true
 		}
-		_, ai := utils.GetParentNameAndOrdinal(a.roleID)
-		_, bi := utils.GetParentNameAndOrdinal(b.roleID)
-		return cmp.Compare(bi, ai)
-	})
+
+		// Roles still present in the spec use their own roleMaxUnavailable; roles removed from the
+		// spec drain entirely (unlimited).
+		roleMaxUnavailable := utils.RoleMaxUnavailableUnlimited
+		if spec, ok := roleSpecByName[roleName]; ok {
+			roleMaxUnavailable, err = utils.GetRoleMaxUnavailable(spec)
+			if err != nil {
+				return nil, 0, false, fmt.Errorf("failed to calculate roleMaxUnavailable for role %s: %v", roleName, err)
+			}
+		}
+
+		totalUnavailable += unavailableByRole[roleName]
+		totalOutdated += len(outdated)
+		states = append(states, roleUpdateState{
+			roleName:           roleName,
+			roleMaxUnavailable: roleMaxUnavailable,
+			unavailableCount:   unavailableByRole[roleName],
+			outdated:           outdated,
+		})
+	}
 
 	// When the group has no outdated replicas and nothing is unavailable, it is fully rolled
 	// out to the new template. Advance its stored revision so it drops out of the outdated set.
-	if len(outdated) == 0 && unavailableCount == 0 {
-		if err := c.store.UpdateServingGroupRevision(utils.GetNamespaceName(ms), sg.Name, revision); err != nil {
-			klog.Errorf("failed to update ServingGroup %s revision: %v", sg.Name, err)
+	if totalOutdated == 0 && totalUnavailable == 0 {
+		if uerr := c.store.UpdateServingGroupRevision(utils.GetNamespaceName(ms), sg.Name, revision); uerr != nil {
+			klog.Errorf("failed to update ServingGroup %s revision: %v", sg.Name, uerr)
 		} else {
 			klog.V(2).Infof("Updated ServingGroup %s revision to latest: %s", sg.Name, revision)
 		}
 	}
 
-	return expectedRoleCount, unavailableCount, outdated
+	return states, totalUnavailable, rolloutStarted, nil
 }
 
 func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, newPod *corev1.Pod) error {

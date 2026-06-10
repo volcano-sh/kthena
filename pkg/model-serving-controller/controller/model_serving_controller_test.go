@@ -6765,7 +6765,8 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 	revision := "rev-new"
 	outdatedHash := "outdated-hash"
 
-	// Two roles: decode with 4 replicas and prefill with 1 replica => expectedRoleCount = 5.
+	// Two roles: decode with 4 replicas (carries roleMaxUnavailable, since it is the role being
+	// rolled) and prefill with 1 replica.
 	newMS := func(roleMaxUnavailable *intstr.IntOrString) *workloadv1alpha1.ModelServing {
 		return &workloadv1alpha1.ModelServing{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
@@ -6773,15 +6774,13 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 				Replicas: ptr.To[int32](1),
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 					Type: workloadv1alpha1.RoleRollingUpdate,
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-						RoleMaxUnavailable: roleMaxUnavailable,
-					},
 				},
 				Template: workloadv1alpha1.ServingGroup{
 					Roles: []workloadv1alpha1.Role{
 						{
-							Name:     "decode",
-							Replicas: ptr.To[int32](4),
+							Name:               "decode",
+							Replicas:           ptr.To[int32](4),
+							RoleMaxUnavailable: roleMaxUnavailable,
 							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
 								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
 							},
@@ -6956,10 +6955,12 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 	}
 }
 
-// TestDeleteOutdatedRolesForRoleRollingUpdate_GroupBudget verifies the group-level disruption
-// budget: a group that is already unavailable (in-progress RoleRollingUpdate, status != Running)
-// must keep advancing its role rollout even when maxScaleDown is exhausted (<= 0), while a
-// fully-available (Running) group must not be disrupted once the budget is gone.
+// TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget verifies the group-level disruption
+// budget: a group whose rollout has truly started (new- and old-revision replicas coexist, or a
+// replica is mid-deletion) must keep advancing even when maxScaleDown is exhausted (<= 0), while a
+// group that is merely outdated but not yet touched is gated by the budget - even when its cached
+// ServingGroup status is momentarily not Running, so a stale status cannot disrupt more groups
+// than maxUnavailable allows.
 func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
@@ -6974,15 +6975,13 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 				Replicas: ptr.To[int32](1),
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 					Type: workloadv1alpha1.RoleRollingUpdate,
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-						RoleMaxUnavailable: ptr.To(intstr.FromInt(2)),
-					},
 				},
 				Template: workloadv1alpha1.ServingGroup{
 					Roles: []workloadv1alpha1.Role{
 						{
-							Name:     "decode",
-							Replicas: ptr.To[int32](4),
+							Name:               "decode",
+							Replicas:           ptr.To[int32](4),
+							RoleMaxUnavailable: ptr.To(intstr.FromInt(2)),
 							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
 								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
 							},
@@ -6993,26 +6992,57 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 		}
 	}
 
+	// instance describes one decode role replica for the test setup.
+	type instance struct {
+		roleID   string
+		newRev   bool // replica already rolled to the new revision
+		deleting bool // replica is mid-deletion
+		ready    bool
+	}
+
 	tests := []struct {
 		name              string
+		instances         []instance
 		groupStatus       datastore.ServingGroupStatus
 		maxScaleDown      int
 		expectedDeletions int
 	}{
 		{
-			name:              "in-progress group continues even when budget is exhausted",
-			groupStatus:       datastore.ServingGroupCreating,
-			maxScaleDown:      0,
-			expectedDeletions: 2, // bounded by roleMaxUnavailable, not blocked by maxScaleDown
-		},
-		{
-			name:              "available group is gated when budget is exhausted",
+			// A genuinely in-progress group (new- and old-revision replicas of the same role
+			// coexist) must keep advancing even when the group-level budget is exhausted.
+			name: "in-progress group (new/old mix) continues even when budget is exhausted",
+			instances: []instance{
+				{roleID: "decode-0", newRev: true, ready: true},
+				{roleID: "decode-1", newRev: true, ready: true},
+				{roleID: "decode-2", ready: true},
+				{roleID: "decode-3", ready: true},
+			},
 			groupStatus:       datastore.ServingGroupRunning,
 			maxScaleDown:      0,
-			expectedDeletions: 0, // disrupting a fresh Running group requires budget
+			expectedDeletions: 2, // bounded by roleMaxUnavailable=2, not blocked by maxScaleDown
 		},
 		{
-			name:              "available group is disrupted when budget remains",
+			// A group that is merely outdated but has not started rolling is gated by the budget,
+			// even when its cached status is not Running: a stale status must not bypass the budget.
+			name: "not-yet-started group is gated when budget is exhausted even if not Running",
+			instances: []instance{
+				{roleID: "decode-0", ready: true},
+				{roleID: "decode-1", ready: true},
+				{roleID: "decode-2", ready: true},
+				{roleID: "decode-3", ready: true},
+			},
+			groupStatus:       datastore.ServingGroupCreating,
+			maxScaleDown:      0,
+			expectedDeletions: 0,
+		},
+		{
+			name: "not-yet-started group is disrupted when budget remains",
+			instances: []instance{
+				{roleID: "decode-0", ready: true},
+				{roleID: "decode-1", ready: true},
+				{roleID: "decode-2", ready: true},
+				{roleID: "decode-3", ready: true},
+			},
 			groupStatus:       datastore.ServingGroupRunning,
 			maxScaleDown:      1,
 			expectedDeletions: 2,
@@ -7032,29 +7062,39 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 			ms := newMS()
 			nsn := utils.GetNamespaceName(ms)
 			controller.store.AddServingGroup(nsn, 0, revision)
+			upToDateHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
 
 			podIndexer := controller.podsInformer.GetIndexer()
-			for i := 0; i < 4; i++ {
-				roleID := fmt.Sprintf("decode-%d", i)
-				controller.store.AddRole(nsn, groupName, "decode", roleID, revision, outdatedHash)
-				require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "decode", roleID, datastore.RoleRunning))
-				pod := &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: ns,
-						Name:      fmt.Sprintf("%s-%s-entry", groupName, roleID),
-						Labels: map[string]string{
-							workloadv1alpha1.ModelServingNameLabelKey: msName,
-							workloadv1alpha1.GroupNameLabelKey:        groupName,
-							workloadv1alpha1.RoleLabelKey:             "decode",
-							workloadv1alpha1.RoleIDKey:                roleID,
-						},
-					},
-					Status: corev1.PodStatus{
-						Phase:      corev1.PodRunning,
-						Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
-					},
+			for _, inst := range tt.instances {
+				hash := outdatedHash
+				if inst.newRev {
+					hash = upToDateHash
 				}
-				require.NoError(t, podIndexer.Add(pod))
+				controller.store.AddRole(nsn, groupName, "decode", inst.roleID, revision, hash)
+				status := datastore.RoleRunning
+				if inst.deleting {
+					status = datastore.RoleDeleting
+				}
+				require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "decode", inst.roleID, status))
+				if inst.ready {
+					pod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace: ns,
+							Name:      fmt.Sprintf("%s-%s-entry", groupName, inst.roleID),
+							Labels: map[string]string{
+								workloadv1alpha1.ModelServingNameLabelKey: msName,
+								workloadv1alpha1.GroupNameLabelKey:        groupName,
+								workloadv1alpha1.RoleLabelKey:             "decode",
+								workloadv1alpha1.RoleIDKey:                inst.roleID,
+							},
+						},
+						Status: corev1.PodStatus{
+							Phase:      corev1.PodRunning,
+							Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+						},
+					}
+					require.NoError(t, podIndexer.Add(pod))
+				}
 			}
 
 			servingGroups := []datastore.ServingGroup{{Name: groupName, Revision: revision, Status: tt.groupStatus}}
@@ -7109,7 +7149,6 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 	tests := []struct {
 		name                     string
 		instances                []roleInstanceFixture
-		expectedRoleCount        int
 		expectedUnavailableCount int
 		expectedOutdated         []roleInstanceRef
 		expectRevisionAdvanced   bool
@@ -7123,7 +7162,6 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 				{roleName: "decode", roleID: "decode-3", ready: true},
 				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			expectedRoleCount:        5,
 			expectedUnavailableCount: 0,
 			expectedOutdated:         nil,
 			expectRevisionAdvanced:   true,
@@ -7137,7 +7175,6 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 				{roleName: "decode", roleID: "decode-3", outdated: true, ready: true},
 				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			expectedRoleCount:        5,
 			expectedUnavailableCount: 0,
 			// Sorted by role name asc, then ordinal desc.
 			expectedOutdated: []roleInstanceRef{
@@ -7157,7 +7194,6 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 				{roleName: "decode", roleID: "decode-3", ready: true},
 				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			expectedRoleCount:        5,
 			expectedUnavailableCount: 1,
 			expectedOutdated: []roleInstanceRef{
 				{roleName: "decode", roleID: "decode-1", ready: false},
@@ -7174,7 +7210,6 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 				{roleName: "decode", roleID: "decode-3", missing: true},
 				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			expectedRoleCount:        5,
 			expectedUnavailableCount: 2,
 			expectedOutdated:         nil,
 			expectRevisionAdvanced:   false,
@@ -7188,7 +7223,6 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 				{roleName: "decode", roleID: "decode-3", ready: true},
 				{roleName: "prefill", roleID: "prefill-0", ready: true},
 			},
-			expectedRoleCount:        5,
 			expectedUnavailableCount: 1,
 			expectedOutdated:         nil,
 			expectRevisionAdvanced:   false,
@@ -7204,7 +7238,6 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 				// sidecar is not present in the new spec; it must be drained regardless of hash/readiness.
 				{roleName: "sidecar", roleID: "sidecar-0"},
 			},
-			expectedRoleCount:        5,
 			expectedUnavailableCount: 0,
 			expectedOutdated: []roleInstanceRef{
 				{roleName: "sidecar", roleID: "sidecar-0", ready: true},
@@ -7267,9 +7300,16 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 			}
 
 			sg := datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning}
-			expectedRoleCount, unavailableCount, outdated := controller.collectGroupRoleUpdateState(ms, sg, newRevision)
+			states, unavailableCount, _, err := controller.collectGroupRoleUpdateState(ms, sg, newRevision)
+			require.NoError(t, err)
 
-			assert.Equal(t, tt.expectedRoleCount, expectedRoleCount, "unexpected expectedRoleCount")
+			// Flatten the per-role outdated lists; states are ordered by role name, and each role's
+			// outdated replicas are ordered by descending ordinal, matching expectedOutdated.
+			var outdated []roleInstanceRef
+			for _, st := range states {
+				outdated = append(outdated, st.outdated...)
+			}
+
 			assert.Equal(t, tt.expectedUnavailableCount, unavailableCount, "unexpected unavailableCount")
 			assert.Equal(t, tt.expectedOutdated, outdated, "unexpected outdated replicas")
 
