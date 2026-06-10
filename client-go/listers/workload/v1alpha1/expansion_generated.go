@@ -49,3 +49,11 @@ type ModelServingListerExpansion interface{}
 // ModelServingNamespaceListerExpansion allows custom methods to be added to
 // ModelServingNamespaceLister.
 type ModelServingNamespaceListerExpansion interface{}
+
+// ModelServingRoleReplicaListerExpansion allows custom methods to be added to
+// ModelServingRoleReplicaLister.
+type ModelServingRoleReplicaListerExpansion interface{}
+
+// ModelServingRoleReplicaNamespaceListerExpansion allows custom methods to be added to
+// ModelServingRoleReplicaNamespaceLister.
+type ModelServingRoleReplicaNamespaceListerExpansion interface{}

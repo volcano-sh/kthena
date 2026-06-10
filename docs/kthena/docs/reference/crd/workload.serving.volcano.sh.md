@@ -16,6 +16,8 @@
 - [ModelBoosterList](#modelboosterlist)
 - [ModelServing](#modelserving)
 - [ModelServingList](#modelservinglist)
+- [ModelServingRoleReplica](#modelservingrolereplica)
+- [ModelServingRoleReplicaList](#modelservingrolereplicalist)
 
 
 
@@ -604,6 +606,77 @@ ModelServingList contains a list of ModelServing
 | `apiVersion` _string_ | `workload.serving.volcano.sh/v1alpha1` | | |
 | `kind` _string_ | `ModelServingList` | | |
 | `items` _[ModelServing](#modelserving) array_ |  |  |  |
+
+
+#### ModelServingRoleReplica
+
+
+
+ModelServingRoleReplica is the Schema for the modelservingrolereplicas API
+
+
+
+_Appears in:_
+- [ModelServingRoleReplicaList](#modelservingrolereplicalist)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `workload.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ModelServingRoleReplica` | | |
+| `spec` _[ModelServingRoleReplicaSpec](#modelservingrolereplicaspec)_ |  |  |  |
+| `status` _[ModelServingRoleReplicaStatus](#modelservingrolereplicastatus)_ |  |  |  |
+
+
+#### ModelServingRoleReplicaList
+
+
+
+ModelServingRoleReplicaList contains a list of ModelServingRoleReplica
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `workload.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ModelServingRoleReplicaList` | | |
+| `items` _[ModelServingRoleReplica](#modelservingrolereplica) array_ |  |  |  |
+
+
+#### ModelServingRoleReplicaSpec
+
+
+
+ModelServingRoleReplicaSpec defines the desired state of ModelServingRoleReplica
+
+
+
+_Appears in:_
+- [ModelServingRoleReplica](#modelservingrolereplica)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelServingRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | ModelServingRef references the parent ModelServing |  |  |
+| `roleName` _string_ | RoleName specifies the target role (e.g., "prefill", "decode") |  |  |
+| `replicas` _integer_ | Replicas maps to this role's replica count |  |  |
+
+
+#### ModelServingRoleReplicaStatus
+
+
+
+ModelServingRoleReplicaStatus defines the observed state of ModelServingRoleReplica
+
+
+
+_Appears in:_
+- [ModelServingRoleReplica](#modelservingrolereplica)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | Replicas is the actual number of replicas for the role |  |  |
+| `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
 
 
 #### ModelServingSpec

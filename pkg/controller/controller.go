@@ -24,6 +24,7 @@ import (
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	autoscaler "github.com/volcano-sh/kthena/pkg/autoscaler/controller"
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
@@ -77,6 +78,8 @@ func SetupController(ctx context.Context, cc Config) {
 	var mc *modelbooster.ModelBoosterController
 	var msc *modelserving.ModelServingController
 	var lwsc *modelserving.LWSController
+	var rrsc *modelserving.RoleReplicaSyncController
+	var workloadInformerFactory informersv1alpha1.SharedInformerFactory
 	var ac *autoscaler.AutoscaleController
 
 	for ctrl, enable := range cc.Controllers {
@@ -95,6 +98,9 @@ func SetupController(ctx context.Context, cc Config) {
 				} else if lwsc == nil {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
+				
+				workloadInformerFactory = informersv1alpha1.NewSharedInformerFactory(client, 0)
+				rrsc = modelserving.NewRoleReplicaSyncController(kubeClient, client, workloadInformerFactory)
 			case AutoscalerController:
 				ac = autoscaler.NewAutoscaleController(kubeClient, client)
 			}
@@ -117,6 +123,12 @@ func SetupController(ctx context.Context, cc Config) {
 					}
 				}()
 				klog.Info("ModelServing lws controller started")
+			}
+			
+			if rrsc != nil {
+				workloadInformerFactory.Start(ctx.Done())
+				go rrsc.Run(ctx, cc.Workers)
+				klog.Info("RoleReplicaSync controller started")
 			}
 		}
 		if ac != nil {

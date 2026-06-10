@@ -44,6 +44,10 @@ func (c *FakeWorkloadV1alpha1) ModelServings(namespace string) v1alpha1.ModelSer
 	return newFakeModelServings(c, namespace)
 }
 
+func (c *FakeWorkloadV1alpha1) ModelServingRoleReplicas(namespace string) v1alpha1.ModelServingRoleReplicaInterface {
+	return newFakeModelServingRoleReplicas(c, namespace)
+}
+
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
 func (c *FakeWorkloadV1alpha1) RESTClient() rest.Interface {
