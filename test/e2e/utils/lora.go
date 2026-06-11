@@ -19,6 +19,7 @@ package utils
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -27,7 +28,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
+
+// LoadLoRAAdapterOnPod port-forwards to the pod and loads a LoRA adapter via /v1/load_lora_adapter.
+func LoadLoRAAdapterOnPod(t *testing.T, pod corev1.Pod, loraName, loraPath string) {
+	t.Helper()
+	localPort := AllocateLocalPort(t)
+	pf, err := SetupPortForwardToPod(pod.Namespace, pod.Name, localPort, "8000")
+	require.NoError(t, err, "Failed to setup port-forward to pod %s", pod.Name)
+	defer pf.Close()
+	LoadLoRAAdapter(t, fmt.Sprintf("http://127.0.0.1:%s", localPort), loraName, loraPath)
+}
 
 // LoadLoRAAdapter loads a LoRA adapter directly on the LLM-Mock pod by sending a request to /v1/load_lora_adapter
 // The request is sent directly to the specified pod URL (e.g., http://127.0.0.1:9000/v1/load_lora_adapter)

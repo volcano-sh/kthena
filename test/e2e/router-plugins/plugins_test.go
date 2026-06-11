@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router-plugins/context"
+	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -40,77 +41,74 @@ func TestSchedulerPluginPrefixCache(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
-	const total = 100
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, route.Spec.ModelName, prompt, total)
+	sendRouterChatRequests(t, chatURL, route.Spec.ModelName, prompt, 200)
 	time.Sleep(2 * time.Second)
 
 	maxCount := 0
 	routed := 0
 	for _, pod := range pods {
-		c := countSelectedPodInLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
-		t.Logf("prefix-cache: pod %s selected %d/%d", pod.Name, c, total)
+		c := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
+		t.Logf("prefix-cache: pod %s selected %d/%d", pod.Name, c, 200)
 		routed += c
 		if c > maxCount {
 			maxCount = c
 		}
 	}
-	t.Logf("prefix-cache: dominant pod %d/%d (of %d log lines)", maxCount, total, routed)
-	require.GreaterOrEqual(t, routed, total/2, "expected access logs for routed requests")
-	require.GreaterOrEqual(t, float64(maxCount)/float64(total), 0.7)
+	t.Logf("prefix-cache: dominant pod %d/%d (of %d log lines)", maxCount, 200, routed)
+	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
+	require.GreaterOrEqual(t, float64(maxCount)/float64(routed), 0.9)
 
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.PrefixCachePluginName, "score")
 }
 
-// TestSchedulerPluginLeastRequest verifies the least-request plugin is active and routes successfully.
+// TestSchedulerPluginLeastRequest verifies least-request Filter avoids a saturated replica.
+// Two identical fast backends: sustain load via direct port-forward on one pod (raises engine
+// waiting, does not touch router access logs), then router probe traffic should land on the
+// idle replica only.
 func TestSchedulerPluginLeastRequest(t *testing.T) {
 	ctx := context.Background()
-	restoreFastReplicas := scaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 1)
-	t.Cleanup(restoreFastReplicas)
+	restoreReplicas := utils.ScaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 2)
+	t.Cleanup(restoreReplicas)
 
 	chatURL, metricsURL, restoreCfg := applySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLeastRequest)
 	t.Cleanup(restoreCfg)
 
-	// Build a two-backend route (fast vs slow). Then make the slow backend busy so least-request should avoid it.
-	deploySlowLatencyMockStack(t, testCtx.KubeClient, testNamespace)
-	_ = deployModelServerFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelServer-plugins-mixed.yaml")
-	route := deployModelRouteFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelRoute-plugins-latency.yaml")
+	route := deployModelRouteFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelRoute-plugins.yaml")
 	model := route.Spec.ModelName
 
-	fastPods := listReadyPodsByApp(t, testCtx.KubeClient, testNamespace, plugincontext.AppLabel)
-	slowPods := listReadyPodsByApp(t, testCtx.KubeClient, testNamespace, plugincontext.SlowMockAppLabel)
-	require.NotEmpty(t, fastPods, "fast mock pool")
-	require.Len(t, slowPods, 1, "slow mock pool")
+	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
+	require.Len(t, pods, 2, "least-request test needs exactly 2 identical mock pods")
+	busyPod, idlePod := pods[0], pods[1]
 
-	// Saturate slow: direct load raises engine waiting (Filter), router load raises onFlight (Score).
-	stopSlowLoad := startLongRequestsToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-least-request-slow-load", 20, 512)
-	t.Cleanup(stopSlowLoad)
-	stopRouterLoad := startLongRequestsViaRouter(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-least-request-load", 30, 512)
-	t.Cleanup(stopRouterLoad)
-	time.Sleep(8 * time.Second)
+	stopLoad := startSustainedLongRequestsToPod(t, busyPod, model, "kthena-router-plugin-e2e-fixed-prompt-least-request-busy-load", 20, 128)
+	t.Cleanup(stopLoad)
+	waitForLeastRequestLoadSeparation(t, testCtx.KubeClient, kthenaNamespace, busyPod, idlePod, leastRequestMaxWaitingRequests)
 
-	const total = 60
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-least-request-route", total)
+	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-least-request-route", 200)
 	time.Sleep(2 * time.Second)
 
-	fastCount := countSelectedPodsInLogs(t, testCtx.KubeClient, kthenaNamespace, since, fastPods)
-	slowCount := countSelectedPodsInLogs(t, testCtx.KubeClient, kthenaNamespace, since, slowPods)
-	routed := fastCount + slowCount
-	t.Logf("least-request: fast pool %d, slow pool %d (of %d log lines)", fastCount, slowCount, routed)
-	require.GreaterOrEqual(t, routed, total/2, "expected access logs for routed requests")
-	require.Greater(t, fastCount, slowCount, "least-request should prefer the fast pool over the busy slow pool")
-	require.GreaterOrEqual(t, float64(fastCount)/float64(routed), 0.7, "least-request should route at least 70%% to the fast pool")
-	require.LessOrEqual(t, float64(slowCount)/float64(routed), 0.2, "least-request should route at most 20%% to the slow pool")
+	busyCount := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, busyPod.Name, since)
+	idleCount := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, idlePod.Name, since)
+	routed := busyCount + idleCount
+	t.Logf("least-request: busy pod %s %d, idle pod %s %d (of %d log lines)", busyPod.Name, busyCount, idlePod.Name, idleCount, routed)
+	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
+	require.Greater(t, idleCount, busyCount, "least-request should prefer the idle pod over the saturated pod")
+	require.GreaterOrEqual(t, float64(idleCount)/float64(routed), 0.9,
+		"least-request should route at least 90%% to the idle pod")
+	require.LessOrEqual(t, float64(busyCount)/float64(routed), 0.1,
+		"least-request should route at most 10%% to the saturated pod")
 
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.LeastRequestPluginName, "score")
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.LeastRequestPluginName, "filter")
 }
 
-// TestSchedulerPluginLeastLatency verifies least-latency prefers pods without prior latency samples on loaded pod.
+// TestSchedulerPluginLeastLatency verifies least-latency prefers the intrinsically faster
+// backend when both pools are idle and scored by observed TTFT/TPOT only.
 func TestSchedulerPluginLeastLatency(t *testing.T) {
 	ctx := context.Background()
-	restoreFastReplicas := scaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 1)
+	restoreFastReplicas := utils.ScaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 1)
 	t.Cleanup(restoreFastReplicas)
 
 	deploySlowLatencyMockStack(t, testCtx.KubeClient, testNamespace)
@@ -127,26 +125,26 @@ func TestSchedulerPluginLeastLatency(t *testing.T) {
 	require.Len(t, fastPods, 1, "fast mock pool")
 	require.Len(t, slowPods, 1, "slow mock pool")
 
-	// Prime both pools so router can observe stable TTFT deltas.
+	// Prime both backends while idle so the router records TTFT/TPOT; do not saturate either pool.
 	const primeRequests = 40
 	directChatToPod(t, fastPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-fast-prime", primeRequests)
 	directChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", primeRequests)
 	time.Sleep(3 * time.Second)
 
-	const total = 100
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-latency-route", total)
+	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-latency-route", 200)
 	time.Sleep(2 * time.Second)
 
-	fastCount := countSelectedPodsInLogs(t, testCtx.KubeClient, kthenaNamespace, since, fastPods)
-	slowCount := countSelectedPodsInLogs(t, testCtx.KubeClient, kthenaNamespace, since, slowPods)
+	fastCount := utils.CountSelectedPodsInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, since, fastPods)
+	slowCount := utils.CountSelectedPodsInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, since, slowPods)
 	routed := fastCount + slowCount
 	t.Logf("least-latency: fast pool %d, slow pool %d (of %d log lines)", fastCount, slowCount, routed)
-	require.GreaterOrEqual(t, routed, total/2, "expected access logs for routed requests")
-	require.GreaterOrEqual(t, float64(fastCount)/float64(routed), 0.7,
-		"least-latency should route at least 70%% to the fast pool")
-	require.LessOrEqual(t, float64(slowCount)/float64(routed), 0.3,
-		"least-latency should route at most 30%% to the slow pool")
+	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
+	require.Greater(t, fastCount, slowCount, "least-latency should prefer the faster backend when both pools are idle")
+	require.GreaterOrEqual(t, float64(fastCount)/float64(routed), 0.9,
+		"least-latency should route at least 90%% to the fast pool")
+	require.LessOrEqual(t, float64(slowCount)/float64(routed), 0.1,
+		"least-latency should route at most 10%% to the slow pool")
 
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.LeastLatencyPluginName, "score")
 }
@@ -154,7 +152,7 @@ func TestSchedulerPluginLeastLatency(t *testing.T) {
 // TestSchedulerPluginLoraAffinity verifies lora-affinity filters to pods that list the adapter in /v1/models.
 func TestSchedulerPluginLoraAffinity(t *testing.T) {
 	ctx := context.Background()
-	restoreReplicas := scaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 2)
+	restoreReplicas := utils.ScaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 2)
 	t.Cleanup(restoreReplicas)
 
 	chatURL, metricsURL, restoreCfg := applySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLoraAffinity)
@@ -165,20 +163,19 @@ func TestSchedulerPluginLoraAffinity(t *testing.T) {
 	require.Len(t, pods, 2, "lora test needs exactly 2 mock pods")
 
 	loadedPod := pods[0]
-	loadLoraOnPod(t, loadedPod, "lora-A", "/models/lora-A")
-	waitForLoRAAdapterRoutable(t, chatURL, "lora-A")
+	utils.LoadLoRAAdapterOnPod(t, loadedPod, "lora-A", "/models/lora-A")
+	utils.WaitForChatModelReady(t, chatURL, "lora-A", []utils.ChatMessage{utils.NewChatMessage("user", "ready")}, 90*time.Second)
 	time.Sleep(3 * time.Second)
 
-	const total = 80
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, "lora-A", "kthena-router-plugin-e2e-fixed-prompt-lora-affinity", total)
+	sendRouterChatRequests(t, chatURL, "lora-A", "kthena-router-plugin-e2e-fixed-prompt-lora-affinity", 200)
 	time.Sleep(2 * time.Second)
 
 	loadedCount := 0
 	otherCount := 0
 	for _, pod := range pods {
-		c := countSelectedPodInLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
-		t.Logf("lora-affinity: pod %s selected %d/%d", pod.Name, c, total)
+		c := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
+		t.Logf("lora-affinity: pod %s selected %d/%d", pod.Name, c, 200)
 		if pod.Name == loadedPod.Name {
 			loadedCount = c
 		} else {
@@ -187,10 +184,10 @@ func TestSchedulerPluginLoraAffinity(t *testing.T) {
 	}
 	routed := loadedCount + otherCount
 	t.Logf("lora-affinity: loaded pod %s %d, other pods %d (of %d log lines)", loadedPod.Name, loadedCount, otherCount, routed)
-	require.GreaterOrEqual(t, routed, total/2, "expected access logs for routed requests")
+	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
 	require.Equal(t, 0, otherCount, "lora-affinity filter should not route to pods without the adapter")
-	require.GreaterOrEqual(t, float64(loadedCount)/float64(routed), 0.7,
-		"lora-affinity should route at least 70%% to the pod that loaded the adapter")
+	require.GreaterOrEqual(t, float64(loadedCount)/float64(routed), 0.9,
+		"lora-affinity should route at least 90%% to the pod that loaded the adapter")
 
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.LoraAffinityPluginName, "filter")
 }
@@ -206,19 +203,31 @@ func TestSchedulerPluginRandom(t *testing.T) {
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
 	require.Len(t, pods, 3, "random test needs 3 mock pods")
 
-	const total = 120
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-random", total)
+	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-random", 200)
 	time.Sleep(2 * time.Second)
 
+	counts := make([]int, len(pods))
 	routed := 0
-	for _, pod := range pods {
-		c := countSelectedPodInLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
-		t.Logf("random: pod %s selected %d/%d", pod.Name, c, total)
+	for i, pod := range pods {
+		c := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
+		counts[i] = c
 		routed += c
-		require.Less(t, float64(c)/float64(total), 0.5, "random should not let pod %s exceed 50%% of traffic", pod.Name)
+		t.Logf("random: pod %s selected %d/%d", pod.Name, c, 200)
 	}
-	require.GreaterOrEqual(t, routed, total/2, "expected access logs for routed requests")
+	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
+
+	// Each pod should receive roughly 1/3 of traffic (±10% absolute ratio).
+	const randomMaxRatioDeviation = 0.10
+	expectedRatio := 1.0 / float64(len(pods))
+	for i, c := range counts {
+		require.Greater(t, c, 0, "random should route some traffic to pod %s", pods[i].Name)
+		ratio := float64(c) / float64(routed)
+		require.GreaterOrEqual(t, ratio, expectedRatio-randomMaxRatioDeviation,
+			"random pod %s ratio %.1f%% below uniform %.1f%% - counts=%v", pods[i].Name, ratio*100, expectedRatio*100, counts)
+		require.LessOrEqual(t, ratio, expectedRatio+randomMaxRatioDeviation,
+			"random pod %s ratio %.1f%% above uniform %.1f%% - counts=%v", pods[i].Name, ratio*100, expectedRatio*100, counts)
+	}
 
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.RandomPluginName, "score")
 }

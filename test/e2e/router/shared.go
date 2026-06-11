@@ -45,7 +45,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -110,107 +109,11 @@ func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bo
 	return true
 }
 
-// rolloutRestartDeployment triggers a rolling restart of a deployment by patching
-// the pod template with a restartedAt annotation — equivalent to `kubectl rollout restart`.
-// Unlike deleting pods, a rolling update ensures new pods are Ready before old ones
-// terminate, so the webhook endpoint is never fully unavailable.
-// It waits for the rollout to fully complete: all new replicas updated, ready, and
-// available, and old replicas terminated.
-func rolloutRestartDeployment(ctx context.Context, kubeClient kubernetes.Interface, namespace, name string, timeout time.Duration) error {
-	deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get deployment %s/%s: %w", namespace, name, err)
-	}
-	if deploy.Spec.Template.Annotations == nil {
-		deploy.Spec.Template.Annotations = make(map[string]string)
-	}
-	deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-	updated, err := kubeClient.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("update deployment %s/%s: %w", namespace, name, err)
-	}
-
-	// Wait for the rollout to fully complete: all new-generation replicas must be
-	// updated, ready, available, and the old ReplicaSet must be scaled down.
-	targetGeneration := updated.Generation
-	err = wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		d, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		if d.Status.ObservedGeneration < targetGeneration {
-			return false, nil
-		}
-		desired := int32(1)
-		if d.Spec.Replicas != nil {
-			desired = *d.Spec.Replicas
-		}
-		return d.Status.UpdatedReplicas == desired &&
-			d.Status.ReadyReplicas == desired &&
-			d.Status.AvailableReplicas == desired &&
-			d.Status.Replicas == desired, nil
-	})
-	if err != nil {
-		return fmt.Errorf("rollout of deployment %s/%s did not complete within %v: %w", namespace, name, timeout, err)
-	}
-	return nil
-}
-
 // WaitForKthenaRouterValidatingWebhook polls until a DryRun ModelRoute create reaches the
 // validating webhook (avoids flaky tests while cert-manager / deployment finishes).
-//
-// The validating webhook is served by the kthena-router pod itself, not a separate
-// deployment. TestRouterConfigUpdate deliberately restarts the kthena-router pod before
-// this test runs. Kubernetes can mark the pod Ready before the webhook handler is fully
-// initialised, so we retry all transient connection errors until the webhook is stable.
 func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace string) {
 	t.Helper()
-	t.Log("Waiting for kthena-router validating webhook to accept requests")
-
-	weight100 := uint32(100)
-	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
-	err := wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-		probe := &networkingv1alpha1.ModelRoute{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: namespace,
-				Name:      "webhook-ready-probe-" + utils.RandomString(5),
-			},
-			Spec: networkingv1alpha1.ModelRouteSpec{
-				ModelName: "probe-model",
-				Rules: []*networkingv1alpha1.Rule{
-					{
-						Name: "default",
-						TargetModels: []*networkingv1alpha1.TargetModel{
-							{ModelServerName: routercontext.ModelServer1_5bName, Weight: &weight100},
-						},
-					},
-				},
-			},
-		}
-		_, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
-		if err != nil {
-			errStr := err.Error()
-			// CHANGE 1: added EOF, connection reset by peer, no endpoints available.
-			// EOF is the primary failure mode — the router pod accepts the TCP
-			// connection but drops it mid-TLS handshake during partial startup after
-			// TestRouterConfigUpdate restarts the pod. Without EOF here the test
-			// dies instantly with no retry on the most common failure case.
-			if strings.Contains(errStr, "connect: connection refused") ||
-				strings.Contains(errStr, "i/o timeout") ||
-				strings.Contains(errStr, "context deadline exceeded") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "connection reset by peer") ||
-				strings.Contains(errStr, "no endpoints available") {
-				t.Logf("Router validating webhook not ready yet, retrying: %v", err)
-				return false, nil
-			}
-			return false, err
-		}
-		return true, nil
-	})
-	require.NoError(t, err, "kthena-router validating webhook did not become ready in time")
+	utils.WaitForRouterValidatingWebhook(t, ctx, kthenaClient, namespace, routercontext.ModelServer1_5bName, "probe-model")
 }
 
 func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
@@ -579,17 +482,14 @@ func testModelRoutePrefillDecodeDisaggregationSharedWithFixtures(
 // backends use the same HuggingFace model id without -v1/-v2 suffixes.
 func subsetCanaryBackendCountsFromRouterLogs(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, since *metav1.Time) (v1, v2 int) {
 	t.Helper()
-	routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
-	opts := &corev1.PodLogOptions{}
+	sinceTime := metav1.Now()
 	if since != nil {
-		opts.SinceTime = since
+		sinceTime = *since
 	}
-	logs, err := kube.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
-	require.NoError(t, err)
-	s := string(logs)
+	logs := utils.RouterLogsSince(t, kube, kthenaNamespace, sinceTime)
 	// Pod names are deployment-prefixed: deepseek-r1-1-5b-v1-<rs>-<suffix>
-	return strings.Count(s, "selected_pod=deepseek-r1-1-5b-v1-"),
-		strings.Count(s, "selected_pod=deepseek-r1-1-5b-v2-")
+	return strings.Count(logs, "selected_pod=deepseek-r1-1-5b-v1-"),
+		strings.Count(logs, "selected_pod=deepseek-r1-1-5b-v2-")
 }
 
 // TestModelRouteSubsetShared is a shared test function that can be used by both
@@ -1793,11 +1693,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 			return
 		}
 
-		// Rollout restart the router deployment so the deployment controller creates
-		// new pods with the restored config via a rolling update. This keeps the
-		// webhook endpoint available throughout the restart (new pods become Ready
-		// before old ones terminate), preventing flaky webhook errors in subsequent tests.
-		if err := rolloutRestartDeployment(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout); err != nil {
+		if err := utils.RolloutRestartDeployment(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout); err != nil {
 			t.Logf("Warning: Failed to rollout restart router deployment: %v", err)
 		}
 	})
@@ -1831,7 +1727,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	// the updated config via a rolling update. This keeps the webhook endpoint
 	// available throughout the restart and waits for the rollout to fully complete.
 	t.Log("Triggering rollout restart of router deployment...")
-	err = rolloutRestartDeployment(ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout)
+	err = utils.RolloutRestartDeployment(ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout)
 	require.NoError(t, err, "Failed to rollout restart router deployment")
 	t.Log("Router deployment is ready after restart")
 
