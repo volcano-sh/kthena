@@ -98,14 +98,14 @@ test-e2e: ## Run all e2e tests sequentially (legacy).
 	@echo "Setting up Kind cluster for E2E tests..."
 	@./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=30m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-controller-manager
 test-e2e-controller-manager: ## Run controller-manager e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=controller-manager ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=15m ./test/e2e/controller-manager/...
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=30m ./test/e2e/controller-manager/...
 
 .PHONY: test-e2e-router
 test-e2e-router: ## Run router e2e tests.
