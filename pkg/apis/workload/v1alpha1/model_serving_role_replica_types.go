@@ -30,6 +30,7 @@ type ModelServingRoleReplicaSpec struct {
 	RoleName string `json:"roleName"`
 
 	// Replicas maps to this role's replica count
+	// +kubebuilder:default:=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 }

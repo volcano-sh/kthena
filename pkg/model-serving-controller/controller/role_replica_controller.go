@@ -32,6 +32,7 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
@@ -50,7 +51,6 @@ type RoleReplicaSyncController struct {
 	roleReplicaLister     listerv1alpha1.ModelServingRoleReplicaLister
 	roleReplicasInformer  cache.SharedIndexInformer
 
-	// nolint
 	workqueue workqueue.RateLimitingInterface
 	recorder  record.EventRecorder
 }
@@ -76,9 +76,21 @@ func NewRoleReplicaSyncController(kubeClientSet kubernetes.Interface, modelServi
 		modelServingsInformer: modelServingInformer.Informer(),
 		roleReplicaLister:     roleReplicaInformer.Lister(),
 		roleReplicasInformer:  roleReplicaInformer.Informer(),
-		// nolint
 		workqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ModelServingRoleReplicas"),
 		recorder:              recorder,
+	}
+
+	err := roleReplicaInformer.Informer().AddIndexers(cache.Indexers{
+		"modelServingRef": func(obj interface{}) ([]string, error) {
+			rr, ok := obj.(*workloadv1alpha1.ModelServingRoleReplica)
+			if !ok {
+				return []string{}, nil
+			}
+			return []string{rr.Spec.ModelServingRef.Name}, nil
+		},
+	})
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("failed to add indexer for ModelServingRoleReplica: %v", err))
 	}
 
 	_, _ = roleReplicaInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -186,12 +198,14 @@ func (c *RoleReplicaSyncController) enqueueModelServing(obj interface{}) {
 	}
 
 	// Enqueue all related RoleReplicas
-	rrs, err := c.roleReplicaLister.ModelServingRoleReplicas(ms.Namespace).List(labels.Everything())
-	if err == nil {
-		for _, rr := range rrs {
-			if rr.Spec.ModelServingRef.Name == ms.Name {
-				c.enqueueRoleReplica(rr)
-			}
+	objs, err := c.roleReplicasInformer.GetIndexer().ByIndex("modelServingRef", ms.Name)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("failed to get RoleReplicas from indexer for ModelServing %s: %v", ms.Name, err))
+		return
+	}
+	for _, obj := range objs {
+		if rr, ok := obj.(*workloadv1alpha1.ModelServingRoleReplica); ok {
+			c.enqueueRoleReplica(rr)
 		}
 	}
 }
@@ -222,26 +236,44 @@ func (c *RoleReplicaSyncController) syncHandler(ctx context.Context, key string)
 	msRoleReplicas := int32(1)
 
 	msCopy := ms.DeepCopy()
-	for i, role := range msCopy.Spec.Template.Roles {
+	for _, role := range msCopy.Spec.Template.Roles {
 		if role.Name == rr.Spec.RoleName {
 			roleFound = true
 			if role.Replicas != nil {
 				msRoleReplicas = *role.Replicas
 			}
 
-			// Sync HPA -> ModelServing
+			// Sync ModelServing -> RoleReplica spec
 			if rr.Spec.Replicas == nil {
 				klog.Infof("Initializing RoleReplica %s/%s spec.replicas to %d", namespace, rr.Name, msRoleReplicas)
-				rrCopy := rr.DeepCopy()
-				rrCopy.Spec.Replicas = &msRoleReplicas
-				_, err = c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Update(ctx, rrCopy, metav1.UpdateOptions{})
+				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					rrLatest, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Get(ctx, rr.Name, metav1.GetOptions{})
+					if getErr != nil {
+						return getErr
+					}
+					rrLatest.Spec.Replicas = &msRoleReplicas
+					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Update(ctx, rrLatest, metav1.UpdateOptions{})
+					return updateErr
+				})
 				return err
 			}
 
 			if *rr.Spec.Replicas != msRoleReplicas {
 				klog.Infof("Syncing role %s replicas from %d to %d based on HPA", role.Name, msRoleReplicas, *rr.Spec.Replicas)
-				msCopy.Spec.Template.Roles[i].Replicas = rr.Spec.Replicas
-				_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(namespace).Update(ctx, msCopy, metav1.UpdateOptions{})
+				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					msLatest, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+					if getErr != nil {
+						return getErr
+					}
+					for j, r := range msLatest.Spec.Template.Roles {
+						if r.Name == role.Name {
+							msLatest.Spec.Template.Roles[j].Replicas = rr.Spec.Replicas
+							break
+						}
+					}
+					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(namespace).Update(ctx, msLatest, metav1.UpdateOptions{})
+					return updateErr
+				})
 				return err
 			}
 			break
@@ -254,12 +286,22 @@ func (c *RoleReplicaSyncController) syncHandler(ctx context.Context, key string)
 	}
 
 	// Sync ModelServing -> RoleReplica Status
-	selector := fmt.Sprintf("%s=%s,%s=%s", workloadv1alpha1.ModelServingNameLabelKey, ms.Name, workloadv1alpha1.RoleLabelKey, rr.Spec.RoleName)
+	selector := labels.Set{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.RoleLabelKey:             rr.Spec.RoleName,
+	}.AsSelector().String()
+	
 	if rr.Status.Replicas != msRoleReplicas || rr.Status.LabelSelector != selector {
-		rrCopy := rr.DeepCopy()
-		rrCopy.Status.Replicas = msRoleReplicas
-		rrCopy.Status.LabelSelector = selector
-		_, err = c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).UpdateStatus(ctx, rrCopy, metav1.UpdateOptions{})
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			rrLatest, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Get(ctx, rr.Name, metav1.GetOptions{})
+			if getErr != nil {
+				return getErr
+			}
+			rrLatest.Status.Replicas = msRoleReplicas
+			rrLatest.Status.LabelSelector = selector
+			_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).UpdateStatus(ctx, rrLatest, metav1.UpdateOptions{})
+			return updateErr
+		})
 		return err
 	}
 

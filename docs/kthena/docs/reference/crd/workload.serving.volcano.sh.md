@@ -659,7 +659,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelServingRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | ModelServingRef references the parent ModelServing |  |  |
 | `roleName` _string_ | RoleName specifies the target role (e.g., "prefill", "decode") |  |  |
-| `replicas` _integer_ | Replicas maps to this role's replica count |  |  |
+| `replicas` _integer_ | Replicas maps to this role's replica count | 1 |  |
 
 
 #### ModelServingRoleReplicaStatus

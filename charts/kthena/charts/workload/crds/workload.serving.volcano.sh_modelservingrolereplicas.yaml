@@ -56,6 +56,7 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               replicas:
+                default: 1
                 description: Replicas maps to this role's replica count
                 format: int32
                 type: integer
