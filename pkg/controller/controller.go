@@ -98,7 +98,7 @@ func SetupController(ctx context.Context, cc Config) {
 				} else if lwsc == nil {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
-				
+
 				workloadInformerFactory = informersv1alpha1.NewSharedInformerFactory(client, 0)
 				rrsc = modelserving.NewRoleReplicaSyncController(kubeClient, client, workloadInformerFactory)
 			case AutoscalerController:
@@ -124,7 +124,7 @@ func SetupController(ctx context.Context, cc Config) {
 				}()
 				klog.Info("ModelServing lws controller started")
 			}
-			
+
 			if rrsc != nil {
 				workloadInformerFactory.Start(ctx.Done())
 				go rrsc.Run(ctx, cc.Workers)

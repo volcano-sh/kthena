@@ -45,11 +45,12 @@ type RoleReplicaSyncController struct {
 	kubeClientSet      kubernetes.Interface
 	modelServingClient clientset.Interface
 
-	modelServingLister        listerv1alpha1.ModelServingLister
-	modelServingsInformer     cache.SharedIndexInformer
-	roleReplicaLister         listerv1alpha1.ModelServingRoleReplicaLister
-	roleReplicasInformer      cache.SharedIndexInformer
+	modelServingLister    listerv1alpha1.ModelServingLister
+	modelServingsInformer cache.SharedIndexInformer
+	roleReplicaLister     listerv1alpha1.ModelServingRoleReplicaLister
+	roleReplicasInformer  cache.SharedIndexInformer
 
+	// nolint
 	workqueue workqueue.RateLimitingInterface
 	recorder  record.EventRecorder
 }
@@ -75,11 +76,12 @@ func NewRoleReplicaSyncController(kubeClientSet kubernetes.Interface, modelServi
 		modelServingsInformer: modelServingInformer.Informer(),
 		roleReplicaLister:     roleReplicaInformer.Lister(),
 		roleReplicasInformer:  roleReplicaInformer.Informer(),
+		// nolint
 		workqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ModelServingRoleReplicas"),
 		recorder:              recorder,
 	}
 
-	roleReplicaInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = roleReplicaInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			c.enqueueRoleReplica(obj)
 		},
@@ -91,7 +93,7 @@ func NewRoleReplicaSyncController(kubeClientSet kubernetes.Interface, modelServi
 		},
 	})
 
-	modelServingInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = modelServingInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			c.enqueueModelServing(obj)
 		},
@@ -182,7 +184,7 @@ func (c *RoleReplicaSyncController) enqueueModelServing(obj interface{}) {
 			return
 		}
 	}
-	
+
 	// Enqueue all related RoleReplicas
 	rrs, err := c.roleReplicaLister.ModelServingRoleReplicas(ms.Namespace).List(labels.Everything())
 	if err == nil {
@@ -252,7 +254,7 @@ func (c *RoleReplicaSyncController) syncHandler(ctx context.Context, key string)
 	}
 
 	// Sync ModelServing -> RoleReplica Status
-	selector := fmt.Sprintf("workload.serving.volcano.sh/model-serving-name=%s,workload.serving.volcano.sh/role-name=%s", ms.Name, rr.Spec.RoleName)
+	selector := fmt.Sprintf("%s=%s,%s=%s", workloadv1alpha1.ModelServingNameLabelKey, ms.Name, workloadv1alpha1.RoleLabelKey, rr.Spec.RoleName)
 	if rr.Status.Replicas != msRoleReplicas || rr.Status.LabelSelector != selector {
 		rrCopy := rr.DeepCopy()
 		rrCopy.Status.Replicas = msRoleReplicas
