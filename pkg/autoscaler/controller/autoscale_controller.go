@@ -463,22 +463,22 @@ func resolveSyncPolicy(policy *workload.AutoscalingPolicy) syncPeriods {
 		}
 	}
 	return syncPeriods{
-		syncPeriod:      applyOrDefault(sp.DefaultPeriod, util.DefaultSyncPeriodSeconds),
-		scaleUpPeriod:   applyOrDefault(sp.ScaleUpPeriod, util.ScaleUpSyncPeriodSeconds),
-		scaleDownPeriod: applyOrDefault(sp.ScaleDownPeriod, util.ScaleDownSyncPeriodSeconds),
+		syncPeriod:      applyOrDefault("defaultPeriod", policy, sp.DefaultPeriod, util.DefaultSyncPeriodSeconds),
+		scaleUpPeriod:   applyOrDefault("scaleUpPeriod", policy, sp.ScaleUpPeriod, util.ScaleUpSyncPeriodSeconds),
+		scaleDownPeriod: applyOrDefault("scaleDownPeriod", policy, sp.ScaleDownPeriod, util.ScaleDownSyncPeriodSeconds),
 	}
 }
 
 // applyOrDefault returns the duration from d if set and >= minReconcileInterval,
 // clamps to minReconcileInterval if set but below the floor (logged as warning),
 // or falls back to defaultSeconds when nil.
-func applyOrDefault(d *metav1.Duration, defaultSeconds int) time.Duration {
+func applyOrDefault(field string, policy *workload.AutoscalingPolicy, d *metav1.Duration, defaultSeconds int) time.Duration {
 	def := time.Duration(defaultSeconds) * time.Second
 	if d == nil {
 		return def
 	}
 	if d.Duration < minReconcileInterval {
-		klog.Warningf("syncPolicy duration %v is below minimum %v, clamping to %v", d.Duration, minReconcileInterval, minReconcileInterval)
+		klog.Warningf("syncPolicy.%s %v in policy %s/%s is below minimum %v, clamping to %v", field, d.Duration, policy.Namespace, policy.Name, minReconcileInterval, minReconcileInterval)
 		return minReconcileInterval
 	}
 	return d.Duration
