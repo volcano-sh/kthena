@@ -343,16 +343,21 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 		klog.Errorf("failed to do optimize, err: %v", err)
 		return 0, err
 	}
-	// Compute direction — compare only targets that exist in both
-	// replicasMap and recommendedInstances, matching the update loop below.
-	var currentSum, recommendedSum int64
+	// Compute direction — any scale-up wins so that an urgent
+	// increase is never masked by a concurrent decrease.
+	var direction int64
 	for name, current := range replicasMap {
 		if recommended, ok := recommendedInstances[name]; ok {
-			currentSum += int64(current)
-			recommendedSum += int64(recommended)
+			delta := int64(recommended) - int64(current)
+			if delta > 0 {
+				direction = 1
+				break
+			}
+			if delta < 0 {
+				direction = -1
+			}
 		}
 	}
-	direction := recommendedSum - currentSum
 
 	// Do update replicas
 	for _, param := range optimizer.Meta.Config.Params {

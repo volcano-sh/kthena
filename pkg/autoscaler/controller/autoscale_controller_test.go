@@ -935,12 +935,12 @@ func TestNextIntervalAggregation(t *testing.T) {
 		{
 			name:       "mixed directions picks scale up interval",
 			directions: []int64{3, -2, 1},
-			wantMin:    defaultUp, // min of (5s, 30s, 5s) = 5s
+			wantMin:    defaultUp, // any scale-up present → scaleUpPeriod
 		},
 		{
 			name:       "all scale down picks scale down interval",
 			directions: []int64{-1, -3},
-			wantMin:    defaultDown, // min(MaxInt64, 30s, 30s) = 30s
+			wantMin:    defaultDown, // only scale-down present → scaleDownPeriod
 		},
 		{
 			name:       "all stable picks default interval",
