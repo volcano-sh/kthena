@@ -328,13 +328,14 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 		klog.Errorf("failed to do optimize, err: %v", err)
 		return 0, err
 	}
-	// Compute direction
+	// Compute direction — compare only targets that exist in both
+	// replicasMap and recommendedInstances, matching the update loop below.
 	var currentSum, recommendedSum int32
-	for _, v := range replicasMap {
-		currentSum += v
-	}
-	for _, v := range recommendedInstances {
-		recommendedSum += v
+	for name, current := range replicasMap {
+		if recommended, ok := recommendedInstances[name]; ok {
+			currentSum += current
+			recommendedSum += recommended
+		}
 	}
 	direction := int(recommendedSum - currentSum)
 
