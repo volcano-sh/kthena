@@ -138,6 +138,11 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) time.Duration {
 	klog.V(4).Info("start to reconcile")
 	ctx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
+	// Check if the parent context (controller shutdown) is already cancelled
+	// before doing work, so we don't start a reconcile during shutdown.
+	if ctx.Err() != nil {
+		return util.DefaultSyncPeriodSeconds * time.Second
+	}
 	bindings, err := ac.autoscalingPoliciesBindingLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list autoscaling policy bindings, err: %v", err)
