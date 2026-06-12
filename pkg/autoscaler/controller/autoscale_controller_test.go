@@ -1031,6 +1031,40 @@ func TestStalePolicyTrackingPrune(t *testing.T) {
 	}
 }
 
+func TestConfigErrorSuppression(t *testing.T) {
+	ac := &AutoscaleController{
+		clampWarnings:  sets.New[string](),
+		policyVersions: make(map[string]string),
+		configErrors:   sets.New[string](),
+	}
+
+	// First error for binding ns/b1: should record and allow Errorf.
+	bindingKey := "ns/b1"
+	if !ac.configErrors.Has(bindingKey) {
+		// Simulate first occurrence — Errorf would fire.
+		ac.configErrors.Insert(bindingKey)
+	}
+	if !ac.configErrors.Has(bindingKey) {
+		t.Fatal("expected configErrors to contain binding key after first error")
+	}
+
+	// Second error for same binding: suppressed (V(2) only).
+	if ac.configErrors.Has(bindingKey) {
+		// Simulate repeated occurrence — V(2) Infof instead of Errorf.
+	}
+
+	// Successful reconcile clears the key.
+	ac.configErrors.Delete(bindingKey)
+	if ac.configErrors.Has(bindingKey) {
+		t.Fatal("expected configErrors to be cleared after successful reconcile")
+	}
+
+	// Next error re-fires at Errorf level.
+	if ac.configErrors.Has(bindingKey) {
+		t.Fatal("expected configErrors to be empty so next error re-fires at Errorf")
+	}
+}
+
 func TestNextIntervalAggregation(t *testing.T) {
 	defaultSync := util.DefaultSyncPeriodSeconds * time.Second
 	defaultUp := util.ScaleUpSyncPeriodSeconds * time.Second

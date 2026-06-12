@@ -61,6 +61,7 @@ type AutoscaleController struct {
 	optimizerMap                       map[string]*autoscaler.Optimizer
 	clampWarnings                      sets.Set[string]
 	policyVersions                     map[string]string
+	configErrors                       sets.Set[string]
 }
 
 func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
@@ -95,6 +96,7 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 		optimizerMap:                       make(map[string]*autoscaler.Optimizer),
 		clampWarnings:                      sets.New[string](),
 		policyVersions:                     make(map[string]string),
+		configErrors:                       sets.New[string](),
 	}
 	return ac
 }
@@ -148,8 +150,11 @@ func (ac *AutoscaleController) reconcileWithCrashProtection(ctx context.Context)
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
+// It delegates to reconcileWithCrashProtection so that panics inside
+// reconcileOnce are caught by utilruntime.HandleCrash, matching the
+// protection that wait.Until provided before the switch to a manual timer.
 func (ac *AutoscaleController) Reconcile(ctx context.Context) {
-	ac.reconcileOnce(ctx)
+	ac.reconcileWithCrashProtection(ctx)
 }
 
 // reconcileOnce performs a single reconciliation pass and returns the minimum
@@ -203,6 +208,19 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 		}
 	}
 
+	// Build set of active binding keys for cleanup.
+	activeBindings := sets.New[string]()
+	for _, binding := range bindings {
+		activeBindings.Insert(fmt.Sprintf("%s/%s", binding.Namespace, binding.Name))
+	}
+
+	// Prune stale config error entries.
+	for key := range ac.configErrors {
+		if !activeBindings.Has(key) {
+			ac.configErrors.Delete(key)
+		}
+	}
+
 	// Prune stale policy tracking entries.
 	for key := range ac.policyVersions {
 		if !activePolicies.Has(key) {
@@ -222,9 +240,17 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 	for _, binding := range bindings {
 		dir, periods, err := ac.schedule(ctx, binding)
 		if err != nil {
-			klog.Errorf("failed to process autoscale for binding %s, err: %v", klog.KObj(binding), err)
+			bindingKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Name)
+			if ac.configErrors.Has(bindingKey) {
+				klog.V(2).Infof("repeated config error for binding %s, err: %v", klog.KObj(binding), err)
+			} else {
+				klog.Errorf("failed to process autoscale for binding %s, err: %v", klog.KObj(binding), err)
+				ac.configErrors.Insert(bindingKey)
+			}
 			continue
 		}
+		bindingKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Name)
+		ac.configErrors.Delete(bindingKey)
 		interval := nextInterval(dir, periods)
 		if !hasValidInterval || interval < minInterval {
 			minInterval = interval
@@ -339,7 +365,7 @@ func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.A
 		}
 		return dir, periods, nil
 	} else {
-		return 0, syncPeriods{}, fmt.Errorf("binding %s has no homogeneousTarget or heterogeneousTarget", binding.Name)
+		return 0, syncPeriods{}, fmt.Errorf("binding %s has no homogeneousTarget or heterogeneousTarget", klog.KObj(binding))
 	}
 }
 
