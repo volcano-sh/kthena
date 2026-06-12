@@ -69,9 +69,6 @@ case "${TEST_CATEGORY}" in
   router)
     echo "Router tests: no additional CRDs needed"
     ;;
-  router-plugins)
-    echo "Router plugin tests: no additional CRDs needed"
-    ;;
   all|*)
     echo "Start to install Gateway API CRDs"
     kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml

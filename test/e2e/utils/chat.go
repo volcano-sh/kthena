@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -261,6 +263,92 @@ func NewChatMessage(role, content string) ChatMessage {
 }
 func SendChatRequest(t *testing.T, modelName string, messages []ChatMessage) *http.Response {
 	return SendChatRequestWithURL(t, DefaultRouterURL, modelName, messages)
+}
+
+// SendRouterChatRequests sends count chat requests to the router and requires HTTP 200 for each.
+func SendRouterChatRequests(t *testing.T, routerChatURL, modelName, prompt string, count int) {
+	t.Helper()
+	messages := []ChatMessage{NewChatMessage("user", prompt)}
+	for i := 0; i < count; i++ {
+		resp := SendChatRequestWithRetryQuiet(t, routerChatURL, modelName, messages, nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+}
+
+// DirectChatToPod sends count streaming chat requests directly to a pod via port-forward.
+func DirectChatToPod(t *testing.T, pod corev1.Pod, model, prompt string, count int) {
+	t.Helper()
+	localPort := AllocateLocalPort(t)
+	pf, err := SetupPortForwardToPod(pod.Namespace, pod.Name, localPort, "8000")
+	require.NoError(t, err)
+	defer pf.Close()
+
+	url := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", localPort)
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":      model,
+		"messages":   []map[string]string{{"role": "user", "content": prompt}},
+		"max_tokens": 32,
+		"stream":     true,
+	})
+	client := &http.Client{Timeout: 30 * time.Second}
+	for i := 0; i < count; i++ {
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+}
+
+// StartSustainedLongRequestsToPod keeps concurrent long requests on one pod via port-forward.
+// Traffic bypasses the router and raises engine waiting for scheduler Filter plugins.
+func StartSustainedLongRequestsToPod(t *testing.T, pod corev1.Pod, model, prompt string, concurrency, maxTokens int) func() {
+	t.Helper()
+	localPort := AllocateLocalPort(t)
+	pf, err := SetupPortForwardToPod(pod.Namespace, pod.Name, localPort, "8000")
+	require.NoError(t, err)
+
+	url := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", localPort)
+	body, err := json.Marshal(map[string]interface{}{
+		"model":      model,
+		"messages":   []map[string]string{{"role": "user", "content": prompt}},
+		"max_tokens": maxTokens,
+		"stream":     true,
+	})
+	require.NoError(t, err)
+
+	client := &http.Client{Timeout: 2 * time.Minute}
+	ctx, cancel := context.WithCancel(context.Background())
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+				if err != nil {
+					continue
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := client.Do(req)
+				if resp != nil {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
+				if err != nil && ctx.Err() != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	return func() {
+		cancel()
+		pf.Close()
+	}
 }
 
 func SendChatRequestWithURL(t *testing.T, url string, modelName string, messages []ChatMessage) *http.Response {

@@ -14,16 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package routerplugins
+package router
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
-	plugincontext "github.com/volcano-sh/kthena/test/e2e/router-plugins/context"
+	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -31,18 +32,18 @@ import (
 // TestSchedulerPluginPrefixCache verifies repeated prompts stick to one pod after warmup.
 func TestSchedulerPluginPrefixCache(t *testing.T) {
 	ctx := context.Background()
-	chatURL, metricsURL, restoreCfg := applySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyPrefixCache)
+	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyPrefixCache, plugincontext.ModelServerName, plugincontext.ModelName)
 	t.Cleanup(restoreCfg)
 
-	route := deployModelRouteFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelRoute-plugins.yaml")
+	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins.yaml")
 	prompt := "kthena-router-plugin-e2e-fixed-prompt-prefix-cache"
 
-	sendRouterChatRequests(t, chatURL, route.Spec.ModelName, prompt, 30)
+	utils.SendRouterChatRequests(t, chatURL, route.Spec.ModelName, prompt, 30)
 	time.Sleep(2 * time.Second)
 
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, route.Spec.ModelName, prompt, 200)
+	utils.SendRouterChatRequests(t, chatURL, route.Spec.ModelName, prompt, 200)
 	time.Sleep(2 * time.Second)
 
 	maxCount := 0
@@ -62,43 +63,43 @@ func TestSchedulerPluginPrefixCache(t *testing.T) {
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.PrefixCachePluginName, "score")
 }
 
-// TestSchedulerPluginLeastRequest verifies least-request Filter avoids a saturated replica.
-// Two identical fast backends: sustain load via direct port-forward on one pod (raises engine
-// waiting, does not touch router access logs), then router probe traffic should land on the
-// idle replica only.
+// TestSchedulerPluginLeastRequest verifies least-request Filter avoids saturated replicas.
+// Three fast backends: sustain load on two pods (raises engine waiting), leave one idle,
+// then router probe traffic should land on the idle replica only.
 func TestSchedulerPluginLeastRequest(t *testing.T) {
 	ctx := context.Background()
-	restoreReplicas := utils.ScaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 2)
-	t.Cleanup(restoreReplicas)
-
-	chatURL, metricsURL, restoreCfg := applySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLeastRequest)
+	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLeastRequest, plugincontext.ModelServerName, plugincontext.ModelName)
 	t.Cleanup(restoreCfg)
 
-	route := deployModelRouteFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelRoute-plugins.yaml")
+	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins.yaml")
 	model := route.Spec.ModelName
 
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
-	require.Len(t, pods, 2, "least-request test needs exactly 2 identical mock pods")
-	busyPod, idlePod := pods[0], pods[1]
+	require.Len(t, pods, pluginMockReplicaCount, "least-request test needs %d mock pods", pluginMockReplicaCount)
+	busyPods := pods[:pluginMockReplicaCount-1]
+	idlePod := pods[pluginMockReplicaCount-1]
 
-	stopLoad := startSustainedLongRequestsToPod(t, busyPod, model, "kthena-router-plugin-e2e-fixed-prompt-least-request-busy-load", 20, 128)
-	t.Cleanup(stopLoad)
-	waitForLeastRequestLoadSeparation(t, testCtx.KubeClient, kthenaNamespace, busyPod, idlePod, leastRequestMaxWaitingRequests)
+	for i, busyPod := range busyPods {
+		stopLoad := utils.StartSustainedLongRequestsToPod(t, busyPod, model,
+			fmt.Sprintf("kthena-router-plugin-e2e-fixed-prompt-least-request-busy-load-%d", i), 20, 128)
+		t.Cleanup(stopLoad)
+	}
+	waitForLeastRequestLoadSeparation(t, testCtx.KubeClient, kthenaNamespace, busyPods, idlePod, leastRequestMaxWaitingRequests)
 
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-least-request-route", 200)
+	utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-least-request-route", 200)
 	time.Sleep(2 * time.Second)
 
-	busyCount := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, busyPod.Name, since)
+	busyCount := utils.CountSelectedPodsInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, since, busyPods)
 	idleCount := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, idlePod.Name, since)
 	routed := busyCount + idleCount
-	t.Logf("least-request: busy pod %s %d, idle pod %s %d (of %d log lines)", busyPod.Name, busyCount, idlePod.Name, idleCount, routed)
+	t.Logf("least-request: busy pool %d, idle pod %s %d (of %d log lines)", busyCount, idlePod.Name, idleCount, routed)
 	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
-	require.Greater(t, idleCount, busyCount, "least-request should prefer the idle pod over the saturated pod")
+	require.Greater(t, idleCount, busyCount, "least-request should prefer the idle pod over saturated pods")
 	require.GreaterOrEqual(t, float64(idleCount)/float64(routed), 0.9,
 		"least-request should route at least 90%% to the idle pod")
 	require.LessOrEqual(t, float64(busyCount)/float64(routed), 0.1,
-		"least-request should route at most 10%% to the saturated pod")
+		"least-request should route at most 10%% to saturated pods")
 
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.LeastRequestPluginName, "score")
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.LeastRequestPluginName, "filter")
@@ -108,31 +109,30 @@ func TestSchedulerPluginLeastRequest(t *testing.T) {
 // backend when both pools are idle and scored by observed TTFT/TPOT only.
 func TestSchedulerPluginLeastLatency(t *testing.T) {
 	ctx := context.Background()
-	restoreFastReplicas := utils.ScaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 1)
-	t.Cleanup(restoreFastReplicas)
+
+	fastPods := utils.ListReadyPodsByLabel(t, testCtx.KubeClient, testNamespace, "app="+plugincontext.AppLabel)
+	require.Len(t, fastPods, pluginMockReplicaCount, "fast mock pool")
 
 	deploySlowLatencyMockStack(t, testCtx.KubeClient, testNamespace)
-	_ = deployModelServerFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelServer-plugins-mixed.yaml")
+	_ = utils.CreateModelServerFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelServer-plugins-mixed.yaml")
 
-	chatURL, metricsURL, restoreCfg := applySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLeastLatency)
+	slowPods := utils.ListReadyPodsByLabel(t, testCtx.KubeClient, testNamespace, "app="+plugincontext.SlowMockAppLabel)
+	require.Len(t, slowPods, 1, "slow mock pool")
+
+	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLeastLatency, plugincontext.ModelServerName, plugincontext.ModelName)
 	t.Cleanup(restoreCfg)
 
-	route := deployModelRouteFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelRoute-plugins-latency.yaml")
+	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins-latency.yaml")
 	model := route.Spec.ModelName
-
-	fastPods := listReadyPodsByApp(t, testCtx.KubeClient, testNamespace, plugincontext.AppLabel)
-	slowPods := listReadyPodsByApp(t, testCtx.KubeClient, testNamespace, plugincontext.SlowMockAppLabel)
-	require.Len(t, fastPods, 1, "fast mock pool")
-	require.Len(t, slowPods, 1, "slow mock pool")
 
 	// Prime both backends while idle so the router records TTFT/TPOT; do not saturate either pool.
 	const primeRequests = 40
-	directChatToPod(t, fastPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-fast-prime", primeRequests)
-	directChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", primeRequests)
+	utils.DirectChatToPod(t, fastPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-fast-prime", primeRequests)
+	utils.DirectChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", primeRequests)
 	time.Sleep(3 * time.Second)
 
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-latency-route", 200)
+	utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-latency-route", 200)
 	time.Sleep(2 * time.Second)
 
 	fastCount := utils.CountSelectedPodsInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, since, fastPods)
@@ -152,15 +152,12 @@ func TestSchedulerPluginLeastLatency(t *testing.T) {
 // TestSchedulerPluginLoraAffinity verifies lora-affinity filters to pods that list the adapter in /v1/models.
 func TestSchedulerPluginLoraAffinity(t *testing.T) {
 	ctx := context.Background()
-	restoreReplicas := utils.ScaleDeploymentReplicas(t, testCtx.KubeClient, testNamespace, plugincontext.DeploymentName, 2)
-	t.Cleanup(restoreReplicas)
-
-	chatURL, metricsURL, restoreCfg := applySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLoraAffinity)
+	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyLoraAffinity, plugincontext.ModelServerName, plugincontext.ModelName)
 	t.Cleanup(restoreCfg)
 
-	_ = deployModelRouteFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelRoute-plugins-lora.yaml")
+	_ = utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins-lora.yaml")
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
-	require.Len(t, pods, 2, "lora test needs exactly 2 mock pods")
+	require.Len(t, pods, pluginMockReplicaCount, "lora test needs %d mock pods", pluginMockReplicaCount)
 
 	loadedPod := pods[0]
 	utils.LoadLoRAAdapterOnPod(t, loadedPod, "lora-A", "/models/lora-A")
@@ -168,7 +165,7 @@ func TestSchedulerPluginLoraAffinity(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, "lora-A", "kthena-router-plugin-e2e-fixed-prompt-lora-affinity", 200)
+	utils.SendRouterChatRequests(t, chatURL, "lora-A", "kthena-router-plugin-e2e-fixed-prompt-lora-affinity", 200)
 	time.Sleep(2 * time.Second)
 
 	loadedCount := 0
@@ -195,16 +192,16 @@ func TestSchedulerPluginLoraAffinity(t *testing.T) {
 // TestSchedulerPluginRandom verifies random score plugin is active.
 func TestSchedulerPluginRandom(t *testing.T) {
 	ctx := context.Background()
-	chatURL, metricsURL, restoreCfg := applySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyRandom)
+	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyRandom, plugincontext.ModelServerName, plugincontext.ModelName)
 	t.Cleanup(restoreCfg)
 
-	route := deployModelRouteFromFile(t, ctx, testCtx.KthenaClient, testNamespace, "ModelRoute-plugins.yaml")
+	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins.yaml")
 	model := route.Spec.ModelName
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
-	require.Len(t, pods, 3, "random test needs 3 mock pods")
+	require.Len(t, pods, pluginMockReplicaCount, "random test needs %d mock pods", pluginMockReplicaCount)
 
 	since := metav1.NewTime(time.Now())
-	sendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-random", 200)
+	utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-random", 200)
 	time.Sleep(2 * time.Second)
 
 	counts := make([]int, len(pods))

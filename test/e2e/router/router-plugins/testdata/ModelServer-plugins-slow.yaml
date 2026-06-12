@@ -1,16 +1,12 @@
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:
-  name: router-plugin-mock-mixed
+  name: router-plugin-mock-slow
   namespace: default
 spec:
   workloadSelector:
-    matchExpressions:
-      - key: app
-        operator: In
-        values:
-          - router-plugin-mock
-          - router-plugin-mock-slow
+    matchLabels:
+      app: router-plugin-mock-slow
   workloadPort:
     port: 8000
   model: "router-plugin-model"

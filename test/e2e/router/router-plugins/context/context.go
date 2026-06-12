@@ -38,10 +38,11 @@ const (
 	ModelServerName = "router-plugin-mock"
 	ModelName       = "router-plugin-model"
 	AppLabel        = "router-plugin-mock"
-	TestDataDir     = "test/e2e/router-plugins/testdata"
+	TestDataDir     = "test/e2e/router/router-plugins/testdata"
 
 	SlowMockDeploymentName = "router-plugin-mock-slow"
 	SlowMockAppLabel       = "router-plugin-mock-slow"
+	SlowModelServerName    = "router-plugin-mock-slow"
 )
 
 // PluginTestContext holds clients for router plugin e2e tests.

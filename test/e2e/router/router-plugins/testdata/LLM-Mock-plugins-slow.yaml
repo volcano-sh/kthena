@@ -1,17 +1,18 @@
-# Mock vLLM backends for router scheduler plugin e2e tests.
+# High-latency mock backend for least-latency e2e (contrasts with LLM-Mock-plugins.yaml).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: router-plugin-mock
+  name: router-plugin-mock-slow
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
-      app: router-plugin-mock
+      app: router-plugin-mock-slow
   template:
     metadata:
       labels:
-        app: router-plugin-mock
+        app: router-plugin-mock-slow
+        router-plugin-pool: latency
     spec:
       containers:
         - name: llm-engine
@@ -22,8 +23,8 @@ spec:
             - --served-model-name=router-plugin-model
             - --port=8000
             - --mode=echo
-            - --time-to-first-token=50ms
-            - --inter-token-latency=10ms
+            - --time-to-first-token=5s
+            - --inter-token-latency=80ms
           ports:
             - containerPort: 8000
           readinessProbe:

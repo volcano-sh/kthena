@@ -27,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
@@ -68,45 +67,6 @@ type pdDisaggregationFixtures struct {
 	modelServing string
 	modelServer  string
 	modelRoute   string
-}
-
-func getCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
-	mf, ok := metrics[metricName]
-	if !ok {
-		return 0
-	}
-	for _, m := range mf.GetMetric() {
-		if matchLabels(m.GetLabel(), labels) {
-			return m.GetCounter().GetValue()
-		}
-	}
-	return 0
-}
-
-func getHistogramCount(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) uint64 {
-	mf, ok := metrics[metricName]
-	if !ok {
-		return 0
-	}
-	for _, m := range mf.GetMetric() {
-		if matchLabels(m.GetLabel(), labels) {
-			return m.GetHistogram().GetSampleCount()
-		}
-	}
-	return 0
-}
-
-func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bool {
-	labelMap := make(map[string]string)
-	for _, lp := range metricLabels {
-		labelMap[lp.GetName()] = lp.GetValue()
-	}
-	for k, v := range wantLabels {
-		if labelMap[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // WaitForKthenaRouterValidatingWebhook polls until a DryRun ModelRoute create reaches the
@@ -1415,8 +1375,8 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 		baselineMetrics, err := backendmetrics.ParseMetricsURL(defaultMetricsURL)
 		require.NoError(t, err, "Failed to fetch baseline metrics")
 
-		baselineRequestCount := getCounterValue(baselineMetrics, "kthena_router_requests_total", labels)
-		baselineLatencyCount := getHistogramCount(baselineMetrics, "kthena_router_request_duration_seconds", labels)
+		baselineRequestCount := utils.GetCounterValue(baselineMetrics, "kthena_router_requests_total", labels)
+		baselineLatencyCount := utils.GetHistogramCount(baselineMetrics, "kthena_router_request_duration_seconds", labels)
 
 		// Send requests
 		for range 3 {
@@ -1434,8 +1394,8 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 				return false
 			}
 
-			currentRequestCount := getCounterValue(currentMetrics, "kthena_router_requests_total", labels)
-			currentLatencyCount := getHistogramCount(currentMetrics, "kthena_router_request_duration_seconds", labels)
+			currentRequestCount := utils.GetCounterValue(currentMetrics, "kthena_router_requests_total", labels)
+			currentLatencyCount := utils.GetHistogramCount(currentMetrics, "kthena_router_request_duration_seconds", labels)
 
 			requestDelta := currentRequestCount - baselineRequestCount
 			latencyDelta := currentLatencyCount - baselineLatencyCount
@@ -1459,7 +1419,7 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 		baselineMetrics, err := backendmetrics.ParseMetricsURL(defaultMetricsURL)
 		require.NoError(t, err, "Failed to fetch baseline metrics")
 
-		baselineErrorCount := getCounterValue(baselineMetrics, "kthena_router_requests_total", labels)
+		baselineErrorCount := utils.GetCounterValue(baselineMetrics, "kthena_router_requests_total", labels)
 
 		resp := utils.SendChatRequest(t, nonExistentModel, messages)
 		defer resp.Body.Close()
@@ -1471,7 +1431,7 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 				return false
 			}
 
-			currentErrorCount := getCounterValue(currentMetrics, "kthena_router_requests_total", labels)
+			currentErrorCount := utils.GetCounterValue(currentMetrics, "kthena_router_requests_total", labels)
 			errorDelta := currentErrorCount - baselineErrorCount
 
 			t.Logf("Error count: baseline=%.0f, current=%.0f, difference=%.0f (expected 1)",
@@ -1573,8 +1533,8 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 		baselineMetrics, err := backendmetrics.ParseMetricsURL(defaultMetricsURL)
 		require.NoError(t, err, "Failed to fetch baseline metrics")
 
-		baselineRateLimitCount := getCounterValue(baselineMetrics, "kthena_router_rate_limit_exceeded_total", rateLimitLabels)
-		baselineRequestCount := getCounterValue(baselineMetrics, "kthena_router_requests_total", requestLabels)
+		baselineRateLimitCount := utils.GetCounterValue(baselineMetrics, "kthena_router_rate_limit_exceeded_total", rateLimitLabels)
+		baselineRequestCount := utils.GetCounterValue(baselineMetrics, "kthena_router_requests_total", requestLabels)
 
 		// First request with retry to ensure route is ready
 		utils.CheckChatCompletions(t, modelName, messages)
@@ -1601,8 +1561,8 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 				return false
 			}
 
-			currentRateLimitCount := getCounterValue(currentMetrics, "kthena_router_rate_limit_exceeded_total", rateLimitLabels)
-			currentRequestCount := getCounterValue(currentMetrics, "kthena_router_requests_total", requestLabels)
+			currentRateLimitCount := utils.GetCounterValue(currentMetrics, "kthena_router_rate_limit_exceeded_total", rateLimitLabels)
+			currentRequestCount := utils.GetCounterValue(currentMetrics, "kthena_router_requests_total", requestLabels)
 
 			rateLimitDelta := currentRateLimitCount - baselineRateLimitCount
 			requestDelta := currentRequestCount - baselineRequestCount
@@ -1762,7 +1722,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 			if err != nil {
 				return false
 			}
-			activeCount := getHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
+			activeCount := utils.GetHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
 				"plugin": plugins.LeastRequestPluginName,
 				"type":   "score",
 			})
@@ -1774,7 +1734,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 
 		// Removed plugins should not appear in fresh metrics after restart.
 		for _, removedPlugin := range []string{plugins.PrefixCachePluginName, plugins.GPUCacheUsagePluginName, plugins.LeastLatencyPluginName} {
-			count := getHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
+			count := utils.GetHistogramCount(metricsData, "kthena_router_scheduler_plugin_duration_seconds", map[string]string{
 				"plugin": removedPlugin,
 				"type":   "score",
 			})
