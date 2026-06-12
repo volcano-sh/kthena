@@ -460,7 +460,7 @@ func applyOrDefault(d *metav1.Duration, defaultSeconds int) time.Duration {
 		return def
 	}
 	if d.Duration < minReconcileInterval {
-		klog.Warningf("syncPolicy duration %v is below minimum %v, clamping to %v", d.Duration, minReconcileInterval, minReconcileInterval)
+		klog.V(2).Infof("syncPolicy duration %v is below minimum %v, clamping to %v", d.Duration, minReconcileInterval, minReconcileInterval)
 		return minReconcileInterval
 	}
 	return d.Duration
