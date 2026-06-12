@@ -26,7 +26,6 @@ rules:
   - apiGroups:
       - workload.serving.volcano.sh
     resources:
-      - autoscalingpolicybindings
       - autoscalingpolicies
     verbs:
       - get
@@ -38,7 +37,6 @@ rules:
       - workload.serving.volcano.sh
     resources:
       - autoscalingpolicies/status
-      - autoscalingpolicybindings/status
     verbs:
       - create
       - get

@@ -11,6 +11,20 @@ spec:
   metrics:
     - name: sglang:kv_available_tokens
       targetValue: "1000000000000000"
+  homogeneousTarget:
+    minReplicas: 1
+    maxReplicas: 5
+    target:
+      targetRef:
+        kind: ModelServing
+        name: autoscale-policy-lifecycle-ms
+      metricSources:
+        sglang:token_usage:
+          type: Pod
+          pod:
+            name: sglang:token_usage
+            port: 30000
+            uri: /metrics
   behavior:
     scaleDown:
       period: 5s

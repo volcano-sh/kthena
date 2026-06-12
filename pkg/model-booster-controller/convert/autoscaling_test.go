@@ -21,33 +21,10 @@ import (
 	"testing"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/yaml"
 )
-
-func TestBuildScalingPolicyBinding(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    *workload.ModelBooster
-		expected *workload.AutoscalingPolicyBinding
-	}{
-		{
-			name:     "simple backend",
-			input:    loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
-			expected: loadYaml[workload.AutoscalingPolicyBinding](t, "testdata/expected/scaling-asp-binding.yaml"),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			backend := tt.input.Spec.Backend
-			got := BuildScalingPolicyBinding(tt.input, &backend, utils.GetBackendResourceName(tt.input.Name, backend.Name))
-			tt.expected.Labels = got.Labels
-			assert.Equal(t, tt.expected, got)
-		})
-	}
-}
 
 func TestBuildAutoscalingPolicy(t *testing.T) {
 	tests := []struct {
@@ -64,7 +41,7 @@ func TestBuildAutoscalingPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.input.Spec.AutoscalingPolicy != nil {
-				got := BuildAutoscalingPolicy(tt.input.Spec.AutoscalingPolicy, tt.input, "")
+				got := BuildAutoscalingPolicy(tt.input.Spec.AutoscalingPolicy, tt.input)
 				tt.expected.Labels = got.Labels
 				assert.Equal(t, tt.expected, got)
 			}

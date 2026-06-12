@@ -47,23 +47,24 @@ func TestReconcile(t *testing.T) {
 	// Load test data
 	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
 
-	// Case1: Create a model with ASP, and then model serving, model server, model route, ASP, ASP binding should be created.
+	// Case1: Create a model with ASP, and then model serving, model server, model route, ASP should be created.
 	// Step1. Create model
 	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	assert.NotNil(t, createdModel)
-	// Step2. Check that ASP, ASP binding, model serving, model server, model route are created
+	// Step2. Check that ASP, model serving, model server, model route are created
 	assert.True(t, waitForCondition(func() bool {
-		aspBindings, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(model.Namespace).List(ctx, metav1.ListOptions{})
+		aspList, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(model.Namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false
 		}
-		return len(aspBindings.Items) == 1
+		return len(aspList.Items) == 1
 	}))
 	// ASP should be created
 	aspList, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(model.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
 	assert.Len(t, aspList.Items, 1, "Expected 1 AutoscalingPolicy to be created")
+	assert.NotNil(t, aspList.Items[0].Spec.HomogeneousTarget, "Expected AutoscalingPolicy to have a HomogeneousTarget")
 	// model serving should be created
 	modelServingList, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
@@ -129,7 +130,6 @@ func TestReconcile_ReturnsError(t *testing.T) {
 	go controller.modelsInformer.RunWithContext(ctx)
 	go controller.modelServingInformer.RunWithContext(ctx)
 	go controller.autoscalingPoliciesInformer.RunWithContext(ctx)
-	go controller.autoscalingPolicyBindingsInformer.RunWithContext(ctx)
 	// Case1: Invalid namespaceAndName
 	t.Run("InvalidNameSpaceAndName", func(t *testing.T) {
 		err := controller.reconcile(ctx, "//")
@@ -228,7 +228,6 @@ func waitForControllerCacheSync(controller *ModelBoosterController) bool {
 		return controller.modelsInformer.HasSynced() &&
 			controller.modelServingInformer.HasSynced() &&
 			controller.autoscalingPoliciesInformer.HasSynced() &&
-			controller.autoscalingPolicyBindingsInformer.HasSynced() &&
 			controller.podsInformer.HasSynced() &&
 			controller.modelServersInformer.HasSynced() &&
 			controller.modelRoutesInformer.HasSynced()

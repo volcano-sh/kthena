@@ -184,7 +184,6 @@ const sidebars: SidebarsConfig = {
               },
               items: [
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_autoscaling-policies', label: 'Get autoscaling-policies' },
-                { type: 'doc', id: 'reference/kthena-cli/kthena_get_autoscaling-policy-bindings', label: 'Get autoscaling-policy-bindings' },
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_model-boosters', label: 'Get model-boosters' },
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_model-servings', label: 'Get model-servings' },
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_template', label: 'Get template' },

@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
-	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	"github.com/volcano-sh/kthena/pkg/controller"
 	modelboosterwebhook "github.com/volcano-sh/kthena/pkg/model-booster-controller/webhook"
 	modelservingwebhook "github.com/volcano-sh/kthena/pkg/model-serving-controller/webhook"
@@ -145,12 +144,6 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 		return err
 	}
 
-	kthenaClient, err := clientset.NewForConfig(cfg)
-	if err != nil {
-		klog.Fatalf("failed to create kthenaClient: %v", err)
-		return err
-	}
-
 	// Secret -> File -> Generate precedence for CA bundle selection
 	namespace := getNamespace()
 	var caBundle []byte
@@ -193,12 +186,10 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	modelMutator := modelboosterwebhook.NewModelMutator()
 	autoscalingPolicyValidator := modelboosterwebhook.NewAutoscalingPolicyValidator()
 	autoscalingPolicyMutator := modelboosterwebhook.NewAutoscalingPolicyMutator()
-	autoscalingBindingValidator := modelboosterwebhook.NewAutoscalingBindingValidator(kthenaClient)
 	mux.HandleFunc("/validate/modelbooster", modelValidator.Handle)
 	mux.HandleFunc("/mutate/modelbooster", modelMutator.Handle)
 	mux.HandleFunc("/validate/autoscalingpolicy", autoscalingPolicyValidator.Handle)
 	mux.HandleFunc("/mutate/autoscalingpolicy", autoscalingPolicyMutator.Handle)
-	mux.HandleFunc("/validate/autoscalingpolicybinding", autoscalingBindingValidator.Handle)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

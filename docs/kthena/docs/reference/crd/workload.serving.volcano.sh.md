@@ -9,8 +9,6 @@
 
 ### Resource Types
 - [AutoscalingPolicy](#autoscalingpolicy)
-- [AutoscalingPolicyBinding](#autoscalingpolicybinding)
-- [AutoscalingPolicyBindingList](#autoscalingpolicybindinglist)
 - [AutoscalingPolicyList](#autoscalingpolicylist)
 - [ModelBooster](#modelbooster)
 - [ModelBoosterList](#modelboosterlist)
@@ -56,98 +54,6 @@ _Appears in:_
 | `scaleDown` _[AutoscalingPolicyStablePolicy](#autoscalingpolicystablepolicy)_ | ScaleDown defines the policy configuration for scaling down (decreasing replicas). |  |  |
 
 
-#### AutoscalingPolicyBinding
-
-
-
-AutoscalingPolicyBinding binds AutoscalingPolicy rules to specific ModelServing deployments.
-It enables either traditional metric-based scaling or multi-target optimization across heterogeneous hardware deployments.
-
-
-
-_Appears in:_
-- [AutoscalingPolicyBindingList](#autoscalingpolicybindinglist)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `apiVersion` _string_ | `workload.serving.volcano.sh/v1alpha1` | | |
-| `kind` _string_ | `AutoscalingPolicyBinding` | | |
-| `spec` _[AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)_ |  |  |  |
-| `status` _[AutoscalingPolicyBindingStatus](#autoscalingpolicybindingstatus)_ |  |  |  |
-
-
-#### AutoscalingPolicyBindingList
-
-
-
-AutoscalingPolicyBindingList contains a list of AutoscalingPolicyBinding objects.
-
-
-
-
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `apiVersion` _string_ | `workload.serving.volcano.sh/v1alpha1` | | |
-| `kind` _string_ | `AutoscalingPolicyBindingList` | | |
-| `items` _[AutoscalingPolicyBinding](#autoscalingpolicybinding) array_ |  |  |  |
-
-
-#### AutoscalingPolicyBindingSpec
-
-
-
-AutoscalingPolicyBindingSpec defines the desired state of AutoscalingPolicyBinding.
-
-Exactly one of HeterogeneousTarget or HomogeneousTarget must be set:
-  - HomogeneousTarget   -> scale a single ModelServing by metric targets.
-  - HeterogeneousTarget -> optimize replica distribution across several
-    ModelServing groups with different hardware/cost.
-
-Example (homogeneous, metric-based scaling):
-
-	spec:
-	  policyRef:
-	    name: podinfo-prom-policy
-	  homogeneousTarget:
-	    minReplicas: 1
-	    maxReplicas: 6
-	    target:
-	      targetRef:
-	        kind: ModelServing
-	        name: podinfo-ms
-	      metricSources:
-	        podinfo_rps:
-	          type: Prometheus
-	          prometheus:
-	            serverURL: http://prometheus.monitoring.svc:9090
-	            query: sum(rate(http_requests_total[2m]))
-
-
-
-_Appears in:_
-- [AutoscalingPolicyBinding](#autoscalingpolicybinding)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `policyRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | PolicyRef references the AutoscalingPolicy that defines the scaling rules and metrics. |  |  |
-| `heterogeneousTarget` _[HeterogeneousTarget](#heterogeneoustarget)_ | HeterogeneousTarget enables optimization-based scaling across multiple ModelServing deployments with different hardware capabilities.<br />This approach dynamically adjusts replica distribution across heterogeneous resources (e.g., H100/A100 GPUs) based on overall computing requirements. |  |  |
-| `homogeneousTarget` _[HomogeneousTarget](#homogeneoustarget)_ | HomogeneousTarget enables traditional metric-based scaling for a single ModelServing deployment.<br />This approach adjusts replica count based on monitoring metrics and their target values. |  |  |
-
-
-#### AutoscalingPolicyBindingStatus
-
-
-
-AutoscalingPolicyBindingStatus defines the observed state of AutoscalingPolicyBinding.
-
-
-
-_Appears in:_
-- [AutoscalingPolicyBinding](#autoscalingpolicybinding)
-
-
-
 #### AutoscalingPolicyList
 
 
@@ -175,6 +81,7 @@ AutoscalingPolicyMetric defines a metric and its target value for scaling decisi
 
 _Appears in:_
 - [AutoscalingPolicySpec](#autoscalingpolicyspec)
+- [RoleScalingParam](#rolescalingparam)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -222,6 +129,13 @@ _Appears in:_
 
 AutoscalingPolicySpec defines the desired state of AutoscalingPolicy.
 
+At most one of HomogeneousTarget, HeterogeneousTarget, or DisaggregatedTarget
+may be set. When the spec is used standalone (as an AutoscalingPolicy custom
+resource), exactly one target must be set; this is enforced by the
+autoscalingpolicy validating webhook rather than a CEL rule, because
+AutoscalingPolicySpec is also embedded into ModelBooster where the target is
+derived by the controller and therefore left unset by users.
+
 
 
 _Appears in:_
@@ -231,8 +145,11 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `tolerancePercent` _integer_ | TolerancePercent defines the percentage of deviation tolerated before scaling actions are triggered.<br />current_replicas represents the current number of instances, while target_replicas represents the expected number of instances calculated from monitoring metrics.<br />Scaling operations are performed only when \|current_replicas - target_replicas\| >= current_replicas * TolerancePercent / 100. | 10 | Maximum: 100 <br />Minimum: 0 <br /> |
-| `metrics` _[AutoscalingPolicyMetric](#autoscalingpolicymetric) array_ | Metrics defines the list of metrics used to evaluate scaling decisions. |  | MinItems: 1 <br /> |
+| `metrics` _[AutoscalingPolicyMetric](#autoscalingpolicymetric) array_ | Metrics defines the list of metrics used to evaluate scaling decisions.<br />This is the uniform metric list applied to all scalable units. For<br />DisaggregatedTarget, spec.metrics and per-role metrics are mutually<br />exclusive: set spec.metrics to scale every role on the same signals, or<br />set metrics on every role and leave spec.metrics empty. |  |  |
 | `behavior` _[AutoscalingPolicyBehavior](#autoscalingpolicybehavior)_ | Behavior defines the scaling behavior configuration for both scale up and scale down operations. |  |  |
+| `homogeneousTarget` _[HomogeneousTarget](#homogeneoustarget)_ | HomogeneousTarget enables traditional metric-based scaling for a single<br />ModelServing deployment (whole-deployment granularity). |  |  |
+| `heterogeneousTarget` _[HeterogeneousTarget](#heterogeneoustarget)_ | HeterogeneousTarget enables optimization-based scaling across multiple<br />ModelServing deployments with different hardware capabilities. |  |  |
+| `disaggregatedTarget` _[DisaggregatedTarget](#disaggregatedtarget)_ | DisaggregatedTarget enables coordinated autoscaling of roles within a<br />single ModelServing that uses disaggregated serving. |  |  |
 
 
 #### AutoscalingPolicyStablePolicy
@@ -265,8 +182,49 @@ AutoscalingPolicyStatus defines the observed state of AutoscalingPolicy.
 _Appears in:_
 - [AutoscalingPolicy](#autoscalingpolicy)
 
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
+| `homogeneousStatus` _[TargetScalingStatus](#targetscalingstatus)_ | HomogeneousStatus reports the observed state when HomogeneousTarget is used. |  |  |
+| `disaggregatedStatus` _[DisaggregatedScalingStatus](#disaggregatedscalingstatus)_ | DisaggregatedStatus reports the observed state when DisaggregatedTarget is used. |  |  |
+| `heterogeneousStatus` _[TargetScalingStatus](#targetscalingstatus) array_ | HeterogeneousStatus reports the per-target observed state when<br />HeterogeneousTarget is used. |  |  |
 
 
+#### DisaggregatedScalingStatus
+
+
+
+DisaggregatedScalingStatus reports the observed state of a DisaggregatedTarget.
+
+
+
+_Appears in:_
+- [AutoscalingPolicyStatus](#autoscalingpolicystatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `roles` _[TargetScalingStatus](#targetscalingstatus) array_ | Roles reports the observed scaling state per role. |  |  |
+| `ratioStatus` _[RoleRatioStatus](#roleratiostatus)_ | RatioStatus reports the observed value of the configured ratio constraint. |  |  |
+| `ratioAdjusted` _boolean_ | RatioAdjusted is true when the most recent reconcile had to override the<br />metric-derived replica counts to satisfy the ratio constraint. |  |  |
+
+
+#### DisaggregatedTarget
+
+
+
+DisaggregatedTarget defines coordinated autoscaling for disaggregated
+serving roles within a single ModelServing deployment.
+
+
+
+_Appears in:_
+- [AutoscalingPolicySpec](#autoscalingpolicyspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the ModelServing deployment that contains<br />all scalable roles. |  |  |
+| `roles` _object (keys:string, values:[RoleScalingParam](#rolescalingparam))_ | Roles defines per-role scaling parameters. The map key is roleName<br />from ModelServing.spec.template.roles[].name. |  | MinProperties: 2 <br /> |
+| `ratioConstraint` _[RoleRatioConstraint](#roleratioconstraint)_ | RatioConstraint defines the acceptable ratio range of a single role pair.<br />It enforces that replicas[numeratorRole] / replicas[denominatorRole] stays<br />within [minRatio, maxRatio] when denominator replica is non-zero. |  |  |
 
 
 #### GangPolicy
@@ -318,7 +276,7 @@ Example (split capacity between an H100 group and a cheaper A100 group):
 
 
 _Appears in:_
-- [AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)
+- [AutoscalingPolicySpec](#autoscalingpolicyspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -380,7 +338,7 @@ Example (scale podinfo-ms between 1 and 6 replicas based on RPS):
 
 
 _Appears in:_
-- [AutoscalingPolicyBindingSpec](#autoscalingpolicybindingspec)
+- [AutoscalingPolicySpec](#autoscalingpolicyspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -438,6 +396,7 @@ Example (read the metric from an external Prometheus server):
 
 
 _Appears in:_
+- [RoleScalingParam](#rolescalingparam)
 - [Target](#target)
 
 | Field | Description | Default | Validation |
@@ -852,6 +811,21 @@ _Appears in:_
 | `spec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#podspec-v1-core)_ | Specification of the desired behavior of the pod. |  |  |
 
 
+#### PrometheusAuth
+
+
+
+PrometheusAuth configures authentication when connecting to an external Prometheus server.
+
+NOTE: This struct describes the intended configuration surface. The runtime
+does not honor any of these fields yet; they are reserved for a follow-up
+implementation. Setting them today has no effect on Prometheus requests.
+
+
+
+_Appears in:_
+- [PrometheusMetricSource](#prometheusmetricsource)
+
 
 
 #### PrometheusMetricSource
@@ -919,6 +893,62 @@ _Appears in:_
 | `entryTemplate` _[PodTemplateSpec](#podtemplatespec)_ | EntryTemplate defines the template for the entry pod of a role.<br />Required: Currently, a role must have only one entry-pod. |  |  |
 | `workerReplicas` _integer_ | WorkerReplicas defines the number for the worker pod of a role.<br />Required: Need to set the number of worker-pod replicas. |  |  |
 | `workerTemplate` _[PodTemplateSpec](#podtemplatespec)_ | WorkerTemplate defines the template for the worker pod of a role. |  |  |
+
+
+#### RoleRatioConstraint
+
+
+
+RoleRatioConstraint defines the acceptable ratio range between two roles.
+
+
+
+_Appears in:_
+- [DisaggregatedTarget](#disaggregatedtarget)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `numeratorRole` _string_ | NumeratorRole is the role on the numerator side of the ratio. |  |  |
+| `denominatorRole` _string_ | DenominatorRole is the role on the denominator side of the ratio. |  |  |
+| `minRatio` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#quantity-resource-api)_ | MinRatio is the minimum allowed value of<br />replicas[numeratorRole] / replicas[denominatorRole]. |  |  |
+| `maxRatio` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#quantity-resource-api)_ | MaxRatio is the maximum allowed value of<br />replicas[numeratorRole] / replicas[denominatorRole]. |  |  |
+
+
+#### RoleRatioStatus
+
+
+
+RoleRatioStatus reports the observed value for the ratio constraint.
+
+
+
+_Appears in:_
+- [DisaggregatedScalingStatus](#disaggregatedscalingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `numeratorRole` _string_ |  |  |  |
+| `denominatorRole` _string_ |  |  |  |
+| `currentRatio` _string_ |  |  |  |
+
+
+#### RoleScalingParam
+
+
+
+RoleScalingParam defines the scaling configuration for one role.
+
+
+
+_Appears in:_
+- [DisaggregatedTarget](#disaggregatedtarget)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas for this role. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
+| `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas for this role. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
+| `metrics` _[AutoscalingPolicyMetric](#autoscalingpolicymetric) array_ | Metrics defines the list of metrics used to evaluate scaling decisions<br />for this role, allowing different roles to scale on different signals.<br />spec.metrics (policy-level) and per-role metrics are MUTUALLY EXCLUSIVE:<br />either set spec.metrics to scale every role on the same signals, or set<br />metrics on every role here and leave spec.metrics empty. They must not<br />both be set. |  | MinItems: 1 <br /> |
+| `metricSources` _object (keys:string, values:[MetricSource](#metricsource))_ | MetricSources declares how each metric is fetched for this role.<br />Keys must match role-level metrics when present, otherwise top-level<br />spec.metrics[].name.<br />Missing keys are treated as missing metrics for that reconcile loop. |  |  |
 
 
 #### RollingUpdateConfiguration
@@ -1012,26 +1042,6 @@ _Appears in:_
 | `roles` _[Role](#role) array_ |  |  | MaxItems: 4 <br />MinItems: 1 <br /> |
 
 
-#### SubTarget
-
-
-
-SubTarget identifies a sub-component of a target to scale independently,
-for example a specific Role inside a ModelServing.
-
-Example: kind=Role, name=decode.
-
-
-
-_Appears in:_
-- [Target](#target)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `kind` _string_ | Kind is the sub-target kind. Currently supported: "Role". |  |  |
-| `name` _string_ | Name is the sub-target name, e.g. the role name "decode" or "prefill". |  |  |
-
-
 #### Target
 
 
@@ -1044,9 +1054,6 @@ Example:
 	  targetRef:
 	    kind: ModelServing
 	    name: podinfo-ms
-	  subTargets:
-	    kind: Role
-	    name: decode
 	  metricSources:
 	    podinfo_rps:
 	      type: Prometheus
@@ -1063,7 +1070,27 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing.<br />Example: kind=ModelServing, name=podinfo-ms. |  |  |
-| `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing.<br />Example: kind=Role, name=decode to scale only the decode role. |  |  |
 | `metricSources` _object (keys:string, values:[MetricSource](#metricsource))_ | MetricSources declares how to fetch specific metrics for this target.<br />Keys must match AutoscalingPolicy.spec.metrics[].name.<br />Missing keys are treated as missing metrics for that reconcile loop.<br />For example, a key "podinfo_rps" here must correspond to a metric named<br />"podinfo_rps" in the referenced AutoscalingPolicy. |  |  |
+
+
+#### TargetScalingStatus
+
+
+
+TargetScalingStatus reports the observed scaling state of a single scalable
+unit (a whole ModelServing, or one role within it).
+
+
+
+_Appears in:_
+- [AutoscalingPolicyStatus](#autoscalingpolicystatus)
+- [DisaggregatedScalingStatus](#disaggregatedscalingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name identifies the unit. For HomogeneousTarget it is the ModelServing<br />name; for a role it is the role name. |  |  |
+| `currentReplicas` _integer_ | CurrentReplicas is the number of replicas currently observed. |  |  |
+| `desiredReplicas` _integer_ | DesiredReplicas is the number of replicas the controller computed from<br />metrics, before ratio enforcement. |  |  |
+| `mode` _string_ | Mode reports whether the unit is currently in "Stable" or "Panic" mode. |  |  |
 
 

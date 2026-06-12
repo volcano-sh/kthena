@@ -26,8 +26,6 @@ import (
 type Interface interface {
 	// AutoscalingPolicies returns a AutoscalingPolicyInformer.
 	AutoscalingPolicies() AutoscalingPolicyInformer
-	// AutoscalingPolicyBindings returns a AutoscalingPolicyBindingInformer.
-	AutoscalingPolicyBindings() AutoscalingPolicyBindingInformer
 	// ModelBoosters returns a ModelBoosterInformer.
 	ModelBoosters() ModelBoosterInformer
 	// ModelServings returns a ModelServingInformer.
@@ -48,11 +46,6 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 // AutoscalingPolicies returns a AutoscalingPolicyInformer.
 func (v *version) AutoscalingPolicies() AutoscalingPolicyInformer {
 	return &autoscalingPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
-}
-
-// AutoscalingPolicyBindings returns a AutoscalingPolicyBindingInformer.
-func (v *version) AutoscalingPolicyBindings() AutoscalingPolicyBindingInformer {
-	return &autoscalingPolicyBindingInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // ModelBoosters returns a ModelBoosterInformer.

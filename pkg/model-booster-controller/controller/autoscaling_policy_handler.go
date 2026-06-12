@@ -28,15 +28,10 @@ import (
 )
 
 func (mc *ModelBoosterController) createOrUpdateAutoscalingPolicyAndBinding(ctx context.Context, model *v1alpha1.ModelBooster) error {
-	// Create autoscaling policy and scaling policy binding for single backend
+	// Create autoscaling policy for single backend
 	if model.Spec.AutoscalingPolicy != nil {
-		backend := model.Spec.Backend
-		asp := convert.BuildAutoscalingPolicy(model.Spec.AutoscalingPolicy, model, backend.Name)
-		aspBinding := convert.BuildScalingPolicyBinding(model, &backend, utils.GetBackendResourceName(model.Name, backend.Name))
+		asp := convert.BuildAutoscalingPolicy(model.Spec.AutoscalingPolicy, model)
 		if err := mc.createOrUpdateAsp(ctx, asp); err != nil {
-			return err
-		}
-		if err := mc.createOrUpdateAspBinding(ctx, aspBinding); err != nil {
 			return err
 		}
 	}
@@ -60,28 +55,6 @@ func (mc *ModelBoosterController) createOrUpdateAsp(ctx context.Context, policy 
 		return nil
 	}
 	if _, err := mc.client.WorkloadV1alpha1().AutoscalingPolicies(policy.Namespace).Update(ctx, policy, metav1.UpdateOptions{}); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (mc *ModelBoosterController) createOrUpdateAspBinding(ctx context.Context, binding *v1alpha1.AutoscalingPolicyBinding) error {
-	oldPolicy, err := mc.autoscalingPolicyBindingsLister.AutoscalingPolicyBindings(binding.Namespace).Get(binding.Name)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			if _, err := mc.client.WorkloadV1alpha1().AutoscalingPolicyBindings(binding.Namespace).Create(ctx, binding, metav1.CreateOptions{}); err != nil {
-				klog.Errorf("failed to create bindings %s,%v", klog.KObj(binding), err)
-				return err
-			}
-			return nil
-		}
-		return err
-	}
-	if oldPolicy.Labels[utils.RevisionLabelKey] == binding.Labels[utils.RevisionLabelKey] {
-		klog.Infof("Bindings %s does not need to update", binding.Name)
-		return nil
-	}
-	if _, err := mc.client.WorkloadV1alpha1().AutoscalingPolicyBindings(binding.Namespace).Update(ctx, binding, metav1.UpdateOptions{}); err != nil {
 		return err
 	}
 	return nil

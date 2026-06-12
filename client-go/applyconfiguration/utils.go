@@ -76,12 +76,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyBehavior"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyBehaviorApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyBinding"):
-		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyBindingApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyBindingSpec"):
-		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyBindingSpecApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyBindingStatus"):
-		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyBindingStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyMetric"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyMetricApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyPanicPolicy"):
@@ -92,6 +86,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicySpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyStablePolicy"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyStablePolicyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyStatus"):
+		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyStatusApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("DisaggregatedScalingStatus"):
+		return &applyconfigurationworkloadv1alpha1.DisaggregatedScalingStatusApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("DisaggregatedTarget"):
+		return &applyconfigurationworkloadv1alpha1.DisaggregatedTargetApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("GangPolicy"):
 		return &applyconfigurationworkloadv1alpha1.GangPolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("HeterogeneousTarget"):
@@ -134,16 +134,22 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.PrometheusMetricSourceApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioConstraint"):
+		return &applyconfigurationworkloadv1alpha1.RoleRatioConstraintApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioStatus"):
+		return &applyconfigurationworkloadv1alpha1.RoleRatioStatusApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleScalingParam"):
+		return &applyconfigurationworkloadv1alpha1.RoleScalingParamApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RollingUpdateConfiguration"):
 		return &applyconfigurationworkloadv1alpha1.RollingUpdateConfigurationApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RolloutStrategy"):
 		return &applyconfigurationworkloadv1alpha1.RolloutStrategyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroup"):
 		return &applyconfigurationworkloadv1alpha1.ServingGroupApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("SubTarget"):
-		return &applyconfigurationworkloadv1alpha1.SubTargetApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Target"):
 		return &applyconfigurationworkloadv1alpha1.TargetApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("TargetScalingStatus"):
+		return &applyconfigurationworkloadv1alpha1.TargetScalingStatusApplyConfiguration{}
 
 	}
 	return nil

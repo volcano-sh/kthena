@@ -32,10 +32,6 @@ func (c *FakeWorkloadV1alpha1) AutoscalingPolicies(namespace string) v1alpha1.Au
 	return newFakeAutoscalingPolicies(c, namespace)
 }
 
-func (c *FakeWorkloadV1alpha1) AutoscalingPolicyBindings(namespace string) v1alpha1.AutoscalingPolicyBindingInterface {
-	return newFakeAutoscalingPolicyBindings(c, namespace)
-}
-
 func (c *FakeWorkloadV1alpha1) ModelBoosters(namespace string) v1alpha1.ModelBoosterInterface {
 	return newFakeModelBoosters(c, namespace)
 }

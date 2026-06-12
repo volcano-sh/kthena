@@ -68,7 +68,6 @@ These defaults are only applied when the model has an autoscaling policy referen
 - **Validation**:
     - `/validate/modelbooster`
     - `/validate/autoscalingpolicy`
-    - `/validate/autoscalingpolicybinding`
 - **Mutation**:
     - `/mutate/modelbooster`
     - `/mutate/autoscalingpolicy`

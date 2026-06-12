@@ -24,40 +24,35 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func BuildAutoscalingPolicy(autoscalingConfig *workload.AutoscalingPolicySpec, model *workload.ModelBooster, backendName string) *workload.AutoscalingPolicy {
+func BuildAutoscalingPolicy(autoscalingConfig *workload.AutoscalingPolicySpec, model *workload.ModelBooster) *workload.AutoscalingPolicy {
+	spec := *autoscalingConfig
+	backend := model.Spec.Backend
+	targetName := utils.GetBackendResourceName(model.Name, backend.Name)
+	spec.HomogeneousTarget = &workload.HomogeneousTarget{
+		Target: workload.Target{
+			TargetRef: corev1.ObjectReference{
+				Name: targetName,
+				Kind: workload.ModelServingKind.Kind,
+			},
+			MetricSources: buildDefaultPodMetricSources(autoscalingConfig),
+		},
+		MinReplicas: backend.MinReplicas,
+		MaxReplicas: backend.MaxReplicas,
+	}
 	return &workload.AutoscalingPolicy{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: workload.AutoscalingPolicyKind.GroupVersion().String(),
 			Kind:       workload.AutoscalingPolicyKind.Kind,
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   utils.GetBackendResourceName(model.Name, backendName),
-			Labels: utils.GetModelControllerLabels(model, backendName, icUtils.Revision(*autoscalingConfig)),
+			Name:   targetName,
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(spec)),
 			OwnerReferences: []metav1.OwnerReference{
 				utils.NewModelOwnerRef(model),
 			},
 			Namespace: model.Namespace,
 		},
-		Spec: *autoscalingConfig,
-	}
-}
-
-func BuildScalingPolicyBindingSpec(backend *workload.ModelBackend, autoscalingPolicy *workload.AutoscalingPolicySpec, name string) *workload.AutoscalingPolicyBindingSpec {
-	return &workload.AutoscalingPolicyBindingSpec{
-		HomogeneousTarget: &workload.HomogeneousTarget{
-			Target: workload.Target{
-				TargetRef: corev1.ObjectReference{
-					Name: name,
-					Kind: workload.ModelServingKind.Kind,
-				},
-				MetricSources: buildDefaultPodMetricSources(autoscalingPolicy),
-			},
-			MinReplicas: backend.MinReplicas,
-			MaxReplicas: backend.MaxReplicas,
-		},
-		PolicyRef: corev1.LocalObjectReference{
-			Name: name,
-		},
+		Spec: spec,
 	}
 }
 
@@ -78,27 +73,4 @@ func buildDefaultPodMetricSources(autoscalingPolicy *workload.AutoscalingPolicyS
 		}
 	}
 	return sources
-}
-
-func BuildPolicyBindingMeta(spec *workload.AutoscalingPolicyBindingSpec, model *workload.ModelBooster, backendName string, name string) *metav1.ObjectMeta {
-	return &metav1.ObjectMeta{
-		Name:      name,
-		Namespace: model.Namespace,
-		Labels:    utils.GetModelControllerLabels(model, backendName, icUtils.Revision(spec)),
-		OwnerReferences: []metav1.OwnerReference{
-			utils.NewModelOwnerRef(model),
-		},
-	}
-}
-
-func BuildScalingPolicyBinding(model *workload.ModelBooster, backend *workload.ModelBackend, name string) *workload.AutoscalingPolicyBinding {
-	spec := BuildScalingPolicyBindingSpec(backend, model.Spec.AutoscalingPolicy, name)
-	return &workload.AutoscalingPolicyBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: workload.AutoscalingPolicyBindingKind.GroupVersion().String(),
-			Kind:       workload.AutoscalingPolicyBindingKind.Kind,
-		},
-		ObjectMeta: *BuildPolicyBindingMeta(spec, model, backend.Name, name),
-		Spec:       *spec,
-	}
 }

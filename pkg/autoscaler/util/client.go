@@ -107,9 +107,6 @@ func GetTargetLabels(target *workload.Target, podSource *workload.PodMetricSourc
 		}
 		selector.MatchLabels[workload.ModelServingNameLabelKey] = target.TargetRef.Name
 		selector.MatchLabels[workload.EntryLabelKey] = Entry
-		if target.SubTarget != nil && target.SubTarget.Kind == ModelServingRoleKind {
-			selector.MatchLabels[workload.RoleLabelKey] = target.SubTarget.Name
-		}
 	} else {
 		return nil, fmt.Errorf("unsupported target ref kind: %s", target.TargetRef.Kind)
 	}

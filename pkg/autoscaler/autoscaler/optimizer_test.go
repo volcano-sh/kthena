@@ -28,13 +28,13 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
-func makeBinding(uid string, namespace string, costExpansionRate int32, params []workload.HeterogeneousTargetParam) *workload.AutoscalingPolicyBinding {
-	return &workload.AutoscalingPolicyBinding{
+func makePolicy(uid string, namespace string, costExpansionRate int32, params []workload.HeterogeneousTargetParam) *workload.AutoscalingPolicy {
+	return &workload.AutoscalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			UID:       types.UID(uid),
 			Namespace: namespace,
 		},
-		Spec: workload.AutoscalingPolicyBindingSpec{
+		Spec: workload.AutoscalingPolicySpec{
 			HeterogeneousTarget: &workload.HeterogeneousTarget{
 				CostExpansionRatePercent: costExpansionRate,
 				Params:                   params,
@@ -56,69 +56,69 @@ func makeParam(name string, cost, minReplicas, maxReplicas int32) workload.Heter
 
 func TestNewOptimizerMeta(t *testing.T) {
 	t.Run("nil when HeterogeneousTarget unset", func(t *testing.T) {
-		binding := &workload.AutoscalingPolicyBinding{
-			Spec: workload.AutoscalingPolicyBindingSpec{},
+		policy := &workload.AutoscalingPolicy{
+			Spec: workload.AutoscalingPolicySpec{},
 		}
-		got := NewOptimizerMeta(binding)
+		got := NewOptimizerMeta(policy)
 		assert.Nil(t, got)
 	})
 
 	t.Run("min/max replica aggregation across backends", func(t *testing.T) {
-		binding := makeBinding("uid-1", "ns-1", 100, []workload.HeterogeneousTargetParam{
+		policy := makePolicy("uid-1", "ns-1", 100, []workload.HeterogeneousTargetParam{
 			makeParam("h100", 10, 2, 6),
 			makeParam("a100", 5, 1, 4),
 		})
-		meta := NewOptimizerMeta(binding)
+		meta := NewOptimizerMeta(policy)
 		require.NotNil(t, meta)
 		assert.Equal(t, int32(3), meta.MinReplicas)
 		assert.Equal(t, int32(10), meta.MaxReplicas)
 	})
 
-	t.Run("scope (namespace + UID) inherited from binding", func(t *testing.T) {
-		binding := makeBinding("test-uid", "test-ns", 100, []workload.HeterogeneousTargetParam{
+	t.Run("scope (namespace + UID) inherited from policy", func(t *testing.T) {
+		policy := makePolicy("test-uid", "test-ns", 100, []workload.HeterogeneousTargetParam{
 			makeParam("h100", 10, 1, 3),
 		})
-		meta := NewOptimizerMeta(binding)
+		meta := NewOptimizerMeta(policy)
 		require.NotNil(t, meta)
 		assert.Equal(t, "test-ns", meta.Scope.Namespace)
-		assert.Equal(t, types.UID("test-uid"), meta.Scope.OwnedBindingId)
+		assert.Equal(t, types.UID("test-uid"), meta.Scope.OwnedPolicyId)
 	})
 
 	t.Run("zero-delta backends produce no blocks", func(t *testing.T) {
-		binding := makeBinding("uid-2", "ns-1", 100, []workload.HeterogeneousTargetParam{
+		policy := makePolicy("uid-2", "ns-1", 100, []workload.HeterogeneousTargetParam{
 			makeParam("h100", 10, 5, 5),
 		})
-		meta := NewOptimizerMeta(binding)
+		meta := NewOptimizerMeta(policy)
 		require.NotNil(t, meta)
 		assert.Len(t, meta.ScalingOrder, 0)
 	})
 
 	t.Run("CostExpansionRatePercent == 100 — single block per backend", func(t *testing.T) {
-		binding := makeBinding("uid-3", "ns-1", 100, []workload.HeterogeneousTargetParam{
+		policy := makePolicy("uid-3", "ns-1", 100, []workload.HeterogeneousTargetParam{
 			makeParam("h100", 10, 1, 4),
 			makeParam("a100", 5, 1, 3),
 		})
-		meta := NewOptimizerMeta(binding)
+		meta := NewOptimizerMeta(policy)
 		require.NotNil(t, meta)
 		assert.Len(t, meta.ScalingOrder, 2)
 	})
 
 	t.Run("scaling order sorted cheapest-first", func(t *testing.T) {
-		binding := makeBinding("uid-4", "ns-1", 100, []workload.HeterogeneousTargetParam{
+		policy := makePolicy("uid-4", "ns-1", 100, []workload.HeterogeneousTargetParam{
 			makeParam("h100", 10, 1, 4),
 			makeParam("a100", 5, 1, 3),
 		})
-		meta := NewOptimizerMeta(binding)
+		meta := NewOptimizerMeta(policy)
 		require.NotNil(t, meta)
 		require.GreaterOrEqual(t, len(meta.ScalingOrder), 2)
 		assert.LessOrEqual(t, meta.ScalingOrder[0].cost, meta.ScalingOrder[1].cost)
 	})
 
 	t.Run("CostExpansionRatePercent != 100 — geometric multi-block splitting", func(t *testing.T) {
-		binding := makeBinding("uid-5", "ns-1", 50, []workload.HeterogeneousTargetParam{
+		policy := makePolicy("uid-5", "ns-1", 50, []workload.HeterogeneousTargetParam{
 			makeParam("h100", 10, 1, 5),
 		})
-		meta := NewOptimizerMeta(binding)
+		meta := NewOptimizerMeta(policy)
 		require.NotNil(t, meta)
 		assert.Greater(t, len(meta.ScalingOrder), 1)
 	})
@@ -182,8 +182,8 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			binding := makeBinding("uid", "ns", tt.rate, tt.params)
-			meta := NewOptimizerMeta(binding)
+			policy := makePolicy("uid", "ns", tt.rate, tt.params)
+			meta := NewOptimizerMeta(policy)
 			require.NotNil(t, meta)
 			got := meta.RestoreReplicasOfEachBackend(tt.replicas)
 			for backend, wantCount := range tt.want {

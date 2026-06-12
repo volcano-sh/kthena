@@ -60,23 +60,21 @@ type ModelBoosterController struct {
 	// httpClient for HTTP requests to LoRA adapter APIs
 	httpClient *http.Client
 
-	syncHandler                       func(ctx context.Context, miKey string) error
-	modelBoosterLister                workloadLister.ModelBoosterLister
-	modelsInformer                    cache.Controller
-	modelServingLister                workloadLister.ModelServingLister
-	modelServingInformer              cache.SharedIndexInformer
-	modelServersLister                networkingLister.ModelServerLister
-	modelServersInformer              cache.SharedIndexInformer
-	modelRoutesLister                 networkingLister.ModelRouteLister
-	modelRoutesInformer               cache.SharedIndexInformer
-	autoscalingPoliciesLister         workloadLister.AutoscalingPolicyLister
-	autoscalingPoliciesInformer       cache.SharedIndexInformer
-	autoscalingPolicyBindingsLister   workloadLister.AutoscalingPolicyBindingLister
-	autoscalingPolicyBindingsInformer cache.SharedIndexInformer
-	podsLister                        listerv1.PodLister
-	podsInformer                      cache.SharedIndexInformer
-	kubeInformerFactory               informers.SharedInformerFactory
-	workQueue                         workqueue.TypedRateLimitingInterface[any]
+	syncHandler                 func(ctx context.Context, miKey string) error
+	modelBoosterLister          workloadLister.ModelBoosterLister
+	modelsInformer              cache.Controller
+	modelServingLister          workloadLister.ModelServingLister
+	modelServingInformer        cache.SharedIndexInformer
+	modelServersLister          networkingLister.ModelServerLister
+	modelServersInformer        cache.SharedIndexInformer
+	modelRoutesLister           networkingLister.ModelRouteLister
+	modelRoutesInformer         cache.SharedIndexInformer
+	autoscalingPoliciesLister   workloadLister.AutoscalingPolicyLister
+	autoscalingPoliciesInformer cache.SharedIndexInformer
+	podsLister                  listerv1.PodLister
+	podsInformer                cache.SharedIndexInformer
+	kubeInformerFactory         informers.SharedInformerFactory
+	workQueue                   workqueue.TypedRateLimitingInterface[any]
 	// loraUpdateCache stores the previous model version for LoRA adapter comparison
 	loraUpdateCacheMu sync.Mutex
 	loraUpdateCache   map[string]*workload.ModelBooster
@@ -90,7 +88,6 @@ func (mc *ModelBoosterController) Run(ctx context.Context, workers int) {
 	go mc.modelsInformer.RunWithContext(ctx)
 	go mc.modelServingInformer.RunWithContext(ctx)
 	go mc.autoscalingPoliciesInformer.RunWithContext(ctx)
-	go mc.autoscalingPolicyBindingsInformer.RunWithContext(ctx)
 	go mc.podsInformer.RunWithContext(ctx)
 	go mc.modelServersInformer.RunWithContext(ctx)
 	go mc.modelRoutesInformer.RunWithContext(ctx)
@@ -102,7 +99,6 @@ func (mc *ModelBoosterController) Run(ctx context.Context, workers int) {
 		mc.modelsInformer.HasSynced,
 		mc.modelServingInformer.HasSynced,
 		mc.autoscalingPoliciesInformer.HasSynced,
-		mc.autoscalingPolicyBindingsInformer.HasSynced,
 		mc.podsInformer.HasSynced,
 		mc.modelServersInformer.HasSynced,
 		mc.modelRoutesInformer.HasSynced,
@@ -326,7 +322,6 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 	modelServerInformer := filterInformerFactory.Networking().V1alpha1().ModelServers()
 	modelRouteInformer := filterInformerFactory.Networking().V1alpha1().ModelRoutes()
 	autoscalingPoliciesInformer := filterInformerFactory.Workload().V1alpha1().AutoscalingPolicies()
-	autoscalingPolicyBindingsInformer := filterInformerFactory.Workload().V1alpha1().AutoscalingPolicyBindings()
 
 	// Initialize Kubernetes informer factory for pods
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
@@ -345,25 +340,23 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 	}
 
 	mc := &ModelBoosterController{
-		kubeClient:                        kubeClient,
-		client:                            client,
-		httpClient:                        httpClient,
-		modelBoosterLister:                modelBoosterInformer.Lister(),
-		modelsInformer:                    modelBoosterInformer.Informer(),
-		modelServingLister:                modelServingInformer.Lister(),
-		modelServingInformer:              modelServingInformer.Informer(),
-		modelServersLister:                modelServerInformer.Lister(),
-		modelServersInformer:              modelServerInformer.Informer(),
-		modelRoutesLister:                 modelRouteInformer.Lister(),
-		modelRoutesInformer:               modelRouteInformer.Informer(),
-		autoscalingPoliciesLister:         autoscalingPoliciesInformer.Lister(),
-		autoscalingPoliciesInformer:       autoscalingPoliciesInformer.Informer(),
-		autoscalingPolicyBindingsLister:   autoscalingPolicyBindingsInformer.Lister(),
-		autoscalingPolicyBindingsInformer: autoscalingPolicyBindingsInformer.Informer(),
-		podsLister:                        podsLister,
-		podsInformer:                      podsInformer,
-		kubeInformerFactory:               kubeInformerFactory,
-		loraUpdateCache:                   make(map[string]*workload.ModelBooster),
+		kubeClient:                  kubeClient,
+		client:                      client,
+		httpClient:                  httpClient,
+		modelBoosterLister:          modelBoosterInformer.Lister(),
+		modelsInformer:              modelBoosterInformer.Informer(),
+		modelServingLister:          modelServingInformer.Lister(),
+		modelServingInformer:        modelServingInformer.Informer(),
+		modelServersLister:          modelServerInformer.Lister(),
+		modelServersInformer:        modelServerInformer.Informer(),
+		modelRoutesLister:           modelRouteInformer.Lister(),
+		modelRoutesInformer:         modelRouteInformer.Informer(),
+		autoscalingPoliciesLister:   autoscalingPoliciesInformer.Lister(),
+		autoscalingPoliciesInformer: autoscalingPoliciesInformer.Informer(),
+		podsLister:                  podsLister,
+		podsInformer:                podsInformer,
+		kubeInformerFactory:         kubeInformerFactory,
+		loraUpdateCache:             make(map[string]*workload.ModelBooster),
 
 		workQueue: workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.DefaultTypedControllerRateLimiter[any](),
 			workqueue.TypedRateLimitingQueueConfig[any]{}),
@@ -405,13 +398,6 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 	})
 	if err != nil {
 		klog.Fatal("Unable to add autoscaling policy event handler")
-		return nil
-	}
-	_, err = autoscalingPolicyBindingsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		DeleteFunc: mc.deleteAutoscalingPolicyBinding,
-	})
-	if err != nil {
-		klog.Fatal("Unable to add autoscaling policy binding event handler")
 		return nil
 	}
 	mc.syncHandler = mc.reconcile
@@ -550,26 +536,6 @@ func (mc *ModelBoosterController) deleteAutoscalingPolicy(obj any) {
 	klog.V(4).Infof("autoscaling policy: %s is deleted", klog.KObj(policy))
 	if len(policy.OwnerReferences) > 0 {
 		if model, err := mc.modelBoosterLister.ModelBoosters(policy.Namespace).Get(policy.OwnerReferences[0].Name); err == nil {
-			mc.enqueueModelBooster(model)
-		}
-	}
-}
-
-// deleteAutoscalingPolicyBinding is called when an AutoscalingPolicyBinding is deleted. It will reconcile the ModelBooster. Recreate AutoscalingPolicyBinding.
-func (mc *ModelBoosterController) deleteAutoscalingPolicyBinding(obj any) {
-	obj, ok := unwrapTombstone(obj)
-	if !ok {
-		klog.Error("failed to unwrap tombstone when deleteAutoscalingPolicyBinding")
-		return
-	}
-	binding, ok := obj.(*workload.AutoscalingPolicyBinding)
-	if !ok {
-		klog.Error("failed to parse AutoscalingPolicyBinding when deleteAutoscalingPolicyBinding")
-		return
-	}
-	klog.V(4).Infof("autoscaling policy binding: %s is deleted", klog.KObj(binding))
-	if len(binding.OwnerReferences) > 0 {
-		if model, err := mc.modelBoosterLister.ModelBoosters(binding.Namespace).Get(binding.OwnerReferences[0].Name); err == nil {
 			mc.enqueueModelBooster(model)
 		}
 	}

@@ -37,24 +37,22 @@ type ScalingMeta struct {
 	Generations
 }
 
-func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) *Autoscaler {
+func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy) *Autoscaler {
 	return &Autoscaler{
 		Status:    NewStatus(&autoscalePolicy.Spec.Behavior),
-		Collector: NewMetricCollector(&binding.Spec.HomogeneousTarget.Target, binding, GetMetricTargets(autoscalePolicy)),
+		Collector: NewMetricCollector(&autoscalePolicy.Spec.HomogeneousTarget.Target, autoscalePolicy, GetMetricTargets(autoscalePolicy)),
 		Meta: &ScalingMeta{
-			Config:    binding.Spec.HomogeneousTarget,
-			Namespace: binding.Namespace,
+			Config:    autoscalePolicy.Spec.HomogeneousTarget,
+			Namespace: autoscalePolicy.Namespace,
 			Generations: Generations{
 				AutoscalePolicyGeneration: autoscalePolicy.Generation,
-				BindingGeneration:         binding.Generation,
 			},
 		},
 	}
 }
 
-func (autoscaler *Autoscaler) NeedUpdate(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) bool {
-	return autoscaler.Meta.Generations.AutoscalePolicyGeneration != autoscalePolicy.Generation ||
-		autoscaler.Meta.Generations.BindingGeneration != binding.Generation
+func (autoscaler *Autoscaler) NeedUpdate(autoscalePolicy *workload.AutoscalingPolicy) bool {
+	return autoscaler.Meta.Generations.AutoscalePolicyGeneration != autoscalePolicy.Generation
 }
 
 func (autoscaler *Autoscaler) UpdateAutoscalePolicy(autoscalePolicy *workload.AutoscalingPolicy) {
