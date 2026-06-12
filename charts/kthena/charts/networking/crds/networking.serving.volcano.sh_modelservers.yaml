@@ -39,6 +39,49 @@ spec:
           spec:
             description: ModelServerSpec defines the desired state of ModelServer.
             properties:
+              externalProvider:
+                description: |-
+                  ExternalProvider specifies an external cloud LLM provider to route requests to.
+                  When this is set, WorkloadSelector is ignored and requests are proxied to the external endpoint.
+                properties:
+                  credentialsRef:
+                    description: |-
+                      Reference to a Kubernetes Secret containing the API credentials/keys for the external provider.
+                      The Secret should contain the token/key under the expected key name (e.g., 'api-key' or 'token').
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  endpoint:
+                    description: The full base URL for the external provider endpoint
+                      (e.g., https://api.openai.com/v1).
+                    format: uri
+                    type: string
+                  providerType:
+                    description: The type of the external provider (e.g., OpenAI,
+                      Anthropic, Custom).
+                    enum:
+                    - OpenAI
+                    - Anthropic
+                    - AzureOpenAI
+                    - AWSBedrock
+                    - Custom
+                    type: string
+                required:
+                - endpoint
+                - providerType
+                type: object
+                x-kubernetes-validations:
+                - message: endpoint must be an https URL for known provider types
+                  rule: self.providerType == 'Custom' || self.endpoint.startsWith('https://')
               inferenceEngine:
                 description: The inference engine used to serve the model.
                 enum:
@@ -153,10 +196,14 @@ spec:
                     - prefillLabels
                     type: object
                 type: object
-            required:
-            - inferenceEngine
-            - workloadSelector
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of workloadSelector or externalProvider must be
+                specified
+              rule: has(self.workloadSelector) != has(self.externalProvider)
+            - message: inferenceEngine must be specified when workloadSelector is
+                set
+              rule: 'has(self.workloadSelector) ? has(self.inferenceEngine) : true'
           status:
             description: ModelServerStatus defines the observed state of ModelServer.
             type: object
