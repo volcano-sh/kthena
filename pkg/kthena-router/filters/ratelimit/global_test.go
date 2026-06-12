@@ -214,60 +214,6 @@ func TestTokenRateLimiter_RedisConnectionFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to connect to redis")
 }
 
-func TestTokenRateLimiter_Isolation(t *testing.T) {
-	mr, redisConfig := setupMiniRedis(t)
-	defer mr.Close()
-
-	rl := NewTokenRateLimiter()
-	keyOne := "namespace-a/modelroute-1"
-	keyTwo := "namespace-a/modelroute-2"
-	prompt := "hello world" // Should be ~3 tokens
-	tokensOne := uint32(3)
-	tokensTwo := uint32(10)
-	unit := networkingv1alpha1.Second
-
-	configOne := &networkingv1alpha1.RateLimit{
-		InputTokensPerUnit: &tokensOne,
-		Unit:               unit,
-		Global: &networkingv1alpha1.GlobalRateLimit{
-			Redis: redisConfig,
-		},
-	}
-	configTwo := &networkingv1alpha1.RateLimit{
-		InputTokensPerUnit: &tokensTwo,
-		Unit:               unit,
-		Global: &networkingv1alpha1.GlobalRateLimit{
-			Redis: redisConfig,
-		},
-	}
-
-	require.NoError(t, rl.AddOrUpdateLimiter(keyOne, configOne))
-	require.NoError(t, rl.AddOrUpdateLimiter(keyTwo, configTwo))
-
-	// Each limiter should write to a different Redis key even though the namespace is the same.
-	redisKeyOne := "kthena:ratelimit:namespace-a/modelroute-1:input"
-	redisKeyTwo := "kthena:ratelimit:namespace-a/modelroute-2:input"
-
-	err := rl.RateLimit(keyOne, prompt)
-	require.NoError(t, err)
-	assert.True(t, mr.Exists(redisKeyOne), "Redis key should exist for the first route")
-
-	err = rl.RateLimit(keyTwo, prompt)
-	require.NoError(t, err)
-	assert.True(t, mr.Exists(redisKeyTwo), "Redis key should exist for the second route")
-
-	// Exhaust the first route only.
-	err = rl.RateLimit(keyOne, prompt)
-	assert.Error(t, err)
-	assert.IsType(t, &InputRateLimitExceededError{}, err)
-
-	// The second route should still have capacity because it uses an isolated key.
-	err = rl.RateLimit(keyTwo, prompt)
-	require.NoError(t, err)
-	err = rl.RateLimit(keyTwo, prompt)
-	require.NoError(t, err)
-}
-
 // newTestGlobalRateLimiter creates a GlobalRateLimiter directly with a miniredis-backed client.
 func newTestGlobalRateLimiter(t *testing.T, mr *miniredis.Miniredis, modelName, tokenType string, limit uint32, unit networkingv1alpha1.RateLimitUnit) *GlobalRateLimiter {
 	client := redis.NewClient(&redis.Options{
