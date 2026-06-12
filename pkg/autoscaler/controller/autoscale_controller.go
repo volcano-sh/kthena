@@ -342,7 +342,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 			recommendedSum += recommended
 		}
 	}
-	direction := int(recommendedSum - currentSum)
+	direction := int(int64(recommendedSum) - int64(currentSum))
 
 	// Do update replicas
 	for _, param := range optimizer.Meta.Config.Params {
@@ -385,7 +385,7 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 	if recommendedInstances < 0 {
 		return 0, nil
 	}
-	direction := int(recommendedInstances - currentInstancesCount)
+	direction := int(int64(recommendedInstances) - int64(currentInstancesCount))
 	// Do update replicas
 	if err := ac.updateTargetReplicas(ctx, &target, binding.Namespace, recommendedInstances); err != nil {
 		klog.Errorf("failed to update target replicas %s, err: %v", target.TargetRef.Name, err)
