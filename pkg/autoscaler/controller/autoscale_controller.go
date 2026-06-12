@@ -29,7 +29,7 @@ import (
 	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
-	"istio.io/istio/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/sets"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
@@ -131,8 +131,8 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 	}
 }
 
-// reconcileWithCrashProtection calls Reconcile with crash recovery so a panic
-// inside Reconcile does not kill the controller loop. This mirrors the
+// reconcileWithCrashProtection calls reconcileOnce with crash recovery so a panic
+// inside reconcileOnce does not kill the controller loop. This mirrors the
 // protection that wait.Until provided before the switch to a manual timer.
 // On panic the returned interval falls back to defaultPeriod so the controller
 // does not enter a tight crash loop (0 duration → immediate re-fire).
@@ -140,14 +140,19 @@ func (ac *AutoscaleController) reconcileWithCrashProtection(ctx context.Context)
 	defer utilruntime.HandleCrash(func(r interface{}) {
 		result = util.DefaultSyncPeriodSeconds * time.Second
 	})
-	return ac.Reconcile(ctx)
+	return ac.reconcileOnce(ctx)
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// Returns the minimum reconcile interval across all bindings so that the most
-// urgent scaling action drives the next wake-up.
-func (ac *AutoscaleController) Reconcile(ctx context.Context) time.Duration {
+func (ac *AutoscaleController) Reconcile(ctx context.Context) {
+	ac.reconcileOnce(ctx)
+}
+
+// reconcileOnce performs a single reconciliation pass and returns the minimum
+// reconcile interval across all bindings so that the most urgent scaling action
+// drives the next wake-up.
+func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration {
 	klog.V(4).Info("start to reconcile")
 	ctx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
@@ -181,13 +186,13 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) time.Duration {
 	}
 
 	for key := range ac.scalerMap {
-		if !scalerSet.Contains(key) {
+		if !scalerSet.Has(key) {
 			delete(ac.scalerMap, key)
 		}
 	}
 
 	for key := range ac.optimizerMap {
-		if !optimizerSet.Contains(key) {
+		if !optimizerSet.Has(key) {
 			delete(ac.optimizerMap, key)
 		}
 	}
@@ -488,7 +493,7 @@ func (ac *AutoscaleController) applyOrDefault(policyKey, field string, d *metav1
 	}
 	if d.Duration < minReconcileInterval {
 		warnKey := policyKey + "/" + field
-		if !ac.clampWarnings.Contains(warnKey) {
+		if !ac.clampWarnings.Has(warnKey) {
 			klog.Warningf("syncPolicy.%s %v in policy %s is below minimum %v, clamping to %v", field, d.Duration, policyKey, minReconcileInterval, minReconcileInterval)
 			ac.clampWarnings.Insert(warnKey)
 		}

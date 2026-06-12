@@ -34,7 +34,7 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
-	"istio.io/istio/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -944,13 +944,13 @@ func TestClampWarningsResetOnPolicyReResolve(t *testing.T) {
 	// First resolve: warning fires and key is recorded.
 	_ = ac.resolveSyncPolicy(policy)
 	warnKey := "ns/policy-a/scaleUpPeriod"
-	if !ac.clampWarnings.Contains(warnKey) {
+	if !ac.clampWarnings.Has(warnKey) {
 		t.Fatalf("expected clampWarnings to contain %q after first resolve", warnKey)
 	}
 
 	// Second resolve: old keys are cleared, so warning fires again.
 	_ = ac.resolveSyncPolicy(policy)
-	if !ac.clampWarnings.Contains(warnKey) {
+	if !ac.clampWarnings.Has(warnKey) {
 		t.Fatalf("expected clampWarnings to contain %q after re-resolve (key should be re-inserted)", warnKey)
 	}
 }
@@ -1126,12 +1126,12 @@ func TestReconcileInterval(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	got := ac.Reconcile(ctx)
+	got := ac.reconcileOnce(ctx)
 
 	// scale-up binding → 3s, stable binding → 15s; min is 3s
 	want := 3 * time.Second
 	if got != want {
-		t.Errorf("Reconcile() = %v, want %v", got, want)
+		t.Errorf("reconcileOnce() = %v, want %v", got, want)
 	}
 }
 
