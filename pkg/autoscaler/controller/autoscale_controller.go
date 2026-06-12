@@ -413,8 +413,14 @@ func formatAutoscalerMapKey(bindingNamespace, bindingName string, targetRef *cor
 	return key
 }
 
+// minReconcileInterval is the floor for any user-configured sync period.
+// Values below this would cause a tight reconcile loop, overwhelming the
+// API Server and burning CPU.
+const minReconcileInterval = 1 * time.Second
+
 // applySyncPolicy updates the controller's reconcile intervals from the Policy's syncPolicy.
-// Fields left unset in the CR use compiled-in defaults.
+// Fields left unset in the CR use compiled-in defaults. Durations below
+// minReconcileInterval are clamped and a warning is logged.
 func (ac *AutoscaleController) applySyncPolicy(policy *workload.AutoscalingPolicy) {
 	sp := policy.Spec.Behavior.SyncPolicy
 	if sp == nil {
@@ -423,21 +429,23 @@ func (ac *AutoscaleController) applySyncPolicy(policy *workload.AutoscalingPolic
 		ac.scaleDownPeriod = util.ScaleDownSyncPeriodSeconds * time.Second
 		return
 	}
-	if sp.DefaultPeriod != nil {
-		ac.syncPeriod = sp.DefaultPeriod.Duration
-	} else {
-		ac.syncPeriod = util.DefaultSyncPeriodSeconds * time.Second
+	ac.syncPeriod = applyOrDefault(sp.DefaultPeriod, util.DefaultSyncPeriodSeconds)
+	ac.scaleUpPeriod = applyOrDefault(sp.ScaleUpPeriod, util.ScaleUpSyncPeriodSeconds)
+	ac.scaleDownPeriod = applyOrDefault(sp.ScaleDownPeriod, util.ScaleDownSyncPeriodSeconds)
+}
+
+// applyOrDefault returns the duration from d if set and >= minReconcileInterval,
+// or falls back to defaultSeconds. Logs a warning when clamping.
+func applyOrDefault(d *metav1.Duration, defaultSeconds int) time.Duration {
+	def := time.Duration(defaultSeconds) * time.Second
+	if d == nil {
+		return def
 	}
-	if sp.ScaleUpPeriod != nil {
-		ac.scaleUpPeriod = sp.ScaleUpPeriod.Duration
-	} else {
-		ac.scaleUpPeriod = util.ScaleUpSyncPeriodSeconds * time.Second
+	if d.Duration < minReconcileInterval {
+		klog.Warningf("syncPolicy duration %v is below minimum %v, using %v", d.Duration, minReconcileInterval, def)
+		return def
 	}
-	if sp.ScaleDownPeriod != nil {
-		ac.scaleDownPeriod = sp.ScaleDownPeriod.Duration
-	} else {
-		ac.scaleDownPeriod = util.ScaleDownSyncPeriodSeconds * time.Second
-	}
+	return d.Duration
 }
 
 // computeNextInterval returns the next reconcile interval based on the net scaling direction:

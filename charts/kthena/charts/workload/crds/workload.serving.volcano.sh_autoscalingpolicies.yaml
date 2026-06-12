@@ -170,20 +170,23 @@ spec:
                     properties:
                       defaultPeriod:
                         default: 15s
-                        description: DefaultPeriod is the reconcile interval when
-                          no scaling is needed.
+                        description: |-
+                          DefaultPeriod is the reconcile interval when no scaling is needed.
+                          Values below 1s are clamped to the compiled-in default at runtime.
                         type: string
                       scaleDownPeriod:
                         default: 30s
                         description: |-
                           ScaleDownPeriod is the reconcile interval during scale-down.
                           Longer intervals reduce API Server load and prevent premature scale-back.
+                          Values below 1s are clamped to the compiled-in default at runtime.
                         type: string
                       scaleUpPeriod:
                         default: 5s
                         description: |-
                           ScaleUpPeriod is the reconcile interval during scale-up.
                           Shorter intervals accelerate replica provisioning.
+                          Values below 1s are clamped to the compiled-in default at runtime.
                         type: string
                     type: object
                 type: object

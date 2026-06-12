@@ -66,18 +66,21 @@ type AutoscalingPolicyBehavior struct {
 // based on scaling direction.
 type AutoscalingPolicySyncPolicy struct {
 	// DefaultPeriod is the reconcile interval when no scaling is needed.
+	// Values below 1s are clamped to the compiled-in default at runtime.
 	// +optional
 	// +kubebuilder:default="15s"
 	DefaultPeriod *metav1.Duration `json:"defaultPeriod,omitempty"`
 
 	// ScaleUpPeriod is the reconcile interval during scale-up.
 	// Shorter intervals accelerate replica provisioning.
+	// Values below 1s are clamped to the compiled-in default at runtime.
 	// +optional
 	// +kubebuilder:default="5s"
 	ScaleUpPeriod *metav1.Duration `json:"scaleUpPeriod,omitempty"`
 
 	// ScaleDownPeriod is the reconcile interval during scale-down.
 	// Longer intervals reduce API Server load and prevent premature scale-back.
+	// Values below 1s are clamped to the compiled-in default at runtime.
 	// +optional
 	// +kubebuilder:default="30s"
 	ScaleDownPeriod *metav1.Duration `json:"scaleDownPeriod,omitempty"`

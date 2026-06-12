@@ -877,6 +877,36 @@ func TestApplySyncPolicy(t *testing.T) {
 			wantScaleUpPeriod: 2 * time.Second,
 			wantScaleDownPer:  60 * time.Second,
 		},
+		{
+			name: "zero duration falls back to default",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					Behavior: workload.AutoscalingPolicyBehavior{
+						SyncPolicy: &workload.AutoscalingPolicySyncPolicy{
+							ScaleUpPeriod: &metav1.Duration{Duration: 0},
+						},
+					},
+				},
+			},
+			wantSyncPeriod:    defaultSync,
+			wantScaleUpPeriod: defaultUp,
+			wantScaleDownPer:  defaultDown,
+		},
+		{
+			name: "negative duration falls back to default",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					Behavior: workload.AutoscalingPolicyBehavior{
+						SyncPolicy: &workload.AutoscalingPolicySyncPolicy{
+							DefaultPeriod: &metav1.Duration{Duration: -5 * time.Second},
+						},
+					},
+				},
+			},
+			wantSyncPeriod:    defaultSync,
+			wantScaleUpPeriod: defaultUp,
+			wantScaleDownPer:  defaultDown,
+		},
 	}
 
 	for _, tt := range tests {
