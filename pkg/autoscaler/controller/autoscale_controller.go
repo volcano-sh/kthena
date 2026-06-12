@@ -111,7 +111,7 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 	)
 
 	klog.Info("start autoscale controller")
-	nextInterval := ac.Reconcile(ctx)
+	nextInterval := ac.reconcileWithCrashProtection(ctx)
 	timer := time.NewTimer(nextInterval)
 	defer timer.Stop()
 	for {
@@ -123,11 +123,19 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 			klog.Info("shut down autoscale controller")
 			return
 		case <-timer.C:
-			nextInterval = ac.Reconcile(ctx)
+			nextInterval = ac.reconcileWithCrashProtection(ctx)
 			klog.V(2).InfoS("adaptive reconcile interval", "interval", nextInterval)
 			timer.Reset(nextInterval)
 		}
 	}
+}
+
+// reconcileWithCrashProtection calls Reconcile with crash recovery so a panic
+// inside Reconcile does not kill the controller loop. This mirrors the
+// protection that wait.Until provided before the switch to a manual timer.
+func (ac *AutoscaleController) reconcileWithCrashProtection(ctx context.Context) time.Duration {
+	defer utilruntime.HandleCrash()
+	return ac.Reconcile(ctx)
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
