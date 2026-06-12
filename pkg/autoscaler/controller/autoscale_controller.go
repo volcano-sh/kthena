@@ -116,16 +116,23 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 	)
 
 	klog.Info("start autoscale controller")
-	interval := ac.syncPeriod
+	direction := ac.Reconcile(ctx)
+	interval := ac.computeNextInterval(direction)
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			klog.Info("shut down autoscale controller")
 			return
-		case <-time.After(interval):
-			direction := ac.Reconcile(ctx)
+		case <-timer.C:
+			direction = ac.Reconcile(ctx)
 			interval = ac.computeNextInterval(direction)
 			klog.V(2).InfoS("adaptive reconcile interval", "interval", interval, "direction", direction)
+			timer.Reset(interval)
 		}
 	}
 }
