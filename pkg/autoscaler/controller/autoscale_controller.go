@@ -132,8 +132,12 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 // reconcileWithCrashProtection calls Reconcile with crash recovery so a panic
 // inside Reconcile does not kill the controller loop. This mirrors the
 // protection that wait.Until provided before the switch to a manual timer.
-func (ac *AutoscaleController) reconcileWithCrashProtection(ctx context.Context) time.Duration {
-	defer utilruntime.HandleCrash()
+// On panic the returned interval falls back to defaultPeriod so the controller
+// does not enter a tight crash loop (0 duration → immediate re-fire).
+func (ac *AutoscaleController) reconcileWithCrashProtection(ctx context.Context) (result time.Duration) {
+	defer utilruntime.HandleCrash(func(r interface{}) {
+		result = util.DefaultSyncPeriodSeconds * time.Second
+	})
 	return ac.Reconcile(ctx)
 }
 
