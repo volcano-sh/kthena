@@ -449,7 +449,7 @@ type syncPeriods struct {
 
 // resolveSyncPolicy derives reconcile intervals from the Policy's syncPolicy.
 // Fields left unset in the CR use compiled-in defaults. Durations below
-// minReconcileInterval are clamped to minReconcileInterval and a warning is logged.
+// minReconcileInterval are clamped to minReconcileInterval and logged at V(2).
 func resolveSyncPolicy(policy *workload.AutoscalingPolicy) syncPeriods {
 	sp := policy.Spec.Behavior.SyncPolicy
 	if sp == nil {
