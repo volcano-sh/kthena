@@ -1003,8 +1003,8 @@ func TestReconcileInterval(t *testing.T) {
 	upSrv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 10\n"))
 	defer upSrv.Close()
 	upU, _ := url.Parse(upSrv.URL)
-	upHost, upPortStr, _ := net.SplitHostPort(upU.Host)
-	upPort := toInt32(upPortStr)
+	upHost, scaleUpPortStr, _ := net.SplitHostPort(upU.Host)
+	scaleUpPort := toInt32(scaleUpPortStr)
 
 	// ModelServing for each binding
 	msStable := &workload.ModelServing{
@@ -1059,7 +1059,7 @@ func TestReconcileInterval(t *testing.T) {
 	// scale-up binding: metric >> target → direction > 0 → scaleUpPeriod 3s
 	upTarget := workload.Target{
 		TargetRef:     corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-up"},
-		MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: upU.Path, Port: upPort}}},
+		MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: upU.Path, Port: scaleUpPort}}},
 	}
 	bindingUp := &workload.AutoscalingPolicyBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "binding-up", Namespace: ns},
