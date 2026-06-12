@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
@@ -188,7 +187,7 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) time.Duration {
 	}
 
 	defaultInterval := util.DefaultSyncPeriodSeconds * time.Second
-	minInterval := time.Duration(math.MaxInt64)
+	var minInterval time.Duration
 	hasValidInterval := false
 	for _, binding := range bindings {
 		dir, periods, err := ac.schedule(ctx, binding)
@@ -197,7 +196,7 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) time.Duration {
 			continue
 		}
 		interval := nextInterval(dir, periods)
-		if interval < minInterval {
+		if !hasValidInterval || interval < minInterval {
 			minInterval = interval
 		}
 		hasValidInterval = true
