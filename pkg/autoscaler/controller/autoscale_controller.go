@@ -310,7 +310,7 @@ func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.A
 		}
 		return dir, periods, nil
 	} else {
-		klog.Warningf("binding %s has no scalingConfiguration and optimizerConfiguration", binding.Name)
+		klog.Warningf("binding %s has no homogeneousTarget or heterogeneousTarget", binding.Name)
 	}
 
 	return 0, periods, nil
