@@ -304,14 +304,14 @@ func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.A
 		dir, err := ac.doOptimize(ctx, binding, autoscalePolicy)
 		if err != nil {
 			klog.Errorf("failed to do optimize, err: %v", err)
-			return 0, syncPeriods{}, err
+			return 0, periods, err
 		}
 		return dir, periods, nil
 	} else if binding.Spec.HomogeneousTarget != nil {
 		dir, err := ac.doScale(ctx, binding, autoscalePolicy)
 		if err != nil {
 			klog.Errorf("failed to do scale, err: %v", err)
-			return 0, syncPeriods{}, err
+			return 0, periods, err
 		}
 		return dir, periods, nil
 	} else {
@@ -454,7 +454,7 @@ type syncPeriods struct {
 // resolveSyncPolicy derives reconcile intervals from the Policy's syncPolicy.
 // Fields left unset in the CR use compiled-in defaults. Durations below
 // minReconcileInterval are clamped to minReconcileInterval and logged as
-// warning once per policy (re-logged when the policy spec changes).
+// warning once per policy+field (re-logged when the policy spec changes).
 func (ac *AutoscaleController) resolveSyncPolicy(policy *workload.AutoscalingPolicy) syncPeriods {
 	policyKey := policy.Namespace + "/" + policy.Name
 	ac.clampWarnings.Delete(policyKey)
