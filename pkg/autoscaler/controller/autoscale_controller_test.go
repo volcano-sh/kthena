@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -938,26 +939,36 @@ func TestReconcileReturnsMinInterval(t *testing.T) {
 			wantMin:    defaultUp, // min of (5s, 30s, 5s) = 5s
 		},
 		{
-			name:       "all scale down capped by default sync interval",
+			name:       "all scale down picks scale down interval",
 			directions: []int{-1, -3},
-			wantMin:    defaultSync, // min(15s, 30s, 30s) = 15s — default is the floor
+			wantMin:    defaultDown, // min(MaxInt64, 30s, 30s) = 30s
 		},
 		{
 			name:       "all stable picks default interval",
 			directions: []int{0, 0},
 			wantMin:    defaultSync, // min of (15s, 15s) = 15s
 		},
+		{
+			name:       "no valid intervals falls back to default",
+			directions: []int{}, // simulates all bindings errored
+			wantMin:    defaultSync,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defaultPeriods := syncPeriods{defaultSync, defaultUp, defaultDown}
-			minInterval := defaultSync // matches Reconcile's initialization
+			minInterval := time.Duration(math.MaxInt64)
+			hasValidInterval := false
 			for _, dir := range tt.directions {
 				interval := nextInterval(dir, defaultPeriods)
 				if interval < minInterval {
 					minInterval = interval
 				}
+				hasValidInterval = true
+			}
+			if !hasValidInterval {
+				minInterval = defaultSync
 			}
 			if minInterval != tt.wantMin {
 				t.Errorf("computed minInterval = %v, want %v", minInterval, tt.wantMin)
