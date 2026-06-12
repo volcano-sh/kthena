@@ -314,9 +314,8 @@ func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.A
 		return dir, periods, nil
 	} else {
 		klog.Warningf("binding %s has no homogeneousTarget or heterogeneousTarget", binding.Name)
+		return 0, syncPeriods{}, fmt.Errorf("binding %s has no homogeneousTarget or heterogeneousTarget", binding.Name)
 	}
-
-	return 0, periods, nil
 }
 
 func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) (int64, error) {
