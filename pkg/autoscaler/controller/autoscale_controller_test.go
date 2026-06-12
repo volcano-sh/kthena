@@ -910,7 +910,8 @@ func TestResolveSyncPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ac := &AutoscaleController{
-				clampWarnings: sets.New[string](),
+				clampWarnings:  sets.New[string](),
+				policyVersions: make(map[string]string),
 			}
 			periods := ac.resolveSyncPolicy(tt.policy)
 			if periods.syncPeriod != tt.wantSyncPeriod {
@@ -928,10 +929,11 @@ func TestResolveSyncPolicy(t *testing.T) {
 
 func TestClampWarningsResetOnPolicyReResolve(t *testing.T) {
 	ac := &AutoscaleController{
-		clampWarnings: sets.New[string](),
+		clampWarnings:  sets.New[string](),
+		policyVersions: make(map[string]string),
 	}
 	policy := &workload.AutoscalingPolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "policy-a"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "policy-a", ResourceVersion: "1"},
 		Spec: workload.AutoscalingPolicySpec{
 			Behavior: workload.AutoscalingPolicyBehavior{
 				SyncPolicy: &workload.AutoscalingPolicySyncPolicy{
@@ -948,10 +950,17 @@ func TestClampWarningsResetOnPolicyReResolve(t *testing.T) {
 		t.Fatalf("expected clampWarnings to contain %q after first resolve", warnKey)
 	}
 
-	// Second resolve: old keys are cleared, so warning fires again.
+	// Second resolve with same ResourceVersion: key stays, no re-warning.
 	_ = ac.resolveSyncPolicy(policy)
 	if !ac.clampWarnings.Has(warnKey) {
-		t.Fatalf("expected clampWarnings to contain %q after re-resolve (key should be re-inserted)", warnKey)
+		t.Fatalf("expected clampWarnings to still contain %q — key should not be cleared for same version", warnKey)
+	}
+
+	// Third resolve after policy update (new ResourceVersion): keys cleared, warning re-fires.
+	policy.ResourceVersion = "2"
+	_ = ac.resolveSyncPolicy(policy)
+	if !ac.clampWarnings.Has(warnKey) {
+		t.Fatalf("expected clampWarnings to contain %q after policy update (key should be re-inserted)", warnKey)
 	}
 }
 
@@ -1123,6 +1132,7 @@ func TestReconcileInterval(t *testing.T) {
 		scalerMap:                       map[string]*autoscalerAutoscaler{},
 		optimizerMap:                    map[string]*autoscalerOptimizer{},
 		clampWarnings:                   sets.New[string](),
+		policyVersions:                  make(map[string]string),
 	}
 
 	ctx := context.Background()

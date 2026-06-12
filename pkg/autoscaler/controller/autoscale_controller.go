@@ -59,6 +59,7 @@ type AutoscaleController struct {
 	scalerMap                          map[string]*autoscaler.Autoscaler
 	optimizerMap                       map[string]*autoscaler.Optimizer
 	clampWarnings                      sets.Set[string]
+	policyVersions                     map[string]string
 }
 
 func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
@@ -92,6 +93,7 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 		scalerMap:                          make(map[string]*autoscaler.Autoscaler),
 		optimizerMap:                       make(map[string]*autoscaler.Optimizer),
 		clampWarnings:                      sets.New[string](),
+		policyVersions:                     make(map[string]string),
 	}
 	return ac
 }
@@ -203,7 +205,7 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 	for _, binding := range bindings {
 		dir, periods, err := ac.schedule(ctx, binding)
 		if err != nil {
-			klog.Errorf("failed to process autoscale, err: %v", err)
+			klog.Errorf("failed to process autoscale for binding %s, err: %v", klog.KObj(binding), err)
 			continue
 		}
 		interval := nextInterval(dir, periods)
@@ -459,15 +461,20 @@ type syncPeriods struct {
 // resolveSyncPolicy derives reconcile intervals from the Policy's syncPolicy.
 // Fields left unset in the CR use compiled-in defaults. Durations below
 // minReconcileInterval are clamped to minReconcileInterval and logged as
-// warning once per policy+field (re-logged when the policy spec changes).
+// warning once per policy+field (re-logged only when the policy spec changes).
 func (ac *AutoscaleController) resolveSyncPolicy(policy *workload.AutoscalingPolicy) syncPeriods {
 	policyKey := policy.Namespace + "/" + policy.Name
-	prefix := policyKey + "/"
-	for _, k := range ac.clampWarnings.UnsortedList() {
-		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
-			ac.clampWarnings.Delete(k)
+	rv := policy.ResourceVersion
+	prevRV := ac.policyVersions[policyKey]
+	if prevRV != "" && prevRV != rv {
+		prefix := policyKey + "/"
+		for _, k := range ac.clampWarnings.UnsortedList() {
+			if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+				ac.clampWarnings.Delete(k)
+			}
 		}
 	}
+	ac.policyVersions[policyKey] = rv
 	sp := policy.Spec.Behavior.SyncPolicy
 	if sp == nil {
 		return syncPeriods{
