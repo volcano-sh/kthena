@@ -176,3 +176,8 @@ func TestSglangMetrics(t *testing.T) {
 func TestRouterConfigUpdate(t *testing.T) {
 	TestRouterConfigUpdateShared(t, testCtx, testNamespace, false, kthenaNamespace)
 }
+
+// TestSessionSticky runs session affinity e2e (random scheduler + debug pod header).
+func TestSessionSticky(t *testing.T) {
+	TestSessionStickyShared(t, testCtx, testNamespace, false, kthenaNamespace)
+}

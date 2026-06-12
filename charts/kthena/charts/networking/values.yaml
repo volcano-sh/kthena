@@ -71,6 +71,13 @@ kthenaRouter:
   # kubeAPIBurst is the burst to use while talking with kubernetes apiserver
   # If 0 or not specified, uses default value (10)
   kubeAPIBurst: 0
+  # sessionSticky configures the router-wide session affinity backing store.
+  sessionSticky:
+    # backend is "memory" (default) or "redis".
+    backend: memory
+    redis:
+      # address is required when backend is redis (e.g. "redis:6379").
+      address: ""
 
 webhook:
   enabled: true

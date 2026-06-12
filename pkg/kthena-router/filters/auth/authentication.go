@@ -82,26 +82,24 @@ func (j *JWTAuthenticator) Close() {
 	}
 }
 
-// authenticate validates the token and returns the subject
-func (j *JWTAuthenticator) authenticate(tokenStr string) (string, error) {
-	// Get current JWKS from rotator
+// parseAndValidate parses and validates a JWT and returns the token and subject.
+func (j *JWTAuthenticator) parseAndValidate(tokenStr string) (jwt.Token, string, error) {
 	jwksValue := j.rotator.GetJwks()
 	if jwksValue.Jwks == nil {
-		return "", fmt.Errorf("no JWKS available for token validation")
+		return nil, "", fmt.Errorf("no JWKS available for token validation")
 	}
 
 	token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(jwksValue.Jwks, jws.WithInferAlgorithmFromKey(true)))
 	if err != nil {
-		return "", fmt.Errorf("failed to parse jwt: %w", err)
+		return nil, "", fmt.Errorf("failed to parse jwt: %w", err)
 	}
 
-	// Validate the claims in the token
 	if err := j.validateClaims(token, jwksValue); err != nil {
-		return "", fmt.Errorf("failed to validate claims: %w", err)
+		return nil, "", fmt.Errorf("failed to validate claims: %w", err)
 	}
 
 	sub, _ := token.Subject()
-	return sub, nil
+	return token, sub, nil
 }
 
 func (j *JWTAuthenticator) validateClaims(token jwt.Token, jwks *Jwks) error {
@@ -296,11 +294,12 @@ func (j *JWTAuthenticator) ValidateToken(ctx context.Context, c *gin.Context, to
 		return fmt.Errorf("authorization header missing or empty")
 	}
 
-	sub, err := j.authenticate(token)
+	parsed, sub, err := j.parseAndValidate(token)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 
+	c.Set(common.JWTTokenKey, parsed)
 	c.Set(common.UserIdKey, sub)
 	return nil
 }
@@ -308,6 +307,34 @@ func (j *JWTAuthenticator) ValidateToken(ctx context.Context, c *gin.Context, to
 // IsEnabled returns whether JWT authentication is enabled
 func (j *JWTAuthenticator) IsEnabled() bool {
 	return j.enabled
+}
+
+// ClaimFromContext returns the named JWT claim from a validated token stored on the Gin context.
+func ClaimFromContext(c *gin.Context, claimName string) string {
+	if c == nil || claimName == "" {
+		return ""
+	}
+	val, ok := c.Get(common.JWTTokenKey)
+	if !ok {
+		return ""
+	}
+	token, ok := val.(jwt.Token)
+	if !ok || token == nil {
+		return ""
+	}
+	return claimString(token, claimName)
+}
+
+func claimString(token jwt.Token, claimName string) string {
+	var s string
+	if err := token.Get(claimName, &s); err == nil && strings.TrimSpace(s) != "" {
+		return strings.TrimSpace(s)
+	}
+	var raw any
+	if err := token.Get(claimName, &raw); err != nil || raw == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(raw))
 }
 
 // Authenticate returns a Gin middleware for JWT token validation
@@ -321,11 +348,12 @@ func (j *JWTAuthenticator) Authenticate() gin.HandlerFunc {
 				return
 			}
 
-			sub, err := j.authenticate(token)
+			parsed, sub, err := j.parseAndValidate(token)
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("Unauthorized: %v", err)})
 				return
 			}
+			c.Set(common.JWTTokenKey, parsed)
 			c.Set(common.UserIdKey, sub)
 		}
 		c.Next()

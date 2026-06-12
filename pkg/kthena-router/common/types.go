@@ -18,6 +18,7 @@ package common
 
 const (
 	UserIdKey     = "user_id"
+	JWTTokenKey   = "jwt_token"
 	TokenUsageKey = "token_usage"
 )
 

@@ -1,0 +1,20 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-sticky
+  namespace: default
+spec:
+  modelName: "deepseek-sticky"
+  sessionSticky:
+    sessionAffinitySeconds: 300
+    sources:
+      - type: Header
+        name: X-Sticky-Session
+      - type: Query
+        name: sticky_q
+      - type: Cookie
+        name: sticky_sid
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "deepseek-r1-1-5b"

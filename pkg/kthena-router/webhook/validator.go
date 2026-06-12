@@ -182,6 +182,34 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		}
 	}
 
+	ssField := specField.Child("sessionSticky")
+	if ss := modelRoute.Spec.SessionSticky; ss != nil {
+		if len(ss.Sources) == 0 {
+			allErrs = append(allErrs, field.Required(ssField.Child("sources"), "sources must be non-empty when sessionSticky is set"))
+		}
+		if len(ss.Sources) > 16 {
+			allErrs = append(allErrs, field.Invalid(ssField.Child("sources"), len(ss.Sources), "must have at most 16 entries"))
+		}
+		if ss.SessionAffinitySeconds != nil && *ss.SessionAffinitySeconds < 1 {
+			allErrs = append(allErrs, field.Invalid(ssField.Child("sessionAffinitySeconds"), *ss.SessionAffinitySeconds, "must be >= 1"))
+		}
+		for i := range ss.Sources {
+			src := ss.Sources[i]
+			sf := ssField.Child("sources").Index(i)
+			if src.Name == "" {
+				allErrs = append(allErrs, field.Required(sf.Child("name"), "name must not be empty"))
+			}
+			switch src.Type {
+			case networkingv1alpha1.SessionKeySourceHeader,
+				networkingv1alpha1.SessionKeySourceQuery,
+				networkingv1alpha1.SessionKeySourceCookie,
+				networkingv1alpha1.SessionKeySourceJWTClaim:
+			default:
+				allErrs = append(allErrs, field.Invalid(sf.Child("type"), src.Type, "must be Header, Query, Cookie, or JWTClaim"))
+			}
+		}
+	}
+
 	if len(allErrs) > 0 {
 		var messages []string
 		for _, err := range allErrs {

@@ -353,6 +353,73 @@ func TestValidateModelRoute(t *testing.T) {
 			expectValid:    false,
 			expectedReason: "validation failed:   - spec: Required value: either modelName or loraAdapters must be specified  - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
 		},
+		{
+			name: "valid model route with session sticky",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{Name: "sr", Namespace: "default"},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "m1",
+					SessionSticky: &networkingv1alpha1.SessionSticky{
+						Sources: []networkingv1alpha1.SessionKeySource{
+							{Type: networkingv1alpha1.SessionKeySourceHeader, Name: "X-S"},
+						},
+					},
+					Rules: []*networkingv1alpha1.Rule{
+						{Name: "r1", TargetModels: []*networkingv1alpha1.TargetModel{{ModelServerName: "srv"}}},
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "invalid session sticky empty sources",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{Name: "sr2", Namespace: "default"},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "m1",
+					SessionSticky: &networkingv1alpha1.SessionSticky{
+						Sources: []networkingv1alpha1.SessionKeySource{},
+					},
+					Rules: []*networkingv1alpha1.Rule{
+						{Name: "r1", TargetModels: []*networkingv1alpha1.TargetModel{{ModelServerName: "srv"}}},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.sessionSticky.sources: Required value: sources must be non-empty when sessionSticky is set",
+		},
+		{
+			name: "invalid session affinity seconds",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{Name: "sr3", Namespace: "default"},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "m1",
+					SessionSticky: &networkingv1alpha1.SessionSticky{
+						SessionAffinitySeconds: func() *int32 { v := int32(0); return &v }(),
+						Sources: []networkingv1alpha1.SessionKeySource{
+							{Type: networkingv1alpha1.SessionKeySourceQuery, Name: "s"},
+						},
+					},
+					Rules: []*networkingv1alpha1.Rule{
+						{Name: "r1", TargetModels: []*networkingv1alpha1.TargetModel{{ModelServerName: "srv"}}},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.sessionSticky.sessionAffinitySeconds: Invalid value: 0: must be >= 1",
+		},
 	}
 
 	// Create a validator instance
