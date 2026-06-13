@@ -38,6 +38,11 @@ const (
 	LabelModelServer = "model_server"
 	LabelEngine      = "engine"
 	LabelUserID      = "user_id"
+	LabelStage       = "stage"
+
+	// kvcache-aware error stage values
+	StageTokenize = "tokenize"
+	StageRedis    = "redis"
 
 	// Token type values
 	TokenTypeInput  = "input"
@@ -91,6 +96,22 @@ type Metrics struct {
 
 	// Tokenizer unsupported engine metrics
 	TokenizerUnsupportedEngineTotal prometheus.CounterVec
+
+	// prefix-cache score plugin metrics
+	PrefixCacheHitsTotal       prometheus.CounterVec
+	PrefixCacheMissesTotal     prometheus.CounterVec
+	PrefixCacheBlocksMatched   prometheus.HistogramVec
+	PrefixCacheEvictionsTotal  prometheus.CounterVec
+	PrefixCacheEntries         prometheus.GaugeFunc
+	prefixCacheEntriesProvider atomic.Value // func() float64
+
+	// kvcache-aware score plugin metrics
+	KVCacheHitsTotal        prometheus.CounterVec
+	KVCacheMissesTotal      prometheus.CounterVec
+	KVCacheBlocksMatched    prometheus.HistogramVec
+	KVCacheRedisDuration    prometheus.HistogramVec
+	KVCacheTokenizeDuration prometheus.HistogramVec
+	KVCacheErrorsTotal      prometheus.CounterVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
@@ -236,6 +257,90 @@ func NewMetrics() *Metrics {
 			},
 			[]string{LabelModel, LabelEngine},
 		),
+
+		PrefixCacheHitsTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_prefix_cache_hits_total",
+				Help: "Number of prefix-cache score calls with at least one matching pod",
+			},
+			[]string{LabelModel},
+		),
+
+		PrefixCacheMissesTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_prefix_cache_misses_total",
+				Help: "Number of prefix-cache score calls that hashed a non-empty prompt but found zero matches",
+			},
+			[]string{LabelModel},
+		),
+
+		PrefixCacheBlocksMatched: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_prefix_cache_blocks_matched",
+				Help:    "Longest prefix match length (in blocks) per prefix-cache score call",
+				Buckets: []float64{0, 1, 2, 4, 8, 16, 32, 64, 128},
+			},
+			[]string{LabelModel},
+		),
+
+		PrefixCacheEvictionsTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_prefix_cache_evictions_total",
+				Help: "Number of hash entries evicted from a pod LRU due to capacity pressure",
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheHitsTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_kvcache_aware_hits_total",
+				Help: "Number of kvcache-aware score calls with at least one block match",
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheMissesTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_kvcache_aware_misses_total",
+				Help: "Number of kvcache-aware score calls that produced block hashes but matched zero blocks",
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheBlocksMatched: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_kvcache_aware_blocks_matched",
+				Help:    "Longest prefix-block match length per kvcache-aware score call",
+				Buckets: []float64{0, 1, 2, 4, 8, 16, 32, 64, 128},
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheRedisDuration: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_kvcache_aware_redis_duration_seconds",
+				Help:    "Time spent in the batched Redis lookup during kvcache-aware scoring",
+				Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheTokenizeDuration: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_kvcache_aware_tokenize_duration_seconds",
+				Help:    "Time spent tokenizing the prompt during kvcache-aware scoring",
+				Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheErrorsTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_kvcache_aware_errors_total",
+				Help: "Number of kvcache-aware score calls that aborted on error, by stage",
+			},
+			[]string{LabelModel, LabelStage},
+		),
 	}
 
 	m.ActiveRequests = promauto.NewGaugeFunc(
@@ -248,7 +353,65 @@ func NewMetrics() *Metrics {
 		},
 	)
 
+	m.PrefixCacheEntries = promauto.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "kthena_router_prefix_cache_entries",
+			Help: "Current number of cached hash entries across all pod LRUs in the prefix-cache store",
+		},
+		func() float64 {
+			if p, ok := m.prefixCacheEntriesProvider.Load().(func() float64); ok && p != nil {
+				return p()
+			}
+			return 0
+		},
+	)
+
 	return m
+}
+
+// SetPrefixCacheEntriesProvider sets the callback read by the prefix_cache_entries gauge at scrape time.
+func (m *Metrics) SetPrefixCacheEntriesProvider(provider func() float64) {
+	m.prefixCacheEntriesProvider.Store(provider)
+}
+
+func (m *Metrics) RecordPrefixCacheHit(model string) {
+	m.PrefixCacheHitsTotal.WithLabelValues(model).Inc()
+}
+
+func (m *Metrics) RecordPrefixCacheMiss(model string) {
+	m.PrefixCacheMissesTotal.WithLabelValues(model).Inc()
+}
+
+func (m *Metrics) RecordPrefixCacheBlocksMatched(model string, blocks int) {
+	m.PrefixCacheBlocksMatched.WithLabelValues(model).Observe(float64(blocks))
+}
+
+func (m *Metrics) RecordPrefixCacheEviction(model string) {
+	m.PrefixCacheEvictionsTotal.WithLabelValues(model).Inc()
+}
+
+func (m *Metrics) RecordKVCacheHit(model string) {
+	m.KVCacheHitsTotal.WithLabelValues(model).Inc()
+}
+
+func (m *Metrics) RecordKVCacheMiss(model string) {
+	m.KVCacheMissesTotal.WithLabelValues(model).Inc()
+}
+
+func (m *Metrics) RecordKVCacheBlocksMatched(model string, blocks int) {
+	m.KVCacheBlocksMatched.WithLabelValues(model).Observe(float64(blocks))
+}
+
+func (m *Metrics) RecordKVCacheRedisDuration(model string, duration time.Duration) {
+	m.KVCacheRedisDuration.WithLabelValues(model).Observe(duration.Seconds())
+}
+
+func (m *Metrics) RecordKVCacheTokenizeDuration(model string, duration time.Duration) {
+	m.KVCacheTokenizeDuration.WithLabelValues(model).Observe(duration.Seconds())
+}
+
+func (m *Metrics) RecordKVCacheError(model, stage string) {
+	m.KVCacheErrorsTotal.WithLabelValues(model, stage).Inc()
 }
 
 // RecordRequest records a completed request with all relevant metrics
@@ -481,6 +644,42 @@ func (r *RequestMetricsRecorder) RecordSchedulerPluginDuration(pluginName, plugi
 // RecordFairnessQueueDuration records the time spent in fairness queue
 func (r *RequestMetricsRecorder) RecordFairnessQueueDuration(userID string, duration time.Duration) {
 	r.metrics.RecordFairnessQueueDuration(r.model, userID, duration)
+}
+
+func (r *RequestMetricsRecorder) RecordPrefixCacheHit() {
+	r.metrics.RecordPrefixCacheHit(r.model)
+}
+
+func (r *RequestMetricsRecorder) RecordPrefixCacheMiss() {
+	r.metrics.RecordPrefixCacheMiss(r.model)
+}
+
+func (r *RequestMetricsRecorder) RecordPrefixCacheBlocksMatched(blocks int) {
+	r.metrics.RecordPrefixCacheBlocksMatched(r.model, blocks)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheHit() {
+	r.metrics.RecordKVCacheHit(r.model)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheMiss() {
+	r.metrics.RecordKVCacheMiss(r.model)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheBlocksMatched(blocks int) {
+	r.metrics.RecordKVCacheBlocksMatched(r.model, blocks)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheRedisDuration(duration time.Duration) {
+	r.metrics.RecordKVCacheRedisDuration(r.model, duration)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheTokenizeDuration(duration time.Duration) {
+	r.metrics.RecordKVCacheTokenizeDuration(r.model, duration)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheError(stage string) {
+	r.metrics.RecordKVCacheError(r.model, stage)
 }
 
 // IncActiveUpstreamRequests increments the active upstream requests counter for this request

@@ -26,6 +26,7 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/tokenization"
 	v1 "k8s.io/api/core/v1"
@@ -2110,5 +2111,47 @@ func TestKVCacheAware_Integration_Comprehensive_Core(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.testFunc(t)
 		})
+	}
+}
+
+func TestKVCacheAware_ScoreMetrics_TokenizeError(t *testing.T) {
+	plugin := &KVCacheAware{
+		name:             KVCacheAwarePluginName,
+		maxBlocksToMatch: 128,
+		keyPrefix:        kvCacheKeyPrefix,
+		processor:        &TokenBlockProcessor{blockSize: 128},
+		// tokenizerManager nil -> normalizeAndTokenizePrompt returns an error
+	}
+
+	const model = "kvmetrics-tokenize-error"
+	recorder := metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
+	ctx := &framework.Context{
+		Model:           model,
+		Prompt:          &common.ChatMessage{Text: "hello world"},
+		MetricsRecorder: recorder,
+	}
+
+	before := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)
+	plugin.Score(ctx, createTestPods("pod1"))
+	if got := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize) - before; got != 1 {
+		t.Errorf("kvcache tokenize errors delta = %v, want 1", got)
+	}
+}
+
+func TestKVCacheAware_CalculatePodScoresAndMatch_LongestMatch(t *testing.T) {
+	plugin := &KVCacheAware{}
+	blockHashes := []uint64{1, 2, 3, 4}
+	blockToPods := map[uint64][]string{
+		1: {"pod1", "pod2"},
+		2: {"pod1", "pod2"},
+		3: {"pod1"},
+		4: {"pod1"},
+	}
+	scores, longest := plugin.calculatePodScoresAndMatch(blockHashes, blockToPods)
+	if scores["pod1"] != 100 {
+		t.Errorf("pod1 score = %d, want 100", scores["pod1"])
+	}
+	if longest != 4 {
+		t.Errorf("longest match = %d, want 4", longest)
 	}
 }
