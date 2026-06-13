@@ -79,6 +79,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/cache"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
@@ -151,6 +152,7 @@ func NewPrefixCache(store datastore.Store, pluginArg runtime.RawExtension) *Pref
 		maxBlocksToMatch: prefixCacheArgs.MaxBlocksToMatch,
 	}
 	p.store = cache.NewModelPrefixStore(store, prefixCacheArgs.MaxHashCacheSize, prefixCacheArgs.TopKMatches)
+	metrics.DefaultMetrics.SetPrefixCacheEntriesProvider(p.store.EntryCount)
 	return p
 }
 
@@ -173,13 +175,26 @@ func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) m
 
 	// Single pass over pods: score = cache-hit score if found, 0 otherwise.
 	totalHashes := len(hashes)
+	longestMatch := 0
 	scoreResults := make(map[*datastore.PodInfo]int, len(pods))
 	for _, pod := range pods {
 		nsName := pod.GetPodNamespacedName()
 		if matchLen, ok := matchByName[nsName]; ok {
 			scoreResults[pod] = int((float64(matchLen) / float64(totalHashes)) * 100)
+			if matchLen > longestMatch {
+				longestMatch = matchLen
+			}
 		} else {
 			scoreResults[pod] = 0
+		}
+	}
+
+	if ctx.MetricsRecorder != nil {
+		ctx.MetricsRecorder.RecordPrefixCacheBlocksMatched(longestMatch)
+		if len(matchByName) > 0 {
+			ctx.MetricsRecorder.RecordPrefixCacheHit()
+		} else {
+			ctx.MetricsRecorder.RecordPrefixCacheMiss()
 		}
 	}
 
