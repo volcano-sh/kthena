@@ -137,6 +137,75 @@ func TestFairnessSameUser(t *testing.T) {
 	}
 }
 
+func TestFairnessSameSessionLift(t *testing.T) {
+	cfg := DefaultFairnessQueueConfig()
+	cfg.MaxConsecutiveSessionRequests = 2
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	defer pq.Close()
+
+	now := time.Now()
+	requests := []*Request{
+		{ReqID: "session-first", UserID: "user1", SessionID: "session-a", Priority: 1.0, RequestTime: now},
+		{ReqID: "other-session", UserID: "user2", SessionID: "session-b", Priority: 2.0, RequestTime: now.Add(time.Second)},
+		{ReqID: "session-next", UserID: "user3", SessionID: "session-a", Priority: 100.0, RequestTime: now.Add(2 * time.Second)},
+	}
+
+	for _, req := range requests {
+		if err := pq.PushRequest(req); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	expectedOrder := []string{"session-first", "session-next", "other-session"}
+	for i, expected := range expectedOrder {
+		req, err := pq.popWhenAvailable(context.Background())
+		if err != nil {
+			t.Fatalf("PopRequest failed at index %d: %v", i, err)
+		}
+		if req.ReqID != expected {
+			t.Errorf("Expected ReqID %s at index %d, got %s", expected, i, req.ReqID)
+		}
+		if req.Complete != nil {
+			req.Complete()
+		}
+	}
+}
+
+func TestFairnessSameSessionLiftLimit(t *testing.T) {
+	cfg := DefaultFairnessQueueConfig()
+	cfg.MaxConsecutiveSessionRequests = 2
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	defer pq.Close()
+
+	now := time.Now()
+	requests := []*Request{
+		{ReqID: "session-first", UserID: "user1", SessionID: "session-a", Priority: 1.0, RequestTime: now},
+		{ReqID: "other-session", UserID: "user2", SessionID: "session-b", Priority: 2.0, RequestTime: now.Add(time.Second)},
+		{ReqID: "session-second", UserID: "user3", SessionID: "session-a", Priority: 100.0, RequestTime: now.Add(2 * time.Second)},
+		{ReqID: "session-third", UserID: "user4", SessionID: "session-a", Priority: 101.0, RequestTime: now.Add(3 * time.Second)},
+	}
+
+	for _, req := range requests {
+		if err := pq.PushRequest(req); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	expectedOrder := []string{"session-first", "session-second", "other-session", "session-third"}
+	for i, expected := range expectedOrder {
+		req, err := pq.popWhenAvailable(context.Background())
+		if err != nil {
+			t.Fatalf("PopRequest failed at index %d: %v", i, err)
+		}
+		if req.ReqID != expected {
+			t.Errorf("Expected ReqID %s at index %d, got %s", expected, i, req.ReqID)
+		}
+		if req.Complete != nil {
+			req.Complete()
+		}
+	}
+}
+
 func TestPopWhenAvailable(t *testing.T) {
 	pq := NewRequestPriorityQueue(nil)
 	defer pq.Close()

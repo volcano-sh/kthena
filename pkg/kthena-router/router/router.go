@@ -1049,6 +1049,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		ReqID:       requestID,
 		UserID:      userId,
 		ModelName:   modelName,
+		SessionID:   strings.TrimSpace(c.Request.Header.Get("x-session-id")),
 		Priority:    pri,
 		RequestTime: time.Now(),
 		NotifyChan:  make(chan struct{}),
@@ -1064,6 +1065,9 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	case <-queueReq.NotifyChan:
 		if queueReq.Release != nil {
 			defer queueReq.Release()
+		}
+		if queueReq.Complete != nil {
+			defer queueReq.Complete()
 		}
 		r.doLoadbalance(c, modelRequest)
 		return nil

@@ -49,17 +49,21 @@ type FairnessQueueConfig struct {
 
 	// RequestNumWeight is the request-count weight in the composite priority score.
 	RequestNumWeight float64
+
+	// MaxConsecutiveSessionRequests bounds consecutive dispatches from the same session.
+	MaxConsecutiveSessionRequests int
 }
 
 // DefaultFairnessQueueConfig returns backward-compatible defaults.
 func DefaultFairnessQueueConfig() FairnessQueueConfig {
 	return FairnessQueueConfig{
-		MaxConcurrent:             0,
-		MaxQPS:                    100,
-		MaxPriorityRefreshRetries: 0,
-		RebuildThreshold:          64,
-		TokenWeight:               1.0,
-		RequestNumWeight:          0.0,
+		MaxConcurrent:                 0,
+		MaxQPS:                        100,
+		MaxPriorityRefreshRetries:     0,
+		RebuildThreshold:              64,
+		TokenWeight:                   1.0,
+		RequestNumWeight:              0.0,
+		MaxConsecutiveSessionRequests: 2,
 	}
 }
 
@@ -92,11 +96,13 @@ type Request struct {
 	ReqID       string
 	UserID      string  // User ID for fairness scheduling
 	ModelName   string  // Target model for per-model fair queuing
+	SessionID   string  // Session ID for multi-round conversation affinity
 	Priority    float64 // Priority (lower value means higher priority)
 	RequestTime time.Time
 	NotifyChan  chan struct{}
 	CancelCh    <-chan struct{} // Request-scoped cancellation signal
 	Release     func()          // Set by the queue when a permit is acquired
+	Complete    func()          // Called after the request is processed
 }
 
 // RequestPriorityQueue implements the heap.Interface
@@ -113,6 +119,9 @@ type RequestPriorityQueue struct {
 
 	// Priority refresh (Phase 2)
 	tokenTracker TokenTracker // Optional; when set, enables dequeue-time priority refresh
+
+	lastSessionID         string
+	lastSessionRequestNum int
 }
 
 var _ heap.Interface = &RequestPriorityQueue{}
@@ -205,7 +214,7 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 	for {
 		pq.mu.Lock()
 		if len(pq.heap) > 0 {
-			req := heap.Pop(pq).(*Request)
+			req, sessionLifted := pq.popNextRequestLocked()
 
 			// Skip cancelled/timed-out requests
 			if req.isCancelled() {
@@ -220,7 +229,7 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 			}
 
 			// Bounded priority refresh: re-evaluate root priority at dequeue time
-			if pq.tokenTracker != nil && pq.config.MaxPriorityRefreshRetries > 0 {
+			if !sessionLifted && pq.tokenTracker != nil && pq.config.MaxPriorityRefreshRetries > 0 {
 				newPri, err := CalculateFairnessPriority(
 					pq.tokenTracker,
 					req.UserID,
@@ -263,6 +272,7 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 				pq.metrics.RecordFairnessQueueDuration(req.ModelName, req.UserID, queueDuration)
 				pq.metrics.IncFairnessQueueDequeue(req.ModelName, req.UserID)
 			}
+			pq.setCompleteLocked(req)
 
 			pq.mu.Unlock()
 			return req, nil
@@ -280,6 +290,58 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 			continue
 		}
 	}
+}
+
+func (pq *RequestPriorityQueue) popNextRequestLocked() (*Request, bool) {
+	if pq.config.MaxConsecutiveSessionRequests > 0 &&
+		pq.lastSessionID != "" &&
+		pq.lastSessionRequestNum < pq.config.MaxConsecutiveSessionRequests {
+		if index := pq.findSessionRequestLocked(pq.lastSessionID); index >= 0 {
+			return heap.Remove(pq, index).(*Request), true
+		}
+	}
+	return heap.Pop(pq).(*Request), false
+}
+
+func (pq *RequestPriorityQueue) findSessionRequestLocked(sessionID string) int {
+	index := -1
+	for i, req := range pq.heap {
+		if req.SessionID != sessionID {
+			continue
+		}
+		if index == -1 || req.RequestTime.Before(pq.heap[index].RequestTime) {
+			index = i
+		}
+	}
+	return index
+}
+
+func (pq *RequestPriorityQueue) setCompleteLocked(req *Request) {
+	if pq.config.MaxConsecutiveSessionRequests <= 0 {
+		return
+	}
+	completeOnce := sync.Once{}
+	req.Complete = func() {
+		completeOnce.Do(func() {
+			pq.recordSession(req)
+		})
+	}
+}
+
+func (pq *RequestPriorityQueue) recordSession(req *Request) {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	if req.SessionID == "" {
+		pq.lastSessionID = ""
+		pq.lastSessionRequestNum = 0
+		return
+	}
+	if req.SessionID == pq.lastSessionID {
+		pq.lastSessionRequestNum++
+		return
+	}
+	pq.lastSessionID = req.SessionID
+	pq.lastSessionRequestNum = 1
 }
 
 func (r *Request) isCancelled() bool {

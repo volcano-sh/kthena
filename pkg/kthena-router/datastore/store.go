@@ -460,6 +460,14 @@ func createFairnessQueueConfig() FairnessQueueConfig {
 		}
 	}
 
+	if v := os.Getenv("FAIRNESS_MAX_CONSECUTIVE_SESSION_REQUESTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.MaxConsecutiveSessionRequests = n
+		} else {
+			klog.Warningf("Invalid FAIRNESS_MAX_CONSECUTIVE_SESSION_REQUESTS: %q, using default %d", v, cfg.MaxConsecutiveSessionRequests)
+		}
+	}
+
 	return cfg
 }
 

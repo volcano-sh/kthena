@@ -59,6 +59,7 @@ The queue also supports the following runtime protections:
 - **Client disconnect handling**: cancelled requests are skipped instead of being sent downstream later.
 - **Dequeue-time priority refresh**: when `FAIRNESS_PRIORITY_REFRESH_RETRIES > 0`, the priority of the candidate request (the heap root) is recalculated against current usage before it is released. If a fresher priority would put it behind another waiting request, it is reinserted and the next candidate is tried instead.
 - **Heap rebuild fallback**: when dequeue-time refresh retries are exhausted *and* the current queue depth is at or below `FAIRNESS_REBUILD_THRESHOLD`, all queued item priorities are recalculated from current usage and the heap is fully rebuilt. This bounds the staleness of the entire queue while protecting against expensive rebuilds on large queues.
+- **Session affinity**: requests with the same `x-session-id` can be released consecutively to improve multi-round conversation cache locality, bounded by `FAIRNESS_MAX_CONSECUTIVE_SESSION_REQUESTS`.
 
 ## Prerequisites
 
@@ -113,6 +114,8 @@ env:
   value: "2"
 - name: FAIRNESS_REBUILD_THRESHOLD
   value: "64"
+- name: FAIRNESS_MAX_CONSECUTIVE_SESSION_REQUESTS
+  value: "2"
 ```
 
 ## Configuration Reference
@@ -135,6 +138,7 @@ env:
 | `FAIRNESS_MAX_QPS` | Maximum dequeue rate in QPS mode | `100` | Used only when `FAIRNESS_MAX_CONCURRENT=0` |
 | `FAIRNESS_PRIORITY_REFRESH_RETRIES` | Max dequeue-time refresh/reinsert attempts before heap rebuild | `0` | `0` disables dequeue-time refresh |
 | `FAIRNESS_REBUILD_THRESHOLD` | Queue size threshold controlling when heap rebuild is allowed | `64` | Helps bound rebuild cost |
+| `FAIRNESS_MAX_CONSECUTIVE_SESSION_REQUESTS` | Maximum consecutive requests released for the same `x-session-id` | `2` | `0` disables same-session lifting |
 
 ### Priority Score Settings
 
