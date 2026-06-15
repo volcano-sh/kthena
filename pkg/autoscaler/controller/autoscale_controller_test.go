@@ -34,11 +34,11 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
-	"k8s.io/apimachinery/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
@@ -830,18 +830,18 @@ func TestResolveSyncPolicy(t *testing.T) {
 	defaultDown := util.ScaleDownSyncPeriodSeconds * time.Second
 
 	tests := []struct {
-		name              string
-		policy            *workload.AutoscalingPolicy
-		wantSyncPeriod    time.Duration
-		wantScaleUpPeriod time.Duration
+		name                string
+		policy              *workload.AutoscalingPolicy
+		wantSyncPeriod      time.Duration
+		wantScaleUpPeriod   time.Duration
 		wantScaleDownPeriod time.Duration
 	}{
 		{
-			name:              "nil syncPolicy uses defaults",
-			policy:            &workload.AutoscalingPolicy{},
-			wantSyncPeriod:    defaultSync,
-			wantScaleUpPeriod: defaultUp,
-			wantScaleDownPeriod:  defaultDown,
+			name:                "nil syncPolicy uses defaults",
+			policy:              &workload.AutoscalingPolicy{},
+			wantSyncPeriod:      defaultSync,
+			wantScaleUpPeriod:   defaultUp,
+			wantScaleDownPeriod: defaultDown,
 		},
 		{
 			name: "partial config uses defaults for unset fields",
@@ -854,9 +854,9 @@ func TestResolveSyncPolicy(t *testing.T) {
 					},
 				},
 			},
-			wantSyncPeriod:    defaultSync,
-			wantScaleUpPeriod: 3 * time.Second,
-			wantScaleDownPeriod:  defaultDown,
+			wantSyncPeriod:      defaultSync,
+			wantScaleUpPeriod:   3 * time.Second,
+			wantScaleDownPeriod: defaultDown,
 		},
 		{
 			name: "full config overrides all defaults",
@@ -871,9 +871,9 @@ func TestResolveSyncPolicy(t *testing.T) {
 					},
 				},
 			},
-			wantSyncPeriod:    10 * time.Second,
-			wantScaleUpPeriod: 2 * time.Second,
-			wantScaleDownPeriod:  60 * time.Second,
+			wantSyncPeriod:      10 * time.Second,
+			wantScaleUpPeriod:   2 * time.Second,
+			wantScaleDownPeriod: 60 * time.Second,
 		},
 		{
 			name: "zero duration clamped to minimum",
@@ -886,9 +886,9 @@ func TestResolveSyncPolicy(t *testing.T) {
 					},
 				},
 			},
-			wantSyncPeriod:    defaultSync,
-			wantScaleUpPeriod: minReconcileInterval, // clamped to 1s, not fallback to 5s
-			wantScaleDownPeriod:  defaultDown,
+			wantSyncPeriod:      defaultSync,
+			wantScaleUpPeriod:   minReconcileInterval, // clamped to 1s, not fallback to 5s
+			wantScaleDownPeriod: defaultDown,
 		},
 		{
 			name: "negative duration clamped to minimum",
@@ -901,9 +901,9 @@ func TestResolveSyncPolicy(t *testing.T) {
 					},
 				},
 			},
-			wantSyncPeriod:    minReconcileInterval, // clamped to 1s, not fallback to 15s
-			wantScaleUpPeriod: defaultUp,
-			wantScaleDownPeriod:  defaultDown,
+			wantSyncPeriod:      minReconcileInterval, // clamped to 1s, not fallback to 15s
+			wantScaleUpPeriod:   defaultUp,
+			wantScaleDownPeriod: defaultDown,
 		},
 	}
 
@@ -1064,9 +1064,9 @@ func TestNextIntervalAggregation(t *testing.T) {
 	defaultDown := util.ScaleDownSyncPeriodSeconds * time.Second
 
 	tests := []struct {
-		name        string
-		directions  []int64
-		wantMin     time.Duration
+		name       string
+		directions []int64
+		wantMin    time.Duration
 	}{
 		{
 			name:       "mixed directions picks scale up interval",
@@ -1218,15 +1218,15 @@ func TestReconcileInterval(t *testing.T) {
 	}
 
 	ac := &AutoscaleController{
-		client:                          fakeClient,
-		modelServingLister:              msLister,
-		autoscalingPoliciesLister:       policyLister,
+		client:                           fakeClient,
+		modelServingLister:               msLister,
+		autoscalingPoliciesLister:        policyLister,
 		autoscalingPoliciesBindingLister: bindingLister,
-		podsLister:                      fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
-		scalerMap:                       map[string]*autoscalerAutoscaler{},
-		optimizerMap:                    map[string]*autoscalerOptimizer{},
-		clampWarnings:                   sets.New[string](),
-		policyVersions:                  make(map[string]int64),
+		podsLister:                       fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
+		scalerMap:                        map[string]*autoscalerAutoscaler{},
+		optimizerMap:                     map[string]*autoscalerOptimizer{},
+		clampWarnings:                    sets.New[string](),
+		policyVersions:                   make(map[string]int64),
 	}
 
 	ctx := context.Background()
@@ -1243,9 +1243,9 @@ func TestReconcileInterval(t *testing.T) {
 // pkg/autoscaler/util stay in sync with the kubebuilder CRD annotations.
 // There are three places that define SyncPolicy defaults, and all three must
 // stay in sync:
-//   1. util constants:           DefaultSyncPeriodSeconds, ScaleUpSyncPeriodSeconds, ScaleDownSyncPeriodSeconds
-//   2. kubebuilder annotations:  +kubebuilder:default="15s", "5s", "30s" in AutoscalingPolicySyncPolicy
-//   3. CRD YAML:                 generated by controller-gen from the above annotations
+//  1. util constants:           DefaultSyncPeriodSeconds, ScaleUpSyncPeriodSeconds, ScaleDownSyncPeriodSeconds
+//  2. kubebuilder annotations:  +kubebuilder:default="15s", "5s", "30s" in AutoscalingPolicySyncPolicy
+//  3. CRD YAML:                 generated by controller-gen from the above annotations
 //
 // The kubebuilder→CRD path is enforced by `make gen-check`. This test
 // enforces the util↔kubebuilder path by asserting the util constants match
