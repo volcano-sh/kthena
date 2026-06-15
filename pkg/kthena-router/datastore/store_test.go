@@ -96,6 +96,62 @@ func TestParseMetricsScrapeInterval(t *testing.T) {
 	}
 }
 
+func TestResolveMetricPortUsesModelServerWorkloadPort(t *testing.T) {
+	tests := []struct {
+		name   string
+		msPort int32
+		expect uint32
+	}{
+		{
+			name:   "uses_modelserver_port_when_set",
+			msPort: 9000,
+			expect: 9000,
+		},
+		{
+			name:   "falls_back_to_default_when_unset",
+			msPort: 0,
+			expect: 8000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPort uint32
+			s := &store{
+				modelServer: sync.Map{},
+				podRuntimeInspector: &fakePodRuntimeInspector{
+					metricsFn: func(_ string, _ *corev1.Pod, metricPort uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+						gotPort = metricPort
+						return nil, nil
+					},
+				},
+			}
+
+			msName := types.NamespacedName{Namespace: "default", Name: "model1"}
+			ms := &aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{Namespace: msName.Namespace, Name: msName.Name},
+				Spec: aiv1alpha1.ModelServerSpec{
+					InferenceEngine: aiv1alpha1.VLLM,
+					WorkloadPort:    aiv1alpha1.WorkloadPort{Port: tt.msPort},
+				},
+			}
+			s.modelServer.Store(msName, newModelServer(ms))
+
+			podInfo := &PodInfo{
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod1"},
+				},
+				engine:      string(aiv1alpha1.VLLM),
+				modelServer: sets.New[types.NamespacedName](msName),
+			}
+
+			s.updatePodMetrics(podInfo)
+
+			assert.Equal(t, tt.expect, gotPort)
+		})
+	}
+}
+
 func TestNewStoreUsesMetricsScrapeInterval(t *testing.T) {
 	t.Setenv("METRICS_SCRAPE_INTERVAL", "2s")
 	s := New().(*store)
@@ -259,7 +315,7 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 		pods:        sync.Map{},
 		modelServer: sync.Map{},
 		podRuntimeInspector: &fakePodRuntimeInspector{
-			metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 				return map[string]float64{
 						utils.KVCacheUsage:      0.8,
 						utils.RequestWaitingNum: 15,
@@ -1533,26 +1589,26 @@ func TestStoreMatchModelServer(t *testing.T) {
 }
 
 type fakePodRuntimeInspector struct {
-	metricsFn    func(string, *corev1.Pod, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
-	modelsFn     func(string, *corev1.Pod) ([]string, error)
+	metricsFn    func(string, *corev1.Pod, uint32, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	modelsFn     func(string, *corev1.Pod, uint32) ([]string, error)
 	metricsCalls atomic.Int64
 	modelsCalls  atomic.Int64
 }
 
-func (f *fakePodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+func (f *fakePodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, metricPort uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 	f.metricsCalls.Add(1)
 	if f.metricsFn == nil {
 		return nil, nil
 	}
-	return f.metricsFn(engine, pod, previousHistogram)
+	return f.metricsFn(engine, pod, metricPort, previousHistogram)
 }
 
-func (f *fakePodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
+func (f *fakePodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, metricPort uint32) ([]string, error) {
 	f.modelsCalls.Add(1)
 	if f.modelsFn == nil {
 		return nil, nil
 	}
-	return f.modelsFn(engine, pod)
+	return f.modelsFn(engine, pod, metricPort)
 }
 
 func newStore(inspector ...PodRuntimeInspector) *store {
@@ -1670,10 +1726,10 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inspector := &fakePodRuntimeInspector{
-				metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+				metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 					return tc.initialMetrics, tc.initialHist
 				},
-				modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+				modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
 					return tc.initialModels, nil
 				},
 			}
@@ -1734,13 +1790,13 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 
 func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
 	inspector := &fakePodRuntimeInspector{
-		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+		metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 			return map[string]float64{
 				utils.KVCacheUsage:      0.3,
 				utils.RequestRunningNum: 2,
 			}, map[string]*dto.Histogram{}
 		},
-		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+		modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
 			return []string{"base-model"}, nil
 		},
 	}
@@ -1763,7 +1819,7 @@ func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
 
 func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {
 	inspector := &fakePodRuntimeInspector{
-		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+		metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 			return map[string]float64{
 				utils.KVCacheUsage:      0.6,
 				utils.RequestWaitingNum: 5,
@@ -1772,7 +1828,7 @@ func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {
 				utils.TTFT:              0.2,
 			}, map[string]*dto.Histogram{}
 		},
-		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+		modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
 			return []string{"model-a"}, nil
 		},
 	}

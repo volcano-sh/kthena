@@ -73,6 +73,39 @@ const (
 	onFlightSyncInterval = 50 * time.Millisecond
 )
 
+// resolveMetricPort returns the workloadPort from any associated model server with a non-zero port, or a default per engine.
+// If no model server is associated or none have a port set, returns engine defaults (vLLM 8000, SGLang 30000).
+func (s *store) resolveMetricPort(pod *PodInfo) uint32 {
+	engine := pod.GetEngine()
+	// Default by engine first
+	port := defaultMetricPort(engine)
+	msList := pod.GetModelServersList()
+	if len(msList) == 0 {
+		return port
+	}
+	// Use the first model server that has a configured workload port
+	for _, msName := range msList {
+		if value, ok := s.modelServer.Load(msName); ok {
+			srv := value.(*modelServer).getModelServer()
+			if srv != nil && srv.Spec.WorkloadPort.Port > 0 {
+				return uint32(srv.Spec.WorkloadPort.Port)
+			}
+		}
+	}
+	return port
+}
+
+func defaultMetricPort(engine string) uint32 {
+	switch strings.ToLower(engine) {
+	case strings.ToLower(string(aiv1alpha1.VLLM)):
+		return 8000
+	case strings.ToLower(string(aiv1alpha1.SGLang)):
+		return 30000
+	default:
+		return 0
+	}
+}
+
 // createTokenTracker creates a token tracker with configuration from environment variables
 func createTokenTracker() TokenTracker {
 	var opts []TokenTrackerOption
@@ -140,18 +173,18 @@ type CallbackFunc func(data EventData)
 
 // PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
 type PodRuntimeInspector interface {
-	GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
-	GetPodModels(engine string, pod *corev1.Pod) ([]string, error)
+	GetPodMetrics(engine string, pod *corev1.Pod, metricPort uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	GetPodModels(engine string, pod *corev1.Pod, metricPort uint32) ([]string, error)
 }
 
 type realPodRuntimeInspector struct{}
 
-func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-	return backend.GetPodMetrics(engine, pod, previousHistogram)
+func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, metricPort uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	return backend.GetPodMetrics(engine, pod, metricPort, previousHistogram)
 }
 
-func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
-	return backend.GetPodModels(engine, pod)
+func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, metricPort uint32) ([]string, error) {
+	return backend.GetPodModels(engine, pod, metricPort)
 }
 
 type Option func(*store)
@@ -1347,9 +1380,10 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 		klog.V(2).Info("failed to find pod")
 		return
 	}
+	metricPort := s.resolveMetricPort(pod)
 
 	previousHistogram := getPreviousHistogram(pod)
-	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, previousHistogram)
+	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, metricPort, previousHistogram)
 	if gaugeMetrics != nil {
 		updateGaugeMetricsInfo(pod, gaugeMetrics)
 	}
@@ -1369,8 +1403,9 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 		klog.V(2).Info("failed to find pod")
 		return
 	}
+	metricPort := s.resolveMetricPort(podInfo)
 
-	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj)
+	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, metricPort)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
 		return

@@ -65,6 +65,6 @@ func FetchPodModels(podIP string, port uint32) ([]string, error) {
 	return models, nil
 }
 
-func (engine *vllmEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
-	return FetchPodModels(pod.Status.PodIP, engine.MetricPort)
+func (engine *vllmEngine) GetPodModels(pod *corev1.Pod, metricPort uint32) ([]string, error) {
+	return FetchPodModels(pod.Status.PodIP, metricPort)
 }

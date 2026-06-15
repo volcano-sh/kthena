@@ -53,21 +53,14 @@ var (
 	}
 )
 
-type vllmEngine struct {
-	// The address of vllm's query metrics is http://{model server}:MetricPort/metrics
-	// Default is 8000
-	MetricPort uint32
-}
+type vllmEngine struct{}
 
 func NewVllmEngine() *vllmEngine {
-	// TODO: Get MetricsPort from vllm configuration
-	return &vllmEngine{
-		MetricPort: 8000,
-	}
+	return &vllmEngine{}
 }
 
-func (engine *vllmEngine) GetPodMetrics(pod *corev1.Pod) (map[string]*dto.MetricFamily, error) {
-	url := metrics.PodEndpointURL(pod.Status.PodIP, engine.MetricPort, "/metrics")
+func (engine *vllmEngine) GetPodMetrics(pod *corev1.Pod, metricPort uint32) (map[string]*dto.MetricFamily, error) {
+	url := metrics.PodEndpointURL(pod.Status.PodIP, metricPort, "/metrics")
 	allMetrics, err := metrics.ParseMetricsURL(url)
 	if err != nil {
 		return nil, err
