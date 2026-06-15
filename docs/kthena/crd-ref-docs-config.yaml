@@ -1,8 +1,12 @@
-# Configuration for crd-ref-docs with optimized recursion handling
+# Configuration for crd-ref-docs
 processor:
   ignoreFields: []
-  maxRecursionDepth: 20  # Increased from default to reduce recursion warnings
+  maxRecursionDepth: 20
   ignoreTypes:
-    - "k8s.io/apimachinery/pkg/apis/meta/v1.*"
+    - "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"
+    - "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"
+    - "k8s.io/apimachinery/pkg/apis/meta/v1.TypeMeta"
+    - "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"
+    - "k8s.io/apimachinery/pkg/apis/meta/v1.LabelSelector"
 render:
   kubernetesVersion: "1.33"

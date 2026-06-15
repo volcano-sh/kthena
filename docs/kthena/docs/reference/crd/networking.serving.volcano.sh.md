@@ -349,6 +349,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `attempts` _integer_ | The maximum number of times an individual inference request to a model server should be retried.<br />If the maximum number of retries has been done without a successgful response, the request will be considered failed. |  |  |
+| `retryInterval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | RetryInterval is the interval between retries. | 100ms |  |
 
 
 #### Rule
@@ -418,6 +419,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `timeout` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | The request timeout for the inference request.<br />By default, there is no timeout. |  |  |
 | `retry` _[Retry](#retry)_ | The retry policy for the inference request. |  |  |
 
 

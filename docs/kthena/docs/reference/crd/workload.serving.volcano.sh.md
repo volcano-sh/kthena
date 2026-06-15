@@ -197,7 +197,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `percent` _integer_ | Percent defines the maximum percentage of current instances to scale up during panic mode. | 1000 | Maximum: 1000 <br />Minimum: 0 <br /> |
+| `period` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | Period defines the evaluation period for panic mode scaling decisions. |  |  |
 | `panicThresholdPercent` _integer_ | PanicThresholdPercent defines the metric threshold percentage that triggers panic mode.<br />When metrics exceed this percentage of target values, panic mode is activated. | 200 | Maximum: 1000 <br />Minimum: 110 <br /> |
+| `panicModeHold` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | PanicModeHold defines the duration to remain in panic mode before returning to normal scaling. | 60s |  |
 
 
 #### AutoscalingPolicyScaleUpPolicy
@@ -252,7 +254,9 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `instances` _integer_ | Instances defines the maximum absolute number of instances to scale per period. | 1 | Minimum: 0 <br /> |
 | `percent` _integer_ | Percent defines the maximum percentage of current instances to scale per period. | 100 | Maximum: 1000 <br />Minimum: 0 <br /> |
+| `period` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | Period defines the time duration over which scaling metrics are evaluated. | 15s |  |
 | `selectPolicy` _[SelectPolicyType](#selectpolicytype)_ | SelectPolicy determines the selection strategy for scaling operations.<br />'Or' means scaling is performed if either the Percent or Instances requirement is met.<br />'And' means scaling is performed only if both Percent and Instances requirements are met. | Or | Enum: [Or And] <br /> |
+| `stabilizationWindow` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | StabilizationWindow defines the time window to stabilize scaling actions and prevent rapid oscillations. |  |  |
 
 
 #### AutoscalingPolicyStatus
@@ -282,9 +286,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `defaultPeriod` _[Duration](https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/duration/)_ | DefaultPeriod is the reconcile interval when no scaling is needed. Values below 1s are clamped to 1s at runtime (logged as warning). | 15s |  |
-| `scaleUpPeriod` _[Duration](https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/duration/)_ | ScaleUpPeriod is the reconcile interval during scale-up. Shorter intervals accelerate replica provisioning. Values below 1s are clamped to 1s at runtime (logged as warning). | 5s |  |
-| `scaleDownPeriod` _[Duration](https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/duration/)_ | ScaleDownPeriod is the reconcile interval during scale-down. Longer intervals reduce API Server load and prevent premature scale-back. Values below 1s are clamped to 1s at runtime (logged as warning). | 30s |  |
+| `defaultPeriod` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | DefaultPeriod is the reconcile interval when no scaling is needed.<br />Values below 1s are clamped to 1s at runtime (logged as warning). | 15s |  |
+| `scaleUpPeriod` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | ScaleUpPeriod is the reconcile interval during scale-up.<br />Shorter intervals accelerate replica provisioning.<br />Values below 1s are clamped to 1s at runtime (logged as warning). | 5s |  |
+| `scaleDownPeriod` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#duration-v1-meta)_ | ScaleDownPeriod is the reconcile interval during scale-down.<br />Longer intervals reduce API Server load and prevent premature scale-back.<br />Values below 1s are clamped to 1s at runtime (logged as warning). | 30s |  |
+
 
 
 
