@@ -17,11 +17,9 @@ limitations under the License.
 package router
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -31,9 +29,7 @@ import (
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -53,62 +49,6 @@ func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string
 	ready := utils.ListReadyPodsByLabel(t, kube, namespace, "app="+plugincontext.DeploymentName)
 	require.NotEmpty(t, ready, "no ready mock pods")
 	return ready
-}
-
-// pluginMockKVCacheSimArgs enables KV-cache simulation with the same fast latency as
-// LLM-Mock-plugins.yaml so probe traffic stays quick; sustained long streaming load
-// keeps busy replicas hot without slow per-token delays.
-var pluginMockKVCacheSimArgs = []string{
-	"--model=kthena-plugin-mock",
-	"--served-model-name=router-plugin-model",
-	"--port=8000",
-	"--mode=echo",
-	"--enable-kvcache=true",
-	"--force-dummy-tokenizer=true",
-	"--kv-cache-size=8",
-	"--block-size=8",
-	"--max-num-seqs=2",
-	"--time-to-first-token=50ms",
-	"--inter-token-latency=10ms",
-}
-
-// applyPluginMockKVCacheProfile patches the shared plugin mock deployment for gpu-usage e2e
-// and restores the baseline LLM-Mock-plugins.yaml spec on cleanup.
-func applyPluginMockKVCacheProfile(t *testing.T, kube kubernetes.Interface, namespace string) {
-	t.Helper()
-	ctx := context.Background()
-	baseline := utils.LoadYAMLFromFile[appsv1.Deployment](filepath.Join(plugincontext.TestDataDir, "LLM-Mock-plugins.yaml"))
-	baseline.Namespace = namespace
-
-	dep, err := kube.AppsV1().Deployments(namespace).Get(ctx, plugincontext.DeploymentName, metav1.GetOptions{})
-	require.NoError(t, err, "get plugin mock deployment")
-
-	container := &dep.Spec.Template.Spec.Containers[0]
-	container.Args = append([]string(nil), pluginMockKVCacheSimArgs...)
-	container.Env = []corev1.EnvVar{{
-		Name: "POD_IP",
-		ValueFrom: &corev1.EnvVarSource{
-			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
-		},
-	}}
-
-	_, err = kube.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
-	require.NoError(t, err, "patch plugin mock deployment for kv-cache simulation")
-	require.NoError(t, utils.WaitForDeploymentReadyE(ctx, kube, namespace, plugincontext.DeploymentName, 5*time.Minute),
-		"wait for kv-cache plugin mock rollout")
-
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		latest, err := kube.AppsV1().Deployments(namespace).Get(cleanupCtx, plugincontext.DeploymentName, metav1.GetOptions{})
-		if err != nil {
-			return
-		}
-		latest.Spec = *baseline.Spec.DeepCopy()
-		if _, err := kube.AppsV1().Deployments(namespace).Update(cleanupCtx, latest, metav1.UpdateOptions{}); err != nil {
-			return
-		}
-		_ = utils.WaitForDeploymentReadyE(cleanupCtx, kube, namespace, plugincontext.DeploymentName, 5*time.Minute)
-	})
 }
 
 func waitForSchedulerPluginInMetrics(t *testing.T, metricsURL, pluginName, pluginType string) {
