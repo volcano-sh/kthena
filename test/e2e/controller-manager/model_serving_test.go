@@ -2127,9 +2127,9 @@ func TestModelServingRoleRollingUpdateRoleMaxUnavailable(t *testing.T) {
 			Template: workload.ServingGroup{
 				Roles: []workload.Role{
 					{
-						Name:               "decode",
-						Replicas:           ptr.To[int32](decodeReplicas),
-						RoleMaxUnavailable: ptr.To(intstr.FromInt(roleMaxUnavailable)),
+						Name:           "decode",
+						Replicas:       ptr.To[int32](decodeReplicas),
+						MaxUnavailable: ptr.To(intstr.FromInt(roleMaxUnavailable)),
 						EntryTemplate: workload.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{
@@ -2244,7 +2244,7 @@ func TestModelServingRoleRollingUpdateRoleMaxUnavailableMultiRole(t *testing.T) 
 	replicas := int32(1)
 	prefillRole := createRole("prefill", prefillReplicas, 0)
 	// roleMaxUnavailable is per-role; bound only the prefill role being updated.
-	prefillRole.RoleMaxUnavailable = ptr.To(intstr.FromInt(roleMaxUnavailable))
+	prefillRole.MaxUnavailable = ptr.To(intstr.FromInt(roleMaxUnavailable))
 	decodeRole := createRole("decode", decodeReplicas, 0)
 	modelServing := createBasicModelServing(
 		"test-role-max-unavailable-multi", replicas, 0, prefillRole, decodeRole)
@@ -2384,13 +2384,6 @@ func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 	t.Log("Creating ModelServing with 4 servingGroup replicas for bin pack scale down test")
 
 	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
-
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
-		}
-	})
 
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)

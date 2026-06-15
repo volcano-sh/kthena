@@ -947,8 +947,8 @@ func (in *Role) DeepCopyInto(out *Role) {
 		*out = new(PodTemplateSpec)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.RoleMaxUnavailable != nil {
-		in, out := &in.RoleMaxUnavailable, &out.RoleMaxUnavailable
+	if in.MaxUnavailable != nil {
+		in, out := &in.MaxUnavailable, &out.MaxUnavailable
 		*out = new(intstr.IntOrString)
 		**out = **in
 	}

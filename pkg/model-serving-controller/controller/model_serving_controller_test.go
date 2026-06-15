@@ -6747,13 +6747,59 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 	}
 }
 
+// TestDemoteRunningRoleToCreating verifies that demoteRunningRoleToCreating only moves a role out of
+// Running (the readiness-regression path that RoleRollingUpdate accounting relies on) and is a no-op
+// for any other status.
+func TestDemoteRunningRoleToCreating(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	roleName := "decode"
+	roleID := "decode-0"
+	revision := "rev-1"
+	hash := "hash-1"
+
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName}}
+	nsn := utils.GetNamespaceName(ms)
+
+	tests := []struct {
+		name           string
+		initialStatus  datastore.RoleStatus
+		expectDemoted  bool
+		expectedStatus datastore.RoleStatus
+	}{
+		{name: "Running is demoted to Creating", initialStatus: datastore.RoleRunning, expectDemoted: true, expectedStatus: datastore.RoleCreating},
+		{name: "Creating is left unchanged", initialStatus: datastore.RoleCreating, expectDemoted: false, expectedStatus: datastore.RoleCreating},
+		{name: "Deleting is left unchanged", initialStatus: datastore.RoleDeleting, expectDemoted: false, expectedStatus: datastore.RoleDeleting},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			modelServingClient := kthenafake.NewSimpleClientset()
+			apiextensionsClient := apiextfake.NewSimpleClientset()
+			controller, err := NewModelServingController(kubeClient, modelServingClient, nil, apiextensionsClient)
+			require.NoError(t, err)
+			controller.store = datastore.New()
+
+			controller.store.AddServingGroup(nsn, 0, revision)
+			controller.store.AddRole(nsn, groupName, roleName, roleID, revision, hash)
+			require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, tt.initialStatus))
+
+			demoted := controller.demoteRunningRoleToCreating(ms, groupName, roleName, roleID)
+			assert.Equal(t, tt.expectDemoted, demoted, "unexpected demotion result")
+			assert.Equal(t, tt.expectedStatus, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID), "unexpected role status")
+		})
+	}
+}
+
 // roleInstanceFixture describes a Role replica to seed into the store (and optionally the pod
 // informer) for RoleRollingUpdate tests.
 type roleInstanceFixture struct {
 	roleName string
 	roleID   string
 	outdated bool // when true, the stored roleTemplateHash differs from the new spec
-	ready    bool // when true, a running+ready entry pod is added to the informer
+	ready    bool // when true, the role is marked Running in the store and a running+ready entry pod is added to the informer
 	deleting bool // when true, the role is marked as Deleting in the store
 	missing  bool // when true, the instance is NOT created in the store (simulates a missing replica)
 }
@@ -6778,9 +6824,9 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{
 					Roles: []workloadv1alpha1.Role{
 						{
-							Name:               "decode",
-							Replicas:           ptr.To[int32](4),
-							RoleMaxUnavailable: roleMaxUnavailable,
+							Name:           "decode",
+							Replicas:       ptr.To[int32](4),
+							MaxUnavailable: roleMaxUnavailable,
 							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
 								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
 							},
@@ -6913,7 +6959,10 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 						hash = outdatedHash
 					}
 					controller.store.AddRole(nsn, groupName, inst.roleName, inst.roleID, revision, hash)
-					status := datastore.RoleRunning
+					status := datastore.RoleCreating
+					if inst.ready {
+						status = datastore.RoleRunning
+					}
 					if inst.deleting {
 						status = datastore.RoleDeleting
 					}
@@ -6979,9 +7028,9 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{
 					Roles: []workloadv1alpha1.Role{
 						{
-							Name:               "decode",
-							Replicas:           ptr.To[int32](4),
-							RoleMaxUnavailable: ptr.To(intstr.FromInt(2)),
+							Name:           "decode",
+							Replicas:       ptr.To[int32](4),
+							MaxUnavailable: ptr.To(intstr.FromInt(2)),
 							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
 								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
 							},
@@ -7071,7 +7120,10 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 					hash = upToDateHash
 				}
 				controller.store.AddRole(nsn, groupName, "decode", inst.roleID, revision, hash)
-				status := datastore.RoleRunning
+				status := datastore.RoleCreating
+				if inst.ready {
+					status = datastore.RoleRunning
+				}
 				if inst.deleting {
 					status = datastore.RoleDeleting
 				}
@@ -7272,7 +7324,10 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 						hash = outdatedHash
 					}
 					controller.store.AddRole(nsn, groupName, inst.roleName, inst.roleID, oldRevision, hash)
-					status := datastore.RoleRunning
+					status := datastore.RoleCreating
+					if inst.ready {
+						status = datastore.RoleRunning
+					}
 					if inst.deleting {
 						status = datastore.RoleDeleting
 					}

@@ -320,9 +320,9 @@ func TestGetRoleMaxUnavailable(t *testing.T) {
 		{
 			name: "absolute value 3",
 			role: workloadv1alpha1.Role{
-				Name:               "decode",
-				Replicas:           ptr.To[int32](5),
-				RoleMaxUnavailable: ptr.To(intstr.FromInt(3)),
+				Name:           "decode",
+				Replicas:       ptr.To[int32](5),
+				MaxUnavailable: ptr.To(intstr.FromInt(3)),
 			},
 			expectedResult: 3,
 			expectError:    false,
@@ -330,9 +330,9 @@ func TestGetRoleMaxUnavailable(t *testing.T) {
 		{
 			name: "percentage 50% of 5 rounds down to 2",
 			role: workloadv1alpha1.Role{
-				Name:               "decode",
-				Replicas:           ptr.To[int32](5),
-				RoleMaxUnavailable: ptr.To(intstr.FromString("50%")),
+				Name:           "decode",
+				Replicas:       ptr.To[int32](5),
+				MaxUnavailable: ptr.To(intstr.FromString("50%")),
 			},
 			expectedResult: 2,
 			expectError:    false,
@@ -340,9 +340,9 @@ func TestGetRoleMaxUnavailable(t *testing.T) {
 		{
 			name: "percentage 100% of 4 equals 4",
 			role: workloadv1alpha1.Role{
-				Name:               "decode",
-				Replicas:           ptr.To[int32](4),
-				RoleMaxUnavailable: ptr.To(intstr.FromString("100%")),
+				Name:           "decode",
+				Replicas:       ptr.To[int32](4),
+				MaxUnavailable: ptr.To(intstr.FromString("100%")),
 			},
 			expectedResult: 4,
 			expectError:    false,
@@ -350,8 +350,8 @@ func TestGetRoleMaxUnavailable(t *testing.T) {
 		{
 			name: "nil replicas defaults to 1",
 			role: workloadv1alpha1.Role{
-				Name:               "decode",
-				RoleMaxUnavailable: ptr.To(intstr.FromInt(1)),
+				Name:           "decode",
+				MaxUnavailable: ptr.To(intstr.FromInt(1)),
 			},
 			expectedResult: 1,
 			expectError:    false,

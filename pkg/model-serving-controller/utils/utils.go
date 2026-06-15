@@ -608,10 +608,10 @@ const RoleMaxUnavailableUnlimited = -1
 
 // GetRoleMaxUnavailable returns the maximum number of the given Role's outdated replicas that can
 // be simultaneously unavailable within a single ServingGroup during a RoleRollingUpdate. The Role's
-// own replicas count is used as the base for percentage values. When role.RoleMaxUnavailable is
+// own replicas count is used as the base for percentage values. When role.MaxUnavailable is
 // unset, it returns RoleMaxUnavailableUnlimited.
 func GetRoleMaxUnavailable(role workloadv1alpha1.Role) (int, error) {
-	if role.RoleMaxUnavailable == nil {
+	if role.MaxUnavailable == nil {
 		return RoleMaxUnavailableUnlimited, nil
 	}
 	roleReplicas := 1
@@ -619,7 +619,7 @@ func GetRoleMaxUnavailable(role workloadv1alpha1.Role) (int, error) {
 		roleReplicas = int(*role.Replicas)
 	}
 	// Calculate roleMaxUnavailable as absolute numbers, rounding down for percentages.
-	return intstr.GetScaledValueFromIntOrPercent(role.RoleMaxUnavailable, roleReplicas, false)
+	return intstr.GetScaledValueFromIntOrPercent(role.MaxUnavailable, roleReplicas, false)
 }
 
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {

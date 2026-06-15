@@ -87,7 +87,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateWorkerImages(modelServing)...)
 	allErrs = append(allErrs, validatorReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
-	allErrs = append(allErrs, validateRoleMaxUnavailable(modelServing)...)
+	allErrs = append(allErrs, validateMaxUnavailable(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
@@ -177,43 +177,43 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 	return allErrs
 }
 
-// validateRoleMaxUnavailable validates each Role's roleMaxUnavailable field. roleMaxUnavailable is
+// validateMaxUnavailable validates each Role's maxUnavailable field. maxUnavailable is
 // per-role (its percentage base is that Role's replicas) and only takes effect for RoleRollingUpdate.
-func validateRoleMaxUnavailable(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+func validateMaxUnavailable(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 	for i, role := range ms.Spec.Template.Roles {
-		roleMaxUnavailable := role.RoleMaxUnavailable
-		if roleMaxUnavailable == nil {
+		maxUnavailable := role.MaxUnavailable
+		if maxUnavailable == nil {
 			continue
 		}
-		roleMaxUnavailablePath := field.NewPath("spec").Child("template").Child("roles").Index(i).Child("roleMaxUnavailable")
-		allErrs = append(allErrs, validateIntOrPercent(roleMaxUnavailable, roleMaxUnavailablePath)...)
+		maxUnavailablePath := field.NewPath("spec").Child("template").Child("roles").Index(i).Child("maxUnavailable")
+		allErrs = append(allErrs, validateIntOrPercent(maxUnavailable, maxUnavailablePath)...)
 
-		// roleMaxUnavailable only takes effect for RoleRollingUpdate.
+		// maxUnavailable only takes effect for RoleRollingUpdate.
 		if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate {
-			allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable,
-				fmt.Sprintf("roleMaxUnavailable can only be set when rolloutStrategy.type is %s", workloadv1alpha1.RoleRollingUpdate)))
+			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable,
+				fmt.Sprintf("maxUnavailable can only be set when rolloutStrategy.type is %s", workloadv1alpha1.RoleRollingUpdate)))
 		}
 
-		// roleMaxUnavailable, scaled against this Role's replicas, cannot be 0.
+		// maxUnavailable, scaled against this Role's replicas, cannot be 0.
 		roleReplicas := int32(1)
 		if role.Replicas != nil {
 			roleReplicas = *role.Replicas
 		}
 		if roleReplicas == 0 {
 			// With zero replicas, any percent value scales to 0 and should be rejected.
-			if roleMaxUnavailable.Type == intstr.String {
-				allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, "roleMaxUnavailable cannot be a percent when role replicas is 0"))
-			} else if roleMaxUnavailable.IntValue() == 0 {
-				allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, "roleMaxUnavailable cannot be 0"))
+			if maxUnavailable.Type == intstr.String {
+				allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "maxUnavailable cannot be a percent when role replicas is 0"))
+			} else if maxUnavailable.IntValue() == 0 {
+				allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "maxUnavailable cannot be 0"))
 			}
 			continue
 		}
-		roleMaxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(roleMaxUnavailable, int(roleReplicas), false)
+		maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(roleReplicas), false)
 		if err != nil {
-			allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, fmt.Sprintf("invalid roleMaxUnavailable: %v", err)))
-		} else if roleMaxUnavailableValue == 0 {
-			allErrs = append(allErrs, field.Invalid(roleMaxUnavailablePath, roleMaxUnavailable, "roleMaxUnavailable cannot be 0"))
+			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))
+		} else if maxUnavailableValue == 0 {
+			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "maxUnavailable cannot be 0"))
 		}
 	}
 	return allErrs

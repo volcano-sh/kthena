@@ -79,7 +79,7 @@ type Role struct {
 	// +optional
 	WorkerTemplate *PodTemplateSpec `json:"workerTemplate,omitempty"`
 
-	// RoleMaxUnavailable bounds the number of this Role's outdated replicas that can be
+	// MaxUnavailable bounds the number of this Role's outdated replicas that can be
 	// simultaneously unavailable within a single ServingGroup during a Role rolling update.
 	// It only takes effect when rolloutStrategy.type is RoleRollingUpdate.
 	// Value can be an absolute number (ex: 2) or a percentage of this Role's replicas (ex: 50%).
@@ -88,7 +88,7 @@ type Role struct {
 	// which preserves the previous behavior.
 	// +kubebuilder:validation:XIntOrString
 	// +optional
-	RoleMaxUnavailable *intstr.IntOrString `json:"roleMaxUnavailable,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // PodTemplateSpec describes the data a pod should have when created from a template

@@ -514,9 +514,9 @@ func TestValidateRoleMaxUnavailable(t *testing.T) {
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
 								{
-									Name:               "decode",
-									Replicas:           ptr.To[int32](4),
-									RoleMaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
 								},
 							},
 						},
@@ -537,9 +537,9 @@ func TestValidateRoleMaxUnavailable(t *testing.T) {
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
 								{
-									Name:               "decode",
-									Replicas:           ptr.To[int32](4),
-									RoleMaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
 								},
 							},
 						},
@@ -548,9 +548,9 @@ func TestValidateRoleMaxUnavailable(t *testing.T) {
 			},
 			want: field.ErrorList{
 				field.Invalid(
-					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("roleMaxUnavailable"),
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("maxUnavailable"),
 					&intstr.IntOrString{Type: intstr.Int, IntVal: 2},
-					fmt.Sprintf("roleMaxUnavailable can only be set when rolloutStrategy.type is %s", workloadv1alpha1.RoleRollingUpdate),
+					fmt.Sprintf("maxUnavailable can only be set when rolloutStrategy.type is %s", workloadv1alpha1.RoleRollingUpdate),
 				),
 			},
 		},
@@ -566,9 +566,9 @@ func TestValidateRoleMaxUnavailable(t *testing.T) {
 						Template: workloadv1alpha1.ServingGroup{
 							Roles: []workloadv1alpha1.Role{
 								{
-									Name:               "decode",
-									Replicas:           ptr.To[int32](4),
-									RoleMaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
 								},
 							},
 						},
@@ -577,9 +577,9 @@ func TestValidateRoleMaxUnavailable(t *testing.T) {
 			},
 			want: field.ErrorList{
 				field.Invalid(
-					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("roleMaxUnavailable"),
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("maxUnavailable"),
 					&intstr.IntOrString{Type: intstr.Int, IntVal: 0},
-					"roleMaxUnavailable cannot be 0",
+					"maxUnavailable cannot be 0",
 				),
 			},
 		},
@@ -596,9 +596,9 @@ func TestValidateRoleMaxUnavailable(t *testing.T) {
 							Roles: []workloadv1alpha1.Role{
 								{Name: "prefill", Replicas: ptr.To[int32](2)},
 								{
-									Name:               "decode",
-									Replicas:           ptr.To[int32](4),
-									RoleMaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
 								},
 							},
 						},
@@ -610,7 +610,7 @@ func TestValidateRoleMaxUnavailable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := validateRoleMaxUnavailable(tt.args.ms)
+			got := validateMaxUnavailable(tt.args.ms)
 			if got != nil {
 				assert.EqualValues(t, tt.want, got)
 			} else {

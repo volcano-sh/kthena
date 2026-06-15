@@ -140,10 +140,10 @@ type RolloutStrategy struct {
 	// Consequently, RoleRollingUpdate is a more granular form of RollingUpdate than ServingGroupRollingUpdate.
 	// "ServingGroupRollingUpdate" will delete all outdated ServingGroups and then recreate the ServingGroups
 	// for the new version. This is done to facilitate the upgrade.
-	// Use `MaxUnavailable` to control the number of unavailable ServingGroups during an rolling update.
-	// Use `RoleMaxUnavailable` to control the number of unavailable Roles during an rolling update.
-	// NOTE: `RoleMaxUnavailable` is only allowed to set in `RoleRollingUpdate` strategy.
-	// And `RoleMaxUnavailable` `RoleMaxUnavailable` field is located under the Role(servinggroup_types.go)
+	// Use `MaxUnavailable` to control the number of unavailable ServingGroups during a rolling update.
+	// Use the Role's `maxUnavailable` to control the number of unavailable replicas of a Role during a rolling update.
+	// NOTE: the Role's `maxUnavailable` is only allowed to set in `RoleRollingUpdate` strategy.
+	// And the `maxUnavailable` field is located under the Role(servinggroup_types.go)
 	//
 	// "RoleRollingUpdate" removes outdated roles from the outdated ServingGroup.
 	// It then recreates new version of the roles to implement the rolling update.
