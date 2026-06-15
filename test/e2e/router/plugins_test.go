@@ -1,3 +1,5 @@
+//go:build e2e
+
 /*
 Copyright The Volcano Authors.
 
@@ -211,7 +213,7 @@ func TestSchedulerPluginRandom(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
 
-	// Each pod should receive roughly 1/3 of traffic (±10% absolute ratio).
+	// Each pod should receive roughly 1/3 of traffic (+/-10% absolute ratio).
 	const randomMaxRatioDeviation = 0.10
 	expectedRatio := 1.0 / float64(len(pods))
 	for i, c := range counts {

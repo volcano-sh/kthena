@@ -120,7 +120,7 @@ Tests that do not require the vLLM image (like webhook validation/mutation tests
 For example, to run the controller manager webhook tests:
 
 ```bash
-go test -v ./test/e2e/controller-manager/ -run TestWebhook
+go test -tags=e2e -v ./test/e2e/controller-manager/ -run TestWebhook
 ```
 
 ## Troubleshooting

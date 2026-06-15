@@ -98,32 +98,32 @@ test-e2e: ## Run all e2e tests sequentially (legacy).
 	@echo "Setting up Kind cluster for E2E tests..."
 	@./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -tags=e2e -p 1 $$(go list -tags=e2e ./... | grep /test/e2e) -v -timeout=15m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-controller-manager
 test-e2e-controller-manager: ## Run controller-manager e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=controller-manager ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=15m ./test/e2e/controller-manager/...
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -tags=e2e -v -timeout=15m ./test/e2e/controller-manager/...
 
 .PHONY: test-e2e-router
 test-e2e-router: ## Run router e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=router ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -tags=e2e -v -timeout=18m ./test/e2e/router
 
 .PHONY: test-e2e-gateway-api
 test-e2e-gateway-api: ## Run gateway-api e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=gateway-api ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-api/...
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -tags=e2e -v -timeout=10m ./test/e2e/router/gateway-api/...
 
 .PHONY: test-e2e-gateway-inference-extension
 test-e2e-gateway-inference-extension: ## Run gateway-inference-extension e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=gateway-inference-extension ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-inference-extension/...
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -tags=e2e -v -timeout=10m ./test/e2e/router/gateway-inference-extension/...
 
 .PHONY: test-e2e-cleanup
 test-e2e-cleanup: ## Clean up the Kind cluster used for E2E tests.

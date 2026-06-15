@@ -1,3 +1,5 @@
+//go:build e2e
+
 /*
 Copyright The Volcano Authors.
 
@@ -276,7 +278,7 @@ func TestModelServingRoleScaleDown(t *testing.T) {
 	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 3 replicas")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
-	// Verify initial pods (expect 3: 1 servingGroup × 3 role replicas × 1 entry pod)
+	// Verify initial pods (expect 3: 1 servingGroup x 3 role replicas x 1 entry pod)
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
 	t.Log("Verified 3 running pods initially")
 
@@ -1798,7 +1800,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a complicated ModelServing with multiple roles
-	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
+	// 5 serving groups x (3 pods for prefill + 2 pods for decode) = 25 pods total
 	prefillRole := createRole("prefill", 1, 2)
 	decodeRole := createRole("decode", 1, 1)
 	modelServing := createBasicModelServing("test-controller-restart", 5, 0, prefillRole, decodeRole)
@@ -1868,7 +1870,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	require.NoError(t, err, "Failed to list ModelServing pods")
 
 	// Calculate expected pod count:
-	// 5 serving groups × (3 pods for prefill role + 2 pods for decode role) = 25 pods
+	// 5 serving groups x (3 pods for prefill role + 2 pods for decode role) = 25 pods
 	expectedPodCount := 25
 	actualPodCount := len(podList.Items)
 
@@ -2010,7 +2012,7 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	// Monitor the role-based rolling update to ensure only prefill role pods are replaced
 	t.Log("Monitoring role-based rolling update to ensure only prefill role pods are replaced while decode role pods remain")
 
-	// It is possible that the ‘modelServing Ready’ check completed before the change in the modelServing status,
+	// It is possible that the 'modelServing Ready' check completed before the change in the modelServing status,
 	// causing subsequent checks to fail. Therefore, the checks have been retried.
 	// This has improved the robustness of the end-to-end tests.
 	require.Eventually(t, func() bool {
