@@ -280,7 +280,11 @@ based on scaling direction.
 _Appears in:_
 - [AutoscalingPolicyBehavior](#autoscalingpolicybehavior)
 
-
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `defaultPeriod` _[Duration](https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/duration/)_ | DefaultPeriod is the reconcile interval when no scaling is needed. Values below 1s are clamped to 1s at runtime (logged as warning). | 15s |  |
+| `scaleUpPeriod` _[Duration](https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/duration/)_ | ScaleUpPeriod is the reconcile interval during scale-up. Shorter intervals accelerate replica provisioning. Values below 1s are clamped to 1s at runtime (logged as warning). | 5s |  |
+| `scaleDownPeriod` _[Duration](https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/duration/)_ | ScaleDownPeriod is the reconcile interval during scale-down. Longer intervals reduce API Server load and prevent premature scale-back. Values below 1s are clamped to 1s at runtime (logged as warning). | 30s |  |
 
 
 

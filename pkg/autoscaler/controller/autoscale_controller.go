@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
@@ -62,6 +63,7 @@ type AutoscaleController struct {
 	clampWarnings                      sets.Set[string]
 	policyVersions                     map[string]string
 	configErrors                       sets.Set[string]
+	mu                                 sync.Mutex
 }
 
 func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
@@ -145,6 +147,8 @@ func (ac *AutoscaleController) reconcileWithCrashProtection(ctx context.Context)
 	defer utilruntime.HandleCrash(func(r interface{}) {
 		result = util.DefaultSyncPeriodSeconds * time.Second
 	})
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
 	return ac.reconcileOnce(ctx)
 }
 
@@ -226,7 +230,7 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 		if !activePolicies.Has(key) {
 			delete(ac.policyVersions, key)
 			prefix := key + "/"
-			for _, k := range ac.clampWarnings.UnsortedList() {
+			for k := range ac.clampWarnings {
 				if strings.HasPrefix(k, prefix) {
 					ac.clampWarnings.Delete(k)
 				}
@@ -511,7 +515,7 @@ func (ac *AutoscaleController) resolveSyncPolicy(policy *workload.AutoscalingPol
 	prevGen := ac.policyVersions[policyKey]
 	if prevGen != "" && prevGen != gen {
 		prefix := policyKey + "/"
-		for _, k := range ac.clampWarnings.UnsortedList() {
+		for k := range ac.clampWarnings {
 			if strings.HasPrefix(k, prefix) {
 				ac.clampWarnings.Delete(k)
 			}
