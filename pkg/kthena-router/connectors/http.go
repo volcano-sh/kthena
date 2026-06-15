@@ -119,7 +119,6 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		hooks.DecrDecode()
 	}
 	if metricsRecorder != nil {
-
 		statusCode := http.StatusOK
 		if decodeErr != nil {
 			statusCode = http.StatusInternalServerError
@@ -127,6 +126,5 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		metricsRecorder.FinishDecodePhase(statusCode)
 		metricsRecorder.DecActiveUpstreamRequests()
 	}
-
 	return result, nil
 }
