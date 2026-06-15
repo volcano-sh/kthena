@@ -110,8 +110,12 @@ func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+	direction, err := ac.doScale(context.Background(), binding, policy)
+	if err != nil {
 		t.Fatalf("doScale error: %v", err)
+	}
+	if direction != 0 {
+		t.Fatalf("expected stable direction, got %d", direction)
 	}
 	if len(client.Fake.Actions()) != 0 {
 		t.Fatalf("expected no update actions with tolerance=100, got %d", len(client.Fake.Actions()))
@@ -138,8 +142,12 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+	direction, err := ac.doScale(context.Background(), binding, policy)
+	if err != nil {
 		t.Fatalf("doScale error: %v", err)
+	}
+	if direction <= 0 {
+		t.Fatalf("expected scale-up direction, got %d", direction)
 	}
 	updated, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-up", metav1.GetOptions{})
 	if err != nil {
@@ -174,8 +182,12 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbsA), readyPod(ns, "pod-b", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
+	direction, err := ac.doOptimize(context.Background(), binding, policy)
+	if err != nil {
 		t.Fatalf("doOptimize error: %v", err)
+	}
+	if direction == 0 {
+		t.Fatal("expected non-zero optimize direction")
 	}
 	updates := 0
 	for _, a := range client.Fake.Actions() {
@@ -212,8 +224,12 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	pods := []*corev1.Pod{readyPod(ns, "pod-a2", host, lbsA), readyPod(ns, "pod-b2", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
+	direction, err := ac.doOptimize(context.Background(), binding, policy)
+	if err != nil {
 		t.Fatalf("doOptimize error: %v", err)
+	}
+	if direction <= 0 {
+		t.Fatalf("expected scale-up optimize direction, got %d", direction)
 	}
 	updatedA, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-a2", metav1.GetOptions{})
 	if err != nil {
@@ -237,6 +253,91 @@ func toInt32(s string) int32  { v, _ := strconv.Atoi(s); return int32(v) }
 
 type autoscalerAutoscaler = autoscaler.Autoscaler
 type autoscalerOptimizer = autoscaler.Optimizer
+
+func TestAutoscalingSyncPolicy(t *testing.T) {
+	defaultPolicy := defaultAutoscalingSyncPolicy()
+	if defaultPolicy.defaultPeriod != 15*time.Second {
+		t.Fatalf("expected default period 15s, got %v", defaultPolicy.defaultPeriod)
+	}
+	if defaultPolicy.scaleUpPeriod != 5*time.Second {
+		t.Fatalf("expected scale-up period 5s, got %v", defaultPolicy.scaleUpPeriod)
+	}
+	if defaultPolicy.scaleDownPeriod != 30*time.Second {
+		t.Fatalf("expected scale-down period 30s, got %v", defaultPolicy.scaleDownPeriod)
+	}
+
+	policy := &workload.AutoscalingPolicy{
+		Spec: workload.AutoscalingPolicySpec{
+			Behavior: workload.AutoscalingPolicyBehavior{
+				SyncPolicy: &workload.AutoscalingPolicySyncPolicy{
+					DefaultPeriod:   &metav1.Duration{Duration: 20 * time.Second},
+					ScaleUpPeriod:   &metav1.Duration{Duration: 3 * time.Second},
+					ScaleDownPeriod: &metav1.Duration{Duration: 45 * time.Second},
+				},
+			},
+		},
+	}
+	got := applySyncPolicy(policy)
+	if got.defaultPeriod != 20*time.Second || got.scaleUpPeriod != 3*time.Second || got.scaleDownPeriod != 45*time.Second {
+		t.Fatalf("unexpected sync policy: %#v", got)
+	}
+
+	if interval := computeNextInterval(1, got); interval != 3*time.Second {
+		t.Fatalf("expected scale-up interval 3s, got %v", interval)
+	}
+	if interval := computeNextInterval(-1, got); interval != 45*time.Second {
+		t.Fatalf("expected scale-down interval 45s, got %v", interval)
+	}
+	if interval := computeNextInterval(0, got); interval != 20*time.Second {
+		t.Fatalf("expected stable interval 20s, got %v", interval)
+	}
+}
+
+func TestMergeAutoscalingSyncPolicy(t *testing.T) {
+	current := autoscalingSyncPolicy{
+		defaultPeriod:   15 * time.Second,
+		scaleUpPeriod:   5 * time.Second,
+		scaleDownPeriod: 30 * time.Second,
+	}
+	next := autoscalingSyncPolicy{
+		defaultPeriod:   10 * time.Second,
+		scaleUpPeriod:   2 * time.Second,
+		scaleDownPeriod: 45 * time.Second,
+	}
+	got := mergeAutoscalingSyncPolicy(current, next)
+	if got.defaultPeriod != 10*time.Second {
+		t.Fatalf("expected shortest default period, got %v", got.defaultPeriod)
+	}
+	if got.scaleUpPeriod != 2*time.Second {
+		t.Fatalf("expected shortest scale-up period, got %v", got.scaleUpPeriod)
+	}
+	if got.scaleDownPeriod != 45*time.Second {
+		t.Fatalf("expected longest scale-down period, got %v", got.scaleDownPeriod)
+	}
+}
+
+func TestMergeAutoscalingDirection(t *testing.T) {
+	tests := []struct {
+		name    string
+		current int
+		next    int
+		want    int
+	}{
+		{name: "scale up wins over scale down", current: -1, next: 1, want: 1},
+		{name: "scale up keeps priority over stable", current: 1, next: 0, want: 1},
+		{name: "stable wins over scale down", current: -1, next: 0, want: 0},
+		{name: "scale down remains when all down", current: -1, next: -2, want: -1},
+		{name: "stable keeps priority over scale down", current: 0, next: -1, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mergeAutoscalingDirection(tt.current, tt.next); got != tt.want {
+				t.Fatalf("expected direction %d, got %d", tt.want, got)
+			}
+		})
+	}
+}
 
 func TestFormatAutoscalerMapKey_IncludesNamespaceAndTarget(t *testing.T) {
 	targetRef := &corev1.ObjectReference{Name: "same-target", Kind: workload.ModelServingKind.Kind}

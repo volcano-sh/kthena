@@ -21,8 +21,9 @@ package v1alpha1
 // AutoscalingPolicyBehaviorApplyConfiguration represents a declarative configuration of the AutoscalingPolicyBehavior type for use
 // with apply.
 type AutoscalingPolicyBehaviorApplyConfiguration struct {
-	ScaleUp   *AutoscalingPolicyScaleUpPolicyApplyConfiguration `json:"scaleUp,omitempty"`
-	ScaleDown *AutoscalingPolicyStablePolicyApplyConfiguration  `json:"scaleDown,omitempty"`
+	ScaleUp    *AutoscalingPolicyScaleUpPolicyApplyConfiguration `json:"scaleUp,omitempty"`
+	ScaleDown  *AutoscalingPolicyStablePolicyApplyConfiguration  `json:"scaleDown,omitempty"`
+	SyncPolicy *AutoscalingPolicySyncPolicyApplyConfiguration    `json:"syncPolicy,omitempty"`
 }
 
 // AutoscalingPolicyBehaviorApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyBehavior type for use with
@@ -44,5 +45,13 @@ func (b *AutoscalingPolicyBehaviorApplyConfiguration) WithScaleUp(value *Autosca
 // If called multiple times, the ScaleDown field is set to the value of the last call.
 func (b *AutoscalingPolicyBehaviorApplyConfiguration) WithScaleDown(value *AutoscalingPolicyStablePolicyApplyConfiguration) *AutoscalingPolicyBehaviorApplyConfiguration {
 	b.ScaleDown = value
+	return b
+}
+
+// WithSyncPolicy sets the SyncPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the SyncPolicy field is set to the value of the last call.
+func (b *AutoscalingPolicyBehaviorApplyConfiguration) WithSyncPolicy(value *AutoscalingPolicySyncPolicyApplyConfiguration) *AutoscalingPolicyBehaviorApplyConfiguration {
+	b.SyncPolicy = value
 	return b
 }
