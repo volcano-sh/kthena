@@ -79,6 +79,51 @@ func ListPodsByLabel(t *testing.T, kubeClient kubernetes.Interface, namespace, l
 	return pods.Items
 }
 
+// ListReadyPodsByLabel returns pods matching the label selector that pass IsPodReady.
+func ListReadyPodsByLabel(t *testing.T, kubeClient kubernetes.Interface, namespace, labelSelector string) []corev1.Pod {
+	t.Helper()
+	pods := ListPodsByLabel(t, kubeClient, namespace, labelSelector)
+	ready := make([]corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if IsPodReady(pod) {
+			ready = append(ready, pod)
+		}
+	}
+	return ready
+}
+
+// RouterLogsSince returns kthena-router pod logs since the given time.
+func RouterLogsSince(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace string, since metav1.Time) string {
+	t.Helper()
+	routerPod := GetRouterPod(t, kubeClient, kthenaNamespace)
+	opts := &corev1.PodLogOptions{SinceTime: &since}
+	logs, err := kubeClient.CoreV1().Pods(kthenaNamespace).GetLogs(routerPod.Name, opts).Do(context.Background()).Raw()
+	require.NoError(t, err)
+	return string(logs)
+}
+
+// CountSubstringInRouterLogs counts occurrences of substring in kthena-router pod logs since the given time.
+func CountSubstringInRouterLogs(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace string, since metav1.Time, substring string) int {
+	t.Helper()
+	return strings.Count(RouterLogsSince(t, kubeClient, kthenaNamespace, since), substring)
+}
+
+// CountSelectedPodInRouterLogs counts router access log lines that selected the given pod.
+func CountSelectedPodInRouterLogs(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace, podName string, since metav1.Time) int {
+	t.Helper()
+	return CountSubstringInRouterLogs(t, kubeClient, kthenaNamespace, since, "selected_pod="+podName)
+}
+
+// CountSelectedPodsInRouterLogs sums selected_pod counts for the given pods.
+func CountSelectedPodsInRouterLogs(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace string, since metav1.Time, pods []corev1.Pod) int {
+	t.Helper()
+	total := 0
+	for _, pod := range pods {
+		total += CountSelectedPodInRouterLogs(t, kubeClient, kthenaNamespace, pod.Name, since)
+	}
+	return total
+}
+
 // WaitForPodLogsContain polls pod logs until all substrings are present.
 // This is useful for verifying async logs like access logs.
 func WaitForPodLogsContain(

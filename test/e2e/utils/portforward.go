@@ -24,7 +24,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -156,6 +159,16 @@ func startForwarder(namespace, podName string, localPort, podPort int) (PortForw
 	}
 
 	return f, nil
+}
+
+// AllocateLocalPort binds to 127.0.0.1:0 and returns the allocated port as a string.
+func AllocateLocalPort(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	require.NoError(t, listener.Close())
+	return port
 }
 
 // SetupPortForward sets up a port-forward to a service and waits for it to be ready.

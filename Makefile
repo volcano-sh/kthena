@@ -111,7 +111,7 @@ test-e2e-controller-manager: ## Run controller-manager e2e tests.
 test-e2e-router: ## Run router e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=router ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
 
 .PHONY: test-e2e-gateway-api
 test-e2e-gateway-api: ## Run gateway-api e2e tests.

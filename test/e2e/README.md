@@ -11,7 +11,7 @@ The E2E tests use helm to install kthena into a Kind cluster and verify core fun
 | Category | Description | Make Target |
 |----------|-------------|-------------|
 | `controller-manager` | ModelServing, ModelBooster, Autoscaling | `make test-e2e-controller-manager` |
-| `router` | ModelRoute without Gateway API | `make test-e2e-router` |
+| `router` | ModelRoute without Gateway API and router scheduler plugins | `make test-e2e-router` |
 | `gateway-api` | ModelRoute with Gateway API | `make test-e2e-gateway-api` |
 | `gateway-inference-extension` | HTTPRoute, InferencePool | `make test-e2e-gateway-inference-extension` |
 
@@ -68,7 +68,7 @@ make test-e2e-cleanup
 # Controller manager tests
 make test-e2e-controller-manager
 
-# Router tests (no Gateway API)
+# Router tests (no Gateway API, includes scheduler plugins)
 make test-e2e-router
 
 # Gateway API tests
