@@ -82,9 +82,13 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		hooks.DecrPrefill()
 	}
 	if metricsRecorder != nil {
+<<<<<<< HEAD
 		statusCode := "200"
+=======
+		statusCode := http.StatusOK // Default status code for successful prefill
+>>>>>>> 75173bbc (updated status code)
 		if err != nil {
-			statusCode = "500"
+			statusCode = http.StatusInternalServerError
 		}
 		metricsRecorder.FinishPrefillPhase(statusCode)
 		metricsRecorder.DecActiveUpstreamRequests()
@@ -111,9 +115,13 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		hooks.DecrDecode()
 	}
 	if metricsRecorder != nil {
+<<<<<<< HEAD
 		statusCode := "200"
+=======
+		statusCode := http.StatusOK // Default status code, will be updated by response
+>>>>>>> 75173bbc (updated status code)
 		if decodeErr != nil {
-			statusCode = "500"
+			statusCode = http.StatusInternalServerError
 		}
 		metricsRecorder.FinishDecodePhase(statusCode)
 		metricsRecorder.DecActiveUpstreamRequests()

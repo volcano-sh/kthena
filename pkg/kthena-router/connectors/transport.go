@@ -66,16 +66,18 @@ func decoderProxy(c *gin.Context, req *http.Request) (int, error) {
 
 	c.Status(resp.StatusCode)
 
-	// Determine if this is a streaming response
-	stream := isStreamingResponse(resp)
-
-	if stream {
-		// Handle streaming response
-		return handleStreamingResponse(c, resp)
-	} else {
-		// Handle non-streaming response
-		return handleNonStreamingResponse(c, resp)
+	// Stream responses using the appropriate handler
+	if isStreamingResponse(resp) {
+		if _, err := handleStreamingResponse(c, resp); err != nil {
+			return resp.StatusCode, fmt.Errorf("streaming decode interrupted: %w", err)
+		}
+		return resp.StatusCode, nil
 	}
+
+	if _, err := handleNonStreamingResponse(c, resp); err != nil {
+		return resp.StatusCode, fmt.Errorf("non-streaming decode failed: %w", err)
+	}
+	return resp.StatusCode, nil
 }
 
 // preparePrefillBody modifies a request body for a prefill request.
@@ -181,9 +183,13 @@ func isStreamingResponse(resp *http.Response) bool {
 // handleStreamingResponse handles streaming responses
 func handleStreamingResponse(c *gin.Context, resp *http.Response) (int, error) {
 	totalOutputTokens := 0
+	var streamErr error
 	reader := bufio.NewReader(resp.Body)
 	c.Stream(func(w io.Writer) bool {
 		line, err := reader.ReadBytes('\n')
+
+		// Process line BEFORE checking err — ReadBytes can return (data, io.EOF)
+		// on the final line. Checking err first silently drops the last chunk.
 		if len(line) > 0 {
 			// Try to parse usage from this line
 			parsed := handlers.ParseStreamRespForUsage(string(line))
@@ -191,23 +197,28 @@ func handleStreamingResponse(c *gin.Context, resp *http.Response) (int, error) {
 				klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 				// Accumulate output tokens
 				totalOutputTokens += parsed.Usage.CompletionTokens
-				// Check if token usage should be filtered
-				if v, ok := c.Get(common.TokenUsageKey); ok && v.(bool) {
-					return true
-				}
 			}
-			// Forward to downstream
-			_, _ = w.Write(line)
+
+			if _, writeErr := w.Write(line); writeErr != nil {
+				// Client disconnect — do NOT set streamErr to avoid triggering pod retry
+				klog.V(4).Infof("client write error (disconnect?): %v", writeErr)
+				return false // Client is gone, exit gracefully
+			}
 		}
+
+		// Check for backend read errors — these should trigger retry
 		if err != nil {
 			if err != io.EOF {
+				// Real backend failure — router must retry the pod
+				streamErr = fmt.Errorf("error reading stream body: %w", err)
 				klog.Errorf("error reading stream body: %v", err)
 			}
 			return false
 		}
+
 		return true
 	})
-	return totalOutputTokens, nil
+	return totalOutputTokens, streamErr
 }
 
 // handleNonStreamingResponse handles non-streaming responses
@@ -218,11 +229,16 @@ func handleNonStreamingResponse(c *gin.Context, resp *http.Response) (int, error
 	_, err := io.Copy(c.Writer, teeReader)
 	if err != nil {
 		klog.Errorf("copy response to downstream failed: %v", err)
-		return 0, err
+		// Do NOT attempt token parse on partial/corrupt buffer after failed copy
+		return 0, fmt.Errorf("non-streaming response copy failed: %w", err)
 	}
 
 	// Parse usage if present
-	parsed, _ := handlers.ParseOpenAIResponseBody(buf.Bytes())
+	parsed, err := handlers.ParseOpenAIResponseBody(buf.Bytes())
+	if err != nil {
+		klog.V(4).Infof("failed to parse non-streaming response usage: %v", err)
+		return 0, nil
+	}
 	if parsed != nil && parsed.Usage.CompletionTokens > 0 {
 		klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 		return parsed.Usage.CompletionTokens, nil

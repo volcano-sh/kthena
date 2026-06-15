@@ -183,16 +183,16 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	prefillResult := <-prefillCh
 
 	if metricsRecorder != nil {
-		decodeStatus := "200"
+		decodeStatus := http.StatusOK
 		if decodeErr != nil {
-			decodeStatus = "500"
+			decodeStatus = http.StatusInternalServerError
 		}
 		metricsRecorder.FinishDecodePhase(decodeStatus)
 		metricsRecorder.DecActiveUpstreamRequests()
 
-		prefillStatus := "200"
+		prefillStatus := http.StatusOK
 		if prefillResult.err != nil {
-			prefillStatus = "500"
+			prefillStatus = http.StatusInternalServerError
 		}
 		metricsRecorder.FinishPrefillPhase(prefillStatus)
 		metricsRecorder.DecActiveUpstreamRequests()

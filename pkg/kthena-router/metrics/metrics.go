@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -252,19 +253,19 @@ func NewMetrics() *Metrics {
 }
 
 // RecordRequest records a completed request with all relevant metrics
-func (m *Metrics) RecordRequest(model, path, statusCode, errorType string, duration time.Duration) {
-	m.RequestsTotal.WithLabelValues(model, path, statusCode, errorType).Inc()
-	m.RequestDuration.WithLabelValues(model, path, statusCode).Observe(duration.Seconds())
+func (m *Metrics) RecordRequest(model, path string, statusCode int, errorType string, duration time.Duration) {
+	m.RequestsTotal.WithLabelValues(model, path, strconv.Itoa(statusCode), errorType).Inc()
+	m.RequestDuration.WithLabelValues(model, path, strconv.Itoa(statusCode)).Observe(duration.Seconds())
 }
 
 // RecordPrefillDuration records prefill phase duration for PD-disaggregated requests
-func (m *Metrics) RecordPrefillDuration(model, path, statusCode string, duration time.Duration) {
-	m.RequestPrefillDuration.WithLabelValues(model, path, statusCode).Observe(duration.Seconds())
+func (m *Metrics) RecordPrefillDuration(model, path string, statusCode int, duration time.Duration) {
+	m.RequestPrefillDuration.WithLabelValues(model, path, strconv.Itoa(statusCode)).Observe(duration.Seconds())
 }
 
 // RecordDecodeDuration records decode phase duration for PD-disaggregated requests
-func (m *Metrics) RecordDecodeDuration(model, path, statusCode string, duration time.Duration) {
-	m.RequestDecodeDuration.WithLabelValues(model, path, statusCode).Observe(duration.Seconds())
+func (m *Metrics) RecordDecodeDuration(model, path string, statusCode int, duration time.Duration) {
+	m.RequestDecodeDuration.WithLabelValues(model, path, strconv.Itoa(statusCode)).Observe(duration.Seconds())
 }
 
 // RecordTokens records input and output token counts
@@ -446,7 +447,7 @@ func (r *RequestMetricsRecorder) StartPrefillPhase() {
 }
 
 // FinishPrefillPhase marks the end of prefill phase and records duration
-func (r *RequestMetricsRecorder) FinishPrefillPhase(statusCode string) {
+func (r *RequestMetricsRecorder) FinishPrefillPhase(statusCode int) {
 	if r.prefillStartTime != nil {
 		duration := time.Since(*r.prefillStartTime)
 		r.metrics.RecordPrefillDuration(r.model, r.path, statusCode, duration)
@@ -460,7 +461,7 @@ func (r *RequestMetricsRecorder) StartDecodePhase() {
 }
 
 // FinishDecodePhase marks the end of decode phase and records duration
-func (r *RequestMetricsRecorder) FinishDecodePhase(statusCode string) {
+func (r *RequestMetricsRecorder) FinishDecodePhase(statusCode int) {
 	if r.decodeStartTime != nil {
 		duration := time.Since(*r.decodeStartTime)
 		r.metrics.RecordDecodeDuration(r.model, r.path, statusCode, duration)
@@ -468,7 +469,7 @@ func (r *RequestMetricsRecorder) FinishDecodePhase(statusCode string) {
 }
 
 // Finish completes the request recording with final status
-func (r *RequestMetricsRecorder) Finish(statusCode, errorType string) {
+func (r *RequestMetricsRecorder) Finish(statusCode int, errorType string) {
 	duration := time.Since(r.startTime)
 	r.metrics.RecordRequest(r.model, r.path, statusCode, errorType, duration)
 }

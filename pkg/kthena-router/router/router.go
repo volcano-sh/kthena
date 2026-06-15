@@ -245,7 +245,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			// Decrement downstream request count when request completes
 			r.metrics.DecActiveDownstreamRequests(modelName)
 			if metricsRecorder != nil {
-				statusCode := strconv.Itoa(c.Writer.Status())
+				statusCode := c.Writer.Status()
 				reason := "successful_request"
 				if r, exists := c.Get("finishReason"); exists {
 					reason = r.(string)
