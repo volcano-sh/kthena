@@ -19,6 +19,7 @@ package autoscaler
 import (
 	"context"
 	"sort"
+	"strings"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
@@ -152,17 +153,19 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
-	externalMetrics := make(algorithm.Metrics)
+	externalMetricAggregates := make(map[string]*externalMetricAggregate)
 	instancesCountSum := int32(0)
 	// Update all model serving instances' metrics
 	for _, param := range optimizer.Meta.Config.Params {
-		collector, exists := optimizer.Collectors[param.Target.TargetRef.Name]
+		targetName := param.Target.TargetRef.Name
+		collector, exists := optimizer.Collectors[targetName]
 		if !exists {
-			klog.Warningf("collector for target %s not exists", param.Target.TargetRef.Name)
+			klog.Warningf("collector for target %s not exists", targetName)
 			continue
 		}
 
-		instancesCountSum += currentInstancesCounts[param.Target.TargetRef.Name]
+		currentInstancesCount := currentInstancesCounts[targetName]
+		instancesCountSum += currentInstancesCount
 		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
@@ -170,15 +173,11 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		}
 		unreadyInstancesCount += currentUnreadyInstancesCount
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
-		// TODO: External metrics are aggregated with a plain sum across targets.
-		// This is correct for additive metrics (for example queue length), but it
-		// is semantically wrong for ratio metrics such as GPU utilization.
-		// Introduce per-metric aggregation strategy (sum/avg/max/weighted) in a
-		// follow-up change and apply it here instead of unconditional summation.
 		for metricName, metricValue := range currentExternalMetrics {
-			addMetric(externalMetrics, metricName, metricValue)
+			addExternalMetric(externalMetricAggregates, metricName, metricValue, currentInstancesCount)
 		}
 	}
+	externalMetrics := finalizeExternalMetrics(externalMetricAggregates)
 	// Get recommended replicas of all model serving instances
 	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
 		MinInstances:          optimizer.Meta.MinReplicas,
@@ -214,4 +213,75 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 
 	replicasMap := optimizer.Meta.RestoreReplicasOfEachBackend(recommendedInstances)
 	return replicasMap, nil
+}
+
+type externalMetricAggregate struct {
+	sum         float64
+	weightedSum float64
+	weight      int32
+	count       int32
+}
+
+func addExternalMetric(aggregates map[string]*externalMetricAggregate, metricName string, metricValue float64, replicas int32) {
+	aggregate, ok := aggregates[metricName]
+	if !ok {
+		aggregate = &externalMetricAggregate{}
+		aggregates[metricName] = aggregate
+	}
+	aggregate.count++
+	if averageExternalMetric(metricName) {
+		if replicas > 0 {
+			aggregate.weightedSum += metricValue * float64(replicas)
+			aggregate.weight += replicas
+			return
+		}
+		aggregate.sum += metricValue
+		return
+	}
+	aggregate.sum += metricValue
+}
+
+func finalizeExternalMetrics(aggregates map[string]*externalMetricAggregate) algorithm.Metrics {
+	metrics := make(algorithm.Metrics, len(aggregates))
+	for metricName, aggregate := range aggregates {
+		if averageExternalMetric(metricName) {
+			if aggregate.weight > 0 {
+				metrics[metricName] = aggregate.weightedSum
+				continue
+			}
+			metrics[metricName] = aggregate.sum / float64(aggregate.count)
+			continue
+		}
+		metrics[metricName] = aggregate.sum
+	}
+	return metrics
+}
+
+func averageExternalMetric(metricName string) bool {
+	name := strings.ToLower(metricName)
+	for _, suffix := range []string{"utilization", "usage", "percent", "percentage", "ratio", "perc"} {
+		if metricNameHasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func metricNameHasSuffix(name, suffix string) bool {
+	if name == suffix {
+		return true
+	}
+	if !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	beforeIdx := len(name) - len(suffix) - 1
+	if beforeIdx < 0 {
+		return false
+	}
+	switch name[beforeIdx] {
+	case '_', '-', '.', '/':
+		return true
+	default:
+		return false
+	}
 }

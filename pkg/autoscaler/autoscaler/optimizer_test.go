@@ -192,3 +192,112 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 		})
 	}
 }
+
+func TestExternalMetricAggregation(t *testing.T) {
+	tests := []struct {
+		name    string
+		samples []struct {
+			metricName string
+			value      float64
+			replicas   int32
+		}
+		want map[string]float64
+	}{
+		{
+			name: "additive metrics are summed across backends",
+			samples: []struct {
+				metricName string
+				value      float64
+				replicas   int32
+			}{
+				{metricName: "num_requests_waiting", value: 10, replicas: 2},
+				{metricName: "num_requests_waiting", value: 15, replicas: 3},
+			},
+			want: map[string]float64{
+				"num_requests_waiting": 25,
+			},
+		},
+		{
+			name: "ratio metrics use weighted sum by backend replica count",
+			samples: []struct {
+				metricName string
+				value      float64
+				replicas   int32
+			}{
+				{metricName: "gpu_utilization", value: 60, replicas: 2},
+				{metricName: "gpu_utilization", value: 90, replicas: 1},
+			},
+			want: map[string]float64{
+				"gpu_utilization": 210,
+			},
+		},
+		{
+			name: "cache usage percent suffix uses weighted sum",
+			samples: []struct {
+				metricName string
+				value      float64
+				replicas   int32
+			}{
+				{metricName: "gpu_cache_usage_perc", value: 50, replicas: 1},
+				{metricName: "gpu_cache_usage_perc", value: 70, replicas: 1},
+			},
+			want: map[string]float64{
+				"gpu_cache_usage_perc": 120,
+			},
+		},
+		{
+			name: "ratio metrics fall back to sample average when replicas are zero",
+			samples: []struct {
+				metricName string
+				value      float64
+				replicas   int32
+			}{
+				{metricName: "cache_usage", value: 40, replicas: 0},
+				{metricName: "cache_usage", value: 80, replicas: 0},
+			},
+			want: map[string]float64{
+				"cache_usage": 60,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aggregates := make(map[string]*externalMetricAggregate)
+			for _, sample := range tt.samples {
+				addExternalMetric(aggregates, sample.metricName, sample.value, sample.replicas)
+			}
+			got := finalizeExternalMetrics(aggregates)
+			for metricName, want := range tt.want {
+				assert.InDelta(t, want, got[metricName], 0.001)
+			}
+		})
+	}
+}
+
+func TestAverageExternalMetric(t *testing.T) {
+	tests := []struct {
+		name       string
+		metricName string
+		want       bool
+	}{
+		{name: "utilization", metricName: "gpu_utilization", want: true},
+		{name: "usage", metricName: "gpu_cache_usage", want: true},
+		{name: "percent", metricName: "memory_percent", want: true},
+		{name: "percentage", metricName: "kv_cache_percentage", want: true},
+		{name: "ratio", metricName: "hit_ratio", want: true},
+		{name: "rate", metricName: "token_rate", want: false},
+		{name: "perc", metricName: "gpu_cache_usage_perc", want: true},
+		{name: "bare suffix", metricName: "usage", want: true},
+		{name: "suffix without separator", metricName: "upperperc", want: false},
+		{name: "false rate suffix", metricName: "error_crate", want: false},
+		{name: "count", metricName: "request_count", want: false},
+		{name: "waiting", metricName: "num_requests_waiting", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, averageExternalMetric(tt.metricName))
+		})
+	}
+}
