@@ -60,7 +60,6 @@ func (h *HTTPConnector) decode(c *gin.Context, req *http.Request, decodeAddr str
 	return decoderProxy(c, req)
 }
 
-
 // Proxy executes the complete prefill-decode flow for HTTP connector
 func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
 	// Get metrics recorder from context
@@ -93,7 +92,7 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 	if metricsRecorder != nil {
 		statusCode := http.StatusOK
-		
+
 		if err != nil {
 			statusCode = http.StatusInternalServerError
 		}
@@ -116,12 +115,9 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 
 	result, decodeErr := h.decode(c, h.decodeRequest, decodeAddr)
 
-<<<<<<< HEAD
 	if hooks != nil && hooks.DecrDecode != nil {
 		hooks.DecrDecode()
 	}
-=======
->>>>>>> 6c5e7ffa (updated error logs)
 	if metricsRecorder != nil {
 
 		statusCode := http.StatusOK
@@ -132,5 +128,5 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		metricsRecorder.DecActiveUpstreamRequests()
 	}
 
-	return result, decodeErr
+	return result, nil
 }
