@@ -911,7 +911,7 @@ func TestResolveSyncPolicy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ac := &AutoscaleController{
 				clampWarnings:  sets.New[string](),
-				policyVersions: make(map[string]string),
+				policyVersions: make(map[string]int64),
 			}
 			periods := ac.resolveSyncPolicy(tt.policy)
 			if periods.syncPeriod != tt.wantSyncPeriod {
@@ -930,7 +930,7 @@ func TestResolveSyncPolicy(t *testing.T) {
 func TestClampWarningsResetOnPolicyReResolve(t *testing.T) {
 	ac := &AutoscaleController{
 		clampWarnings:  sets.New[string](),
-		policyVersions: make(map[string]string),
+		policyVersions: make(map[string]int64),
 	}
 	policy := &workload.AutoscalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "policy-a", Generation: 1},
@@ -967,7 +967,7 @@ func TestClampWarningsResetOnPolicyReResolve(t *testing.T) {
 func TestStalePolicyTrackingPrune(t *testing.T) {
 	ac := &AutoscaleController{
 		clampWarnings:  sets.New[string](),
-		policyVersions: make(map[string]string),
+		policyVersions: make(map[string]int64),
 		scalerMap:      make(map[string]*autoscaler.Autoscaler),
 		optimizerMap:   make(map[string]*autoscaler.Optimizer),
 	}
@@ -1004,18 +1004,9 @@ func TestStalePolicyTrackingPrune(t *testing.T) {
 	}
 
 	// Now prune: only p1 is active (p2's binding was deleted).
+	activeBindings := sets.New[string]()
 	activePolicies := sets.New[string]("ns/p1")
-	for key := range ac.policyVersions {
-		if !activePolicies.Has(key) {
-			delete(ac.policyVersions, key)
-			prefix := key + "/"
-			for _, k := range ac.clampWarnings.UnsortedList() {
-				if strings.HasPrefix(k, prefix) {
-					ac.clampWarnings.Delete(k)
-				}
-			}
-		}
-	}
+	ac.pruneStaleTracking(activeBindings, activePolicies)
 
 	if _, ok := ac.policyVersions["ns/p2"]; ok {
 		t.Fatal("expected ns/p2 to be pruned from policyVersions")
@@ -1034,34 +1025,36 @@ func TestStalePolicyTrackingPrune(t *testing.T) {
 func TestConfigErrorSuppression(t *testing.T) {
 	ac := &AutoscaleController{
 		clampWarnings:  sets.New[string](),
-		policyVersions: make(map[string]string),
+		policyVersions: make(map[string]int64),
 		configErrors:   sets.New[string](),
 	}
 
-	// First error for binding ns/b1: should record and allow Errorf.
-	bindingKey := "ns/b1"
-	if !ac.configErrors.Has(bindingKey) {
-		// Simulate first occurrence — Errorf would fire.
-		ac.configErrors.Insert(bindingKey)
+	binding := &workload.AutoscalingPolicyBinding{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "b1"},
 	}
-	if !ac.configErrors.Has(bindingKey) {
-		t.Fatal("expected configErrors to contain binding key after first error")
+
+	// First error: recordConfigError inserts and logs at Errorf.
+	ac.recordConfigError(binding, fmt.Errorf("first"))
+	if !ac.configErrors.Has("ns/b1") {
+		t.Fatal("expected configErrors to contain ns/b1 after first error")
 	}
 
 	// Second error for same binding: suppressed (V(2) only).
-	if ac.configErrors.Has(bindingKey) {
-		// Simulate repeated occurrence — V(2) Infof instead of Errorf.
+	ac.recordConfigError(binding, fmt.Errorf("second"))
+	if !ac.configErrors.Has("ns/b1") {
+		t.Fatal("expected configErrors to still contain ns/b1 after repeated error")
 	}
 
 	// Successful reconcile clears the key.
-	ac.configErrors.Delete(bindingKey)
-	if ac.configErrors.Has(bindingKey) {
-		t.Fatal("expected configErrors to be cleared after successful reconcile")
+	ac.clearConfigError(binding)
+	if ac.configErrors.Has("ns/b1") {
+		t.Fatal("expected configErrors to be cleared after clearConfigError")
 	}
 
 	// Next error re-fires at Errorf level.
-	if ac.configErrors.Has(bindingKey) {
-		t.Fatal("expected configErrors to be empty so next error re-fires at Errorf")
+	ac.recordConfigError(binding, fmt.Errorf("third"))
+	if !ac.configErrors.Has("ns/b1") {
+		t.Fatal("expected configErrors to contain ns/b1 after error following clear")
 	}
 }
 
@@ -1233,7 +1226,7 @@ func TestReconcileInterval(t *testing.T) {
 		scalerMap:                       map[string]*autoscalerAutoscaler{},
 		optimizerMap:                    map[string]*autoscalerOptimizer{},
 		clampWarnings:                   sets.New[string](),
-		policyVersions:                  make(map[string]string),
+		policyVersions:                  make(map[string]int64),
 	}
 
 	ctx := context.Background()

@@ -61,7 +61,7 @@ type AutoscaleController struct {
 	scalerMap                          map[string]*autoscaler.Autoscaler
 	optimizerMap                       map[string]*autoscaler.Optimizer
 	clampWarnings                      sets.Set[string]
-	policyVersions                     map[string]string
+	policyVersions                     map[string]int64
 	configErrors                       sets.Set[string]
 	mu                                 sync.Mutex
 }
@@ -97,7 +97,7 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 		scalerMap:                          make(map[string]*autoscaler.Autoscaler),
 		optimizerMap:                       make(map[string]*autoscaler.Optimizer),
 		clampWarnings:                      sets.New[string](),
-		policyVersions:                     make(map[string]string),
+		policyVersions:                     make(map[string]int64),
 		configErrors:                       sets.New[string](),
 	}
 	return ac
@@ -182,6 +182,7 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 	scalerSet := sets.New[string]()
 	optimizerSet := sets.New[string]()
 	activePolicies := sets.New[string]()
+	activeBindings := sets.New[string]()
 
 	for _, binding := range bindings {
 		policyName := binding.Spec.PolicyRef.Name
@@ -191,6 +192,8 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 		}
 		policyKey := binding.Namespace + "/" + policyName
 		activePolicies.Insert(policyKey)
+		bindingKey := binding.Namespace + "/" + binding.Name
+		activeBindings.Insert(bindingKey)
 		if binding.Spec.HomogeneousTarget != nil {
 			scalerSet.Insert(formatAutoscalerMapKey(binding.Namespace, binding.Name, &binding.Spec.HomogeneousTarget.Target.TargetRef))
 		} else if binding.Spec.HeterogeneousTarget != nil {
@@ -212,20 +215,38 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 		}
 	}
 
-	// Build set of active binding keys for cleanup.
-	activeBindings := sets.New[string]()
-	for _, binding := range bindings {
-		activeBindings.Insert(fmt.Sprintf("%s/%s", binding.Namespace, binding.Name))
-	}
+	ac.pruneStaleTracking(activeBindings, activePolicies)
 
-	// Prune stale config error entries.
+	defaultInterval := util.DefaultSyncPeriodSeconds * time.Second
+	var minInterval time.Duration
+	hasValidInterval := false
+	for _, binding := range bindings {
+		dir, periods, err := ac.schedule(ctx, binding)
+		if err != nil {
+			ac.recordConfigError(binding, err)
+			continue
+		}
+		ac.clearConfigError(binding)
+		interval := nextInterval(dir, periods)
+		if !hasValidInterval || interval < minInterval {
+			minInterval = interval
+		}
+		hasValidInterval = true
+	}
+	if !hasValidInterval {
+		return defaultInterval
+	}
+	return minInterval
+}
+
+// pruneStaleTracking removes configErrors, policyVersions, and clampWarnings
+// entries for bindings/policies that are no longer active.
+func (ac *AutoscaleController) pruneStaleTracking(activeBindings, activePolicies sets.Set[string]) {
 	for key := range ac.configErrors {
 		if !activeBindings.Has(key) {
 			ac.configErrors.Delete(key)
 		}
 	}
-
-	// Prune stale policy tracking entries.
 	for key := range ac.policyVersions {
 		if !activePolicies.Has(key) {
 			delete(ac.policyVersions, key)
@@ -237,34 +258,25 @@ func (ac *AutoscaleController) reconcileOnce(ctx context.Context) time.Duration 
 			}
 		}
 	}
+}
 
-	defaultInterval := util.DefaultSyncPeriodSeconds * time.Second
-	var minInterval time.Duration
-	hasValidInterval := false
-	for _, binding := range bindings {
-		dir, periods, err := ac.schedule(ctx, binding)
-		if err != nil {
-			bindingKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Name)
-			if ac.configErrors.Has(bindingKey) {
-				klog.V(2).Infof("repeated config error for binding %s, err: %v", klog.KObj(binding), err)
-			} else {
-				klog.Errorf("failed to process autoscale for binding %s, err: %v", klog.KObj(binding), err)
-				ac.configErrors.Insert(bindingKey)
-			}
-			continue
-		}
-		bindingKey := fmt.Sprintf("%s/%s", binding.Namespace, binding.Name)
-		ac.configErrors.Delete(bindingKey)
-		interval := nextInterval(dir, periods)
-		if !hasValidInterval || interval < minInterval {
-			minInterval = interval
-		}
-		hasValidInterval = true
+// recordConfigError logs the error for the binding, suppressing repeated errors
+// to V(2) level so the controller does not spam Errorf on persistent misconfigurations.
+func (ac *AutoscaleController) recordConfigError(binding *workload.AutoscalingPolicyBinding, err error) {
+	bindingKey := binding.Namespace + "/" + binding.Name
+	if ac.configErrors.Has(bindingKey) {
+		klog.V(2).Infof("repeated config error for binding %s, err: %v", klog.KObj(binding), err)
+	} else {
+		klog.Errorf("failed to process autoscale for binding %s, err: %v", klog.KObj(binding), err)
+		ac.configErrors.Insert(bindingKey)
 	}
-	if !hasValidInterval {
-		return defaultInterval
-	}
-	return minInterval
+}
+
+// clearConfigError removes the config error tracking entry for a binding after
+// a successful reconcile, so that a future error will fire at Errorf level again.
+func (ac *AutoscaleController) clearConfigError(binding *workload.AutoscalingPolicyBinding) {
+	bindingKey := binding.Namespace + "/" + binding.Name
+	ac.configErrors.Delete(bindingKey)
 }
 
 func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, defaultNamespace string, replicas int32) error {
@@ -511,9 +523,9 @@ type syncPeriods struct {
 // warning once per policy+field (re-logged only when the policy spec changes).
 func (ac *AutoscaleController) resolveSyncPolicy(policy *workload.AutoscalingPolicy) syncPeriods {
 	policyKey := policy.Namespace + "/" + policy.Name
-	gen := fmt.Sprintf("%d", policy.Generation)
+	gen := policy.Generation
 	prevGen := ac.policyVersions[policyKey]
-	if prevGen != "" && prevGen != gen {
+	if prevGen != 0 && prevGen != gen {
 		prefix := policyKey + "/"
 		for k := range ac.clampWarnings {
 			if strings.HasPrefix(k, prefix) {
