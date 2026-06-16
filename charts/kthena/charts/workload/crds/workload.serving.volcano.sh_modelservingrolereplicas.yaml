@@ -66,6 +66,7 @@ spec:
                 type: string
             required:
             - modelServingRef
+            - replicas
             - roleName
             type: object
           status:

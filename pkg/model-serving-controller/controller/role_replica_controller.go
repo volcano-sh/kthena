@@ -244,22 +244,22 @@ func (c *RoleReplicaSyncController) syncHandler(ctx context.Context, key string)
 			}
 
 			// Sync ModelServing -> RoleReplica spec
-			if rr.Spec.Replicas == nil {
+			if rr.Spec.Replicas == 0 { // Default zero value initialization
 				klog.Infof("Initializing RoleReplica %s/%s spec.replicas to %d", namespace, rr.Name, msRoleReplicas)
 				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 					rrLatest, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Get(ctx, rr.Name, metav1.GetOptions{})
 					if getErr != nil {
 						return getErr
 					}
-					rrLatest.Spec.Replicas = &msRoleReplicas
+					rrLatest.Spec.Replicas = msRoleReplicas
 					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Update(ctx, rrLatest, metav1.UpdateOptions{})
 					return updateErr
 				})
 				return err
 			}
 
-			if *rr.Spec.Replicas != msRoleReplicas {
-				klog.Infof("Syncing role %s replicas from %d to %d based on HPA", role.Name, msRoleReplicas, *rr.Spec.Replicas)
+			if rr.Spec.Replicas != msRoleReplicas {
+				klog.Infof("Syncing role %s replicas from %d to %d based on HPA", role.Name, msRoleReplicas, rr.Spec.Replicas)
 				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 					msLatest, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, ms.Name, metav1.GetOptions{})
 					if getErr != nil {
@@ -267,7 +267,8 @@ func (c *RoleReplicaSyncController) syncHandler(ctx context.Context, key string)
 					}
 					for j, r := range msLatest.Spec.Template.Roles {
 						if r.Name == role.Name {
-							msLatest.Spec.Template.Roles[j].Replicas = rr.Spec.Replicas
+							newReplicas := rr.Spec.Replicas
+							msLatest.Spec.Template.Roles[j].Replicas = &newReplicas
 							break
 						}
 					}
