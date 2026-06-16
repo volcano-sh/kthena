@@ -25,6 +25,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/vllm"
+	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	corev1 "k8s.io/api/core/v1"
@@ -35,6 +37,11 @@ const (
 	pluginMockReplicaCount         = 3
 	leastRequestMaxWaitingRequests = 1
 	leastRequestLoadWaitTimeout    = 60 * time.Second
+	gpuCacheUsageBusyMin           = 0.1
+	gpuCacheUsageIdleMax           = 0.05
+	gpuCacheUsageLoadWaitTimeout   = 90 * time.Second
+	gpuCacheUsageLoadConcurrency   = 2
+	gpuCacheUsageLoadMaxTokens     = 256
 )
 
 func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string) []corev1.Pod {
@@ -88,6 +95,77 @@ func fetchRouterPodMetricsViaDebug(t *testing.T, debugBaseURL string, pod corev1
 		RequestWaitingNum: parsed.Metrics.RequestWaitingNum,
 		RequestRunningNum: parsed.Metrics.RequestRunningNum,
 	}, true
+}
+
+type mockPodMetricsPortForward struct {
+	pod     corev1.Pod
+	metrics string
+	close   func()
+}
+
+func setupMockPodMetricsPortForward(t *testing.T, pod corev1.Pod) mockPodMetricsPortForward {
+	t.Helper()
+	localPort := utils.AllocateLocalPort(t)
+	pf, err := utils.SetupPortForwardToPod(pod.Namespace, pod.Name, localPort, "8000")
+	require.NoError(t, err, "port-forward to mock pod %s for /metrics", pod.Name)
+	return mockPodMetricsPortForward{
+		pod:     pod,
+		metrics: fmt.Sprintf("http://127.0.0.1:%s/metrics", localPort),
+		close:   func() { pf.Close() },
+	}
+}
+
+func fetchMockPodKVCacheUsage(metricsURL string) (float64, bool) {
+	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
+	if err != nil {
+		return 0, false
+	}
+	countMetrics := vllm.NewVllmEngine().GetCountMetricsInfo(allMetrics)
+	kvUsage, ok := countMetrics[routerutils.KVCacheUsage]
+	return kvUsage, ok
+}
+
+func waitForMockPodKVCacheSeparation(t *testing.T, busyPods []corev1.Pod, idlePod corev1.Pod) {
+	t.Helper()
+	require.NotEmpty(t, busyPods)
+
+	forwards := make([]mockPodMetricsPortForward, 0, len(busyPods)+1)
+	for _, pod := range busyPods {
+		forwards = append(forwards, setupMockPodMetricsPortForward(t, pod))
+	}
+	forwards = append(forwards, setupMockPodMetricsPortForward(t, idlePod))
+	defer func() {
+		for _, forward := range forwards {
+			forward.close()
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		allBusyHot := true
+		for _, forward := range forwards[:len(busyPods)] {
+			kvUsage, ok := fetchMockPodKVCacheUsage(forward.metrics)
+			if !ok || kvUsage < gpuCacheUsageBusyMin {
+				allBusyHot = false
+				break
+			}
+		}
+		idleForward := forwards[len(forwards)-1]
+		idleUsage, okIdle := fetchMockPodKVCacheUsage(idleForward.metrics)
+		if !okIdle {
+			return false
+		}
+		idleCool := idleUsage < gpuCacheUsageIdleMax
+		if allBusyHot && idleCool {
+			for _, forward := range forwards[:len(busyPods)] {
+				kvUsage, _ := fetchMockPodKVCacheUsage(forward.metrics)
+				t.Logf("gpu-usage load ready: busy %s kv_cache=%.3f (mock /metrics)", forward.pod.Name, kvUsage)
+			}
+			t.Logf("gpu-usage load ready: idle %s kv_cache=%.3f (mock /metrics)", idleForward.pod.Name, idleUsage)
+		}
+		return allBusyHot && idleCool
+	}, gpuCacheUsageLoadWaitTimeout, 2*time.Second,
+		"all busy pods should report kv_cache_usage_perc >= %.2f and idle pod %s should report < %.2f on mock /metrics",
+		gpuCacheUsageBusyMin, idlePod.Name, gpuCacheUsageIdleMax)
 }
 
 func waitForLeastRequestLoadSeparation(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, busyPods []corev1.Pod, idlePod corev1.Pod, maxWaitingRequests int) {
@@ -195,5 +273,15 @@ const (
     Score:
       enabled:
         - name: random
+          weight: 1`
+
+	schedulerOnlyGPUCacheUsage = `scheduler:
+  pluginConfig: []
+  plugins:
+    Filter:
+      enabled: []
+    Score:
+      enabled:
+        - name: gpu-usage
           weight: 1`
 )

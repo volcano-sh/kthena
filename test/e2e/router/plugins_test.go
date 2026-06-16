@@ -105,6 +105,50 @@ func TestSchedulerPluginLeastRequest(t *testing.T) {
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.LeastRequestPluginName, "filter")
 }
 
+// TestSchedulerPluginGPUCacheUsage verifies gpu-usage prefers replicas with lower KV cache
+// utilization. Mock backends run with enable-kvcache (see LLM-Mock-plugins.yaml); two
+// replicas are kept hot with sustained long streaming load and probe traffic lands on idle.
+func TestSchedulerPluginGPUCacheUsage(t *testing.T) {
+	ctx := context.Background()
+
+	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerOnlyGPUCacheUsage, plugincontext.ModelServerName, plugincontext.ModelName)
+	t.Cleanup(restoreCfg)
+
+	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins.yaml")
+	model := route.Spec.ModelName
+
+	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
+	require.Len(t, pods, pluginMockReplicaCount, "gpu-usage test needs %d mock pods", pluginMockReplicaCount)
+	busyPods := pods[:pluginMockReplicaCount-1]
+	idlePod := pods[pluginMockReplicaCount-1]
+
+	for i, busyPod := range busyPods {
+		stopLoad := utils.StartSustainedLongRequestsToPod(t, busyPod, model,
+			fmt.Sprintf("kthena-router-plugin-e2e-fixed-prompt-gpu-usage-busy-load-%d with many tokens to consume kv cache blocks for gpu usage plugin testing", i),
+			gpuCacheUsageLoadConcurrency, gpuCacheUsageLoadMaxTokens)
+		t.Cleanup(stopLoad)
+	}
+	waitForMockPodKVCacheSeparation(t, busyPods, idlePod)
+	time.Sleep(3 * time.Second) // allow router to scrape updated mock metrics before probe traffic
+
+	since := metav1.NewTime(time.Now())
+	utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-gpu-usage-route", 200)
+	time.Sleep(2 * time.Second)
+
+	busyCount := utils.CountSelectedPodsInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, since, busyPods)
+	idleCount := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, idlePod.Name, since)
+	routed := busyCount + idleCount
+	t.Logf("gpu-usage: busy pool %d, idle pod %s %d (of %d log lines)", busyCount, idlePod.Name, idleCount, routed)
+	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
+	require.Greater(t, idleCount, busyCount, "gpu-usage should prefer the idle pod over kv-cache-hot pods")
+	require.GreaterOrEqual(t, float64(idleCount)/float64(routed), 0.9,
+		"gpu-usage should route at least 90%% to the idle pod")
+	require.LessOrEqual(t, float64(busyCount)/float64(routed), 0.1,
+		"gpu-usage should route at most 10%% to kv-cache-hot pods")
+
+	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.GPUCacheUsagePluginName, "score")
+}
+
 // TestSchedulerPluginLeastLatency verifies least-latency prefers the intrinsically faster
 // backend when both pools are idle and scored by observed TTFT/TPOT only.
 func TestSchedulerPluginLeastLatency(t *testing.T) {
@@ -122,11 +166,11 @@ func TestSchedulerPluginLeastLatency(t *testing.T) {
 	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins-latency.yaml")
 	model := route.Spec.ModelName
 
-	// Prime both backends while idle so the router records TTFT/TPOT; do not saturate either pool.
-	const primeRequests = 40
-	utils.DirectChatToPod(t, fastPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-fast-prime", primeRequests)
-	utils.DirectChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", primeRequests)
-	time.Sleep(3 * time.Second)
+	// Prime slow pool only: fast pods already have TTFT/TPOT from earlier plugin tests; an
+	// unprimed slow pod reports TTFT=0 and would incorrectly win least-latency scoring.
+	const slowPrimeRequests = 8
+	utils.DirectChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", slowPrimeRequests)
+	time.Sleep(2 * time.Second) // allow router to scrape updated slow-pool metrics
 
 	since := metav1.NewTime(time.Now())
 	utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-latency-route", 200)

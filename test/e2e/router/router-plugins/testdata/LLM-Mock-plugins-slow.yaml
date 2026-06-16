@@ -23,8 +23,8 @@ spec:
             - --served-model-name=router-plugin-model
             - --port=8000
             - --mode=echo
-            - --time-to-first-token=5s
-            - --inter-token-latency=80ms
+            - --time-to-first-token=500ms
+            - --inter-token-latency=20ms
           ports:
             - containerPort: 8000
           readinessProbe:
