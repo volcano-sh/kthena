@@ -32,6 +32,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,12 @@ const (
 
 	// defaultSGLangTokenizerPort is the upstream-default port for sglang
 	defaultSGLangTokenizerPort = 30000
+
+	// kvCacheFieldFreshDuration matches the runtime mapping key expiry
+	kvCacheFieldFreshDuration = 24 * time.Hour
+
+	kvCacheGCInterval = time.Hour
+	kvCacheGCScanSize = int64(100)
 )
 
 type KVCacheAwareArgs struct {
@@ -86,6 +93,7 @@ type KVCacheAware struct {
 	redisClient      *redis.Client
 	processor        *TokenBlockProcessor
 	tokenizerManager *tokenization.TokenizerManager
+	gcCursor         uint64
 }
 
 var _ framework.ScorePlugin = &KVCacheAware{}
@@ -161,7 +169,7 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		klog.Infof("KVCacheAware: Redis client initialized successfully")
 	}
 
-	return &KVCacheAware{
+	plugin := &KVCacheAware{
 		name:             KVCacheAwarePluginName,
 		maxBlocksToMatch: maxBlocksToMatch,
 		keyPrefix:        kvCacheKeyPrefix,
@@ -169,6 +177,8 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
 		tokenizerManager: manager,
 	}
+	plugin.startGC()
+	return plugin
 }
 
 func (t *KVCacheAware) Name() string {
@@ -271,8 +281,9 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	}
 	scoreResults := make(map[*datastore.PodInfo]int, len(podScores))
 	for _, pod := range pods {
-		podName := pod.GetPodNamespacedName().Name
-		if score, exists := podScores[podName]; exists {
+		podName := pod.GetPodNamespacedName()
+		podScoreKey := fmt.Sprintf("%s.%s", podName.Name, podName.Namespace)
+		if score, exists := podScores[podScoreKey]; exists {
 			scoreResults[pod] = score
 		}
 	}
@@ -327,17 +338,74 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 
 		klog.V(2).Infof("KVCacheAware.queryRedis: block[%d] hash=%d key=%s matched pods=%v", i, blockHashes[i], keys[i], pods)
 
-		podNames := make([]string, 0, len(pods))
-		for _, pod := range pods {
-			// Redis field is pod identifier (e.g., "pod-name.namespace")
-			podName := extractPodNameFromIdentifier(pod)
-			podNames = append(podNames, podName)
-		}
-		blockToPods[blockHashes[i]] = podNames
+		blockToPods[blockHashes[i]] = pods
 	}
 
 	klog.V(4).Infof("KVCacheAware.queryRedis: total blocks with hits: %d/%d", len(blockToPods), len(blockHashes))
 	return blockToPods, nil
+}
+
+func (t *KVCacheAware) startGC() {
+	if t.redisClient == nil {
+		return
+	}
+	go t.runGC()
+}
+
+func (t *KVCacheAware) runGC() {
+	ticker := time.NewTicker(kvCacheGCInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		t.gcStaleFields()
+	}
+}
+
+func (t *KVCacheAware) gcStaleFields() {
+	if t.redisClient == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	keys, nextCursor, err := t.redisClient.Scan(ctx, t.gcCursor, t.keyPrefix+"*", kvCacheGCScanSize).Result()
+	if err != nil {
+		klog.V(4).Infof("KVCacheAware.gcStaleFields: scan failed: %v", err)
+		return
+	}
+	t.gcCursor = nextCursor
+
+	now := time.Now()
+	staleFields := make(map[string][]string)
+	for _, key := range keys {
+		podTimes, err := t.redisClient.HGetAll(ctx, key).Result()
+		if err != nil {
+			klog.V(4).Infof("KVCacheAware.gcStaleFields: failed to read %s: %v", key, err)
+			continue
+		}
+		for pod, ts := range podTimes {
+			updatedAt, err := strconv.ParseInt(ts, 10, 64)
+			if err == nil && now.Sub(time.Unix(updatedAt, 0)) > kvCacheFieldFreshDuration {
+				staleFields[key] = append(staleFields[key], pod)
+			}
+		}
+	}
+	if len(staleFields) > 0 {
+		t.deleteStaleFields(staleFields)
+	}
+}
+
+func (t *KVCacheAware) deleteStaleFields(staleFields map[string][]string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pipe := t.redisClient.Pipeline()
+	for key, pods := range staleFields {
+		pipe.HDel(ctx, key, pods...)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		klog.V(4).Infof("KVCacheAware.gcStaleFields: failed to delete stale fields: %v", err)
+	}
 }
 
 func extractPodNameFromIdentifier(podIdentifier string) string {

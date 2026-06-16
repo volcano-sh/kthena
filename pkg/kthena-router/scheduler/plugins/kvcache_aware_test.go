@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"reflect"
@@ -24,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
@@ -377,6 +380,18 @@ func TestKVCacheAware_CalculatePodScores_Core(t *testing.T) {
 				"pod2": 25, // 1/4 * 100 (only block 1, then stops at missing block 2)
 			},
 		},
+		{
+			name:        "Namespaced pods stay distinct",
+			blockHashes: []uint64{1, 2},
+			blockToPods: map[uint64][]string{
+				1: {"pod1.default", "pod1.other"},
+				2: {"pod1.default"},
+			},
+			expected: map[string]int{
+				"pod1.default": 100,
+				"pod1.other":   50,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -387,6 +402,144 @@ func TestKVCacheAware_CalculatePodScores_Core(t *testing.T) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestKVCacheAware_QueryRedisForBlocks_ReturnsRedisOwners(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+	}
+
+	ctx := context.Background()
+	hash := uint64(111)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	if err := client.HSet(ctx, key,
+		"pod-1", now,
+		"pod-1.default", now,
+		"pod-2.default", now,
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen")
+	if err != nil {
+		t.Fatalf("queryRedisForBlocks returned error: %v", err)
+	}
+	gotPods := make(map[string]bool, len(result[hash]))
+	for _, pod := range result[hash] {
+		gotPods[pod] = true
+	}
+	for _, pod := range []string{"pod-1", "pod-1.default", "pod-2.default"} {
+		if !gotPods[pod] {
+			t.Errorf("expected %s in result, got %v", pod, result[hash])
+		}
+	}
+}
+
+func TestKVCacheAware_QueryRedisForBlocks_KeepsNamespacedOwners(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+	}
+
+	ctx := context.Background()
+	hash := uint64(333)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	if err := client.HSet(ctx, key,
+		"pod-1.default", now,
+		"pod-1.other", now,
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen")
+	if err != nil {
+		t.Fatalf("queryRedisForBlocks returned error: %v", err)
+	}
+
+	gotPods := make(map[string]bool, len(result[hash]))
+	for _, pod := range result[hash] {
+		gotPods[pod] = true
+	}
+	for _, pod := range []string{"pod-1.default", "pod-1.other"} {
+		if !gotPods[pod] {
+			t.Errorf("expected %s in result, got %v", pod, result[hash])
+		}
+	}
+
+	scores, _ := plugin.calculatePodScores([]uint64{hash}, result)
+	if scores["pod-1.default"] != 100 || scores["pod-1.other"] != 100 {
+		t.Errorf("expected namespaced scores to stay separate, got %v", scores)
+	}
+}
+
+func TestKVCacheAware_GCStaleFields(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+	}
+
+	ctx := context.Background()
+	hash := uint64(444)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	stale := fmt.Sprintf("%d", time.Now().Add(-25*time.Hour).Unix())
+	if err := client.HSet(ctx, key,
+		"pod-1", now,
+		"pod-1.default", now,
+		"pod-2.default", now,
+		"pod-3.default", stale,
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	plugin.gcStaleFields()
+
+	exists, err := client.HExists(ctx, key, "pod-3.default").Result()
+	if err != nil {
+		t.Fatalf("failed to check pod-3.default: %v", err)
+	}
+	if exists {
+		t.Errorf("expected pod-3.default to be removed")
+	}
+	for _, pod := range []string{"pod-1", "pod-1.default", "pod-2.default"} {
+		exists, err := client.HExists(ctx, key, pod).Result()
+		if err != nil {
+			t.Fatalf("failed to check %s: %v", pod, err)
+		}
+		if !exists {
+			t.Errorf("expected %s to remain", pod)
+		}
 	}
 }
 
