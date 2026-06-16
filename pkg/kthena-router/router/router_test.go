@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
@@ -59,6 +60,16 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
+type mockPodRuntimeInspector struct{}
+
+func (m *mockPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, metricPort uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	return nil, nil
+}
+
+func (m *mockPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, metricPort uint32) ([]string, error) {
+	return nil, nil
+}
+
 // setupTestRouter initializes a router and its dependencies for testing.
 // It uses a mock HTTP server as the backend, following the community's recommendation
 // to avoid hacky dependency injection.
@@ -66,7 +77,7 @@ func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datast
 	gin.SetMode(gin.TestMode)
 
 	backend := httptest.NewServer(backendHandler)
-	store := datastore.New()
+	store := datastore.New(datastore.WithPodRuntimeInspector(&mockPodRuntimeInspector{}))
 	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
 
 	return router, store, backend
@@ -1106,7 +1117,7 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	backendIP := backendURL.Hostname()
 	backendPort, _ := strconv.Atoi(backendURL.Port())
 
-	store := datastore.New()
+	store := datastore.New(datastore.WithPodRuntimeInspector(&mockPodRuntimeInspector{}))
 	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
 
 	modelServer := &aiv1alpha1.ModelServer{
