@@ -150,6 +150,20 @@ func TestJWTAuthenticatorValidateToken(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "authorization header missing")
 	})
+
+	t.Run("missing jwks cache", func(t *testing.T) {
+		validator := &JWTAuthenticator{
+			enabled: true,
+			rotator: NewJWKSRotator(conf.AuthenticationConfig{
+				JwksUri: "invalid-url",
+			}),
+		}
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+		err := validator.ValidateToken(context.Background(), c, "some-token")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no JWKS available")
+	})
 }
 
 func TestJWTAuthenticatorMiddleware(t *testing.T) {
