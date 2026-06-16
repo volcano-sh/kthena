@@ -19,14 +19,16 @@ limitations under the License.
 package v1alpha1
 
 import (
+	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 )
 
 // AutoscalingPolicyMetricApplyConfiguration represents a declarative configuration of the AutoscalingPolicyMetric type for use
 // with apply.
 type AutoscalingPolicyMetricApplyConfiguration struct {
-	Name        *string            `json:"name,omitempty"`
-	TargetValue *resource.Quantity `json:"targetValue,omitempty"`
+	Name        *string                           `json:"name,omitempty"`
+	TargetValue *resource.Quantity                `json:"targetValue,omitempty"`
+	Aggregation *workloadv1alpha1.AggregationType `json:"aggregation,omitempty"`
 }
 
 // AutoscalingPolicyMetricApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyMetric type for use with
@@ -48,5 +50,13 @@ func (b *AutoscalingPolicyMetricApplyConfiguration) WithName(value string) *Auto
 // If called multiple times, the TargetValue field is set to the value of the last call.
 func (b *AutoscalingPolicyMetricApplyConfiguration) WithTargetValue(value resource.Quantity) *AutoscalingPolicyMetricApplyConfiguration {
 	b.TargetValue = &value
+	return b
+}
+
+// WithAggregation sets the Aggregation field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Aggregation field is set to the value of the last call.
+func (b *AutoscalingPolicyMetricApplyConfiguration) WithAggregation(value workloadv1alpha1.AggregationType) *AutoscalingPolicyMetricApplyConfiguration {
+	b.Aggregation = &value
 	return b
 }

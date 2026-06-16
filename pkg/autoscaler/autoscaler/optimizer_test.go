@@ -198,6 +198,7 @@ func TestExternalMetricAggregation(t *testing.T) {
 		name    string
 		samples []struct {
 			metricName string
+			aggType    workload.AggregationType
 			value      float64
 			replicas   int32
 		}
@@ -207,11 +208,12 @@ func TestExternalMetricAggregation(t *testing.T) {
 			name: "additive metrics are summed across backends",
 			samples: []struct {
 				metricName string
+				aggType    workload.AggregationType
 				value      float64
 				replicas   int32
 			}{
-				{metricName: "num_requests_waiting", value: 10, replicas: 2},
-				{metricName: "num_requests_waiting", value: 15, replicas: 3},
+				{metricName: "num_requests_waiting", aggType: workload.AggregationTypeSum, value: 10, replicas: 2},
+				{metricName: "num_requests_waiting", aggType: workload.AggregationTypeSum, value: 15, replicas: 3},
 			},
 			want: map[string]float64{
 				"num_requests_waiting": 25,
@@ -221,39 +223,27 @@ func TestExternalMetricAggregation(t *testing.T) {
 			name: "ratio metrics use weighted sum by backend replica count",
 			samples: []struct {
 				metricName string
+				aggType    workload.AggregationType
 				value      float64
 				replicas   int32
 			}{
-				{metricName: "gpu_utilization", value: 60, replicas: 2},
-				{metricName: "gpu_utilization", value: 90, replicas: 1},
+				{metricName: "gpu_utilization", aggType: workload.AggregationTypeAvg, value: 60, replicas: 2},
+				{metricName: "gpu_utilization", aggType: workload.AggregationTypeAvg, value: 90, replicas: 1},
 			},
 			want: map[string]float64{
 				"gpu_utilization": 210,
 			},
 		},
 		{
-			name: "cache usage percent suffix uses weighted sum",
-			samples: []struct {
-				metricName string
-				value      float64
-				replicas   int32
-			}{
-				{metricName: "gpu_cache_usage_perc", value: 50, replicas: 1},
-				{metricName: "gpu_cache_usage_perc", value: 70, replicas: 1},
-			},
-			want: map[string]float64{
-				"gpu_cache_usage_perc": 120,
-			},
-		},
-		{
 			name: "ratio metrics fall back to sample average when replicas are zero",
 			samples: []struct {
 				metricName string
+				aggType    workload.AggregationType
 				value      float64
 				replicas   int32
 			}{
-				{metricName: "cache_usage", value: 40, replicas: 0},
-				{metricName: "cache_usage", value: 80, replicas: 0},
+				{metricName: "cache_usage", aggType: workload.AggregationTypeAvg, value: 40, replicas: 0},
+				{metricName: "cache_usage", aggType: workload.AggregationTypeAvg, value: 80, replicas: 0},
 			},
 			want: map[string]float64{
 				"cache_usage": 60,
@@ -265,7 +255,7 @@ func TestExternalMetricAggregation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			aggregates := make(map[string]*externalMetricAggregate)
 			for _, sample := range tt.samples {
-				addExternalMetric(aggregates, sample.metricName, sample.value, sample.replicas)
+				addExternalMetric(aggregates, sample.metricName, sample.value, sample.replicas, sample.aggType)
 			}
 			got := finalizeExternalMetrics(aggregates)
 			for metricName, want := range tt.want {
@@ -275,29 +265,3 @@ func TestExternalMetricAggregation(t *testing.T) {
 	}
 }
 
-func TestAverageExternalMetric(t *testing.T) {
-	tests := []struct {
-		name       string
-		metricName string
-		want       bool
-	}{
-		{name: "utilization", metricName: "gpu_utilization", want: true},
-		{name: "usage", metricName: "gpu_cache_usage", want: true},
-		{name: "percent", metricName: "memory_percent", want: true},
-		{name: "percentage", metricName: "kv_cache_percentage", want: true},
-		{name: "ratio", metricName: "hit_ratio", want: true},
-		{name: "rate", metricName: "token_rate", want: false},
-		{name: "perc", metricName: "gpu_cache_usage_perc", want: true},
-		{name: "bare suffix", metricName: "usage", want: true},
-		{name: "suffix without separator", metricName: "upperperc", want: false},
-		{name: "false rate suffix", metricName: "error_crate", want: false},
-		{name: "count", metricName: "request_count", want: false},
-		{name: "waiting", metricName: "num_requests_waiting", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, averageExternalMetric(tt.metricName))
-		})
-	}
-}

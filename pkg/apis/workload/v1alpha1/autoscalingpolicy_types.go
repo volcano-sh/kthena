@@ -46,7 +46,23 @@ type AutoscalingPolicyMetric struct {
 	Name string `json:"name"`
 	// TargetValue defines the target value for the metric that triggers scaling operations.
 	TargetValue resource.Quantity `json:"targetValue"`
+	// Aggregation defines how the metric should be aggregated across multiple instances.
+	// 'Sum' is used for additive metrics like queue length or request counts.
+	// 'Avg' is used for ratio/percentage metrics like GPU utilization or cache usage.
+	// +kubebuilder:validation:Enum=Sum;Avg
+	// +kubebuilder:default="Sum"
+	// +optional
+	Aggregation AggregationType `json:"aggregation,omitempty"`
 }
+
+// AggregationType defines the strategy for aggregating external metrics across backends.
+// +kubebuilder:validation:Enum=Sum;Avg
+type AggregationType string
+
+const (
+	AggregationTypeSum AggregationType = "Sum"
+	AggregationTypeAvg AggregationType = "Avg"
+)
 
 // AutoscalingPolicyBehavior defines the scaling behavior configuration for both scale up and scale down operations.
 type AutoscalingPolicyBehavior struct {

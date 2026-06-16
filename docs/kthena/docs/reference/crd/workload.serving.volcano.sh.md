@@ -19,6 +19,24 @@
 
 
 
+#### AggregationType
+
+_Underlying type:_ _string_
+
+AggregationType defines the strategy for aggregating external metrics across backends.
+
+_Validation:_
+- Enum: [Sum Avg]
+
+_Appears in:_
+- [AutoscalingPolicyMetric](#autoscalingpolicymetric)
+
+| Field | Description |
+| --- | --- |
+| `Sum` |  |
+| `Avg` |  |
+
+
 #### AutoscalingPolicy
 
 
@@ -180,6 +198,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name defines the metric key used by the scaling algorithm. |  | MinLength: 1 <br /> |
 | `targetValue` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#quantity-resource-api)_ | TargetValue defines the target value for the metric that triggers scaling operations. |  |  |
+| `aggregation` _[AggregationType](#aggregationtype)_ | Aggregation defines how the metric should be aggregated across multiple instances.<br />'Sum' is used for additive metrics like queue length or request counts.<br />'Avg' is used for ratio/percentage metrics like GPU utilization or cache usage. | Sum | Enum: [Sum Avg] <br /> |
 
 
 #### AutoscalingPolicyPanicPolicy

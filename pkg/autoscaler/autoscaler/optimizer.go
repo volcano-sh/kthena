@@ -19,7 +19,6 @@ package autoscaler
 import (
 	"context"
 	"sort"
-	"strings"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
@@ -35,12 +34,13 @@ type Optimizer struct {
 }
 
 type OptimizerMeta struct {
-	Config        *workload.HeterogeneousTarget
-	MetricTargets map[string]float64
-	ScalingOrder  []*ReplicaBlock
-	MinReplicas   int32
-	MaxReplicas   int32
-	Scope         Scope
+	Config             *workload.HeterogeneousTarget
+	MetricTargets      map[string]float64
+	MetricAggregations map[string]workload.AggregationType
+	ScalingOrder       []*ReplicaBlock
+	MinReplicas        int32
+	MaxReplicas        int32
+	Scope              Scope
 }
 
 type ReplicaBlock struct {
@@ -133,6 +133,7 @@ func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy, binding *workload
 
 	meta := NewOptimizerMeta(binding)
 	meta.MetricTargets = metricTargets
+	meta.MetricAggregations = GetMetricAggregations(autoscalePolicy)
 	return &Optimizer{
 		Meta:       meta,
 		Collectors: collectors,
@@ -174,7 +175,8 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		unreadyInstancesCount += currentUnreadyInstancesCount
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
 		for metricName, metricValue := range currentExternalMetrics {
-			addExternalMetric(externalMetricAggregates, metricName, metricValue, currentInstancesCount)
+			aggType := optimizer.Meta.MetricAggregations[metricName]
+			addExternalMetric(externalMetricAggregates, metricName, metricValue, currentInstancesCount, aggType)
 		}
 	}
 	externalMetrics := finalizeExternalMetrics(externalMetricAggregates)
@@ -216,20 +218,21 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 }
 
 type externalMetricAggregate struct {
-	sum         float64
-	weightedSum float64
-	weight      int32
-	count       int32
+	aggregationType workload.AggregationType
+	sum             float64
+	weightedSum     float64
+	weight          int32
+	count           int32
 }
 
-func addExternalMetric(aggregates map[string]*externalMetricAggregate, metricName string, metricValue float64, replicas int32) {
+func addExternalMetric(aggregates map[string]*externalMetricAggregate, metricName string, metricValue float64, replicas int32, aggType workload.AggregationType) {
 	aggregate, ok := aggregates[metricName]
 	if !ok {
-		aggregate = &externalMetricAggregate{}
+		aggregate = &externalMetricAggregate{aggregationType: aggType}
 		aggregates[metricName] = aggregate
 	}
 	aggregate.count++
-	if averageExternalMetric(metricName) {
+	if aggType == workload.AggregationTypeAvg {
 		if replicas > 0 {
 			aggregate.weightedSum += metricValue * float64(replicas)
 			aggregate.weight += replicas
@@ -244,7 +247,7 @@ func addExternalMetric(aggregates map[string]*externalMetricAggregate, metricNam
 func finalizeExternalMetrics(aggregates map[string]*externalMetricAggregate) algorithm.Metrics {
 	metrics := make(algorithm.Metrics, len(aggregates))
 	for metricName, aggregate := range aggregates {
-		if averageExternalMetric(metricName) {
+		if aggregate.aggregationType == workload.AggregationTypeAvg {
 			if aggregate.weight > 0 {
 				metrics[metricName] = aggregate.weightedSum
 				continue
@@ -255,33 +258,4 @@ func finalizeExternalMetrics(aggregates map[string]*externalMetricAggregate) alg
 		metrics[metricName] = aggregate.sum
 	}
 	return metrics
-}
-
-func averageExternalMetric(metricName string) bool {
-	name := strings.ToLower(metricName)
-	for _, suffix := range []string{"utilization", "usage", "percent", "percentage", "ratio", "perc"} {
-		if metricNameHasSuffix(name, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-func metricNameHasSuffix(name, suffix string) bool {
-	if name == suffix {
-		return true
-	}
-	if !strings.HasSuffix(name, suffix) {
-		return false
-	}
-	beforeIdx := len(name) - len(suffix) - 1
-	if beforeIdx < 0 {
-		return false
-	}
-	switch name[beforeIdx] {
-	case '_', '-', '.', '/':
-		return true
-	default:
-		return false
-	}
 }

@@ -171,6 +171,20 @@ spec:
                   description: AutoscalingPolicyMetric defines a metric and its target
                     value for scaling decisions.
                   properties:
+                    aggregation:
+                      allOf:
+                      - enum:
+                        - Sum
+                        - Avg
+                      - enum:
+                        - Sum
+                        - Avg
+                      default: Sum
+                      description: |-
+                        Aggregation defines how the metric should be aggregated across multiple instances.
+                        'Sum' is used for additive metrics like queue length or request counts.
+                        'Avg' is used for ratio/percentage metrics like GPU utilization or cache usage.
+                      type: string
                     name:
                       description: Name defines the metric key used by the scaling
                         algorithm.

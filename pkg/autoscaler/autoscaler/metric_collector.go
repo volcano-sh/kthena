@@ -99,6 +99,23 @@ func GetMetricTargets(autoscalePolicy *v1alpha1.AutoscalingPolicy) algorithm.Met
 	return metricTargets
 }
 
+func GetMetricAggregations(autoscalePolicy *v1alpha1.AutoscalingPolicy) map[string]v1alpha1.AggregationType {
+	metricAggregations := make(map[string]v1alpha1.AggregationType)
+	if autoscalePolicy == nil {
+		klog.Warning("autoscalePolicy is nil, can't get metricAggregations")
+		return metricAggregations
+	}
+
+	for _, metric := range autoscalePolicy.Spec.Metrics {
+		if metric.Aggregation == "" {
+			metricAggregations[metric.Name] = v1alpha1.AggregationTypeSum
+		} else {
+			metricAggregations[metric.Name] = metric.Aggregation
+		}
+	}
+	return metricAggregations
+}
+
 func (collector *MetricCollector) UpdateMetrics(
 	ctx context.Context,
 	podLister listerv1.PodLister,
