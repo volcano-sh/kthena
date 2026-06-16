@@ -51,7 +51,7 @@ type RoleReplicaSyncController struct {
 	roleReplicaLister     listerv1alpha1.ModelServingRoleReplicaLister
 	roleReplicasInformer  cache.SharedIndexInformer
 
-	workqueue workqueue.RateLimitingInterface
+	workqueue workqueue.TypedRateLimitingInterface[string]
 	recorder  record.EventRecorder
 }
 
@@ -76,7 +76,7 @@ func NewRoleReplicaSyncController(kubeClientSet kubernetes.Interface, modelServi
 		modelServingsInformer: modelServingInformer.Informer(),
 		roleReplicaLister:     roleReplicaInformer.Lister(),
 		roleReplicasInformer:  roleReplicaInformer.Informer(),
-		workqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ModelServingRoleReplicas"),
+		workqueue:             workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
 		recorder:              recorder,
 	}
 
@@ -150,20 +150,13 @@ func (c *RoleReplicaSyncController) processNextWorkItem(ctx context.Context) boo
 		return false
 	}
 
-	err := func(obj interface{}) error {
-		defer c.workqueue.Done(obj)
-		var key string
-		var ok bool
-		if key, ok = obj.(string); !ok {
-			c.workqueue.Forget(obj)
-			utilruntime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
-			return nil
-		}
+	err := func(key string) error {
+		defer c.workqueue.Done(key)
 		if err := c.syncHandler(ctx, key); err != nil {
 			c.workqueue.AddRateLimited(key)
 			return fmt.Errorf("error syncing '%s': %s, requeuing", key, err.Error())
 		}
-		c.workqueue.Forget(obj)
+		c.workqueue.Forget(key)
 		return nil
 	}(obj)
 
@@ -205,7 +198,9 @@ func (c *RoleReplicaSyncController) enqueueModelServing(obj interface{}) {
 	}
 	for _, obj := range objs {
 		if rr, ok := obj.(*workloadv1alpha1.ModelServingRoleReplica); ok {
-			c.enqueueRoleReplica(rr)
+			if rr.Namespace == ms.Namespace {
+				c.enqueueRoleReplica(rr)
+			}
 		}
 	}
 }
@@ -244,19 +239,6 @@ func (c *RoleReplicaSyncController) syncHandler(ctx context.Context, key string)
 			}
 
 			// Sync ModelServing -> RoleReplica spec
-			if rr.Spec.Replicas == 0 { // Default zero value initialization
-				klog.Infof("Initializing RoleReplica %s/%s spec.replicas to %d", namespace, rr.Name, msRoleReplicas)
-				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-					rrLatest, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Get(ctx, rr.Name, metav1.GetOptions{})
-					if getErr != nil {
-						return getErr
-					}
-					rrLatest.Spec.Replicas = msRoleReplicas
-					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Update(ctx, rrLatest, metav1.UpdateOptions{})
-					return updateErr
-				})
-				return err
-			}
 
 			if rr.Spec.Replicas != msRoleReplicas {
 				klog.Infof("Syncing role %s replicas from %d to %d based on HPA", role.Name, msRoleReplicas, rr.Spec.Replicas)
@@ -291,7 +273,7 @@ func (c *RoleReplicaSyncController) syncHandler(ctx context.Context, key string)
 		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 		workloadv1alpha1.RoleLabelKey:             rr.Spec.RoleName,
 	}.AsSelector().String()
-	
+
 	if rr.Status.Replicas != msRoleReplicas || rr.Status.LabelSelector != selector {
 		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			rrLatest, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServingRoleReplicas(namespace).Get(ctx, rr.Name, metav1.GetOptions{})

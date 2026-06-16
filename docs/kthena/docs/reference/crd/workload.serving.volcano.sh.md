@@ -675,7 +675,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | Replicas is the actual number of replicas for the role |  |  |
+| `replicas` _integer_ | Replicas is the observed target replica count for the role from the ModelServing object |  |  |
 | `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
 
 

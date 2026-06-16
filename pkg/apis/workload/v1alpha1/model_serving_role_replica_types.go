@@ -36,7 +36,7 @@ type ModelServingRoleReplicaSpec struct {
 
 // ModelServingRoleReplicaStatus defines the observed state of ModelServingRoleReplica
 type ModelServingRoleReplicaStatus struct {
-	// Replicas is the actual number of replicas for the role
+	// Replicas is the observed target replica count for the role from the ModelServing object
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 

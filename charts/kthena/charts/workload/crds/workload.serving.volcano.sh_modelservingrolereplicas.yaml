@@ -78,7 +78,8 @@ spec:
                   match the replica count.
                 type: string
               replicas:
-                description: Replicas is the actual number of replicas for the role
+                description: Replicas is the observed target replica count for the
+                  role from the ModelServing object
                 format: int32
                 type: integer
             type: object
