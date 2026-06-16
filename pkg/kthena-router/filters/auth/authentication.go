@@ -86,7 +86,7 @@ func (j *JWTAuthenticator) Close() {
 func (j *JWTAuthenticator) authenticate(tokenStr string) (string, error) {
 	// Get current JWKS from rotator
 	jwksValue := j.rotator.GetJwks()
-	if jwksValue.Jwks == nil {
+	if jwksValue == nil || jwksValue.Jwks == nil {
 		return "", fmt.Errorf("no JWKS available for token validation")
 	}
 
