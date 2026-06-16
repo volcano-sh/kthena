@@ -167,27 +167,6 @@ spec:
                                 type: string
                             type: object
                         type: object
-                      syncPolicy:
-                        description: |-
-                          SyncPolicy defines how frequently the autoscaler reconciles after scale-up,
-                          scale-down, or stable reconcile cycles.
-                        properties:
-                          defaultPeriod:
-                            default: 15s
-                            description: DefaultPeriod defines the reconcile interval
-                              when no replica changes are detected.
-                            type: string
-                          scaleDownPeriod:
-                            default: 30s
-                            description: ScaleDownPeriod defines the reconcile interval
-                              after a net scale-down.
-                            type: string
-                          scaleUpPeriod:
-                            default: 5s
-                            description: ScaleUpPeriod defines the reconcile interval
-                              after a net scale-up.
-                            type: string
-                        type: object
                     type: object
                   metrics:
                     description: Metrics defines the list of metrics used to evaluate

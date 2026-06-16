@@ -56,26 +56,6 @@ type AutoscalingPolicyBehavior struct {
 	// ScaleDown defines the policy configuration for scaling down (decreasing replicas).
 	// +optional
 	ScaleDown AutoscalingPolicyStablePolicy `json:"scaleDown"`
-	// SyncPolicy defines how frequently the autoscaler reconciles after scale-up,
-	// scale-down, or stable reconcile cycles.
-	// +optional
-	SyncPolicy *AutoscalingPolicySyncPolicy `json:"syncPolicy,omitempty"`
-}
-
-// AutoscalingPolicySyncPolicy defines adaptive autoscaler reconcile periods.
-type AutoscalingPolicySyncPolicy struct {
-	// DefaultPeriod defines the reconcile interval when no replica changes are detected.
-	// +kubebuilder:default="15s"
-	// +optional
-	DefaultPeriod *metav1.Duration `json:"defaultPeriod,omitempty"`
-	// ScaleUpPeriod defines the reconcile interval after a net scale-up.
-	// +kubebuilder:default="5s"
-	// +optional
-	ScaleUpPeriod *metav1.Duration `json:"scaleUpPeriod,omitempty"`
-	// ScaleDownPeriod defines the reconcile interval after a net scale-down.
-	// +kubebuilder:default="30s"
-	// +optional
-	ScaleDownPeriod *metav1.Duration `json:"scaleDownPeriod,omitempty"`
 }
 
 // AutoscalingPolicyScaleUpPolicy defines the scaling up policy configuration.

@@ -60,10 +60,9 @@ type AutoscaleController struct {
 	optimizerMap                       map[string]*autoscaler.Optimizer
 }
 
-type autoscalingSyncPolicy struct {
-	defaultPeriod   time.Duration
-	scaleUpPeriod   time.Duration
-	scaleDownPeriod time.Duration
+type autoscalingDecision struct {
+	direction int
+	interval  time.Duration
 }
 
 func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
@@ -100,64 +99,66 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 	return ac
 }
 
-func defaultAutoscalingSyncPolicy() autoscalingSyncPolicy {
-	return autoscalingSyncPolicy{
-		defaultPeriod:   util.AutoscalingSyncPeriodSeconds * time.Second,
-		scaleUpPeriod:   util.AutoscalingScaleUpSyncPeriodSeconds * time.Second,
-		scaleDownPeriod: util.AutoscalingScaleDownSyncPeriodSeconds * time.Second,
+func defaultAutoscalingDecision() autoscalingDecision {
+	return autoscalingDecision{
+		direction: 0,
+		interval:  util.AutoscalingSyncPeriodSeconds * time.Second,
 	}
 }
 
-func applySyncPolicy(policy *workload.AutoscalingPolicy) autoscalingSyncPolicy {
-	syncPolicy := defaultAutoscalingSyncPolicy()
-	if policy == nil || policy.Spec.Behavior.SyncPolicy == nil {
-		return syncPolicy
+func computeNextInterval(policy *workload.AutoscalingPolicy, direction int, isPanic bool) time.Duration {
+	defaultPeriod := util.AutoscalingSyncPeriodSeconds * time.Second
+	if policy == nil {
+		return defaultPeriod
 	}
 
-	if period := policy.Spec.Behavior.SyncPolicy.DefaultPeriod; period != nil && period.Duration > 0 {
-		syncPolicy.defaultPeriod = period.Duration
-	}
-	if period := policy.Spec.Behavior.SyncPolicy.ScaleUpPeriod; period != nil && period.Duration > 0 {
-		syncPolicy.scaleUpPeriod = period.Duration
-	}
-	if period := policy.Spec.Behavior.SyncPolicy.ScaleDownPeriod; period != nil && period.Duration > 0 {
-		syncPolicy.scaleDownPeriod = period.Duration
-	}
-	return syncPolicy
-}
-
-func mergeAutoscalingSyncPolicy(current, next autoscalingSyncPolicy) autoscalingSyncPolicy {
-	if next.defaultPeriod < current.defaultPeriod {
-		current.defaultPeriod = next.defaultPeriod
-	}
-	if next.scaleUpPeriod < current.scaleUpPeriod {
-		current.scaleUpPeriod = next.scaleUpPeriod
-	}
-	if next.scaleDownPeriod > current.scaleDownPeriod {
-		current.scaleDownPeriod = next.scaleDownPeriod
-	}
-	return current
-}
-
-func computeNextInterval(direction int, syncPolicy autoscalingSyncPolicy) time.Duration {
+	behavior := policy.Spec.Behavior
 	switch {
 	case direction > 0:
-		return syncPolicy.scaleUpPeriod
+		if isPanic && behavior.ScaleUp.PanicPolicy.Period.Duration > 0 {
+			return behavior.ScaleUp.PanicPolicy.Period.Duration
+		}
+		if period := behavior.ScaleUp.StablePolicy.Period; period != nil && period.Duration > 0 {
+			return period.Duration
+		}
 	case direction < 0:
-		return syncPolicy.scaleDownPeriod
+		if period := behavior.ScaleDown.Period; period != nil && period.Duration > 0 {
+			return period.Duration
+		}
+	}
+	return defaultPeriod
+}
+
+func directionPriority(direction int) int {
+	switch {
+	case direction > 0:
+		return 2
+	case direction == 0:
+		return 1
 	default:
-		return syncPolicy.defaultPeriod
+		return 0
 	}
 }
 
-func mergeAutoscalingDirection(current, next int) int {
-	if current > 0 || next > 0 {
-		return 1
+func mergeAutoscalingDecision(current, next autoscalingDecision) autoscalingDecision {
+	currentPriority := directionPriority(current.direction)
+	nextPriority := directionPriority(next.direction)
+	if nextPriority > currentPriority {
+		return next
 	}
-	if current == 0 || next == 0 {
-		return 0
+	if nextPriority < currentPriority {
+		return current
 	}
-	return -1
+	if current.direction < 0 {
+		if next.interval > current.interval {
+			return next
+		}
+		return current
+	}
+	if next.interval < current.interval {
+		return next
+	}
+	return current
 }
 
 func (ac *AutoscaleController) Run(ctx context.Context) {
@@ -184,9 +185,8 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 
 func (ac *AutoscaleController) runReconcileLoop(ctx context.Context) {
 	for {
-		direction, syncPolicy := ac.Reconcile(ctx)
-		interval := computeNextInterval(direction, syncPolicy)
-		timer := time.NewTimer(interval)
+		decision := ac.Reconcile(ctx)
+		timer := time.NewTimer(decision.interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -198,14 +198,14 @@ func (ac *AutoscaleController) runReconcileLoop(ctx context.Context) {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (ac *AutoscaleController) Reconcile(ctx context.Context) (int, autoscalingSyncPolicy) {
+func (ac *AutoscaleController) Reconcile(ctx context.Context) autoscalingDecision {
 	klog.V(4).Info("start to reconcile")
 	ctx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
 	bindings, err := ac.autoscalingPoliciesBindingLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list autoscaling policy bindings, err: %v", err)
-		return 0, defaultAutoscalingSyncPolicy()
+		return defaultAutoscalingDecision()
 	}
 
 	scalerSet := sets.New[string]()
@@ -238,24 +238,25 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) (int, autoscalingS
 		}
 	}
 
-	direction := -1
+	decision := autoscalingDecision{
+		direction: -1,
+		interval:  util.AutoscalingSyncPeriodSeconds * time.Second,
+	}
 	hasBindings := false
-	syncPolicy := defaultAutoscalingSyncPolicy()
 	for _, binding := range bindings {
-		currentDirection, currentSyncPolicy, err := ac.schedule(ctx, binding)
+		currentDecision, err := ac.schedule(ctx, binding)
 		if err != nil {
 			klog.Errorf("failed to process autoscale,err: %v", err)
 			continue
 		}
 		hasBindings = true
-		direction = mergeAutoscalingDirection(direction, currentDirection)
-		syncPolicy = mergeAutoscalingSyncPolicy(syncPolicy, currentSyncPolicy)
+		decision = mergeAutoscalingDecision(decision, currentDecision)
 	}
 	if !hasBindings {
-		direction = 0
+		decision = defaultAutoscalingDecision()
 	}
 
-	return direction, syncPolicy
+	return decision
 }
 
 func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, defaultNamespace string, replicas int32) error {
@@ -336,36 +337,41 @@ func (ac *AutoscaleController) getTargetReplicas(target *workload.Target, defaul
 	return 0, fmt.Errorf("target ref kind %s, name: %s not supported", targetRef.Kind, targetRef.Name)
 }
 
-func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.AutoscalingPolicyBinding) (int, autoscalingSyncPolicy, error) {
+func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.AutoscalingPolicyBinding) (autoscalingDecision, error) {
 	klog.V(2).Infof("start to process asp binding %s", klog.KObj(binding))
 	autoscalePolicy, err := ac.getAutoscalePolicy(binding.Spec.PolicyRef.Name, binding.Namespace)
-	syncPolicy := applySyncPolicy(autoscalePolicy)
 	if err != nil {
 		klog.Errorf("get autoscale policy error: %v", err)
-		return 0, syncPolicy, err
+		return defaultAutoscalingDecision(), err
 	}
 	if binding.Spec.HeterogeneousTarget != nil {
-		direction, err := ac.doOptimize(ctx, binding, autoscalePolicy)
+		direction, isPanic, err := ac.doOptimize(ctx, binding, autoscalePolicy)
 		if err != nil {
 			klog.Errorf("failed to do optimize, err: %v", err)
-			return 0, syncPolicy, err
+			return defaultAutoscalingDecision(), err
 		}
-		return direction, syncPolicy, nil
+		return autoscalingDecision{
+			direction: direction,
+			interval:  computeNextInterval(autoscalePolicy, direction, isPanic),
+		}, nil
 	} else if binding.Spec.HomogeneousTarget != nil {
-		direction, err := ac.doScale(ctx, binding, autoscalePolicy)
+		direction, isPanic, err := ac.doScale(ctx, binding, autoscalePolicy)
 		if err != nil {
 			klog.Errorf("failed to do scale, err: %v", err)
-			return 0, syncPolicy, err
+			return defaultAutoscalingDecision(), err
 		}
-		return direction, syncPolicy, nil
+		return autoscalingDecision{
+			direction: direction,
+			interval:  computeNextInterval(autoscalePolicy, direction, isPanic),
+		}, nil
 	} else {
 		klog.Warningf("binding %s has no scalingConfiguration and optimizerConfiguration", binding.Name)
 	}
 
-	return 0, syncPolicy, nil
+	return defaultAutoscalingDecision(), nil
 }
 
-func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) (int, error) {
+func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) (int, bool, error) {
 	key := formatAutoscalerMapKey(binding.Namespace, binding.Name, nil)
 	optimizer, ok := ac.optimizerMap[key]
 	if !ok || optimizer.NeedUpdate(autoscalePolicy, binding) {
@@ -379,7 +385,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 		currentInstancesCount, err := ac.getTargetReplicas(&param.Target, binding.Namespace)
 		if err != nil {
 			klog.Errorf("failed to get current replicas, err: %v", err)
-			return 0, err
+			return 0, false, err
 		}
 		replicasMap[param.Target.TargetRef.Name] = currentInstancesCount
 	}
@@ -388,10 +394,10 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 	recommendedInstances, err := optimizer.Optimize(ctx, ac.podsLister, autoscalePolicy, replicasMap)
 	if err != nil {
 		klog.Errorf("failed to do optimize, err: %v", err)
-		return 0, err
+		return 0, false, err
 	}
 	if recommendedInstances == nil {
-		return 0, nil
+		return 0, optimizer.Status.IsPanicMode(), nil
 	}
 	// Do update replicas
 	direction := 0
@@ -404,14 +410,14 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, binding *workload
 		direction += int(instancesCount - replicasMap[param.Target.TargetRef.Name])
 		if err := ac.updateTargetReplicas(ctx, &param.Target, binding.Namespace, instancesCount); err != nil {
 			klog.Errorf("failed to update target kind:%s name: %s replicas:%d, err: %v", param.Target.TargetRef.Kind, param.Target.TargetRef.Name, instancesCount, err)
-			return 0, err
+			return 0, optimizer.Status.IsPanicMode(), err
 		}
 	}
 
-	return direction, nil
+	return direction, optimizer.Status.IsPanicMode(), nil
 }
 
-func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) (int, error) {
+func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) (int, bool, error) {
 	target := binding.Spec.HomogeneousTarget.Target
 	key := formatAutoscalerMapKey(binding.Namespace, binding.Name, &target.TargetRef)
 	scaler, ok := ac.scalerMap[key]
@@ -424,25 +430,25 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 	currentInstancesCount, err := ac.getTargetReplicas(&target, binding.Namespace)
 	if err != nil {
 		klog.Errorf("failed to get current replicas, err: %v", err)
-		return 0, err
+		return 0, false, err
 	}
 	// Get recommended replicas
 	klog.InfoS("do homogeneous scaling for target", "targetRef", target.TargetRef, "currentInstancesCount", currentInstancesCount)
 	recommendedInstances, err := scaler.Scale(ctx, ac.podsLister, autoscalePolicy, currentInstancesCount)
 	if err != nil {
 		klog.Errorf("failed to do homogeneous scaling for target %s, err: %v", target.TargetRef.Name, err)
-		return 0, err
+		return 0, false, err
 	}
 	if recommendedInstances < 0 {
-		return 0, nil
+		return 0, scaler.Status.IsPanicMode(), nil
 	}
 	// Do update replicas
 	if err := ac.updateTargetReplicas(ctx, &target, binding.Namespace, recommendedInstances); err != nil {
 		klog.Errorf("failed to update target replicas %s, err: %v", target.TargetRef.Name, err)
-		return 0, err
+		return 0, scaler.Status.IsPanicMode(), err
 	}
 	klog.InfoS("successfully update target replicas", "targetRef", target.TargetRef, "recommendedInstances", recommendedInstances)
-	return int(recommendedInstances - currentInstancesCount), nil
+	return int(recommendedInstances - currentInstancesCount), scaler.Status.IsPanicMode(), nil
 }
 
 func (ac *AutoscaleController) getAutoscalePolicy(autoscalingPolicyName string, namespace string) (*workload.AutoscalingPolicy, error) {

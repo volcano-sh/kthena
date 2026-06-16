@@ -110,7 +110,7 @@ func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	direction, err := ac.doScale(context.Background(), binding, policy)
+	direction, _, err := ac.doScale(context.Background(), binding, policy)
 	if err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	direction, err := ac.doScale(context.Background(), binding, policy)
+	direction, _, err := ac.doScale(context.Background(), binding, policy)
 	if err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbsA), readyPod(ns, "pod-b", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	direction, err := ac.doOptimize(context.Background(), binding, policy)
+	direction, _, err := ac.doOptimize(context.Background(), binding, policy)
 	if err != nil {
 		t.Fatalf("doOptimize error: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	pods := []*corev1.Pod{readyPod(ns, "pod-a2", host, lbsA), readyPod(ns, "pod-b2", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	direction, err := ac.doOptimize(context.Background(), binding, policy)
+	direction, _, err := ac.doOptimize(context.Background(), binding, policy)
 	if err != nil {
 		t.Fatalf("doOptimize error: %v", err)
 	}
@@ -254,86 +254,80 @@ func toInt32(s string) int32  { v, _ := strconv.Atoi(s); return int32(v) }
 type autoscalerAutoscaler = autoscaler.Autoscaler
 type autoscalerOptimizer = autoscaler.Optimizer
 
-func TestAutoscalingSyncPolicy(t *testing.T) {
-	defaultPolicy := defaultAutoscalingSyncPolicy()
-	if defaultPolicy.defaultPeriod != 15*time.Second {
-		t.Fatalf("expected default period 15s, got %v", defaultPolicy.defaultPeriod)
-	}
-	if defaultPolicy.scaleUpPeriod != 5*time.Second {
-		t.Fatalf("expected scale-up period 5s, got %v", defaultPolicy.scaleUpPeriod)
-	}
-	if defaultPolicy.scaleDownPeriod != 30*time.Second {
-		t.Fatalf("expected scale-down period 30s, got %v", defaultPolicy.scaleDownPeriod)
-	}
-
+func TestComputeNextInterval(t *testing.T) {
 	policy := &workload.AutoscalingPolicy{
 		Spec: workload.AutoscalingPolicySpec{
 			Behavior: workload.AutoscalingPolicyBehavior{
-				SyncPolicy: &workload.AutoscalingPolicySyncPolicy{
-					DefaultPeriod:   &metav1.Duration{Duration: 20 * time.Second},
-					ScaleUpPeriod:   &metav1.Duration{Duration: 3 * time.Second},
-					ScaleDownPeriod: &metav1.Duration{Duration: 45 * time.Second},
+				ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{
+					StablePolicy: workload.AutoscalingPolicyStablePolicy{
+						Period: &metav1.Duration{Duration: 20 * time.Second},
+					},
+					PanicPolicy: workload.AutoscalingPolicyPanicPolicy{
+						Period: metav1.Duration{Duration: 3 * time.Second},
+					},
+				},
+				ScaleDown: workload.AutoscalingPolicyStablePolicy{
+					Period: &metav1.Duration{Duration: 45 * time.Second},
 				},
 			},
 		},
 	}
-	got := applySyncPolicy(policy)
-	if got.defaultPeriod != 20*time.Second || got.scaleUpPeriod != 3*time.Second || got.scaleDownPeriod != 45*time.Second {
-		t.Fatalf("unexpected sync policy: %#v", got)
-	}
 
-	if interval := computeNextInterval(1, got); interval != 3*time.Second {
-		t.Fatalf("expected scale-up interval 3s, got %v", interval)
+	if interval := computeNextInterval(policy, 1, false); interval != 20*time.Second {
+		t.Fatalf("expected stable scale-up interval 20s, got %v", interval)
 	}
-	if interval := computeNextInterval(-1, got); interval != 45*time.Second {
+	if interval := computeNextInterval(policy, 1, true); interval != 3*time.Second {
+		t.Fatalf("expected panic scale-up interval 3s, got %v", interval)
+	}
+	if interval := computeNextInterval(policy, -1, false); interval != 45*time.Second {
 		t.Fatalf("expected scale-down interval 45s, got %v", interval)
 	}
-	if interval := computeNextInterval(0, got); interval != 20*time.Second {
-		t.Fatalf("expected stable interval 20s, got %v", interval)
+	if interval := computeNextInterval(policy, 0, false); interval != 15*time.Second {
+		t.Fatalf("expected stable interval 15s, got %v", interval)
 	}
 }
 
-func TestMergeAutoscalingSyncPolicy(t *testing.T) {
-	current := autoscalingSyncPolicy{
-		defaultPeriod:   15 * time.Second,
-		scaleUpPeriod:   5 * time.Second,
-		scaleDownPeriod: 30 * time.Second,
-	}
-	next := autoscalingSyncPolicy{
-		defaultPeriod:   10 * time.Second,
-		scaleUpPeriod:   2 * time.Second,
-		scaleDownPeriod: 45 * time.Second,
-	}
-	got := mergeAutoscalingSyncPolicy(current, next)
-	if got.defaultPeriod != 10*time.Second {
-		t.Fatalf("expected shortest default period, got %v", got.defaultPeriod)
-	}
-	if got.scaleUpPeriod != 2*time.Second {
-		t.Fatalf("expected shortest scale-up period, got %v", got.scaleUpPeriod)
-	}
-	if got.scaleDownPeriod != 45*time.Second {
-		t.Fatalf("expected longest scale-down period, got %v", got.scaleDownPeriod)
+func TestComputeNextIntervalFallback(t *testing.T) {
+	policy := &workload.AutoscalingPolicy{Spec: workload.AutoscalingPolicySpec{Behavior: workload.AutoscalingPolicyBehavior{}}}
+	for _, tt := range []struct {
+		name      string
+		policy    *workload.AutoscalingPolicy
+		direction int
+		isPanic   bool
+	}{
+		{name: "nil policy", direction: 1},
+		{name: "missing scale up period", policy: policy, direction: 1},
+		{name: "missing panic period", policy: policy, direction: 1, isPanic: true},
+		{name: "missing scale down period", policy: policy, direction: -1},
+		{name: "stable", policy: policy, direction: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if interval := computeNextInterval(tt.policy, tt.direction, tt.isPanic); interval != 15*time.Second {
+				t.Fatalf("expected fallback interval 15s, got %v", interval)
+			}
+		})
 	}
 }
 
-func TestMergeAutoscalingDirection(t *testing.T) {
+func TestMergeAutoscalingDecision(t *testing.T) {
 	tests := []struct {
 		name    string
-		current int
-		next    int
-		want    int
+		current autoscalingDecision
+		next    autoscalingDecision
+		want    autoscalingDecision
 	}{
-		{name: "scale up wins over scale down", current: -1, next: 1, want: 1},
-		{name: "scale up keeps priority over stable", current: 1, next: 0, want: 1},
-		{name: "stable wins over scale down", current: -1, next: 0, want: 0},
-		{name: "scale down remains when all down", current: -1, next: -2, want: -1},
-		{name: "stable keeps priority over scale down", current: 0, next: -1, want: 0},
+		{name: "scale up wins over scale down", current: autoscalingDecision{direction: -1, interval: 45 * time.Second}, next: autoscalingDecision{direction: 1, interval: 20 * time.Second}, want: autoscalingDecision{direction: 1, interval: 20 * time.Second}},
+		{name: "scale up keeps priority over stable", current: autoscalingDecision{direction: 1, interval: 20 * time.Second}, next: autoscalingDecision{direction: 0, interval: 15 * time.Second}, want: autoscalingDecision{direction: 1, interval: 20 * time.Second}},
+		{name: "stable wins over scale down", current: autoscalingDecision{direction: -1, interval: 30 * time.Second}, next: autoscalingDecision{direction: 0, interval: 15 * time.Second}, want: autoscalingDecision{direction: 0, interval: 15 * time.Second}},
+		{name: "scale up picks shortest interval", current: autoscalingDecision{direction: 1, interval: 20 * time.Second}, next: autoscalingDecision{direction: 1, interval: 3 * time.Second}, want: autoscalingDecision{direction: 1, interval: 3 * time.Second}},
+		{name: "stable picks shortest interval", current: autoscalingDecision{direction: 0, interval: 15 * time.Second}, next: autoscalingDecision{direction: 0, interval: 10 * time.Second}, want: autoscalingDecision{direction: 0, interval: 10 * time.Second}},
+		{name: "scale down picks longest interval", current: autoscalingDecision{direction: -1, interval: 30 * time.Second}, next: autoscalingDecision{direction: -2, interval: 45 * time.Second}, want: autoscalingDecision{direction: -2, interval: 45 * time.Second}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mergeAutoscalingDirection(tt.current, tt.next); got != tt.want {
-				t.Fatalf("expected direction %d, got %d", tt.want, got)
+			if got := mergeAutoscalingDecision(tt.current, tt.next); got != tt.want {
+				t.Fatalf("expected decision %#v, got %#v", tt.want, got)
 			}
 		})
 	}
