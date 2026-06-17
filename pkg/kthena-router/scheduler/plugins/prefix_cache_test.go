@@ -194,6 +194,19 @@ func counterValue(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float
 	return m.GetCounter().GetValue()
 }
 
+func histSampleSum(t *testing.T, vec *prometheus.HistogramVec, lvs ...string) float64 {
+	t.Helper()
+	obs, err := vec.GetMetricWithLabelValues(lvs...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := obs.(prometheus.Metric).Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return m.GetHistogram().GetSampleSum()
+}
+
 func histSampleCount(t *testing.T, vec *prometheus.HistogramVec, lvs ...string) uint64 {
 	t.Helper()
 	obs, err := vec.GetMetricWithLabelValues(lvs...)
@@ -227,6 +240,24 @@ func histBucketCount(t *testing.T, vec *prometheus.HistogramVec, le float64, lvs
 	return 0
 }
 
+func TestMatchRatio(t *testing.T) {
+	cases := []struct {
+		matched, total int
+		want           float64
+	}{
+		{7, 13, 7.0 / 13.0}, // partial — guards against a numerator/denominator swap
+		{0, 13, 0},          // miss
+		{13, 13, 1},         // full match
+		{5, 0, 0},           // no blocks — must not divide by zero
+		{0, 0, 0},
+	}
+	for _, c := range cases {
+		if got := matchRatio(c.matched, c.total); got != c.want {
+			t.Errorf("matchRatio(%d, %d) = %v, want %v", c.matched, c.total, got, c.want)
+		}
+	}
+}
+
 func TestPrefixCacheScoreMetrics(t *testing.T) {
 	mockDS := datastore.New()
 	prefixStore := cache.NewModelPrefixStore(mockDS, 100, 5)
@@ -249,14 +280,20 @@ func TestPrefixCacheScoreMetrics(t *testing.T) {
 
 	countBefore := histSampleCount(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model)
 	missBefore := histBucketCount(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, 0, model)
+	sumBefore := histSampleSum(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model)
 
-	// Matching prompt -> ratio > 0.
+	// Matching prompt -> full self-match, ratio == 1.0.
 	hitCtx := &framework.Context{Model: model, Prompt: &common.ChatMessage{Text: prompt}, MetricsRecorder: recorder}
 	plugin.Score(hitCtx, []*datastore.PodInfo{pod1, pod2})
 
 	// Non-matching prompt -> ratio 0 (lands in the le=0 bucket).
 	missCtx := &framework.Context{Model: model, Prompt: &common.ChatMessage{Text: "a completely different prompt"}, MetricsRecorder: recorder}
 	plugin.Score(missCtx, []*datastore.PodInfo{pod1, pod2})
+
+	// Recorded values: 1.0 (full match) + 0.0 (miss) = 1.0.
+	if got := histSampleSum(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model) - sumBefore; got != 1.0 {
+		t.Errorf("prefix cache match_ratio sum delta = %v, want 1.0", got)
+	}
 
 	if got := histSampleCount(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model) - countBefore; got != 2 {
 		t.Errorf("prefix cache match_ratio sample count delta = %d, want 2", got)

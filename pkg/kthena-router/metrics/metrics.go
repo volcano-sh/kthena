@@ -258,7 +258,7 @@ func NewMetrics() *Metrics {
 			prometheus.HistogramOpts{
 				Name:    "kthena_router_prefix_cache_match_ratio",
 				Help:    "Fraction of the prompt's blocks matched by the best pod per prefix-cache match attempt (0 = miss)",
-				Buckets: []float64{0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+				Buckets: []float64{0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0},
 			},
 			[]string{LabelModel},
 		),
@@ -275,7 +275,7 @@ func NewMetrics() *Metrics {
 			prometheus.HistogramOpts{
 				Name:    "kthena_router_kvcache_aware_match_ratio",
 				Help:    "Fraction of the prompt's blocks matched by the best pod per kvcache-aware match attempt (0 = miss)",
-				Buckets: []float64{0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+				Buckets: []float64{0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0},
 			},
 			[]string{LabelModel},
 		),

@@ -161,6 +161,14 @@ func (p *PrefixCache) Name() string {
 	return p.name
 }
 
+// matchRatio returns matched/total as a fraction in [0,1], or 0 when total is 0.
+func matchRatio(matched, total int) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return float64(matched) / float64(total)
+}
+
 func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
 	// Hash the prompt
 	hashes := p.hashPrompt(ctx.Model, utils.GetPromptString(ctx.Prompt))
@@ -192,11 +200,7 @@ func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) m
 
 	if ctx.MetricsRecorder != nil {
 		// Fraction of the prompt's blocks matched by the best pod; 0 on a miss.
-		matchRatio := 0.0
-		if totalHashes > 0 {
-			matchRatio = float64(longestMatch) / float64(totalHashes)
-		}
-		ctx.MetricsRecorder.RecordPrefixCacheMatchRatio(matchRatio)
+		ctx.MetricsRecorder.RecordPrefixCacheMatchRatio(matchRatio(longestMatch, totalHashes))
 	}
 
 	return scoreResults
