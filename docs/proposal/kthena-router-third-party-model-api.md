@@ -152,6 +152,13 @@ const (
     OpenAICompatible ExternalProviderType = "OpenAICompatible"
 )
 
+type ProviderAuthScheme string
+
+const (
+    ProviderAuthSchemeBearer ProviderAuthScheme = "Bearer"
+    ProviderAuthSchemeRaw    ProviderAuthScheme = "Raw"
+)
+
 // +kubebuilder:validation:XValidation:rule="self.allowInsecure || self.baseURL.startsWith('https://')",message="baseURL must be HTTPS unless allowInsecure is true"
 type ExternalModelProviderSpec struct {
     // MVP supports only OpenAICompatible.
@@ -163,7 +170,8 @@ type ExternalModelProviderSpec struct {
     // BaseURL is the provider endpoint root.
     // Example: https://api.deepseek.com
     // +kubebuilder:validation:Required
-    // +kubebuilder:validation:Pattern=`^https?://.+`
+    // +kubebuilder:validation:MinLength=1
+    // +kubebuilder:validation:Pattern=^https?://.+
     BaseURL string `json:"baseURL"`
 
     // AllowInsecure permits http:// only for local/in-cluster mock providers.
@@ -195,7 +203,7 @@ type ProviderAuth struct {
     // Bearer -> "Authorization: Bearer <key>"; Raw -> "<key>".
     // +kubebuilder:default=Bearer
     // +kubebuilder:validation:Enum=Bearer;Raw
-    Scheme string `json:"scheme,omitempty"`
+    Scheme ProviderAuthScheme `json:"scheme,omitempty"`
 }
 
 type ExternalModelProviderStatus struct {
@@ -242,6 +250,9 @@ Validation:
 
 - Exactly one of `modelServerName` and `externalProviderRef` must be set.
 - `baseURL` must be HTTPS unless `allowInsecure=true`.
+- `baseURL` must be parsed and must not contain URL userinfo, query, or
+  fragment. This should be enforced by webhook validation because CEL is not a
+  good fit for full URL parsing.
 - Static `headers` must not overwrite the configured auth header, `Host`, `Content-Length`, or hop-by-hop headers. Header names must be validated case-insensitively, for example by canonicalizing with `http.CanonicalHeaderKey` or comparing with `strings.EqualFold` in webhook validation.
 - `secretRef.name` and `secretRef.key` are structurally validated at admission time. Secret existence and key availability are resolved asynchronously by the controller/router lister and reported through provider status.
 
@@ -417,7 +428,7 @@ type Credential struct {
 }
 
 type Input struct {
-    ProviderType   string
+    ProviderType   ExternalProviderType
     BaseURL        string
     StaticHeaders  map[string]string
     Credential     *Credential
@@ -598,7 +609,7 @@ Unit tests should not call real third-party APIs. Use `httptest.Server` and fake
 
 | Area | Coverage |
 |---|---|
-| API validation | `modelServerName` XOR `externalProviderRef`; HTTPS/`allowInsecure`; URL userinfo/fragment rejection; static header conflicts |
+| API validation | `modelServerName` XOR `externalProviderRef`; HTTPS/`allowInsecure`; URL userinfo/query/fragment rejection; static header conflicts |
 | Secret resolution | missing Secret, missing key, valid key, rotation behavior, status conditions |
 | Route resolution | external target, internal target, weighted internal/external split |
 | Request building | `/v1` prefix stripping, path join, raw body preservation, `UseNumber`, model rewrite, Bearer/Raw auth, static/request headers |
