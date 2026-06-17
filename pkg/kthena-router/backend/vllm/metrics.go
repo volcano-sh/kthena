@@ -55,7 +55,7 @@ var (
 
 type vllmEngine struct {
 	// The address of vllm's query metrics is http://{model server}:port/metrics
-	// This is now provided by the user via Model.SErver.Spec.WorkloadPort
+	// This is now provided by the user via Model.Server.Spec.WorkloadPort
 	// Default is 8000 if not specified
 }
 

@@ -1348,6 +1348,9 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 		return
 	}
 
+	if podObj.Status.PodIP == "" {
+		return
+	}
 	port := s.getPodWorkloadPort(pod)
 	previousHistogram := getPreviousHistogram(pod)
 	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, port, previousHistogram)
@@ -1371,6 +1374,9 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 		return
 	}
 
+	if podObj.Status.PodIP == "" {
+		return
+	}
 	port := s.getPodWorkloadPort(podInfo)
 	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
 	if err != nil {

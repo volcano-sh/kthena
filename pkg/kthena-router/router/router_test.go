@@ -59,13 +59,33 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
+func withMetricsEndpoint(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			fmt.Fprint(w, "# TYPE up gauge\nup 1\n")
+			return
+		}
+		if r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"data":[]}`)
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
+}
+
 // setupTestRouter initializes a router and its dependencies for testing.
 // It uses a mock HTTP server as the backend, following the community's recommendation
 // to avoid hacky dependency injection.
 func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datastore.Store, *httptest.Server) {
 	gin.SetMode(gin.TestMode)
 
-	backend := httptest.NewServer(backendHandler)
+	backend := httptest.NewServer(withMetricsEndpoint(backendHandler))
 	store := datastore.New()
 	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
 
@@ -1091,6 +1111,17 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	// Single backend: returns 503 on the first call, 200 on the second.
 	// Both pods in the test point to this same server so we can observe both attempts.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "")
+			return
+		}
+		if r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"data":[]}`)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		receivedBodies = append(receivedBodies, string(body))
 		if len(receivedBodies) == 1 {

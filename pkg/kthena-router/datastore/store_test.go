@@ -235,7 +235,11 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 	sum2 := float64(2)
 	count2 := uint64(2)
 	podinfo := PodInfo{
-		Pod:    &corev1.Pod{},
+		Pod: &corev1.Pod{
+			Status: corev1.PodStatus{
+				PodIP: "10.0.0.1",
+			},
+		},
 		engine: "vLLM",
 		TimePerOutputToken: &dto.Histogram{
 			SampleSum:   &sum1,
@@ -1680,9 +1684,15 @@ func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 			s := newStore(inspector)
 
 			ms := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
+			ms.Spec.WorkloadPort.Port = 8000
 			s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
 
 			pod := createTestPod("default", "pod1")
+			pod.Status.PodIP = "10.0.0.1"
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			pod.Annotations["kthena.io/engine"] = "vLLM"
 			err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
 			assert.NoError(t, err)
 			assert.Equal(t, int64(1), inspector.metricsCalls.Load(), "backend metrics should be fetched on initial pod add")
@@ -1747,9 +1757,15 @@ func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
 	s := newStore(inspector)
 
 	ms := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
+	ms.Spec.WorkloadPort.Port = 8000
 	s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
 
 	pod := createTestPod("default", "fresh-pod")
+	pod.Status.PodIP = "10.0.0.1"
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations["kthena.io/engine"] = "vLLM"
 	err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
 	assert.NoError(t, err)
 
@@ -1779,11 +1795,18 @@ func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {
 	s := newStore(inspector)
 
 	ms1 := createTestModelServer("default", "ms1", aiv1alpha1.VLLM)
+	ms1.Spec.WorkloadPort.Port = 8000
 	ms2 := createTestModelServer("default", "ms2", aiv1alpha1.VLLM)
+	ms2.Spec.WorkloadPort.Port = 8000
 	s.AddOrUpdateModelServer(ms1, sets.New[types.NamespacedName]())
 	s.AddOrUpdateModelServer(ms2, sets.New[types.NamespacedName]())
 
 	pod := createTestPod("default", "pod1")
+	pod.Status.PodIP = "10.0.0.1"
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations["kthena.io/engine"] = "vLLM"
 	err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms1})
 	assert.NoError(t, err)
 	assert.Equal(t, int64(1), inspector.metricsCalls.Load(), "backend metrics should be fetched on initial pod add")
