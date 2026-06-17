@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -7005,11 +7006,10 @@ func TestDeleteOutdatedRolesForRoleRollingUpdate(t *testing.T) {
 }
 
 // TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget verifies the group-level disruption
-// budget: a group whose rollout has truly started (new- and old-revision replicas coexist, or a
-// replica is mid-deletion) must keep advancing even when maxScaleDown is exhausted (<= 0), while a
-// group that is merely outdated but not yet touched is gated by the budget - even when its cached
-// ServingGroup status is momentarily not Running, so a stale status cannot disrupt more groups
-// than maxUnavailable allows.
+// budget: a group whose rollout has already started (status ServingGroupRoleRolling) must keep
+// advancing even when maxScaleDown is exhausted (<= 0), while a group that is merely outdated but
+// not yet touched is gated by the budget - even when its cached ServingGroup status is momentarily
+// not Running, so a stale status cannot disrupt more groups than maxUnavailable allows.
 func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
@@ -7057,16 +7057,16 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 		expectedDeletions int
 	}{
 		{
-			// A genuinely in-progress group (new- and old-revision replicas of the same role
-			// coexist) must keep advancing even when the group-level budget is exhausted.
-			name: "in-progress group (new/old mix) continues even when budget is exhausted",
+			// A group whose rollout has already started is marked ServingGroupRoleRolling; it must keep
+			// advancing even when the group-level budget is exhausted.
+			name: "in-progress group (RoleRolling) continues even when budget is exhausted",
 			instances: []instance{
 				{roleID: "decode-0", newRev: true, ready: true},
 				{roleID: "decode-1", newRev: true, ready: true},
 				{roleID: "decode-2", ready: true},
 				{roleID: "decode-3", ready: true},
 			},
-			groupStatus:       datastore.ServingGroupRunning,
+			groupStatus:       datastore.ServingGroupRoleRolling,
 			maxScaleDown:      0,
 			expectedDeletions: 2, // bounded by roleMaxUnavailable=2, not blocked by maxScaleDown
 		},
@@ -7162,6 +7162,131 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateGroupBudget(t *testing.T) {
 			assert.Equal(t, tt.expectedDeletions, deletions, "unexpected number of deleted Role replicas")
 		})
 	}
+}
+
+// TestDeleteOutdatedRolesForRoleRollingUpdateMultiGroupInProgress verifies that, across multiple
+// groups, a group already mid-rollout (status ServingGroupRoleRolling) keeps advancing and reserves
+// a disruption slot, so a still-fully-available not-started group is correctly gated when the slot
+// is exhausted. This is the case the explicit RoleRolling status enables: the in-progress group is
+// identified by its status (no role inspection), and the not-started group beyond budget is skipped.
+func TestDeleteOutdatedRolesForRoleRollingUpdateMultiGroupInProgress(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	revision := "rev-new"
+	outdatedHash := "outdated-hash"
+	inProgressGroup := "test-ms-1"
+	notStartedGroup := "test-ms-0"
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.RoleRollingUpdate,
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           "decode",
+						Replicas:       ptr.To[int32](4),
+						MaxUnavailable: ptr.To(intstr.FromInt(2)),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset()
+	modelServingClient := kthenafake.NewSimpleClientset()
+	apiextensionsClient := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, modelServingClient, nil, apiextensionsClient)
+	require.NoError(t, err)
+	controller.store = datastore.New()
+	nsn := utils.GetNamespaceName(ms)
+	upToDateHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+	podIndexer := controller.podsInformer.GetIndexer()
+
+	// roleInstance describes a single decode replica for a group's setup.
+	type roleInstance struct {
+		roleID string
+		newRev bool
+	}
+	addGroup := func(ordinal int, groupName string, status datastore.ServingGroupStatus, instances []roleInstance) {
+		controller.store.AddServingGroup(nsn, ordinal, revision)
+		require.NoError(t, controller.store.UpdateServingGroupStatus(nsn, groupName, status))
+		for _, inst := range instances {
+			hash := outdatedHash
+			if inst.newRev {
+				hash = upToDateHash
+			}
+			controller.store.AddRole(nsn, groupName, "decode", inst.roleID, revision, hash)
+			require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "decode", inst.roleID, datastore.RoleRunning))
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: ns,
+					Name:      fmt.Sprintf("%s-%s-entry", groupName, inst.roleID),
+					Labels: map[string]string{
+						workloadv1alpha1.ModelServingNameLabelKey: msName,
+						workloadv1alpha1.GroupNameLabelKey:        groupName,
+						workloadv1alpha1.RoleLabelKey:             "decode",
+						workloadv1alpha1.RoleIDKey:                inst.roleID,
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				},
+			}
+			require.NoError(t, podIndexer.Add(pod))
+		}
+	}
+
+	// In-progress group: 2 replicas already rolled, 2 still outdated (all ready). Marked RoleRolling.
+	addGroup(1, inProgressGroup, datastore.ServingGroupRoleRolling, []roleInstance{
+		{roleID: "decode-0", newRev: true},
+		{roleID: "decode-1", newRev: true},
+		{roleID: "decode-2"},
+		{roleID: "decode-3"},
+	})
+	// Not-started group: fully outdated but healthy and untouched. Still Running.
+	addGroup(0, notStartedGroup, datastore.ServingGroupRunning, []roleInstance{
+		{roleID: "decode-0"},
+		{roleID: "decode-1"},
+		{roleID: "decode-2"},
+		{roleID: "decode-3"},
+	})
+
+	// Mirror manageRollingUpdate's ordering: running-outdated first, then not-running (RoleRolling) last.
+	allOutdatedGroups := []datastore.ServingGroup{
+		{Name: notStartedGroup, Revision: revision, Status: datastore.ServingGroupRunning},
+		{Name: inProgressGroup, Revision: revision, Status: datastore.ServingGroupRoleRolling},
+	}
+	// maxScaleDown=1 is fully consumed by the in-progress group, so the not-started group must wait.
+	_, err = controller.deleteOutdatedRolesForRoleRollingUpdate(context.Background(), ms, 1, allOutdatedGroups, revision)
+	require.NoError(t, err)
+
+	deletionsByGroup := map[string]int{}
+	for _, action := range kubeClient.Actions() {
+		if !action.Matches("delete-collection", "pods") {
+			continue
+		}
+		deleteAction := action.(kubetesting.DeleteCollectionAction)
+		selector := deleteAction.GetListRestrictions().Labels.String()
+		if strings.Contains(selector, inProgressGroup) {
+			deletionsByGroup[inProgressGroup]++
+		} else if strings.Contains(selector, notStartedGroup) {
+			deletionsByGroup[notStartedGroup]++
+		}
+	}
+
+	assert.Equal(t, 2, deletionsByGroup[inProgressGroup], "in-progress group should roll its 2 outdated replicas (bounded by maxUnavailable)")
+	assert.Equal(t, 0, deletionsByGroup[notStartedGroup], "not-started group must be gated when the disruption budget is exhausted")
+	// The not-started group must not be marked RoleRolling, since it was never disrupted.
+	assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(nsn, notStartedGroup))
 }
 
 func TestCollectGroupRoleUpdateState(t *testing.T) {
@@ -7355,7 +7480,7 @@ func TestCollectGroupRoleUpdateState(t *testing.T) {
 			}
 
 			sg := datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning}
-			states, unavailableCount, _, err := controller.collectGroupRoleUpdateState(ms, sg, newRevision)
+			states, unavailableCount, err := controller.collectGroupRoleUpdateState(ms, sg, newRevision)
 			require.NoError(t, err)
 
 			// Flatten the per-role outdated lists; states are ordered by role name, and each role's

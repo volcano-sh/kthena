@@ -79,11 +79,12 @@ type Role struct {
 type ServingGroupStatus string
 
 const (
-	ServingGroupRunning  ServingGroupStatus = "Running"
-	ServingGroupCreating ServingGroupStatus = "Creating"
-	ServingGroupDeleting ServingGroupStatus = "Deleting"
-	ServingGroupScaling  ServingGroupStatus = "Scaling"
-	ServingGroupNotFound ServingGroupStatus = "NotFound"
+	ServingGroupRunning     ServingGroupStatus = "Running"
+	ServingGroupCreating    ServingGroupStatus = "Creating"
+	ServingGroupDeleting    ServingGroupStatus = "Deleting"
+	ServingGroupScaling     ServingGroupStatus = "Scaling"
+	ServingGroupNotFound    ServingGroupStatus = "NotFound"
+	ServingGroupRoleRolling ServingGroupStatus = "RoleRolling"
 )
 
 type RoleStatus string
