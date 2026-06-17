@@ -66,6 +66,22 @@ func newTestCollector() *MetricCollector {
 		Target: &workload.Target{
 			TargetRef: corev1.ObjectReference{Name: "ut-target"},
 		},
+		httpClient: metricHTTPClient,
+	}
+}
+
+func TestMetricHTTPClientConnectionPooling(t *testing.T) {
+	if metricTransport.MaxIdleConnsPerHost != 5 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 5", metricTransport.MaxIdleConnsPerHost)
+	}
+	if metricTransport.IdleConnTimeout != 30*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 30s", metricTransport.IdleConnTimeout)
+	}
+	if metricTransport.MaxIdleConns != 1000 {
+		t.Errorf("MaxIdleConns = %d, want 1000", metricTransport.MaxIdleConns)
+	}
+	if metricHTTPClient.Transport != metricTransport {
+		t.Error("metricHTTPClient should use metricTransport")
 	}
 }
 

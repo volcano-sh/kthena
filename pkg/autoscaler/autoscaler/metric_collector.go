@@ -45,6 +45,24 @@ import (
 	inferControllerUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
+// metricTransport is a shared http.Transport for scraping pod metrics.
+// MaxIdleConnsPerHost is raised from the Go default (2) to allow connection
+// reuse across reconcile cycles. IdleConnTimeout is set slightly longer than
+// the reconcile period so that connections to the same Pod IP survive between
+// scrapes. MaxIdleConns caps the total idle pool to bound memory usage.
+var metricTransport = &http.Transport{
+	MaxIdleConns:        1000,
+	MaxIdleConnsPerHost: 5,
+	IdleConnTimeout:     30 * time.Second,
+}
+
+// metricHTTPClient is the client used by all MetricCollector instances for
+// pod-scraping. It shares metricTransport so idle connections are pooled
+// globally across collectors.
+var metricHTTPClient = &http.Client{
+	Transport: metricTransport,
+}
+
 type MetricCollector struct {
 	PastHistograms *datastructure.SnapshotSlidingWindow[map[string]HistogramInfo]
 	Target         *v1alpha1.Target
@@ -52,6 +70,7 @@ type MetricCollector struct {
 	MetricTargets  map[string]float64
 	promClients    map[string]promapi.Client
 	promClientsMu  sync.Mutex
+	httpClient     *http.Client
 }
 
 func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPolicyBinding, metricTargets map[string]float64) *MetricCollector {
@@ -68,6 +87,7 @@ func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPo
 		},
 		MetricTargets: metricTargets,
 		promClients:   make(map[string]promapi.Client),
+		httpClient:    metricHTTPClient,
 	}
 }
 
@@ -360,7 +380,7 @@ func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := collector.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
