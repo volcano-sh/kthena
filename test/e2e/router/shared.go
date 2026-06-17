@@ -1564,7 +1564,7 @@ func TestSglangMetricsShared(t *testing.T, testCtx *routercontext.RouterTestCont
 	assert.Contains(t, histogramMetrics, routerutils.TTFT,
 		"Missing TTFT (sglang:time_to_first_token_seconds) in histogram metrics")
 	assert.Contains(t, histogramMetrics, routerutils.TPOT,
-		"Missing TPOT (sglang:time_per_output_token_seconds) in histogram metrics")
+		"Missing TPOT (sglang:inter_token_latency_seconds) in histogram metrics")
 
 	t.Logf("Pod %s: kv_cache_usage=%.4f, request_waiting_num=%.0f, TTFT=%.6f, TPOT=%.6f",
 		targetPod.Name,
