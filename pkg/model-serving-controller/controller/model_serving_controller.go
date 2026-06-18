@@ -1280,6 +1280,11 @@ func (c *ModelServingController) promoteServingGroupIfRolledOut(ms *workloadv1al
 		klog.Warningf("failed to get roles for ServingGroup %s: %v", groupName, err)
 		return false
 	}
+	storedRevision, ok := c.store.GetServingGroupRevision(ns, groupName)
+	if !ok {
+		storedRevision = revision
+	}
+	servingGroup := datastore.ServingGroup{Name: groupName, Revision: storedRevision}
 
 	expectedRoleNames := make(map[string]struct{}, len(ms.Spec.Template.Roles))
 	for _, role := range ms.Spec.Template.Roles {
@@ -1295,7 +1300,11 @@ func (c *ModelServingController) promoteServingGroupIfRolledOut(ms *workloadv1al
 		}
 		expectedHash := utils.CalRoleTemplateHash(role)
 		for _, r := range instances {
-			if r.Status != datastore.RoleRunning || r.RoleTemplateHash != expectedHash {
+			if r.Status != datastore.RoleRunning {
+				return false
+			}
+			observedHash, resolved := c.resolveRoleTemplateHashForComparison(ms, servingGroup, role.Name, *r)
+			if resolved && observedHash != expectedHash {
 				return false
 			}
 		}
@@ -1498,7 +1507,12 @@ func (c *ModelServingController) collectGroupRoleUpdateState(
 		// keeping the rollout progressing even when every outdated replica is unavailable.
 		newRevUnavailable := 0
 		for roleID, role := range instances {
-			isNewRev := inSpec && role.RoleTemplateHash == expectedHash
+			observedHash := ""
+			hashResolved := false
+			if inSpec {
+				observedHash, hashResolved = c.resolveRoleTemplateHashForComparison(ms, group, roleName, *role)
+			}
+			isNewRev := inSpec && hashResolved && observedHash == expectedHash
 			// Replicas already being deleted are unavailable; do not reselect them.
 			if role.Status == datastore.RoleDeleting {
 				unavailable++
@@ -1523,7 +1537,7 @@ func (c *ModelServingController) collectGroupRoleUpdateState(
 				}
 			}
 			// Outdated simply means the stored RoleTemplateHash no longer matches the spec's hash.
-			if !isNewRev {
+			if hashResolved && !isNewRev {
 				outdated = append(outdated, roleInstanceRef{roleName: roleName, roleID: roleID, ready: isReady})
 			}
 		}

@@ -7546,6 +7546,88 @@ func TestResolveRoleTemplateHashForComparison_FromControllerRevision(t *testing.
 	assert.Equal(t, utils.CalRoleTemplateHash(oldRole), hash)
 }
 
+func TestCollectGroupRoleUpdateStateUsesLegacyRoleTemplateHashFallback(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	oldRevision := "old-revision"
+	newRevision := "new-revision"
+	roleName := "prefill"
+
+	role := workloadv1alpha1.Role{
+		Name:     roleName,
+		Replicas: ptr.To[int32](1),
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1.25"}}},
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}},
+		},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset()
+	_, err := utils.CreateControllerRevision(context.TODO(), kubeClient, ms, oldRevision, []workloadv1alpha1.Role{role})
+	require.NoError(t, err)
+
+	controller := &ModelServingController{kubeClientSet: kubeClient, store: datastore.New()}
+	nsn := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(nsn, 0, oldRevision)
+	controller.store.AddRole(nsn, groupName, roleName, "prefill-0", oldRevision, "")
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, roleName, "prefill-0", datastore.RoleRunning))
+
+	states, unavailableCount, err := controller.collectGroupRoleUpdateState(
+		ms,
+		datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning},
+		newRevision,
+	)
+	require.NoError(t, err)
+
+	assert.Empty(t, states)
+	assert.Equal(t, 0, unavailableCount)
+	storedRevision, ok := controller.store.GetServingGroupRevision(nsn, groupName)
+	require.True(t, ok)
+	assert.Equal(t, newRevision, storedRevision)
+}
+
+func TestPromoteServingGroupIfRolledOutUsesLegacyRoleTemplateHashFallback(t *testing.T) {
+	ns := "default"
+	msName := "test-ms"
+	groupName := "test-ms-0"
+	oldRevision := "old-revision"
+	newRevision := "new-revision"
+	roleName := "prefill"
+
+	role := workloadv1alpha1.Role{
+		Name:     roleName,
+		Replicas: ptr.To[int32](1),
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1.25"}}},
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}},
+		},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset()
+	_, err := utils.CreateControllerRevision(context.TODO(), kubeClient, ms, oldRevision, []workloadv1alpha1.Role{role})
+	require.NoError(t, err)
+
+	controller := &ModelServingController{kubeClientSet: kubeClient, store: datastore.New()}
+	nsn := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(nsn, 0, oldRevision)
+	require.NoError(t, controller.store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupRoleRolling))
+	controller.store.AddRole(nsn, groupName, roleName, "prefill-0", oldRevision, "")
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, roleName, "prefill-0", datastore.RoleRunning))
+
+	assert.True(t, controller.promoteServingGroupIfRolledOut(ms, groupName, newRevision))
+}
+
 func TestResolveRoleTemplateHash_UsesPodRevisionControllerRevision(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
