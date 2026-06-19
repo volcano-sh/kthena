@@ -25,3 +25,14 @@ type KVTransferParams struct {
 	RemoteHost      *string  `json:"remote_host,omitempty"`
 	RemotePort      *int     `json:"remote_port,omitempty"`
 }
+
+// OnFlightHooks carries per-request callbacks that the router passes into
+// Proxy() so connectors can track in-flight request counts on prefill and
+// decode pods at the precise point in their proxy lifecycle.
+// All fields are optional; a nil pointer or nil field is a no-op.
+type OnFlightHooks struct {
+	IncrPrefill func()
+	DecrPrefill func()
+	IncrDecode  func()
+	DecrDecode  func()
+}

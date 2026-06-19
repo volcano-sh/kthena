@@ -18,11 +18,14 @@ package controller_manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/stretchr/testify/require"
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
@@ -89,6 +92,11 @@ func TestMain(m *testing.M) {
 func setupControllerManagerE2ETest(t *testing.T) (context.Context, *clientset.Clientset, *kubernetes.Clientset) {
 	t.Helper()
 	ctx := context.Background()
+	if deadline, ok := t.Deadline(); ok {
+		ctxWithDeadline, cancel := context.WithDeadline(ctx, deadline)
+		t.Cleanup(cancel)
+		ctx = ctxWithDeadline
+	}
 	config, err := utils.GetKubeConfig()
 	require.NoError(t, err, "Failed to get kubeconfig")
 	kthenaClient, err := clientset.NewForConfig(config)
@@ -110,11 +118,13 @@ func waitForWebhookReady(t *testing.T, ctx context.Context, kthenaClient *client
 		probe.Namespace = namespace
 		probe.Name = "webhook-ready-probe-" + utils.RandomString(5)
 
-		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(namespace).Create(ctx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
+		createCtx, cancel := context.WithTimeout(ctx, utils.DefaultAPICallTimeout)
+		defer cancel()
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(namespace).Create(createCtx, probe, metav1.CreateOptions{DryRun: []string{"All"}})
 		if err != nil {
 			errStr := err.Error()
-			if strings.Contains(errStr, "connect: connection refused") {
-				t.Logf("Webhook not ready yet (connection refused), retrying: %v", err)
+			if strings.Contains(errStr, "connect: connection refused") || errors.Is(err, context.DeadlineExceeded) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) {
+				t.Logf("Webhook not ready yet (connection refused or timeout), retrying: %v", err)
 				return false, nil
 			}
 			return false, err

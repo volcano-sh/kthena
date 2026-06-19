@@ -107,6 +107,19 @@ kthenaRouter:
       memory: 128Mi
 ```
 
+### Drain Timeout
+
+```yaml
+kthenaRouter:
+  terminationGracePeriodSeconds: 330
+  drainTimeout: 5m
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `kthenaRouter.terminationGracePeriodSeconds` | int | `330` | Pod termination grace period for the router |
+| `kthenaRouter.drainTimeout` | string | `"5m"` | Time allowed for the router to drain in-flight requests before shutdown |
+
 ## Installation
 
 ### Basic Installation

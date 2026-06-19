@@ -37,14 +37,17 @@ import (
 
 // JWT token extraction constants
 const (
-	header = "Authorization"
-	prefix = "Bearer "
+	header       = "Authorization"
+	bearerScheme = "Bearer"
 )
 
 // extractTokenFromHeader extracts the Bearer token from the Authorization header
 func extractTokenFromHeader(req *http.Request) string {
-	value := req.Header.Get(header)
-	return strings.TrimPrefix(value, prefix)
+	fields := strings.Fields(req.Header.Get(header))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], bearerScheme) {
+		return ""
+	}
+	return fields[1]
 }
 
 // JWTAuthenticator provides JWT token validation with automatic JWKS rotation support
@@ -83,7 +86,7 @@ func (j *JWTAuthenticator) Close() {
 func (j *JWTAuthenticator) authenticate(tokenStr string) (string, error) {
 	// Get current JWKS from rotator
 	jwksValue := j.rotator.GetJwks()
-	if jwksValue.Jwks == nil {
+	if jwksValue == nil || jwksValue.Jwks == nil {
 		return "", fmt.Errorf("no JWKS available for token validation")
 	}
 

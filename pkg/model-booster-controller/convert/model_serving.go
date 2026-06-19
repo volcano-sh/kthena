@@ -167,12 +167,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"VOLUME_MOUNTS": []corev1.VolumeMount{{
@@ -206,6 +201,11 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		"ENGINE_PREFILL_RESOURCES":           workersMap[workload.ModelWorkerTypePrefill].Resources,
 		"ENGINE_PREFILL_IMAGE":               workersMap[workload.ModelWorkerTypePrefill].Image,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
+		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+		"PREFILL_AFFINITY":                   workersMap[workload.ModelWorkerTypePrefill].Affinity,
+		"DECODE_AFFINITY":                    workersMap[workload.ModelWorkerTypeDecode].Affinity,
+		"PREFILL_TOLERATIONS":                workersMap[workload.ModelWorkerTypePrefill].Tolerations,
+		"DECODE_TOLERATIONS":                 workersMap[workload.ModelWorkerTypeDecode].Tolerations,
 	}
 	return loadModelServingTemplate(VllmDisaggregatedTemplatePath, &data)
 }
@@ -278,12 +278,7 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"MODEL_NAME":       model.Name,
@@ -330,6 +325,9 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"ENGINE_SERVER_COMMAND":              commands,
 		"WORKER_REPLICAS":                    workersMap[workload.ModelWorkerTypeServer].Pods - 1,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
+		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+		"SERVER_AFFINITY":                    workersMap[workload.ModelWorkerTypeServer].Affinity,
+		"SERVER_TOLERATIONS":                 workersMap[workload.ModelWorkerTypeServer].Tolerations,
 	}
 	return loadModelServingTemplate(VllmTemplatePath, &data)
 }
@@ -432,7 +430,7 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: GetCachePath(backend.CacheURI),
+					ClaimName: GetPVCClaimName(backend.CacheURI),
 				},
 			},
 		}, nil
@@ -450,7 +448,11 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 	return nil, fmt.Errorf("not support prefix in CacheURI: %s", backend.CacheURI)
 }
 
-// GetCachePath gets the path from string after "://". For example, for "pvc://my-pvc", it returns "/my-pvc".
+// GetCachePath returns the in-container mount path derived from a cache URI.
+// It takes the substring after "://", trims surrounding slashes, and prepends a
+// single "/" so the result is a valid absolute path suitable for a container's
+// VolumeMount.MountPath or HostPath.Path. For example, for "pvc://my-pvc" it
+// returns "/my-pvc". It is NOT a PVC ClaimName; use GetPVCClaimName for that.
 func GetCachePath(path string) string {
 	if path == "" || !strings.Contains(path, URIPrefixSeparator) {
 		return ""
@@ -461,6 +463,13 @@ func GetCachePath(path string) string {
 	builder.WriteString("/")
 	builder.WriteString(s)
 	return builder.String()
+}
+
+// GetPVCClaimName extracts the bare PVC name from a "pvc://" cache URI, trimming
+// surrounding slashes so malformed inputs like "pvc:///my-pvc" still yield a
+// valid Kubernetes resource name (which cannot contain slashes).
+func GetPVCClaimName(uri string) string {
+	return strings.Trim(strings.TrimPrefix(uri, CacheURIPrefixPVC), "/")
 }
 
 func getVolumeName(backendName string) string {

@@ -95,6 +95,9 @@ spec:
               value: {{ .Values.kthenaRouter.accessLog.format | quote }}
             - name: ACCESS_LOG_OUTPUT
               value: {{ .Values.kthenaRouter.accessLog.output | quote }}
+
+            - name: DRAIN_TIMEOUT
+              value: {{ .Values.kthenaRouter.drainTimeout | quote }}
           resources: {{- toYaml .Values.kthenaRouter.resource | nindent 12 }}
           livenessProbe:
             httpGet:
@@ -144,3 +147,4 @@ spec:
             optional: true
         {{- end }}
       serviceAccountName: kthena-router
+      terminationGracePeriodSeconds: {{ .Values.kthenaRouter.terminationGracePeriodSeconds }}

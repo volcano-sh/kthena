@@ -40,15 +40,16 @@ import (
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
-	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 var (
 	metricsName = []string{
-		utils.GPUCacheUsage,
+		utils.KVCacheUsage,
 		utils.RequestWaitingNum,
 		utils.RequestRunningNum,
 		utils.TPOT,
@@ -62,9 +63,14 @@ var (
 )
 
 const (
-	// Configuration constants for fairness scheduling
-	defaultQueueQPS = 100
-	uppdateInterval = 1 * time.Second
+	// defaultMetricsScrapeInterval is the default polling interval for pod metrics.
+	defaultMetricsScrapeInterval = 1 * time.Second
+	metricsScrapeIntervalEnv     = "METRICS_SCRAPE_INTERVAL"
+
+	// onFlightSyncInterval caps Redis read traffic from SyncOnFlightCounts.
+	// At most one HMGET is issued per interval regardless of request rate;
+	// all other callers use the local atomic values maintained by Incr/Decr.
+	onFlightSyncInterval = 50 * time.Millisecond
 )
 
 // createTokenTracker creates a token tracker with configuration from environment variables
@@ -134,18 +140,18 @@ type CallbackFunc func(data EventData)
 
 // PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
 type PodRuntimeInspector interface {
-	GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
-	GetPodModels(engine string, pod *corev1.Pod) ([]string, error)
+	GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
+	GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error)
 }
 
 type realPodRuntimeInspector struct{}
 
-func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-	return backend.GetPodMetrics(engine, pod, previousHistogram)
+func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	return backend.GetPodMetrics(engine, pod, port, previousHistogram)
 }
 
-func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
-	return backend.GetPodModels(engine, pod)
+func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
+	return backend.GetPodModels(engine, pod, port)
 }
 
 type Option func(*store)
@@ -155,6 +161,15 @@ func WithPodRuntimeInspector(inspector PodRuntimeInspector) Option {
 		if inspector != nil {
 			s.podRuntimeInspector = inspector
 		}
+	}
+}
+
+// WithRedisOnFlightCounter configures the store to maintain globally visible
+// in-flight request counts via Redis, enabling accurate scheduling across
+// multiple router replicas.
+func WithRedisOnFlightCounter(counter OnFlightCounter) Option {
+	return func(s *store) {
+		s.onFlightCounter = counter
 	}
 }
 
@@ -198,6 +213,22 @@ type Store interface {
 
 	// GetPodInfo returns the pod info for a given pod name (for testing)
 	GetPodInfo(podName types.NamespacedName) *PodInfo
+
+	// SyncOnFlightCounts fetches the current on-flight counts for all tracked
+	// pods from Redis in a single round-trip and updates their local counters.
+	// Call this immediately before scheduling so scores reflect cross-router
+	// traffic. Reads are rate-limited to at most one Redis HMGET per
+	// onFlightSyncInterval; all other callers use the local atomic values that
+	// Incr/Decr keep up to date. No-op when no Redis counter is configured.
+	SyncOnFlightCounts()
+
+	// IncrPodOnFlightRequests atomically increments the in-flight request counter for
+	// the given pod. Must be called just before dispatching a request to the pod.
+	IncrPodOnFlightRequests(podName types.NamespacedName)
+	// DecrPodOnFlightRequests atomically decrements the in-flight request counter for
+	// the given pod. Must be called once the response is received (or the request fails).
+	DecrPodOnFlightRequests(podName types.NamespacedName)
+
 	// GetTokenCount returns the token count for a user and model
 	GetTokenCount(userId, modelName string) (float64, error)
 	// UpdateTokenCount updates token usage for a user and model
@@ -231,7 +262,10 @@ type Store interface {
 	GetHTTPRoute(key string) *gatewayv1.HTTPRoute
 	GetAllHTTPRoutes() []*gatewayv1.HTTPRoute
 	GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
-	GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRoute
+
+	// GetModelNames returns all model names registered via ModelRoutes,
+	// including both base model names and LoRA adapter names.
+	GetModelNames() []string
 
 	// Debug interface methods
 	GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute
@@ -259,10 +293,24 @@ type PodInfo struct {
 	TPOT               float64
 	TTFT               float64
 
-	mutex sync.RWMutex // Protects concurrent access to metrics, models and modelServer fields
+	// onFlightRequestNum tracks requests actively in-flight from the router to this pod.
+	// Updated atomically with zero delay — not subject to the ~1 s engine-metrics poll lag.
+	// When a Redis-backed OnFlightCounter is configured on the store this field is also
+	// kept in sync with the global Redis counter so it reflects cross-router traffic.
+	onFlightRequestNum atomic.Int64
+
+	mutex sync.RWMutex // Protects concurrent access to Pod, engine, metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
 	models      sets.Set[string]               // running models. Including base model and lora adapters.
 	modelServer sets.Set[types.NamespacedName] // The modelservers this pod belongs to
+}
+
+// NewPodInfo constructs a PodInfo with the given pod and inference engine.
+func NewPodInfo(pod *corev1.Pod, engine string) *PodInfo {
+	return &PodInfo{
+		Pod:    pod,
+		engine: engine,
+	}
 }
 
 // modelRouteInfo stores the mapping between a ModelRoute resource and its associated models.
@@ -280,6 +328,16 @@ type modelRouteInfo struct {
 type store struct {
 	modelServer sync.Map // map[types.NamespacedName]*modelServer
 	pods        sync.Map // map[types.NamespacedName]*PodInfo
+
+	// onFlightCounter is optional. When non-nil (Redis-backed), in-flight request
+	// counts are shared across all router replicas via Redis. When nil, only the
+	// local per-PodInfo atomic counter is used (suitable for single-router setups).
+	onFlightCounter OnFlightCounter
+	// lastOnFlightSync is the Unix nanosecond timestamp of the last sync attempt.
+	// Updated before the Redis call (not after) to prevent concurrent goroutines
+	// from all hitting Redis within the same window. Gates SyncOnFlightCounts to
+	// at most one Redis HMGET per onFlightSyncInterval.
+	lastOnFlightSync atomic.Int64
 
 	routeMutex sync.RWMutex
 	// Model routing fields
@@ -306,11 +364,12 @@ type store struct {
 	// initialSynced is used to indicate whether all the resources has been processed and storred into this store.
 	initialSynced *atomic.Bool
 	// model -> RequestPriorityQueue
-	requestWaitingQueue sync.Map
-	tokenTracker        TokenTracker
-	podRuntimeInspector PodRuntimeInspector
-	rootCtx             context.Context // Lifecycle context for queue goroutines, set by Run()
-	fairnessQueueConfig FairnessQueueConfig
+	requestWaitingQueue   sync.Map
+	tokenTracker          TokenTracker
+	podRuntimeInspector   PodRuntimeInspector
+	rootCtx               context.Context // Lifecycle context for queue goroutines, set by Run()
+	fairnessQueueConfig   FairnessQueueConfig
+	metricsScrapeInterval time.Duration
 }
 
 func New(opts ...Option) Store {
@@ -329,9 +388,10 @@ func New(opts ...Option) Store {
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
-		tokenTracker:        createTokenTracker(),
-		podRuntimeInspector: realPodRuntimeInspector{},
-		fairnessQueueConfig: createFairnessQueueConfig(),
+		tokenTracker:          createTokenTracker(),
+		podRuntimeInspector:   realPodRuntimeInspector{},
+		fairnessQueueConfig:   createFairnessQueueConfig(),
+		metricsScrapeInterval: parseMetricsScrapeInterval(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -407,26 +467,86 @@ func isValidFairnessWeight(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
 }
 
+func parseMetricsScrapeInterval() time.Duration {
+	if v := os.Getenv(metricsScrapeIntervalEnv); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		} else {
+			klog.Warningf("Invalid %s: %q, using default %v", metricsScrapeIntervalEnv, v, defaultMetricsScrapeInterval)
+		}
+	}
+	return defaultMetricsScrapeInterval
+}
+
 func (s *store) Run(ctx context.Context) {
 	s.rootCtx = ctx
 	go func() {
+		ticker := time.NewTicker(s.metricsScrapeInterval)
+		defer ticker.Stop()
 		for {
+			s.pods.Range(func(key, value any) bool {
+				if p, ok := value.(*PodInfo); ok {
+					s.updatePodMetrics(p)
+					s.updatePodModels(p)
+				}
+				return true
+			})
+			s.initialSynced.Store(true)
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				s.pods.Range(func(key, value any) bool {
-					if p, ok := value.(*PodInfo); ok {
-						s.updatePodMetrics(p)
-						s.updatePodModels(p)
-					}
-					return true
-				})
-				s.initialSynced.Store(true)
-				time.Sleep(uppdateInterval)
+			case <-ticker.C:
 			}
 		}
 	}()
+}
+
+// SyncOnFlightCounts fetches current on-flight counts for all tracked pods from
+// Redis in one HMGET and updates their local atomic counters. Reads are
+// rate-limited by onFlightSyncInterval: at most one goroutine per interval
+// actually hits Redis (via a CAS on lastOnFlightSync); all other callers return
+// immediately and use the local values maintained by IncrPodOnFlightRequests /
+// DecrPodOnFlightRequests.
+func (s *store) SyncOnFlightCounts() {
+	if s.onFlightCounter == nil {
+		return
+	}
+
+	// Rate-gate: skip Redis if we synced recently.
+	now := time.Now().UnixNano()
+	lastSync := s.lastOnFlightSync.Load()
+	if now-lastSync < int64(onFlightSyncInterval) {
+		return
+	}
+	// CAS ensures exactly one goroutine wins the sync slot per interval.
+	// Using the previously loaded lastSync as the expected value prevents multiple
+	// goroutines from all winning the CAS when they observe the same stale timestamp.
+	if !s.lastOnFlightSync.CompareAndSwap(lastSync, now) {
+		return
+	}
+
+	var podNames []types.NamespacedName
+	s.pods.Range(func(k, v any) bool {
+		if nn, ok := k.(types.NamespacedName); ok {
+			podNames = append(podNames, nn)
+		}
+		return true
+	})
+	if len(podNames) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	counts, err := s.onFlightCounter.BatchGet(ctx, podNames)
+	if err != nil {
+		klog.V(4).Infof("SyncOnFlightCounts: Redis batch get failed: %v", err)
+		return
+	}
+	for podName, count := range counts {
+		if value, ok := s.pods.Load(podName); ok {
+			value.(*PodInfo).SetOnFlightRequestNum(count)
+		}
+	}
 }
 func (s *store) GetTokenCount(userID, model string) (float64, error) {
 	return s.tokenTracker.GetTokenCount(userID, model)
@@ -493,6 +613,51 @@ func (s *store) GetPodInfo(podName types.NamespacedName) *PodInfo {
 		return value.(*PodInfo)
 	}
 	return nil
+}
+
+// IncrPodOnFlightRequests increments the in-flight counter for the given pod.
+// When a Redis counter is configured the increment is performed atomically in
+// Redis and the returned global value is stored locally; otherwise the local
+// atomic counter is incremented directly.
+func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) {
+	value, ok := s.pods.Load(podName)
+	if !ok {
+		klog.V(4).Infof("IncrPodOnFlightRequests: pod %s not found in store", podName)
+		return
+	}
+	podInfo := value.(*PodInfo)
+	if s.onFlightCounter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if count, err := s.onFlightCounter.Incr(ctx, podName); err == nil {
+			podInfo.SetOnFlightRequestNum(count)
+			return
+		} else {
+			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, falling back to local counter", podName, err)
+		}
+	}
+	podInfo.IncrOnFlightRequests()
+}
+
+// DecrPodOnFlightRequests decrements the in-flight counter for the given pod.
+func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
+	value, ok := s.pods.Load(podName)
+	if !ok {
+		klog.V(4).Infof("DecrPodOnFlightRequests: pod %s not found in store", podName)
+		return
+	}
+	podInfo := value.(*PodInfo)
+	if s.onFlightCounter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if count, err := s.onFlightCounter.Decr(ctx, podName); err == nil {
+			podInfo.SetOnFlightRequestNum(count)
+			return
+		} else {
+			klog.V(4).Infof("Redis on-flight decr failed for pod %s: %v, falling back to local counter", podName, err)
+		}
+	}
+	podInfo.DecrOnFlightRequests()
 }
 
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
@@ -658,20 +823,17 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		oldPodInfo := value.(*PodInfo)
 		oldModelServers := oldPodInfo.GetModelServers()
 		// Handle the case where the pod no longer belongs to some model servers
+		oldPodLabels := oldPodInfo.GetPodLabels()
 		for msName := range oldModelServers.Difference(newModelServers) {
 			if value, ok := s.modelServer.Load(msName); ok {
 				ms := value.(*modelServer)
 				ms.deletePod(podName)
 				// Remove from PDGroup categorizations
-				ms.removePodFromPDGroups(podName, oldPodInfo.Pod.Labels)
+				ms.removePodFromPDGroups(podName, oldPodLabels)
 			}
 		}
 
-		oldPodInfo.mutex.Lock()
-		oldPodInfo.Pod = pod
-		oldPodInfo.engine = engine
-		oldPodInfo.modelServer = newModelServers
-		oldPodInfo.mutex.Unlock()
+		oldPodInfo.UpdatePod(pod, engine, newModelServers)
 		return nil
 	}
 
@@ -708,8 +870,8 @@ func (s *store) AppendModelServerToPod(pod *corev1.Pod, modelServers []*aiv1alph
 		if !podInfo.HasModelServer(modelServerName) {
 			podInfo.AddModelServer(modelServerName)
 			// NOTE: even if a pod belongs to multiple model servers, the backend should be the same
-			if podInfo.engine == "" {
-				podInfo.engine = string(ms.Spec.InferenceEngine)
+			if podInfo.GetEngine() == "" {
+				podInfo.SetEngine(string(ms.Spec.InferenceEngine))
 			}
 
 			// Update modelServer object to include this pod
@@ -730,17 +892,26 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 	if value, ok := s.pods.Load(podName); ok {
 		pod := value.(*PodInfo)
 		modelServers := pod.GetModelServers()
+		podLabels := pod.GetPodLabels()
 		for modelServerName := range modelServers {
 			if value, ok := s.modelServer.Load(modelServerName); ok {
 				ms := value.(*modelServer)
 				ms.deletePod(podName)
 				// Remove from PDGroup categorizations
-				ms.removePodFromPDGroups(podName, pod.Pod.Labels)
+				ms.removePodFromPDGroups(podName, podLabels)
 			} else {
 				klog.V(4).Infof("model server %s not found for pod %s, maybe already deleted", modelServerName, podName)
 			}
 		}
 		s.pods.Delete(podName)
+		// Remove the pod's Redis counter so stale keys do not accumulate.
+		if s.onFlightCounter != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if err := s.onFlightCounter.Delete(ctx, podName); err != nil {
+				klog.V(4).Infof("failed to delete Redis on-flight counter for pod %s: %v", podName, err)
+			}
+		}
 	}
 
 	s.triggerCallbacks("Pod", EventData{
@@ -928,7 +1099,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	s.triggerCallbacks("ModelRoute", EventData{
 		EventType:  EventDelete,
 		ModelName:  modelName,
-		ModelRoute: nil,
+		ModelRoute: deletedRoute,
 	})
 	return nil
 }
@@ -1166,13 +1337,23 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 }
 
 func (s *store) updatePodMetrics(pod *PodInfo) {
-	if pod.engine == "" {
+	engine := pod.GetEngine()
+	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
 		return
 	}
+	podObj := pod.GetPod()
+	if podObj == nil {
+		klog.V(2).Info("failed to find pod")
+		return
+	}
 
+	if podObj.Status.PodIP == "" {
+		return
+	}
+	port := s.getPodWorkloadPort(pod)
 	previousHistogram := getPreviousHistogram(pod)
-	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(pod.engine, pod.Pod, previousHistogram)
+	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, port, previousHistogram)
 	if gaugeMetrics != nil {
 		updateGaugeMetricsInfo(pod, gaugeMetrics)
 	}
@@ -1182,21 +1363,47 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) {
-	if podInfo.engine == "" {
+	engine := podInfo.GetEngine()
+	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
 		return
 	}
+	podObj := podInfo.GetPod()
+	if podObj == nil {
+		klog.V(2).Info("failed to find pod")
+		return
+	}
 
-	models, err := s.getPodRuntimeInspector().GetPodModels(podInfo.engine, podInfo.Pod)
+	if podObj.Status.PodIP == "" {
+		return
+	}
+	port := s.getPodWorkloadPort(podInfo)
+	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
 	if err != nil {
-		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podInfo.Pod.GetNamespace(), podInfo.Pod.GetName(), err)
+		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
 		return
 	}
 
 	podInfo.UpdateModels(models)
 }
 
+func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
+	modelServers := podInfo.GetModelServers()
+	for msName := range modelServers {
+		if msValue, ok := s.modelServer.Load(msName); ok {
+			ms := msValue.(*modelServer).getModelServer()
+			if ms != nil && ms.Spec.WorkloadPort.Port > 0 {
+				return uint32(ms.Spec.WorkloadPort.Port)
+			}
+		}
+	}
+	return 0
+}
+
 func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
+	podinfo.mutex.RLock()
+	defer podinfo.mutex.RUnlock()
+
 	previousHistogram := make(map[string]*dto.Histogram)
 	if podinfo.TimePerOutputToken != nil {
 		previousHistogram[utils.TPOT] = podinfo.TimePerOutputToken
@@ -1211,7 +1418,7 @@ func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
 	podinfo.mutex.Lock()
 	defer podinfo.mutex.Unlock()
 	updateFuncs := map[string]func(float64){
-		utils.GPUCacheUsage: func(f float64) {
+		utils.KVCacheUsage: func(f float64) {
 			podinfo.GPUCacheUsage = f
 		},
 		utils.RequestWaitingNum: func(f float64) {
@@ -1282,7 +1489,43 @@ func (s *store) triggerCallbacks(kind string, data EventData) {
 	}
 }
 
-// PodInfo methods for thread-safe access to models and modelServer fields
+// PodInfo methods for thread-safe access to mutable fields
+
+// GetPod returns the current pod pointer. The returned object must be treated as read-only.
+func (p *PodInfo) GetPod() *corev1.Pod {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.Pod
+}
+
+// GetPodLabels returns the current pod labels. The returned map must be treated as read-only.
+func (p *PodInfo) GetPodLabels() map[string]string {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	if p.Pod == nil || len(p.Pod.Labels) == 0 {
+		return nil
+	}
+	return p.Pod.Labels
+}
+
+// GetPodNamespacedName returns the current pod namespace/name.
+func (p *PodInfo) GetPodNamespacedName() types.NamespacedName {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	if p.Pod == nil {
+		return types.NamespacedName{}
+	}
+	return types.NamespacedName{Namespace: p.Pod.Namespace, Name: p.Pod.Name}
+}
+
+// UpdatePod replaces pod metadata tracked by PodInfo while preserving runtime metrics and models.
+func (p *PodInfo) UpdatePod(pod *corev1.Pod, engine string, modelServers sets.Set[types.NamespacedName]) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.Pod = pod
+	p.engine = engine
+	p.modelServer = modelServers
+}
 
 // GetModels returns a copy of the models set
 func (p *PodInfo) GetModels() sets.Set[string] {
@@ -1396,7 +1639,16 @@ func (p *PodInfo) GetModelServersList() []types.NamespacedName {
 
 // GetEngine returns the inference engine name
 func (p *PodInfo) GetEngine() string {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
 	return p.engine
+}
+
+// SetEngine updates the inference engine name.
+func (p *PodInfo) SetEngine(engine string) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.engine = engine
 }
 
 // GetGPUCacheUsage returns the GPU cache usage
@@ -1418,6 +1670,30 @@ func (p *PodInfo) GetRequestRunningNum() float64 {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 	return p.RequestRunningNum
+}
+
+// IncrOnFlightRequests atomically increments the local in-flight counter and
+// returns the new value.
+func (p *PodInfo) IncrOnFlightRequests() int64 {
+	return p.onFlightRequestNum.Add(1)
+}
+
+// DecrOnFlightRequests atomically decrements the local in-flight counter and
+// returns the new value.
+func (p *PodInfo) DecrOnFlightRequests() int64 {
+	return p.onFlightRequestNum.Add(-1)
+}
+
+// SetOnFlightRequestNum atomically stores a new value for the in-flight counter
+// (used to sync the global Redis value into the local field).
+func (p *PodInfo) SetOnFlightRequestNum(v int64) {
+	p.onFlightRequestNum.Store(v)
+}
+
+// GetOnFlightRequestNum returns the current in-flight request count as tracked
+// by this router instance (or globally, if a Redis counter is configured).
+func (p *PodInfo) GetOnFlightRequestNum() int64 {
+	return p.onFlightRequestNum.Load()
 }
 
 // GetTPOT returns the time per output token
@@ -1481,6 +1757,23 @@ func (s *store) GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute {
 		}
 	}
 	return result
+}
+
+// GetModelNames returns all model names registered via ModelRoutes,
+// including both base model names and LoRA adapter names.
+func (s *store) GetModelNames() []string {
+	s.routeMutex.RLock()
+	defer s.routeMutex.RUnlock()
+
+	names := make([]string, 0, len(s.routes)+len(s.loraRoutes))
+	for name := range s.routes {
+		names = append(names, name)
+	}
+	for name := range s.loraRoutes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // GetAllModelServers returns all ModelServers in the store
@@ -1693,7 +1986,8 @@ func (s *store) GetPodsByInferencePool(name types.NamespacedName) ([]*PodInfo, e
 	var pods []*PodInfo
 	s.pods.Range(func(key, value interface{}) bool {
 		podInfo := value.(*PodInfo)
-		if podInfo.Pod.Namespace == name.Namespace && selector.Matches(labels.Set(podInfo.Pod.Labels)) {
+		pod := podInfo.GetPod()
+		if pod != nil && pod.Namespace == name.Namespace && selector.Matches(labels.Set(podInfo.GetPodLabels())) {
 			pods = append(pods, podInfo)
 		}
 		return true
@@ -1781,32 +2075,6 @@ func (s *store) GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
 		for routeKey := range routeSet {
 			if hr, ok := s.httpRoutes[routeKey]; ok {
 				result = append(result, hr)
-			}
-		}
-	}
-	return result
-}
-
-func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRoute {
-	s.routeMutex.RLock()
-	defer s.routeMutex.RUnlock()
-
-	var result []*aiv1alpha1.ModelRoute
-	if routeSet, exists := s.gatewayModelRoutes[gatewayKey]; exists {
-		for routeKey := range routeSet {
-			// Find the ModelRoute in routes or loraRoutes
-			if info, ok := s.routeInfo[routeKey]; ok {
-				// Try to find from primary model routes
-				if info.model != "" {
-					if routes, exists := s.routes[info.model]; exists {
-						for _, route := range routes {
-							if route.Namespace+"/"+route.Name == routeKey {
-								result = append(result, route)
-								break
-							}
-						}
-					}
-				}
 			}
 		}
 	}

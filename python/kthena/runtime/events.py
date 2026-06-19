@@ -27,6 +27,9 @@ class EventType(Enum):
     VLLM_BLOCK_STORED = "vllm_block_stored"
     VLLM_BLOCK_REMOVED = "vllm_block_removed"
     VLLM_ALL_BLOCKS_CLEARED = "vllm_all_blocks_cleared"
+    SGLANG_BLOCK_STORED = "sglang_block_stored"
+    SGLANG_BLOCK_REMOVED = "sglang_block_removed"
+    SGLANG_ALL_BLOCKS_CLEARED = "sglang_all_blocks_cleared"
 
 
 @dataclass
@@ -60,6 +63,34 @@ class VLLMEventData(EventData):
     pod_identifier: Optional[str] = None
     data_parallel_rank: Optional[int] = None
     vllm_event: Optional[Any] = None
+
+
+@dataclass
+class SGLangBlockStoredEvent:
+    block_hashes: List[int]
+    parent_block_hash: Optional[int] = None
+    token_ids: Optional[List[int]] = None
+    block_size: Optional[int] = None
+    lora_id: Optional[int] = None
+    medium: Optional[str] = None
+
+
+@dataclass
+class SGLangBlockRemovedEvent:
+    block_hashes: List[int]
+    medium: Optional[str] = None
+
+
+@dataclass
+class SGLangAllBlocksClearedEvent:
+    pass
+
+
+@dataclass
+class SGLangEventData(EventData):
+    pod_identifier: Optional[str] = None
+    attn_dp_rank: Optional[int] = None
+    sglang_event: Optional[Any] = None
 
 
 class EventHandler(ABC):

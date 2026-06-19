@@ -25,7 +25,7 @@ import (
 // AutoscalingPolicyMetricApplyConfiguration represents a declarative configuration of the AutoscalingPolicyMetric type for use
 // with apply.
 type AutoscalingPolicyMetricApplyConfiguration struct {
-	MetricName  *string            `json:"metricName,omitempty"`
+	Name        *string            `json:"name,omitempty"`
 	TargetValue *resource.Quantity `json:"targetValue,omitempty"`
 }
 
@@ -35,11 +35,11 @@ func AutoscalingPolicyMetric() *AutoscalingPolicyMetricApplyConfiguration {
 	return &AutoscalingPolicyMetricApplyConfiguration{}
 }
 
-// WithMetricName sets the MetricName field in the declarative configuration to the given value
+// WithName sets the Name field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the MetricName field is set to the value of the last call.
-func (b *AutoscalingPolicyMetricApplyConfiguration) WithMetricName(value string) *AutoscalingPolicyMetricApplyConfiguration {
-	b.MetricName = &value
+// If called multiple times, the Name field is set to the value of the last call.
+func (b *AutoscalingPolicyMetricApplyConfiguration) WithName(value string) *AutoscalingPolicyMetricApplyConfiguration {
+	b.Name = &value
 	return b
 }
 

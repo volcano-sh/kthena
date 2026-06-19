@@ -524,44 +524,32 @@ func TestKVCacheAware_Score_Core(t *testing.T) {
 			name: "Empty prompt returns zero scores",
 			context: &framework.Context{
 				Model:  "test-model",
-				Prompt: common.ChatMessage{},
+				Prompt: nil,
 			},
-			pods: pods,
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
+			pods:           pods,
+			expectedScores: map[string]int{},
 		},
 		{
 			name: "Empty model returns zero scores",
 			context: &framework.Context{
 				Model: "",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
-			pods: pods,
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
+			pods:           pods,
+			expectedScores: map[string]int{},
 		},
 		{
 			name: "No tokenizer available returns zero scores",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
-			pods: pods,
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
+			pods:           pods,
+			expectedScores: map[string]int{},
 		},
 	}
 
@@ -882,7 +870,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Core(t *testing.T) {
 				plugin := &KVCacheAware{}
 				ctx := &framework.Context{
 					Model: "test-model",
-					Prompt: common.ChatMessage{
+					Prompt: &common.ChatMessage{
 						Text:     "",
 						Messages: []common.Message{},
 					},
@@ -1387,7 +1375,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 			name: "Text prompt with nil tokenizer",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
@@ -1403,7 +1391,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 			name: "Chat messages with nil tokenizer",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Messages: []common.Message{
 						{Role: "user", Content: "Hello"},
 					},
@@ -1421,7 +1409,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 			name: "Empty text and empty messages",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text:     "",
 					Messages: []common.Message{},
 				},
@@ -1472,7 +1460,7 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 			name: "Score with processor nil",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
@@ -1484,18 +1472,14 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 					// processor is nil
 				}
 			},
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
-			description: "Should handle nil processor gracefully",
+			expectedScores: map[string]int{},
+			description:    "Should handle nil processor gracefully",
 		},
 		{
 			name: "Score with maxBlocksToMatch limit",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
@@ -1507,12 +1491,8 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 					processor:        &TokenBlockProcessor{blockSize: 1},
 				}
 			},
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
-			description: "Should handle maxBlocksToMatch limit",
+			expectedScores: map[string]int{},
+			description:    "Should handle maxBlocksToMatch limit",
 		},
 	}
 
@@ -1783,7 +1763,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 			name: "Nil context",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello",
 				},
 			},
@@ -1801,7 +1781,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 			name: "Very small maxBlocksToMatch",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world this is a longer text",
 				},
 			},
@@ -1824,16 +1804,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 			// This should not panic
 			result := plugin.Score(tt.context, pods)
 
-			// Verify result structure
-			if result == nil {
-				t.Error("Expected non-nil result")
-			}
-
-			if len(result) != len(pods) {
-				t.Errorf("Expected %d results, got %d", len(pods), len(result))
-			}
-
-			// Verify all scores are non-negative
+			// Verify no panic and any returned scores are within bounds.
 			for pod, score := range result {
 				if score < 0 {
 					t.Errorf("Score should be non-negative, got %d for pod %s", score, pod.Pod.Name)
@@ -2001,7 +1972,7 @@ func TestKVCacheAware_Concurrency_Core(t *testing.T) {
 	pods := createTestPods("pod1", "pod2")
 	ctx := &framework.Context{
 		Model: "",
-		Prompt: common.ChatMessage{
+		Prompt: &common.ChatMessage{
 			Text: "",
 		},
 	}
@@ -2011,10 +1982,7 @@ func TestKVCacheAware_Concurrency_Core(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func() {
 			defer func() { done <- true }()
-			result := plugin.Score(ctx, pods)
-			if result == nil {
-				t.Error("Expected non-nil result")
-			}
+			_ = plugin.Score(ctx, pods)
 		}()
 	}
 

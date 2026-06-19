@@ -118,6 +118,12 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	router.TestModelRoutePrefillDecodeDisaggregationShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
+// TestModelRouteSglangPrefillDecodeDisaggregation tests SGLang PD disaggregation with ModelServing, ModelServer, and ModelRoute.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestModelRouteSglangPrefillDecodeDisaggregation(t *testing.T) {
+	router.TestModelRouteSglangPrefillDecodeDisaggregationShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
 // TestModelRouteSubset tests ModelRoute with subset routing.
 // This test runs the shared test function with Gateway API enabled (with ParentRefs).
 func TestModelRouteSubset(t *testing.T) {
@@ -317,4 +323,11 @@ func TestDuplicateModelName(t *testing.T) {
 	assert.Contains(t, response2.Body, "DeepSeek-R1-Distill-Qwen-7B", "Response should indicate 7B model")
 
 	t.Log("Test completed successfully: same modelName routes to different models via different ports")
+}
+
+// TestRouterConfigUpdate verifies that updating the router's ConfigMap and restarting
+// the router deployment causes the new configuration to take effect.
+// This test runs the shared test function with Gateway API enabled (with ParentRefs).
+func TestRouterConfigUpdate(t *testing.T) {
+	router.TestRouterConfigUpdateShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }

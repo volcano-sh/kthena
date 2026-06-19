@@ -219,14 +219,18 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 	// Build a set of existing pod names that are already bound to the model server
 	existingPodNames := sets.New[types.NamespacedName]()
 	for _, podInfo := range existingPods {
+		pod := podInfo.GetPod()
+		if pod == nil {
+			continue
+		}
 		if !podInfo.HasModelServer(utils.GetNamespaceName(ms)) {
 			// If the pod is not bound to the model server, establish the binding
-			if err := c.store.AppendModelServerToPod(podInfo.Pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
-				klog.Warningf("failed to append modelserver %s/%s to pod %s/%s: %v", ms.Namespace, ms.Name, podInfo.Pod.Namespace, podInfo.Pod.Name, err)
+			if err := c.store.AppendModelServerToPod(pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
+				klog.Warningf("failed to append modelserver %s/%s to pod %s/%s: %v", ms.Namespace, ms.Name, pod.Namespace, pod.Name, err)
 				continue
 			}
 		}
-		existingPodNames.Insert(utils.GetNamespaceName(podInfo.Pod))
+		existingPodNames.Insert(utils.GetNamespaceName(pod))
 	}
 
 	// Add new pods that are not yet bound to the store

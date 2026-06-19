@@ -153,8 +153,8 @@ func (h *DebugHandler) ListModelServers(c *gin.Context) {
 		if pods, err := h.store.GetPodsByModelServer(namespacedName); err == nil {
 			var podNames []string
 			for _, pod := range pods {
-				if pod.Pod != nil {
-					podNames = append(podNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+				if podName := pod.GetPodNamespacedName(); podName.Name != "" {
+					podNames = append(podNames, podName.Namespace+"/"+podName.Name)
 				}
 			}
 			response.AssociatedPods = podNames
@@ -164,8 +164,8 @@ func (h *DebugHandler) ListModelServers(c *gin.Context) {
 		if decodePods, err := h.store.GetDecodePods(namespacedName); err == nil {
 			var decodePodNames []string
 			for _, pod := range decodePods {
-				if pod.Pod != nil {
-					decodePodNames = append(decodePodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+				if podName := pod.GetPodNamespacedName(); podName.Name != "" {
+					decodePodNames = append(decodePodNames, podName.Namespace+"/"+podName.Name)
 				}
 			}
 			response.DecodePods = decodePodNames
@@ -175,8 +175,8 @@ func (h *DebugHandler) ListModelServers(c *gin.Context) {
 		if prefillPods, err := h.store.GetPrefillPods(namespacedName); err == nil {
 			var prefillPodNames []string
 			for _, pod := range prefillPods {
-				if pod.Pod != nil {
-					prefillPodNames = append(prefillPodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+				if podName := pod.GetPodNamespacedName(); podName.Name != "" {
+					prefillPodNames = append(prefillPodNames, podName.Namespace+"/"+podName.Name)
 				}
 			}
 			response.PrefillPods = prefillPodNames
@@ -321,8 +321,8 @@ func (h *DebugHandler) GetModelServer(c *gin.Context) {
 	if pods, err := h.store.GetPodsByModelServer(namespacedName); err == nil {
 		var podNames []string
 		for _, pod := range pods {
-			if pod.Pod != nil {
-				podNames = append(podNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+			if podName := pod.GetPodNamespacedName(); podName.Name != "" {
+				podNames = append(podNames, podName.Namespace+"/"+podName.Name)
 			}
 		}
 		response.AssociatedPods = podNames
@@ -332,8 +332,8 @@ func (h *DebugHandler) GetModelServer(c *gin.Context) {
 	if decodePods, err := h.store.GetDecodePods(namespacedName); err == nil {
 		var decodePodNames []string
 		for _, pod := range decodePods {
-			if pod.Pod != nil {
-				decodePodNames = append(decodePodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+			if podName := pod.GetPodNamespacedName(); podName.Name != "" {
+				decodePodNames = append(decodePodNames, podName.Namespace+"/"+podName.Name)
 			}
 		}
 		response.DecodePods = decodePodNames
@@ -343,8 +343,8 @@ func (h *DebugHandler) GetModelServer(c *gin.Context) {
 	if prefillPods, err := h.store.GetPrefillPods(namespacedName); err == nil {
 		var prefillPodNames []string
 		for _, pod := range prefillPods {
-			if pod.Pod != nil {
-				prefillPodNames = append(prefillPodNames, pod.Pod.Namespace+"/"+pod.Pod.Name)
+			if podName := pod.GetPodNamespacedName(); podName.Name != "" {
+				prefillPodNames = append(prefillPodNames, podName.Namespace+"/"+podName.Name)
 			}
 		}
 		response.PrefillPods = prefillPodNames
@@ -482,24 +482,24 @@ func (h *DebugHandler) convertPodInfoToResponse(namespacedName types.NamespacedN
 
 	// Add metrics
 	response.Metrics = &Metrics{
-		GPUCacheUsage:     podInfo.GPUCacheUsage,
-		RequestWaitingNum: podInfo.RequestWaitingNum,
-		RequestRunningNum: podInfo.RequestRunningNum,
-		TPOT:              podInfo.TPOT,
-		TTFT:              podInfo.TTFT,
+		GPUCacheUsage:     podInfo.GetGPUCacheUsage(),
+		RequestWaitingNum: podInfo.GetRequestWaitingNum(),
+		RequestRunningNum: podInfo.GetRequestRunningNum(),
+		TPOT:              podInfo.GetTPOT(),
+		TTFT:              podInfo.GetTTFT(),
 	}
 
 	// Add pod info if details are requested
-	if includeDetails && podInfo.Pod != nil {
+	if pod := podInfo.GetPod(); includeDetails && pod != nil {
 		response.PodInfo = &PodInfo{
-			PodIP:    podInfo.Pod.Status.PodIP,
-			NodeName: podInfo.Pod.Spec.NodeName,
-			Phase:    string(podInfo.Pod.Status.Phase),
-			Labels:   podInfo.Pod.Labels,
+			PodIP:    pod.Status.PodIP,
+			NodeName: pod.Spec.NodeName,
+			Phase:    string(pod.Status.Phase),
+			Labels:   podInfo.GetPodLabels(),
 		}
 
-		if podInfo.Pod.Status.StartTime != nil {
-			response.PodInfo.StartTime = podInfo.Pod.Status.StartTime.Format("2006-01-02T15:04:05Z")
+		if pod.Status.StartTime != nil {
+			response.PodInfo.StartTime = pod.Status.StartTime.Format("2006-01-02T15:04:05Z")
 		}
 	}
 

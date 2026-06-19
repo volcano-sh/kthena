@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -179,6 +180,36 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		ruleField := rulesField.Index(i)
 		if len(rule.TargetModels) == 0 {
 			allErrs = append(allErrs, field.Required(ruleField.Child("targetModels"), "each rule must have at least one target model"))
+			continue
+		}
+		totalWeight := uint32(0)
+		for j, targetModel := range rule.TargetModels {
+			targetModelField := ruleField.Child("targetModels").Index(j)
+			if targetModel.ModelServerName == "" {
+				allErrs = append(allErrs, field.Invalid(targetModelField.Child("modelServerName"), targetModel.ModelServerName, "modelServerName cannot be an empty string"))
+			}
+			if targetModel.Weight != nil {
+				totalWeight += *targetModel.Weight
+			} else {
+				totalWeight += 100
+			}
+		}
+		if totalWeight == 0 {
+			allErrs = append(allErrs, field.Invalid(ruleField.Child("targetModels"), totalWeight, "total weight must be greater than zero"))
+		}
+		if rule.ModelMatch != nil {
+			for key, sm := range rule.ModelMatch.Headers {
+				if sm != nil && sm.Regex != nil {
+					if _, err := regexp.Compile(*sm.Regex); err != nil {
+						allErrs = append(allErrs, field.Invalid(ruleField.Child("modelMatch").Child("headers").Key(key).Child("regex"), *sm.Regex, err.Error()))
+					}
+				}
+			}
+			if rule.ModelMatch.Uri != nil && rule.ModelMatch.Uri.Regex != nil {
+				if _, err := regexp.Compile(*rule.ModelMatch.Uri.Regex); err != nil {
+					allErrs = append(allErrs, field.Invalid(ruleField.Child("modelMatch").Child("uri").Child("regex"), *rule.ModelMatch.Uri.Regex, err.Error()))
+				}
+			}
 		}
 	}
 

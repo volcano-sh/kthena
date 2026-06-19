@@ -42,7 +42,7 @@ func BuildAutoscalingPolicy(autoscalingConfig *workload.AutoscalingPolicySpec, m
 	}
 }
 
-func BuildScalingPolicyBindingSpec(backend *workload.ModelBackend, name string) *workload.AutoscalingPolicyBindingSpec {
+func BuildScalingPolicyBindingSpec(backend *workload.ModelBackend, autoscalingPolicy *workload.AutoscalingPolicySpec, name string) *workload.AutoscalingPolicyBindingSpec {
 	return &workload.AutoscalingPolicyBindingSpec{
 		HomogeneousTarget: &workload.HomogeneousTarget{
 			Target: workload.Target{
@@ -50,13 +50,7 @@ func BuildScalingPolicyBindingSpec(backend *workload.ModelBackend, name string) 
 					Name: name,
 					Kind: workload.ModelServingKind.Kind,
 				},
-				MetricEndpoint: workload.MetricEndpoint{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							workload.RoleLabelKey: workload.ModelServingEntryPodLeaderLabel,
-						},
-					},
-				},
+				MetricSources: buildDefaultPodMetricSources(autoscalingPolicy),
 			},
 			MinReplicas: backend.MinReplicas,
 			MaxReplicas: backend.MaxReplicas,
@@ -65,6 +59,25 @@ func BuildScalingPolicyBindingSpec(backend *workload.ModelBackend, name string) 
 			Name: name,
 		},
 	}
+}
+
+func buildDefaultPodMetricSources(autoscalingPolicy *workload.AutoscalingPolicySpec) map[string]workload.MetricSource {
+	sources := make(map[string]workload.MetricSource)
+	if autoscalingPolicy == nil {
+		return sources
+	}
+	for _, metric := range autoscalingPolicy.Metrics {
+		sources[metric.Name] = workload.MetricSource{
+			Type: workload.PodMetricSourceType,
+			Pod: &workload.PodMetricSource{
+				Name: metric.Name,
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					workload.RoleLabelKey: workload.ModelServingEntryPodLeaderLabel,
+				}},
+			},
+		}
+	}
+	return sources
 }
 
 func BuildPolicyBindingMeta(spec *workload.AutoscalingPolicyBindingSpec, model *workload.ModelBooster, backendName string, name string) *metav1.ObjectMeta {
@@ -79,7 +92,7 @@ func BuildPolicyBindingMeta(spec *workload.AutoscalingPolicyBindingSpec, model *
 }
 
 func BuildScalingPolicyBinding(model *workload.ModelBooster, backend *workload.ModelBackend, name string) *workload.AutoscalingPolicyBinding {
-	spec := BuildScalingPolicyBindingSpec(backend, name)
+	spec := BuildScalingPolicyBindingSpec(backend, model.Spec.AutoscalingPolicy, name)
 	return &workload.AutoscalingPolicyBinding{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: workload.AutoscalingPolicyBindingKind.GroupVersion().String(),

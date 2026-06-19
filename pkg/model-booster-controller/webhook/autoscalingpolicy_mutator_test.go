@@ -96,7 +96,7 @@ func TestAutoscalingPolicyMutator_Handle_Success(t *testing.T) {
 			TolerancePercent: 10,
 			Metrics: []registryv1.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("80"),
 				},
 			},
@@ -142,7 +142,7 @@ func TestMutateAutoscalingPolicy_EmptyBehavior(t *testing.T) {
 			TolerancePercent: 10,
 			Metrics: []registryv1.AutoscalingPolicyMetric{
 				{
-					MetricName:  "cpu",
+					Name:        "cpu",
 					TargetValue: resource.MustParse("80"),
 				},
 			},

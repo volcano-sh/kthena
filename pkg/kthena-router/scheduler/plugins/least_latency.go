@@ -19,9 +19,9 @@ package plugins
 import (
 	"math"
 
-	"github.com/stretchr/testify/assert/yaml"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/yaml"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -45,7 +45,7 @@ type LeastLatencyArgs struct {
 
 func NewLeastLatency(pluginArg runtime.RawExtension) *LeastLatency {
 	var leastLatencyArgs LeastLatencyArgs
-	if yaml.Unmarshal(pluginArg.Raw, &leastLatencyArgs) != nil {
+	if pluginArg.Raw == nil || yaml.Unmarshal(pluginArg.Raw, &leastLatencyArgs) != nil {
 		klog.Errorf("Unmarshal LeastLatencyArgs error, setting default value")
 		leastLatencyArgs = LeastLatencyArgs{
 			0.5,

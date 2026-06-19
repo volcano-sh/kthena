@@ -18,8 +18,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,8 +38,7 @@ import (
 )
 
 const (
-	gracefulShutdownTimeout = 15 * time.Second
-	routerConfigFile        = "/etc/config/routerConfiguration.yaml"
+	routerConfigFile = "/etc/config/routerConfiguration.yaml"
 )
 
 func NewRouter(store datastore.Store) *router.Router {
@@ -80,7 +81,6 @@ func (s *Server) startRouter(ctx context.Context, router *router.Router, store d
 			listenerManager.StartListenersForGateway(gw)
 		}
 	} else {
-		_ = store
 		// No Gateway API: default HTTP server.
 		startListener(ctx, listenerConfig{
 			addr:             ":" + s.Port,
@@ -90,6 +90,8 @@ func (s *Server) startRouter(ctx context.Context, router *router.Router, store d
 			tlsMissingMsg:    "",
 			defaultRouter:    router,
 			readyCheck:       s.HasSynced,
+			activeRequests:   router.ActiveRequestCount,
+			drainTimeout:     s.drainTimeout,
 			startLog:         fmt.Sprintf("Starting default server on port %s", s.Port),
 			shutdownStartLog: "Shutting down default HTTP server ...",
 			shutdownDoneLog:  "Default HTTP server exited",
@@ -131,6 +133,18 @@ func (s *Server) startDebugServer(ctx context.Context, store datastore.Store) {
 		debugGroup.GET("/namespaces/:namespace/inferencepools/:name", debugHandler.GetInferencePool)
 	}
 
+	// Pprof endpoints for performance profiling
+	pprofGroup := engine.Group("/debug/pprof")
+	{
+		pprofGroup.GET("/", gin.WrapF(pprof.Index))
+		pprofGroup.GET("/profile", gin.WrapF(pprof.Profile))
+		pprofGroup.GET("/goroutine", gin.WrapF(pprof.Handler("goroutine").ServeHTTP))
+		pprofGroup.GET("/heap", gin.WrapF(pprof.Handler("heap").ServeHTTP))
+		pprofGroup.GET("/allocs", gin.WrapF(pprof.Handler("allocs").ServeHTTP))
+		pprofGroup.GET("/block", gin.WrapF(pprof.Handler("block").ServeHTTP))
+		pprofGroup.GET("/mutex", gin.WrapF(pprof.Handler("mutex").ServeHTTP))
+	}
+
 	server := &http.Server{
 		Addr:    fmt.Sprintf("localhost:%d", s.DebugPort),
 		Handler: engine.Handler(),
@@ -144,9 +158,9 @@ func (s *Server) startDebugServer(ctx context.Context, store datastore.Store) {
 
 	go func() {
 		<-ctx.Done()
-		// graceful shutdown
+		// graceful shutdown with timeout to allow ongoing debug requests to complete
 		klog.Info("Shutting down debug HTTP server ...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			klog.Errorf("Debug server shutdown failed: %v", err)
@@ -187,8 +201,10 @@ type listenerConfig struct {
 	tlsKeyFile    string
 	tlsMissingMsg string
 	// Default-server mode: health, metrics, /v1.
-	defaultRouter *router.Router
-	readyCheck    func() bool
+	defaultRouter  *router.Router
+	readyCheck     func() bool
+	activeRequests func() int64
+	drainTimeout   time.Duration
 	// Gateway mode (non-nil => use gateway branch).
 	gateway          *listenerGatewayConfig
 	startLog         string
@@ -289,16 +305,27 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 	go func() {
 		<-ctx.Done()
 		klog.Info(cfg.shutdownStartLog)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.drainTimeout)
 		defer cancel()
+
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			cfg.logShutdownErr(err)
+			if errors.Is(err, context.DeadlineExceeded) {
+				var remaining int64
+				if cfg.activeRequests != nil {
+					remaining = cfg.activeRequests()
+				}
+				klog.Warningf("Drain timeout exceeded after %vs: %d requests still inflight, force-closing",
+					cfg.drainTimeout.Seconds(), remaining)
+				srv.Close()
+			} else {
+				cfg.logShutdownErr(err)
+			}
 		}
+
 		if cfg.shutdownDoneLog != "" {
 			klog.Info(cfg.shutdownDoneLog)
 		}
 	}()
-
 	return srv
 }
 
@@ -493,6 +520,8 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 			tlsKeyFile:       tlsKeyFile,
 			tlsMissingMsg:    fmt.Sprintf("TLS enabled but cert or key file not specified for port %d", port),
 			gateway:          &listenerGatewayConfig{lm: lm, port: port},
+			activeRequests:   lm.router.ActiveRequestCount,
+			drainTimeout:     lm.server.drainTimeout,
 			startLog:         fmt.Sprintf("Starting Gateway listener server on port %d", port),
 			shutdownStartLog: fmt.Sprintf("Shutting down Gateway listener server on port %d ...", port),
 			shutdownDoneLog:  "",

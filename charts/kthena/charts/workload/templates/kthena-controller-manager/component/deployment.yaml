@@ -38,6 +38,9 @@ spec:
             {{- if .Values.controllerManager.kubeAPIBurst }}
             - --kube-api-burst={{ .Values.controllerManager.kubeAPIBurst }}
             {{- end }}
+            {{- if .Values.controllerManager.debugPort }}
+            - --debug-port={{ .Values.controllerManager.debugPort }}
+            {{- end }}
           imagePullPolicy: {{ .Values.controllerManager.image.pullPolicy }}
           resources:
             {{- toYaml .Values.controllerManager.resource | nindent 12 }}

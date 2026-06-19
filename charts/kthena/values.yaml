@@ -9,6 +9,8 @@ workload:
       tag: latest
       # -- Image pull policy for the Controller Manager.
       pullPolicy: IfNotPresent
+    # -- Debug server port for Controller Manager (set 0 to disable).
+    debugPort: 0
     downloaderImage:
       # -- Image repository for the Downloader.
       repository: ghcr.io/volcano-sh/downloader
@@ -81,6 +83,11 @@ networking:
       # -- Enable Gateway API Inference Extension features.<br/>
       # Requires `gatewayAPI.enabled` to be true.
       inferenceExtension: false
+    # -- The router will drain all in-flight requests before forcefully closing connections.
+    terminationGracePeriodSeconds: 330
+    # -- Drain timeout for kthena-router graceful shutdown.
+    # -- This should be less than terminationGracePeriodSeconds.
+    drainTimeout: 5m
 
 global:
   # -- Certificate Management Mode.<br/>

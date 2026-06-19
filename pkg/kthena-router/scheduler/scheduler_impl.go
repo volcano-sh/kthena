@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
@@ -44,6 +43,10 @@ type SchedulerImpl struct {
 	scorePlugins  []*scorePlugin
 
 	postScheduleHooks []framework.PostScheduleHook
+
+	// syncOnFlight is true when the least-request plugin is enabled.
+	// In that case Schedule() syncs on-flight counts from Redis before scoring.
+	syncOnFlight bool
 }
 
 type scorePlugin struct {
@@ -87,6 +90,22 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		}
 	}
 
+	leastRequestEnabled := false
+	for _, name := range filterPluginMap {
+		if name == plugins.LeastRequestPluginName {
+			leastRequestEnabled = true
+			break
+		}
+	}
+	if !leastRequestEnabled {
+		for name := range scorePluginMap {
+			if name == plugins.LeastRequestPluginName {
+				leastRequestEnabled = true
+				break
+			}
+		}
+	}
+
 	prefixCache := plugins.NewPrefixCache(store, pluginsArgMap[plugins.PrefixCachePluginName])
 	return &SchedulerImpl{
 		store:         store,
@@ -95,10 +114,17 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		postScheduleHooks: []framework.PostScheduleHook{
 			prefixCache,
 		},
+		syncOnFlight: leastRequestEnabled,
 	}
 }
 
 func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
+	// Sync on-flight counts from Redis before scoring when least-request is active,
+	// so cross-router traffic is reflected in pod scores. Rate-limited internally.
+	if s.syncOnFlight {
+		s.store.SyncOnFlightCounts()
+	}
+
 	// first filter out invalid pods that wonot be selected to loadbalance to.
 	pods, err := s.RunFilterPlugins(pods, ctx)
 	if err != nil {
@@ -128,14 +154,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		validPairs := 0
 
 		for i, decodePod := range ctx.DecodePods {
+			decodePodName := decodePod.GetPodNamespacedName()
+			if decodePodName.Name == "" {
+				continue
+			}
 			// Get prefill pods for the same PD group as the decode pod (O(1) lookup)
-			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName,
-				types.NamespacedName{
-					Namespace: decodePod.Pod.Namespace,
-					Name:      decodePod.Pod.Name,
-				})
+			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName, decodePodName)
 			if err != nil || len(selectedPods) == 0 {
-				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", klog.KObj(decodePod.Pod), "error", err)
+				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", decodePodName, "error", err)
 				continue
 			}
 
@@ -144,7 +170,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			bestPrefillPod := TopNPodInfos(scores, 1)
 			if len(bestPrefillPod) == 0 {
 				klog.V(4).InfoS("no valid prefill pods after scoring, skipping",
-					"decode instance", klog.KObj(decodePod.Pod))
+					"decode instance", decodePodName)
 				continue
 			}
 			prefillPods[i] = bestPrefillPod[0]
@@ -199,8 +225,8 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 
 		klog.V(4).Infof("ScorePlugin: %s", scorePlugin.plugin.Name())
 		for k, v := range scores {
-			if k.Pod != nil {
-				klog.V(4).Infof("Pod: %s/%s, Score: %d", k.Pod.Namespace, k.Pod.Name, v)
+			if podName := k.GetPodNamespacedName(); podName.Name != "" {
+				klog.V(4).Infof("Pod: %s/%s, Score: %d", podName.Namespace, podName.Name, v)
 			}
 			if _, ok := res[k]; !ok {
 				res[k] = v * scorePlugin.weight
@@ -213,8 +239,8 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 	if klog.V(4).Enabled() {
 		klog.Info("Final Pod Scores:")
 		for k, v := range res {
-			if k.Pod != nil {
-				klog.Infof("  Pod: %s/%s, Final Score: %d", k.Pod.Namespace, k.Pod.Name, v)
+			if podName := k.GetPodNamespacedName(); podName.Name != "" {
+				klog.Infof("  Pod: %s/%s, Final Score: %d", podName.Namespace, podName.Name, v)
 			}
 		}
 	}

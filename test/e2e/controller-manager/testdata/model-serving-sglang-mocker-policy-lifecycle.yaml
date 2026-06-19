@@ -1,0 +1,32 @@
+# ModelServing for controller-manager autoscale e2e (policy lifecycle).
+# SGLang-format Prometheus metrics on :30000/metrics (dynamo-mocker-sglang).
+# Autoscale tests assume pinned image emits sglang:token_usage (gauge/counter) such that after
+# scale-down to one entry pod, aggregate sum / 0.1 >= 5 so maxReplicas can be reached (target "100m").
+
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: autoscale-policy-lifecycle-ms
+spec:
+  replicas: 4
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    rollingUpdateConfiguration:
+      maxUnavailable: 2
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+                imagePullPolicy: IfNotPresent
+                ports:
+                  - name: metrics
+                    containerPort: 30000
+                env:
+                  - name: MODEL_NAME
+                    value: "Qwen/Qwen3-8B"
+        workerReplicas: 0
