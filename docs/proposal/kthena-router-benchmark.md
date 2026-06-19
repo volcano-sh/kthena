@@ -69,6 +69,8 @@ The benchmark framework centers on a **sandwich isolation model**: Router perfor
                                     + router internals)
 ```
 
+![](images/router_benchmark_design.png)
+
 #### Why Dual Control is Necessary
 
 | What happens if... | Consequence |
@@ -77,78 +79,40 @@ The benchmark framework centers on a **sandwich isolation model**: Router perfor
 | Backend response is uncontrolled | Real GPU inference variance (batch size, KV cache) drowns out routing overhead |
 | Neither is controlled | Results are non-reproducible; regression detection is meaningless |
 
-The framework consists of four loosely coupled components around this sandwich:
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    Benchmark Orchestrator (CLI)                   │
-│  - Reads scenario config                                          │
-│  - Coordinates lifecycle of all components                        │
-│  - Aggregates results and generates report                        │
-└──────┬──────────────┬────────────────┬───────────────────────────┘
-       │              │                │
-       ▼              ▼                ▼
-┌─────────────┐ ┌─────────────┐ ┌──────────────────┐
-│   Load      │ │   Metrics   │ │   Result         │
-│  Generator  │ │  Collector  │ │   Reporter       │
-│             │ │             │ │                  │
-│ - HTTP/SSE  │ │ - Router    │ │ - JSON output    │
-│ - Concurrency│ │   Prometheus│ │ - Markdown report│
-│ - Rate limit │ │   metrics   │ │ - CSV export     │
-│ - Token-aware│ │ - pprof CPU │ │ - Comparison vs  │
-│   metrics    │ │   /mem snap │ │   baseline       │
-└──────┬───────┘ └──────┬──────┘ └──────────────────┘
-       │                │
-       ▼                ▼
-┌──────────────────────────────────────────────┐
-│            Target Environment                 │
-│  ┌──────────────┐    ┌──────────────────────┐│
-│  │ Kthena Router│◄───│ Mock LLM Backend(s)  ││
-│  │  (under test)│    │ - Streaming response  ││
-│  └──────────────┘    │ - Configurable TTFT   ││
-│                      │ - Configurable TPOT   ││
-│                      │ - Variable token count││
-│                      │ - Prometheus metrics   ││
-│                      └──────────────────────┘│
-└──────────────────────────────────────────────┘
-```
-
 **Key insight for Router benchmarking**: the router does not generate TTFT/TPOT—it **observes** them from backend engines. The mock backend must simulate not only streaming responses, but also the **Prometheus metric emission patterns** of real vLLM/SGLang engines (identical metric names, histogram buckets, update frequency at `/metrics` on port 8000/30000). This allows the router's existing metrics parsers (`backend/vllm/metrics.go`, `backend/sglang/metrics.go`) and scheduler plugins (`least_latency.go`, `least_request.go`) to function identically to how they would against real backends.
 
-#### 1. Benchmark Orchestrator (`cmd/benchmark/main.go`)
+#### 1. Benchmark Orchestrator
 
-A Go CLI tool that:
+A CLI tool that:
 - Parses a YAML scenario configuration file
-- Deploys Router + mock backends into the target Kubernetes cluster (kind for local, ephemeral cluster for CI)
-- Waits for all components to be healthy
 - Starts the Load Generator
 - Starts the Metrics Collector
 - Runs the benchmark for the configured duration
 - Collects results, tears down resources, generates the report
 - Exits with code 0 on success, non-zero on benchmark failure or resource exhaustion
 
-#### 2. Load Generator (`pkg/benchmark/loadgen/`)
+#### 2. Load Generator
 
-A Go-based HTTP load generator tailored for LLM serving benchmarks. Key features:
+A load generator tailored for LLM serving benchmarks. Key features:
 
-- **Concurrency model**: Configurable number of concurrent virtual users (VUs), each maintaining a persistent HTTP connection for SSE streaming
+- **Concurrency**: Configurable number of concurrent virtual users (VUs), each maintaining a persistent HTTP connection for SSE streaming
 - **Rate control**: Supports constant rate (requests/second), ramp-up profiles (linear/exponential, e.g., 10→50→100 QPS over phases), and Gamma-distributed burstiness (shape parameter γ controlling inter-request gap distribution)
 - **Token-aware metrics**: Tracks TTFT (time to first token) and TPOT (inter-token interval) from SSE stream timing
 - **Configurable request body**: Supports variable prompt lengths (short ~100 tokens → long ~4000 tokens) using tokenizer-aware payload generation
-- **Output**: Latency histograms, success/error counts, throughput (requests/sec and tokens/sec), streamed to Metrics Collector
+- **Metrics Output**: Latency histograms, success/error counts, throughput (requests/sec and tokens/sec), streamed to Metrics Collector
 
-#### 3. Metrics Collector (`pkg/benchmark/metrics/`)
+#### 3. Metrics Collector
 
 Collects data from multiple sources during a benchmark run:
 
 - **Load Generator metrics**: Latency histograms, throughput, error rates (via in-process shared memory or gRPC streaming)
 - **Router Prometheus metrics**: Scrapes Router's `/metrics` endpoint for Go runtime metrics (goroutines, heap, GC), HTTP handler latencies, connection pool stats
 - **pprof profiles**: Takes CPU profile snapshots and heap profiles during steady-state benchmark phase
-- **System metrics** (optional): If running alongside node-exporter, collects CPU/memory usage of the Router pod
+- **Environment metrics** (optional): If running alongside node-exporter, collects CPU/memory usage of the Router pod
 
 Data is stored in memory during the run and serialized to JSON at completion.
 
-#### 4. Result Reporter (`pkg/benchmark/reporter/`)
+#### 4. Result Reporter
 
 Generates outputs from raw benchmark data:
 
@@ -181,7 +145,7 @@ load:
     mode: "rate"            # rate | timestamp_replay | trace_file
     rate: 50                # requests/second (when mode=rate)
 
-  # Traffic shape (inspired by AISBench traffic_cfg)
+  # Traffic shape
   traffic:
     burstiness: 0.5         # Gamma shape param: 0=uniform, 1=Poisson, <1=bursty
     ramp:
@@ -253,9 +217,9 @@ output:
 - **Orthogonality**: Parameters within each side are also independent; `burstiness` and `ramp` can be combined with any `prompts` distribution
 - **Fidelity**: The mock backend emits the same Prometheus metric names, histogram buckets, and scrape ports as real vLLM/SGLang engines—Router's existing parsers work unchanged
 
-### Mock LLM Inference Backend (`pkg/benchmark/mockbackend/`)
+### Mock LLM Inference Backend
 
-A purpose-built Go HTTP server that simulates an OpenAI-compatible `/v1/chat/completions` endpoint with SSE streaming. This is essential because:
+It simulates an OpenAI-compatible `/v1/chat/completions` endpoint with SSE streaming. This is essential because:
 
 - Real LLM backends require GPUs, which are expensive and not available in CI
 - Mock backends provide **deterministic, reproducible latency profiles**, which real backends cannot guarantee due to hardware variance
@@ -283,7 +247,7 @@ A purpose-built Go HTTP server that simulates an OpenAI-compatible `/v1/chat/com
 | `METRICS_PORT` | 8000 | Prometheus /metrics endpoint port (8000=vLLM, 30000=SGLang) |
 | `METRICS_ENGINE` | vllm | Metrics naming convention: `vllm` or `sglang` |
 
-The mock backend must also expose a `/metrics` endpoint that emits Prometheus metrics with the **identical naming, histogram bucket distribution, and data types** as a real vLLM or SGLang engine. This is essential because the Router's scheduler plugins (`least_latency.go`, `least_request.go`) consume these scraped metrics to make routing decisions. Key metrics to simulate:
+The mock backend must also expose a `/metrics` endpoint that emits Prometheus metrics with the identical naming, histogram bucket distribution, and data types as a real vLLM or SGLang engine. This is essential because the Router's scheduler plugins (`least_latency.go`, `least_request.go`) **consume** these scraped metrics to make routing decisions. Key metrics to simulate:
 
 | Metric | vLLM Name | SGLang Name | Type |
 |--------|-----------|-------------|------|
@@ -293,15 +257,25 @@ The mock backend must also expose a `/metrics` endpoint that emits Prometheus me
 | Time to First Token | `vllm:time_to_first_token_seconds` | `sglang:time_to_first_token_seconds` | Histogram |
 | Time Per Output Token | `vllm:time_per_output_token_seconds` | `sglang:time_per_output_token_seconds` | Histogram |
 
-### Test Scenarios
+### ⭐ Test Scenarios
 
-> ⭐️Test scenarios also work as user stories.
+The test strategy uses a **two-tier** approach that differs not only in scope but in methodology—the two tiers answer fundamentally different questions about the Router:
 
-The test strategy uses a **two-tier** approach: a lightweight **Smoke Test Suite** (the 8 scenarios from the original proposal) for quick validation, plus an **Orthogonal Condition Matrix** to systematically explore the full design space.
+| Dimension | Tier 1: Smoke Test Suite | Tier 2: Orthogonal Condition Matrix |
+|---|---|---|
+| **Methodology** | Black-box | Profiling-driven (white-box) |
+| **Model** | **Sandwich Model** — both sides of the Router are fully controlled; the Router itself is treated as an opaque system | **Component Isolation** — each scenario targets a specific Router internal subsystem with pprof instrumentation enabled |
+| **Core question** | *How fast? How much? Where does it break?* | *Which code path is the bottleneck? What is the per-component cost?* |
+| **What we vary** | External pressure parameters: QPS, concurrency, prompt length, backend count | Conditions that stress specific code paths: scheduler plugin chain, connection pool, SSE relay, metrics parsing, lock contention |
+| **What we measure** | End-to-end metrics: TTFT, TPOT, request throughput, error rate — all observed from outside the Router | Internal metrics: per-function CPU via pprof flame graphs, goroutine profiles, heap allocations, lock contention profiles, scheduler plugin execution duration |
+| **Output** | Regression detection: "did P95 latency increase by >5%?" | Optimization guidance: "`leastLatencyPlugin.Score()` accounts for 12% of CPU under burst load — candidate for caching" |
+| **Execution cadence** | Every PR (CI, ~15 min) | Nightly / on-demand (characterization jobs) |
 
-#### Tier 1: Smoke Test Suite (Quick Validation)
+In short: Tier 1 tells you **if** the Router is slow. Tier 2 tells you **why**.
 
-These 8 scenarios serve as the "fast path"—run them first to catch obvious regressions. They represent the most representative single-variable sweeps:
+#### Tier 1: Smoke Test Suite — Black-box & Quick Validation
+
+These 8 scenarios serve as the "fast path"—run them first to catch obvious regressions. They operate under the Sandwich Model: user traffic (AIPerf) and backend response (Dynamo Mocker) are both fully controlled, allowing the Router's end-to-end behavior to be measured in isolation. The Router is treated as a black box — we vary external pressure and observe external outcomes:
 
 | # | Scenario | What It Validates | Key Parameters |
 |---|----------|-------------------|---------------|
@@ -316,11 +290,31 @@ These 8 scenarios serve as the "fast path"—run them first to catch obvious reg
 
 **Smoke test execution time target**: All 8 scenarios should complete within **15 minutes** on a kind cluster.
 
-#### Tier 2: Orthogonal Condition Matrix (Comprehensive Coverage)
+#### Tier 2: Orthogonal Condition Matrix — Profiling & Optimization Oriented
 
-For deeper characterization, conditions from the User Traffic (left) and Backend Response (right) control planes are cross-combined:
+Where Tier 1 measures the Router from the outside, Tier 2 looks inside — each scenario is designed to stress a specific Router subsystem and produce actionable pprof data (CPU flame graphs, heap profiles, goroutine dumps, mutex contention traces). The methodology is **component isolation**: vary conditions that exercise a single code path while keeping everything else constant, then profile the result.
 
-##### User Traffic Control Plane
+##### Mapping Scenarios to Router Internals
+
+Every Tier 2 scenario is paired with instrumentation on a specific internal component. The control-plane dimensions below are not abstract — they correspond directly to code paths in the Router:
+
+| Scenario Dimension | Router Component Under Test | Code Path (Representative) | What Profiling Reveals |
+|---|---|---|---|
+| **Schedule Mode** (burst/ramp) | Request dispatch → scheduler invocation rate | `pkg/kthena-router/scheduler/` — how often `Schedule()` is called under burst | Lock contention on scheduler mutex; goroutine scheduling latency |
+| **QPS Level** (10→1000) | Connection pool & HTTP transport | `net/http.Transport.RoundTrip` → backend connection management | `MaxIdleConnsPerHost` saturation; TCP handshake overhead; HTTP/2 stream contention |
+| **Burstiness (γ)** | Fair queue depth & admission control | `pkg/kthena-router/fairqueue/` — queue push/pop under Gamma-distributed arrival | Queue-induced latency; head-of-line blocking; memory pressure from queued requests |
+| **Ramp Strategy** | Scheduler plugin chain adaptation | `pkg/kthena-router/plugins/least_latency.go` — plugin scoring frequency during load ramp | Scheduler staleness window; plugin `Score()` CPU cost at high invocation rates |
+| **Prompt Distribution** | Request body parsing & deserialization | `encoding/json.Unmarshal` in proxy handler → `pkg/kthena-router/proxy/` | JSON alloc cost for large (4000-token) vs. small (100-token) prompts; `json.RawMessage` pass-through efficiency |
+| **Max-Token Distribution** | SSE stream relay & response buffering | `pkg/kthena-router/proxy/` — SSE chunk forwarding loop | Per-chunk copy overhead; buffer growth for long (4096-token) streams; goroutine lifetime |
+| **Concurrent Connections** | Goroutine model & memory footprint | `go runtime` — goroutine count, heap size per connection | Goroutine leak detection; memory pressure at 500+ concurrent SSE connections |
+| **Pod Count** (1→30) | Backend discovery & health checking | `pkg/kthena-router/discovery/` — endpoint watch & health probe loop | O(n) scaling in endpoint iteration; health-check CPU cost at high pod counts |
+| **TTFT/TPOT Profile** | Scheduler scoring accuracy | `pkg/kthena-router/plugins/least_latency.go` — TTFT histogram consumption | Scoring bias toward low-variance pods; percentile selection logic correctness |
+| **Error Rate** | Error propagation & retry logic | `pkg/kthena-router/proxy/` — upstream error handling | Retry storm overhead; error response allocation; circuit-breaker CPU cost |
+| **Pod Churn** | Failover & connection draining | `pkg/kthena-router/proxy/` — in-flight request draining on backend removal | Connection drain latency; orphaned goroutine detection; reconnect storm cost |
+| **Metrics Update Interval** | Scheduler decision freshness | `pkg/kthena-router/backend/vllm/metrics.go` — scrape interval effect on scheduler | Quantifies the staleness penalty: how much worse is routing with 10s-old vs. 1s-old metrics? |
+| **Engine Type** (vLLM/SGLang/mixed) | Cross-engine metric normalization | `pkg/kthena-router/backend/sglang/metrics.go` — SGLang → vLLM metric mapping | Per-call normalization overhead; correctness of cross-engine comparison in `least_latency` |
+
+##### User Traffic
 
 | Dimension | Values | Description |
 |-----------|--------|-------------|
@@ -332,7 +326,7 @@ For deeper characterization, conditions from the User Traffic (left) and Backend
 | **Max-Token Distribution** | fixed(128), normal(μ=256,σ=100), long-tail(128+2048+4096) | Distribution of requested output lengths |
 | **Concurrent Connections** | 1, 10, 100, 500 | Persistent SSE connections per load generator instance |
 
-##### Backend Response Control Plane
+##### Backend Response
 
 | Dimension | Values | Description |
 |-----------|--------|-------------|
@@ -344,7 +338,7 @@ For deeper characterization, conditions from the User Traffic (left) and Backend
 | **Metrics Update Interval** | 1s, 5s, 10s | Backend /metrics scrape frequency → affects scheduler decision freshness |
 | **Engine Type** | `vllm`, `sglang`, `mixed(2 vllm + 2 sglang)` | Prometheus metric format on /metrics endpoint |
 
-##### High-Value Combinations (Priority Matrix)
+##### High-Value Combinations
 
 Not all cross-combinations are equally valuable. The following matrix identifies the **highest-priority intersections**—conditions where Router-specific behavior is most likely to diverge from baseline:
 
@@ -442,18 +436,93 @@ The optimization phase follows a structured approach to prevent scope creep:
 
 ## Implementation Plan
 
-### Phase 1: Framework Foundation (Weeks 1-4)
+The framework consists of four loosely coupled components around this sandwich:
 
-- Set up development environment (kind cluster via `local-up-kthena.sh`)
-- Implement Mock LLM Backend with configurable latency profiles
-- Implement Load Generator with SSE-aware timing and token counting
-- Implement Benchmark Orchestrator CLI with YAML scenario parsing
-- Implement Metrics Collector (loadgen metrics + Router Prometheus scraping)
-- Implement Result Reporter (JSON + Markdown output)
-- Write unit tests for all components
-- Deliverable: Framework runs end-to-end on a local kind cluster
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    Benchmark Orchestrator (CLI)                   │
+│  - Reads scenario config                                          │
+│  - Coordinates lifecycle of all components                        │
+│  - Aggregates results and generates report                        │
+└──────┬──────────────┬────────────────┬───────────────────────────┘
+       │              │                │
+       ▼              ▼                ▼
+┌─────────────┐ ┌─────────────┐ ┌──────────────────┐
+│   Load      │ │   Metrics   │ │   Result         │
+│  Generator  │ │  Collector  │ │   Reporter       │
+│             │ │             │ │                  │
+│ - HTTP/SSE  │ │ - Router    │ │ - JSON output    │
+│ - Concurrency│ │   Prometheus│ │ - Markdown report│
+│ - Rate limit │ │   metrics   │ │ - CSV export     │
+│ - Token-aware│ │ - pprof CPU │ │ - Comparison vs  │
+│   metrics    │ │   /mem snap │ │   baseline       │
+└──────┬───────┘ └──────┬──────┘ └──────────────────┘
+       │                │
+       ▼                ▼
+┌──────────────────────────────────────────────┐
+│            Target Environment                 │
+│  ┌──────────────┐    ┌──────────────────────┐│
+│  │ Kthena Router│◄───│ Mock LLM Backend(s)  ││
+│  │  (under test)│    │ - Streaming response  ││
+│  └──────────────┘    │ - Configurable TTFT   ││
+│                      │ - Configurable TPOT   ││
+│                      │ - Variable token count││
+│                      │ - Prometheus metrics   ││
+│                      └──────────────────────┘│
+└──────────────────────────────────────────────┘
+```
 
-### Phase 2: Scenarios & CI (Weeks 5-6)
+![](images/router_benchmark_implement.png)
+
+### Phase 1: Framework Foundation
+
+Phase 1 introduces the two upstream tools that form the left and right sides of the sandwich model, instead of building load generator and mock backend from scratch. This decision was driven by three factors: (1) these tools are already maintained by the NVIDIA Dynamo ecosystem and used in production benchmarking, (2) they provide richer, battle-tested features than an in-house implementation could deliver in the same timeframe, and (3) kthena's E2E tests already use Dynamo Mocker (PR #920), so adopting it here provides consistency across the test stack.
+
+#### Tool 1: AIPerf — Load Generator
+
+**[AIPerf](https://github.com/ai-dynamo/aiperf)** is NVIDIA's official LLM benchmark load generator. It replaces the originally planned Go-based load generator and provides:
+
+| Capability              | AIPerf Feature | Why It Matters |
+|-------------------------|---|---|
+| Rate Control            | Constant rate (QPS), Poisson/Gamma/Constant arrival distributions | Precisely reproduces real-world LLM traffic burstiness patterns |
+| Credit-Based Flow Control | Prevents overloading the system under test via a credit mechanism, analogous to TCP congestion control | Ensures the Router is measured under a controlled, repeatable load — not an overload flood |
+| Concurrency             | Configurable persistent connections per load-generator instance | Matches the SSE long-connection model of LLM serving |
+| Prompt Distribution     | Token-aware payload generation with configurable length distributions | Exercises the Router's request-body parsing and forwarding overhead |
+| Built-in E2E Metrics    | TTFT, TPOT, Request Latency, Output Token Throughput, Request Throughput — all reported per-run with percentile breakdowns | Eliminates the need to build SSE-aware timing from scratch |
+| Trace Replay            | `timestamp_replay` mode consumes captured trace files for reproducible workload reproduction | Enables future A/B comparison against real production traffic traces |
+
+**Why AIPerf over a custom Go load generator:** AIPerf is actively maintained, already handles SSE streaming metrics (TTFT/TPOT), and provides credit-based flow control that prevents the load generator itself from becoming the bottleneck. Building equivalent functionality in Go would require reimplementing token-aware SSE timing, rate-limiting with statistical distributions, and a metrics pipeline — at least 2–3 weeks of work for a result that would still lack the real-time dashboard and trace replay features.
+
+#### Tool 2: Dynamo Mocker — Mock Backend
+
+**[Dynamo Mocker](https://github.com/ai-dynamo/dynamo/blob/main/docs/mocker/mocker.md)** is a GPU-free, high-fidelity LLM inference simulator from the NVIDIA Dynamo project. It replaces the originally planned Go mock backend and provides:
+
+| Capability | Dynamo Mocker Feature | Why It Matters |
+|---|---|---|
+| OpenAI-Compatible API | `POST /v1/chat/completions` with SSE streaming | Router connects to it identically to a real vLLM/SGLang backend |
+| Configurable Latency | TTFT mean/stddev and TPOT mean/stddev per backend profile | Enables homogeneous, heterogeneous, and degrading backend scenarios |
+| Engine Mode Switching | Operates in vLLM mode or SGLang mode per instance | Router's `backend/vllm/metrics.go` and `backend/sglang/metrics.go` parsers are exercised identically to production |
+| Prometheus Metrics | Exposes `/metrics` on port 8000 (vLLM) or 30000 (SGLang) with identical metric names, histogram buckets, and data types as real engines | Router's scheduler plugins (`least_latency.go`, `least_request.go`) consume scraped metrics and make routing decisions indistinguishable from real-backend operation |
+| KV Cache Simulation | Simulates GPU KV cache usage and capacity pressure | Exercises Router's cache-aware scheduling (prefix caching, GPU locality) |
+| Prefix Caching | Supports automatic prefix caching with configurable hit rates | Validates Router's prefix-aware routing behavior |
+| GPU-Free | Runs as a standard Kubernetes Deployment, no GPU required | Deployable on any kind cluster, developer laptop, or CI runner |
+
+**Why Dynamo Mocker over a custom Go mock backend:** Dynamo Mocker already implements the full vLLM/SGLang metrics surface — including histogram buckets, metric naming conventions, and scrape intervals — that the Router's scheduler depends on. A custom implementation would need to replicate this entire surface correctly, which is error-prone: a single misconfigured histogram bucket could cause the `least_latency` scheduler to behave differently than in production. Additionally, Dynamo Mocker's KV cache simulation and engine-mode switching have no equivalent in a purpose-built mock — adding them would significantly expand scope.
+
+#### Remaining Components to Build
+
+With the left and right sides provided by upstream tools, Phase 1 focuses on the "glue" — the components that tie the sandwich together and make it a reusable, CI-ready framework:
+
+- **Set up development environment**: kind cluster via `local-up-kthena.sh`, deploy Kthena Router, verify connectivity between all three sandwich components (AIPerf → Router → Dynamo Mocker)
+- **Implement Benchmark Orchestrator**: Reads YAML scenario config, deploys mock backends with appropriate latency profiles, applies Router scheduling configuration, launches AIPerf Jobs, collects results, and orchestrates the full A/B test lifecycle (deploy → run A → swap config → run B → compare)
+- **Implement Scenario Configuration Format**: YAML-based scenario files that express the full sandwich model — user traffic (AIPerf settings), backend response (mocker profiles), and routing strategy — in a single, version-controllable file
+- **Implement Metrics Collector**: Aggregates AIPerf output JSON (TTFT, TPOT, throughput, error counts) with Router Prometheus metrics (scheduler plugin duration, active upstream requests, fairness queue depth) and produces a unified metrics dataset
+- **Implement Result Reporter**: Generates JSON (machine-readable), Markdown (human-readable summary with comparison tables), and CSV (spreadsheet analysis) outputs with before/after delta computation for A/B test comparison
+- **Build Kubernetes resource definitions**: Mocker Deployment/Service, ModelServer CRD, ModelRoute CRD (routes to mocker ModelServer), router ConfigMaps for different scheduling strategies, and AIPerf Job template
+- **Write unit tests** for the orchestrator, metrics collector, and reporter
+- **Deliverable**: Framework runs end-to-end on a kind cluster
+
+### Phase 2: Scenarios & CI
 
 - Create all 8 smoke test YAML files for quick CI validation
 - Create P0 priority matrix YAML files (5 scenarios exposing Router-unique failure modes)
@@ -462,7 +531,7 @@ The optimization phase follows a structured approach to prevent scope creep:
 - Write the runbook documenting the full test procedure
 - Deliverable: CI pipeline runs smoke test suite on every PR; P0 matrix runs nightly
 
-### Phase 3: Benchmark Report (Weeks 7-8)
+### Phase 3: Benchmark Report
 
 - Run the full scenario suite and collect data
 - Analyze results: latency distributions, throughput curves, resource utilization patterns
@@ -470,7 +539,7 @@ The optimization phase follows a structured approach to prevent scope creep:
 - Write the benchmark report with visualizations (tables, latency CDFs, throughput vs. QPS charts)
 - Deliverable: Comprehensive benchmark report (Markdown + PDF)
 
-### Phase 4: Optimization (Weeks 9-11)
+### Phase 4: Optimization
 
 - Identify up to 3 hotspots from profiling data
 - Implement targeted optimizations (one PR per hotspot)
@@ -501,7 +570,7 @@ The optimization phase follows a structured approach to prevent scope creep:
 ## Open Questions
 
 1. **Baseline storage strategy**: Should baseline results be stored as JSON files in the repo (simpler, but bloats repo size over time), or fetched from a GitHub Release artifact (cleaner, but more complex CI setup)?
-2. **Mock backend implementation**: Should the mock backend be built from scratch (full control, but more effort) or by extending the existing Dynamo Mocker used in kthena E2E tests (less effort, but limited to Dynamo Mocker's extension points)? The latter provides an existing `/v1/chat/completions` endpoint and `/metrics` emission—only latency configurability needs to be added.
+2. **Mock backend implementation**: Resolved — the framework adopts Dynamo Mocker (see Phase 1) rather than building a mock backend from scratch. Dynamo Mocker provides the full vLLM/SGLang metrics surface, KV cache simulation, and engine-mode switching that a custom implementation would need to replicate. The "extend Dynamo Mocker" option was chosen; only latency configurability and per-pod profile assignment (via environment variables) needed integration work.
 3. **Orthogonal matrix execution model**: The P0/P1 matrix contains ~20 high-value combinations. Should these be run as (a) a single nightly CI job, (b) on-demand manual triggers, or (c) a subset (e.g., 5 P0 scenarios) in CI + the rest on-demand?
 4. **Multi-Router-instance benchmarks**: Should Phase 2 include scenarios with horizontally scaled Router instances behind a load balancer? This would measure the effectiveness of Router statelessness but adds significant CI complexity.
 5. **Real-backend validation**: After the LFX term, should the framework add an optional "real backend" mode using vLLM/SGLang for validation that mock backend results correlate with real-world performance?
@@ -516,8 +585,7 @@ The optimization phase follows a structured approach to prevent scope creep:
 - sglang bench_serving: https://github.com/sgl-project/sglang/blob/main/python/sglang/bench_serving.py
 - Go pprof Documentation: https://pkg.go.dev/net/http/pprof
 - LFX Mentorship 2026 Term 2: https://github.com/cncf/mentoring/blob/main/programs/lfx-mentorship/2026/02-Jun-Aug/README.md
-- **AISBench benchmark framework**: https://github.com/AISBench/benchmark — Reference for traffic pattern design (burstiness via Gamma distribution, ramp-up profiles, timestamp-based trace replay) and orthogonal condition decomposition
-- **Dynamo Mocker**: https://github.com/FAUST-BENCHOU/dynamo/tree/main/examples/backends/mocker — Existing mock backend for vLLM/SGLang used in kthena E2E tests (PR #920). Provides OpenAI-compatible `/v1/chat/completions` and `/metrics` endpoints. The proposed mock backend extends this with configurable latency profiles, token-level streaming control, and cross-engine metrics simulation
+- **Dynamo Mocker**: https://github.com/FAUST-BENCHOU/dynamo/blob/main/docs/mocker/mocker.md — Existing mock backend for vLLM/SGLang used in kthena E2E tests (PR #920). Provides OpenAI-compatible `/v1/chat/completions` and `/metrics` endpoints. The proposed mock backend extends this with configurable latency profiles, token-level streaming control, and cross-engine metrics simulation
 - **AISBench Mooncake Trace**: https://github.com/AISBench/benchmark/blob/master/ais_bench/benchmark/configs/datasets/mooncake_trace/README.md — Deterministic prompt generation with hash_id caching and timestamp-based request scheduling for reproducible benchmarks
 - **Real-world LLM workload characterization**: "Towards Efficient and Reliable LLM Serving: A Real-World Workload Study" (arXiv:2401.17644) — First public dataset of production LLM serving traces, documenting burstiness patterns and request distributions
 - vLLM Benchmarking Guide: https://docs.vllm.ai/en/stable/benchmarking/
