@@ -1,7 +1,9 @@
 # ModelServing for controller-manager autoscale e2e (policy lifecycle).
-# SGLang-format Prometheus metrics on :30000/metrics (dynamo-mocker-sglang).
-# Autoscale tests assume pinned image emits sglang:token_usage (gauge/counter) such that after
-# scale-down to one entry pod, aggregate sum / 0.1 >= 5 so maxReplicas can be reached (target "100m").
+# SGLang-format Prometheus metrics on :30000/metrics (sglang-inference-sim).
+# Autoscale tests use sglang:kv_available_tokens, a stable non-zero gauge (KV cache free slots)
+# that is emitted per entry pod regardless of traffic, so after scale-down to one entry pod the
+# aggregate sum / 0.1 >= 5 and maxReplicas can be reached (target "100m"). token_usage is unsuitable
+# here because the mock reports it as 0 while idle.
 
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
