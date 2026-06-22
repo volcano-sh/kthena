@@ -601,6 +601,18 @@ func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
 }
 
+func GetMaxUnavailableForRole(role workloadv1alpha1.Role) (int, bool, error) {
+	if role.MaxUnavailable == nil {
+		return 0, false, nil
+	}
+	replicas := 1
+	if role.Replicas != nil {
+		replicas = int(*role.Replicas)
+	}
+	maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(role.MaxUnavailable, replicas, false)
+	return maxUnavailable, true, err
+}
+
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
 	copy := RemoveRoleReplicasForRoleTemplateHash(role)
 	return Revision(copy)

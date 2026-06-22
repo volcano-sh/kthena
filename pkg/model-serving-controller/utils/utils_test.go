@@ -303,3 +303,61 @@ func TestGetMaxUnavailable(t *testing.T) {
 		})
 	}
 }
+
+func TestGetMaxUnavailableForRole(t *testing.T) {
+	tests := []struct {
+		name           string
+		role           workloadv1alpha1.Role
+		wantValue      int
+		wantConfigured bool
+		wantErr        bool
+	}{
+		{
+			name:           "unset",
+			role:           workloadv1alpha1.Role{Name: "decode", Replicas: ptr.To[int32](4)},
+			wantConfigured: false,
+		},
+		{
+			name: "absolute value",
+			role: workloadv1alpha1.Role{
+				Name:           "decode",
+				Replicas:       ptr.To[int32](4),
+				MaxUnavailable: ptr.To(intstr.FromInt(2)),
+			},
+			wantValue:      2,
+			wantConfigured: true,
+		},
+		{
+			name: "percentage rounds down",
+			role: workloadv1alpha1.Role{
+				Name:           "decode",
+				Replicas:       ptr.To[int32](5),
+				MaxUnavailable: ptr.To(intstr.FromString("50%")),
+			},
+			wantValue:      2,
+			wantConfigured: true,
+		},
+		{
+			name: "nil replicas defaults to one",
+			role: workloadv1alpha1.Role{
+				Name:           "decode",
+				MaxUnavailable: ptr.To(intstr.FromInt(1)),
+			},
+			wantValue:      1,
+			wantConfigured: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotValue, gotConfigured, err := GetMaxUnavailableForRole(tt.role)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantValue, gotValue)
+			assert.Equal(t, tt.wantConfigured, gotConfigured)
+		})
+	}
+}
