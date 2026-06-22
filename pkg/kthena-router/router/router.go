@@ -325,6 +325,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		if matchedModelRoute != nil {
 			rateLimitKey = fmt.Sprintf("%s/%s", matchedModelRoute.Namespace, matchedModelRoute.Name)
+			c.Set("rateLimitKey", rateLimitKey)
 		} else {
 			// HTTPRoute or fallback: use model-scoped
 			rateLimitKey = modelName
