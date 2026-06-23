@@ -201,6 +201,7 @@ type Store interface {
 	// PDGroup methods for efficient PD scheduling
 	GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo, error)
 	GetPrefillPods(modelServerName types.NamespacedName) ([]*PodInfo, error)
+	GetEncodePods(modelServerName types.NamespacedName) ([]*PodInfo, error)
 	GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error)
 
 	// New methods for callback management
@@ -772,6 +773,26 @@ func (s *store) GetPrefillPods(modelServerName types.NamespacedName) ([]*PodInfo
 	}
 
 	return prefillPods, nil
+}
+
+// GetEncodePods returns all encode pods for a given model server
+func (s *store) GetEncodePods(modelServerName types.NamespacedName) ([]*PodInfo, error) {
+	value, ok := s.modelServer.Load(modelServerName)
+	if !ok {
+		return nil, fmt.Errorf("model server not found: %v", modelServerName)
+	}
+	ms := value.(*modelServer)
+
+	encodePodNames := ms.getAllEncodePods()
+	encodePods := make([]*PodInfo, 0, len(encodePodNames))
+
+	for _, podName := range encodePodNames {
+		if value, ok := s.pods.Load(podName); ok {
+			encodePods = append(encodePods, value.(*PodInfo))
+		}
+	}
+
+	return encodePods, nil
 }
 
 // GetPrefillPodsForDecodeGroup returns prefill pods that match the same PD group as the decode pod

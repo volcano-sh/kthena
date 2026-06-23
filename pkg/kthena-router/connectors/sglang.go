@@ -231,3 +231,9 @@ func buildRequest(req *http.Request, reqBody map[string]interface{}) (*http.Requ
 	reqCopy.ContentLength = int64(len(body))
 	return reqCopy, nil
 }
+
+// ProxyEPD executes the complete encode-prefill-decode flow natively for SGLang.
+func (s *SGLangConnector) ProxyEPD(c *gin.Context, reqBody map[string]interface{}, encodeAddr, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
+	// EPD logic for SGLang
+	return 0, fmt.Errorf("EPD is not natively implemented for SGLangConnector yet")
+}

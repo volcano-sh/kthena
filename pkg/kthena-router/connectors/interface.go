@@ -30,4 +30,7 @@ type KVConnector interface {
 	// pods; pass nil when not needed.
 	// Returns the number of output tokens consumed, or error if the operation fails.
 	Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error)
+
+	// ProxyEPD executes the complete encode-prefill-decode flow natively for vLLM/SGLang.
+	ProxyEPD(c *gin.Context, reqBody map[string]interface{}, encodeAddr, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error)
 }

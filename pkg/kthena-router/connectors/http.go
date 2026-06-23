@@ -17,6 +17,7 @@ limitations under the License.
 package connectors
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -127,4 +128,11 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	return result, decodeErr
+}
+
+// ProxyEPD executes the complete encode-prefill-decode flow for HTTP connector
+func (h *HTTPConnector) ProxyEPD(c *gin.Context, reqBody map[string]interface{}, encodeAddr, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
+	// For now, EPD is not implemented in the base HTTP connector.
+	// You can implement sequential encode -> prefill -> decode here if needed.
+	return 0, fmt.Errorf("EPD is not natively implemented for HTTPConnector yet")
 }

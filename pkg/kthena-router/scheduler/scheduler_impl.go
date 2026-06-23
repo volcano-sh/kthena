@@ -145,6 +145,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			return fmt.Errorf("no decode pod found")
 		}
 
+		// Get encode pods if they exist (for EPD mode)
+		encodePods, _ := s.store.GetEncodePods(ctx.ModelServerName)
+		if len(encodePods) > 0 {
+			klog.V(4).Info("Running score plugins for encode pod")
+			encodeScores := s.RunScorePlugins(encodePods, ctx)
+			ctx.EncodePods = TopNPodInfos(encodeScores, topN)
+		}
+
 		klog.V(4).Info("Running score plugins for decode pod")
 		scores := s.RunScorePlugins(decodePods, ctx)
 

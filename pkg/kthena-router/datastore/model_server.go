@@ -99,6 +99,13 @@ func (m *modelServer) categorizePodForPDGroup(podName types.NamespacedName, podL
 	isPrefillPod := matchesLabels(podLabels, pdGroup.PrefillLabels)
 	if isPrefillPod {
 		pdGroupPods.AddPrefillPod(podName)
+		return
+	}
+
+	// Check if pod matches encode labels (for EPD)
+	isEncodePod := matchesLabels(podLabels, pdGroup.EncodeLabels)
+	if isEncodePod {
+		pdGroupPods.AddEncodePod(podName)
 	}
 }
 
@@ -151,6 +158,18 @@ func (m *modelServer) getAllPrefillPods() []types.NamespacedName {
 	var result []types.NamespacedName
 	for _, pdGroupPods := range m.pdGroups {
 		result = append(result, pdGroupPods.GetPrefillPods()...)
+	}
+	return result
+}
+
+// getAllEncodePods returns all encode pods across all PD groups
+func (m *modelServer) getAllEncodePods() []types.NamespacedName {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	var result []types.NamespacedName
+	for _, pdGroupPods := range m.pdGroups {
+		result = append(result, pdGroupPods.GetEncodePods()...)
 	}
 	return result
 }

@@ -28,6 +28,7 @@ type PDGroupPods struct {
 	mutex       sync.RWMutex
 	decodePods  sets.Set[types.NamespacedName] // Pods that match decode labels
 	prefillPods sets.Set[types.NamespacedName] // Pods that match prefill labels
+	encodePods  sets.Set[types.NamespacedName] // Pods that match encode labels
 }
 
 // NewPDGroupPods creates a new PDGroupPods instance
@@ -35,6 +36,7 @@ func NewPDGroupPods() *PDGroupPods {
 	return &PDGroupPods{
 		decodePods:  sets.New[types.NamespacedName](),
 		prefillPods: sets.New[types.NamespacedName](),
+		encodePods:  sets.New[types.NamespacedName](),
 	}
 }
 
@@ -52,6 +54,13 @@ func (p *PDGroupPods) AddPrefillPod(podName types.NamespacedName) {
 	p.prefillPods.Insert(podName)
 }
 
+// AddEncodePod adds a pod to the encode pods set
+func (p *PDGroupPods) AddEncodePod(podName types.NamespacedName) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.encodePods.Insert(podName)
+}
+
 // RemoveDecodePod removes a pod from the decode pods set
 func (p *PDGroupPods) RemoveDecodePod(podName types.NamespacedName) {
 	p.mutex.Lock()
@@ -66,12 +75,20 @@ func (p *PDGroupPods) RemovePrefillPod(podName types.NamespacedName) {
 	p.prefillPods.Delete(podName)
 }
 
+// RemoveEncodePod removes a pod from the encode pods set
+func (p *PDGroupPods) RemoveEncodePod(podName types.NamespacedName) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	p.encodePods.Delete(podName)
+}
+
 // RemovePod removes a pod from both decode and prefill sets
 func (p *PDGroupPods) RemovePod(podName types.NamespacedName) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	p.decodePods.Delete(podName)
 	p.prefillPods.Delete(podName)
+	p.encodePods.Delete(podName)
 }
 
 // GetDecodePods returns a copy of decode pods
@@ -88,9 +105,16 @@ func (p *PDGroupPods) GetPrefillPods() []types.NamespacedName {
 	return p.prefillPods.UnsortedList()
 }
 
+// GetEncodePods returns a copy of encode pods
+func (p *PDGroupPods) GetEncodePods() []types.NamespacedName {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.encodePods.UnsortedList()
+}
+
 // IsEmpty returns true if both decode and prefill pod sets are empty
 func (p *PDGroupPods) IsEmpty() bool {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
-	return p.decodePods.Len() == 0 && p.prefillPods.Len() == 0
+	return p.decodePods.Len() == 0 && p.prefillPods.Len() == 0 && p.encodePods.Len() == 0
 }

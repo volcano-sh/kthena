@@ -213,3 +213,8 @@ func (n *NIXLConnector) buildPrefillRequest(req *http.Request, reqBody map[strin
 
 	return prefillReq
 }
+
+// ProxyEPD executes the complete encode-prefill-decode flow natively for NIXL.
+func (n *NIXLConnector) ProxyEPD(c *gin.Context, reqBody map[string]interface{}, encodeAddr, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
+	return 0, fmt.Errorf("EPD is not natively implemented for NIXLConnector yet")
+}

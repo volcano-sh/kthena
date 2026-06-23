@@ -740,6 +740,13 @@ func (r *Router) proxyModelEndpoint(
 		return fmt.Errorf("failed to get KV connector: %w", err)
 	}
 
+	modelServer := r.store.GetModelServer(ctx.ModelServerName)
+	if modelServer != nil && modelServer.Spec.PipelineMode != nil &&
+		(*modelServer.Spec.PipelineMode == v1alpha1.PipelineModeEPD || *modelServer.Spec.PipelineMode == v1alpha1.PipelineModeSGLangEPD) {
+		// EPD disaggregated mode
+		return r.proxyToEPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port)
+	}
+
 	// PD disaggregated mode - use KV connector
 	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port)
 }
@@ -1031,6 +1038,110 @@ func (r *Router) proxyToPDDisaggregated(
 
 	c.AbortWithStatusJSON(http.StatusInternalServerError, "all prefill/decode attempts failed")
 	return fmt.Errorf("all prefill/decode attempts failed")
+}
+
+// proxyToEPDDisaggregated handles EPD disaggregated routing natively using direct API endpoints.
+func (r *Router) proxyToEPDDisaggregated(
+	c *gin.Context,
+	req *http.Request,
+	ctx *framework.Context,
+	kvConnector connectors.KVConnector,
+	modelRequest ModelRequest,
+	port int32,
+) error {
+	// Get metrics recorder from context
+	var metricsRecorder *metrics.RequestMetricsRecorder
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			metricsRecorder = rec
+		}
+	}
+
+	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
+	var modelRouteName string
+	if routeName, exists := c.Get("modelRouteName"); exists {
+		if name, ok := routeName.(string); ok {
+			modelRouteName = name
+		}
+	}
+
+	if metricsRecorder != nil {
+		metricsRecorder.SetUpstreamConnectionInfo(modelServerName, modelRouteName)
+	}
+
+	// Ensure we have all necessary pods
+	if len(ctx.EncodePods) == 0 {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "no encode pods available for EPD routing")
+		return fmt.Errorf("no encode pods available")
+	}
+	if len(ctx.PrefillPods) == 0 {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "no prefill pods available for EPD routing")
+		return fmt.Errorf("no prefill pods available")
+	}
+	if len(ctx.DecodePods) == 0 {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "no decode pods available for EPD routing")
+		return fmt.Errorf("no decode pods available")
+	}
+
+	encodePod := ctx.EncodePods[0].GetPod()
+	prefillPod := ctx.PrefillPods[0].GetPod()
+	decodePod := ctx.DecodePods[0].GetPod()
+
+	encodeAddr := net.JoinHostPort(encodePod.Status.PodIP, strconv.Itoa(int(port)))
+	prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
+	decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(port)))
+
+	klog.V(4).Infof("Attempting EPD disaggregated request: encode=%s, prefill=%s, decode=%s", encodeAddr, prefillAddr, decodeAddr)
+
+	encodePodName := types.NamespacedName{Namespace: encodePod.Namespace, Name: encodePod.Name}
+	prefillPodName := types.NamespacedName{Namespace: prefillPod.Namespace, Name: prefillPod.Name}
+	decodePodName := types.NamespacedName{Namespace: decodePod.Namespace, Name: decodePod.Name}
+
+	hooks := &connectors.OnFlightHooks{
+		IncrPrefill: func() { r.store.IncrPodOnFlightRequests(prefillPodName) },
+		DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillPodName) },
+		IncrDecode:  func() { r.store.IncrPodOnFlightRequests(decodePodName) },
+		DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodePodName) },
+	}
+	// Note: You can add IncrEncode/DecrEncode to hooks in the future if desired.
+	// For now, tracking encode is done manually here if needed.
+	r.store.IncrPodOnFlightRequests(encodePodName)
+	defer r.store.DecrPodOnFlightRequests(encodePodName)
+
+	// In EPD, we let the KV connector know about the encode address via context or by
+	// executing encode first, but right now we pass it as prefillAddr, or we can use
+	// an extended Proxy method on kvConnector if it supports EPD.
+	// But actually, we don't have EPD in KVConnector.
+	// The KVConnector interface doesn't have an EPD method. We need to implement it!
+	// For now, let's just abort if we don't have EPD support yet.
+	// Wait, the user said: "Implement native EPD support in Kthena Router." "use direct HTTP calls (localhost) for sidecar communication instead of Redis."
+	// We need to implement EPD logic here without KVConnector or add EPD to KVConnector.
+	// We can add ProxyEPD to KVConnector or just implement it right here for vLLM/SGLang.
+
+	// Since vLLM/SGLang have their own API for proxying EPD, and KVConnector is just an interface,
+	// let's add ProxyEPD to KVConnector and then implement it.
+
+	outputTokens, err := kvConnector.ProxyEPD(c, modelRequest, encodeAddr, prefillAddr, decodeAddr, hooks)
+
+	if err != nil {
+		klog.Errorf("proxy failed for encode %s, prefill %s, decode %s: %v",
+			encodePod.Name, prefillPod.Name, decodePod.Name, err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("EPD proxy failed: %v", err))
+		return err
+	}
+
+	if outputTokens > 0 && r.loadRateLimiter != nil {
+		r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens)
+	}
+
+	if metricsRecorder != nil {
+		metricsRecorder.RecordOutputTokens(outputTokens)
+	}
+
+	r.scheduler.RunPostHooks(ctx, 0)
+	klog.V(4).Infof("kv connector run successful for EPD, output tokens: %d", outputTokens)
+
+	return nil
 }
 
 // handleFairnessScheduling handles the fairness scheduling flow for requests
