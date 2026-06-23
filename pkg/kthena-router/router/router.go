@@ -56,9 +56,18 @@ import (
 
 const (
 	// Context keys for gin context
-	GatewayKey = "gatewayKey"
-	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
+	GatewayKey            = "gatewayKey"
+	PromptKey             = "promptKey" // store parsed ChatMessage, which will be reused
+	MatchedRouteResultKey = "matchedRouteResult"
 )
+
+// MatchedRouteResult holds the results of early route matching to be passed down the request context
+type MatchedRouteResult struct {
+	ModelServerName types.NamespacedName
+	IsLora          bool
+	ModelRoute      *v1alpha1.ModelRoute
+	MatchError      error
+}
 
 func getEnvBool(key string, fallback bool) bool {
 	if value, ok := os.LookupEnv(key); ok {
@@ -265,14 +274,12 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Early route matching
 		matchedModelServerName, matchedIsLora, matchedModelRoute, matchedMatchError := r.store.MatchModelServer(modelName, c.Request, gatewayKey)
-		c.Set("matchedModelServerName", matchedModelServerName)
-		c.Set("matchedIsLora", matchedIsLora)
-		if matchedModelRoute != nil {
-			c.Set("matchedModelRoute", matchedModelRoute)
-		}
-		if matchedMatchError != nil {
-			c.Set("matchedMatchError", matchedMatchError)
-		}
+		c.Set(MatchedRouteResultKey, &MatchedRouteResult{
+			ModelServerName: matchedModelServerName,
+			IsLora:          matchedIsLora,
+			ModelRoute:      matchedModelRoute,
+			MatchError:      matchedMatchError,
+		})
 
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
@@ -408,16 +415,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var isLora bool
 	var err error
 	// Retrieve cached ModelRoute matching results from the context
-	if cachedServerName, exists := c.Get("matchedModelServerName"); exists {
-		modelServerName = cachedServerName.(types.NamespacedName)
-		if cachedIsLora, ok := c.Get("matchedIsLora"); ok {
-			isLora = cachedIsLora.(bool)
-		}
-		if cachedRoute, ok := c.Get("matchedModelRoute"); ok {
-			modelRoute = cachedRoute.(*v1alpha1.ModelRoute)
-		}
-		if cachedErr, ok := c.Get("matchedMatchError"); ok {
-			err = cachedErr.(error)
+	if val, exists := c.Get(MatchedRouteResultKey); exists {
+		if result, ok := val.(*MatchedRouteResult); ok {
+			modelServerName = result.ModelServerName
+			isLora = result.IsLora
+			modelRoute = result.ModelRoute
+			err = result.MatchError
 		}
 	} else {
 		// Fallback to match if not cached
