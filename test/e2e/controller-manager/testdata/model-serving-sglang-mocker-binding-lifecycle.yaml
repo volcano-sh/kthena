@@ -1,5 +1,5 @@
 # ModelServing for controller-manager autoscale e2e (binding lifecycle).
-# Same mocker/token_usage assumptions as model-serving-sglang-mocker-policy-lifecycle.yaml.
+# Same mocker/kv_available_tokens assumptions as model-serving-sglang-mocker-policy-lifecycle.yaml.
 
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing

@@ -13,9 +13,9 @@ spec:
         kind: ModelServing
         name: autoscale-binding-lifecycle-ms
       metricSources:
-        sglang:token_usage:
+        sglang:kv_available_tokens:
           type: Pod
           pod:
-            name: sglang:token_usage
+            name: sglang:kv_available_tokens
             port: 30000
             uri: /metrics
