@@ -2559,6 +2559,7 @@ func TestManageRoleReplicas(t *testing.T) {
 		initialRoleIDs   []int
 		addEntryPod      bool
 		mismatchOwnerUID bool
+		clearOwnerRefs   bool
 		expectedRoleSize int
 		expectedPodCount int
 		expectRequeue    bool
@@ -2600,6 +2601,17 @@ func TestManageRoleReplicas(t *testing.T) {
 			initialRoleIDs:   []int{0},
 			addEntryPod:      true,
 			mismatchOwnerUID: true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			expectRequeue:    true,
+		},
+		{
+			name:             "reenqueue when pod owner reference is missing",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			clearOwnerRefs:   true,
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
@@ -2667,6 +2679,9 @@ func TestManageRoleReplicas(t *testing.T) {
 				entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, 0, revision, "test-roleTemplateHash")
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
+				}
+				if tt.clearOwnerRefs {
+					entryPod.OwnerReferences = nil
 				}
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)

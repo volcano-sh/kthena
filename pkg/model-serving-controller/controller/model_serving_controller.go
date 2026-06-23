@@ -980,8 +980,15 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		for _, pod := range pods {
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 				// If the pod is not owned by the ModelServing, we do not need to handle it.
+				ownerUID := types.UID("")
+				for _, ref := range pod.GetOwnerReferences() {
+					if ref.Kind == workloadv1alpha1.ModelServingKind.Kind && ref.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() {
+						ownerUID = ref.UID
+						break
+					}
+				}
 				klog.Warningf("manageRoleReplicas: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
 				c.enqueueModelServingAfter(ms, 1*time.Second)
 				break
 			}
