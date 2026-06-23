@@ -28,6 +28,7 @@ import (
 // HTTPConnector implements simple HTTP-based KV transfer
 // Many kv connectors like LMCache, MoonCakeStore can use this
 type HTTPConnector struct {
+	encodeRequest  *http.Request
 	prefillRequest *http.Request
 	decodeRequest  *http.Request
 }
@@ -40,6 +41,15 @@ func NewHTTPConnector() KVConnector {
 // Name returns the connector type name
 func (h *HTTPConnector) Name() string {
 	return "default"
+}
+
+// encode executes encode request
+func (h *HTTPConnector) encode(req *http.Request, encodeAddr string) error {
+	req.URL.Host = encodeAddr
+	req.URL.Scheme = "http"
+
+	klog.V(4).Infof("Sending encode request to %s", encodeAddr)
+	return prefillerProxy(nil, req)
 }
 
 // prefill executes prefill request
@@ -86,6 +96,93 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	err := h.prefill(h.prefillRequest, prefillAddr)
+
+	if hooks != nil && hooks.DecrPrefill != nil {
+		hooks.DecrPrefill()
+	}
+	if metricsRecorder != nil {
+		statusCode := "200"
+		if err != nil {
+			statusCode = "500"
+		}
+		metricsRecorder.FinishPrefillPhase(statusCode)
+		metricsRecorder.DecActiveUpstreamRequests()
+	}
+
+	if err != nil {
+		return 0, err
+	}
+
+	// --- Decode phase ---
+	if metricsRecorder != nil {
+		metricsRecorder.StartDecodePhase()
+		metricsRecorder.IncActiveUpstreamRequests()
+	}
+	if hooks != nil && hooks.IncrDecode != nil {
+		hooks.IncrDecode()
+	}
+
+	result, decodeErr := h.decode(c, h.decodeRequest, decodeAddr)
+
+	if hooks != nil && hooks.DecrDecode != nil {
+		hooks.DecrDecode()
+	}
+	if metricsRecorder != nil {
+		statusCode := "200"
+		if decodeErr != nil {
+			statusCode = "500"
+		}
+		metricsRecorder.FinishDecodePhase(statusCode)
+		metricsRecorder.DecActiveUpstreamRequests()
+	}
+
+	return result, decodeErr
+}
+
+// ProxyEPD executes the complete encode-prefill-decode flow for HTTP connector
+func (h *HTTPConnector) ProxyEPD(c *gin.Context, reqBody map[string]interface{}, encodeAddr, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
+	// Get metrics recorder from context
+	var metricsRecorder *metrics.RequestMetricsRecorder
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			metricsRecorder = rec
+		}
+	}
+
+	decodeBody := cloneReqBody(reqBody)
+	h.decodeRequest = BuildDecodeRequest(c, c.Request, decodeBody)
+
+	prefillBody := cloneReqBody(reqBody)
+	h.prefillRequest = buildPrefillRequest(c.Request, prefillBody)
+
+	encodeBody := cloneReqBody(reqBody)
+	h.encodeRequest = buildEncodeRequest(c.Request, encodeBody)
+
+	// --- Encode phase ---
+	if hooks != nil && hooks.IncrEncode != nil {
+		hooks.IncrEncode()
+	}
+
+	err := h.encode(h.encodeRequest, encodeAddr)
+
+	if hooks != nil && hooks.DecrEncode != nil {
+		hooks.DecrEncode()
+	}
+
+	if err != nil {
+		return 0, err
+	}
+
+	// --- Prefill phase ---
+	if metricsRecorder != nil {
+		metricsRecorder.StartPrefillPhase()
+		metricsRecorder.IncActiveUpstreamRequests()
+	}
+	if hooks != nil && hooks.IncrPrefill != nil {
+		hooks.IncrPrefill()
+	}
+
+	err = h.prefill(h.prefillRequest, prefillAddr)
 
 	if hooks != nil && hooks.DecrPrefill != nil {
 		hooks.DecrPrefill()
