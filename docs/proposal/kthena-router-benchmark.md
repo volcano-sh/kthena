@@ -148,12 +148,12 @@ environment:
 load:
   # Request scheduling mode
   schedule:
-    mode: "rate"            # rate | timestamp_replay | trace_file
-    rate: 50                # requests/second (when mode=rate)
+    mode: "constant_rate"     # constant_rate | ramp_up | burst | timestamp_replay
+    rate: 50                  # requests/second (when mode=constant_rate)
 
   # Traffic shape
   traffic:
-    burstiness: 0.5         # Gamma shape param: 0=uniform, 1=Poisson, <1=bursty
+    burstiness: 0.5         # Gamma shape param (γ>0): 1=Poisson-like, <1=bursty, >1=smoother
     ramp:
       strategy: "none"      # none | linear | exponential
       # start_rps: 10       # only when ramp enabled
@@ -326,7 +326,7 @@ Every Tier 2 scenario is paired with instrumentation on a specific internal comp
 |-----------|--------|-------------|
 | **Schedule Mode** | `constant_rate`, `ramp_up`, `burst`, `timestamp_replay` | How requests are dispatched over time |
 | **QPS Level** | 10, 50, 100, 500, 1000 | Base request rate (when mode ≠ timestamp_replay) |
-| **Burstiness (γ)** | 0 (uniform), 0.5 (bursty), 1 (Poisson), 10 (smooth) | Gamma distribution shape parameter for inter-request gaps |
+| **Burstiness (γ)** | 0.1 (very bursty), 0.5 (bursty), 1 (Poisson), 10 (smooth) | Gamma distribution shape parameter for inter-request gaps |
 | **Ramp Strategy** | none, linear, exponential | RPS growth pattern (start_rps → end_rps over scenario duration) |
 | **Prompt Distribution** | fixed(512), narrow(μ=512,σ=100), wide(μ=1000,σ=800), bimodal(100+4000) | Distribution of input token counts |
 | **Max-Token Distribution** | fixed(128), normal(μ=256,σ=100), long-tail(128+2048+4096) | Distribution of requested output lengths |
