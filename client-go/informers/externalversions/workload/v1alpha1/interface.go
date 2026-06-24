@@ -32,6 +32,8 @@ type Interface interface {
 	ModelBoosters() ModelBoosterInformer
 	// ModelServings returns a ModelServingInformer.
 	ModelServings() ModelServingInformer
+	// ModelServingRoleReplicas returns a ModelServingRoleReplicaInformer.
+	ModelServingRoleReplicas() ModelServingRoleReplicaInformer
 }
 
 type version struct {
@@ -63,4 +65,9 @@ func (v *version) ModelBoosters() ModelBoosterInformer {
 // ModelServings returns a ModelServingInformer.
 func (v *version) ModelServings() ModelServingInformer {
 	return &modelServingInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// ModelServingRoleReplicas returns a ModelServingRoleReplicaInformer.
+func (v *version) ModelServingRoleReplicas() ModelServingRoleReplicaInformer {
+	return &modelServingRoleReplicaInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

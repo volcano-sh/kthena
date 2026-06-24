@@ -112,6 +112,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.ModelBoosterSpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"):
 		return &applyconfigurationworkloadv1alpha1.ModelServingApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServingRoleReplica"):
+		return &applyconfigurationworkloadv1alpha1.ModelServingRoleReplicaApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServingRoleReplicaSpec"):
+		return &applyconfigurationworkloadv1alpha1.ModelServingRoleReplicaSpecApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServingRoleReplicaStatus"):
+		return &applyconfigurationworkloadv1alpha1.ModelServingRoleReplicaStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServingSpec"):
 		return &applyconfigurationworkloadv1alpha1.ModelServingSpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServingStatus"):

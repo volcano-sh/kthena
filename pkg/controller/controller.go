@@ -24,11 +24,13 @@ import (
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	autoscaler "github.com/volcano-sh/kthena/pkg/autoscaler/controller"
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	modelserving "github.com/volcano-sh/kthena/pkg/model-serving-controller/controller"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
@@ -77,6 +79,8 @@ func SetupController(ctx context.Context, cc Config) {
 	var mc *modelbooster.ModelBoosterController
 	var msc *modelserving.ModelServingController
 	var lwsc *modelserving.LWSController
+	var rrsc *modelserving.RoleReplicaSyncController
+	var workloadInformerFactory informersv1alpha1.SharedInformerFactory
 	var ac *autoscaler.AutoscaleController
 
 	for ctrl, enable := range cc.Controllers {
@@ -94,6 +98,16 @@ func SetupController(ctx context.Context, cc Config) {
 					klog.Errorf("Failed to initialize LWS controller: %v", err)
 				} else if lwsc == nil {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
+				}
+
+				_, err = apiextClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), "modelservingrolereplicas.workload.serving.volcano.sh", metav1.GetOptions{})
+				if err == nil {
+					workloadInformerFactory = informersv1alpha1.NewSharedInformerFactory(client, 0)
+					rrsc = modelserving.NewRoleReplicaSyncController(kubeClient, client, workloadInformerFactory)
+				} else if apierrors.IsNotFound(err) {
+					klog.Info("ModelServingRoleReplica CRD not found, role replica sync disabled")
+				} else {
+					klog.Errorf("Failed to check ModelServingRoleReplica CRD: %v", err)
 				}
 			case AutoscalerController:
 				ac = autoscaler.NewAutoscaleController(kubeClient, client)
@@ -117,6 +131,12 @@ func SetupController(ctx context.Context, cc Config) {
 					}
 				}()
 				klog.Info("ModelServing lws controller started")
+			}
+
+			if rrsc != nil {
+				workloadInformerFactory.Start(ctx.Done())
+				go rrsc.Run(ctx, cc.Workers)
+				klog.Info("RoleReplicaSync controller started")
 			}
 		}
 		if ac != nil {

@@ -25,3 +25,5 @@ type AutoscalingPolicyBindingExpansion interface{}
 type ModelBoosterExpansion interface{}
 
 type ModelServingExpansion interface{}
+
+type ModelServingRoleReplicaExpansion interface{}
