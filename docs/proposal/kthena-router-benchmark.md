@@ -8,18 +8,24 @@
 
 ## Summary
 
-This proposal introduces a reusable, config-driven benchmark framework for the Kthena Router — the LLM routing data-plane component of the Volcano/Kthena project. The framework uses a **sandwich isolation model**: user traffic (Load Generator) and backend responses (Mock LLM Backend) are both fully controlled, allowing the Router's performance to be measured in isolation. It enables reproducible performance measurement under realistic LLM traffic patterns, produces structured reports for regression detection across releases, and supports local and CI execution. Where the benchmark surfaces clear bottlenecks, targeted optimizations will be proposed and submitted as upstream PRs with before/after performance data.
+This proposal introduces a reusable, config-driven benchmark framework for the Kthena Router — the LLM routing data-plane component of the Volcano/Kthena project. The framework uses a **sandwich isolation model**: user traffic (Load Generator) and backend responses (Mock LLM Backend) are both fully controlled. While the Router itself accounts for a small fraction of end-to-end LLM inference latency (typically <5%), the real performance lever lies in the **score plugins** — the scheduler components that decide which backend pod receives each request. The framework therefore focuses on measuring and comparing **plugin combination effectiveness** under varied backend conditions. It enables reproducible performance measurement under realistic LLM traffic patterns, produces structured reports for regression detection across releases, and supports local and CI execution. Where the benchmark reveals suboptimal plugin behavior, targeted plugin optimizations will be proposed and submitted as upstream PRs with before/after performance data.
 
 ## Motivation
 
-Kthena Router is the critical path for every inference request in a Kthena deployment. As the project matures toward production-grade reliability, the community lacks:
+Kthena Router sits on the critical path for every inference request. But in LLM serving, the Router's own contribution to end-to-end latency is dwarfed by engine-side inference time.
 
-1. **Reproducible performance baselines** — No standardized way to measure throughput, latency, or resource utilization under controlled conditions
-2. **Regression detection** — No automated mechanism to catch performance regressions introduced by PRs or dependency updates
-3. **Bottleneck visibility** — No tooling to identify hotspots in the request processing pipeline (routing overhead, connection pooling, serialization costs)
-4. **Capacity planning data** — No benchmarks to help operators size Router deployments for their expected traffic
+The Router cannot make the engine faster — but it *can* choose *which* engine to send each request to. That decision is made by the **score plugin chain** (`least_latency.go`, `kvcache_aware.go`, `prefix.go`, `gpu.go`, etc.). A bad plugin combination routes requests to overloaded or cold-cache engines, causing the >95% engine time to explode. A good one avoids those engines and keeps tail latency in check.
 
-The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/tree/main/benchmark/kthena-router) tool is a thin wrapper around `sglang/bench_serving.py` packaged as a Kubernetes Job. It measures end-to-end throughput but lacks scenario configurability, CI integration, router-specific metrics, and bottleneck analysis — making it unsuitable for the community's growing needs.
+The community already recognizes this. Issue [#1100](https://github.com/volcano-sh/kthena/issues/1100) documented that a single `KVCacheAware.Score()` call adds 30–100ms of scheduling latency per request, more than the Router's own parsing and proxying combined. This is a plugin-level bottleneck, not a Router-level one. The community wants to (a) observe plugin behavior quantitatively, (b) stress-test plugin chains under varied backend conditions, and (c) optimize plugin combinations based on data.
+
+Currently, the community lacks:
+
+1. **Plugin-level observability** — `kthena_router_scheduler_plugin_duration_seconds` exists but is not systematically collected, correlated with scenario conditions, or compared across plugin combinations
+2. **Controlled backend simulation** — No way to test how plugins behave when backends degrade (KV cache pressure, queue buildup, heterogeneous TTFT) without deploying real GPUs
+3. **Reproducible plugin benchmarks** — No YAML-configurable scenario format that varies both traffic patterns *and* backend engine conditions simultaneously
+4. **Plugin optimization data** — No before/after comparison data for plugin changes (different weight factors, caching strategies, new plugin types), making it impossible to evaluate whether a plugin PR actually improves scheduling quality
+
+The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/tree/main/benchmark/kthena-router) tool measures end-to-end throughput but lacks plugin-specific metrics, controlled backend simulation, CI integration, and scenario configurability.
 
 ### Goals
 
@@ -30,9 +36,9 @@ The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/t
 - Define an **orthogonal condition matrix** identifying high-value test combinations that expose Router-unique failure modes (scheduler staleness, failover latency, cross-engine metrics, fair queue behavior under burst)
 - Retain the 8 original scenarios as a **Smoke Test Suite** for fast (~15 min) regression detection in CI
 - Build a **mock LLM inference backend** in Go that simulates realistic streaming token generation with configurable latency profiles **and Prometheus metric emission** matching real vLLM/SGLang engines
-- Produce a **comprehensive benchmark report** with throughput, TTFT, TPOT, latency percentiles (P50/P95/P99), CPU/memory/goroutine metrics, and bottleneck analysis via `pprof`
+- Produce a **comprehensive benchmark report** with throughput, TTFT, TPOT, latency percentiles (P50/P95/P99), scheduler plugin duration breakdowns (per-plugin Score() latency, per-plugin sub-operation timing), CPU/memory/goroutine metrics, and bottleneck analysis via `pprof`
 - Document the **end-to-end test procedure as a runbook** covering cluster preparation, mock/real backend deployment, benchmark execution, and result interpretation
-- **Identify and optimize** up to 3 clear performance hotspots, submitting upstream PRs with before/after comparison data
+- **Identify and optimize** score plugin combination strategies — up to 3 distinct optimizations (e.g., adjust plugin weight factors, introduce caching for expensive plugin sub-operations, propose new plugin ordering), submitting upstream PRs with before/after comparison data quantifying the scheduling-quality improvement
 
 ### Non-Goals
 
@@ -40,7 +46,7 @@ The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/t
 - **Production SLO monitoring** — The framework targets offline benchmarking, not continuous production monitoring. Integration with Prometheus/Grafana dashboards for ongoing SLO tracking is future work.
 - **Comparative benchmarks against other routers** — We benchmark Kthena Router against its own historical baselines, not against other projects (e.g., Envoy AI Gateway, LiteLLM proxy).
 - **gRPC routing benchmarks** — Initial scope covers HTTP/SSE routing only. gRPC streaming benchmarks are deferred to a future iteration.
-- **Optimization guarantee** — The optimization deliverable is conditional on the benchmark surfacing identifiable bottlenecks. If the Router demonstrates excellent performance with no clear hotspots, the optimization PR is replaced with a performance characterization report and recommendations for future optimization targets.
+- **Plugin optimization guarantee** — The optimization deliverable is conditional on the benchmark surfacing identifiable suboptimal plugin behavior. If all tested plugin combinations demonstrate near-optimal scheduling quality with no clear improvement opportunities, the optimization deliverable is replaced with a performance characterization report and recommendations for future optimization targets.
 
 ## Proposal
 
@@ -409,30 +415,29 @@ Key CI design decisions:
 - Fail the CI check when regression exceeds thresholds: >5% P95 latency increase or >10% max throughput decrease
 - PR authors can update baselines by running the benchmark locally and committing the new JSON
 
-### Optimization Strategy
+### Plugin Optimization Strategy
 
-The optimization phase follows a structured approach to prevent scope creep:
+The optimization phase targets score plugin combinations. While the Router's own code paths (parsing, proxying) contribute <5% of end-to-end latency, plugin decisions directly control which engine receives each request, and therefore indirectly control the >95% engine inference time. We should:
 
-1. **Run benchmark suite** against the latest Router build
-2. **Profile with pprof** (CPU + heap) during steady-state load to identify hotspots
-3. **Classify hotspots** by category (CPU-bound, memory allocation, lock contention, I/O wait)
-4. **Prioritize** up to 3 hotspots based on estimated impact and implementation effort
-5. **Implement, benchmark, compare** — submit each optimization as a separate PR with before/after data
+1. **Run the benchmark suite** against the latest Router build with multiple plugin chain configurations (e.g., `least-latency + gpu` vs. `least-latency + kvcache-aware + gpu` vs. `random` baseline)
+2. **Collect per-plugin timing breakdowns** — use the existing `kthena_router_scheduler_plugin_duration_seconds` Prometheus histogram plus sub-operation timing logs (tokenization duration, Redis query duration, hash computation) to identify which plugin in the chain contributes the most scheduling latency and which sub-operation dominates
+3. **Correlate plugin latency with scheduling quality** — for each plugin chain combination, measure whether longer plugin execution time actually produces better scheduling decisions (i.e., lower P95 end-to-end latency due to smarter engine selection), or whether it's pure overhead with no scheduling benefit
+4. **Prioritize** up to 3 optimization targets based on (latency impact × improvement headroom) / implementation effort
+5. **Implement, benchmark, compare** — submit each optimization as a separate PR with before/after data showing the scheduling-quality delta
 
-**Optimization targets** (candidates, to be confirmed by profiling):
+**Optimization targets** (candidates, to be confirmed by benchmark data):
 
-| Category | Likely Hotspot | Optimization Approach |
-|----------|---------------|----------------------|
-| Memory | Repeated request body copies in proxy handler | Pool byte buffers or use `io.Copy` with pooled buffers |
-| Lock contention | Global mutex on backend selection | Per-backend atomic counters or lock-free data structures |
-| Connection pool | Default HTTP transport not tuned for LLM workloads | Tune `MaxIdleConnsPerHost`, idle timeout, disable HTTP/2 coalescing for backend connections |
-| Serialization | Per-request JSON marshal/unmarshal in proxy path | Avoid re-serializing unchanged fields; use `json.RawMessage` pass-through |
-| Goroutine | Unbounded goroutine creation for streaming connections | Introduce semaphores or connection limits for SSE relay |
+| Category | Example | Optimization Approach |
+|----------|---------|----------------------|
+| Plugin execution cost | `KVCacheAware.Score()` re-tokenizes same prefix on every multi-turn request | Cache tokenization results and Redis query results per session; reuse across turns |
+| Plugin weight tuning | Improper `least_latency` TTFT/TPOT weight factor causes oversensitivity to transient spikes | Benchmark-driven calibration of `TTFTTPOTWeightFactor` under heterogeneous backend conditions |
+| Plugin ordering | Expensive plugin runs before cheap filter; cheap filter could eliminate most pods first | Reorder plugin chain so cheapest filters run first, reducing input set for expensive score plugins |
+| Missing plugin | No plugin accounts for engine queue depth under burst conditions, causing repeated routing to the same backlogged engine | Propose a `least-queue-depth` score plugin that reads `vllm:num_requests_waiting` / `sglang:num_queue_reqs` |
+| Plugin redundancy | Two plugins compute overlapping information (e.g., both read TTFT from the same metric source) | Merge overlapping computations; share pre-computed values across plugins via `framework.Context` |
 
-**Fallback clause:** If profiling reveals no hotspots exceeding a 5% CPU/memory impact threshold, the optimization deliverable is replaced with:
-- A performance characterization report documenting the Router's existing efficiency
-- Recommendations for future optimization targets as traffic patterns evolve
-- A "performance health" dashboard definition for ongoing monitoring
+**Fallback clause:** If benchmark results show that all tested plugin combinations produce near-identical scheduling quality (i.e., engine selection doesn't meaningfully affect end-to-end latency), the optimization deliverable is replaced with:
+- A performance characterization report documenting that plugin choice has negligible impact under the tested conditions
+- Recommendations for conditions where plugin choice *would* matter (higher backend variance, larger pod counts, different traffic patterns)
 
 ## Implementation Plan
 
@@ -539,13 +544,13 @@ With the left and right sides provided by upstream tools, Phase 1 focuses on the
 - Write the benchmark report with visualizations (tables, latency CDFs, throughput vs. QPS charts)
 - Deliverable: Comprehensive benchmark report (Markdown + PDF)
 
-### Phase 4: Optimization
+### Phase 4: Plugin Optimization
 
-- Identify up to 3 hotspots from profiling data
-- Implement targeted optimizations (one PR per hotspot)
-- Re-run benchmarks and produce before/after comparison data
+- Analyze benchmark data from Phase 3 to identify the plugin chain with the most promising optimization headroom
+- Implement targeted plugin optimizations, one PR per optimization (e.g., caching for `KVCacheAware` tokenization, weight factor calibration for `least_latency`, plugin chain reordering)
+- Re-run benchmarks and produce before/after comparison data quantifying the improvement in scheduling quality (P95 end-to-end latency reduction, plugin Score() duration reduction)
 - Community review, address feedback, merge
-- Deliverable: Up to 3 optimization PRs with before/after data, OR performance characterization report (see fallback clause)
+- Some plugin optimization PRs with before/after data, OR plugin characterization report
 
 ## Alternatives Considered
 
