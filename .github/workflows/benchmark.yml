@@ -14,8 +14,8 @@ on:
 
   push:
     branches:
-      - proto/router-benchmark
       - feat/router-benchmark
+      - feat/benchmark-prototype
     paths:
       - "benchmark/router-ab-test/**"
       - "pkg/kthena-router/**"

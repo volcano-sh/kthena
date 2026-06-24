@@ -173,36 +173,46 @@ class AIPerfRunner:
         if extra_args:
             cmd.extend(extra_args)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        # Run without capture so output streams to terminal (visible in CI logs).
+        # No timeout — block until aiperf exits naturally.
+        run_dir = self.output_dir / config_name
+        print(f"  Running: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
 
-        metrics = self._parse_output(result.stdout)
+        metrics = self._read_metrics_from_output(run_dir)
 
         return BenchmarkResult(
             config_name=config_name,
             scenario=scenario.name,
             timestamp=datetime.now().isoformat(),
             metrics=metrics,
-            raw_output=result.stdout,
+            raw_output=f"metrics read from {run_dir}",
         )
 
-    def _parse_output(self, output: str) -> Dict[str, Any]:
-        metrics = {}
-        for line in output.split("\n"):
-            if "Time to First Token" in line and "avg" in line:
-                parts = line.split("│")
-                if len(parts) >= 3:
-                    metrics["ttft_avg_ms"] = float(parts[2].strip().replace(",", ""))
-            elif "Request Latency" in line and "avg" in line:
-                parts = line.split("│")
-                if len(parts) >= 3:
-                    metrics["latency_avg_ms"] = float(parts[2].strip().replace(",", ""))
-            elif "Request Throughput" in line:
-                parts = line.split("│")
-                if len(parts) >= 3:
-                    try:
-                        metrics["throughput_rps"] = float(parts[2].strip().replace(",", ""))
-                    except ValueError:
-                        pass
+    def _read_metrics_from_output(self, run_dir: Path) -> Dict[str, Any]:
+        """Parse aiperf's aggregated JSON output (profile_export_aiperf.json)."""
+        metrics: Dict[str, Any] = {}
+
+        summary_path = run_dir / "profile_export_aiperf.json"
+        if not summary_path.exists():
+            print(f"  WARNING: {summary_path} not found; metrics will be empty")
+            return metrics
+
+        with open(summary_path) as f:
+            data = json.load(f)
+
+        # Map aiperf metric names to our internal keys.
+        metric_map = {
+            "time_to_first_token": "ttft_avg_ms",
+            "request_latency": "latency_avg_ms",
+            "request_throughput": "throughput_rps",
+        }
+
+        for aiperf_key, our_key in metric_map.items():
+            entry = data.get(aiperf_key)
+            if isinstance(entry, dict) and "avg" in entry:
+                metrics[our_key] = entry["avg"]
+
         return metrics
 
 
