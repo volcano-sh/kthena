@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -199,6 +200,112 @@ func TestGetModelBoosterStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := getModelBoosterStatus(tt.conditions)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGetAutoscalingPolicyBindingTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		binding  workload.AutoscalingPolicyBinding
+		expected string
+	}{
+		{
+			name:     "NoTarget",
+			binding:  workload.AutoscalingPolicyBinding{},
+			expected: "<none>",
+		},
+		{
+			name: "HomogeneousTarget",
+			binding: workload.AutoscalingPolicyBinding{
+				Spec: workload.AutoscalingPolicyBindingSpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{
+						Target: workload.Target{
+							TargetRef: corev1.ObjectReference{Name: "my-serving"},
+						},
+					},
+				},
+			},
+			expected: "my-serving",
+		},
+		{
+			name: "HomogeneousTargetEmptyName",
+			binding: workload.AutoscalingPolicyBinding{
+				Spec: workload.AutoscalingPolicyBindingSpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{},
+				},
+			},
+			expected: "<none>",
+		},
+		{
+			name: "HeterogeneousTarget",
+			binding: workload.AutoscalingPolicyBinding{
+				Spec: workload.AutoscalingPolicyBindingSpec{
+					HeterogeneousTarget: &workload.HeterogeneousTarget{
+						Params: []workload.HeterogeneousTargetParam{
+							{Target: workload.Target{TargetRef: corev1.ObjectReference{Name: "serving-a"}}},
+							{Target: workload.Target{TargetRef: corev1.ObjectReference{Name: "serving-b"}}},
+						},
+					},
+				},
+			},
+			expected: "serving-a,serving-b",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, getAutoscalingPolicyBindingTarget(tt.binding))
+		})
+	}
+}
+
+func TestGetAutoscalingPolicyBindingMinMax(t *testing.T) {
+	tests := []struct {
+		name        string
+		binding     workload.AutoscalingPolicyBinding
+		expectedMin string
+		expectedMax string
+	}{
+		{
+			name:        "NoTarget",
+			binding:     workload.AutoscalingPolicyBinding{},
+			expectedMin: "-",
+			expectedMax: "-",
+		},
+		{
+			name: "HomogeneousTarget",
+			binding: workload.AutoscalingPolicyBinding{
+				Spec: workload.AutoscalingPolicyBindingSpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{
+						MinReplicas: 2,
+						MaxReplicas: 10,
+					},
+				},
+			},
+			expectedMin: "2",
+			expectedMax: "10",
+		},
+		{
+			name: "HeterogeneousTarget",
+			binding: workload.AutoscalingPolicyBinding{
+				Spec: workload.AutoscalingPolicyBindingSpec{
+					HeterogeneousTarget: &workload.HeterogeneousTarget{
+						Params: []workload.HeterogeneousTargetParam{
+							{MinReplicas: 1, MaxReplicas: 5},
+							{MinReplicas: 2, MaxReplicas: 10},
+						},
+					},
+				},
+			},
+			expectedMin: "3",
+			expectedMax: "15",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			min, max := getAutoscalingPolicyBindingMinMax(tt.binding)
+			assert.Equal(t, tt.expectedMin, min)
+			assert.Equal(t, tt.expectedMax, max)
 		})
 	}
 }
