@@ -18,11 +18,16 @@ limitations under the License.
 
 package v1alpha1
 
+import (
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
 // AutoscalingPolicyBehaviorApplyConfiguration represents a declarative configuration of the AutoscalingPolicyBehavior type for use
 // with apply.
 type AutoscalingPolicyBehaviorApplyConfiguration struct {
-	ScaleUp   *AutoscalingPolicyScaleUpPolicyApplyConfiguration `json:"scaleUp,omitempty"`
-	ScaleDown *AutoscalingPolicyStablePolicyApplyConfiguration  `json:"scaleDown,omitempty"`
+	ScaleUp        *AutoscalingPolicyScaleUpPolicyApplyConfiguration `json:"scaleUp,omitempty"`
+	ScaleDown      *AutoscalingPolicyStablePolicyApplyConfiguration  `json:"scaleDown,omitempty"`
+	CooldownPeriod *v1.Duration                                      `json:"cooldownPeriod,omitempty"`
 }
 
 // AutoscalingPolicyBehaviorApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyBehavior type for use with
@@ -44,5 +49,13 @@ func (b *AutoscalingPolicyBehaviorApplyConfiguration) WithScaleUp(value *Autosca
 // If called multiple times, the ScaleDown field is set to the value of the last call.
 func (b *AutoscalingPolicyBehaviorApplyConfiguration) WithScaleDown(value *AutoscalingPolicyStablePolicyApplyConfiguration) *AutoscalingPolicyBehaviorApplyConfiguration {
 	b.ScaleDown = value
+	return b
+}
+
+// WithCooldownPeriod sets the CooldownPeriod field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the CooldownPeriod field is set to the value of the last call.
+func (b *AutoscalingPolicyBehaviorApplyConfiguration) WithCooldownPeriod(value v1.Duration) *AutoscalingPolicyBehaviorApplyConfiguration {
+	b.CooldownPeriod = &value
 	return b
 }

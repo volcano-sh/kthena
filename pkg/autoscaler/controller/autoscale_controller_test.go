@@ -797,3 +797,230 @@ func TestPatchDoesNotMutateResourcesInFakeClient(t *testing.T) {
 		})
 	}
 }
+
+func newCooldownSetup(t *testing.T, msName string) (*clientfake.Clientset, *AutoscaleController, workload.Target, func()) {
+	t.Helper()
+	ns := "ns"
+	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: msName, Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	client := clientfake.NewSimpleClientset(ms)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 0\n"))
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	target := workload.Target{
+		TargetRef:      corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: msName},
+		MetricEndpoint: workload.MetricEndpoint{Uri: u.Path, Port: port},
+	}
+	pods := []*corev1.Pod{readyPod(ns, "pod-"+msName, host, map[string]string{})}
+	ac := &AutoscaleController{
+		client:             client,
+		modelServingLister: msLister,
+		podsLister:         fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
+		scalerMap:          map[string]*autoscalerAutoscaler{},
+		optimizerMap:       map[string]*autoscalerOptimizer{},
+	}
+
+	return client, ac, target, srv.Close
+}
+
+func newCooldownBinding(t *testing.T, target workload.Target, bindingName string, minReplicas int32) (*workload.AutoscalingPolicy, *workload.AutoscalingPolicyBinding) {
+	t.Helper()
+	cooldown := metav1.Duration{Duration: 1 * time.Hour}
+	policy := &workload.AutoscalingPolicy{
+		Spec: workload.AutoscalingPolicySpec{
+			TolerancePercent: 0,
+			Metrics:          []workload.AutoscalingPolicyMetric{{MetricName: "load", TargetValue: resource.MustParse("1")}},
+			Behavior:         workload.AutoscalingPolicyBehavior{CooldownPeriod: &cooldown},
+		},
+	}
+	binding := &workload.AutoscalingPolicyBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: "ns"},
+		Spec: workload.AutoscalingPolicyBindingSpec{
+			PolicyRef:         corev1.LocalObjectReference{Name: "ap"},
+			HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: minReplicas, MaxReplicas: 10},
+		},
+	}
+	return policy, binding
+}
+
+func TestCooldown_PreventsZero(t *testing.T) {
+	client, ac, target, cleanup := newCooldownSetup(t, "ms-cooldown")
+	defer cleanup()
+	policy, binding := newCooldownBinding(t, target, "binding-cooldown", 0)
+
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale: %v", err)
+	}
+	for _, a := range client.Fake.Actions() {
+		if a.GetVerb() == "patch" || a.GetVerb() == "update" {
+			t.Fatalf("unexpected action during cooldown: %v", a)
+		}
+	}
+	key := formatAutoscalerMapKey("ns", binding.Name, &target.TargetRef)
+	if s := ac.scalerMap[key]; s == nil || s.Status.IdleStartTime == 0 {
+		t.Fatal("expected IdleStartTime to be set")
+	}
+}
+
+func TestCooldown_Expired(t *testing.T) {
+	client, ac, target, cleanup := newCooldownSetup(t, "ms-cooldown-expire")
+	defer cleanup()
+	policy, binding := newCooldownBinding(t, target, "binding-cooldown-expire", 0)
+
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale: %v", err)
+	}
+
+	key := formatAutoscalerMapKey("ns", binding.Name, &target.TargetRef)
+	scaler := ac.scalerMap[key]
+	if scaler == nil {
+		t.Fatal("scaler not found")
+	}
+	scaler.Status.IdleStartTime -= (1*time.Hour + 1*time.Millisecond).Milliseconds()
+
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale: %v", err)
+	}
+
+	updated, err := client.WorkloadV1alpha1().ModelServings("ns").Get(context.Background(), "ms-cooldown-expire", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get modelserving: %v", err)
+	}
+	if updated.Spec.Replicas == nil || *updated.Spec.Replicas != 0 {
+		t.Fatalf("expected replicas=0 after cooldown, got %v", updated.Spec.Replicas)
+	}
+}
+
+func TestCooldown_ResetsOnTraffic(t *testing.T) {
+	ns := "ns"
+	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-cooldown-reset", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	client := clientfake.NewSimpleClientset(ms)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+
+	var responseBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(responseBody))
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-cooldown-reset"}, MetricEndpoint: workload.MetricEndpoint{Uri: u.Path, Port: port}}
+	policy, binding := newCooldownBinding(t, target, "binding-cooldown-reset", 0)
+
+	pods := []*corev1.Pod{readyPod(ns, "pod-cooldown-reset", host, map[string]string{})}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+
+	responseBody = "# TYPE load gauge\nload 10\n"
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale: %v", err)
+	}
+
+	key := formatAutoscalerMapKey(ns, binding.Name, &target.TargetRef)
+	scaler := ac.scalerMap[key]
+	if scaler == nil {
+		t.Fatal("scaler not found")
+	}
+	if scaler.Status.IdleStartTime != 0 {
+		t.Fatalf("expected IdleStartTime=0 with traffic, got %d", scaler.Status.IdleStartTime)
+	}
+
+	responseBody = "# TYPE load gauge\nload 0\n"
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale: %v", err)
+	}
+	if scaler.Status.IdleStartTime == 0 {
+		t.Fatal("expected IdleStartTime to be set")
+	}
+}
+
+func TestCooldown_MinReplicasIgnores(t *testing.T) {
+	client, ac, target, cleanup := newCooldownSetup(t, "ms-cooldown-ignore")
+	defer cleanup()
+	policy, binding := newCooldownBinding(t, target, "binding-cooldown-ignore", 1)
+
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale: %v", err)
+	}
+	for _, a := range client.Fake.Actions() {
+		if a.GetVerb() == "patch" || a.GetVerb() == "update" {
+			t.Fatalf("unexpected action when minReplicas>0: %v", a)
+		}
+	}
+	key := formatAutoscalerMapKey("ns", binding.Name, &target.TargetRef)
+	if s := ac.scalerMap[key]; s == nil || s.Status.IdleStartTime != 0 {
+		t.Fatal("expected IdleStartTime=0 when minReplicas>0")
+	}
+}
+
+func TestCooldown_ScaleFromZeroResetsCooldown(t *testing.T) {
+	ns := "ns"
+	msName := "ms-cooldown-sfz"
+	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: msName, Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	client := clientfake.NewSimpleClientset(ms)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 0\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: msName}, MetricEndpoint: workload.MetricEndpoint{Uri: u.Path, Port: port}}
+	policy, binding := newCooldownBinding(t, target, "binding-cooldown-sfz", 0)
+
+	pods := []*corev1.Pod{readyPod(ns, "pod-sfz", host, map[string]string{})}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+
+	// Step 1: idle, cooldown starts, holds at 1
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale step 1: %v", err)
+	}
+	key := formatAutoscalerMapKey(ns, binding.Name, &target.TargetRef)
+	scaler := ac.scalerMap[key]
+	if scaler == nil {
+		t.Fatal("scaler not found")
+	}
+	if scaler.Status.IdleStartTime == 0 {
+		t.Fatal("expected IdleStartTime to be set after step 1")
+	}
+
+	// Step 2: simulate cooldown expired (backdate IdleStartTime)
+	scaler.Status.IdleStartTime -= (1*time.Hour + 1*time.Millisecond).Milliseconds()
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale step 2: %v", err)
+	}
+	updated, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), msName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get modelserving: %v", err)
+	}
+	if updated.Spec.Replicas == nil || *updated.Spec.Replicas != 0 {
+		t.Fatalf("expected replicas=0 after cooldown expired, got %v", updated.Spec.Replicas)
+	}
+	// IdleStartTime should be reset after cooldown expires
+	if scaler.Status.IdleStartTime != 0 {
+		t.Fatalf("expected IdleStartTime=0 after cooldown expired, got %d", scaler.Status.IdleStartTime)
+	}
+
+	// Step 3: simulate scale-from-zero (router sets replicas back to 1)
+	updated.Spec.Replicas = ptrInt32(1)
+	client.WorkloadV1alpha1().ModelServings(ns).Update(context.Background(), updated, metav1.UpdateOptions{})
+
+	// Step 4: autoscaler reconciles with replicas=1, metrics=0 (cold start)
+	// Cooldown should start fresh, NOT be skipped due to stale IdleStartTime
+	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+		t.Fatalf("doScale step 4: %v", err)
+	}
+	// IdleStartTime should have been reset and re-set (not the stale value from step 1)
+	if scaler.Status.IdleStartTime == 0 {
+		t.Fatal("expected IdleStartTime to be set after scale-from-zero")
+	}
+	now := util.GetCurrentTimestamp()
+	if now-scaler.Status.IdleStartTime > 5000 {
+		t.Fatalf("expected IdleStartTime to be recent (within 5s), got stale value (diff=%dms)", now-scaler.Status.IdleStartTime)
+	}
+}
