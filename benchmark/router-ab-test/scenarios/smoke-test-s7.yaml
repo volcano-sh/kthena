@@ -1,0 +1,52 @@
+name: "smoke-test-s7-backend-variance"
+description: "s7 scenario: latency variance on heterogeneous backends"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 50
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  concurrency:
+    connections: 100
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  count: 3
+  profiles:
+    - name: "fast"
+      count: 1
+      ttftMean: "10ms"
+      ttftStddev: "2ms"
+      tpotMean: "5ms"
+      tpotStddev: "1ms"
+    - name: "normal"
+      count: 1
+      ttftMean: "100ms"
+      ttftStddev: "15ms"
+      tpotMean: "20ms"
+      tpotStddev: "5ms"
+    - name: "slow"
+      count: 1
+      ttftMean: "500ms"
+      ttftStddev: "50ms"
+      tpotMean: "50ms"
+      tpotStddev: "10ms"
+  responseTokens: 128
+  errorRate: 0.0
+
+routing:
+  strategy: "least-latency"
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
