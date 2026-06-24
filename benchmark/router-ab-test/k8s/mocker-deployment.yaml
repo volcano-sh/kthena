@@ -1,0 +1,74 @@
+# Dynamo Mocker Deployment
+# 模拟 4 个同构的 LLM 后端 (SGLang mock, 纯 CPU)
+# 镜像默认 entrypoint.bash 自动启动: NATS → frontend → proxy → mocker workers
+# 对外暴露端口 30000 (OpenAI API + /metrics)
+# 配置通过环境变量传入，entrypoint.bash 转换为 CLI 参数
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mocker-llm
+  namespace: default
+  labels:
+    app: mocker-llm
+    component: mock-backend
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: mocker-llm
+  template:
+    metadata:
+      labels:
+        app: mocker-llm
+        component: mock-backend
+    spec:
+      containers:
+      - name: mocker
+        image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: MOCKER_MODELS
+          value: "Qwen/Qwen3-0.6B"
+        - name: MOCKER_ENGINE_TYPE
+          value: "sglang"
+        ports:
+        - containerPort: 30000
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: 30000
+          initialDelaySeconds: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /v1/models
+            port: 30000
+          initialDelaySeconds: 180
+          periodSeconds: 15
+---
+# 同构 Mocker 的 Service（供 Router 使用）
+apiVersion: v1
+kind: Service
+metadata:
+  name: mocker-llm
+  namespace: default
+  labels:
+    app: mocker-llm
+spec:
+  selector:
+    app: mocker-llm
+  ports:
+  - name: http
+    port: 30000
+    targetPort: 30000
+    protocol: TCP
+  type: ClusterIP

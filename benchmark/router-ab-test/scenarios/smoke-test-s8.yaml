@@ -1,0 +1,52 @@
+name: "smoke-test-s8-routing-strategy"
+description: "s8 scenario: schedule strategy comparison"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 100
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  concurrency:
+    connections: 100
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  count: 4
+  profiles:
+    - name: "fast"
+      count: 1
+      ttftMean: "10ms"
+      ttftStddev: "2ms"
+      tpotMean: "5ms"
+      tpotStddev: "1ms"
+    - name: "normal"
+      count: 2
+      ttftMean: "50ms"
+      ttftStddev: "10ms"
+      tpotMean: "15ms"
+      tpotStddev: "3ms"
+    - name: "slow"
+      count: 1
+      ttftMean: "200ms"
+      ttftStddev: "30ms"
+      tpotMean: "40ms"
+      tpotStddev: "8ms"
+  responseTokens: 128
+  errorRate: 0.0
+
+routing:
+  strategy: "least-request"
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"

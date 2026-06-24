@@ -1,0 +1,19 @@
+# Router scheduler config — Round Robin (random plugin only for uniform distribution)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-config
+  namespace: kthena-system
+data:
+  routerConfiguration: |
+    scheduler:
+      plugins:
+        Filter:
+          enabled: []
+          disabled:
+            - least-request
+            - lora-affinity
+        Score:
+          enabled:
+            - name: random
+              weight: 1

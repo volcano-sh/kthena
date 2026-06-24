@@ -1,0 +1,40 @@
+name: "smoke-test-s2-latency-vs-qps"
+description: "s2 scenario: routing latency under different QPS"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 50
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  concurrency:
+    connections: 100
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  count: 4
+  profiles:
+    - name: "homogeneous"
+      count: 4
+      ttftMean: "50ms"
+      ttftStddev: "10ms"
+      tpotMean: "15ms"
+      tpotStddev: "3ms"
+  responseTokens: 128
+  errorRate: 0.0
+
+routing:
+  strategy: "least-latency"
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
