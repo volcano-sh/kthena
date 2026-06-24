@@ -15,8 +15,10 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -143,17 +145,38 @@ class AIPerfRunner:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(
+    @staticmethod
+    def _parse_duration_seconds(duration: str) -> int:
+        """Parse a duration string like '60s', '5m', '1h' to seconds."""
+        match = re.fullmatch(r"(\d+)\s*(s|m|h)", duration.strip().lower())
+        if not match:
+            raise ValueError(f"Invalid duration format: {duration!r}")
+        value = int(match.group(1))
+        unit = match.group(2)
+        if unit == "m":
+            return value * 60
+        if unit == "h":
+            return value * 3600
+        return value
+
+    def build_aiperf_cmd(
         self,
         config_name: str,
-        scenario: ScenarioConfig,
+        scenario: "ScenarioConfig",
         router_endpoint: str,
-        extra_args: Optional[list] = None,
-    ) -> BenchmarkResult:
+    ) -> List[str]:
+        """Build the aiperf profile command from a ScenarioConfig.
+
+        Maps YAML scenario fields to AIPerf CLI flags with full support for
+        sweep syntax, arrival patterns, rate ramping, and token length control.
+        """
         load = scenario.load
         schedule = load.get("schedule", {})
+        traffic = load.get("traffic", {})
         concurrency = load.get("concurrency", {})
-        duration = load.get("duration", "60s")
+
+        # Deterministic seed from scenario name (MD5 for cross-run stability).
+        seed = int(hashlib.md5(scenario.name.encode()).hexdigest()[:8], 16) % (2**31)
 
         cmd = [
             "aiperf", "profile",
@@ -161,20 +184,75 @@ class AIPerfRunner:
             "--endpoint-type", "chat",
             "--url", f"http://{router_endpoint}",
             "--streaming",
-            "--duration", duration,
-            "--output-dir", str(self.output_dir / config_name),
+            "--use-server-token-count",
+            "--random-seed", str(seed),
         ]
 
-        if schedule.get("mode") == "rate":
-            cmd.extend(["--request-rate", str(schedule.get("rate", 10))])
+        # ── Duration ──
+        duration_raw = load.get("duration", "60s")
+        benchmark_secs = self._parse_duration_seconds(duration_raw)
+        cmd.extend(["--benchmark-duration", str(benchmark_secs)])
 
+        # ── Output directory (AIPerf flag is --output-artifact-dir) ──
+        cmd.extend([
+            "--output-artifact-dir",
+            str(self.output_dir / config_name),
+        ])
+
+        # ── Rate control (with sweep support) ──
+        if schedule.get("mode") in ("rate", "constant_rate"):
+            rate = schedule.get("rate", 10)
+            # Support comma-separated sweep (e.g. YAML list → "10,50,100").
+            cmd.extend(["--request-rate", str(rate)])
+
+        # ── Concurrency (with sweep support) ──
         cmd.extend(["--concurrency", str(concurrency.get("connections", 10))])
+
+        # ── Arrival pattern (burstiness → arrival-pattern + arrival-smoothness) ──
+        burstiness = float(traffic.get("burstiness", 1.0))
+        if burstiness == 1.0:
+            cmd.extend(["--arrival-pattern", "poisson"])
+        else:
+            cmd.extend([
+                "--arrival-pattern", "gamma",
+                "--arrival-smoothness", str(burstiness),
+            ])
+
+        # ── Rate ramp-up ──
+        ramp = traffic.get("ramp", {})
+        if ramp.get("strategy", "none") != "none":
+            cmd.extend([
+                "--request-rate-ramp-duration",
+                str(benchmark_secs),
+            ])
+
+        # ── Prompt token lengths (sweep: comma-separated) ──
+        prompts = load.get("prompts", [])
+        if prompts:
+            tokens = ",".join(str(p.get("tokens", 512)) for p in prompts)
+            cmd.extend(["--synthetic-input-tokens-mean", tokens])
+
+        # ── Output token lengths (sweep: comma-separated) ──
+        max_tokens = load.get("max_tokens", [])
+        if max_tokens:
+            tokens = ",".join(str(m.get("tokens", 128)) for m in max_tokens)
+            cmd.extend(["--output-tokens-mean", tokens])
+
+        return cmd
+
+    def run(
+        self,
+        config_name: str,
+        scenario: "ScenarioConfig",
+        router_endpoint: str,
+        extra_args: Optional[list] = None,
+    ) -> BenchmarkResult:
+        cmd = self.build_aiperf_cmd(config_name, scenario, router_endpoint)
 
         if extra_args:
             cmd.extend(extra_args)
 
         # Run without capture so output streams to terminal (visible in CI logs).
-        # No timeout — block until aiperf exits naturally.
         run_dir = self.output_dir / config_name
         print(f"  Running: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
