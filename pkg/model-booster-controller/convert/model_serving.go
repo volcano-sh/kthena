@@ -178,7 +178,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 			cacheVolume,
 		},
 		"MODEL_NAME":             model.Name,
-		"BACKEND_REPLICAS":       backend.MinReplicas, // todo: backend replicas
+		"BACKEND_REPLICAS":       backend.Replicas,
 		"INIT_CONTAINERS":        initContainers,
 		"MODEL_DOWNLOAD_ENVFROM": backend.EnvFrom,
 		"ENGINE_PREFILL_COMMAND": preFillCommand,
@@ -283,7 +283,7 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		},
 		"MODEL_NAME":       model.Name,
 		"BACKEND_NAME":     strings.ToLower(backend.Name),
-		"BACKEND_REPLICAS": backend.MinReplicas, // todo: backend replicas
+		"BACKEND_REPLICAS": backend.Replicas,
 		"BACKEND_TYPE":     strings.ToLower(string(backend.Type)),
 		"ENGINE_ENV":       engineEnv,
 		"WORKER_ENV":       backend.Env,

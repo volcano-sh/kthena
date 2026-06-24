@@ -22,7 +22,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -36,12 +35,11 @@ func TestValidateModel_ErrorFormatting(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: registryv1alpha1.ModelBoosterSpec{
-			// This will trigger validation errors for autoscaling-related fields
+			// This will trigger validation errors for replica bounds.
 			Backend: registryv1alpha1.ModelBackend{
-				Name:        "backend1",
-				Type:        registryv1alpha1.ModelBackendTypeVLLM,
-				MinReplicas: 1,
-				MaxReplicas: 3,
+				Name:     "backend1",
+				Type:     registryv1alpha1.ModelBackendTypeVLLM,
+				Replicas: 1000001,
 				Workers: []registryv1alpha1.ModelWorker{
 					{
 						Type:  registryv1alpha1.ModelWorkerTypeServer,
@@ -94,10 +92,9 @@ func TestValidateModel_NoErrors(t *testing.T) {
 		},
 		Spec: registryv1alpha1.ModelBoosterSpec{
 			Backend: registryv1alpha1.ModelBackend{
-				Name:        "backend1",
-				Type:        registryv1alpha1.ModelBackendTypeVLLM,
-				MinReplicas: 1,
-				MaxReplicas: 1,
+				Name:     "backend1",
+				Type:     registryv1alpha1.ModelBackendTypeVLLM,
+				Replicas: 1,
 				Workers: []registryv1alpha1.ModelWorker{
 					{
 						Type:  registryv1alpha1.ModelWorkerTypeServer,
@@ -112,78 +109,6 @@ func TestValidateModel_NoErrors(t *testing.T) {
 	valid, errorMsg := validator.validateModel(model)
 
 	// Should be valid with no errors
-	assert.True(t, valid)
-	assert.Empty(t, errorMsg)
-}
-
-func TestValidateModel_AutoscalingPolicyRequiresMetrics(t *testing.T) {
-	validator := &ModelValidator{}
-
-	model := &registryv1alpha1.ModelBooster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-model",
-			Namespace: "default",
-		},
-		Spec: registryv1alpha1.ModelBoosterSpec{
-			AutoscalingPolicy: &registryv1alpha1.AutoscalingPolicySpec{},
-			Backend: registryv1alpha1.ModelBackend{
-				Name:        "backend1",
-				Type:        registryv1alpha1.ModelBackendTypeVLLM,
-				MinReplicas: 0,
-				MaxReplicas: 3,
-				Workers: []registryv1alpha1.ModelWorker{
-					{
-						Type:  registryv1alpha1.ModelWorkerTypeServer,
-						Pods:  1,
-						Image: "test-image:latest",
-					},
-				},
-			},
-		},
-	}
-
-	valid, errorMsg := validator.validateModel(model)
-
-	assert.False(t, valid)
-	assert.Contains(t, errorMsg, "spec.autoscalingPolicy.metrics")
-	assert.Contains(t, errorMsg, "at least one metric must be set when model-level autoscaling is set")
-}
-
-func TestValidateModel_AutoscalingPolicyWithMetrics(t *testing.T) {
-	validator := &ModelValidator{}
-
-	model := &registryv1alpha1.ModelBooster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-model",
-			Namespace: "default",
-		},
-		Spec: registryv1alpha1.ModelBoosterSpec{
-			AutoscalingPolicy: &registryv1alpha1.AutoscalingPolicySpec{
-				Metrics: []registryv1alpha1.AutoscalingPolicyMetric{
-					{
-						Name:        "num_requests_waiting",
-						TargetValue: resource.MustParse("10"),
-					},
-				},
-			},
-			Backend: registryv1alpha1.ModelBackend{
-				Name:        "backend1",
-				Type:        registryv1alpha1.ModelBackendTypeVLLM,
-				MinReplicas: 0,
-				MaxReplicas: 3,
-				Workers: []registryv1alpha1.ModelWorker{
-					{
-						Type:  registryv1alpha1.ModelWorkerTypeServer,
-						Pods:  1,
-						Image: "test-image:latest",
-					},
-				},
-			},
-		},
-	}
-
-	valid, errorMsg := validator.validateModel(model)
-
 	assert.True(t, valid)
 	assert.Empty(t, errorMsg)
 }

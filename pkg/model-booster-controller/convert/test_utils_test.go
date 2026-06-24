@@ -20,38 +20,12 @@ import (
 	"os"
 	"testing"
 
-	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-
-	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/yaml"
 )
 
-func TestBuildAutoscalingPolicy(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    *workload.ModelBooster
-		expected *workload.AutoscalingPolicy
-	}{
-		{
-			name:     "simple-backend",
-			input:    loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml"),
-			expected: loadYaml[workload.AutoscalingPolicy](t, "testdata/expected/scaling-asp.yaml"),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.input.Spec.AutoscalingPolicy != nil {
-				got := BuildAutoscalingPolicy(tt.input.Spec.AutoscalingPolicy, tt.input)
-				tt.expected.Labels = got.Labels
-				assert.Equal(t, tt.expected, got)
-			}
-		})
-	}
-}
-
-// loadYaml transfer yaml data into a struct of type T.
-// Used for test.
+// loadYaml transfers yaml data into a struct of type T.
 func loadYaml[T any](t *testing.T, path string) *T {
+	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("Failed to read YAML: %v", err)

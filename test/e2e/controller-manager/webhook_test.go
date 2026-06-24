@@ -41,10 +41,10 @@ func TestWebhook(t *testing.T) {
 		checkMutation func(t *testing.T, obj interface{})
 	}{
 		{
-			name:        "Invalid ModelBooster (minReplicas > maxReplicas)",
+			name:        "Invalid ModelBooster (replicas too large)",
 			resource:    createInvalidModel(),
 			expectError: true,
-			errorMsg:    "minReplicas cannot be greater than maxReplicas",
+			errorMsg:    "replicas",
 		},
 		{
 			name:        "Valid ModelBooster (DryRun)",

@@ -571,11 +571,6 @@ func (in *ModelBoosterList) DeepCopyObject() runtime.Object {
 func (in *ModelBoosterSpec) DeepCopyInto(out *ModelBoosterSpec) {
 	*out = *in
 	in.Backend.DeepCopyInto(&out.Backend)
-	if in.AutoscalingPolicy != nil {
-		in, out := &in.AutoscalingPolicy, &out.AutoscalingPolicy
-		*out = new(AutoscalingPolicySpec)
-		(*in).DeepCopyInto(*out)
-	}
 	if in.ModelMatch != nil {
 		in, out := &in.ModelMatch, &out.ModelMatch
 		*out = new(networkingv1alpha1.ModelMatch)
