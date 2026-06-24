@@ -35,7 +35,7 @@ The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/t
   - **Backend response**: TTFT/TPOT latency profiles (homogeneous, heterogeneous, degrading), backend count, error rates, pod churn (crash/scale), metrics emission fidelity
 - Define an **orthogonal condition matrix** identifying high-value test combinations that expose Router-unique failure modes (scheduler staleness, failover latency, cross-engine metrics, fair queue behavior under burst)
 - Retain the 8 original scenarios as a **Smoke Test Suite** for fast (~15 min) regression detection in CI
-- Build a **mock LLM inference backend** in Go that simulates realistic streaming token generation with configurable latency profiles **and Prometheus metric emission** matching real vLLM/SGLang engines
+- Adopt and integrate **Dynamo Mocker** as the mock LLM inference backend, providing configurable streaming token generation latency profiles **and Prometheus metric emission** matching real vLLM/SGLang engines
 - Produce a **comprehensive benchmark report** with throughput, TTFT, TPOT, latency percentiles (P50/P95/P99), scheduler plugin duration breakdowns (per-plugin Score() latency, per-plugin sub-operation timing), CPU/memory/goroutine metrics, and bottleneck analysis via `pprof`
 - Document the **end-to-end test procedure as a runbook** covering cluster preparation, mock/real backend deployment, benchmark execution, and result interpretation
 - **Identify and optimize** score plugin combination strategies — up to 3 distinct optimizations (e.g., adjust plugin weight factors, introduce caching for expensive plugin sub-operations, propose new plugin ordering), submitting upstream PRs with before/after comparison data quantifying the scheduling-quality improvement
@@ -235,7 +235,7 @@ It simulates an OpenAI-compatible `/v1/chat/completions` endpoint with SSE strea
 
 1. Receive `POST /v1/chat/completions` with an OpenAI-compatible request body
 2. Parse `max_tokens` (or use configured default) to determine how many tokens to generate
-3. After a configurable TTFT delay (Gaussian distribution), send the first SSE chunk: `data: {"choices":[{"delta":{"content":"tok"},"index":0}]}`
+3. After a configurable TTFT delay (Gaussian distribution, clamped to non-negative), send the first SSE chunk: data: {"choices":[{"delta":{"content":"tok"},"index":0}]}
 4. Continue sending tokens with configurable TPOT interval between each chunk
 5. Send `data: [DONE]` to signal stream completion
 6. Close the SSE connection
@@ -412,7 +412,7 @@ benchmark:
 Key CI design decisions:
 - Use **kind** (Kubernetes in Docker) for zero-cost ephemeral clusters
 - Store baseline results as version-controlled JSON files in `benchmarks/baselines/`
-- Fail the CI check when regression exceeds thresholds: >5% P95 latency increase or >10% max throughput decrease
+- Fail the CI check when regression exceeds thresholds: >10% P95 latency increase or >10% max throughput decrease (emit warnings at >5% P95 latency increase)
 - PR authors can update baselines by running the benchmark locally and committing the new JSON
 
 ### Plugin Optimization Strategy
