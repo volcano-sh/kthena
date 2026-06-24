@@ -142,6 +142,67 @@ lint-python: ## Run python linter
 	pip install ruff
 	ruff check . --config python/kthena/pyproject.toml
 
+##@ Benchmark
+
+.PHONY: benchmark-setup
+benchmark-setup: ## Set up Kind cluster and deploy Kthena for benchmark
+	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
+	@echo "Creating Kind cluster for benchmark..."
+	kind create cluster --name kthena-benchmark --wait 5m
+	@echo "Deploying Kthena..."
+	$(MAKE) generate
+	helm install kthena charts/kthena \
+		--namespace kthena-system \
+		--create-namespace \
+		--wait \
+		--timeout 5m
+	@echo "Waiting for Kthena components..."
+	kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kthena -n kthena-system --timeout=120s
+	kubectl wait --for=condition=ready pod -l app=kthena-router -n kthena-system --timeout=120s
+
+.PHONY: benchmark-deploy
+benchmark-deploy: ## Deploy mock backends and router configs for benchmark
+	@echo "Deploying mock backends..."
+	kubectl apply -f benchmark/router-ab-test/k8s/mocker-deployment.yaml
+	kubectl wait --for=condition=ready pod -l app=mocker-llm --timeout=180s
+	@echo "Deploying ModelServer and ModelRoute..."
+	kubectl apply -f benchmark/router-ab-test/k8s/modelserver.yaml
+	kubectl apply -f benchmark/router-ab-test/k8s/modelroute.yaml
+	sleep 10
+
+.PHONY: benchmark-run
+benchmark-run: ## Run router A/B test (SCENARIO=smoke-test-s2, ROUTER_CONFIG_A/B overridable)
+	SCENARIO ?= smoke-test-s2
+	ROUTER_CONFIG_A ?= benchmark/router-ab-test/k8s/router-config-random.yaml
+	ROUTER_CONFIG_B ?= benchmark/router-ab-test/k8s/router-config-least-latency.yaml
+	pip install aiperf
+	python benchmark/router-ab-test/scripts/ab_test.py \
+		--scenario benchmark/router-ab-test/scenarios/$(SCENARIO).yaml \
+		--router-config-a $(ROUTER_CONFIG_A) \
+		--router-config-b $(ROUTER_CONFIG_B) \
+		--output benchmark/router-ab-test/results/ \
+		--skip-setup
+
+.PHONY: benchmark
+benchmark: benchmark-setup benchmark-deploy benchmark-run ## Run full benchmark (setup, deploy, run)
+	@echo "Benchmark completed. Results in benchmark/router-ab-test/results/"
+
+.PHONY: benchmark-cleanup
+benchmark-cleanup: ## Clean up benchmark Kind cluster
+	kind delete cluster --name kthena-benchmark || true
+
+.PHONY: workflows-disable
+workflows-disable: ## Disable non-benchmark workflows for faster benchmark CI
+	./hack/manage-workflows.sh disable
+
+.PHONY: workflows-enable
+workflows-enable: ## Enable all workflows for PR creation
+	./hack/manage-workflows.sh enable
+
+.PHONY: workflows-status
+workflows-status: ## Show current workflow status
+	./hack/manage-workflows.sh status
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...

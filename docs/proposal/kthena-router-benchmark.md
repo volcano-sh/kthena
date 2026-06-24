@@ -204,7 +204,7 @@ backends:
 
 # ── MIDDLE: Routing Strategy ──
 routing:
-  strategy: "least-latency" # round-robin | least-connection | least-latency | least-request
+  strategy: "least-latency" # random | least-connection | least-latency | least-request
   plugins: ["gpu", "prefix"] # scheduler plugin chain
 
 # ── COLLECTION ──
@@ -292,7 +292,7 @@ These 8 scenarios serve as the "fast path"—run them first to catch obvious reg
 | S5 | **Prompt Length Impact** | Request body parsing cost | Prompt tokens: 100, 1000, 4000; fixed QPS=50 |
 | S6 | **Long Response** | SSE relay overhead for long streams | Response tokens: 100, 1000, 4096 |
 | S7 | **Backend Latency Variance** | Scheduler behavior under uneven backends | 3 pods: TTFT 10ms / 100ms / 500ms; measures if scheduler avoids slow pod |
-| S8 | **Routing Strategy Comparison** | Plugin overhead vs. routing quality | round-robin vs. least-latency vs. least-request |
+| S8 | **Routing Strategy Comparison** | Plugin overhead vs. routing quality | random vs. least-latency vs. least-request |
 
 **Smoke test execution time target**: All 8 scenarios should complete within **15 minutes** on a kind cluster.
 

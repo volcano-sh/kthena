@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "aiperf-benchmark-{{ .RunID }}"
+  namespace: default
+  labels:
+    app: aiperf-benchmark
+    run-id: "{{ .RunID }}"
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: aiperf-benchmark
+        run-id: "{{ .RunID }}"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: aiperf
+        image: ghcr.io/ai-dynamo/aiperf:latest
+        imagePullPolicy: IfNotPresent
+        command: ["aiperf", "profile"]
+        args:
+        - "--model"
+        - "{{ .ModelName }}"
+        - "--endpoint-type"
+        - "chat"
+        - "--url"
+        - "http://kthena-router.kthena-system.svc.cluster.local:80"
+        - "--streaming"
+        - "--concurrency"
+        - "{{ .Concurrency }}"
+        - "--request-rate"
+        - "{{ .RequestRate }}"
+        - "--request-count"
+        - "{{ .RequestCount }}"
+        - "--duration"
+        - "{{ .Duration }}"
+        - "--output-dir"
+        - "/results"
+        env:
+        - name: AIPERF_LOG_LEVEL
+          value: "INFO"
+        volumeMounts:
+        - name: results
+          mountPath: /results
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+      volumes:
+      - name: results
+        emptyDir: {}
