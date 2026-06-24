@@ -4,8 +4,6 @@ metadata:
   name: deepseek-r1-1-5b-sglang-pd-disaggregation
   namespace: default
 spec:
-  kvConnector:
-    type: http
   workloadSelector:
     matchLabels:
       modelserving.volcano.sh/name: deepseek-r1-1-5b-sglang-pd

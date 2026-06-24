@@ -94,6 +94,7 @@ const (
 )
 
 var _ framework.ScorePlugin = &PrefixCache{}
+var _ framework.PostScheduleHook = &PrefixCache{}
 
 type PrefixCache struct {
 	name string

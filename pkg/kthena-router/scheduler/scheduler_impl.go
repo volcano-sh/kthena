@@ -106,15 +106,13 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		}
 	}
 
-	prefixCache := plugins.NewPrefixCache(store, pluginsArgMap[plugins.PrefixCachePluginName])
+	scorePlugins := getScorePlugins(registry, store, scorePluginMap, pluginsArgMap)
 	return &SchedulerImpl{
-		store:         store,
-		filterPlugins: getFilterPlugins(registry, filterPluginMap, pluginsArgMap),
-		scorePlugins:  getScorePlugins(registry, prefixCache, scorePluginMap, pluginsArgMap),
-		postScheduleHooks: []framework.PostScheduleHook{
-			prefixCache,
-		},
-		syncOnFlight: leastRequestEnabled,
+		store:             store,
+		filterPlugins:     getFilterPlugins(registry, filterPluginMap, pluginsArgMap),
+		scorePlugins:      scorePlugins,
+		postScheduleHooks: getPostScheduleHooks(scorePlugins),
+		syncOnFlight:      leastRequestEnabled,
 	}
 }
 

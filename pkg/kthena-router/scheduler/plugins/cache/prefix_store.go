@@ -199,8 +199,8 @@ func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.Pod
 	podLRU, exists := s.podHashes[nsName]
 	if !exists {
 		podLRU, _ = NewLRUCache(s.hashCapacity, func(key hashModelKey, value struct{}) {
-			// onEvict callback need to acquire `modelCache.mu.Lock()` as well, so start a goroutine to run it async.
-			go s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
+			// Safe to call synchronously: podLRU.Add() is invoked after shard.mu.Unlock().
+			s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
 		})
 		s.podHashes[nsName] = podLRU
 	}

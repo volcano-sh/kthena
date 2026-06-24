@@ -66,7 +66,7 @@ STANDARD_RULES: Dict[str, List[MetricOperator]] = {
             StandardMetricNames.TIME_TO_FIRST_TOKEN_SECONDS,
         ),
         RenameMetric(
-            "sglang:time_per_output_token_seconds",
+            "sglang:inter_token_latency_seconds",
             StandardMetricNames.TIME_PER_OUTPUT_TOKEN_SECONDS,
         ),
         RenameMetric(

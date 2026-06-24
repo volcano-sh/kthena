@@ -1,5 +1,5 @@
 # ModelServing for controller-manager autoscale e2e (binding lifecycle).
-# Same mocker/token_usage assumptions as model-serving-sglang-mocker-policy-lifecycle.yaml.
+# Same mocker/kv_available_tokens assumptions as model-serving-sglang-mocker-policy-lifecycle.yaml.
 
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
@@ -19,12 +19,22 @@ spec:
           spec:
             containers:
               - name: leader
-                image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+                image: ghcr.io/faust-benchou/sglang-inference-sim:0.1.1
                 imagePullPolicy: IfNotPresent
+                args:
+                  - --model=kthena-mock-sglang
+                  - --served-model-name=Qwen/Qwen3-8B
+                  - --port=30000
+                  - --mode=echo
+                  - --time-to-first-token=0ms
+                  - --inter-token-latency=0ms
                 ports:
                   - name: metrics
                     containerPort: 30000
-                env:
-                  - name: MODEL_NAME
-                    value: "Qwen/Qwen3-8B"
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 30000
+                  initialDelaySeconds: 2
+                  periodSeconds: 2
         workerReplicas: 0

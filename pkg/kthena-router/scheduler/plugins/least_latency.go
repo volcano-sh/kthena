@@ -78,10 +78,17 @@ func (l *LeastLatency) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	// 2. Second pass: Compute scores using linear normalization
 	// Note: If all pods have identical latency (max == min), all pods get MaxScore
 	for _, info := range pods {
-		scoreTTFT := MaxScore
-		scoreTPOT := MaxScore
 		ttft := info.GetTTFT()
 		tpot := info.GetTPOT()
+		// Pods with no observed latency yet (zero default) are uninitialized — assign a
+		// neutral mid-range score so they receive some traffic via other plugins without
+		// monopolizing dispatch ahead of warm, measured replicas.
+		if ttft <= 0 || tpot <= 0 {
+			scoreResults[info] = int(MaxScore / 2)
+			continue
+		}
+		scoreTTFT := MaxScore
+		scoreTPOT := MaxScore
 		// Only compute normalized score if there's variance in latency values
 		if maxTTFT > minTTFT {
 			scoreTTFT = MaxScore * (maxTTFT - ttft) / (maxTTFT - minTTFT)
@@ -104,8 +111,8 @@ func calculateMinMaxMetrics(pods []*datastore.PodInfo) (minTTFT, maxTTFT, minTPO
 	for _, info := range pods {
 		ttft := info.GetTTFT()
 		tpot := info.GetTPOT()
-		// Skip pods with invalid values
-		if ttft < 0 || tpot < 0 {
+		// Skip pods with no observed data (zero is the uninitialized default, not a valid measurement)
+		if ttft <= 0 || tpot <= 0 {
 			continue
 		}
 

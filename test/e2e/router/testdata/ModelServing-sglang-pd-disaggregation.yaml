@@ -14,13 +14,24 @@ spec:
           spec:
             containers:
               - name: leader
-                image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+                image: ghcr.io/faust-benchou/sglang-inference-sim:0.1.1
                 imagePullPolicy: IfNotPresent
-                env:
-                  - name: MODEL_NAME
-                    value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+                args:
+                  - --model=kthena-mock-1.5b-prefill
+                  - --served-model-name=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+                  - --port=30000
+                  - --mode=echo
+                  - --time-to-first-token=0ms
+                  - --inter-token-latency=0ms
+                  - --disaggregation-mode=prefill
                 ports:
                   - containerPort: 30000
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 30000
+                  initialDelaySeconds: 2
+                  periodSeconds: 2
         workerReplicas: 0
       - name: decode
         replicas: 1
@@ -28,11 +39,23 @@ spec:
           spec:
             containers:
               - name: leader
-                image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+                image: ghcr.io/faust-benchou/sglang-inference-sim:0.1.1
                 imagePullPolicy: IfNotPresent
-                env:
-                  - name: MODEL_NAME
-                    value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+                args:
+                  - --model=kthena-mock-1.5b-decode
+                  - --served-model-name=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+                  - --port=30000
+                  - --mode=echo
+                  - --time-to-first-token=0ms
+                  - --inter-token-latency=0ms
+                  - --kv-cache-transfer-latency=1ms
+                  - --disaggregation-mode=decode
                 ports:
                   - containerPort: 30000
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 30000
+                  initialDelaySeconds: 2
+                  periodSeconds: 2
         workerReplicas: 0
