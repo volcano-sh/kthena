@@ -34,7 +34,7 @@ graph LR
     R -->|external| EP["ExternalModelProvider → third-party API"]
 ```
 
-This proposal evaluates two API shapes. **Option A** extends `ModelServer` with external provider fields. **Option B** adds a dedicated `ExternalModelProvider` CRD. The proposal recommends Option B, while keeping Option A as a valid lower-churn fallback. The final API shape should be confirmed with the mentor/maintainers.
+This proposal evaluates two API shapes. **Option A** extends `ModelServer` with external provider fields. **Option B** adds a dedicated `ExternalModelProvider` CRD. The selected design is Option B; Option A remains documented below to preserve the trade-off analysis and explain why it was not selected.
 
 The MVP endpoint scope is intentionally small:
 
@@ -42,7 +42,6 @@ The MVP endpoint scope is intentionally small:
 |---|---|---|
 | `/v1/chat/completions` | Supported | Text-only requests where `messages[].content` is a string |
 | `/v1/completions` | Supported | Text-only requests where `prompt` is a string |
-| `/v1/embeddings` | Not supported | Uses `input`, while the current router requires a text `ChatMessage` before target selection; support needs a separate request-processing design |
 
 ### Motivation
 
@@ -59,7 +58,7 @@ graph LR
     style G fill:#f9d,stroke:#333
 ```
 
-Everything up to the upstream hop is protocol-agnostic. Only the **final hop** is tightly coupled to in-cluster Pods: 
+Everything up to the upstream hop is protocol-agnostic. Only the **final hop** is tightly coupled to in-cluster Pods:
 
 | Coupling point | What it does | Why it breaks for external APIs |
 |:--|:--|:--|
@@ -81,9 +80,9 @@ External providers should therefore **skip Pod scheduling** and go directly thro
 ### Non-Goals
 
 - Native Gemini, Anthropic, Bedrock, or Vertex request/response translation. (Note: Gemini and Cohere expose OpenAI-compatible endpoints — e.g. Gemini's `/v1beta/openai` prefix — so they work day-one via `baseURL` without a new adapter. Only their *native* formats are out of scope.)
-- `/v1/embeddings` support. The current router requires a text `ChatMessage` before target selection, so supporting `input` needs wider changes to request parsing, token counting, rate limiting, and scheduling.
 - Multimodal chat content such as `messages[].content` arrays.
 - Pod scheduling, KV-cache-aware routing, prefix-aware routing, LoRA affinity, or PD disaggregation for external providers.
+- LoRA routes targeting external providers. `ModelRoute.spec.loraAdapters[]` remains an in-cluster ModelServer feature in the MVP.
 - Managing the external service lifecycle.
 - Provider-side multi-endpoint load balancing beyond what weighted `targetModels[]` can already express.
 - Automatic failure fallback from one selected target to another.
@@ -99,13 +98,13 @@ This is the lower-churn shape because it preserves the existing `ModelRoute -> M
 
 #### Option B: Add ExternalModelProvider
 
-Option B adds a namespaced `ExternalModelProvider` CRD and extends `ModelRoute.targetModels[]` with an `externalProviderRef`. `ModelServer` remains the resource for Pod-backed serving, while external providers get their own fields for endpoint, credentials, and protocol.
+Option B adds a namespaced `ExternalModelProvider` CRD and extends `ModelRoute.targetModels[]` with an `externalModelProviderName`. `ModelServer` remains the resource for Pod-backed serving, while external providers get their own fields for endpoint, credentials, model override, and protocol.
 
-This proposal recommends Option B because Kthena is CRD-native and `ModelServer` is already documented and implemented around Pods. Separating the resources keeps lifecycle, validation, status, and future provider-specific fields cleaner.
+This proposal selects Option B because Kthena is CRD-native and `ModelServer` is already documented and implemented around Pods. Separating the resources keeps lifecycle, validation, status, and future provider-specific fields cleaner.
 
 | Dimension | Option A: extend `ModelServer` | Option B: new `ExternalModelProvider` |
 |---|---|---|
-| Recommendation | Fallback | Recommended |
+| Decision | Not selected; retained for comparison | Selected |
 | Router path change | Smaller | Larger |
 | User-facing concepts | Reuses `ModelServer` | Adds one CRD |
 | API clarity | `ModelServer` mixes Pod and external fields | Single-purpose resources |
@@ -122,7 +121,7 @@ Resource relationships (all within one namespace):
 
 ```mermaid
 graph TD
-    MR["ModelRoute<br/>modelName: deepseek"] -->|externalProviderRef| EP["ExternalModelProvider<br/>deepseek-provider"]
+    MR["ModelRoute<br/>modelName: deepseek"] -->|externalModelProviderName| EP["ExternalModelProvider<br/>deepseek-provider<br/>model: deepseek-chat"]
     MR -->|modelServerName| MS["ModelServer<br/>(in-cluster, unchanged)"]
     EP -->|auth.secretRef| SEC["Secret<br/>deepseek-api-key"]
     EP -->|baseURL| API["Third-party API<br/>api.deepseek.com"]
@@ -132,43 +131,46 @@ graph TD
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
-| `providerType` | enum | no | `OpenAICompatible` | Only `OpenAICompatible` in MVP |
+| `providerType` | enum | no | `OpenAI` | Only `OpenAI` in MVP; it selects the OpenAI-compatible API adapter and does not restrict the upstream vendor |
+| `model` | string | no | — | Actual upstream model name; when set, overrides the request model like `ModelServer.spec.model`; when unset, preserves the request model |
 | `baseURL` | string | yes | — | `^https?://.+`; HTTPS unless `allowInsecure` |
 | `allowInsecure` | bool | no | `false` | Permits `http://` for local/mock providers |
-| `auth` | `ProviderAuth` | no | — | Credential Secret reference; if unset, no auth header is injected |
+| `insecureSkipVerify` | bool | no | `false` | For HTTPS only, skips server certificate-chain and hostname verification; use only when the endpoint cannot present a certificate trusted by the Router |
+| `auth` | `ProviderAuth` | no | — | Credential Secret reference; its value is injected as `Authorization: Bearer <secret value>`; if unset, no auth header is injected |
 | `headers` | map | no | — | Non-sensitive static upstream headers; credentials must use `auth.secretRef` |
 
 `ProviderAuth` fields:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `secretRef` | `corev1.SecretKeySelector` | — | `{name, key}`, same namespace; `optional` must be unset or `false` |
-| `header` | string | `Authorization` | Header carrying the credential |
-| `scheme` | enum | `Bearer` | `Bearer` → `Authorization: Bearer <key>`; `Raw` → `<key>` |
+| `secretRef` | `corev1.SecretKeySelector` | — | `{name, key}`, same namespace; `optional` must be unset or `false`; the selected value is sent with Bearer authentication |
 
 ```go
 type ExternalProviderType string
 
 const (
-    OpenAICompatible ExternalProviderType = "OpenAICompatible"
+    OpenAI ExternalProviderType = "OpenAI"
 )
 
-type ProviderAuthScheme string
-
-const (
-    ProviderAuthSchemeBearer ProviderAuthScheme = "Bearer"
-    ProviderAuthSchemeRaw    ProviderAuthScheme = "Raw"
-)
-
+// The BaseURL pattern limits the scheme to HTTP(S). These CEL rules require
+// HTTPS unless HTTP is explicitly enabled and restrict InsecureSkipVerify to HTTPS.
 // +kubebuilder:validation:XValidation:rule="self.allowInsecure || self.baseURL.startsWith('https://')",message="baseURL must be HTTPS unless allowInsecure is true"
+// +kubebuilder:validation:XValidation:rule="!self.insecureSkipVerify || self.baseURL.startsWith('https://')",message="insecureSkipVerify is only valid for HTTPS baseURL"
 type ExternalModelProviderSpec struct {
-    // MVP supports only OpenAICompatible.
+    // MVP supports only the OpenAI-compatible API adapter.
     // +optional
-    // +kubebuilder:validation:Enum=OpenAICompatible
-    // +kubebuilder:default=OpenAICompatible
+    // +kubebuilder:validation:Enum=OpenAI
+    // +kubebuilder:default=OpenAI
     ProviderType ExternalProviderType `json:"providerType,omitempty"`
 
-    // BaseURL is the provider endpoint root.
+    // Model is the actual upstream model name. When set, it overwrites the
+    // model in the request, matching ModelServer.Spec.Model behavior.
+    // +optional
+    // +kubebuilder:validation:MaxLength=256
+    Model *string `json:"model,omitempty"`
+
+    // BaseURL is the provider endpoint root. The pattern allows only HTTP(S);
+    // the struct-level CEL rule controls whether HTTP is permitted.
     // Example: https://api.deepseek.com
     // +kubebuilder:validation:Required
     // +kubebuilder:validation:MinLength=1
@@ -177,33 +179,30 @@ type ExternalModelProviderSpec struct {
 
     // AllowInsecure permits http:// only for local/in-cluster mock providers.
     // +optional
+    // +kubebuilder:default=false
     AllowInsecure bool `json:"allowInsecure,omitempty"`
+
+    // InsecureSkipVerify disables server certificate-chain and hostname
+    // verification for HTTPS. It does not enable plain HTTP.
+    // +optional
+    // +kubebuilder:default=false
+    InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 
     // Auth references a credential Secret in the same namespace.
     // +optional
     Auth *ProviderAuth `json:"auth,omitempty"`
 
     // Non-sensitive static headers added to upstream requests. Credentials must use
-    // Auth.SecretRef. Reserved credential, hop-by-hop, and request-routing headers
-    // such as Authorization, Host, and Content-Length are forbidden.
+    // Auth.SecretRef. Authorization, other credential-bearing headers, hop-by-hop
+    // headers, and request-routing headers such as Host and Content-Length are forbidden.
     // +optional
     Headers map[string]string `json:"headers,omitempty"`
-
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.secretRef.optional) || !self.secretRef.optional",message="secretRef.optional must be false or unset"
 type ProviderAuth struct {
     // +kubebuilder:validation:Required
     SecretRef corev1.SecretKeySelector `json:"secretRef"`
-
-    // Default: Authorization.
-    // +kubebuilder:default=Authorization
-    Header string `json:"header,omitempty"`
-
-    // Bearer -> "Authorization: Bearer <key>"; Raw -> "<key>".
-    // +kubebuilder:default=Bearer
-    // +kubebuilder:validation:Enum=Bearer;Raw
-    Scheme ProviderAuthScheme `json:"scheme,omitempty"`
 }
 
 type ExternalModelProviderStatus struct {
@@ -222,40 +221,32 @@ Status should only report whether the provider config and referenced credentials
 Extend `TargetModel` with an external destination:
 
 ```go
-// +kubebuilder:validation:XValidation:rule="(has(self.modelServerName) && self.modelServerName != '') != has(self.externalProviderRef)",message="exactly one of modelServerName or externalProviderRef must be set"
+// +kubebuilder:validation:XValidation:rule="(has(self.modelServerName) && self.modelServerName != '') != (has(self.externalModelProviderName) && self.externalModelProviderName != '')",message="exactly one of modelServerName or externalModelProviderName must be set"
 type TargetModel struct {
-    // Existing in-cluster target. Mutually exclusive with ExternalProviderRef.
+    // Existing in-cluster target. Mutually exclusive with ExternalModelProviderName.
     ModelServerName string `json:"modelServerName,omitempty"`
 
-    // New external target. Mutually exclusive with ModelServerName.
-    ExternalProviderRef *ExternalProviderRef `json:"externalProviderRef,omitempty"`
+    // ExternalModelProviderName references an ExternalModelProvider in the same
+    // namespace. It is mutually exclusive with ModelServerName.
+    ExternalModelProviderName string `json:"externalModelProviderName,omitempty"`
 
     // Existing weighted splitting field.
     Weight *uint32 `json:"weight,omitempty"`
-}
-
-type ExternalProviderRef struct {
-    // ExternalModelProvider name in the same namespace.
-    // +kubebuilder:validation:Required
-    Name string `json:"name"`
-
-    // Upstream model name sent to the provider.
-    // +kubebuilder:validation:Required
-    // +kubebuilder:validation:MaxLength=256
-    Model string `json:"model"`
 }
 ```
 
 Validation:
 
-- Exactly one of `modelServerName` and `externalProviderRef` must be set.
+- Exactly one of `modelServerName` and `externalModelProviderName` must be set.
+- If `ModelRoute.spec.loraAdapters[]` is non-empty, every `targetModels[]` entry must use `modelServerName`; `externalModelProviderName` is rejected for that route. OpenAI-compatible passthrough has no standard way to express a Kthena LoRA adapter to an arbitrary provider.
 - `baseURL` must be HTTPS unless `allowInsecure=true`.
+- `insecureSkipVerify` is valid only with an HTTPS `baseURL`. It leaves the connection encrypted but disables certificate-chain and hostname verification.
 - `baseURL` must be parsed and must not contain URL userinfo, query, or
   fragment. This should be enforced by webhook validation because CEL is not a
   good fit for full URL parsing.
-- Static `headers` are for non-sensitive values only. Always reject standard credential headers such as `Authorization`, `Proxy-Authorization`, and `Cookie`, plus the configured auth header, `Host`, `Content-Length`, and hop-by-hop headers. Custom credential headers must use `auth.header` with `auth.secretRef`. Header names must be validated case-insensitively, for example by canonicalizing with `http.CanonicalHeaderKey` or comparing with `strings.EqualFold` in webhook validation.
-- `auth.header` must be a valid HTTP header name and must not be `Host`, `Content-Length`, a hop-by-hop header, or another request-routing header.
+- Static `headers` are for non-sensitive values only. Always reject credential-bearing headers such as `Authorization`, `Proxy-Authorization`, and `Cookie`, plus `Host`, `Content-Length`, and hop-by-hop headers. Header names must be validated case-insensitively, for example by canonicalizing with `http.CanonicalHeaderKey` or comparing with `strings.EqualFold` in webhook validation.
 - `auth` may be omitted for providers that require no credential. When `auth` is present, its Secret and key are mandatory; reject `secretRef.optional=true` rather than silently sending an unauthenticated request.
+- When `auth` is present, inject the selected Secret value as `Authorization: Bearer <secret value>`. The MVP does not support alternate credential headers or authentication schemes; future native provider adapters should define their own authentication behavior.
 - `secretRef.name` and `secretRef.key` are structurally validated at admission time. Secret existence and key availability are resolved asynchronously by the controller/router lister and reported through provider status.
 
 Example:
@@ -276,14 +267,13 @@ metadata:
   name: deepseek-provider
   namespace: default
 spec:
-  providerType: OpenAICompatible
+  providerType: OpenAI
+  model: deepseek-chat
   baseURL: https://api.deepseek.com
   auth:
     secretRef:
       name: deepseek-api-key
       key: apiKey
-    header: Authorization
-    scheme: Bearer
 ---
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelRoute
@@ -295,9 +285,7 @@ spec:
   rules:
   - name: default
     targetModels:
-    - externalProviderRef:
-        name: deepseek-provider
-        model: deepseek-chat
+    - externalModelProviderName: deepseek-provider
 ```
 
 Hybrid split also works:
@@ -308,23 +296,53 @@ rules:
   targetModels:
   - modelServerName: qwen-local
     weight: 80
-  - externalProviderRef:
-      name: openai-provider
-      model: gpt-4o-mini
+  - externalModelProviderName: openai-provider
     weight: 20
+```
+
+In this example, `openai-provider` sets `spec.model: gpt-4o-mini` when the external target should override the request model. If `spec.model` is unset, the request model is forwarded unchanged.
+
+If a base model should use an external provider while LoRA adapters remain in-cluster, split them into separate `ModelRoute` resources instead of mixing `modelName` and `loraAdapters[]` in one route:
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: qwen-external
+  namespace: default
+spec:
+  modelName: qwen
+  rules:
+  - name: external
+    targetModels:
+    - externalModelProviderName: qwen-provider
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: qwen-lora
+  namespace: default
+spec:
+  loraAdapters:
+  - qwen-lora-a
+  - qwen-lora-b
+  rules:
+  - name: lora
+    targetModels:
+    - modelServerName: qwen-lora-server
 ```
 
 This is traffic splitting, not failure fallback. The MVP selects one target by weight at the beginning of the request; it does not automatically try the external provider after an in-cluster target fails, or vice versa.
 
 ### Prior Art
 
-The A/B split mirrors a consistent pattern across existing LLM gateways (verified against primary sources):
+The A/B split mirrors a common pattern across existing LLM gateways:
 
 | Project | Type | How it models an external provider | Maps to |
 |---|---|---|---|
-| Envoy AI Gateway | K8s CRDs | Separate `AIServiceBackend` + `BackendSecurityPolicy` (credentials in their own resource, `secretRef` injected into `Authorization`) | Option B |
-| LiteLLM Proxy | Config file | One uniform `model_list[]` entry per model, self-hosted or external | Option A |
-| Kong / Higress AI Gateway | Gateway plugin | Single `provider` block on the route/service | Option A |
+| [Envoy AI Gateway](https://aigateway.envoyproxy.io/docs/concepts/resources) | K8s CRDs | Separate `AIServiceBackend` + `BackendSecurityPolicy` (credentials in their own resource, `secretRef` injected into `Authorization`) | Option B |
+| [LiteLLM Proxy](https://docs.litellm.ai/docs/proxy/configs) | Config file | One uniform `model_list[]` entry per model, self-hosted or external | Option A |
+| [Kong AI Gateway](https://developer.konghq.com/ai-gateway/) / [Higress AI Gateway](https://higress.ai/en/docs/latest/plugins/ai/api-provider/ai-proxy/) | Gateway plugin | Single `provider` block on the route/service | Option A |
 
 The takeaway: **CRD-native gateways lean toward separate resources (B); flat config/plugin proxies lean toward a unified entry (A).** Since Kthena is CRD-native, the closest precedent (Envoy AI Gateway) favors Option B. Its `secretRef`-into-`Authorization` credential model is also identical to this proposal's `auth.secretRef` + Bearer injection, and its pluggable `APISchema` validates the OpenAI-compatible-first MVP with adapters added later.
 
@@ -363,9 +381,9 @@ Mapped onto the documented Router pipeline stages, the external path is **additi
 | Auth | ✅ reuse | ✅ reuse |
 | RateLimit | ✅ reuse | ✅ reuse |
 | Fairness | ✅ reuse | ✅ reuse |
-| Scheduling | Pod filter/score | ⏭️ **skipped** (no Pods) |
-| LoadBalancing | weighted Pod pick | 🔁 **replaced** by provider client |
-| Proxy | `doRequest(podIP)` | 🔁 **replaced** by provider call |
+| Target selection | weighted `targetModels[]` pick | ✅ reuse |
+| Pod scheduling | Pod filter/score | ⏭️ **skipped** (no Pods) |
+| Upstream execution | `doRequest(podIP)` | 🔁 **replaced** by provider call |
 | Response forwarding | Shared body/SSE mechanics after Pod-specific status handling | Shared body/SSE mechanics; provider HTTP errors pass through |
 
 The external path skips Pod scheduling, reuses the front half of the pipeline, and shares response-copying, SSE, and usage-parsing mechanics. Status acceptance, retry, and fallback behavior remain path-specific.
@@ -378,38 +396,29 @@ The external path skips Pod scheduling, reuses the front half of the pipeline, a
 
 ```go
 type RouteTarget struct {
-    Kind DestinationKind // ModelServer or ExternalProvider
-
-    ModelServer      *ModelServerTarget
-    ExternalProvider *ExternalProviderTarget
+    Kind DestinationKind
+    Name types.NamespacedName
 
     IsLora     bool
     ModelRoute *aiv1alpha1.ModelRoute
 }
-
-type ModelServerTarget struct {
-    Name types.NamespacedName
-}
-
-type ExternalProviderTarget struct {
-    ProviderRef   types.NamespacedName
-    UpstreamModel string
-}
 ```
 
-Only the target representation changes; rule matching and weighted selection stay the same. The signature change is mechanical but touches the `Store` interface, `MockStore`, and a handful of existing tests, plus the single live caller in `doLoadbalance` (a router-level wrapper with no callers can be deleted).
+Only the target representation changes; rule matching and weighted selection stay the same. `Kind` identifies whether `Name` refers to a `ModelServer` or an `ExternalModelProvider`; this avoids pointer combinations such as `Kind=ExternalProvider` with a populated `ModelServer` branch. `IsLora` is only valid for `Kind=ModelServer` in the MVP. After entering the external branch, the Router resolves the `ExternalModelProvider` and computes the upstream model from `provider.spec.model`, preserving the request model when that field is unset. This mirrors the existing ModelServer path, which resolves `ModelServer.spec.model` after route selection.
+
+The signature change is mechanical but touches the `Store` interface, `MockStore`, and a handful of existing tests, plus the single live caller in `doLoadbalance` (a router-level wrapper with no callers can be deleted).
 
 #### Provider Adapter Layer
 
-Add a small provider adapter layer under `pkg/kthena-router/provider/`. 
+Add a small provider adapter layer under `pkg/kthena-router/provider/`.
 
 | File | Responsibility |
 |---|---|
-| `provider.go` | `ProviderAdapter` interface + `Input`/`Credential` types |
+| `provider.go` | `ProviderAdapter` interface + `Input` type |
 | `registry.go` | `providerType` → constructor lookup |
-| `openai.go` | `OpenAICompatibleProvider` (MVP) |
+| `openai.go` | `OpenAIProvider` implementing the OpenAI-compatible API adapter (MVP) |
 | `secret.go` | Secret resolver (lister-backed) |
-| `transport.go` | Shared HTTP executor (`*http.Client`, timeouts, TLS, redirects, pooling) |
+| `transport.go` | Shared HTTP executor (`*http.Client`, timeouts, TLS, redirect policy, pooling) |
 
 Minimal interface:
 
@@ -419,19 +428,18 @@ type ProviderAdapter interface {
 }
 
 type Transport interface {
-    Do(req *http.Request) (*http.Response, error)
+    Do(req *http.Request, opts TransportOptions) (*http.Response, error)
 }
 
-type Credential struct {
-    HeaderName  string
-    HeaderValue string
+type TransportOptions struct {
+    InsecureSkipVerify bool
 }
 
 type Input struct {
     ProviderType   ExternalProviderType
     BaseURL        string
     StaticHeaders  map[string]string
-    Credential     *Credential
+    APIKey         []byte
     RawBody        []byte
     Fields         map[string]any
     OriginalPath   string
@@ -440,14 +448,16 @@ type Input struct {
 }
 ```
 
-The adapter decides what the upstream request should look like: URL, model rewrite, headers, and future provider-specific conversion. The shared transport sends the HTTP request and handles connection pooling, TLS, redirects, and connection-level timeouts. The MVP does not automatically retry external-provider requests. If an implementation keeps a provider-level `Do()` helper, it should only call the shared transport instead of adding separate network rules inside each provider.
+The adapter decides what the upstream request should look like: URL, model rewrite, headers, and future provider-specific conversion. The shared transport sends the HTTP request and handles connection pooling, TLS, redirect policy, and connection-level timeouts. Redirects are disabled by default. `TransportOptions` is populated from the resolved `ExternalModelProvider`; adapters must not choose TLS verification policy themselves. The MVP does not automatically retry external-provider requests. If an implementation keeps a provider-level `Do()` helper, it should only call the shared transport instead of adding separate network rules inside each provider.
+
+The transport should keep separate long-lived secure and skip-verification clients, both created by cloning a private base `http.Transport`. The secure client uses normal certificate and hostname verification. The opt-in client uses a cloned `tls.Config` with `InsecureSkipVerify=true`. Never mutate `http.DefaultTransport`, a shared `tls.Config`, or the secure client when processing a provider with `insecureSkipVerify=true`; otherwise one provider could silently disable verification for every provider sharing the connection pool.
 
 The MVP provider only needs OpenAI-compatible passthrough:
 
 - Treat `baseURL` as the provider's OpenAI-compatible API root. Strip the public Router `/v1` prefix from the original path before joining. For example, `/v1/chat/completions` joined with `https://api.example.com/v1` becomes `https://api.example.com/v1/chat/completions`, and the same request joined with `https://generativelanguage.googleapis.com/v1beta/openai` becomes `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`.
-- Inject auth from Secret.
-- Do not copy downstream headers wholesale. Forward only `Content-Type`, `Accept`, and explicitly allowed tracing/request-correlation headers. Strip `Authorization`, `Proxy-Authorization`, `Cookie`, `Host`, `Content-Length`, hop-by-hop headers, and the configured provider auth header; apply static headers and then inject the provider credential last so client input cannot override it.
-- Rewrite `model` to the upstream model name.
+- If `auth` is configured, inject the selected Secret value as `Authorization: Bearer <secret value>`.
+- Do not copy downstream headers wholesale. Forward only `Content-Type`, `Accept`, and explicitly allowed tracing/request-correlation headers. Strip `Authorization`, `Proxy-Authorization`, `Cookie`, `Host`, `Content-Length`, and hop-by-hop headers; apply static headers and then inject the provider `Authorization` header last so client input cannot override it.
+- If `ExternalModelProvider.spec.model` is set, rewrite the request `model` to that value; otherwise preserve the request model. This matches the existing `ModelServer.spec.model` override behavior.
 - Use request context for cancellation.
 - Execute the request through the shared transport.
 
@@ -464,7 +474,7 @@ The API should leave room for provider-specific adapters even though the first i
 | `AWSBedrock` | Service-specific signing/auth, model identifiers, and response envelopes differ |
 | `Custom` | User-controlled OpenAI-compatible or organization-specific gateway behavior |
 
-This means the first implementation should add the provider registry and `providerType`, but only register `OpenAICompatible` until routing, Secret handling, streaming, and observability are stable.
+This means the first implementation should add the provider registry and `providerType`, but only register `OpenAI` until routing, Secret handling, streaming, and observability are stable. Here, `OpenAI` identifies the OpenAI-compatible API adapter, so compatible services such as DeepSeek do not need separate provider types.
 
 #### Body and Usage Handling
 
@@ -487,7 +497,7 @@ Streaming usage handling should be shared with the existing Pod path. Today this
 applyUsageOpts(c, modelRequest, backendType)
 ```
 
-For streaming, keep the standard OpenAI-compatible `stream_options.include_usage=true`. For non-streaming external calls, avoid injecting non-standard top-level fields unless a provider explicitly supports it.
+For streaming, keep the standard OpenAI-compatible `stream_options.include_usage=true`. Match the current Pod path semantics: if the downstream request already asked for `stream_options.include_usage=true`, forward the provider's usage chunk to the client; if the Router injects `include_usage=true` only for internal accounting, parse that usage chunk and suppress the injected usage-only chunk before forwarding. For non-streaming external calls, avoid injecting non-standard top-level fields unless a provider explicitly supports it.
 
 #### Streaming Support
 
@@ -499,10 +509,11 @@ The external path should:
 - Parse usage chunks when the provider returns them.
 - Record output tokens for rate limiting, access logs, and metrics when usage is available.
 - Continue forwarding the stream even if usage is absent.
+- For OpenAI-compatible chat/completions streams, forward `data: [DONE]` when the upstream sends it, and finish when the upstream response body reaches EOF.
 - Cancel the upstream request and exit the forwarding loop when the downstream client disconnects.
 - Never automatically retry the provider request, including after a stream has started.
 
-Streaming requests should not use `http.Client.Timeout` as a total request timeout, because a valid model stream can last longer than a normal non-streaming request. The MVP should use request context plus HTTP connection timeouts such as connect, TLS handshake, response-header, and idle connection timeouts. More specific first-token or stream-idle timeout fields can be added later.
+Streaming requests should follow the existing ModelServer path and must not use `http.Client.Timeout` as a total request timeout, because a valid model stream can last longer than a normal non-streaming request. Normal stream completion is upstream-driven: OpenAI-compatible chat/completions streams normally send `data: [DONE]` and then close the response body, so the forwarding loop exits on EOF. The request context still handles downstream client disconnects and router shutdown. The external transport can add connection-stage bounds such as dial, TLS handshake, and response-header timeouts; `IdleConnTimeout` only controls pooled idle connections and is not an active stream-idle timeout. More specific first-token or active stream-idle timeout fields can be added later as explicit API decisions.
 
 The streaming copy and usage-parsing mechanics should be shared instead of implemented separately for providers. Status acceptance, retry, and fallback decisions remain path-specific and happen before response forwarding starts.
 
@@ -537,7 +548,8 @@ After path-specific status handling accepts a response, both Pod and external pa
 - Parse usage chunks when available.
 - Record output tokens for rate limit and metrics.
 
-This does not make the two paths' error semantics identical. The existing Pod path remains unchanged: it treats a non-2xx response as a failed Pod attempt, tries another candidate Pod when available, and returns a Router-generated error after all candidates fail.
+This does not make the two paths' error semantics identical. The existing Pod path keeps its current error and retry semantics: it treats a non-2xx response as a failed Pod attempt, tries another candidate Pod when available, and returns a Router-generated error after all candidates fail. Shared forwarding may still intentionally standardize response-header filtering, such as stripping hop-by-hop headers and stale `Content-Length`.
+
 The external provider path has no implicit fallback to another weighted target after target selection, so an upstream HTTP error response is passed through to the client.
 
 For external providers, every non-2xx response is passed through unchanged; only transport failures without an upstream response are created by the Router. The handler must set the fixed completion category before `RequestMetricsRecorder.Finish()` runs so a forwarded provider response is never incorrectly recorded as `successful_request`:
@@ -573,7 +585,7 @@ Destination labels:
 | `model_route` | namespaced ModelRoute name, or `none` | The matched ModelRoute; `none` when no ModelRoute was selected |
 | `backend_type` | `model_server`, `external_provider`, `inference_pool`, or `unresolved` | The selected destination kind; `unresolved` when the request ends before destination selection |
 | `backend_name` | namespaced backend resource name, or `none` | The selected ModelServer, ExternalModelProvider, or InferencePool |
-| `upstream_model` | configured upstream model, or `none` | `ExternalProviderRef.Model`; for a LoRA ModelServer request, the matched `ModelRoute.spec.loraAdapters[]` name; otherwise `ModelServer.spec.model` or the matched `ModelRoute.spec.modelName` when `spec.model` is unset |
+| `upstream_model` | configured upstream model, or `none` | For an external request, `ExternalModelProvider.spec.model` or the matched `ModelRoute.spec.modelName` when `spec.model` is unset; for a LoRA ModelServer request, the matched `ModelRoute.spec.loraAdapters[]` name; otherwise `ModelServer.spec.model` or the matched `ModelRoute.spec.modelName` when `spec.model` is unset |
 
 These labels are added only to metrics that describe a completed routed request or a real upstream attempt:
 
@@ -633,11 +645,11 @@ This proposal intentionally does not implement cost-aware routing in the first v
 - Never log Secret contents or upstream auth headers.
 - Require HTTPS by default.
 - Use `allowInsecure` only for local or in-cluster mock providers.
-- `allowInsecure` only permits `http://`; it must not disable TLS certificate verification for `https://` endpoints.
-- Reject `baseURL` values with URL userinfo or fragments.
+- `allowInsecure` only permits `http://`; it does not change HTTPS certificate verification.
+- `insecureSkipVerify` applies only to HTTPS and disables both certificate-chain and hostname verification. Restrict its use to trusted provider configuration where the endpoint cannot present a certificate trusted by the Router; prefer adding the organization CA to the Router trust store because skip-verification permits man-in-the-middle attacks.
+- Reject `baseURL` values with URL userinfo, query, or fragments.
 - Disable automatic redirects by default so an allowed provider endpoint cannot redirect the router to a different host.
-- Reject credential-bearing static headers, the configured auth header, `Host`, `Content-Length`, and hop-by-hop headers; static header values must be non-sensitive.
-- Validate the configured auth header against the same reserved-header rules.
+- Reject credential-bearing static headers, `Host`, `Content-Length`, and hop-by-hop headers; static header values must be non-sensitive.
 - Forward downstream headers through an explicit allowlist, strip client credentials and cookies, and inject provider credentials last.
 - Strip hop-by-hop response headers, and do not forward a stale `Content-Length` after streaming or body modification.
 - Keep provider, Secret, and ModelRoute references in the same namespace.
@@ -648,34 +660,16 @@ Unit tests should not call real third-party APIs. Use `httptest.Server` and fake
 
 | Area | Coverage |
 |---|---|
-| API validation | `modelServerName` XOR `externalProviderRef`; HTTPS/`allowInsecure`; URL userinfo/query/fragment rejection; credential/reserved static-header rejection; anonymous provider without `auth`; reject `secretRef.optional=true` when `auth` is present |
-| Request scope | text-only chat messages and string prompts; reject embeddings and multimodal content |
+| API validation | `modelServerName` XOR `externalModelProviderName`; reject `externalModelProviderName` on routes with `loraAdapters[]`; optional provider `model` length; HTTPS/`allowInsecure`; reject `insecureSkipVerify` for HTTP; URL userinfo/query/fragment rejection; credential/reserved static-header rejection; anonymous provider without `auth`; reject `secretRef.optional=true` when `auth` is present |
+| Request scope | text-only chat messages and string prompts; reject multimodal content |
 | Secret resolution | missing Secret, missing key, valid key, rotation behavior, Secret add/update/delete event mapping, `ObservedGeneration`, `CredentialsResolved`, and `Ready` transitions |
-| Route resolution | external target, internal target, weighted internal/external split |
-| Request building | `/v1` prefix stripping, path join, raw body preservation, `UseNumber`, model rewrite, Bearer/Raw auth, reserved auth-header rejection, downstream header allowlist, credential precedence |
-| Streaming | SSE passthrough, line-by-line flush, usage callback, downstream cancellation, response header filtering, no mid-stream retry |
+| Route resolution | external target, internal target, weighted internal/external split, LoRA route remains ModelServer-only |
+| Request building | `/v1` prefix stripping, path join, raw body preservation, `UseNumber`, configured model override and unset-model passthrough, fixed Bearer auth, reserved `Authorization` static-header rejection, downstream header allowlist, credential precedence |
+| TLS | trusted certificate succeeds by default; self-signed certificate fails by default; the same self-signed endpoint succeeds only with `insecureSkipVerify=true`; enabling it for HTTP is rejected; secure and skip-verification connection pools remain isolated |
+| Streaming | SSE passthrough, line-by-line flush, usage callback, suppression of Router-injected usage-only chunks, downstream-requested usage chunks still forwarded, `[DONE]` forwarding, EOF completion, downstream cancellation, response header filtering, no mid-stream retry |
 | Non-streaming | body passthrough, usage parsing when present, response header filtering |
 | Errors | pass through every upstream non-2xx response with `upstream_response`/`upstream` attribution; create 502/504 with `upstream_transport`/`router` attribution; bounded access-log messages; no automatic provider retry |
 | Compatibility | existing ModelServer-only routes unchanged |
 | Observability | exact label schemas; ModelServer, matched LoRA adapter, provider, explicitly bound InferencePool, and unresolved values; buffered input tokens; consistent input/output attribution; balanced upstream gauges across retries and cancellation; no external-only metrics; controlled label values; e2e aggregation across matching series |
 
 E2E can use an in-cluster mock OpenAI-compatible server. This avoids depending on real external providers or free API availability.
-
-### Implementation Milestones
-
-| # | Milestone | Output |
-|---|---|---|
-| 1 | Confirm API shape with mentor/maintainers | Decision on Option B (recommended) vs A |
-| 2 | CRD types + codegen | `ExternalModelProvider` types, deepcopy, CRD YAML, client |
-| 3 | Registry + controller + store | Provider controller, store registry, provider/Secret informers, reverse Secret-reference index, status reconciliation and RBAC |
-| 4 | Route target refactor | `RouteTarget` + external branch in `doLoadbalance` |
-| 5 | Provider request + Secret + forwarding | `OpenAICompatibleProvider`, secret resolver, external forward |
-| 6 | Shared helpers | Extract `forwardResponse` + usage helper from Pod path |
-| 7 | Validation, docs, examples, tests | CEL/webhook, user guide, manifests, unit tests |
-
-### Open Questions
-
-- Do maintainers accept Option B, or prefer Option A for lower implementation churn?
-- Is OpenAI-compatible-only scope acceptable for the first implementation?
-- Should the API reserve room for future cost-aware routing policies while keeping the first implementation limited to weighted target selection?
-- Is a mock OpenAI-compatible server acceptable for e2e?
