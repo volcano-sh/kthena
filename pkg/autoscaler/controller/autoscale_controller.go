@@ -59,6 +59,7 @@ type AutoscaleController struct {
 	podsInformer                       cache.Controller
 	scalerMap                          map[string]*autoscaler.Autoscaler
 	optimizerMap                       map[string]*autoscaler.Optimizer
+	pdDisaggregatedScalerMap           map[string]*autoscaler.PDDisaggregatedAutoscaler
 }
 
 func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
@@ -91,6 +92,7 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 		podsInformer:                       podsInformer.Informer(),
 		scalerMap:                          make(map[string]*autoscaler.Autoscaler),
 		optimizerMap:                       make(map[string]*autoscaler.Optimizer),
+		pdDisaggregatedScalerMap:           make(map[string]*autoscaler.PDDisaggregatedAutoscaler),
 	}
 	return ac
 }
@@ -133,6 +135,7 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 
 	scalerSet := sets.New[string]()
 	optimizerSet := sets.New[string]()
+	pdDisaggregatedScalerSet := sets.New[string]()
 
 	for _, binding := range bindings {
 		policyName := binding.Spec.PolicyRef.Name
@@ -144,8 +147,10 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 			scalerSet.Insert(formatAutoscalerMapKey(binding.Namespace, binding.Name, &binding.Spec.HomogeneousTarget.Target.TargetRef))
 		} else if binding.Spec.HeterogeneousTarget != nil {
 			optimizerSet.Insert(formatAutoscalerMapKey(binding.Namespace, binding.Name, nil))
+		} else if binding.Spec.PDDisaggregatedTarget != nil {
+			pdDisaggregatedScalerSet.Insert(formatAutoscalerMapKey(binding.Namespace, binding.Name, nil))
 		} else {
-			klog.Warningf("Either homogeneous or heterogeneous not set, binding name: %s", binding.Name)
+			klog.Warningf("No supported target set in binding: %s", binding.Name)
 		}
 	}
 
@@ -158,6 +163,12 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	for key := range ac.optimizerMap {
 		if !optimizerSet.Contains(key) {
 			delete(ac.optimizerMap, key)
+		}
+	}
+
+	for key := range ac.pdDisaggregatedScalerMap {
+		if !pdDisaggregatedScalerSet.Contains(key) {
+			delete(ac.pdDisaggregatedScalerMap, key)
 		}
 	}
 
@@ -260,6 +271,11 @@ func (ac *AutoscaleController) schedule(ctx context.Context, binding *workload.A
 			klog.Errorf("failed to do optimize, err: %v", err)
 			return err
 		}
+	} else if binding.Spec.PDDisaggregatedTarget != nil {
+		if err := ac.doPDDisaggregatedScale(ctx, binding, autoscalePolicy); err != nil {
+			klog.Errorf("failed to do pd disaggregated scale, err: %v", err)
+			return err
+		}
 	} else if binding.Spec.HomogeneousTarget != nil {
 		if err := ac.doScale(ctx, binding, autoscalePolicy); err != nil {
 			klog.Errorf("failed to do scale, err: %v", err)
@@ -345,6 +361,59 @@ func (ac *AutoscaleController) doScale(ctx context.Context, binding *workload.Au
 	}
 	klog.InfoS("successfully update target replicas", "targetRef", target.TargetRef, "recommendedInstances", recommendedInstances)
 	return nil
+}
+
+func (ac *AutoscaleController) doPDDisaggregatedScale(ctx context.Context, binding *workload.AutoscalingPolicyBinding, autoscalePolicy *workload.AutoscalingPolicy) error {
+	key := formatAutoscalerMapKey(binding.Namespace, binding.Name, nil)
+	scaler, ok := ac.pdDisaggregatedScalerMap[key]
+	if !ok || scaler.NeedUpdate(autoscalePolicy, binding) {
+		scaler = autoscaler.NewPDDisaggregatedAutoscaler(autoscalePolicy, binding)
+		ac.pdDisaggregatedScalerMap[key] = scaler
+		klog.Infof("asp: %s or binding: %s changed, create new pd disaggregated scaler", autoscalePolicy.Name, binding.Name)
+	}
+
+	prefillCurrent, err := ac.getTargetReplicas(scaler.Meta.PrefillTarget, binding.Namespace)
+	if err != nil {
+		return err
+	}
+	decodeCurrent, err := ac.getTargetReplicas(scaler.Meta.DecodeTarget, binding.Namespace)
+	if err != nil {
+		return err
+	}
+
+	prefillRecommended, decodeRecommended, effectiveRatio, err := scaler.Scale(ctx, ac.podsLister, autoscalePolicy, prefillCurrent, decodeCurrent)
+	if err != nil {
+		return err
+	}
+	if prefillRecommended < 0 || decodeRecommended < 0 {
+		return nil
+	}
+
+	if err := ac.updateTargetReplicas(ctx, scaler.Meta.PrefillTarget, binding.Namespace, prefillRecommended); err != nil {
+		return err
+	}
+	if err := ac.updateTargetReplicas(ctx, scaler.Meta.DecodeTarget, binding.Namespace, decodeRecommended); err != nil {
+		return err
+	}
+
+	if err := ac.updatePDScalingStatus(ctx, binding, prefillRecommended, decodeRecommended, effectiveRatio); err != nil {
+		klog.Warningf("failed to update pd scaling status for binding %s/%s: %v", binding.Namespace, binding.Name, err)
+	}
+
+	return nil
+}
+
+func (ac *AutoscaleController) updatePDScalingStatus(ctx context.Context, binding *workload.AutoscalingPolicyBinding, prefillReplicas int32, decodeReplicas int32, effectiveRatio string) error {
+	bindingCopy := binding.DeepCopy()
+	now := metav1.Now()
+	bindingCopy.Status.PDScalingStatus = &workload.PDScalingStatus{
+		PrefillReplicas: prefillReplicas,
+		DecodeReplicas:  decodeReplicas,
+		EffectiveRatio:  effectiveRatio,
+		LastScaleTime:   &now,
+	}
+	_, err := ac.client.WorkloadV1alpha1().AutoscalingPolicyBindings(binding.Namespace).UpdateStatus(ctx, bindingCopy, metav1.UpdateOptions{})
+	return err
 }
 
 func (ac *AutoscaleController) getAutoscalePolicy(autoscalingPolicyName string, namespace string) (*workload.AutoscalingPolicy, error) {

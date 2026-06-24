@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -188,7 +187,7 @@ func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName s
 	// Assert successful response
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
-	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
+	assert.False(t, containsError(resp.Body), "Chat response contains structured error payload")
 
 	return resp
 }
@@ -199,7 +198,7 @@ func CheckChatCompletionsQuiet(t *testing.T, modelName string, messages []ChatMe
 	resp := SendChatRequestWithRetryQuiet(t, DefaultRouterURL, modelName, messages, nil)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
-	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
+	assert.False(t, containsError(resp.Body), "Chat response contains structured error payload")
 	return resp
 }
 
@@ -240,10 +239,20 @@ func WaitForChatModelReady(t *testing.T, url, modelName string, messages []ChatM
 	require.NoError(t, err, "Model %s did not become ready within %v", modelName, timeout)
 }
 
-// containsError checks if the response string contains error indicators
+// containsError checks whether the response has a top-level OpenAI-style error payload.
 func containsError(response string) bool {
-	responseLower := strings.ToLower(response)
-	return strings.Contains(responseLower, "error")
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(response), &payload); err != nil {
+		return false
+	}
+
+	errorPayload, exists := payload["error"]
+	if !exists {
+		return false
+	}
+
+	trimmed := bytes.TrimSpace(errorPayload)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 // min returns the minimum of two time.Duration values

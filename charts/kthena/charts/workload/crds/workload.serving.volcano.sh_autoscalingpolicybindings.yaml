@@ -40,17 +40,17 @@ spec:
             type: object
           spec:
             description: "AutoscalingPolicyBindingSpec defines the desired state of
-              AutoscalingPolicyBinding.\n\nExactly one of HeterogeneousTarget or HomogeneousTarget
-              must be set:\n  - HomogeneousTarget   -> scale a single ModelServing
-              by metric targets.\n  - HeterogeneousTarget -> optimize replica distribution
-              across several\n    ModelServing groups with different hardware/cost.\n\nExample
-              (homogeneous, metric-based scaling):\n\n\tspec:\n\t  policyRef:\n\t
-              \   name: podinfo-prom-policy\n\t  homogeneousTarget:\n\t    minReplicas:
-              1\n\t    maxReplicas: 6\n\t    target:\n\t      targetRef:\n\t        kind:
-              ModelServing\n\t        name: podinfo-ms\n\t      metricSources:\n\t
-              \       podinfo_rps:\n\t          type: Prometheus\n\t          prometheus:\n\t
-              \           serverURL: http://prometheus.monitoring.svc:9090\n\t            query:
-              sum(rate(http_requests_total[2m]))"
+              AutoscalingPolicyBinding.\n\nExactly one target must be set:\n  - HomogeneousTarget
+              \    -> scale a single ModelServing by metric targets.\n  - HeterogeneousTarget
+              \  -> optimize replica distribution across several\n    ModelServing
+              groups with different hardware/cost.\n  - PDDisaggregatedTarget -> coordinate
+              prefill/decode disaggregated\n    ModelServing roles.\n\nExample (homogeneous,
+              metric-based scaling):\n\n\tspec:\n\t  policyRef:\n\t    name: podinfo-prom-policy\n\t
+              \ homogeneousTarget:\n\t    minReplicas: 1\n\t    maxReplicas: 6\n\t
+              \   target:\n\t      targetRef:\n\t        kind: ModelServing\n\t        name:
+              podinfo-ms\n\t      metricSources:\n\t        podinfo_rps:\n\t          type:
+              Prometheus\n\t          prometheus:\n\t            serverURL: http://prometheus.monitoring.svc:9090\n\t
+              \           query: sum(rate(http_requests_total[2m]))"
             properties:
               heterogeneousTarget:
                 description: |-
@@ -548,6 +548,231 @@ spec:
                 - maxReplicas
                 - minReplicas
                 type: object
+              pdDisaggregatedTarget:
+                description: PDDisaggregatedTarget enables coordinated autoscaling
+                  for prefill/decode disaggregated roles.
+                properties:
+                  decodeRole:
+                    description: DecodeRole defines the target and replica bounds
+                      for decode.
+                    properties:
+                      maxReplicas:
+                        description: MaxReplicas defines the maximum number of replicas
+                          allowed for this role.
+                        format: int32
+                        maximum: 1000000
+                        minimum: 1
+                        type: integer
+                      metricEndpoint:
+                        description: MetricEndpoint defines endpoint for scraping
+                          metrics from role pods.
+                        properties:
+                          labelSelector:
+                            description: |-
+                              LabelSelector defines additional filtering for pods exposing this metric.
+                              Only pods matching both the target and this selector are scraped, e.g.
+                              matchLabels with role=decode to scrape only the decode role's pods.
+                            properties:
+                              matchExpressions:
+                                description: matchExpressions is a list of label selector
+                                  requirements. The requirements are ANDed.
+                                items:
+                                  description: |-
+                                    A label selector requirement is a selector that contains values, a key, and an operator that
+                                    relates the key and values.
+                                  properties:
+                                    key:
+                                      description: key is the label key that the selector
+                                        applies to.
+                                      type: string
+                                    operator:
+                                      description: |-
+                                        operator represents a key's relationship to a set of values.
+                                        Valid operators are In, NotIn, Exists and DoesNotExist.
+                                      type: string
+                                    values:
+                                      description: |-
+                                        values is an array of string values. If the operator is In or NotIn,
+                                        the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                        the values array must be empty. This array is replaced during a strategic
+                                        merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                  required:
+                                  - key
+                                  - operator
+                                  type: object
+                                type: array
+                                x-kubernetes-list-type: atomic
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                description: |-
+                                  matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                  map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                  operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                type: object
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          name:
+                            description: |-
+                              Name is the Prometheus metric name matched against labels in the pod's scraped output.
+                              Defaults to the policy metric key when omitted.
+                              For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
+                            type: string
+                          port:
+                            default: 8100
+                            description: Port defines the network port where metrics
+                              are exposed by the pods (e.g., 8000).
+                            format: int32
+                            type: integer
+                          uri:
+                            default: /metrics
+                            description: Uri defines the HTTP path where metrics are
+                              exposed (e.g., "/metrics").
+                            type: string
+                        type: object
+                      minReplicas:
+                        description: MinReplicas defines the minimum number of replicas
+                          to maintain for this role.
+                        format: int32
+                        maximum: 1000000
+                        minimum: 0
+                        type: integer
+                      roleName:
+                        description: 'RoleName is the role name in ModelServing template
+                          (for example: prefill/decode).'
+                        type: string
+                    required:
+                    - maxReplicas
+                    - minReplicas
+                    - roleName
+                    type: object
+                  modelServingRef:
+                    description: ModelServingRef references the parent ModelServing
+                      resource.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  prefillDecodeRatio:
+                    description: PrefillDecodeRatio defines desired replica ratio
+                      in format "P:D" (for example "1:2").
+                    pattern: ^[1-9][0-9]*:[1-9][0-9]*$
+                    type: string
+                  prefillRole:
+                    description: PrefillRole defines the target and replica bounds
+                      for prefill.
+                    properties:
+                      maxReplicas:
+                        description: MaxReplicas defines the maximum number of replicas
+                          allowed for this role.
+                        format: int32
+                        maximum: 1000000
+                        minimum: 1
+                        type: integer
+                      metricEndpoint:
+                        description: MetricEndpoint defines endpoint for scraping
+                          metrics from role pods.
+                        properties:
+                          labelSelector:
+                            description: |-
+                              LabelSelector defines additional filtering for pods exposing this metric.
+                              Only pods matching both the target and this selector are scraped, e.g.
+                              matchLabels with role=decode to scrape only the decode role's pods.
+                            properties:
+                              matchExpressions:
+                                description: matchExpressions is a list of label selector
+                                  requirements. The requirements are ANDed.
+                                items:
+                                  description: |-
+                                    A label selector requirement is a selector that contains values, a key, and an operator that
+                                    relates the key and values.
+                                  properties:
+                                    key:
+                                      description: key is the label key that the selector
+                                        applies to.
+                                      type: string
+                                    operator:
+                                      description: |-
+                                        operator represents a key's relationship to a set of values.
+                                        Valid operators are In, NotIn, Exists and DoesNotExist.
+                                      type: string
+                                    values:
+                                      description: |-
+                                        values is an array of string values. If the operator is In or NotIn,
+                                        the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                        the values array must be empty. This array is replaced during a strategic
+                                        merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                  required:
+                                  - key
+                                  - operator
+                                  type: object
+                                type: array
+                                x-kubernetes-list-type: atomic
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                description: |-
+                                  matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                  map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                  operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                type: object
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          name:
+                            description: |-
+                              Name is the Prometheus metric name matched against labels in the pod's scraped output.
+                              Defaults to the policy metric key when omitted.
+                              For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
+                            type: string
+                          port:
+                            default: 8100
+                            description: Port defines the network port where metrics
+                              are exposed by the pods (e.g., 8000).
+                            format: int32
+                            type: integer
+                          uri:
+                            default: /metrics
+                            description: Uri defines the HTTP path where metrics are
+                              exposed (e.g., "/metrics").
+                            type: string
+                        type: object
+                      minReplicas:
+                        description: MinReplicas defines the minimum number of replicas
+                          to maintain for this role.
+                        format: int32
+                        maximum: 1000000
+                        minimum: 0
+                        type: integer
+                      roleName:
+                        description: 'RoleName is the role name in ModelServing template
+                          (for example: prefill/decode).'
+                        type: string
+                    required:
+                    - maxReplicas
+                    - minReplicas
+                    - roleName
+                    type: object
+                required:
+                - decodeRole
+                - modelServingRef
+                - prefillRole
+                type: object
               policyRef:
                 description: PolicyRef references the AutoscalingPolicy that defines
                   the scaling rules and metrics.
@@ -567,9 +792,10 @@ spec:
             - policyRef
             type: object
             x-kubernetes-validations:
-            - message: Either heterogeneousTarget or homogeneousTarget must be set,
-                but not both.
-              rule: has(self.heterogeneousTarget) != has(self.homogeneousTarget)
+            - message: Exactly one of heterogeneousTarget, homogeneousTarget or pdDisaggregatedTarget
+                must be set.
+              rule: '(has(self.heterogeneousTarget) ? 1 : 0) + (has(self.homogeneousTarget)
+                ? 1 : 0) + (has(self.pdDisaggregatedTarget) ? 1 : 0) == 1'
           status:
             description: AutoscalingPolicyBindingStatus defines the observed state
               of AutoscalingPolicyBinding.
@@ -635,6 +861,26 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              pdScalingStatus:
+                description: PDScalingStatus reflects the last reconciled state for
+                  PD disaggregated autoscaling.
+                properties:
+                  decodeReplicas:
+                    format: int32
+                    type: integer
+                  effectiveRatio:
+                    type: string
+                  lastScaleTime:
+                    format: date-time
+                    type: string
+                  prefillReplicas:
+                    format: int32
+                    type: integer
+                required:
+                - decodeReplicas
+                - effectiveRatio
+                - prefillReplicas
+                type: object
             type: object
         type: object
     served: true

@@ -25,9 +25,10 @@ import (
 // AutoscalingPolicyBindingSpecApplyConfiguration represents a declarative configuration of the AutoscalingPolicyBindingSpec type for use
 // with apply.
 type AutoscalingPolicyBindingSpecApplyConfiguration struct {
-	PolicyRef           *v1.LocalObjectReference               `json:"policyRef,omitempty"`
-	HeterogeneousTarget *HeterogeneousTargetApplyConfiguration `json:"heterogeneousTarget,omitempty"`
-	HomogeneousTarget   *HomogeneousTargetApplyConfiguration   `json:"homogeneousTarget,omitempty"`
+	PolicyRef             *v1.LocalObjectReference                 `json:"policyRef,omitempty"`
+	HeterogeneousTarget   *HeterogeneousTargetApplyConfiguration   `json:"heterogeneousTarget,omitempty"`
+	HomogeneousTarget     *HomogeneousTargetApplyConfiguration     `json:"homogeneousTarget,omitempty"`
+	PDDisaggregatedTarget *PDDisaggregatedTargetApplyConfiguration `json:"pdDisaggregatedTarget,omitempty"`
 }
 
 // AutoscalingPolicyBindingSpecApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyBindingSpec type for use with
@@ -57,5 +58,13 @@ func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithHeterogeneousTarget
 // If called multiple times, the HomogeneousTarget field is set to the value of the last call.
 func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithHomogeneousTarget(value *HomogeneousTargetApplyConfiguration) *AutoscalingPolicyBindingSpecApplyConfiguration {
 	b.HomogeneousTarget = value
+	return b
+}
+
+// WithPDDisaggregatedTarget sets the PDDisaggregatedTarget field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PDDisaggregatedTarget field is set to the value of the last call.
+func (b *AutoscalingPolicyBindingSpecApplyConfiguration) WithPDDisaggregatedTarget(value *PDDisaggregatedTargetApplyConfiguration) *AutoscalingPolicyBindingSpecApplyConfiguration {
+	b.PDDisaggregatedTarget = value
 	return b
 }

@@ -25,13 +25,22 @@ import (
 // AutoscalingPolicyBindingStatusApplyConfiguration represents a declarative configuration of the AutoscalingPolicyBindingStatus type for use
 // with apply.
 type AutoscalingPolicyBindingStatusApplyConfiguration struct {
-	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	PDScalingStatus *PDScalingStatusApplyConfiguration `json:"pdScalingStatus,omitempty"`
+	Conditions      []v1.ConditionApplyConfiguration   `json:"conditions,omitempty"`
 }
 
 // AutoscalingPolicyBindingStatusApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyBindingStatus type for use with
 // apply.
 func AutoscalingPolicyBindingStatus() *AutoscalingPolicyBindingStatusApplyConfiguration {
 	return &AutoscalingPolicyBindingStatusApplyConfiguration{}
+}
+
+// WithPDScalingStatus sets the PDScalingStatus field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PDScalingStatus field is set to the value of the last call.
+func (b *AutoscalingPolicyBindingStatusApplyConfiguration) WithPDScalingStatus(value *PDScalingStatusApplyConfiguration) *AutoscalingPolicyBindingStatusApplyConfiguration {
+	b.PDScalingStatus = value
+	return b
 }
 
 // WithConditions adds the given value to the Conditions field in the declarative configuration

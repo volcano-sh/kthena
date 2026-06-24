@@ -58,7 +58,7 @@ func TestValidateAutoscalingBinding(t *testing.T) {
 					HomogeneousTarget:   nil,
 				},
 			},
-			expected: []string{"  - spec.homogeneousTarget: Required value: spec.homogeneousTarget should be set if spec.heterogeneousTarget does not exist"},
+			expected: []string{"  - spec: Required value: exactly one of spec.homogeneousTarget, spec.heterogeneousTarget or spec.pdDisaggregatedTarget must be set"},
 		},
 		{
 			name: "optimizer and scaling config both are not nil",
@@ -96,7 +96,7 @@ func TestValidateAutoscalingBinding(t *testing.T) {
 					},
 				},
 			},
-			expected: []string{"  - spec.homogeneousTarget: Forbidden: both spec.heterogeneousTarget and spec.homogeneousTarget can not be set at the same time"},
+			expected: []string{"  - spec: Forbidden: only one of spec.homogeneousTarget, spec.heterogeneousTarget or spec.pdDisaggregatedTarget can be set"},
 		},
 		{
 			name: "different autoscaling policy name",
@@ -264,5 +264,61 @@ func TestValidateBindingTargetKind_HomogeneousInvalid(t *testing.T) {
 	}
 	if errs[0].Field != "spec.homogeneousTarget.targetRef.kind" {
 		t.Fatalf("unexpected field path: %s", errs[0].Field)
+	}
+}
+
+func TestValidateBindingTargetKind_PDDisaggregatedValid(t *testing.T) {
+	asp := &v1alpha1.AutoscalingPolicyBinding{
+		Spec: v1alpha1.AutoscalingPolicyBindingSpec{
+			PDDisaggregatedTarget: &v1alpha1.PDDisaggregatedTarget{
+				ModelServingRef:    corev1.LocalObjectReference{Name: "ms"},
+				PrefillRole:        v1alpha1.PDRoleTarget{RoleName: "prefill", MinReplicas: 1, MaxReplicas: 3},
+				DecodeRole:         v1alpha1.PDRoleTarget{RoleName: "decode", MinReplicas: 2, MaxReplicas: 6},
+				PrefillDecodeRatio: "1:2",
+			},
+		},
+	}
+	err := validateBindingTargetKind(asp)
+	if len(err) != 0 {
+		t.Fatalf("expected no errors, got %d: %v", len(err), err)
+	}
+}
+
+func TestValidateBindingTargetKind_PDDisaggregatedInvalidRatio(t *testing.T) {
+	asp := &v1alpha1.AutoscalingPolicyBinding{
+		Spec: v1alpha1.AutoscalingPolicyBindingSpec{
+			PDDisaggregatedTarget: &v1alpha1.PDDisaggregatedTarget{
+				ModelServingRef:    corev1.LocalObjectReference{Name: "ms"},
+				PrefillRole:        v1alpha1.PDRoleTarget{RoleName: "prefill", MinReplicas: 1, MaxReplicas: 3},
+				DecodeRole:         v1alpha1.PDRoleTarget{RoleName: "decode", MinReplicas: 2, MaxReplicas: 6},
+				PrefillDecodeRatio: "1:x",
+			},
+		},
+	}
+	err := validateBindingTargetKind(asp)
+	if len(err) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(err), err)
+	}
+	if errsField := err[0].Field; errsField != "spec.pdDisaggregatedTarget.prefillDecodeRatio" {
+		t.Fatalf("unexpected field path: %s", errsField)
+	}
+}
+
+func TestValidateBindingTargetKind_PDDisaggregatedSameRoleName(t *testing.T) {
+	asp := &v1alpha1.AutoscalingPolicyBinding{
+		Spec: v1alpha1.AutoscalingPolicyBindingSpec{
+			PDDisaggregatedTarget: &v1alpha1.PDDisaggregatedTarget{
+				ModelServingRef: corev1.LocalObjectReference{Name: "ms"},
+				PrefillRole:     v1alpha1.PDRoleTarget{RoleName: "shared", MinReplicas: 1, MaxReplicas: 3},
+				DecodeRole:      v1alpha1.PDRoleTarget{RoleName: "shared", MinReplicas: 2, MaxReplicas: 6},
+			},
+		},
+	}
+	err := validateBindingTargetKind(asp)
+	if len(err) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(err), err)
+	}
+	if errsField := err[0].Field; errsField != "spec.pdDisaggregatedTarget" {
+		t.Fatalf("unexpected field path: %s", errsField)
 	}
 }

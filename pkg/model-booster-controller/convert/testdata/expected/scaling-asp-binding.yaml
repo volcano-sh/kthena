@@ -5,7 +5,7 @@ metadata:
     workload.serving.volcano.sh/backend-name: backend1
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
-    workload.serving.volcano.sh/revision: 65ccd5bdff
+    workload.serving.volcano.sh/revision: 5864844f75
     workload.serving.volcano.sh/model-uid: randomUID
   name: test-model-backend1
   namespace: default
@@ -34,6 +34,4 @@ spec:
       targetRef:
         kind: ModelServing
         name: test-model-backend1
-
-
 
