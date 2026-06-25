@@ -19,7 +19,7 @@ on:
   pull_request:
     branches:
       - main
-      - "release-**"
+      - "release-*"
     paths:
       - "docker/**"
       - "python/Dockerfile"
