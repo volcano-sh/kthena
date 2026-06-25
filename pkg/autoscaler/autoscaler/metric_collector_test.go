@@ -414,14 +414,16 @@ func TestCollectCounterMetric(t *testing.T) {
 
 			// First scrape
 			values := make(map[string]float64)
-			pastPodMetrics := make(map[string]PodMetricsInfo)
-			currentPodMetrics := make(map[string]PodMetricsInfo)
+			pastHistograms := make(map[string]HistogramInfo)
+			currentHistograms := make(map[string]HistogramInfo)
+			pastCounters := make(map[string]CounterInfo)
+			currentCounters := make(map[string]CounterInfo)
 
-			err = collector.collectPodMetrics(context.Background(), pod, podSource, wanted, values, pastPodMetrics, currentPodMetrics)
+			err = collector.collectPodMetrics(context.Background(), pod, podSource, wanted, values, pastHistograms, currentHistograms, pastCounters, currentCounters)
 			require.NoError(t, err)
 
 			assert.Equal(t, 0.0, values["my_policy_key"])
-			info, ok := currentPodMetrics[pod.Name]
+			info, ok := currentCounters[pod.Name]
 			require.True(t, ok)
 			assert.Equal(t, tc.firstScrape, info.CounterMap["my_policy_key"])
 
@@ -432,16 +434,17 @@ func TestCollectCounterMetric(t *testing.T) {
 				// Change start time to simulate restart
 				pod.Status.StartTime = &metav1.Time{Time: time.Now()}
 			}
-			pastPodMetrics[pod.Name] = info
+			pastCounters[pod.Name] = info
 
 			// Second scrape
 			values = make(map[string]float64)
-			currentPodMetrics = make(map[string]PodMetricsInfo)
-			err = collector.collectPodMetrics(context.Background(), pod, podSource, wanted, values, pastPodMetrics, currentPodMetrics)
+			currentHistograms = make(map[string]HistogramInfo)
+			currentCounters = make(map[string]CounterInfo)
+			err = collector.collectPodMetrics(context.Background(), pod, podSource, wanted, values, pastHistograms, currentHistograms, pastCounters, currentCounters)
 			require.NoError(t, err)
 
 			assert.InDelta(t, tc.want.rate, values["my_policy_key"], 1e-2)
-			info2, ok := currentPodMetrics[pod.Name]
+			info2, ok := currentCounters[pod.Name]
 			require.True(t, ok)
 			assert.Equal(t, tc.want.currentCounter, info2.CounterMap["my_policy_key"])
 		})

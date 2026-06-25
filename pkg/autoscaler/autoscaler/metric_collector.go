@@ -47,6 +47,7 @@ import (
 
 type MetricCollector struct {
 	PastHistograms *datastructure.SnapshotSlidingWindow[map[string]HistogramInfo]
+	PastCounters   *datastructure.SnapshotSlidingWindow[map[string]CounterInfo]
 	Target         *v1alpha1.Target
 	Scope          Scope
 	MetricTargets  map[string]float64
@@ -61,6 +62,7 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 	}
 	return &MetricCollector{
 		PastHistograms: datastructure.NewSnapshotSlidingWindow[map[string]HistogramInfo](util.SecondToTimestamp(util.SloQuantileSlidingWindowSeconds), util.SecondToTimestamp(util.SloQuantileDataKeepSeconds)),
+		PastCounters:   datastructure.NewSnapshotSlidingWindow[map[string]CounterInfo](util.SecondToTimestamp(util.SloQuantileSlidingWindowSeconds), util.SecondToTimestamp(util.SloQuantileDataKeepSeconds)),
 		Target:         target,
 		Scope: Scope{
 			Namespace:     namespace,
@@ -72,8 +74,12 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 }
 
 type HistogramInfo struct {
+	PodStartTime *metav1.Time
+	HistogramMap map[string]*histogram.Snapshot
+}
+
+type CounterInfo struct {
 	PodStartTime    *metav1.Time
-	HistogramMap    map[string]*histogram.Snapshot
 	CounterMap      map[string]float64
 	ScrapeTimestamp int64
 }
@@ -113,13 +119,23 @@ func (collector *MetricCollector) UpdateMetrics(
 	}
 	currentHistograms := make(map[string]HistogramInfo)
 
+	pastCounters, ok := collector.PastCounters.GetLastUnfreshSnapshot()
+	if !ok {
+		pastCounters = make(map[string]CounterInfo)
+	}
+	currentCounters := make(map[string]CounterInfo)
+
 	// Group pod metrics by identical PodMetricSource (uri/port/selector) so we
 	// scrape each pod endpoint once per reconcile and extract every required
 	// metric from the same payload. Prometheus-sourced metrics stay per-metric.
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, anyUnready, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		values, anyUnready, failed, collectErr := collector.collectPodMetricsGroup(
+			ctx, podLister, g.podSource, g.specs,
+			pastHistograms, currentHistograms,
+			pastCounters, currentCounters,
+		)
 		if collectErr != nil {
 			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
 			continue
@@ -138,6 +154,7 @@ func (collector *MetricCollector) UpdateMetrics(
 	}
 
 	collector.PastHistograms.Append(currentHistograms)
+	collector.PastCounters.Append(currentCounters)
 	return
 }
 
@@ -234,6 +251,8 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
+	pastCounters map[string]CounterInfo,
+	currentCounters map[string]CounterInfo,
 ) (values map[string]float64, anyUnready bool, failed bool, err error) {
 	values = make(map[string]float64, len(specs))
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
@@ -253,7 +272,11 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	wanted := groupPolicyKeysByScrapeName(specs)
 
 	for _, pod := range pods {
-		if err = collector.collectPodMetrics(ctx, pod, podSource, wanted, values, pastHistograms, currentHistograms); err != nil {
+		if err = collector.collectPodMetrics(
+			ctx, pod, podSource, wanted, values,
+			pastHistograms, currentHistograms,
+			pastCounters, currentCounters,
+		); err != nil {
 			return nil, false, false, err
 		}
 	}
@@ -285,7 +308,7 @@ func groupPolicyKeysByScrapeName(specs []podMetricSpec) map[string][]string {
 }
 
 // collectPodMetrics scrapes a single pod and accumulates its metric values into
-// values, refreshing the pod's histogram snapshots in currentHistograms.
+// values, refreshing the pod's snapshots.
 func (collector *MetricCollector) collectPodMetrics(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -294,8 +317,11 @@ func (collector *MetricCollector) collectPodMetrics(
 	values map[string]float64,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
+	pastCounters map[string]CounterInfo,
+	currentCounters map[string]CounterInfo,
 ) error {
-	pastHistogramMap, pastCounterMap, pastScrapeTimestamp := pastHistogramAndCounterForPod(pod, pastHistograms)
+	pastHistogramMap := pastHistogramMapForPod(pod, pastHistograms)
+	pastCounterMap, pastScrapeTimestamp := pastCounterMapForPod(pod, pastCounters)
 
 	currentHistogramMap := make(map[string]*histogram.Snapshot)
 	currentCounterMap := make(map[string]float64)
@@ -347,26 +373,40 @@ func (collector *MetricCollector) collectPodMetrics(
 	}
 
 	currentHistograms[pod.Name] = HistogramInfo{
+		PodStartTime: pod.Status.StartTime,
+		HistogramMap: currentHistogramMap,
+	}
+
+	currentCounters[pod.Name] = CounterInfo{
 		PodStartTime:    pod.Status.StartTime,
-		HistogramMap:    currentHistogramMap,
 		CounterMap:      currentCounterMap,
 		ScrapeTimestamp: util.GetCurrentTimestamp(),
 	}
 	return nil
 }
 
-// pastHistogramAndCounterForPod returns the previous histogram and counter snapshots for pod,
-// but only when the pod has not restarted since they were recorded.
-func pastHistogramAndCounterForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) (map[string]*histogram.Snapshot, map[string]float64, int64) {
+// pastHistogramMapForPod returns the previous histogram snapshots for pod, but
+// only when the pod has not restarted since they were recorded.
+func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) map[string]*histogram.Snapshot {
 	pastValue, ok := pastHistograms[pod.Name]
 	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
-		pastCounters := pastValue.CounterMap
-		if pastCounters == nil {
-			pastCounters = make(map[string]float64)
-		}
-		return pastValue.HistogramMap, pastCounters, pastValue.ScrapeTimestamp
+		return pastValue.HistogramMap
 	}
-	return map[string]*histogram.Snapshot{}, map[string]float64{}, 0
+	return map[string]*histogram.Snapshot{}
+}
+
+// pastCounterMapForPod returns the previous counter snapshots for pod,
+// but only when the pod has not restarted since they were recorded.
+func pastCounterMapForPod(pod *corev1.Pod, pastCounters map[string]CounterInfo) (map[string]float64, int64) {
+	pastValue, ok := pastCounters[pod.Name]
+	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
+		pastMap := pastValue.CounterMap
+		if pastMap == nil {
+			pastMap = make(map[string]float64)
+		}
+		return pastMap, pastValue.ScrapeTimestamp
+	}
+	return map[string]float64{}, 0
 }
 
 func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) (string, error) {
