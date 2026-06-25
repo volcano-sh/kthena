@@ -72,8 +72,12 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 }
 
 type HistogramInfo struct {
-	PodStartTime *metav1.Time
-	HistogramMap map[string]*histogram.Snapshot
+	PodStartTime    *metav1.Time
+	HistogramMap    map[string]*histogram.Snapshot
+	// CounterMap stores cumulative counter values observed at the last scrape for this pod
+	CounterMap      map[string]float64
+	// ScrapeTimestamp is the timestamp (milliseconds) when the counters/histograms were scraped
+	ScrapeTimestamp int64
 }
 
 type Scope struct {
@@ -106,6 +110,29 @@ func (collector *MetricCollector) UpdateMetrics(
 	readyInstancesMetric = make(algorithm.Metrics)
 
 	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
+	currentHistograms := make(map[string]HistogramInfo)
+	instanceInfo := collector.fetchMetricsFromPods(ctx, pods, &currentHistograms)
+	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isFailed", instanceInfo.IsFailed)
+	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isReady", instanceInfo.IsReady)
+	klog.V(10).InfoS("finish to processInstance", "instanceInfo.metricsMap", instanceInfo.MetricsMap)
+	if instanceInfo.IsFailed {
+		klog.Warningf("some pod of %s are failed in namespace: %s.", collector.Scope, collector.Scope.Namespace)
+		return
+	}
+
+	if !instanceInfo.IsReady {
+		unreadyInstancesCount++
+		klog.Warningf("some pod of %s are not ready in namespace: %s.", collector.Scope, collector.Scope.Namespace)
+		return
+	}
+	readyInstancesMetric = instanceInfo.MetricsMap
+	collector.PastHistograms.Append(currentHistograms)
+	return
+}
+
+func (collector *MetricCollector) fetchMetricsFromPods(ctx context.Context, pods []*corev1.Pod, currentHistograms *map[string]HistogramInfo) InstanceInfo {
+	instanceInfo := InstanceInfo{true, false, make(algorithm.Metrics)}
+	pastHistograms, _, ok := collector.PastHistograms.GetLastUnfreshSnapshotWithTimestamp()
 	if !ok {
 		pastHistograms = make(map[string]HistogramInfo)
 	}
@@ -133,6 +160,58 @@ func (collector *MetricCollector) UpdateMetrics(
 		for policyKey, v := range values {
 			readyInstancesMetric[policyKey] = v
 		}
+			pastValue, ok := pastHistograms[pod.Name]
+			var pastHistogramMap map[string]*histogram.Snapshot
+			var pastCounterMap map[string]float64
+			var pastScrapeTimestamp int64
+			if !ok || pod.Status.StartTime == nil || pastValue.PodStartTime == nil || !pod.Status.StartTime.Equal(pastValue.PodStartTime) {
+				pastHistogramMap = make(map[string]*histogram.Snapshot)
+				pastCounterMap = make(map[string]float64)
+				pastScrapeTimestamp = 0
+			} else {
+				pastHistogramMap = pastValue.HistogramMap
+				// CounterMap and ScrapeTimestamp may be missing on older snapshots
+				if pastValue.CounterMap == nil {
+					pastCounterMap = make(map[string]float64)
+				} else {
+					pastCounterMap = pastValue.CounterMap
+				}
+				pastScrapeTimestamp = pastValue.ScrapeTimestamp
+			}
+
+			currentHistogramMap := make(map[string]*histogram.Snapshot)
+			currentCounterMap := make(map[string]float64)
+			ip := pod.Status.PodIP
+			podCtx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
+			defer cancel()
+			url := fmt.Sprintf("http://%s:%d%s", ip, collector.Target.MetricEndpoint.Port, collector.Target.MetricEndpoint.Uri)
+
+			req, _ := http.NewRequestWithContext(podCtx, http.MethodGet, url, nil)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				klog.Errorf("get metric response error: %v", err)
+				return
+			}
+			if resp == nil || !util.IsRequestSuccess(resp.StatusCode) || resp.Body == nil {
+				klog.Errorf("get metric response is invalid")
+				return
+			}
+			defer resp.Body.Close()
+
+			bodyStr, err := io.ReadAll(resp.Body)
+			if err != nil {
+				klog.Errorf("get metrics read response error: %v", err)
+				return
+			}
+			result := string(bodyStr)
+			collector.processPrometheusString(result, pastHistogramMap, pastCounterMap, currentHistogramMap, currentCounterMap, pastScrapeTimestamp, instanceInfo.MetricsMap)
+			(*currentHistograms)[pod.Name] = HistogramInfo{
+				PodStartTime: pod.Status.StartTime,
+				HistogramMap: currentHistogramMap,
+				CounterMap:   currentCounterMap,
+				ScrapeTimestamp: util.GetCurrentTimestamp(),
+			}
+		}()
 	}
 
 	collector.PastHistograms.Append(currentHistograms)
@@ -386,6 +465,8 @@ func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *
 func parsePrometheusFamilies(body string, wanted map[string][]string) (map[string]*io_prometheus_client.MetricFamily, error) {
 	families := make(map[string]*io_prometheus_client.MetricFamily, len(wanted))
 	reader := strings.NewReader(body)
+func (collector *MetricCollector) processPrometheusString(metricStr string, pastHistograms map[string]*histogram.Snapshot, pastCounters map[string]float64, currentHistograms map[string]*histogram.Snapshot, currentCounters map[string]float64, pastScrapeTimestamp int64, instanceMetricMap algorithm.Metrics) {
+	reader := strings.NewReader(metricStr)
 	decoder := expfmt.NewDecoder(reader, expfmt.NewFormat(expfmt.TypeTextPlain))
 	for {
 		mf := &io_prometheus_client.MetricFamily{}
@@ -451,6 +532,51 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 		quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
 		if qErr != nil {
 			return 0, snapshot, false, qErr
+
+		metric := mf.Metric[0]
+		switch mf.GetType() {
+		case io_prometheus_client.MetricType_COUNTER:
+			cur := metric.GetCounter().GetValue()
+			currentCounters[mf.GetName()] = cur
+
+			// compute rate = (cur - prev) / elapsed_seconds
+			rate := 0.0
+			now := util.GetCurrentTimestamp()
+			if pastCounters != nil && pastScrapeTimestamp > 0 {
+				if prev, ok := pastCounters[mf.GetName()]; ok {
+					if cur < prev {
+						// counter reset
+						rate = 0
+					} else {
+						elapsedSec := float64(now-pastScrapeTimestamp) / 1000.0
+						if elapsedSec > 0 {
+							rate = (cur - prev) / elapsedSec
+						}
+					}
+				}
+			}
+			addMetric(instanceMetricMap, mf.GetName(), rate)
+		case io_prometheus_client.MetricType_GAUGE:
+			addMetric(instanceMetricMap, mf.GetName(), metric.GetGauge().GetValue())
+		case io_prometheus_client.MetricType_HISTOGRAM:
+			hist := metric.GetHistogram()
+			snapshot := histogram.NewSnapshotOfHistogram(hist)
+			currentHistograms[mf.GetName()] = snapshot
+
+			if pastHistograms == nil {
+				klog.Warning("pastHistograms is nil")
+				continue
+			}
+			past, ok := pastHistograms[mf.GetName()]
+			if !ok {
+				past = histogram.NewDefaultSnapshot()
+			}
+			quantileInDiffMetric, err := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
+			if err == nil {
+				addMetric(instanceMetricMap, mf.GetName(), quantileInDiffMetric)
+			}
+		default:
+			klog.InfoS("metric type is out of range", "type", mf.GetType())
 		}
 		return quantile, snapshot, true, nil
 	default:
