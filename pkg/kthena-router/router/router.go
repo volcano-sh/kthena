@@ -898,7 +898,7 @@ func doRequest(
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 500 {
 		resp.Body.Close()
 		return nil, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
 	}

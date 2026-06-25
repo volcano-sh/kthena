@@ -727,6 +727,29 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"id":"response-id"`)
 }
 
+func TestProxyRequest_ForwardBackendClientError(t *testing.T) {
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"bad request from model"}`)
+	})
+	backend := httptest.NewServer(backendHandler)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req, _ := http.NewRequest("POST", "http://kthena/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model"}`))
+
+	err := proxyRequest(c, req, backendURL.Hostname(), int32(backendPort), false, nil)
+
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "bad request from model")
+}
+
 func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
 	// 1. Setup backend mock server
 	prefillReqs := 0
