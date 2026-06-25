@@ -3,7 +3,7 @@ on:
   pull_request:
     branches:
       - main
-      - "release-**"
+      - "release-*"
     paths:
       - "**.go"
       - "pkg/**"
