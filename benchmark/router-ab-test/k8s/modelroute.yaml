@@ -8,7 +8,7 @@ metadata:
   labels:
     app: model-route
 spec:
-  modelName: "Qwen/Qwen3-0.6B"
+  modelName: "mocker-model"
   rules:
   - targetModels:
     - modelServerName: mocker-model-server

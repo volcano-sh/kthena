@@ -95,6 +95,60 @@ class K8sManager:
             check=True,
         )
 
+    def wait_for_modelserver_ready(self, name: str, namespace: str = "default", timeout: int = 60) -> None:
+        """Wait until a ModelServer CRD reports ready replicas > 0."""
+        print(f"  Waiting for ModelServer {name} to have ready replicas...")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = subprocess.run(
+                ["kubectl", "get", "modelserver", name,
+                 "-n", namespace,
+                 "-o", "jsonpath={.status.readyReplicas}"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                # CRD might not exist yet — controller may still be reconciling
+                time.sleep(2)
+                continue
+            if result.stdout.strip() and int(result.stdout.strip()) > 0:
+                print(f"  ModelServer {name} ready with {result.stdout.strip()} ready replicas")
+                return
+            time.sleep(2)
+        raise RuntimeError(f"ModelServer {name} not ready within {timeout}s")
+
+    def wait_for_router_route_ready(
+        self, model_name: str, endpoint: str, timeout: int = 30
+    ) -> None:
+        """Probe the router to confirm the route table has the given model loaded."""
+        print(f"  Probing router for model={model_name} at {endpoint}...")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                result = subprocess.run(
+                    ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                     "-X", "POST", f"http://{endpoint}/v1/chat/completions",
+                     "-H", "Content-Type: application/json",
+                     "-d", (
+                         '{"model":"' + model_name + '",'
+                         '"messages":[{"role":"user","content":"ping"}],'
+                         '"max_tokens":1}'
+                     )],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.stdout.strip() == "200":
+                    print(f"  Router route for '{model_name}' is ready")
+                    return
+                # 404 = route not found (still warming up). Other codes = unexpected.
+                if result.stdout.strip() != "404":
+                    print(f"  Router probe returned {result.stdout.strip()}, retrying...")
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(2)
+        raise RuntimeError(
+            f"Router route for '{model_name}' not ready within {timeout}s. "
+            "Check: kubectl get modelroute -A, kubectl get modelserver -A"
+        )
+
     def apply_router_config(self, config_path: str) -> None:
         """Apply router ConfigMap and restart the router deployment to pick it up."""
         print(f"  Applying router config: {config_path}")
@@ -380,13 +434,26 @@ class ABTestOrchestrator:
         )
 
     def setup_mock_backends(self) -> None:
+        # ── Deploy mocker pods ──
         self.k8s.apply(self.mocker_manifest)
         self.k8s.wait_for_ready("app=mocker-llm", timeout=180)
+
+        # ── Create ModelServer + ModelRoute CRDs ──
+        crd_dir = Path(__file__).parent.parent / "k8s"
+        self.k8s.apply(str(crd_dir / "modelserver.yaml"))
+        self.k8s.apply(str(crd_dir / "modelroute.yaml"))
+
+        # ── Wait for controller to reconcile ModelServer → pods discovered ──
+        self.k8s.wait_for_modelserver_ready("mocker-model-server", timeout=60)
 
     def run_single_config(self, config_path: str, config_name: str) -> BenchmarkResult:
         self.k8s.apply_router_config(config_path)
 
         router_endpoint = self.k8s.get_router_endpoint()
+
+        # Wait until router's route table is warm before launching AIPerf
+        model_name = "mocker-model"
+        self.k8s.wait_for_router_route_ready(model_name, router_endpoint, timeout=30)
 
         return self.runner.run(
             config_name=config_name,
