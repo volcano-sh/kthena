@@ -58,7 +58,15 @@ func TestReconcile(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return len(modelServingList.Items) == 1
+		modelServers, err := kthenaClient.NetworkingV1alpha1().ModelServers(model.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+		modelRoutes, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(model.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+		return len(modelServingList.Items) == 1 && len(modelServers.Items) == 1 && len(modelRoutes.Items) == 1
 	}))
 	// model serving should be created
 	modelServingList, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
@@ -124,6 +132,10 @@ func TestReconcile_ReturnsError(t *testing.T) {
 	// start informers
 	go controller.modelsInformer.RunWithContext(ctx)
 	go controller.modelServingInformer.RunWithContext(ctx)
+	assert.True(t, waitForCondition(func() bool {
+		return controller.modelsInformer.HasSynced() &&
+			controller.modelServingInformer.HasSynced()
+	}), "controller informers did not sync")
 	// Case1: Invalid namespaceAndName
 	t.Run("InvalidNameSpaceAndName", func(t *testing.T) {
 		err := controller.reconcile(ctx, "//")
@@ -149,7 +161,7 @@ func TestReconcile_ReturnsError(t *testing.T) {
 		assert.NotNil(t, createdModel)
 		assert.True(t, waitForCondition(func() bool {
 			err = controller.reconcile(ctx, model.Namespace+"/"+model.Name)
-			return err.Error() == "not support model backend type: MindIEDisaggregated"
+			return err != nil && err.Error() == "not support model backend type: MindIEDisaggregated"
 		}))
 		get, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
 		assert.NoError(t, err)
