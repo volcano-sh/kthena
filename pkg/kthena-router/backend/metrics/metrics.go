@@ -66,6 +66,9 @@ func ParseMetricsURL(url string) (map[string]*dto.MetricFamily, error) {
 }
 
 func LastPeriodAvg(previous, current *dto.Histogram) float64 {
+	if previous == nil || current == nil {
+		return 0
+	}
 	previousSum := previous.GetSampleSum()
 	previousCount := previous.GetSampleCount()
 
