@@ -28,10 +28,11 @@ import (
 
 func TestBuildModelServer(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        *registry.ModelBooster
-		expected     []*networking.ModelServer
-		expectErrMsg string
+		name              string
+		input             *registry.ModelBooster
+		expected          []*networking.ModelServer
+		expectedModelName string
+		expectErrMsg      string
 	}{
 		{
 			name:     "normal case with VLLM backend",
@@ -59,6 +60,66 @@ func TestBuildModelServer(t *testing.T) {
 			},
 			expectErrMsg: "not support InvalidType backend yet",
 		},
+		{
+			name: "empty config on first worker fallback to second worker's served-model-name",
+			input: &registry.ModelBooster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model",
+					Namespace: "default",
+				},
+				Spec: registry.ModelBoosterSpec{
+					Backend: registry.ModelBackend{
+						Name: "test-backend",
+						Type: registry.ModelBackendTypeVLLM,
+						Workers: []registry.ModelWorker{
+							{
+								Type: registry.ModelWorkerTypeServer,
+								Config: apiextensionsv1.JSON{
+									Raw: nil,
+								},
+							},
+							{
+								Type: registry.ModelWorkerTypeServer,
+								Config: apiextensionsv1.JSON{
+									Raw: []byte(`{"served-model-name":"custom-name"}`),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedModelName: "custom-name",
+		},
+		{
+			name: "all worker configs empty defaults to model name",
+			input: &registry.ModelBooster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model",
+					Namespace: "default",
+				},
+				Spec: registry.ModelBoosterSpec{
+					Backend: registry.ModelBackend{
+						Name: "test-backend",
+						Type: registry.ModelBackendTypeVLLM,
+						Workers: []registry.ModelWorker{
+							{
+								Type: registry.ModelWorkerTypeServer,
+								Config: apiextensionsv1.JSON{
+									Raw: nil,
+								},
+							},
+							{
+								Type: registry.ModelWorkerTypeServer,
+								Config: apiextensionsv1.JSON{
+									Raw: []byte{},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedModelName: "test-model",
+		},
 	}
 
 	for _, tt := range tests {
@@ -70,7 +131,12 @@ func TestBuildModelServer(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
-			assert.Equal(t, tt.expected, got)
+			if tt.expected != nil {
+				assert.Equal(t, tt.expected, got)
+			}
+			if tt.expectedModelName != "" {
+				assert.Equal(t, tt.expectedModelName, *got[0].Spec.Model)
+			}
 		})
 	}
 }
@@ -165,6 +231,30 @@ func TestGetKvConnectorSpec(t *testing.T) {
 				},
 			},
 			expectErrMsg: "failed to get kv-transfer-config for worker prefill",
+		},
+		{
+			name: "worker config is nil (empty raw)",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: nil,
+					},
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "worker config has empty raw bytes",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte{},
+					},
+				},
+			},
+			expected: nil,
 		},
 	}
 
