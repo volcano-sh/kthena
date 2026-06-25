@@ -11,11 +11,9 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check Python lint related changes
+  python_lint:
+    name: Python Lint
     runs-on: ubuntu-latest
-    outputs:
-      python: ${{ steps.filter.outputs.python }}
     steps:
       - name: Check Python lint related changes
         id: filter
@@ -33,17 +31,14 @@ jobs:
         if: steps.filter.outputs.python != 'true'
         run: echo "No Python lint-related files changed; marking required check as passed."
 
-  python_lint:
-    name: Python Lint
-    needs: changes
-    if: needs.changes.outputs.python == 'true'
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.python == 'true'
       - name: Set up Python
+        if: steps.filter.outputs.python == 'true'
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
       - name: Run Lint
+        if: steps.filter.outputs.python == 'true'
         run: |
           make lint-python

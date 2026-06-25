@@ -26,11 +26,13 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check whether pull request need build
+  setup:
     runs-on: ubuntu-latest
     outputs:
       release_build: ${{ steps.filter.outputs.release_build }}
+      version: ${{ steps.version.outputs.version }}
+      is_tag: ${{ steps.version.outputs.is_tag }}
+      prerelease: ${{ steps.is_prerelease.outputs.prerelease }}
     steps:
       - name: Check build related changes
         id: filter
@@ -47,21 +49,14 @@ jobs:
         if: github.event_name == 'pull_request' && steps.filter.outputs.release_build != 'true'
         run: echo "No release build-related files changed; marking required check as passed."
 
-  setup:
-    needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.release_build == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      is_tag: ${{ steps.version.outputs.is_tag }}
-      prerelease: ${{ steps.is_prerelease.outputs.prerelease }}
-    steps:
       - name: Checkout
+        if: github.event_name != 'pull_request' || steps.filter.outputs.release_build == 'true'
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Determine Version
+        if: github.event_name != 'pull_request' || steps.filter.outputs.release_build == 'true'
         id: version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -74,7 +69,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Check for Prerelease
-        if: steps.version.outputs.is_tag == 'true'
+        if: steps.version.outputs.is_tag == 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.release_build == 'true')
         id: is_prerelease
         run: |
           if [[ "${{ steps.version.outputs.version }}" == *-* ]]; then
@@ -142,6 +137,7 @@ jobs:
             platform: linux/arm64
     steps:
       - name: Checkout
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: actions/checkout@v5
 
       - name: Login to GitHub Container Registry
@@ -153,6 +149,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker Image Metadata
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -162,9 +159,11 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Docker Buildx
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and Push Docker Images
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: docker/build-push-action@v6
         id: build
         with:
@@ -278,14 +277,17 @@ jobs:
             ext: ".exe"
     steps:
       - name: Checkout
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: actions/checkout@v5
 
       - name: Set up Go
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: actions/setup-go@v5
         with:
           go-version-file: "go.mod"
 
       - name: Build binary
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -294,6 +296,7 @@ jobs:
           go build -o kthena${{ matrix.ext }} ./cli/kthena
 
       - name: Package binary
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         run: |
           VERSION="${{ needs.setup.outputs.version }}"
           OS="${{ matrix.os }}"

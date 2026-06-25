@@ -11,11 +11,9 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check Python test related changes
+  python_unit_test:
+    name: Python tests
     runs-on: ubuntu-latest
-    outputs:
-      python: ${{ steps.filter.outputs.python }}
     steps:
       - name: Check Python test related changes
         id: filter
@@ -32,27 +30,26 @@ jobs:
         if: steps.filter.outputs.python != 'true'
         run: echo "No Python test-related files changed; marking required check as passed."
 
-  python_unit_test:
-    name: Python tests
-    needs: changes
-    if: needs.changes.outputs.python == 'true'
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.python == 'true'
       - name: Set up Python
+        if: steps.filter.outputs.python == 'true'
         uses: actions/setup-python@v4.0.0
         with:
           python-version: "3.10"
       - name: Install dependencies
+        if: steps.filter.outputs.python == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r python/kthena/downloader/requirements.txt
           pip install -r python/kthena/runtime/requirements.txt
           pip install -r python/kthena/runtime/requirements-dev.txt
       - name: Run tests
+        if: steps.filter.outputs.python == 'true'
         run: |
           pip install coverage
           coverage run -m pytest
       - name: Check coverage threshold
+        if: steps.filter.outputs.python == 'true'
         run: |
           coverage report --fail-under=60 # Set coverage threshold

@@ -11,11 +11,10 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check Python license related changes
+  python-licenses-lint:
+    name: Python Licenses Lint
+    timeout-minutes: 40
     runs-on: ubuntu-latest
-    outputs:
-      python: ${{ steps.filter.outputs.python }}
     steps:
       - name: Check Python license related changes
         id: filter
@@ -32,24 +31,21 @@ jobs:
         if: steps.filter.outputs.python != 'true'
         run: echo "No Python license-related files changed; marking required check as passed."
 
-  python-licenses-lint:
-    name: Python Licenses Lint
-    needs: changes
-    if: needs.changes.outputs.python == 'true'
-    timeout-minutes: 40
-    runs-on: ubuntu-latest
-    steps:
       - name: Checkout code
+        if: steps.filter.outputs.python == 'true'
         uses: actions/checkout@v3
       - name: Set up Python
+        if: steps.filter.outputs.python == 'true'
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
       - name: Install liccheck
+        if: steps.filter.outputs.python == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install liccheck
       - name: Check Runtime Requirements
+        if: steps.filter.outputs.python == 'true'
         run: |
           if [ -f "python/kthena/runtime/requirements.txt" ]; then
             echo "🔍 Checking runtime requirements..."
@@ -60,6 +56,7 @@ jobs:
             echo "⚠️  Runtime requirements file not found, skipping..."
           fi
       - name: Check Downloader Requirements
+        if: steps.filter.outputs.python == 'true'
         run: |
           if [ -f "python/kthena/downloader/requirements.txt" ]; then
             echo "🔍 Checking downloader requirements..."
