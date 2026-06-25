@@ -18,6 +18,7 @@ package autoscaler
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
@@ -334,4 +336,122 @@ not a valid prometheus metric line
 	})
 
 	require.Error(t, err)
+}
+func TestCollectCounterMetric(t *testing.T) {
+	type want struct {
+		rate           float64
+		currentCounter float64
+	}
+
+	cases := []struct {
+		name         string
+		firstScrape  float64
+		secondScrape float64
+		elapsedMs    int64
+		podRestarted bool
+		want         want
+	}{
+		{
+			name:         "counter delta rate calculation",
+			firstScrape:  10,
+			secondScrape: 30,
+			elapsedMs:    2000,
+			want:         want{rate: 10.0, currentCounter: 30.0},
+		},
+		{
+			name:         "counter reset handles rate of 0",
+			firstScrape:  30,
+			secondScrape: 10,
+			elapsedMs:    2000,
+			want:         want{rate: 0.0, currentCounter: 10.0},
+		},
+		{
+			name:         "pod restart resets baseline",
+			firstScrape:  10,
+			secondScrape: 30,
+			elapsedMs:    2000,
+			podRestarted: true,
+			want:         want{rate: 0.0, currentCounter: 30.0},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var scrapeCount int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				if scrapeCount == 0 {
+					fmt.Fprintf(w, "# HELP my_counter A test counter\n# TYPE my_counter counter\nmy_counter %g\n", tc.firstScrape)
+				} else {
+					fmt.Fprintf(w, "# HELP my_counter A test counter\n# TYPE my_counter counter\nmy_counter %g\n", tc.secondScrape)
+				}
+				scrapeCount++
+			}))
+			defer srv.Close()
+
+			urlParts := strings.Split(strings.TrimPrefix(srv.URL, "http://"), ":")
+			require.Len(t, urlParts, 2)
+			ip := urlParts[0]
+			var port int32
+			_, err := fmt.Sscanf(urlParts[1], "%d", &port)
+			require.NoError(t, err)
+
+			collector := newTestCollector()
+			pod := &corev1.Pod{}
+			pod.Name = "pod-1"
+			pod.Status.PodIP = ip
+			pod.Status.StartTime = &metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
+
+			podSource := &workload.PodMetricSource{
+				Uri:  "/metrics",
+				Port: port,
+			}
+
+			wanted := map[string][]string{
+				"my_counter": {"my_policy_key"},
+			}
+
+			values := make(map[string]float64)
+			pastHistograms := make(map[string]HistogramInfo)
+			currentHistograms := make(map[string]HistogramInfo)
+			pastCounters := make(map[string]CounterInfo)
+			currentCounters := make(map[string]CounterInfo)
+			missingBaselines := make(map[string]bool)
+
+			err = collector.collectPodMetrics(context.Background(), pod, podSource, wanted, values, pastHistograms, currentHistograms, pastCounters, currentCounters, missingBaselines)
+			require.NoError(t, err)
+
+			_, ok := values["my_policy_key"]
+			assert.False(t, ok)
+			info, ok := currentCounters[pod.Name]
+			require.True(t, ok)
+			assert.Equal(t, tc.firstScrape, info.CounterMap["my_policy_key"])
+
+			t1 := info.ScrapeTimestamps["my_policy_key"]
+			info.ScrapeTimestamps["my_policy_key"] = t1 - tc.elapsedMs
+			if tc.podRestarted {
+				// Change start time to simulate restart
+				pod.Status.StartTime = &metav1.Time{Time: time.Now()}
+			}
+			pastCounters[pod.Name] = info
+
+			values = make(map[string]float64)
+			currentHistograms = make(map[string]HistogramInfo)
+			currentCounters = make(map[string]CounterInfo)
+			missingBaselines = make(map[string]bool)
+			err = collector.collectPodMetrics(context.Background(), pod, podSource, wanted, values, pastHistograms, currentHistograms, pastCounters, currentCounters, missingBaselines)
+			require.NoError(t, err)
+
+			if tc.want.rate > 0 {
+				assert.InDelta(t, tc.want.rate, values["my_policy_key"], 1e-2)
+			} else {
+				_, ok := values["my_policy_key"]
+				assert.False(t, ok)
+			}
+			info2, ok := currentCounters[pod.Name]
+			require.True(t, ok)
+			assert.Equal(t, tc.want.currentCounter, info2.CounterMap["my_policy_key"])
+		})
+	}
 }
