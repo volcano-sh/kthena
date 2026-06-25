@@ -11,11 +11,9 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check Go check related changes
-    runs-on: ubuntu-latest
-    outputs:
-      go_check: ${{ steps.filter.outputs.go_check }}
+  build:
+    runs-on: ubuntu-22.04
+
     steps:
       - name: Check Go check related changes
         id: filter
@@ -36,30 +34,30 @@ jobs:
         if: steps.filter.outputs.go_check != 'true'
         run: echo "No Go check-related files changed; marking required check as passed."
 
-  build:
-    needs: changes
-    if: needs.changes.outputs.go_check == 'true'
-    runs-on: ubuntu-22.04
-
-    steps:
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.go_check == 'true'
       - name: install helm
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
       - name: helm lint
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           helm lint charts/kthena
       - name: Setup Go
+        if: steps.filter.outputs.go_check == 'true'
         uses: actions/setup-go@v6
         with:
           go-version-file: "go.mod"
       - name: Build Kthena
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           make gen-check
       - name: golangci-lint
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           make lint

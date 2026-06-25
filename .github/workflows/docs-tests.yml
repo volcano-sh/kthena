@@ -10,11 +10,9 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check Documentation related changes
+  docs_test:
+    name: Docusaurus tests
     runs-on: ubuntu-latest
-    outputs:
-      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - name: Check Documentation related changes
         id: filter
@@ -30,21 +28,19 @@ jobs:
         if: steps.filter.outputs.docs != 'true'
         run: echo "No documentation-related files changed; marking required check as passed."
 
-  docs_test:
-    name: Docusaurus tests
-    needs: changes
-    if: needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.docs == 'true'
       - name: Setup Node.js
+        if: steps.filter.outputs.docs == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "24.5.0"
           cache: "npm"
           cache-dependency-path: "./docs/kthena/package-lock.json"
       - name: Install dependencies
+        if: steps.filter.outputs.docs == 'true'
         working-directory: ./docs/kthena
         run: npm ci
       - name: Run documentation tests
+        if: steps.filter.outputs.docs == 'true'
         run: make test-docs

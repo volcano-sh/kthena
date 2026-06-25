@@ -10,11 +10,9 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check Go test related changes
+  go_unit_test:
+    name: Go tests
     runs-on: ubuntu-latest
-    outputs:
-      go: ${{ steps.filter.outputs.go }}
     steps:
       - name: Check Go test related changes
         id: filter
@@ -34,26 +32,25 @@ jobs:
         if: steps.filter.outputs.go != 'true'
         run: echo "No Go test-related files changed; marking required check as passed."
 
-  go_unit_test:
-    name: Go tests
-    needs: changes
-    if: needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.go == 'true'
       - name: Setup Go
+        if: steps.filter.outputs.go == 'true'
         uses: actions/setup-go@v5
         with:
           go-version-file: "go.mod" # Automatically set Go version from go.mod
       - name: Run Unit Tests
+        if: steps.filter.outputs.go == 'true'
         run: make test
       - name: Calculate coverage percentage
+        if: steps.filter.outputs.go == 'true'
         id: coverage
         run: |
           COVERAGE=$(go tool cover -func=cover.out | grep total | awk '{print $3}' | sed 's/\%//')
           echo "Current coverage: $COVERAGE%"
           echo "coverage_percentage=$COVERAGE" >> $GITHUB_OUTPUT
       - name: Check coverage threshold
+        if: steps.filter.outputs.go == 'true'
         run: |
           THRESHOLD=10 # Set coverage threshold
           CURRENT_COVERAGE=${{ steps.coverage.outputs.coverage_percentage }}

@@ -11,11 +11,10 @@ permissions:
   pull-requests: read
 
 jobs:
-  changes:
-    name: Check license lint related changes
-    runs-on: ubuntu-latest
-    outputs:
-      licenses: ${{ steps.filter.outputs.licenses }}
+  licenses-lint:
+    name: Licenses Lint
+    timeout-minutes: 40
+    runs-on: ubuntu-24.04
     steps:
       - name: Check license lint related changes
         id: filter
@@ -36,23 +35,20 @@ jobs:
         if: steps.filter.outputs.licenses != 'true'
         run: echo "No license lint-related files changed; marking required check as passed."
 
-  licenses-lint:
-    name: Licenses Lint
-    needs: changes
-    if: needs.changes.outputs.licenses == 'true'
-    timeout-minutes: 40
-    runs-on: ubuntu-24.04
-    steps:
       - name: Checkout code
+        if: steps.filter.outputs.licenses == 'true'
         uses: actions/checkout@v3
       - name: Install Go
+        if: steps.filter.outputs.licenses == 'true'
         uses: actions/setup-go@v5
         with:
           go-version-file: "go.mod"
       - name: generate license mirror
+        if: steps.filter.outputs.licenses == 'true'
         run: |
           make licenses-check
       - name: lint-licenses
+        if: steps.filter.outputs.licenses == 'true'
         # if restricted > 0, CI will report an error.
         run: |
           make lint-licenses
