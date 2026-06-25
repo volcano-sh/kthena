@@ -5,20 +5,38 @@ on:
     branches:
       - main
       - "release-*"
-    paths:
-      - "python/**"
-      - "**.py"
-      - "python/kthena/pyproject.toml"
-  push:
-    branches:
-      - main
-    paths:
-      - "python/**"
-      - "python/kthena/pyproject.toml"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: Check Python lint related changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+    steps:
+      - name: Check Python lint related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            python:
+              - "python/**"
+              - "**.py"
+              - "python/kthena/pyproject.toml"
+              - ".github/workflows/python-lint.yml"
+
+      - name: Skip Python lint
+        if: steps.filter.outputs.python != 'true'
+        run: echo "No Python lint-related files changed; marking required check as passed."
+
   python_lint:
     name: Python Lint
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

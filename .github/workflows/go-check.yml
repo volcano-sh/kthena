@@ -5,21 +5,40 @@ on:
     branches:
       - main
       - "release-*"
-    paths-ignore:
-      - "**.md"
-      - "**.svg"
-      - "**.png"
-      - "docs/**"
-      - ".github/**"
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - "docs/**"
-      - ".github/**"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: Check Go check related changes
+    runs-on: ubuntu-latest
+    outputs:
+      go_check: ${{ steps.filter.outputs.go_check }}
+    steps:
+      - name: Check Go check related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          predicate-quantifier: every
+          filters: |
+            go_check:
+              - "**"
+              - "!**.md"
+              - "!**.svg"
+              - "!**.png"
+              - "!docs/**"
+              - "!.github/**"
+
+      - name: Skip Go check
+        if: steps.filter.outputs.go_check != 'true'
+        run: echo "No Go check-related files changed; marking required check as passed."
+
   build:
+    needs: changes
+    if: needs.changes.outputs.go_check == 'true'
     runs-on: ubuntu-22.04
 
     steps:
