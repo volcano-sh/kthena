@@ -1,3 +1,17 @@
+# Copyright The Volcano Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python3
 """
 A/B Test Orchestrator for Kthena Router Benchmarks.
@@ -86,10 +100,10 @@ class K8sManager:
         )
 
     def wait_for_router_route_ready(
-        self, model_name: str, endpoint: str, timeout: int = 300
+        self, mocker_model_name: str, endpoint: str, timeout: int = 300
     ) -> None:
         """Probe the router to confirm the route table has the given model loaded."""
-        print(f"  Probing router for model={model_name} at {endpoint}...")
+        print(f"  Probing router for model={mocker_model_name} at {endpoint}...")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -98,14 +112,14 @@ class K8sManager:
                      "-X", "POST", f"http://{endpoint}/v1/chat/completions",
                      "-H", "Content-Type: application/json",
                      "-d", (
-                         '{"model":"' + model_name + '",'
+                         '{"model":"' + mocker_model_name + '",'
                          '"messages":[{"role":"user","content":"ping"}],'
                          '"max_tokens":1}'
                      )],
                     capture_output=True, text=True, timeout=5,
                 )
                 if result.stdout.strip() == "200":
-                    print(f"  Router route for '{model_name}' is ready")
+                    print(f"  Router route for '{mocker_model_name}' is ready")
                     return
                 # 404 = route not found (still warming up). Other codes = unexpected.
                 if result.stdout.strip() != "404":
@@ -114,8 +128,7 @@ class K8sManager:
                 pass
             time.sleep(2)
         raise RuntimeError(
-            f"Router route for '{model_name}' not ready within {timeout}s. "
-            "Check: kubectl get modelroute -A, kubectl get modelserver -A"
+            f"Router route for '{mocker_model_name}' not ready within {timeout}s. "
         )
 
     def apply_router_config(self, config_path: str) -> None:
@@ -263,7 +276,7 @@ class AIPerfRunner:
 
         cmd = [
             "aiperf", "profile",
-            "--model", "mocker-model",
+            "--model", "Qwen/Qwen3-0.6B",
             "--endpoint-type", "chat",
             "--url", f"http://{router_endpoint}",
             "--streaming",
@@ -406,8 +419,7 @@ class ABTestOrchestrator:
         router_endpoint = self.k8s.get_router_endpoint()
 
         # Wait until router's route table is warm before launching AIPerf
-        model_name = "mocker-model"
-        self.k8s.wait_for_router_route_ready(model_name, router_endpoint, timeout=300)
+        self.k8s.wait_for_router_route_ready("Qwen/Qwen3-0.6B", router_endpoint, timeout=300)
 
         return self.runner.run(
             config_name=config_name,
