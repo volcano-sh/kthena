@@ -198,3 +198,110 @@ func TestFetchPrometheusMetric(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractMetricFromFamily_AggregatesLabelSamples is the regression test for
+// issue #1063: COUNTER and GAUGE families that carry multiple label series must
+// be summed instead of reading only the first series.
+func TestExtractMetricFromFamily_AggregatesLabelSamples(t *testing.T) {
+	cases := []struct {
+		name     string
+		metric   string
+		payload  string
+		expected float64
+	}{
+		{
+			name:   "multi-label counter is summed",
+			metric: "requests_total",
+			payload: `# TYPE requests_total counter
+requests_total{status="success"} 2
+requests_total{status="error"} 3
+`,
+			expected: 5, // before the fix this was 2 (first series only)
+		},
+		{
+			name:   "multi-label gauge is summed",
+			metric: "queue_size",
+			payload: `# TYPE queue_size gauge
+queue_size{shard="a"} 4
+queue_size{shard="b"} 6
+`,
+			expected: 10,
+		},
+		{
+			name:   "three label series are summed",
+			metric: "requests_total",
+			payload: `# TYPE requests_total counter
+requests_total{code="200"} 10
+requests_total{code="404"} 1
+requests_total{code="500"} 4
+`,
+			expected: 15,
+		},
+		{
+			name:   "single-sample counter is unchanged",
+			metric: "requests_total",
+			payload: `# TYPE requests_total counter
+requests_total 7
+`,
+			expected: 7,
+		},
+		{
+			name:   "single-sample gauge is unchanged",
+			metric: "num_requests_waiting",
+			payload: `# TYPE num_requests_waiting gauge
+num_requests_waiting 5
+`,
+			expected: 5,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			families, err := parsePrometheusFamilies(tc.payload, map[string][]string{tc.metric: nil})
+			require.NoError(t, err)
+			mf, ok := families[tc.metric]
+			require.True(t, ok, "expected family %q to be parsed", tc.metric)
+
+			value, _, found, err := extractMetricFromFamily(mf, nil)
+			require.NoError(t, err)
+			assert.True(t, found)
+			assert.InDelta(t, tc.expected, value, 1e-9)
+		})
+	}
+}
+
+// TestExtractMetricFromFamily_HistogramUnchanged confirms the COUNTER/GAUGE
+// aggregation change leaves HISTOGRAM handling intact: a histogram family still
+// yields a snapshot built from its first series.
+func TestExtractMetricFromFamily_HistogramUnchanged(t *testing.T) {
+	payload := `# TYPE latency histogram
+latency_bucket{le="0.1"} 1
+latency_bucket{le="0.5"} 2
+latency_bucket{le="+Inf"} 3
+latency_sum 0.35
+latency_count 3
+`
+	families, err := parsePrometheusFamilies(payload, map[string][]string{"latency": nil})
+	require.NoError(t, err)
+	mf, ok := families["latency"]
+	require.True(t, ok)
+
+	_, snapshot, _, _ := extractMetricFromFamily(mf, nil)
+	assert.NotNil(t, snapshot, "histogram path should still produce a snapshot")
+}
+
+// TestAddMetric verifies the aggregation helper accumulates values per key.
+func TestAddMetric(t *testing.T) {
+	m := map[string]float64{}
+
+	addMetric(m, "x", 2)
+	assert.Equal(t, 2.0, m["x"])
+
+	addMetric(m, "x", 3)
+	assert.Equal(t, 5.0, m["x"], "values accumulate for the same key")
+
+	addMetric(m, "y", 1)
+	assert.Equal(t, 1.0, m["y"], "keys are independent")
+	assert.Equal(t, 5.0, m["x"])
+}
