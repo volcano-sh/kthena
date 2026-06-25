@@ -159,6 +159,9 @@ jobs:
           # Deployment status
           kubectl get deployments -A -o wide > "$SNAPDIR/deployments.txt" 2>&1 || true
 
+          # Service status
+          kubectl get services -A -o wide > "$SNAPDIR/services.txt" 2>&1 || true
+
           # Cluster events (last 10 min, sorted by time)
           kubectl get events -A --sort-by='.lastTimestamp' > "$SNAPDIR/events.txt" 2>&1 || true
 
@@ -174,7 +177,6 @@ jobs:
           done
 
           # Node resource usage
-          kubectl top nodes > "$SNAPDIR/nodes-top.txt" 2>&1 || true
           kubectl describe nodes > "$SNAPDIR/nodes-describe.txt" 2>&1 || true
 
           # Mocker pod logs (current + previous instance)
@@ -184,9 +186,9 @@ jobs:
           done
 
           # Kthena controller & router logs
-          kubectl logs -l app=kthena-controller-manager -n kthena-system --tail=500 \
+          kubectl logs deployment/kthena-controller-manager -n kthena-system --tail=500 \
             > "$SNAPDIR/kthena-controller.log" 2>&1 || true
-          kubectl logs -l app=kthena-router -n kthena-system --tail=500 \
+          kubectl logs deployment/kthena-router -n kthena-system --tail=500 \
             > "$SNAPDIR/kthena-router.log" 2>&1 || true
 
           echo "=== Snapshot saved to $SNAPDIR ==="

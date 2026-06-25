@@ -61,9 +61,13 @@ class K8sManager:
 
     ROUTER_NAMESPACE = "kthena-system"
     ROUTER_DEPLOYMENT = "kthena-router"
+    ROUTER_SVC_PORT = 80
+    DEFAULT_LOCAL_PORT = 8080
 
-    def __init__(self, namespace: str = "default"):
+    def __init__(self, namespace: str = "default", local_port: int = DEFAULT_LOCAL_PORT):
         self.namespace = namespace
+        self.local_port = local_port
+        self._pf_proc: "Optional[subprocess.Popen]" = None
 
     def apply(self, manifest_path: str) -> None:
         subprocess.run(
@@ -125,17 +129,73 @@ class K8sManager:
         time.sleep(5)
 
     def get_router_endpoint(self) -> str:
-        result = subprocess.run(
+        """Return a reachable <ip>:<port> for the router Service.
+
+        Primary: node's InternalIP + the Service's NodePort.
+        Fallback: starts a kubectl port-forward to the Service ClusterIP.
+        """
+        # ── Primary: NodePort ──
+        node_ip = subprocess.run(
+            [
+                "kubectl", "get", "nodes",
+                "-o", r"jsonpath={.items[0].status.addresses[?(@.type=='InternalIP')].address}",
+            ],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        node_port = subprocess.run(
             [
                 "kubectl", "get", "svc", self.ROUTER_DEPLOYMENT,
                 "-n", self.ROUTER_NAMESPACE,
-                "-o", "jsonpath={.spec.clusterIP}:{.spec.ports[0].port}",
+                "-o", "jsonpath={.spec.ports[0].nodePort}",
             ],
-            check=True,
-            capture_output=True,
-            text=True,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        if node_ip and node_port:
+            return f"{node_ip}:{node_port}"
+
+        # ── Fallback: kubectl port-forward ──
+        local = f"localhost:{self.local_port}"
+        print(f"  NodePort unavailable — starting port-forward ({local} → "
+              f"svc/{self.ROUTER_DEPLOYMENT}:{self.ROUTER_SVC_PORT})")
+
+        self._pf_proc = subprocess.Popen(
+            [
+                "kubectl", "port-forward",
+                f"svc/{self.ROUTER_DEPLOYMENT}",
+                f"{self.local_port}:{self.ROUTER_SVC_PORT}",
+                "-n", self.ROUTER_NAMESPACE,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        return result.stdout.strip()
+
+        # Wait for port-forward to be ready (or die early).
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            ret = self._pf_proc.poll()
+            if ret is not None:
+                raise RuntimeError(
+                    f"kubectl port-forward exited early with code {ret}"
+                )
+            time.sleep(0.5)
+
+        print(f"  Port-forward ready: {local}")
+        return local
+
+    def cleanup_port_forward(self) -> None:
+        """Stop the port-forward process if one was started."""
+        if self._pf_proc is None:
+            return
+        if self._pf_proc.poll() is None:
+            self._pf_proc.terminate()
+            try:
+                self._pf_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._pf_proc.kill()
+                self._pf_proc.wait()
+        self._pf_proc = None
 
 
 class AIPerfRunner:
@@ -303,6 +363,7 @@ class ABTestOrchestrator:
         router_config_a_path: str,
         router_config_b_path: str,
         output_dir: str,
+        local_port: int = K8sManager.DEFAULT_LOCAL_PORT,
         mocker_manifest: Optional[str] = None,
     ):
         self.scenario = ScenarioConfig.from_yaml(scenario_path)
@@ -311,7 +372,7 @@ class ABTestOrchestrator:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.k8s = K8sManager()
+        self.k8s = K8sManager(local_port=local_port)
         self.runner = AIPerfRunner(str(self.output_dir / "runs"))
 
         self.mocker_manifest = mocker_manifest or str(
@@ -335,8 +396,12 @@ class ABTestOrchestrator:
         )
 
     def run(self) -> Dict[str, Any]:
-        result_a = self.run_single_config(str(self.router_config_a_path), "config_a")
-        result_b = self.run_single_config(str(self.router_config_b_path), "config_b")
+        """Run A/B test."""
+        try:
+            result_a = self.run_single_config(str(self.router_config_a_path), "config_a")
+            result_b = self.run_single_config(str(self.router_config_b_path), "config_b")
+        finally:
+            self.k8s.cleanup_port_forward()
 
         comparison = self._compare(result_a, result_b)
 
@@ -411,6 +476,10 @@ def main():
     parser.add_argument("--output", default="./results", help="Output directory")
     parser.add_argument("--mocker-manifest", help="Path to mocker deployment YAML")
     parser.add_argument("--skip-setup", action="store_true", help="Skip mocker + ModelServer + ModelRoute setup")
+    parser.add_argument(
+        "--local-port", type=int, default=K8sManager.DEFAULT_LOCAL_PORT,
+        help=f"Local port for kubectl port-forward fallback (default: {K8sManager.DEFAULT_LOCAL_PORT})",
+    )
 
     args = parser.parse_args()
 
@@ -419,6 +488,7 @@ def main():
         router_config_a_path=args.router_config_a,
         router_config_b_path=args.router_config_b,
         output_dir=args.output,
+        local_port=args.local_port,
         mocker_manifest=args.mocker_manifest,
     )
 
