@@ -5,18 +5,37 @@ on:
     branches:
       - main
       - "release-*"
-    paths:
-      - "python/**"
-      - "**.py"
-  push:
-    branches:
-      - main
-    paths:
-      - "python/**"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: Check Python test related changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+    steps:
+      - name: Check Python test related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            python:
+              - "python/**"
+              - "**.py"
+              - ".github/workflows/python-tests.yml"
+
+      - name: Skip Python tests
+        if: steps.filter.outputs.python != 'true'
+        run: echo "No Python test-related files changed; marking required check as passed."
+
   python_unit_test:
     name: Python tests
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

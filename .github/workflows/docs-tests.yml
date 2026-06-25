@@ -5,17 +5,35 @@ on:
     branches:
       - main
       - "release-*"
-    paths:
-      - "docs/kthena/**"
-  push:
-    branches:
-      - main
-    paths:
-      - "docs/kthena/**"
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: Check Documentation related changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - name: Check Documentation related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            docs:
+              - "docs/kthena/**"
+              - ".github/workflows/docs-tests.yml"
+
+      - name: Skip Documentation tests
+        if: steps.filter.outputs.docs != 'true'
+        run: echo "No documentation-related files changed; marking required check as passed."
+
   docs_test:
     name: Docusaurus tests
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
