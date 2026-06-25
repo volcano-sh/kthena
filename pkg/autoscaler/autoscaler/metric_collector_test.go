@@ -412,7 +412,6 @@ func TestCollectCounterMetric(t *testing.T) {
 				"my_counter": {"my_policy_key"},
 			}
 
-			// First scrape
 			values := make(map[string]float64)
 			pastHistograms := make(map[string]HistogramInfo)
 			currentHistograms := make(map[string]HistogramInfo)
@@ -427,7 +426,6 @@ func TestCollectCounterMetric(t *testing.T) {
 			require.True(t, ok)
 			assert.Equal(t, tc.firstScrape, info.CounterMap["my_policy_key"])
 
-			// Fake the scrape timestamp
 			t1 := info.ScrapeTimestamp
 			info.ScrapeTimestamp = t1 - tc.elapsedMs
 			if tc.podRestarted {
@@ -436,7 +434,6 @@ func TestCollectCounterMetric(t *testing.T) {
 			}
 			pastCounters[pod.Name] = info
 
-			// Second scrape
 			values = make(map[string]float64)
 			currentHistograms = make(map[string]HistogramInfo)
 			currentCounters = make(map[string]CounterInfo)

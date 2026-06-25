@@ -385,8 +385,6 @@ func (collector *MetricCollector) collectPodMetrics(
 	return nil
 }
 
-// pastHistogramMapForPod returns the previous histogram snapshots for pod, but
-// only when the pod has not restarted since they were recorded.
 func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) map[string]*histogram.Snapshot {
 	pastValue, ok := pastHistograms[pod.Name]
 	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
@@ -395,8 +393,6 @@ func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]Histogram
 	return map[string]*histogram.Snapshot{}
 }
 
-// pastCounterMapForPod returns the previous counter snapshots for pod,
-// but only when the pod has not restarted since they were recorded.
 func pastCounterMapForPod(pod *corev1.Pod, pastCounters map[string]CounterInfo) (map[string]float64, int64) {
 	pastValue, ok := pastCounters[pod.Name]
 	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
