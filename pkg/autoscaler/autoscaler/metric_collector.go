@@ -131,8 +131,7 @@ func (collector *MetricCollector) UpdateMetrics(
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, anyUnready, failed, collectErr := collector.collectPodMetricsGroup(
-			ctx, podLister, g.podSource, g.specs,
+		values, anyUnready, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs,
 			pastHistograms, currentHistograms,
 			pastCounters, currentCounters,
 		)
@@ -272,11 +271,7 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	wanted := groupPolicyKeysByScrapeName(specs)
 
 	for _, pod := range pods {
-		if err = collector.collectPodMetrics(
-			ctx, pod, podSource, wanted, values,
-			pastHistograms, currentHistograms,
-			pastCounters, currentCounters,
-		); err != nil {
+		if err = collector.collectPodMetrics(ctx, pod, podSource, wanted, values, pastHistograms, currentHistograms, pastCounters, currentCounters); err != nil {
 			return nil, false, false, err
 		}
 	}
@@ -323,8 +318,15 @@ func (collector *MetricCollector) collectPodMetrics(
 	pastHistogramMap := pastHistogramMapForPod(pod, pastHistograms)
 	pastCounterMap, pastScrapeTimestamp := pastCounterMapForPod(pod, pastCounters)
 
-	currentHistogramMap := make(map[string]*histogram.Snapshot)
-	currentCounterMap := make(map[string]float64)
+	currentHistogramMap := currentHistograms[pod.Name].HistogramMap
+	if currentHistogramMap == nil {
+		currentHistogramMap = make(map[string]*histogram.Snapshot)
+	}
+
+	currentCounterMap := currentCounters[pod.Name].CounterMap
+	if currentCounterMap == nil {
+		currentCounterMap = make(map[string]float64)
+	}
 
 	body, err := collector.scrapePod(ctx, pod, podSource)
 	if err != nil {
