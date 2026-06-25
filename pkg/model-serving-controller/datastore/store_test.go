@@ -184,6 +184,32 @@ func TestGetRoleList(t *testing.T) {
 	assert.Nil(t, roles)
 }
 
+func TestGetRolesByGroupReturnsRoleCopies(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex: sync.RWMutex{},
+		servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+			key: {
+				"group0": &ServingGroup{
+					Name: "group0",
+					roles: map[string]map[string]*Role{
+						"prefill": {
+							"prefill-0": &Role{Name: "prefill-0", Status: RoleCreating},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	roles, err := s.GetRolesByGroup(key, "group0")
+	assert.NoError(t, err)
+	roles["prefill"]["prefill-0"].Status = RoleRunning
+
+	assert.Equal(t, RoleCreating, s.GetRoleStatus(key, "group0", "prefill", "prefill-0"))
+}
+
 func TestUpdateRoleStatus(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
 

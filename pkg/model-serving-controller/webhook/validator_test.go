@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -482,6 +483,134 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := validateRollingUpdateConfiguration(tt.args.ms)
+			if got != nil {
+				assert.EqualValues(t, tt.want, got)
+			} else {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestValidateRoleMaxUnavailable(t *testing.T) {
+	replicas := int32(3)
+	type args struct {
+		ms *workloadv1alpha1.ModelServing
+	}
+	tests := []struct {
+		name string
+		args args
+		want field.ErrorList
+	}{
+		{
+			name: "valid roleMaxUnavailable with RoleRollingUpdate",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.RoleRollingUpdate,
+						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "roleMaxUnavailable set with non-RoleRollingUpdate type",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.ServingGroupRollingUpdate,
+						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("maxUnavailable"),
+					&intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+					fmt.Sprintf("maxUnavailable can only be set when rolloutStrategy.type is %s", workloadv1alpha1.RoleRollingUpdate),
+				),
+			},
+		},
+		{
+			name: "roleMaxUnavailable is zero",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.RoleRollingUpdate,
+						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("maxUnavailable"),
+					&intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+					"maxUnavailable cannot be 0",
+				),
+			},
+		},
+		{
+			name: "per-role roleMaxUnavailable on the second role uses its own index",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.RoleRollingUpdate,
+						},
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: ptr.To[int32](2)},
+								{
+									Name:           "decode",
+									Replicas:       ptr.To[int32](4),
+									MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateMaxUnavailable(tt.args.ms)
 			if got != nil {
 				assert.EqualValues(t, tt.want, got)
 			} else {

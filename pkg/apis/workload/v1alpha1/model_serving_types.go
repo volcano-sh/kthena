@@ -136,6 +136,17 @@ type RolloutStrategy struct {
 	// Type defines the rollout strategy. Supported values are
 	// "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
 	// it defaults to "ServingGroupRollingUpdate".
+	// In ModelServing, the status of a role affects the status of the serving group.
+	// Consequently, RoleRollingUpdate is a more granular form of RollingUpdate than ServingGroupRollingUpdate.
+	// "ServingGroupRollingUpdate" will delete all outdated ServingGroups and then recreate the ServingGroups
+	// for the new version. This is done to facilitate the upgrade.
+	// Use `MaxUnavailable` to control the number of unavailable ServingGroups during a rolling update.
+	// Use the Role's `maxUnavailable` to control the number of unavailable replicas of a Role during a rolling update.
+	// NOTE: the Role's `maxUnavailable` is only allowed to set in `RoleRollingUpdate` strategy.
+	// And the `maxUnavailable` field is located under the Role(servinggroup_types.go)
+	//
+	// "RoleRollingUpdate" removes outdated roles from the outdated ServingGroup.
+	// It then recreates new version of the roles to implement the rolling update.
 	//
 	// +kubebuilder:default=ServingGroupRollingUpdate
 	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}

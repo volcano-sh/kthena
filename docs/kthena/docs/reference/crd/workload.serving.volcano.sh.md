@@ -864,6 +864,7 @@ _Appears in:_
 | `entryTemplate` _[PodTemplateSpec](#podtemplatespec)_ | EntryTemplate defines the template for the entry pod of a role.<br />Required: Currently, a role must have only one entry-pod. |  |  |
 | `workerReplicas` _integer_ | WorkerReplicas defines the number for the worker pod of a role.<br />Required: Need to set the number of worker-pod replicas. |  |  |
 | `workerTemplate` _[PodTemplateSpec](#podtemplatespec)_ | WorkerTemplate defines the template for the worker pod of a role. |  |  |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable bounds the number of this Role's outdated replicas that can be<br />simultaneously unavailable within a single ServingGroup during a Role rolling update.<br />It only takes effect when rolloutStrategy.type is RoleRollingUpdate.<br />Value can be an absolute number (ex: 2) or a percentage of this Role's replicas (ex: 50%).<br />Absolute number is calculated from percentage by rounding down. This can not be 0.<br />When unset, all of this Role's outdated replicas in a ServingGroup are recreated at once,<br />which preserves the previous behavior. |  | XIntOrString: \{\} <br /> |
 
 
 #### RoleRatioConstraint
@@ -953,7 +954,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type defines the rollout strategy. Supported values are<br />"ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,<br />it defaults to "ServingGroupRollingUpdate". | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
+| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type defines the rollout strategy. Supported values are<br />"ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,<br />it defaults to "ServingGroupRollingUpdate".<br />In ModelServing, the status of a role affects the status of the serving group.<br />Consequently, RoleRollingUpdate is a more granular form of RollingUpdate than ServingGroupRollingUpdate.<br />"ServingGroupRollingUpdate" will delete all outdated ServingGroups and then recreate the ServingGroups<br />for the new version. This is done to facilitate the upgrade.<br />Use `MaxUnavailable` to control the number of unavailable ServingGroups during a rolling update.<br />Use the Role's `maxUnavailable` to control the number of unavailable replicas of a Role during a rolling update.<br />NOTE: the Role's `maxUnavailable` is only allowed to set in `RoleRollingUpdate` strategy.<br />And the `maxUnavailable` field is located under the Role(servinggroup_types.go)<br />"RoleRollingUpdate" removes outdated roles from the outdated ServingGroup.<br />It then recreates new version of the roles to implement the rolling update. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
 | `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration defines the parameters to be used when type is RollingUpdateStrategyType.<br />optional |  |  |
 
 

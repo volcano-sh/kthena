@@ -79,11 +79,12 @@ type Role struct {
 type ServingGroupStatus string
 
 const (
-	ServingGroupRunning  ServingGroupStatus = "Running"
-	ServingGroupCreating ServingGroupStatus = "Creating"
-	ServingGroupDeleting ServingGroupStatus = "Deleting"
-	ServingGroupScaling  ServingGroupStatus = "Scaling"
-	ServingGroupNotFound ServingGroupStatus = "NotFound"
+	ServingGroupRunning     ServingGroupStatus = "Running"
+	ServingGroupCreating    ServingGroupStatus = "Creating"
+	ServingGroupDeleting    ServingGroupStatus = "Deleting"
+	ServingGroupScaling     ServingGroupStatus = "Scaling"
+	ServingGroupNotFound    ServingGroupStatus = "NotFound"
+	ServingGroupRoleRolling ServingGroupStatus = "RoleRolling"
 )
 
 type RoleStatus string
@@ -181,7 +182,8 @@ func (s *store) GetRolesByGroup(modelServingName types.NamespacedName, groupName
 		}
 		copiedInner := make(map[string]*Role, len(roleMap))
 		for roleID, role := range roleMap {
-			copiedInner[roleID] = role
+			roleCopy := *role
+			copiedInner[roleID] = &roleCopy
 		}
 		copiedRoles[roleName] = copiedInner
 	}

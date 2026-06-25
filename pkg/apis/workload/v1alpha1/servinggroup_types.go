@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	volcanoV1Beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
@@ -77,6 +78,17 @@ type Role struct {
 	// WorkerTemplate defines the template for the worker pod of a role.
 	// +optional
 	WorkerTemplate *PodTemplateSpec `json:"workerTemplate,omitempty"`
+
+	// MaxUnavailable bounds the number of this Role's outdated replicas that can be
+	// simultaneously unavailable within a single ServingGroup during a Role rolling update.
+	// It only takes effect when rolloutStrategy.type is RoleRollingUpdate.
+	// Value can be an absolute number (ex: 2) or a percentage of this Role's replicas (ex: 50%).
+	// Absolute number is calculated from percentage by rounding down. This can not be 0.
+	// When unset, all of this Role's outdated replicas in a ServingGroup are recreated at once,
+	// which preserves the previous behavior.
+	// +kubebuilder:validation:XIntOrString
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // PodTemplateSpec describes the data a pod should have when created from a template
