@@ -85,39 +85,8 @@ class K8sManager:
             text=True,
         )
 
-    def wait_for_ready(self, label: str, timeout: int = 120) -> None:
-        subprocess.run(
-            [
-                "kubectl", "wait", "--for=condition=ready", "pod",
-                f"-l={label}", f"-n", self.namespace,
-                f"--timeout={timeout}s",
-            ],
-            check=True,
-        )
-
-    def wait_for_modelserver_ready(self, name: str, namespace: str = "default", timeout: int = 60) -> None:
-        """Wait until a ModelServer CRD reports ready replicas > 0."""
-        print(f"  Waiting for ModelServer {name} to have ready replicas...")
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            result = subprocess.run(
-                ["kubectl", "get", "modelserver", name,
-                 "-n", namespace,
-                 "-o", "jsonpath={.status.readyReplicas}"],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                # CRD might not exist yet — controller may still be reconciling
-                time.sleep(2)
-                continue
-            if result.stdout.strip() and int(result.stdout.strip()) > 0:
-                print(f"  ModelServer {name} ready with {result.stdout.strip()} ready replicas")
-                return
-            time.sleep(2)
-        raise RuntimeError(f"ModelServer {name} not ready within {timeout}s")
-
     def wait_for_router_route_ready(
-        self, model_name: str, endpoint: str, timeout: int = 30
+        self, model_name: str, endpoint: str, timeout: int = 300
     ) -> None:
         """Probe the router to confirm the route table has the given model loaded."""
         print(f"  Probing router for model={model_name} at {endpoint}...")
@@ -429,22 +398,7 @@ class ABTestOrchestrator:
         self.k8s = K8sManager(local_port=local_port)
         self.runner = AIPerfRunner(str(self.output_dir / "runs"))
 
-        self.mocker_manifest = mocker_manifest or str(
-            Path(__file__).parent.parent / "k8s" / "mocker-deployment.yaml"
-        )
-
-    def setup_mock_backends(self) -> None:
-        # ── Deploy mocker pods ──
-        self.k8s.apply(self.mocker_manifest)
-        self.k8s.wait_for_ready("app=mocker-llm", timeout=180)
-
-        # ── Create ModelServer + ModelRoute CRDs ──
-        crd_dir = Path(__file__).parent.parent / "k8s"
-        self.k8s.apply(str(crd_dir / "modelserver.yaml"))
-        self.k8s.apply(str(crd_dir / "modelroute.yaml"))
-
-        # ── Wait for controller to reconcile ModelServer → pods discovered ──
-        self.k8s.wait_for_modelserver_ready("mocker-model-server", timeout=60)
+        self.mocker_manifest = mocker_manifest
 
     def run_single_config(self, config_path: str, config_name: str) -> BenchmarkResult:
         self.k8s.apply_router_config(config_path)
@@ -453,7 +407,7 @@ class ABTestOrchestrator:
 
         # Wait until router's route table is warm before launching AIPerf
         model_name = "mocker-model"
-        self.k8s.wait_for_router_route_ready(model_name, router_endpoint, timeout=30)
+        self.k8s.wait_for_router_route_ready(model_name, router_endpoint, timeout=300)
 
         return self.runner.run(
             config_name=config_name,
@@ -542,7 +496,6 @@ def main():
     parser.add_argument("--router-config-b", required=True, help="Path to router scheduler ConfigMap for config B")
     parser.add_argument("--output", default="./results", help="Output directory")
     parser.add_argument("--mocker-manifest", help="Path to mocker deployment YAML")
-    parser.add_argument("--skip-setup", action="store_true", help="Skip mocker + ModelServer + ModelRoute setup")
     parser.add_argument(
         "--local-port", type=int, default=K8sManager.DEFAULT_LOCAL_PORT,
         help=f"Local port for kubectl port-forward fallback (default: {K8sManager.DEFAULT_LOCAL_PORT})",
@@ -558,9 +511,6 @@ def main():
         local_port=args.local_port,
         mocker_manifest=args.mocker_manifest,
     )
-
-    if not args.skip_setup:
-        orchestrator.setup_mock_backends()
 
     report = orchestrator.run()
 

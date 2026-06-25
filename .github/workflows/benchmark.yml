@@ -108,9 +108,7 @@ jobs:
         run: |
           kubectl apply -f k8s/modelserver.yaml
           kubectl apply -f k8s/modelroute.yaml
-          # Wait for ModelServer to be ready
-          kubectl wait --for=condition=ready modelserver/mocker-model-server --timeout=300s || \
-            echo "ModelServer did not ready, proceeding anyway"
+          # `kubectl wait` unimplement 
 
       - name: Install AIPerf
         run: |
@@ -125,7 +123,6 @@ jobs:
             --router-config-a "k8s/${{ matrix.router-config-a }}.yaml" \
             --router-config-b "k8s/${{ matrix.router-config-b }}.yaml" \
             --output results/ \
-            --skip-setup
 
       - name: Collect Results
         if: always()
