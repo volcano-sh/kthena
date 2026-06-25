@@ -5,22 +5,46 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "pkg/**"
-      - "cmd/**"
-      - "test/**"
-      - "config/**"
-      - "charts/**"
-      - "docker/**"
-      - "hack/**"
-      - "go.mod"
-      - "go.sum"
-      - "Makefile"
-      - ".github/workflows/e2e-tests.yml"
+      - "release-**"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: Check E2E related changes
+    runs-on: ubuntu-latest
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - name: Check E2E related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            e2e:
+              - "pkg/**"
+              - "cmd/**"
+              - "test/**"
+              - "config/**"
+              - "charts/**"
+              - "docker/**"
+              - "hack/**"
+              - "go.mod"
+              - "go.sum"
+              - "Makefile"
+              - ".github/workflows/e2e-tests.yml"
+
+      - name: Skip E2E Tests
+        if: github.event_name != 'workflow_dispatch' && steps.filter.outputs.e2e != 'true'
+        run: echo "No E2E-related files changed; marking required check as passed."
+
   e2e-tests:
     name: E2E (${{ matrix.category }})
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -49,7 +73,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
 
       - name: Install helm
         shell: bash
