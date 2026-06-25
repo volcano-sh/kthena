@@ -178,8 +178,6 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 			allErrs = append(allErrs, field.Invalid(rollingUpdateConfigurationPath,
 				"",
 				"maxUnavailable cannot be 0"))
-		} else if maxUnavailableValue > replicas {
-			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, fmt.Sprintf("maxUnavailable cannot be greater than replicas (%d)", replicas)))
 		}
 	}
 	return allErrs

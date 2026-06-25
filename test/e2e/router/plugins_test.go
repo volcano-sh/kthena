@@ -26,6 +26,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -166,11 +167,18 @@ func TestSchedulerPluginLeastLatency(t *testing.T) {
 	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins-latency.yaml")
 	model := route.Spec.ModelName
 
-	// Prime slow pool only: fast pods already have TTFT/TPOT from earlier plugin tests; an
-	// unprimed slow pod reports TTFT=0 and would incorrectly win least-latency scoring.
-	const slowPrimeRequests = 8
-	utils.DirectChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", slowPrimeRequests)
-	time.Sleep(2 * time.Second) // allow router to scrape updated slow-pool metrics
+	// Prime both pools after the scheduler-specific router restart. Histogram deltas need
+	// an initial scrape baseline, so send a small baseline batch first, then the measured
+	// batch that should make the fast pool strictly lower-latency than the slow pool.
+	latencyPods := append(append([]corev1.Pod{}, fastPods...), slowPods...)
+	for _, pod := range latencyPods {
+		utils.DirectChatToPod(t, pod, model, "kthena-router-plugin-e2e-fixed-prompt-latency-baseline-prime", 2)
+	}
+	time.Sleep(2 * time.Second)
+	for _, pod := range latencyPods {
+		utils.DirectChatToPod(t, pod, model, "kthena-router-plugin-e2e-fixed-prompt-latency-measured-prime", 8)
+	}
+	waitForLeastLatencyMetricsSeparation(t, testCtx.KubeClient, kthenaNamespace, fastPods, slowPods)
 
 	since := metav1.NewTime(time.Now())
 	utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-latency-route", 200)

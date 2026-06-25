@@ -6967,6 +6967,22 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			expectedOutdated: true,
 		},
 		{
+			name: "deleting roles consume maxUnavailable budget",
+			roles: []workloadv1alpha1.Role{
+				newRole("prefill", "nginx:latest", 4, ptr.To(intstr.FromInt(2))),
+			},
+			setupStore: func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing) {
+				t.Helper()
+				store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
+				hash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+				addRole(t, store, ms, "prefill", "prefill-0", "old-hash", datastore.RoleRunning)
+				addRole(t, store, ms, "prefill", "prefill-1", "old-hash", datastore.RoleRunning)
+				addRole(t, store, ms, "prefill", "prefill-2", "old-hash", datastore.RoleDeleting)
+				addRole(t, store, ms, "prefill", "prefill-3", hash, datastore.RoleCreating)
+			},
+			expectedOutdated: true,
+		},
+		{
 			name: "roles removed from spec are deleted except already deleting roles",
 			roles: []workloadv1alpha1.Role{
 				newRole("prefill", "nginx:latest", 1, nil),

@@ -329,7 +329,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			},
 		},
 		{
-			name: "maxUnavailable greater than replicas",
+			name: "maxUnavailable greater than replicas is allowed for scale down",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -345,16 +345,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable"),
-					&intstr.IntOrString{
-						Type:   intstr.Int,
-						IntVal: 4,
-					},
-					"maxUnavailable cannot be greater than replicas (3)",
-				),
-			},
+			want: field.ErrorList(nil),
 		},
 		{
 			name: "valid partition - within range",

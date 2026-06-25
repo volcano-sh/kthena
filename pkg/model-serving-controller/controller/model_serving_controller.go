@@ -1337,6 +1337,7 @@ func (c *ModelServingController) outdatedRoles(ms *workloadv1alpha1.ModelServing
 	newUnavailable := 0
 	for _, role := range roleList {
 		if role.Status == datastore.RoleDeleting {
+			newUnavailable++
 			continue
 		}
 		observedHash, ok := c.resolveRoleTemplateHashForComparison(ms, sg, roleSpec.Name, role)
