@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -687,7 +688,14 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		hasOldPDGroup := oldPDGroup != nil
 		hasNewPDGroup := newPDGroup != nil
 
-		if hasOldPDGroup && (!hasNewPDGroup || oldPDGroup.GroupKey != newPDGroup.GroupKey) {
+		pdGroupChanged := false
+		if hasOldPDGroup != hasNewPDGroup {
+			pdGroupChanged = true
+		} else if hasOldPDGroup && hasNewPDGroup {
+			pdGroupChanged = !reflect.DeepEqual(oldPDGroup, newPDGroup)
+		}
+
+		if hasOldPDGroup && pdGroupChanged {
 			// PDGroup configuration was removed or modified, clear the existing map
 			modelServerObj.pdGroups = make(map[string]*PDGroupPods)
 		}
@@ -698,7 +706,7 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 			modelServerObj.pods = pods
 		}
 
-		if hasNewPDGroup && (!hasOldPDGroup || oldPDGroup.GroupKey != newPDGroup.GroupKey) {
+		if hasNewPDGroup && pdGroupChanged {
 			// Recategorize all existing pods
 			for podName := range modelServerObj.pods {
 				if value, ok := s.pods.Load(podName); ok {
