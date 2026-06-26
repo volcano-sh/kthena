@@ -205,16 +205,6 @@ routing:
 | `active_upstream_requests` | 活跃上游请求数 |
 | `fairness_queue_depth` | 公平队列深度 |
 
-## 备忘
-
-准备向上游提交 PR 时，请执行:
-
-```shell
-./hack/manage-workflows.sh enable
-git add .github/workflows/
-git commit -m "Restore all workflows"
-```
-
 ## 参考文档
 
 - [Kthena Router Benchmark Proposal](../../docs/proposal/router-benchmark.md)
