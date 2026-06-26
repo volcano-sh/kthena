@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -44,7 +45,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
-
 
 type ResourceType string
 
@@ -210,7 +210,10 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 
 	_ = c.store.AddOrUpdateModelServer(ms, pods)
 
-	c.updateModelServerStatus(ms, podList, pods)
+	if err := c.updateModelServerStatus(ms, podList, pods); err != nil {
+		klog.Errorf("Failed to update ModelServer status for %s/%s: %v", ms.Namespace, ms.Name, err)
+		return err
+	}
 
 	existingPods, err := c.store.GetPodsByModelServer(utils.GetNamespaceName(ms))
 	if err != nil {
@@ -250,33 +253,57 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 	return nil
 }
 
-func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServer, podList []*corev1.Pod, readyPods sets.Set[types.NamespacedName]) {
-	msCopy := ms.DeepCopy()
-	msCopy.Status.ObservedGeneration = ms.Generation
-	msCopy.Status.MatchedReplicas = int32(len(podList))
-	msCopy.Status.ReadyReplicas = int32(readyPods.Len())
-
+func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServer, podList []*corev1.Pod, readyPods sets.Set[types.NamespacedName]) error {
+	expectedReadyStatus := metav1.ConditionFalse
+	expectedReason := "NoReadyPods"
 	if readyPods.Len() > 0 {
-		meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
-			Type:    "Ready",
-			Status:  metav1.ConditionTrue,
-			Reason:  "PodsReady",
-			Message: fmt.Sprintf("%d ready pods matched", readyPods.Len()),
-		})
-	} else {
-		meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
-			Type:    "Ready",
-			Status:  metav1.ConditionFalse,
-			Reason:  "NoReadyPods",
-			Message: "No ready pods match workloadSelector",
-		})
+		expectedReadyStatus = metav1.ConditionTrue
+		expectedReason = "PodsReady"
 	}
 
-	ctx := context.Background()
-	_, err := c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).UpdateStatus(ctx, msCopy, metav1.UpdateOptions{})
-	if err != nil {
-		klog.Errorf("Failed to update ModelServer status for %s/%s: %v", ms.Namespace, ms.Name, err)
+	// Check if status is already up-to-date
+	if ms.Status.ObservedGeneration == ms.Generation &&
+		ms.Status.MatchedReplicas == int32(len(podList)) &&
+		ms.Status.ReadyReplicas == int32(readyPods.Len()) {
+		if cond := meta.FindStatusCondition(ms.Status.Conditions, "Ready"); cond != nil &&
+			cond.Status == expectedReadyStatus &&
+			cond.Reason == expectedReason {
+			return nil
+		}
 	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get latest version to avoid conflicts
+		latest, err := c.modelServerLister.ModelServers(ms.Namespace).Get(ms.Name)
+		if err != nil {
+			return err
+		}
+
+		msCopy := latest.DeepCopy()
+		msCopy.Status.ObservedGeneration = latest.Generation
+		msCopy.Status.MatchedReplicas = int32(len(podList))
+		msCopy.Status.ReadyReplicas = int32(readyPods.Len())
+
+		if readyPods.Len() > 0 {
+			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+				Type:    "Ready",
+				Status:  metav1.ConditionTrue,
+				Reason:  "PodsReady",
+				Message: fmt.Sprintf("%d ready pods matched", readyPods.Len()),
+			})
+		} else {
+			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+				Type:    "Ready",
+				Status:  metav1.ConditionFalse,
+				Reason:  "NoReadyPods",
+				Message: "No ready pods match workloadSelector",
+			})
+		}
+
+		ctx := context.Background()
+		_, err = c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).UpdateStatus(ctx, msCopy, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (c *ModelServerController) syncPodHandler(key string) error {

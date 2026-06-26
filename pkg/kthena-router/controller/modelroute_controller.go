@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -154,27 +155,40 @@ func (c *ModelRouteController) syncHandler(key string) error {
 		return err
 	}
 
-	c.updateModelRouteStatus(mr)
-
-	return nil
+	return c.updateModelRouteStatus(mr)
 }
 
-func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute) {
-	mrCopy := mr.DeepCopy()
-	mrCopy.Status.ObservedGeneration = mr.Generation
-
-	meta.SetStatusCondition(&mrCopy.Status.Conditions, metav1.Condition{
-		Type:    "Ready",
-		Status:  metav1.ConditionTrue,
-		Reason:  "RouteRegistered",
-		Message: "ModelRoute registered in router store",
-	})
-
-	ctx := context.Background()
-	_, err := c.kthenaClient.NetworkingV1alpha1().ModelRoutes(mr.Namespace).UpdateStatus(ctx, mrCopy, metav1.UpdateOptions{})
-	if err != nil {
-		klog.Errorf("Failed to update ModelRoute status for %s/%s: %v", mr.Namespace, mr.Name, err)
+func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute) error {
+	// Check if status is already up-to-date
+	if mr.Status.ObservedGeneration == mr.Generation {
+		if cond := meta.FindStatusCondition(mr.Status.Conditions, "Ready"); cond != nil &&
+			cond.Status == metav1.ConditionTrue &&
+			cond.Reason == "RouteRegistered" {
+			return nil
+		}
 	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get latest version to avoid conflicts
+		latest, err := c.modelRouteLister.ModelRoutes(mr.Namespace).Get(mr.Name)
+		if err != nil {
+			return err
+		}
+
+		mrCopy := latest.DeepCopy()
+		mrCopy.Status.ObservedGeneration = latest.Generation
+
+		meta.SetStatusCondition(&mrCopy.Status.Conditions, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionTrue,
+			Reason:  "RouteRegistered",
+			Message: "ModelRoute registered in router store",
+		})
+
+		ctx := context.Background()
+		_, err = c.kthenaClient.NetworkingV1alpha1().ModelRoutes(mr.Namespace).UpdateStatus(ctx, mrCopy, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (c *ModelRouteController) enqueueModelRoute(obj interface{}) {
