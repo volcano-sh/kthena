@@ -159,10 +159,9 @@ type ModelServerStatus struct {
 
 	// Conditions track the lifecycle of this ModelServer.
 	// Types:
-	//   - "Ready": true when at least one pod is matched and the ModelServer has been
+	//   - "Ready": true when at least one ready pod is matched and the ModelServer has been
 	//     registered with the router store. Signals that `kubectl wait --for=condition=ready`
 	//     can be used.
-	//   - "Reconciled": true when the last reconciliation completed successfully.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
