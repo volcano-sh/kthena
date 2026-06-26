@@ -70,11 +70,14 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, ctrlErr := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	if ctrlErr != nil {
+		t.Fatalf("unexpected error: %v", ctrlErr)
+	}
 	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
 
 	stop := make(chan struct{})
@@ -271,11 +274,14 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, ctrlErr := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	if ctrlErr != nil {
+		t.Fatalf("unexpected error: %v", ctrlErr)
+	}
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -487,11 +493,14 @@ func TestModelServerController_ErrorHandling(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, ctrlErr := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	if ctrlErr != nil {
+		t.Fatalf("unexpected error: %v", ctrlErr)
+	}
 
 	// Test Case 1: Invalid ModelServer Key
 	t.Run("InvalidModelServerKey", func(t *testing.T) {
@@ -531,11 +540,14 @@ func TestModelServerController_WorkQueueProcessing(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, ctrlErr := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	if ctrlErr != nil {
+		t.Fatalf("unexpected error: %v", ctrlErr)
+	}
 
 	// Test Case 1: Initial Sync Signal
 	t.Run("InitialSyncSignal", func(t *testing.T) {
@@ -606,11 +618,14 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, ctrlErr := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	if ctrlErr != nil {
+		t.Fatalf("unexpected error: %v", ctrlErr)
+	}
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -794,11 +809,14 @@ func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 
 	// Create controller and store
 	store := newStoreWithMockBackend()
-	controller := NewModelServerController(
+	controller, ctrlErr := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	if ctrlErr != nil {
+		t.Fatalf("unexpected error: %v", ctrlErr)
+	}
 
 	kthenaInformerFactory.Start(stopCh)
 	kubeInformerFactory.Start(stopCh)
@@ -970,11 +988,14 @@ func TestModelServerController_SharedPods(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, ctrlErr := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	if ctrlErr != nil {
+		t.Fatalf("unexpected error: %v", ctrlErr)
+	}
 
 	stop := make(chan struct{})
 	defer close(stop)

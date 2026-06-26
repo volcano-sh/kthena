@@ -46,7 +46,7 @@ type InferencePoolController struct {
 func NewInferencePoolController(
 	dynamicInformerFactory dynamicinformer.DynamicSharedInformerFactory,
 	store datastore.Store,
-) *InferencePoolController {
+) (*InferencePoolController, error) {
 	gvr := inferencev1.SchemeGroupVersion.WithResource("inferencepools")
 	inferencePoolInformer := dynamicInformerFactory.ForResource(gvr).Informer()
 
@@ -58,13 +58,17 @@ func NewInferencePoolController(
 		store:                 store,
 	}
 
-	controller.registration, _ = inferencePoolInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	var err error
+	controller.registration, err = inferencePoolInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueInferencePool,
 		UpdateFunc: func(old, new interface{}) { controller.enqueueInferencePool(new) },
 		DeleteFunc: controller.enqueueInferencePool,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add event handler for inferencepool controller: %w", err)
+	}
 
-	return controller
+	return controller, nil
 }
 
 func (c *InferencePoolController) Run(stopCh <-chan struct{}) error {
