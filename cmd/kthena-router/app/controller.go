@@ -78,8 +78,8 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := kthenaInformers.NewSharedInformerFactory(kthenaClient, 0)
 
-	modelRouteController := controller.NewModelRouteController(kthenaInformerFactory, store)
-	modelServerController := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+	modelRouteController := controller.NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
+	modelServerController := controller.NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
 
 	cacheSyncs := []cache.InformerSynced{
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,

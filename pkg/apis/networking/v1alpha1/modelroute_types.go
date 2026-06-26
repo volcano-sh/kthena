@@ -167,6 +167,18 @@ const (
 
 // ModelRouteStatus defines the observed state of ModelRoute.
 type ModelRouteStatus struct {
+	// observedGeneration is the most recent generation observed for this ModelRoute.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions track the lifecycle of this ModelRoute.
+	// Types:
+	//   - "Ready": true when the route has been registered with the router store
+	//     and is available for request matching.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true
