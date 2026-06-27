@@ -49,8 +49,12 @@ class TokenizerDownloader:
         pass
 
     def download_tokenizer_from_huggingface(self, modelroute: str, revision: str | None = None) -> Tokenizer:
-       
-        tokenizer = Tokenizer.from_pretrained(modelroute, revision=revision)
+
+        if revision is not None:
+            tokenizer = Tokenizer.from_pretrained(modelroute, revision=revision)
+        else:
+            tokenizer = Tokenizer.from_pretrained(modelroute)    
+
         return tokenizer
     
     def download_tokenizer_from_modelscope(self, modelroute: str, revision: str | None = None) -> Tokenizer:
@@ -145,16 +149,9 @@ class DownloadHelper:
         snapshot_path = snapshot_download(
             repo_id=modelroute,
             revision=revision,
-            allow_patterns=[
-                "tokenizer.json",
-                "tokenizer_config.json",
-                "special_tokens_map.json",
-                "vocab.json",
-                "merges.txt",
-                "vocab.txt",
-            ],
+            allow_patterns=_TOKENIZER_FILES,
             )
-            
+        
         tokenizer = Tokenizer.from_pretrained(snapshot_path)
         return tokenizer
 

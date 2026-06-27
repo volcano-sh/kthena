@@ -1,7 +1,8 @@
 from fastapi import FastAPI
-from app import routers
+from app.routes import router as routes
 
-app = FastAPI()
+app = FastAPI(title="Kthena Tokenizer Service")
 
-for router in routers:
-    app.include_router(router)
+app.include_router(routes,tags=["Tokenizer Service"])
+
+
