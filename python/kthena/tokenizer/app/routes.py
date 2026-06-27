@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, HTTPException
 from .schema import EncodeRequest, LoadRequest, UnLoadRequest
 from .downloader import TokenizerManager, TokenizerDownloader
@@ -30,13 +31,11 @@ async def encode(req: EncodeRequest):
 
 @router.post("/v1/load")
 async def load(req: LoadRequest):
-    try:
-        tokenizer = downloader.download_tokenizer(req.model_uri ,req.modelrevision)
+    loop = asyncio.get_event_loop()
 
-        manager.load_tokenizer(
-            req.model_server_id,
-            tokenizer
-        )
+    try:
+        tokenizer = await loop.run_in_executor(None,downloader.download_tokenizer,req.model_uri,req.modelrevision)
+        manager.load_tokenizer(req.model_server_id,tokenizer)
 
     except Exception as e:
         logger.exception(f"Failed to load tokenizer for {req.model_server_id}")
@@ -83,3 +82,4 @@ def encoder(model_server_id: str, text: str):
     num_tokens = len(encoded.ids)
 
     return encoded, num_tokens
+
