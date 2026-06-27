@@ -31,7 +31,7 @@ async def encode(req: EncodeRequest):
 @router.post("/v1/load")
 async def load(req: LoadRequest):
     try:
-        tokenizer = downloader.download_tokenizer_from_huggingface(req.model_uri ,req.modelrevision)
+        tokenizer = downloader.download_tokenizer(req.model_uri ,req.modelrevision)
 
         manager.load_tokenizer(
             req.model_server_id,

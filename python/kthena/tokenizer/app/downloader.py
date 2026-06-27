@@ -46,39 +46,52 @@ class TokenizerManager:
 
 class TokenizerDownloader:
     def __init__(self):
-        pass
-
+        self.download_helper = DownloadHelper()
+    
+    def download_tokenizer(self, model_uri: str, revision: str | None = None) -> Tokenizer:
+        if model_uri.startswith("s3://"):
+            return self.download_tokenizer_from_s3(model_uri, revision)
+        
+        elif model_uri.startswith("pvc://"):
+            pvc_path = model_uri.removeprefix("pvc://")
+            return self.download_tokenizer_from_pvc(pvc_path)
+        
+        elif model_uri.startswith("ms://"):
+            modelroute = model_uri.removeprefix("ms://")
+            return self.download_tokenizer_from_modelscope(modelroute, revision)
+        
+        else:
+            # Default to HuggingFace (with optional hf:// prefix)
+            modelroute = model_uri.removeprefix("hf://") if model_uri.startswith("hf://") else model_uri
+            return self.download_tokenizer_from_huggingface(modelroute, revision)
+    
     def download_tokenizer_from_huggingface(self, modelroute: str, revision: str | None = None) -> Tokenizer:
-
         if revision is not None:
             tokenizer = Tokenizer.from_pretrained(modelroute, revision=revision)
         else:
             tokenizer = Tokenizer.from_pretrained(modelroute)    
-
         return tokenizer
     
     def download_tokenizer_from_modelscope(self, modelroute: str, revision: str | None = None) -> Tokenizer:
-
-        modelroute = f"{modelroute}@{revision}"
-        tokenizer = DownloadHelper().modelscope_download(modelroute, revision)
+        snapshot_path = snapshot_download(
+            repo_id=modelroute,
+            revision=revision,
+            allow_patterns=_TOKENIZER_FILES,
+        )
+        tokenizer = Tokenizer.from_pretrained(snapshot_path)
         return tokenizer
     
-    def download_tokenizer_from_s3(self, s3_info : str , s3_route : str) -> Tokenizer:
+    def download_tokenizer_from_s3(self, s3_uri: str, revision: str | None = None) -> Tokenizer:
         with TemporaryDirectory() as output_dir:
-            helper = DownloadHelper(s3_info)
-            download_path = helper.downloadS3(s3_route, output_dir)
+            download_path = self.download_helper.downloadS3(s3_uri, output_dir)
             tokenizer = Tokenizer.from_pretrained(download_path)
             return tokenizer
     
-        
-
     def download_tokenizer_from_pvc(self, pvc_path: str) -> Tokenizer:
         with TemporaryDirectory() as output_dir:
-            DownloadHelper = DownloadHelper(pvc_path).downloadPVC(output_dir)
-            tokenizer = Tokenizer.from_pretrained(DownloadHelper)
+            download_path = self.download_helper.downloadPVC(pvc_path, output_dir)
+            tokenizer = Tokenizer.from_pretrained(download_path)
             return tokenizer
-    
-    
   
 
 
@@ -154,19 +167,3 @@ class DownloadHelper:
         
         tokenizer = Tokenizer.from_pretrained(snapshot_path)
         return tokenizer
-
-'''
-def download_tokenizer(model_uri: str, revision: str | None = None) -> Tokenizer:
-    if model_uri.startswith("s3://"):
-        return _downloader.download_tokenizer_from_s3(s3_info=model_uri, s3_route=model_uri)
-    elif model_uri.startswith("pvc://"):
-        pvc_path = model_uri.removeprefix("pvc://")
-        return _downloader.download_tokenizer_from_pvc(pvc_path)
-    elif model_uri.startswith("ms://"):
-        modelroute = model_uri.removeprefix("ms://")
-        return _downloader.download_tokenizer_from_modelscope(modelroute, revision)
-    else:
-        modelroute = model_uri.removeprefix("hf://") if model_uri.startswith("hf://") else model_uri
-        return _downloader.download_tokenizer_from_huggingface(modelroute, revision)
-
-'''
