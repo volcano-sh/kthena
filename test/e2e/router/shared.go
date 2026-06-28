@@ -1548,12 +1548,38 @@ func TestSglangMetricsShared(t *testing.T, testCtx *routercontext.RouterTestCont
 	require.NoError(t, err, "Failed to setup port-forward to sglang-mock pod")
 	defer pf.Close()
 
+	const sglangMockModel = "Qwen/Qwen3-8B"
+	chatURL := "http://127.0.0.1:30300/v1/chat/completions"
+	// Echo mode returns the user message as completion tokens; a short prompt yields only one
+	// token and does not populate sglang:inter_token_latency_seconds (needs >= 2 output tokens).
+	chatResp := utils.SendChatRequestWithRetry(t, chatURL, sglangMockModel, []utils.ChatMessage{
+		utils.NewChatMessage("user", "hello world this is a longer echo test message for metrics"),
+	}, nil)
+	require.Equal(t, http.StatusOK, chatResp.StatusCode, "sglang-mock chat request failed: %s", chatResp.Body)
+
 	metricsURL := "http://127.0.0.1:30300/metrics"
+	engine := sglang.NewSglangEngine()
+	require.Eventually(t, func() bool {
+		allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
+		if err != nil {
+			return false
+		}
+		if _, ok := allMetrics[sglang.TTFT]; !ok {
+			return false
+		}
+		if _, ok := allMetrics[sglang.TPOT]; !ok {
+			return false
+		}
+		histogramMetrics, _ := engine.GetHistogramPodMetrics(allMetrics, nil)
+		_, hasTTFT := histogramMetrics[routerutils.TTFT]
+		_, hasTPOT := histogramMetrics[routerutils.TPOT]
+		return hasTTFT && hasTPOT
+	}, 15*time.Second, 500*time.Millisecond, "histogram metrics not populated after chat request")
+
 	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
 	require.NoError(t, err, "Failed to fetch metrics from sglang-mock via port-forward")
 	require.NotEmpty(t, allMetrics, "No metrics returned from sglang-mock")
 
-	engine := sglang.NewSglangEngine()
 	countMetrics := engine.GetCountMetricsInfo(allMetrics)
 	assert.Contains(t, countMetrics, routerutils.KVCacheUsage,
 		"Missing gpu_usage (sglang:token_usage) in count metrics")
@@ -1564,7 +1590,7 @@ func TestSglangMetricsShared(t *testing.T, testCtx *routercontext.RouterTestCont
 	assert.Contains(t, histogramMetrics, routerutils.TTFT,
 		"Missing TTFT (sglang:time_to_first_token_seconds) in histogram metrics")
 	assert.Contains(t, histogramMetrics, routerutils.TPOT,
-		"Missing TPOT (sglang:time_per_output_token_seconds) in histogram metrics")
+		"Missing TPOT (sglang:inter_token_latency_seconds) in histogram metrics")
 
 	t.Logf("Pod %s: kv_cache_usage=%.4f, request_waiting_num=%.0f, TTFT=%.6f, TPOT=%.6f",
 		targetPod.Name,

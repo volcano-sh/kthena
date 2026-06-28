@@ -29,7 +29,7 @@ var (
 	KVCacheUsage      = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
 	RequestRunningNum = "sglang:num_running_reqs"
-	TPOT              = "sglang:time_per_output_token_seconds"
+	TPOT              = "sglang:inter_token_latency_seconds"
 	TTFT              = "sglang:time_to_first_token_seconds"
 )
 

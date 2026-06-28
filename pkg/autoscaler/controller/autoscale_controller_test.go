@@ -33,7 +33,6 @@ import (
 	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
-	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	corev1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -102,15 +101,14 @@ func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(u.Host)
 	port := toInt32(portStr)
 
-	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a"}, MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
-	policy := &workload.AutoscalingPolicy{Spec: workload.AutoscalingPolicySpec{TolerancePercent: 100, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{}}}
-	binding := &workload.AutoscalingPolicyBinding{ObjectMeta: metav1.ObjectMeta{Name: "binding-a", Namespace: ns}, Spec: workload.AutoscalingPolicyBindingSpec{PolicyRef: corev1.LocalObjectReference{Name: "ap"}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 100}}}
+	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 100, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 100}}}
 
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+	if err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
 	if len(client.Fake.Actions()) != 0 {
@@ -130,15 +128,14 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(u.Host)
 	port := toInt32(portStr)
 
-	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-up"}, MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
-	policy := &workload.AutoscalingPolicy{Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}}}
-	binding := &workload.AutoscalingPolicyBinding{ObjectMeta: metav1.ObjectMeta{Name: "binding-up", Namespace: ns}, Spec: workload.AutoscalingPolicyBindingSpec{PolicyRef: corev1.LocalObjectReference{Name: "ap"}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10}}}
+	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-up"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10}}}
 
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doScale(context.Background(), binding, policy); err != nil {
+	if err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
 	updated, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-up", metav1.GetOptions{})
@@ -163,18 +160,17 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(u.Host)
 	port := toInt32(portStr)
 
-	paramA := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a"}, MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 1, MaxReplicas: 5, Cost: 10}
-	paramB := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-b"}, MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 2, MaxReplicas: 4, Cost: 20}
+	paramA := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 1, MaxReplicas: 5, Cost: 10}
+	paramB := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-b"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 2, MaxReplicas: 4, Cost: 20}
 	var threshold int32 = 200
-	policy := &workload.AutoscalingPolicy{Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}}}
-	binding := &workload.AutoscalingPolicyBinding{ObjectMeta: metav1.ObjectMeta{Name: "binding-b", Namespace: ns}, Spec: workload.AutoscalingPolicyBindingSpec{PolicyRef: corev1.LocalObjectReference{Name: "ap"}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
 
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbsA), readyPod(ns, "pod-b", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
+	if err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
 	}
 	updates := 0
@@ -201,18 +197,17 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	host, portStr, _ := net.SplitHostPort(u.Host)
 	port := toInt32(portStr)
 
-	paramA := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a2"}, MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 1, MaxReplicas: 5, Cost: 10}
-	paramB := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-b2"}, MetricSources: map[string]workload.MetricSource{"load": {Type: workload.PodMetricSourceType, Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 2, MaxReplicas: 4, Cost: 20}
+	paramA := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a2"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 1, MaxReplicas: 5, Cost: 10}
+	paramB := workload.HeterogeneousTargetParam{Target: workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-b2"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}, MinReplicas: 2, MaxReplicas: 4, Cost: 20}
 	var threshold int32 = 200
-	policy := &workload.AutoscalingPolicy{Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}}}
-	binding := &workload.AutoscalingPolicyBinding{ObjectMeta: metav1.ObjectMeta{Name: "binding-b2", Namespace: ns}, Spec: workload.AutoscalingPolicyBindingSpec{PolicyRef: corev1.LocalObjectReference{Name: "ap"}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
 
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a2", host, lbsA), readyPod(ns, "pod-b2", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doOptimize(context.Background(), binding, policy); err != nil {
+	if err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
 	}
 	updatedA, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-a2", metav1.GetOptions{})
@@ -374,24 +369,6 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 			newReplicas:     3,
 			expectPatchVerb: true,
 		},
-		{
-			name: "patch role prefill replicas (JSONPatch)",
-			target: workload.Target{
-				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
-				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
-			},
-			newReplicas:     5,
-			expectPatchVerb: true,
-		},
-		{
-			name: "patch role decode replicas (JSONPatch)",
-			target: workload.Target{
-				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
-				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "decode"},
-			},
-			newReplicas:     4,
-			expectPatchVerb: true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -442,112 +419,7 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 			if !strings.Contains(patchBody, fmt.Sprintf("%d", tt.newReplicas)) {
 				t.Errorf("patch body does not contain the expected replicas value %d.\nPatch: %s", tt.newReplicas, patchBody)
 			}
-
-			// For role-level patches, verify it's a valid JSON Patch targeting only replicas
-			if tt.target.SubTarget != nil {
-				var ops []map[string]interface{}
-				if err := json.Unmarshal([]byte(patchBody), &ops); err != nil {
-					t.Fatalf("failed to parse JSON Patch: %v", err)
-				}
-				if len(ops) != 2 {
-					t.Fatalf("expected exactly 2 JSON Patch operations, got %d", len(ops))
-				}
-				op := ops[1]
-				if op["op"] != "add" {
-					t.Errorf("expected op=add, got %v", op["op"])
-				}
-				path, _ := op["path"].(string)
-				if !strings.HasSuffix(path, "/replicas") {
-					t.Errorf("expected path ending with /replicas, got %q", path)
-				}
-				if !strings.HasPrefix(path, "/spec/template/roles/") {
-					t.Errorf("expected path starting with /spec/template/roles/, got %q", path)
-				}
-			}
 		})
-	}
-}
-
-// TestPatchRoleReplicasPreservesOtherRoles verifies that patching one role's replicas
-// does not affect other roles in the ModelServing spec.
-func TestPatchRoleReplicasPreservesOtherRoles(t *testing.T) {
-	ns := "default"
-
-	ms := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
-		Spec: workload.ModelServingSpec{
-			Replicas: ptrInt32(1),
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: ptrInt32(2),
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: "model", Image: "model:latest"}},
-							},
-						},
-					},
-					{
-						Name:     "decode",
-						Replicas: ptrInt32(3),
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: "model", Image: "model:latest"}},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	fakeClient := clientfake.NewSimpleClientset(ms.DeepCopy())
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms.DeepCopy()))
-
-	ac := &AutoscaleController{
-		client:             fakeClient,
-		modelServingLister: msLister,
-		scalerMap:          map[string]*autoscalerAutoscaler{},
-		optimizerMap:       map[string]*autoscalerOptimizer{},
-	}
-
-	// Patch only the "prefill" role replicas
-	target := workload.Target{
-		TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
-		SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
-	}
-
-	err := ac.updateTargetReplicas(context.Background(), &target, ns, 10)
-	if err != nil {
-		t.Fatalf("updateTargetReplicas error: %v", err)
-	}
-
-	// Verify exactly one patch was issued, and that it only targets role index 0 (prefill).
-	var patchBody string
-	patchCount := 0
-	updateCount := 0
-	for _, action := range fakeClient.Actions() {
-		if pa, ok := action.(k8stesting.PatchAction); ok {
-			patchCount++
-			patchBody = string(pa.GetPatch())
-		}
-		if _, ok := action.(k8stesting.UpdateAction); ok {
-			updateCount++
-		}
-	}
-	if patchCount != 1 {
-		t.Fatalf("expected exactly one patch action, got %d actions: %#v", patchCount, fakeClient.Actions())
-	}
-	if updateCount != 0 {
-		t.Fatalf("expected no update actions, got %d actions: %#v", updateCount, fakeClient.Actions())
-	}
-	// Must target roles/0 (prefill), not roles/1 (decode)
-	if !strings.Contains(patchBody, "/spec/template/roles/0/replicas") {
-		t.Errorf("expected patch to target roles/0, got: %s", patchBody)
-	}
-	if strings.Contains(patchBody, "/spec/template/roles/1") {
-		t.Errorf("patch should not touch roles/1 (decode), got: %s", patchBody)
 	}
 }
 
@@ -587,14 +459,6 @@ func TestPatchSkipsWhenReplicasUnchanged(t *testing.T) {
 				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
 			},
 			replicas: 3,
-		},
-		{
-			name: "role.replicas unchanged",
-			target: workload.Target{
-				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"},
-				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
-			},
-			replicas: 5,
 		},
 	}
 
@@ -702,26 +566,6 @@ func TestPatchDoesNotMutateResourcesInFakeClient(t *testing.T) {
 			},
 			newReplicas: 5,
 		},
-		{
-			name: "patch prefill role replicas does not mutate resources",
-			target: workload.Target{
-				TargetRef: corev1.ObjectReference{
-					Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms",
-				},
-				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "prefill"},
-			},
-			newReplicas: 10,
-		},
-		{
-			name: "patch decode role replicas does not mutate resources",
-			target: workload.Target{
-				TargetRef: corev1.ObjectReference{
-					Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms",
-				},
-				SubTarget: &workload.SubTarget{Kind: util.ModelServingRoleKind, Name: "decode"},
-			},
-			newReplicas: 8,
-		},
 	}
 
 	for _, tt := range tests {
@@ -751,19 +595,8 @@ func TestPatchDoesNotMutateResourcesInFakeClient(t *testing.T) {
 			}
 
 			// Verify replicas was actually changed
-			if tt.target.SubTarget == nil {
-				if updated.Spec.Replicas == nil || *updated.Spec.Replicas != tt.newReplicas {
-					t.Errorf("expected spec.replicas=%d, got %v", tt.newReplicas, updated.Spec.Replicas)
-				}
-			} else {
-				for _, role := range updated.Spec.Template.Roles {
-					if role.Name == tt.target.SubTarget.Name {
-						if role.Replicas == nil || *role.Replicas != tt.newReplicas {
-							t.Errorf("expected role %s replicas=%d, got %v",
-								tt.target.SubTarget.Name, tt.newReplicas, role.Replicas)
-						}
-					}
-				}
+			if updated.Spec.Replicas == nil || *updated.Spec.Replicas != tt.newReplicas {
+				t.Errorf("expected spec.replicas=%d, got %v", tt.newReplicas, updated.Spec.Replicas)
 			}
 
 			// Verify resources.limits are UNCHANGED for all roles

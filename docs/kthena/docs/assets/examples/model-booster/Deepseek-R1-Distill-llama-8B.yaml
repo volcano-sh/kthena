@@ -7,17 +7,12 @@ metadata:
 spec:
   name: "deepseek-r1-distill-llama-8b"
   owner: "example"
-  autoscalingPolicy:
-    metrics:
-      - metricName: "kthena:num_requests_waiting"
-        targetValue: 10
   backend:
     name: "deepseek-r1-distill-llama-8b-vllm"
     type: "vLLM"
     modelURI: "s3://model-bucket/deepseek-r1-distill-llama-8b"
     cacheURI: "hostpath://tmp/test"
-    minReplicas: 1
-    maxReplicas: 3
+    replicas: 1
     workers:
       - type: "server"
         image: "vllm/vllm-openai:v0.7.1"

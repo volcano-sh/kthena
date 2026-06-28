@@ -181,7 +181,8 @@ func (s *store) GetRolesByGroup(modelServingName types.NamespacedName, groupName
 		}
 		copiedInner := make(map[string]*Role, len(roleMap))
 		for roleID, role := range roleMap {
-			copiedInner[roleID] = role
+			roleCopy := *role
+			copiedInner[roleID] = &roleCopy
 		}
 		copiedRoles[roleName] = copiedInner
 	}

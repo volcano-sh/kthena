@@ -47,23 +47,27 @@ func TestReconcile(t *testing.T) {
 	// Load test data
 	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
 
-	// Case1: Create a model with ASP, and then model serving, model server, model route, ASP, ASP binding should be created.
+	// Case1: Create a model, then model serving, model server, and model route should be created.
 	// Step1. Create model
 	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	assert.NotNil(t, createdModel)
-	// Step2. Check that ASP, ASP binding, model serving, model server, model route are created
+	// Step2. Check that model serving, model server, and model route are created
 	assert.True(t, waitForCondition(func() bool {
-		aspBindings, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(model.Namespace).List(ctx, metav1.ListOptions{})
+		modelServingList, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false
 		}
-		return len(aspBindings.Items) == 1
+		modelServers, err := kthenaClient.NetworkingV1alpha1().ModelServers(model.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+		modelRoutes, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(model.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+		return len(modelServingList.Items) == 1 && len(modelServers.Items) == 1 && len(modelRoutes.Items) == 1
 	}))
-	// ASP should be created
-	aspList, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(model.Namespace).List(ctx, metav1.ListOptions{})
-	assert.NoError(t, err)
-	assert.Len(t, aspList.Items, 1, "Expected 1 AutoscalingPolicy to be created")
 	// model serving should be created
 	modelServingList, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
@@ -104,8 +108,8 @@ func TestReconcile(t *testing.T) {
 		return true
 	}))
 
-	// Case3: delete model. Because we are not running in a real K8s cluster, model server, model route, model serving,
-	// ASP and ASP binding will not be deleted automatically. So here only check if model is deleted.
+	// Case3: delete model. Because we are not running in a real K8s cluster, model server, model route, and model serving
+	// will not be deleted automatically. So here only check if model is deleted.
 	err = kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Delete(ctx, model.Name, metav1.DeleteOptions{})
 	assert.NoError(t, err)
 	assert.True(t, waitForCondition(func() bool {
@@ -128,8 +132,10 @@ func TestReconcile_ReturnsError(t *testing.T) {
 	// start informers
 	go controller.modelsInformer.RunWithContext(ctx)
 	go controller.modelServingInformer.RunWithContext(ctx)
-	go controller.autoscalingPoliciesInformer.RunWithContext(ctx)
-	go controller.autoscalingPolicyBindingsInformer.RunWithContext(ctx)
+	assert.True(t, waitForCondition(func() bool {
+		return controller.modelsInformer.HasSynced() &&
+			controller.modelServingInformer.HasSynced()
+	}), "controller informers did not sync")
 	// Case1: Invalid namespaceAndName
 	t.Run("InvalidNameSpaceAndName", func(t *testing.T) {
 		err := controller.reconcile(ctx, "//")
@@ -155,7 +161,7 @@ func TestReconcile_ReturnsError(t *testing.T) {
 		assert.NotNil(t, createdModel)
 		assert.True(t, waitForCondition(func() bool {
 			err = controller.reconcile(ctx, model.Namespace+"/"+model.Name)
-			return err.Error() == "not support model backend type: MindIEDisaggregated"
+			return err != nil && err.Error() == "not support model backend type: MindIEDisaggregated"
 		}))
 		get, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
 		assert.NoError(t, err)
@@ -227,8 +233,6 @@ func waitForControllerCacheSync(controller *ModelBoosterController) bool {
 	return waitForCondition(func() bool {
 		return controller.modelsInformer.HasSynced() &&
 			controller.modelServingInformer.HasSynced() &&
-			controller.autoscalingPoliciesInformer.HasSynced() &&
-			controller.autoscalingPolicyBindingsInformer.HasSynced() &&
 			controller.podsInformer.HasSynced() &&
 			controller.modelServersInformer.HasSynced() &&
 			controller.modelRoutesInformer.HasSynced()

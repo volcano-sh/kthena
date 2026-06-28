@@ -41,10 +41,10 @@ func TestWebhook(t *testing.T) {
 		checkMutation func(t *testing.T, obj interface{})
 	}{
 		{
-			name:        "Invalid ModelBooster (minReplicas > maxReplicas)",
+			name:        "Invalid ModelBooster (replicas too large)",
 			resource:    createInvalidModel(),
 			expectError: true,
-			errorMsg:    "minReplicas cannot be greater than maxReplicas",
+			errorMsg:    "replicas",
 		},
 		{
 			name:        "Valid ModelBooster (DryRun)",
@@ -77,12 +77,6 @@ func TestWebhook(t *testing.T) {
 			},
 		},
 		{
-			name:        "Invalid AutoscalingPolicyBinding (non-existent policy)",
-			resource:    createTestAutoscalingPolicyBinding("non-existent-policy"),
-			expectError: true,
-			errorMsg:    "autoscaling policy resource non-existent-policy does not exist",
-		},
-		{
 			name:        "Invalid ModelServing (negative replicas)",
 			resource:    createInvalidModelServing(),
 			expectError: true,
@@ -100,8 +94,6 @@ func TestWebhook(t *testing.T) {
 				created, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, r, metav1.CreateOptions{DryRun: []string{"All"}})
 			case *workload.AutoscalingPolicy:
 				created, err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, r, metav1.CreateOptions{DryRun: []string{"All"}})
-			case *workload.AutoscalingPolicyBinding:
-				created, err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(testNamespace).Create(ctx, r, metav1.CreateOptions{DryRun: []string{"All"}})
 			case *workload.ModelServing:
 				created, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, r, metav1.CreateOptions{DryRun: []string{"All"}})
 			default:

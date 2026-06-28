@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kthena-router
+  namespace: kthena-system
+  labels:
+    # Must match the serviceMonitorSelector of your Prometheus
+    # kube-prometheus-stack default selects on this release label.
+    release: kube-prometheus-stack
+spec:
+  endpoints:
+    - interval: 15s
+      path: /metrics
+      port: http
+  namespaceSelector:
+    matchNames:
+      - kthena-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: kthena-router

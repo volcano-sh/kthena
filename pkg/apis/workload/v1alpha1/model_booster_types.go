@@ -37,9 +37,6 @@ type ModelBoosterSpec struct {
 	// Backend is the model backend associated with this model.
 	// ModelBackend is the minimum unit of inference instance. It can be vLLM or vLLMDisaggregated.
 	Backend ModelBackend `json:"backend"`
-	// AutoscalingPolicy references the autoscaling policy to be used for this model.
-	// +optional
-	AutoscalingPolicy *AutoscalingPolicySpec `json:"autoscalingPolicy,omitempty"`
 	// ModelMatch defines the predicate used to match LLM inference requests to a given
 	// TargetModels. Multiple match conditions are ANDed together, i.e. the match will
 	// evaluate to true only if all conditions are satisfied.
@@ -85,14 +82,10 @@ type ModelBackend struct {
 	// +listType=map
 	// +listMapKey=name
 	Env []corev1.EnvVar `json:"env,omitempty" patchStrategy:"merge" patchMergeKey:"name" protobuf:"bytes,7,rep,name=env"`
-	// MinReplicas is the minimum number of replicas for the backend.
+	// Replicas is the fixed number of replicas for the backend.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000000
-	MinReplicas int32 `json:"minReplicas"`
-	// MaxReplicas is the maximum number of replicas for the backend.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1000000
-	MaxReplicas int32 `json:"maxReplicas"`
+	Replicas int32 `json:"replicas"`
 	// Workers is the list of workers associated with this backend.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=1000

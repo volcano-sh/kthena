@@ -29,8 +29,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/cache"
 )
@@ -176,6 +180,175 @@ func TestPrefixCacheScore(t *testing.T) {
 		}
 	})
 }
+
+func counterValue(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float64 {
+	t.Helper()
+	c, err := vec.GetMetricWithLabelValues(lvs...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+func histSampleSum(t *testing.T, vec *prometheus.HistogramVec, lvs ...string) float64 {
+	t.Helper()
+	obs, err := vec.GetMetricWithLabelValues(lvs...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := obs.(prometheus.Metric).Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return m.GetHistogram().GetSampleSum()
+}
+
+func histSampleCount(t *testing.T, vec *prometheus.HistogramVec, lvs ...string) uint64 {
+	t.Helper()
+	obs, err := vec.GetMetricWithLabelValues(lvs...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := obs.(prometheus.Metric).Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return m.GetHistogram().GetSampleCount()
+}
+
+// histBucketCount returns the cumulative count of the bucket whose upper bound equals le.
+func histBucketCount(t *testing.T, vec *prometheus.HistogramVec, le float64, lvs ...string) uint64 {
+	t.Helper()
+	obs, err := vec.GetMetricWithLabelValues(lvs...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := obs.(prometheus.Metric).Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	for _, b := range m.GetHistogram().GetBucket() {
+		if b.GetUpperBound() == le {
+			return b.GetCumulativeCount()
+		}
+	}
+	t.Fatalf("bucket le=%v not found", le)
+	return 0
+}
+
+func TestMatchRatio(t *testing.T) {
+	cases := []struct {
+		matched, total int
+		want           float64
+	}{
+		{7, 13, 7.0 / 13.0}, // partial — guards against a numerator/denominator swap
+		{0, 13, 0},          // miss
+		{13, 13, 1},         // full match
+		{5, 0, 0},           // no blocks — must not divide by zero
+		{0, 0, 0},
+	}
+	for _, c := range cases {
+		if got := matchRatio(c.matched, c.total); got != c.want {
+			t.Errorf("matchRatio(%d, %d) = %v, want %v", c.matched, c.total, got, c.want)
+		}
+	}
+}
+
+func TestPrefixCacheScoreMetrics(t *testing.T) {
+	mockDS := datastore.New()
+	prefixStore := cache.NewModelPrefixStore(mockDS, 100, 5)
+	plugin := &PrefixCache{
+		name:             PrefixCachePluginName,
+		blockSizeToHash:  64,
+		maxBlocksToMatch: 128,
+		store:            prefixStore,
+	}
+
+	pod1 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
+	pod2 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"}}}
+
+	const model = "prefixmetrics-model"
+	prompt := "hello world from prefix cache metrics test"
+	hashes := plugin.hashPrompt(model, prompt)
+	prefixStore.Add(model, hashes, pod1)
+
+	recorder := metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
+
+	countBefore := histSampleCount(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model)
+	missBefore := histBucketCount(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, 0, model)
+	sumBefore := histSampleSum(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model)
+
+	// Matching prompt -> full self-match, ratio == 1.0.
+	hitCtx := &framework.Context{Model: model, Prompt: &common.ChatMessage{Text: prompt}, MetricsRecorder: recorder}
+	plugin.Score(hitCtx, []*datastore.PodInfo{pod1, pod2})
+
+	// Non-matching prompt -> ratio 0 (lands in the le=0 bucket).
+	missCtx := &framework.Context{Model: model, Prompt: &common.ChatMessage{Text: "a completely different prompt"}, MetricsRecorder: recorder}
+	plugin.Score(missCtx, []*datastore.PodInfo{pod1, pod2})
+
+	// Recorded values: 1.0 (full match) + 0.0 (miss) = 1.0.
+	if got := histSampleSum(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model) - sumBefore; got != 1.0 {
+		t.Errorf("prefix cache match_ratio sum delta = %v, want 1.0", got)
+	}
+
+	if got := histSampleCount(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, model) - countBefore; got != 2 {
+		t.Errorf("prefix cache match_ratio sample count delta = %d, want 2", got)
+	}
+	if got := histBucketCount(t, &metrics.DefaultMetrics.PrefixCacheMatchRatio, 0, model) - missBefore; got != 1 {
+		t.Errorf("prefix cache match_ratio le=0 (miss) delta = %d, want 1", got)
+	}
+}
+
+func TestPrefixCacheEntriesProviderRegistered(t *testing.T) {
+	mockDS := datastore.New()
+	plugin := NewPrefixCache(mockDS, runtime.RawExtension{Raw: []byte{}})
+
+	pod := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
+	const model = "prefixentries-model"
+	hashes := plugin.hashPrompt(model, "some prompt that yields a single block")
+	plugin.store.Add(model, hashes, pod)
+
+	if got := plugin.store.EntryCount(); got < 1 {
+		t.Fatalf("EntryCount() = %v, want >= 1 after Add", got)
+	}
+}
+
+func benchmarkPrefixScore(b *testing.B, withMetrics bool) {
+	mockDS := datastore.New()
+	prefixStore := cache.NewModelPrefixStore(mockDS, 100000, 5)
+	plugin := &PrefixCache{
+		name:             PrefixCachePluginName,
+		blockSizeToHash:  64,
+		maxBlocksToMatch: 128,
+		store:            prefixStore,
+	}
+	pod1 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
+	pod2 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"}}}
+	pods := []*datastore.PodInfo{pod1, pod2}
+
+	const model = "bench-prefix-model"
+	prompt := strings.Repeat("the quick brown fox jumps over the lazy dog ", 40)
+	hashes := plugin.hashPrompt(model, prompt)
+	prefixStore.Add(model, hashes, pod1)
+
+	ctx := &framework.Context{Model: model, Prompt: &common.ChatMessage{Text: prompt}}
+	if withMetrics {
+		ctx.MetricsRecorder = metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		plugin.Score(ctx, pods)
+	}
+}
+
+func BenchmarkPrefixCacheScore_NoMetrics(b *testing.B)   { benchmarkPrefixScore(b, false) }
+func BenchmarkPrefixCacheScore_WithMetrics(b *testing.B) { benchmarkPrefixScore(b, true) }
 
 func TestNewPrefixCacheWithEmptyArgs(t *testing.T) {
 	state := klog.CaptureState()

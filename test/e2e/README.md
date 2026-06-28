@@ -18,7 +18,7 @@ The E2E tests use helm to install kthena into a Kind cluster and verify core fun
 ## Prerequisites
 
 - [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) must be installed
-- Go 1.24
+- Go 1.26
 - Docker (required by Kind)
 - Helm (required to install helm charts)
 

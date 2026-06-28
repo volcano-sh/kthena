@@ -2080,6 +2080,136 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	t.Log("ModelServing role-based rolling update test passed successfully")
 }
 
+// TestModelServingRoleRollingUpdateMaxUnavailable verifies RoleRollingUpdate respects
+// role-level maxUnavailable and leaves unaffected roles untouched.
+func TestModelServingRoleRollingUpdateMaxUnavailable(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const badImage = "nginx:role-rollingupdate-maxunavailable-bad-image"
+	replicas := int32(1)
+	prefillReplicas := int32(4)
+	decodeReplicas := int32(1)
+
+	maxUnavailable := intstr.FromInt(2)
+	modelServing := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-role-rolling-maxunavailable",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas:       &replicas,
+			RecoveryPolicy: workload.RoleRecreate,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.RoleRollingUpdate,
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:           "prefill",
+						Replicas:       &prefillReplicas,
+						MaxUnavailable: &maxUnavailable,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "test-container",
+									Image: nginxImage,
+									Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
+								}},
+							},
+						},
+					},
+					{
+						Name:     "decode",
+						Replicas: &decodeReplicas,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "test-container",
+									Image: nginxImage,
+									Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Creating ModelServing for RoleRollingUpdate maxUnavailable test")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	decodeUIDs := map[string]string{}
+	decodeSelector := fmt.Sprintf("%s,%s=decode", modelServingLabelSelector(modelServing.Name), workload.RoleLabelKey)
+	decodePods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: decodeSelector})
+	require.NoError(t, err)
+	require.Len(t, decodePods.Items, int(decodeReplicas), "unexpected initial decode pod count")
+	for _, pod := range decodePods.Items {
+		decodeUIDs[pod.Name] = string(pod.UID)
+	}
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	updatedMS := initialMS.DeepCopy()
+	for i := range updatedMS.Spec.Template.Roles {
+		if updatedMS.Spec.Template.Roles[i].Name == "prefill" {
+			updatedMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = badImage
+		}
+	}
+
+	t.Log("Updating prefill role to a bad image; only maxUnavailable prefill replicas should be replaced")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	countRolePods := func() (oldPrefillRunning, badPrefill, decodeUnchanged int, ok bool) {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: modelServingLabelSelector(modelServing.Name),
+		})
+		if err != nil {
+			t.Logf("Failed to list pods: %v", err)
+			return 0, 0, 0, false
+		}
+
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil || len(pod.Spec.Containers) == 0 {
+				continue
+			}
+			switch pod.Labels[workload.RoleLabelKey] {
+			case "prefill":
+				if pod.Spec.Containers[0].Image == nginxImage && pod.Status.Phase == corev1.PodRunning {
+					oldPrefillRunning++
+				}
+				if pod.Spec.Containers[0].Image == badImage {
+					badPrefill++
+				}
+			case "decode":
+				if pod.Spec.Containers[0].Image != nginxImage {
+					continue
+				}
+				if uid, exists := decodeUIDs[pod.Name]; exists && uid == string(pod.UID) {
+					decodeUnchanged++
+				}
+			}
+		}
+		return oldPrefillRunning, badPrefill, decodeUnchanged, true
+	}
+
+	require.Eventually(t, func() bool {
+		oldPrefillRunning, badPrefill, decodeUnchanged, ok := countRolePods()
+		t.Logf("oldPrefillRunning=%d badPrefill=%d decodeUnchanged=%d", oldPrefillRunning, badPrefill, decodeUnchanged)
+		return ok && oldPrefillRunning == 2 && badPrefill == 2 && decodeUnchanged == int(decodeReplicas)
+	}, 2*time.Minute, 2*time.Second, "RoleRollingUpdate should replace only maxUnavailable prefill replicas")
+
+	stableUntil := time.Now().Add(30 * time.Second)
+	for time.Now().Before(stableUntil) {
+		oldPrefillRunning, badPrefill, decodeUnchanged, ok := countRolePods()
+		t.Logf("stable check: oldPrefillRunning=%d badPrefill=%d decodeUnchanged=%d", oldPrefillRunning, badPrefill, decodeUnchanged)
+		require.True(t, ok && oldPrefillRunning >= 2 && badPrefill <= 2 && decodeUnchanged == int(decodeReplicas),
+			"RoleRollingUpdate should not exceed role maxUnavailable while updated pods are unavailable")
+		time.Sleep(2 * time.Second)
+	}
+}
+
 // TestModelServingBinPackScaleDownServingGroup tests bin pack scale down at ServingGroup level
 func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)

@@ -24,6 +24,7 @@ import (
 
 	registryv1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
@@ -88,6 +89,22 @@ func (v *AutoscalingPolicyValidator) validateAutoscalingPolicy(policy *registryv
 	// Validate metrics
 	allErrs = append(allErrs, v.validateMetrics(policy)...)
 
+	// Validate target configuration (exactly one target, valid kind/name)
+	allErrs = append(allErrs, v.validateTarget(policy)...)
+
+	// Require metrics for homogeneous/heterogeneous targets. DisaggregatedTarget may use per-role metrics.
+	if policy.Spec.HomogeneousTarget != nil || policy.Spec.HeterogeneousTarget != nil {
+		if len(policy.Spec.Metrics) == 0 {
+			allErrs = append(allErrs, field.Required(field.NewPath("spec").Child("metrics"), "at least one metric must be set"))
+		}
+	}
+
+	// TODO(disaggregated): enforce the metrics contract documented on the type once
+	// DisaggregatedTarget is implemented:
+	//   - spec.metrics and per-role metrics are mutually exclusive, and
+	//   - a disaggregated policy must set exactly one of them (today a disaggregated
+	//     policy with no metrics anywhere incorrectly passes validation).
+
 	// Validate scale down behavior
 	allErrs = append(allErrs, v.validateScaleDownBehavior(policy)...)
 
@@ -102,6 +119,73 @@ func (v *AutoscalingPolicyValidator) validateAutoscalingPolicy(policy *registryv
 		return false, fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
 	}
 	return true, ""
+}
+
+// validateTarget validates the target configuration of an AutoscalingPolicy.
+//
+// Exactly one of homogeneousTarget, heterogeneousTarget, or disaggregatedTarget
+// must be set.
+func (v *AutoscalingPolicyValidator) validateTarget(policy *registryv1.AutoscalingPolicy) field.ErrorList {
+	var allErrs field.ErrorList
+	specPath := field.NewPath("spec")
+
+	targetCount := 0
+	if policy.Spec.HomogeneousTarget != nil {
+		targetCount++
+	}
+	if policy.Spec.HeterogeneousTarget != nil {
+		targetCount++
+	}
+	if policy.Spec.DisaggregatedTarget != nil {
+		targetCount++
+	}
+	if targetCount != 1 {
+		allErrs = append(allErrs, field.Invalid(
+			specPath,
+			targetCount,
+			"exactly one of homogeneousTarget, heterogeneousTarget, or disaggregatedTarget must be set",
+		))
+		return allErrs
+	}
+
+	switch {
+	case policy.Spec.HomogeneousTarget != nil:
+		allErrs = append(allErrs, validateTargetRef(
+			&policy.Spec.HomogeneousTarget.Target.TargetRef,
+			specPath.Child("homogeneousTarget").Child("target").Child("targetRef"))...)
+	case policy.Spec.HeterogeneousTarget != nil:
+		for idx, param := range policy.Spec.HeterogeneousTarget.Params {
+			allErrs = append(allErrs, validateTargetRef(
+				&param.Target.TargetRef,
+				specPath.Child("heterogeneousTarget").Child("params").Index(idx).Child("target").Child("targetRef"))...)
+		}
+	case policy.Spec.DisaggregatedTarget != nil:
+		allErrs = append(allErrs, validateTargetRef(
+			&policy.Spec.DisaggregatedTarget.TargetRef,
+			specPath.Child("disaggregatedTarget").Child("targetRef"))...)
+	}
+
+	return allErrs
+}
+
+// validateTargetRef ensures the target ref kind is ModelServing (or empty) and name is set.
+func validateTargetRef(targetRef *corev1.ObjectReference, path *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	if targetRef.Kind != "" && targetRef.Kind != registryv1.ModelServingKind.Kind {
+		allErrs = append(allErrs, field.Invalid(
+			path.Child("kind"),
+			targetRef.Kind,
+			fmt.Sprintf("targetRef.kind must be ModelServing, but got %s", targetRef.Kind),
+		))
+	}
+	if targetRef.Name == "" {
+		allErrs = append(allErrs, field.Invalid(
+			path.Child("name"),
+			targetRef.Name,
+			"targetRef.name must be set, but got empty",
+		))
+	}
+	return allErrs
 }
 
 // validateMetrics validates the metrics configuration

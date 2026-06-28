@@ -54,17 +54,17 @@ type MetricCollector struct {
 	promClientsMu  sync.Mutex
 }
 
-func NewMetricCollector(target *v1alpha1.Target, binding *v1alpha1.AutoscalingPolicyBinding, metricTargets map[string]float64) *MetricCollector {
+func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPolicy, metricTargets map[string]float64) *MetricCollector {
 	namespace := target.TargetRef.Namespace
 	if namespace == "" {
-		namespace = binding.Namespace
+		namespace = policy.Namespace
 	}
 	return &MetricCollector{
 		PastHistograms: datastructure.NewSnapshotSlidingWindow[map[string]HistogramInfo](util.SecondToTimestamp(util.SloQuantileSlidingWindowSeconds), util.SecondToTimestamp(util.SloQuantileDataKeepSeconds)),
 		Target:         target,
 		Scope: Scope{
-			Namespace:      namespace,
-			OwnedBindingId: binding.UID,
+			Namespace:     namespace,
+			OwnedPolicyId: policy.UID,
 		},
 		MetricTargets: metricTargets,
 		promClients:   make(map[string]promapi.Client),
@@ -77,13 +77,12 @@ type HistogramInfo struct {
 }
 
 type Scope struct {
-	Namespace      string
-	OwnedBindingId types.UID
+	Namespace     string
+	OwnedPolicyId types.UID
 }
 
 type Generations struct {
 	AutoscalePolicyGeneration int64
-	BindingGeneration         int64
 }
 
 func GetMetricTargets(autoscalePolicy *v1alpha1.AutoscalingPolicy) algorithm.Metrics {
@@ -156,18 +155,13 @@ func (collector *MetricCollector) planMetricSources(
 			klog.Warningf("metric source missing for metric %s in target %s", metricName, collector.Target.TargetRef.Name)
 			continue
 		}
-		sourceType := source.Type
-		if sourceType == "" {
-			sourceType = v1alpha1.PodMetricSourceType
-		}
-
-		switch sourceType {
-		case v1alpha1.PodMetricSourceType:
+		switch {
+		case source.Pod != nil:
 			addPodMetricToGroups(podGroups, metricName, source.Pod)
-		case v1alpha1.PrometheusMetricSourceType:
+		case source.Prometheus != nil:
 			collector.resolvePrometheusMetric(ctx, metricName, source.Prometheus, externalMetrics)
 		default:
-			klog.Warningf("unknown metric source type %q for metric %s", sourceType, metricName)
+			klog.Warningf("metric source backend config missing for metric %s", metricName)
 		}
 	}
 	return
@@ -411,19 +405,44 @@ func parsePrometheusFamilies(body string, wanted map[string][]string) (map[strin
 }
 
 // extractMetricFromFamily returns the scalar value (and histogram snapshot, when
-// applicable) for the first metric series of mf.
+// applicable) for mf. Counter and gauge families may contain multiple labeled
+// samples, so their values are summed.
 func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogram *histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
 	if len(mf.Metric) < 1 {
 		return 0, nil, false, nil
 	}
-	metric := mf.Metric[0]
+
 	switch mf.GetType() {
 	case io_prometheus_client.MetricType_COUNTER:
-		return metric.GetCounter().GetValue(), nil, true, nil
+		validSamples := 0
+		for _, metric := range mf.Metric {
+			counter := metric.GetCounter()
+			if counter == nil {
+				continue
+			}
+			value += counter.GetValue()
+			validSamples++
+		}
+		return value, nil, validSamples > 0, nil
 	case io_prometheus_client.MetricType_GAUGE:
-		return metric.GetGauge().GetValue(), nil, true, nil
+		validSamples := 0
+		for _, metric := range mf.Metric {
+			gauge := metric.GetGauge()
+			if gauge == nil {
+				continue
+			}
+			value += gauge.GetValue()
+			validSamples++
+		}
+		return value, nil, validSamples > 0, nil
 	case io_prometheus_client.MetricType_HISTOGRAM:
+		// Histogram samples are cumulative bucket sets. Unlike counters/gauges,
+		// labeled histogram series cannot be safely summed after decoding here.
+		metric := mf.Metric[0]
 		hist := metric.GetHistogram()
+		if hist == nil {
+			return 0, nil, false, nil
+		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
 		if pastHistogram != nil {

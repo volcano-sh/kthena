@@ -51,7 +51,7 @@ func TestModelCR(t *testing.T) {
 			t.Logf("Get model error: %v", err)
 			return false
 		}
-		return true == meta.IsStatusConditionPresentAndEqual(model.Status.Conditions,
+		return meta.IsStatusConditionPresentAndEqual(model.Status.Conditions,
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
 	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
 	// Test chat via port-forward
@@ -108,14 +108,8 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 	model := createTestModel()
 	model.Name = "self-healing-test-model"
 	model.Spec.Name = "self-healing-test-model"
-	model.Spec.AutoscalingPolicy = &workload.AutoscalingPolicySpec{
-		Metrics: []workload.AutoscalingPolicyMetric{
-			{
-				Name:        "concurrency",
-				TargetValue: resource.MustParse("10"),
-			},
-		},
-	}
+
+	waitForWebhookReady(t, ctx, kthenaClient, model.Namespace)
 
 	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create Model CR")
@@ -139,29 +133,10 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
 	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
 
-	t.Log("Model is active. Testing self-healing of AutoscalingPolicy...")
+	t.Log("Model is active. Testing self-healing of ModelServing...")
 
 	// The controller contract guarantees the child resource is named: {modelName}-{backendName}
 	expectedChildName := fmt.Sprintf("%s-%s", model.Name, model.Spec.Backend.Name)
-
-	// Fetch the generated AutoscalingPolicy deterministically by name
-	policyToDelete, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
-	require.NoError(t, err, "Expected AutoscalingPolicy to be generated with deterministic name")
-
-	err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Delete(ctx, policyToDelete.Name, metav1.DeleteOptions{})
-	require.NoError(t, err, "Failed to delete AutoscalingPolicy")
-
-	// Wait for the controller to self-heal and recreate it
-	require.Eventually(t, func() bool {
-		recreated, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Get(ctx, policyToDelete.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		// Make sure it's a new instance (different UID)
-		return recreated.UID != policyToDelete.UID
-	}, 1*time.Minute, 2*time.Second, "Controller failed to self-heal deleted AutoscalingPolicy")
-
-	t.Log("AutoscalingPolicy was successfully self-healed. Testing ModelServing...")
 
 	// Fetch the generated ModelServing deterministically by name
 	servingToDelete, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
@@ -209,12 +184,11 @@ func createTestModel() *workload.ModelBooster {
 		Spec: workload.ModelBoosterSpec{
 			Name: "test-model",
 			Backend: workload.ModelBackend{
-				Name:        "backend1",
-				Type:        workload.ModelBackendTypeVLLM,
-				ModelURI:    "hf://Qwen/Qwen2.5-0.5B-Instruct",
-				CacheURI:    "hostpath:///tmp/cache",
-				MinReplicas: 1,
-				MaxReplicas: 1,
+				Name:     "backend1",
+				Type:     workload.ModelBackendTypeVLLM,
+				ModelURI: "hf://Qwen/Qwen2.5-0.5B-Instruct",
+				CacheURI: "hostpath:///tmp/cache",
+				Replicas: 1,
 				Workers: []workload.ModelWorker{
 					{
 						Type:      workload.ModelWorkerTypeServer,
@@ -250,12 +224,11 @@ func createInvalidModel() *workload.ModelBooster {
 		Spec: workload.ModelBoosterSpec{
 			Name: "invalid-model",
 			Backend: workload.ModelBackend{
-				Name:        "backend1",
-				Type:        workload.ModelBackendTypeVLLM,
-				ModelURI:    "hf://Qwen/Qwen2.5-0.5B-Instruct",
-				CacheURI:    "hostpath:///tmp/cache",
-				MinReplicas: 5, // invalid: greater than maxReplicas
-				MaxReplicas: 1,
+				Name:     "backend1",
+				Type:     workload.ModelBackendTypeVLLM,
+				ModelURI: "hf://Qwen/Qwen2.5-0.5B-Instruct",
+				CacheURI: "hostpath:///tmp/cache",
+				Replicas: 1000001, // invalid: greater than maximum
 				Workers: []workload.ModelWorker{
 					{
 						Type:      workload.ModelWorkerTypeServer,

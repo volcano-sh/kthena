@@ -1,5 +1,5 @@
 # AutoscalingPolicy for policy lifecycle e2e. Very large targetValue makes desired replicas 1
-# (metric_collector sums sglang:token_usage across entry pods; see model-serving fixture comment).
+# (metric_collector sums sglang:kv_available_tokens across entry pods; see model-serving fixture comment).
 # Scale-up phase: policy Update in autoscaling_test.go sets small target (100m).
 
 apiVersion: workload.serving.volcano.sh/v1alpha1
@@ -9,8 +9,21 @@ metadata:
 spec:
   tolerancePercent: 50
   metrics:
-    - name: sglang:token_usage
+    - name: sglang:kv_available_tokens
       targetValue: "1000000000000000"
+  homogeneousTarget:
+    minReplicas: 1
+    maxReplicas: 5
+    target:
+      targetRef:
+        kind: ModelServing
+        name: autoscale-policy-lifecycle-ms
+      metricSources:
+        sglang:kv_available_tokens:
+          pod:
+            name: sglang:kv_available_tokens
+            port: 30000
+            uri: /metrics
   behavior:
     scaleDown:
       period: 5s

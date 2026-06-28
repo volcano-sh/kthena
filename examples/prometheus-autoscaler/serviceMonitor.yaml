@@ -12,11 +12,6 @@ spec:
   - interval: 15s
     path: /metrics
     port: http
-  # Copy the pod's "modelserving.volcano.sh/name" label onto every scraped
-  # series so PromQL can scope queries to a single ModelServing. Prometheus
-  # sanitizes the name to modelserving_volcano_sh_name.
-  podTargetLabels:
-  - modelserving.volcano.sh/name
   namespaceSelector:
     matchNames:
     - autoscale-demo

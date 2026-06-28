@@ -407,7 +407,6 @@ spec:
             targetValue: "5"
         metricSources:
           num_requests_waiting:
-            type: Pod
             pod:
               name: deepseek-prefill
               uri: /metrics
@@ -423,7 +422,6 @@ spec:
             targetValue: "80"
         metricSources:
           gpu_kv_cache_usage_percent:
-            type: Prometheus
             prometheus:
               serverURL: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
               query: avg(vllm_gpu_kv_cache_usage_percent{role="decode",model="llm-vllm-disagg"})

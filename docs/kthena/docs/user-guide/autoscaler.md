@@ -11,17 +11,16 @@ Both modes use the same core autoscaling mechanisms but differ in their resource
 
 ## Configuration Guide
 
-The autoscaler operates through two primary custom resources:
+The autoscaler is configured through a single custom resource:
 
-- **[`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy)**: Defines the core autoscaling strategy, metrics, and behavior parameters
-- **[`AutoscalingPolicyBinding`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding)**: Connects policies to target resources and specifies scaling boundaries
+- **[`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy)**: Defines the core autoscaling strategy, metrics, behavior parameters, and the scaling target (with its scaling boundaries) in one place
 
 ### AutoscalingPolicy Configuration
 
 The [`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) resource defines the core autoscaling strategy and behavior parameters.
 
 #### Metrics Configuration
-- **metricName**: Name of the metric to monitor (e.g., `kthena:num_requests_waiting`)
+- **name**: Name of the metric to monitor (e.g., `kthena:num_requests_waiting`). The values under `metricSources` are keyed by this name.
 - **targetValue**: Target value for the specified metric, serving as the scaling threshold
   - *Example*: Setting `targetValue: 10.0` for `kthena:num_requests_waiting` means the autoscaler aims to maintain no more than 10 waiting requests per instance
 
@@ -45,18 +44,16 @@ Controls detailed scaling behavior for both **scale-up** and **scale-down** oper
 
 These configuration parameters work together to create a responsive yet stable autoscaling system that balances resource utilization with performance requirements.
 
-### AutoscalingPolicyBinding Configuration
+### Target Configuration
 
-The [`AutoscalingPolicyBinding`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding) resource connects autoscaling policies to target resources and specifies scaling boundaries. It supports two distinct scaling modes:
+An `AutoscalingPolicy` declares exactly one scaling target directly in its `spec`. Choose one of the following mutually exclusive modes:
 
 #### Configuration Structure
 
 ```yaml
 spec:
-  # Reference to the autoscaling policy
-  policyRef:
-    name: your-autoscaling-policy-name
-  
+  # ... metrics, tolerancePercent, behavior ...
+
   # Select EITHER homogeneousTarget OR heterogeneousTarget mode, not both
   homogeneousTarget:
     # Homogeneous Target mode configuration
@@ -72,13 +69,7 @@ Configures autoscaling for a single instance type:
   - **targetRef**: References the target serving instance
     - **kind**: Only supported value is `ModelServing`
     - **name**: For `ModelServing`, use the serving name, e.g. `example-model-serving`
-  - **subTarget**: Optional reference to a specific role within the `ModelServing` instance
-    - **kind**: Optional. Must be `Role` when `targetRef.kind` is `ModelServing`
-    - **name**: The role name to target. Must be one of `ModelServing.spec.template.roles[].name`.
-  - **metricEndpoint**: Optional endpoint configuration for custom metric collection
-    - **uri**: Path to the metrics endpoint on the target pods (default: "/metrics")
-    - **port**: Port number where metrics are exposed on the target pods (default: 8100)
-    - **labelSelector**: Optional label selector to filter target pods for this instance type
+  - **metricSources**: Map of metric name to its collection source (`Pod` or `Prometheus`). The map keys must match the metric names declared in `spec.metrics`.
 - **minReplicas**: Minimum number of instances to maintain, ensuring baseline availability
   - Must be greater than or equal to 1
   - Sets a floor on scaling operations to prevent scaling down below this threshold
@@ -102,10 +93,7 @@ Configures autoscaling across multiple instance types with cost optimization:
     - **targetRef**: References the specific instance type
       - **kind**: Only supported value is `ModelServing`
       - **name**: For `ModelServing`, use the serving name, e.g. `example-model-serving`
-    - **metricEndpoint**: Optional endpoint configuration for custom metric collection
-      - **uri**: Path to the metrics endpoint on the target pods (default: "/metrics")
-      - **port**: Port number where metrics are exposed on the target pods (default: 8100)
-      - **labelSelector**: Optional label selector to filter target pods for this instance type
+    - **metricSources**: Map of metric name to its collection source (`Pod` or `Prometheus`). The map keys must match the metric names declared in `spec.metrics`.
   - **minReplicas**: Minimum number of instances for this specific type
     - Ensures availability of this instance type regardless of load conditions
     - Supports 0
@@ -130,7 +118,7 @@ metadata:
   name: scaling-policy
 spec:
   metrics:
-  - metricName: kthena:num_requests_waiting
+  - name: num_requests_waiting
     targetValue: 10.0
   tolerancePercent: 10
   behavior:
@@ -144,59 +132,20 @@ spec:
     scaleDown:
       stabilizationWindow: 5m
       period: 1m
----
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: AutoscalingPolicyBinding
-metadata:
-  name: scaling-binding
-spec:
-  policyRef:
-    name: scaling-policy
   homogeneousTarget:
     target:
       targetRef:
         kind: ModelServing
         name: example-model-serving
-      # Optional: Customize metric collection endpoint
-      metricEndpoint:
-        uri: "/custom-metrics"  # Custom metric path
-        port: 9090               # Custom metric port
+      metricSources:
+        # The key must match a metric name declared in spec.metrics above.
+        num_requests_waiting:
+          pod:
+            name: kthena:num_requests_waiting
+            uri: /metrics
+            port: 8000
     minReplicas: 2
     maxReplicas: 10
-```
-
-#### Role-Level Target Example
-
-This example demonstrates binding directly to a specific role within a `ModelServing` (role-level scaling):
-
-```yaml
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: AutoscalingPolicyBinding
-metadata:
-  name: role-binding
-spec:
-  policyRef:
-    name: scaling-policy
-  homogeneousTarget:
-    target:
-      targetRef:
-        kind: ModelServing
-        name: example-model-serving
-      subTargets:
-        kind: Role
-        name: prefill
-    minReplicas: 1
-    maxReplicas: 5
-```
-
-**Behavior Details:**
-- When the target is `ModelServing` and `subTargets.kind` is not specified, the controller updates the target object's `spec.replicas`
-- When the target kind is `ModelServing` and `subTargets.kind` is `Role`, the controller updates `replicas` for the entry in `spec.template.roles[]` whose `subTarget.name` matches the role's name
-
-For role-level scaling, check the role replica within the `ModelServing`:
-
-```bash
-kubectl get modelservings.workload.serving.volcano.sh <serving-name> -o jsonpath='{range .spec.template.roles[?(@.name=="<role-name>")]}{.replicas}{end}'
 ```
 
 #### Heterogeneous Target Example
@@ -210,7 +159,7 @@ metadata:
   name: optimizer-policy
 spec:
   metrics:
-  - metricName: kthena:num_requests_waiting
+  - name: num_requests_waiting
     targetValue: 10.0
   tolerancePercent: 10
   behavior:
@@ -224,14 +173,6 @@ spec:
     scaleDown:
       stabilizationWindow: 5m
       period: 1m
----
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: AutoscalingPolicyBinding
-metadata:
-  name: optimizer-binding
-spec:
-  policyRef:
-    name: optimizer-policy
   heterogeneousTarget:
     costExpansionRatePercent: 20
     params:
@@ -239,6 +180,13 @@ spec:
         targetRef:
           kind: ModelServing
           name: gpu-serving-instance
+        metricSources:
+          # The key must match a metric name declared in spec.metrics above.
+          num_requests_waiting:
+            pod:
+              name: kthena:num_requests_waiting
+              uri: /metrics
+              port: 8000
       minReplicas: 1
       maxReplicas: 5
       cost: 100
@@ -246,6 +194,12 @@ spec:
         targetRef:
           kind: ModelServing
           name: cpu-serving-instance
+        metricSources:
+          num_requests_waiting:
+            pod:
+              name: kthena:num_requests_waiting
+              uri: /metrics
+              port: 8000
       minReplicas: 2
       maxReplicas: 8
       cost: 30
@@ -264,9 +218,6 @@ After applying your configuration, verify that the custom resources are created 
 ```bash
 # Check AutoscalingPolicy status
 kubectl get autoscalingpolicies.workload.serving.volcano.sh
-
-# Check AutoscalingPolicyBinding status
-kubectl get autoscalingpolicybindings.workload.serving.volcano.sh
 ```
 
 #### 2. Verify Instance Count Changes
@@ -309,7 +260,7 @@ Monitor these critical metrics to assess autoscaling effectiveness:
 If your autoscaling configuration doesn't behave as expected:
 
 1. **Verify Metric Availability**: Ensure target metrics are properly collected and exposed
-2. **Check Policy Binding**: Confirm [`AutoscalingPolicyBinding`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding) correctly references both policy and target resources
+2. **Check Target Configuration**: Confirm the [`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) correctly references the target resource and that `metricSources` keys match the declared `spec.metrics`
 3. **Examine Controller Logs**: Look for error messages or warnings in autoscaler controller logs
 4. **Review Scaling Boundaries**: Ensure `minReplicas` and `maxReplicas` values are appropriately set
 5. **Test Load Patterns**: Gradually increase or decrease load to observe scaling behavior across different conditions
@@ -324,7 +275,7 @@ The Kthena Autoscaler provides powerful, flexible autoscaling capabilities for y
 - **Dual Modes**: Choose between homogeneous scaling (single instance type) or heterogeneous optimization (multiple instance types)
 - **Precise Control**: Fine-tune scaling behavior with panic thresholds, stabilization windows, and tolerance ranges
 - **Cost Optimization**: Automatically balance performance and cost across different instance types
-- **Role-Level Scaling**: Sub target specific roles within `ModelServing` resources for granular control
-- **Custom Metrics**: Configure custom metric endpoints for specialized monitoring needs
+- **Single-Resource UX**: Define the strategy, metrics, behavior, and target in one `AutoscalingPolicy`
+- **Custom Metrics**: Configure custom metric sources for specialized monitoring needs
 
 For more advanced configurations and use cases, refer to the [Kthena CLI reference](../reference/kthena-cli/kthena.md) and [CRD documentation](../reference/crd/workload.serving.volcano.sh.md).

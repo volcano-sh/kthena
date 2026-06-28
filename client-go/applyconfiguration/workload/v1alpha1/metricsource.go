@@ -18,14 +18,9 @@ limitations under the License.
 
 package v1alpha1
 
-import (
-	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-)
-
 // MetricSourceApplyConfiguration represents a declarative configuration of the MetricSource type for use
 // with apply.
 type MetricSourceApplyConfiguration struct {
-	Type       *workloadv1alpha1.MetricSourceType        `json:"type,omitempty"`
 	Pod        *PodMetricSourceApplyConfiguration        `json:"pod,omitempty"`
 	Prometheus *PrometheusMetricSourceApplyConfiguration `json:"prometheus,omitempty"`
 }
@@ -34,14 +29,6 @@ type MetricSourceApplyConfiguration struct {
 // apply.
 func MetricSource() *MetricSourceApplyConfiguration {
 	return &MetricSourceApplyConfiguration{}
-}
-
-// WithType sets the Type field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the Type field is set to the value of the last call.
-func (b *MetricSourceApplyConfiguration) WithType(value workloadv1alpha1.MetricSourceType) *MetricSourceApplyConfiguration {
-	b.Type = &value
-	return b
 }
 
 // WithPod sets the Pod field in the declarative configuration to the given value

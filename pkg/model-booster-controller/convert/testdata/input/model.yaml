@@ -5,17 +5,12 @@ metadata:
   namespace: default
   uid: randomUID
 spec:
-  autoscalingPolicy:
-    metrics:
-      - name: "vllm:iteration_tokens_total"
-        targetValue: 10
   backend:
     name: backend1
     type: vLLM
     modelURI: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend
     cacheURI: hostpath:///tmp/test
-    minReplicas: 0
-    maxReplicas: 1
+    replicas: 0
     env:
       - name: ENDPOINT
         value: https://obs.test.com

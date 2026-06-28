@@ -229,6 +229,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.ServingGroupRollingUpdate,
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
 								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
@@ -240,6 +241,31 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 				},
 			},
 			want: field.ErrorList(nil),
+		},
+		{
+			name: "rejects configuration for role rolling update",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.RoleRollingUpdate,
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 1,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
+					"rollingUpdateConfiguration is only valid when rolloutStrategy.type is ServingGroupRollingUpdate",
+				),
+			},
 		},
 		{
 			name: "invalid maxUnavailable format",
@@ -301,6 +327,25 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					"maxUnavailable cannot be 0",
 				),
 			},
+		},
+		{
+			name: "maxUnavailable greater than replicas is allowed for scale down",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 4,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
 		},
 		{
 			name: "valid partition - within range",
@@ -486,6 +531,84 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 				assert.EqualValues(t, tt.want, got)
 			} else {
 				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestValidateMaxUnavailableForRoles(t *testing.T) {
+	tests := []struct {
+		name    string
+		ms      *workloadv1alpha1.ModelServing
+		wantErr bool
+	}{
+		{
+			name: "valid with role rolling update",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:           "decode",
+					Replicas:       ptr.To[int32](4),
+					MaxUnavailable: ptr.To(intstr.FromInt(2)),
+				}}},
+			}},
+		},
+		{
+			name: "rejects zero",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:           "decode",
+					Replicas:       ptr.To[int32](4),
+					MaxUnavailable: ptr.To(intstr.FromString("0%")),
+				}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "requires role rolling update",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:           "decode",
+					Replicas:       ptr.To[int32](4),
+					MaxUnavailable: ptr.To(intstr.FromInt(1)),
+				}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "rejects maxUnavailable greater than role replicas",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:           "decode",
+					Replicas:       ptr.To[int32](3),
+					MaxUnavailable: ptr.To(intstr.FromInt(4)),
+				}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "allows maxUnavailable equal to role replicas",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:           "decode",
+					Replicas:       ptr.To[int32](3),
+					MaxUnavailable: ptr.To(intstr.FromInt(3)),
+				}}},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateMaxUnavailableForRoles(tt.ms)
+			if tt.wantErr {
+				assert.NotEmpty(t, got)
+			} else {
+				assert.Empty(t, got)
 			}
 		})
 	}

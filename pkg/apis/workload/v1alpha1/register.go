@@ -43,7 +43,6 @@ var (
 	ModelServingListKind            = SchemeGroupVersion.WithKind("ModelServingList")
 	ModelKind                       = SchemeGroupVersion.WithKind("ModelBooster")
 	AutoscalingPolicyKind           = SchemeGroupVersion.WithKind("AutoscalingPolicy")
-	AutoscalingPolicyBindingKind    = SchemeGroupVersion.WithKind("AutoscalingPolicyBinding")
 	ModelServingEntryPodLeaderLabel = "leader"
 )
 
@@ -72,8 +71,6 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ModelBoosterList{},
 		&AutoscalingPolicy{},
 		&AutoscalingPolicyList{},
-		&AutoscalingPolicyBinding{},
-		&AutoscalingPolicyBindingList{},
 	)
 	// AddToGroupVersion allows the serialization of client types like ListOptions.
 	v1.AddToGroupVersion(scheme, SchemeGroupVersion)

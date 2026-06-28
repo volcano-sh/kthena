@@ -149,26 +149,6 @@ func TestGetTargetLabels(t *testing.T) {
 			},
 		},
 		{
-			name: "adds role label for role sub target",
-			target: &workload.Target{
-				TargetRef: corev1.ObjectReference{
-					Name: "model3",
-					Kind: workload.ModelServingKind.Kind,
-				},
-				SubTarget: &workload.SubTarget{
-					Kind: ModelServingRoleKind,
-					Name: "decode",
-				},
-			},
-			wantErr: false,
-			wantNil: false,
-			wantMatchLabel: map[string]string{
-				workload.ModelServingNameLabelKey: "model3",
-				workload.EntryLabelKey:            Entry,
-				workload.RoleLabelKey:             "decode",
-			},
-		},
-		{
 			name: "preserves custom metric labels",
 			target: &workload.Target{
 				TargetRef: corev1.ObjectReference{

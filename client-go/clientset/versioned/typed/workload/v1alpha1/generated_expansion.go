@@ -20,8 +20,6 @@ package v1alpha1
 
 type AutoscalingPolicyExpansion interface{}
 
-type AutoscalingPolicyBindingExpansion interface{}
-
 type ModelBoosterExpansion interface{}
 
 type ModelServingExpansion interface{}

@@ -38,6 +38,11 @@ const (
 	LabelModelServer = "model_server"
 	LabelEngine      = "engine"
 	LabelUserID      = "user_id"
+	LabelStage       = "stage"
+
+	// kvcache-aware error stage values
+	StageTokenize = "tokenize"
+	StageRedis    = "redis"
 
 	// Token type values
 	TokenTypeInput  = "input"
@@ -91,6 +96,18 @@ type Metrics struct {
 
 	// Tokenizer unsupported engine metrics
 	TokenizerUnsupportedEngineTotal prometheus.CounterVec
+
+	// prefix-cache score plugin metrics
+	PrefixCacheMatchRatio      prometheus.HistogramVec
+	PrefixCacheEvictionsTotal  prometheus.CounterVec
+	PrefixCacheEntries         prometheus.GaugeFunc
+	prefixCacheEntriesProvider atomic.Value // func() float64
+
+	// kvcache-aware score plugin metrics
+	KVCacheMatchRatio       prometheus.HistogramVec
+	KVCacheRedisDuration    prometheus.HistogramVec
+	KVCacheTokenizeDuration prometheus.HistogramVec
+	KVCacheErrorsTotal      prometheus.CounterVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
@@ -236,6 +253,58 @@ func NewMetrics() *Metrics {
 			},
 			[]string{LabelModel, LabelEngine},
 		),
+
+		PrefixCacheMatchRatio: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_prefix_cache_match_ratio",
+				Help:    "Fraction of the prompt's blocks the best-matching candidate pod had already cached, per prefix-cache match attempt (0 = miss)",
+				Buckets: []float64{0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0},
+			},
+			[]string{LabelModel},
+		),
+
+		PrefixCacheEvictionsTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_prefix_cache_evictions_total",
+				Help: "Number of (prefix block, pod) entries evicted from a per-pod cache when it reached capacity; excludes entries removed when a pod is deleted",
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheMatchRatio: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_kvcache_aware_match_ratio",
+				Help:    "Fraction of the prompt's blocks whose KV cache the best-matching candidate pod already held, per kvcache-aware match attempt (0 = miss)",
+				Buckets: []float64{0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0},
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheRedisDuration: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_kvcache_aware_redis_duration_seconds",
+				Help:    "Time spent in the batched Redis lookup during a kvcache-aware match attempt",
+				Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheTokenizeDuration: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_kvcache_aware_tokenize_duration_seconds",
+				Help:    "Time spent tokenizing the prompt during a kvcache-aware match attempt",
+				Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+			},
+			[]string{LabelModel},
+		),
+
+		KVCacheErrorsTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_kvcache_aware_errors_total",
+				Help: "Number of kvcache-aware match attempts aborted by an error, labelled by failing stage (tokenize or redis)",
+			},
+			[]string{LabelModel, LabelStage},
+		),
 	}
 
 	m.ActiveRequests = promauto.NewGaugeFunc(
@@ -248,7 +317,49 @@ func NewMetrics() *Metrics {
 		},
 	)
 
+	m.PrefixCacheEntries = promauto.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "kthena_router_prefix_cache_entries",
+			Help: "Total prefix-cache occupancy: number of (prefix block, pod) entries currently stored across all pods; a block cached on N pods is counted N times (once per pod)",
+		},
+		func() float64 {
+			if p, ok := m.prefixCacheEntriesProvider.Load().(func() float64); ok && p != nil {
+				return p()
+			}
+			return 0
+		},
+	)
+
 	return m
+}
+
+// SetPrefixCacheEntriesProvider sets the callback read by the prefix_cache_entries gauge at scrape time.
+func (m *Metrics) SetPrefixCacheEntriesProvider(provider func() float64) {
+	m.prefixCacheEntriesProvider.Store(provider)
+}
+
+func (m *Metrics) RecordPrefixCacheMatchRatio(model string, ratio float64) {
+	m.PrefixCacheMatchRatio.WithLabelValues(model).Observe(ratio)
+}
+
+func (m *Metrics) RecordPrefixCacheEviction(model string) {
+	m.PrefixCacheEvictionsTotal.WithLabelValues(model).Inc()
+}
+
+func (m *Metrics) RecordKVCacheMatchRatio(model string, ratio float64) {
+	m.KVCacheMatchRatio.WithLabelValues(model).Observe(ratio)
+}
+
+func (m *Metrics) RecordKVCacheRedisDuration(model string, duration time.Duration) {
+	m.KVCacheRedisDuration.WithLabelValues(model).Observe(duration.Seconds())
+}
+
+func (m *Metrics) RecordKVCacheTokenizeDuration(model string, duration time.Duration) {
+	m.KVCacheTokenizeDuration.WithLabelValues(model).Observe(duration.Seconds())
+}
+
+func (m *Metrics) RecordKVCacheError(model, stage string) {
+	m.KVCacheErrorsTotal.WithLabelValues(model, stage).Inc()
 }
 
 // RecordRequest records a completed request with all relevant metrics
@@ -481,6 +592,26 @@ func (r *RequestMetricsRecorder) RecordSchedulerPluginDuration(pluginName, plugi
 // RecordFairnessQueueDuration records the time spent in fairness queue
 func (r *RequestMetricsRecorder) RecordFairnessQueueDuration(userID string, duration time.Duration) {
 	r.metrics.RecordFairnessQueueDuration(r.model, userID, duration)
+}
+
+func (r *RequestMetricsRecorder) RecordPrefixCacheMatchRatio(ratio float64) {
+	r.metrics.RecordPrefixCacheMatchRatio(r.model, ratio)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheMatchRatio(ratio float64) {
+	r.metrics.RecordKVCacheMatchRatio(r.model, ratio)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheRedisDuration(duration time.Duration) {
+	r.metrics.RecordKVCacheRedisDuration(r.model, duration)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheTokenizeDuration(duration time.Duration) {
+	r.metrics.RecordKVCacheTokenizeDuration(r.model, duration)
+}
+
+func (r *RequestMetricsRecorder) RecordKVCacheError(stage string) {
+	r.metrics.RecordKVCacheError(r.model, stage)
 }
 
 // IncActiveUpstreamRequests increments the active upstream requests counter for this request

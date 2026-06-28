@@ -68,6 +68,8 @@ func waitForSchedulerPluginInMetrics(t *testing.T, metricsURL, pluginName, plugi
 type routerPodMetricsSnapshot struct {
 	RequestWaitingNum float64
 	RequestRunningNum float64
+	TPOT              float64
+	TTFT              float64
 }
 
 func fetchRouterPodMetricsViaDebug(t *testing.T, debugBaseURL string, pod corev1.Pod) (routerPodMetricsSnapshot, bool) {
@@ -86,6 +88,8 @@ func fetchRouterPodMetricsViaDebug(t *testing.T, debugBaseURL string, pod corev1
 		Metrics *struct {
 			RequestWaitingNum float64 `json:"requestWaitingNum"`
 			RequestRunningNum float64 `json:"requestRunningNum"`
+			TPOT              float64 `json:"tpot"`
+			TTFT              float64 `json:"ttft"`
 		} `json:"metrics"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil || parsed.Metrics == nil {
@@ -94,7 +98,53 @@ func fetchRouterPodMetricsViaDebug(t *testing.T, debugBaseURL string, pod corev1
 	return routerPodMetricsSnapshot{
 		RequestWaitingNum: parsed.Metrics.RequestWaitingNum,
 		RequestRunningNum: parsed.Metrics.RequestRunningNum,
+		TPOT:              parsed.Metrics.TPOT,
+		TTFT:              parsed.Metrics.TTFT,
 	}, true
+}
+
+func waitForLeastLatencyMetricsSeparation(t *testing.T, kube kubernetes.Interface, kthenaNamespace string, fastPods, slowPods []corev1.Pod) {
+	t.Helper()
+	require.NotEmpty(t, fastPods)
+	require.NotEmpty(t, slowPods)
+
+	routerPod := utils.GetRouterPod(t, kube, kthenaNamespace)
+	localPort := utils.AllocateLocalPort(t)
+	pf, err := utils.SetupPortForwardToPod(routerPod.Namespace, routerPod.Name, localPort, utils.RouterDebugPort)
+	require.NoError(t, err, "port-forward to router debug API")
+	defer pf.Close()
+
+	debugBaseURL := fmt.Sprintf("http://127.0.0.1:%s", localPort)
+	require.Eventually(t, func() bool {
+		maxFastTTFT := 0.0
+		maxFastTPOT := 0.0
+		for _, fastPod := range fastPods {
+			fastMetrics, ok := fetchRouterPodMetricsViaDebug(t, debugBaseURL, fastPod)
+			if !ok || fastMetrics.TTFT <= 0 || fastMetrics.TPOT <= 0 {
+				return false
+			}
+			if fastMetrics.TTFT > maxFastTTFT {
+				maxFastTTFT = fastMetrics.TTFT
+			}
+			if fastMetrics.TPOT > maxFastTPOT {
+				maxFastTPOT = fastMetrics.TPOT
+			}
+		}
+
+		allSlowMeasuredAndSlower := true
+		for _, slowPod := range slowPods {
+			slowMetrics, ok := fetchRouterPodMetricsViaDebug(t, debugBaseURL, slowPod)
+			if !ok || slowMetrics.TTFT <= 0 || slowMetrics.TPOT <= 0 || slowMetrics.TTFT <= maxFastTTFT || slowMetrics.TPOT <= maxFastTPOT {
+				allSlowMeasuredAndSlower = false
+				break
+			}
+		}
+		if allSlowMeasuredAndSlower {
+			t.Logf("least-latency metrics ready: max fast ttft=%.4f tpot=%.4f", maxFastTTFT, maxFastTPOT)
+		}
+		return allSlowMeasuredAndSlower
+	}, 45*time.Second, time.Second,
+		"router should observe non-zero latency metrics where slow pods are slower than all fast pods")
 }
 
 type mockPodMetricsPortForward struct {

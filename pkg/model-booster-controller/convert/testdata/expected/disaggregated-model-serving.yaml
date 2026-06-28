@@ -6,7 +6,7 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: 658648b7fb
+    workload.serving.volcano.sh/revision: 68df7d9886
   name: ds-r1-qwen-7b-pd-ds-r1-qwen-7b-pd
   namespace: demo
   ownerReferences:
@@ -33,7 +33,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 658648b7fb
+              workload.serving.volcano.sh/revision: 68df7d9886
           spec:
             affinity: {}
             containers:
@@ -217,7 +217,7 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: ds-r1-qwen-7b-pd
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 658648b7fb
+              workload.serving.volcano.sh/revision: 68df7d9886
           spec:
             affinity: {}
             containers:

@@ -105,7 +105,6 @@ spec:
         name: my-serving
       metricSources:
         num_requests_waiting:
-          type: Prometheus
           prometheus:
             serverURL: "http://prometheus.monitoring.svc.cluster.local:9090"
             query: 'kthena:num_requests_waiting:rate5m{serving="my-serving"}'
@@ -134,7 +133,6 @@ spec:
           name: h100-serving
         metricSources:
           gpu_utilization:
-            type: Prometheus
             prometheus:
               serverURL: "http://prometheus.monitoring.svc.cluster.local:9090"
               query: 'avg(DCGM_FI_DEV_GPU_UTIL{serving="h100-serving"})'
@@ -147,7 +145,6 @@ spec:
           name: a100-serving
         metricSources:
           gpu_utilization:
-            type: Prometheus
             prometheus:
               serverURL: "http://prometheus.monitoring.svc.cluster.local:9090"
               query: 'avg(DCGM_FI_DEV_GPU_UTIL{serving="a100-serving"})'

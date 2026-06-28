@@ -39,174 +39,6 @@ spec:
           spec:
             description: ModelBoosterSpec defines the desired state of ModelBooster.
             properties:
-              autoscalingPolicy:
-                description: AutoscalingPolicy references the autoscaling policy to
-                  be used for this model.
-                properties:
-                  behavior:
-                    description: Behavior defines the scaling behavior configuration
-                      for both scale up and scale down operations.
-                    properties:
-                      scaleDown:
-                        description: ScaleDown defines the policy configuration for
-                          scaling down (decreasing replicas).
-                        properties:
-                          instances:
-                            default: 1
-                            description: Instances defines the maximum absolute number
-                              of instances to scale per period.
-                            format: int32
-                            minimum: 0
-                            type: integer
-                          percent:
-                            default: 100
-                            description: Percent defines the maximum percentage of
-                              current instances to scale per period.
-                            format: int32
-                            maximum: 1000
-                            minimum: 0
-                            type: integer
-                          period:
-                            default: 15s
-                            description: Period defines the time duration over which
-                              scaling metrics are evaluated.
-                            type: string
-                          selectPolicy:
-                            default: Or
-                            description: |-
-                              SelectPolicy determines the selection strategy for scaling operations.
-                              'Or' means scaling is performed if either the Percent or Instances requirement is met.
-                              'And' means scaling is performed only if both Percent and Instances requirements are met.
-                            enum:
-                            - Or
-                            - And
-                            type: string
-                          stabilizationWindow:
-                            description: StabilizationWindow defines the time window
-                              to stabilize scaling actions and prevent rapid oscillations.
-                            type: string
-                        type: object
-                      scaleUp:
-                        description: ScaleUp defines the policy configuration for
-                          scaling up (increasing replicas).
-                        properties:
-                          panicPolicy:
-                            description: |-
-                              PanicPolicy defines the emergency scaling policy for handling sudden traffic spikes.
-                              This policy activates during rapid load surges to prevent service degradation or timeouts.
-                            properties:
-                              panicModeHold:
-                                default: 60s
-                                description: PanicModeHold defines the duration to
-                                  remain in panic mode before returning to normal
-                                  scaling.
-                                type: string
-                              panicThresholdPercent:
-                                default: 200
-                                description: |-
-                                  PanicThresholdPercent defines the metric threshold percentage that triggers panic mode.
-                                  When metrics exceed this percentage of target values, panic mode is activated.
-                                format: int32
-                                maximum: 1000
-                                minimum: 110
-                                type: integer
-                              percent:
-                                default: 1000
-                                description: Percent defines the maximum percentage
-                                  of current instances to scale up during panic mode.
-                                format: int32
-                                maximum: 1000
-                                minimum: 0
-                                type: integer
-                              period:
-                                description: Period defines the evaluation period
-                                  for panic mode scaling decisions.
-                                type: string
-                            required:
-                            - period
-                            type: object
-                          stablePolicy:
-                            description: |-
-                              StablePolicy defines the stable scaling policy that uses average metric values over time windows.
-                              This policy smooths out short-term fluctuations and avoids unnecessary frequent scaling operations.
-                            properties:
-                              instances:
-                                default: 1
-                                description: Instances defines the maximum absolute
-                                  number of instances to scale per period.
-                                format: int32
-                                minimum: 0
-                                type: integer
-                              percent:
-                                default: 100
-                                description: Percent defines the maximum percentage
-                                  of current instances to scale per period.
-                                format: int32
-                                maximum: 1000
-                                minimum: 0
-                                type: integer
-                              period:
-                                default: 15s
-                                description: Period defines the time duration over
-                                  which scaling metrics are evaluated.
-                                type: string
-                              selectPolicy:
-                                default: Or
-                                description: |-
-                                  SelectPolicy determines the selection strategy for scaling operations.
-                                  'Or' means scaling is performed if either the Percent or Instances requirement is met.
-                                  'And' means scaling is performed only if both Percent and Instances requirements are met.
-                                enum:
-                                - Or
-                                - And
-                                type: string
-                              stabilizationWindow:
-                                description: StabilizationWindow defines the time
-                                  window to stabilize scaling actions and prevent
-                                  rapid oscillations.
-                                type: string
-                            type: object
-                        type: object
-                    type: object
-                  metrics:
-                    description: Metrics defines the list of metrics used to evaluate
-                      scaling decisions.
-                    items:
-                      description: AutoscalingPolicyMetric defines a metric and its
-                        target value for scaling decisions.
-                      properties:
-                        name:
-                          description: Name defines the metric key used by the scaling
-                            algorithm.
-                          minLength: 1
-                          type: string
-                        targetValue:
-                          anyOf:
-                          - type: integer
-                          - type: string
-                          description: TargetValue defines the target value for the
-                            metric that triggers scaling operations.
-                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                          x-kubernetes-int-or-string: true
-                      required:
-                      - name
-                      - targetValue
-                      type: object
-                    minItems: 1
-                    type: array
-                  tolerancePercent:
-                    default: 10
-                    description: |-
-                      TolerancePercent defines the percentage of deviation tolerated before scaling actions are triggered.
-                      current_replicas represents the current number of instances, while target_replicas represents the expected number of instances calculated from monitoring metrics.
-                      Scaling operations are performed only when |current_replicas - target_replicas| >= current_replicas * TolerancePercent / 100.
-                    format: int32
-                    maximum: 100
-                    minimum: 0
-                    type: integer
-                required:
-                - metrics
-                type: object
               backend:
                 description: |-
                   Backend is the model backend associated with this model.
@@ -441,20 +273,6 @@ spec:
                       type: object
                     type: array
                     x-kubernetes-list-type: atomic
-                  maxReplicas:
-                    description: MaxReplicas is the maximum number of replicas for
-                      the backend.
-                    format: int32
-                    maximum: 1000000
-                    minimum: 1
-                    type: integer
-                  minReplicas:
-                    description: MinReplicas is the minimum number of replicas for
-                      the backend.
-                    format: int32
-                    maximum: 1000000
-                    minimum: 0
-                    type: integer
                   modelURI:
                     description: ModelURI is the URI where you download the model.
                       Support hf://, s3://, pvc://, ms://.
@@ -466,6 +284,13 @@ spec:
                       Note: update name will cause the old modelInfer deletion and a new modelInfer creation.
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
+                  replicas:
+                    description: Replicas is the fixed number of replicas for the
+                      backend.
+                    format: int32
+                    maximum: 1000000
+                    minimum: 0
+                    type: integer
                   runtimeClassName:
                     description: |-
                       RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,
@@ -1550,10 +1375,9 @@ spec:
                     minItems: 1
                     type: array
                 required:
-                - maxReplicas
-                - minReplicas
                 - modelURI
                 - name
+                - replicas
                 - type
                 - workers
                 type: object

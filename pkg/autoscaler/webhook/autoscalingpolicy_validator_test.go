@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	registryv1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -131,6 +132,14 @@ func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 					TargetValue: resource.MustParse("75"),
 				},
 			},
+			HomogeneousTarget: &registryv1.HomogeneousTarget{
+				Target: registryv1.Target{
+					TargetRef: corev1.ObjectReference{
+						Kind: registryv1.ModelServingKind.Kind,
+						Name: "test-target",
+					},
+				},
+			},
 			Behavior: registryv1.AutoscalingPolicyBehavior{
 				ScaleDown: registryv1.AutoscalingPolicyStablePolicy{
 					Instances:           ptr.To(int32(1)),
@@ -180,6 +189,14 @@ func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 				{
 					Name:        "cpu",
 					TargetValue: resource.MustParse("80"),
+				},
+			},
+			HomogeneousTarget: &registryv1.HomogeneousTarget{
+				Target: registryv1.Target{
+					TargetRef: corev1.ObjectReference{
+						Kind: registryv1.ModelServingKind.Kind,
+						Name: "test-target",
+					},
 				},
 			},
 			Behavior: registryv1.AutoscalingPolicyBehavior{

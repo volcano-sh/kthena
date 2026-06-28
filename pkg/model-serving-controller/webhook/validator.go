@@ -87,6 +87,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateWorkerImages(modelServing)...)
 	allErrs = append(allErrs, validatorReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
+	allErrs = append(allErrs, validateMaxUnavailableForRoles(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
@@ -152,24 +153,59 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 		return allErrs
 	}
 
+	rollingUpdateConfigurationPath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration")
+	if ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
+		allErrs = append(allErrs, field.Forbidden(rollingUpdateConfigurationPath, "rollingUpdateConfiguration is only valid when rolloutStrategy.type is ServingGroupRollingUpdate"))
+		return allErrs
+	}
+
 	maxUnavailable := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
-	maxUnavailablePath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable")
+	maxUnavailablePath := rollingUpdateConfigurationPath.Child("maxUnavailable")
 	allErrs = append(allErrs, validateIntOrPercent(maxUnavailable, maxUnavailablePath)...)
 
 	// Validate partition field
 	if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partitionPath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition")
+		partitionPath := rollingUpdateConfigurationPath.Child("partition")
 		allErrs = append(allErrs, validateIntOrPercent(ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition, partitionPath)...)
 	}
 
 	if ms.Spec.Replicas != nil && maxUnavailable != nil {
-		maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)
+		replicas := int(*ms.Spec.Replicas)
+		maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, replicas, false)
 		if err != nil {
 			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))
 		} else if maxUnavailableValue == 0 {
-			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
+			allErrs = append(allErrs, field.Invalid(rollingUpdateConfigurationPath,
 				"",
 				"maxUnavailable cannot be 0"))
+		}
+	}
+	return allErrs
+}
+
+func validateMaxUnavailableForRoles(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	roleRollingUpdate := ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
+	for i, role := range ms.Spec.Template.Roles {
+		if role.MaxUnavailable == nil {
+			continue
+		}
+		fieldPath := field.NewPath("spec").Child("template").Child("roles").Index(i).Child("maxUnavailable")
+		allErrs = append(allErrs, validateIntOrPercent(role.MaxUnavailable, fieldPath)...)
+		if !roleRollingUpdate {
+			allErrs = append(allErrs, field.Forbidden(fieldPath, "maxUnavailable is only valid when rolloutStrategy.type is RoleRollingUpdate"))
+		}
+		replicas := 1
+		if role.Replicas != nil {
+			replicas = int(*role.Replicas)
+		}
+		maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(role.MaxUnavailable, replicas, false)
+		if err != nil {
+			allErrs = append(allErrs, field.Invalid(fieldPath, role.MaxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))
+		} else if maxUnavailable == 0 {
+			allErrs = append(allErrs, field.Invalid(fieldPath, role.MaxUnavailable, "maxUnavailable cannot be 0"))
+		} else if maxUnavailable > replicas {
+			allErrs = append(allErrs, field.Invalid(fieldPath, role.MaxUnavailable, fmt.Sprintf("maxUnavailable cannot be greater than replicas (%d)", replicas)))
 		}
 	}
 	return allErrs

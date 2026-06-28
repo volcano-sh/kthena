@@ -27,3 +27,20 @@ spec:
         percent: 200
         panicThresholdPercent: 200
         panicModeHold: 30s
+  homogeneousTarget:
+    minReplicas: 1
+    maxReplicas: 6
+    target:
+      targetRef:
+        kind: ModelServing
+        name: podinfo-ms
+      metricSources:
+        podinfo_rps:
+          prometheus:
+            serverURL: http://kube-prometheus-stack-prometheus.test.svc.cluster.local:9090
+            # Scope the query to this ModelServing's pods only. The ServiceMonitor
+            # selects the "podinfo" Service, so Prometheus tags every scraped
+            # series with service="podinfo". Filtering by namespace alone would
+            # also sum http_requests_total from unrelated pods in the namespace
+            # and skew the scaling signal.
+            query: sum(rate(http_requests_total{namespace="autoscale-demo", service="podinfo"}[2m]))

@@ -79,6 +79,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/cache"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
@@ -94,6 +95,7 @@ const (
 )
 
 var _ framework.ScorePlugin = &PrefixCache{}
+var _ framework.PostScheduleHook = &PrefixCache{}
 
 type PrefixCache struct {
 	name string
@@ -151,11 +153,20 @@ func NewPrefixCache(store datastore.Store, pluginArg runtime.RawExtension) *Pref
 		maxBlocksToMatch: prefixCacheArgs.MaxBlocksToMatch,
 	}
 	p.store = cache.NewModelPrefixStore(store, prefixCacheArgs.MaxHashCacheSize, prefixCacheArgs.TopKMatches)
+	metrics.DefaultMetrics.SetPrefixCacheEntriesProvider(p.store.EntryCount)
 	return p
 }
 
 func (p *PrefixCache) Name() string {
 	return p.name
+}
+
+// matchRatio returns matched/total as a fraction in [0,1], or 0 when total is 0.
+func matchRatio(matched, total int) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return float64(matched) / float64(total)
 }
 
 func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
@@ -173,14 +184,23 @@ func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) m
 
 	// Single pass over pods: score = cache-hit score if found, 0 otherwise.
 	totalHashes := len(hashes)
+	longestMatch := 0
 	scoreResults := make(map[*datastore.PodInfo]int, len(pods))
 	for _, pod := range pods {
 		nsName := pod.GetPodNamespacedName()
 		if matchLen, ok := matchByName[nsName]; ok {
 			scoreResults[pod] = int((float64(matchLen) / float64(totalHashes)) * 100)
+			if matchLen > longestMatch {
+				longestMatch = matchLen
+			}
 		} else {
 			scoreResults[pod] = 0
 		}
+	}
+
+	if ctx.MetricsRecorder != nil {
+		// Fraction of the prompt's blocks the best-matching pod had cached; 0 on a miss.
+		ctx.MetricsRecorder.RecordPrefixCacheMatchRatio(matchRatio(longestMatch, totalHashes))
 	}
 
 	return scoreResults

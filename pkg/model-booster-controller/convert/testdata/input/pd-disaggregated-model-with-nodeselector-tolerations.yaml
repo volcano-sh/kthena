@@ -10,8 +10,7 @@ spec:
     type: vLLMDisaggregated
     modelURI: s3://aios_models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
     cacheURI: hostpath:///tmp/test
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
       - type: prefill
         image: vllm-prefill:latest
