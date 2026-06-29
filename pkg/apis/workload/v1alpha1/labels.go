@@ -33,3 +33,11 @@ const (
 	// RoleTemplateHashLabelKey is the revision label for the role, used for RoleRollingUpdate strategy.
 	RoleTemplateHashLabelKey = "modelserving.volcano.sh/role-template-hash"
 )
+
+// Role name constants used in SubTarget.Name and pod labels.
+const (
+	// RoleNameDecode is the role name for decode pods in PD-separated modelServing.
+	RoleNameDecode = "decode"
+	// RoleNamePrefill is the role name for prefill pods in PD-separated modelServing.
+	RoleNamePrefill = "prefill"
+)

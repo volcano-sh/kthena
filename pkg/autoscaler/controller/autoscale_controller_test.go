@@ -223,6 +223,306 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	}
 }
 
+func TestRoleOfPolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		policy   *workload.AutoscalingPolicy
+		expected string
+	}{
+		{
+			name: "homogeneous target with decode role via MetricSources",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{
+						Target: workload.Target{
+							MetricSources: map[string]workload.MetricSource{
+								"rps": {Pod: &workload.PodMetricSource{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{workload.RoleLabelKey: workload.RoleNameDecode},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: workload.RoleNameDecode,
+		},
+		{
+			name: "homogeneous target with prefill role via MetricSources",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{
+						Target: workload.Target{
+							MetricSources: map[string]workload.MetricSource{
+								"rps": {Pod: &workload.PodMetricSource{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{workload.RoleLabelKey: workload.RoleNamePrefill},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: workload.RoleNamePrefill,
+		},
+		{
+			name: "homogeneous target without role in MetricSources",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{
+						Target: workload.Target{
+							MetricSources: map[string]workload.MetricSource{
+								"rps": {Pod: &workload.PodMetricSource{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{"app": "myapp"},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: "",
+		},
+		{
+			name: "heterogeneous target returns empty",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					HeterogeneousTarget: &workload.HeterogeneousTarget{
+						Params: []workload.HeterogeneousTargetParam{
+							{Target: workload.Target{}, MinReplicas: 1, MaxReplicas: 4, Cost: 10},
+						},
+					},
+				},
+			},
+			expected: "",
+		},
+		{
+			name: "MetricSources with non-Role label key returns empty",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{
+						Target: workload.Target{
+							MetricSources: map[string]workload.MetricSource{
+								"rps": {Pod: &workload.PodMetricSource{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{"custom-key": workload.RoleNameDecode},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: "",
+		},
+		{
+			name: "conflicting roles deterministically picks highest priority",
+			policy: &workload.AutoscalingPolicy{
+				Spec: workload.AutoscalingPolicySpec{
+					HomogeneousTarget: &workload.HomogeneousTarget{
+						Target: workload.Target{
+							MetricSources: map[string]workload.MetricSource{
+								"queue": {Pod: &workload.PodMetricSource{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{workload.RoleLabelKey: workload.RoleNamePrefill},
+									},
+								}},
+								"latency": {Pod: &workload.PodMetricSource{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{workload.RoleLabelKey: workload.RoleNameDecode},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: workload.RoleNameDecode,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := roleOfPolicy(tt.policy)
+			if got != tt.expected {
+				t.Errorf("roleOfPolicy() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestRoleOrder(t *testing.T) {
+	tests := []struct {
+		name     string
+		role     string
+		expected int
+	}{
+		{"decode", workload.RoleNameDecode, 0},
+		{"prefill", workload.RoleNamePrefill, 1},
+		{"server", "server", 2},
+		{"controller", "controller", 2},
+		{"empty string", "", 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := roleOrder(tt.role)
+			if got != tt.expected {
+				t.Errorf("roleOrder(%q) = %d, want %d", tt.role, got, tt.expected)
+			}
+		})
+	}
+
+	// Verify ordering: decode < prefill < other
+	if roleOrder(workload.RoleNameDecode) >= roleOrder(workload.RoleNamePrefill) {
+		t.Error("decode should have lower (higher priority) order than prefill")
+	}
+	if roleOrder(workload.RoleNamePrefill) >= roleOrder("server") {
+		t.Error("prefill should have lower order than server")
+	}
+}
+
+func TestReconcile_SortPutsDecodeBeforePrefill(t *testing.T) {
+	policies := []*workload.AutoscalingPolicy{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "prefill-policy", Namespace: "ns"},
+			Spec: workload.AutoscalingPolicySpec{
+				HomogeneousTarget: &workload.HomogeneousTarget{
+					Target: workload.Target{
+						MetricSources: map[string]workload.MetricSource{
+							"rps": {Pod: &workload.PodMetricSource{
+								LabelSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{workload.RoleLabelKey: workload.RoleNamePrefill},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "decode-policy", Namespace: "ns"},
+			Spec: workload.AutoscalingPolicySpec{
+				HomogeneousTarget: &workload.HomogeneousTarget{
+					Target: workload.Target{
+						MetricSources: map[string]workload.MetricSource{
+							"rps": {Pod: &workload.PodMetricSource{
+								LabelSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{workload.RoleLabelKey: workload.RoleNameDecode},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sortPoliciesByRolePriority(policies)
+
+	if roleOfPolicy(policies[0]) != workload.RoleNameDecode {
+		t.Errorf("expected first policy to be decode, got %q", roleOfPolicy(policies[0]))
+	}
+	if roleOfPolicy(policies[1]) != workload.RoleNamePrefill {
+		t.Errorf("expected second policy to be prefill, got %q", roleOfPolicy(policies[1]))
+	}
+}
+
+func TestReconcile_SortPolicyWithoutRole(t *testing.T) {
+	policies := []*workload.AutoscalingPolicy{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "no-role-policy", Namespace: "ns"},
+			Spec: workload.AutoscalingPolicySpec{
+				HomogeneousTarget: &workload.HomogeneousTarget{
+					Target: workload.Target{
+						MetricSources: map[string]workload.MetricSource{
+							"rps": {Pod: &workload.PodMetricSource{
+								LabelSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"app": "myapp"},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "decode-policy", Namespace: "ns"},
+			Spec: workload.AutoscalingPolicySpec{
+				HomogeneousTarget: &workload.HomogeneousTarget{
+					Target: workload.Target{
+						MetricSources: map[string]workload.MetricSource{
+							"rps": {Pod: &workload.PodMetricSource{
+								LabelSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{workload.RoleLabelKey: workload.RoleNameDecode},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sortPoliciesByRolePriority(policies)
+
+	if roleOfPolicy(policies[0]) != workload.RoleNameDecode {
+		t.Errorf("expected first policy to be decode, got %q", roleOfPolicy(policies[0]))
+	}
+	if roleOfPolicy(policies[1]) != "" {
+		t.Errorf("expected second policy to have no role, got %q", roleOfPolicy(policies[1]))
+	}
+}
+
+func TestReconcile_SortEmptyRoleAfterOtherRole(t *testing.T) {
+	policies := []*workload.AutoscalingPolicy{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "empty-role", Namespace: "ns"},
+			Spec: workload.AutoscalingPolicySpec{
+				HomogeneousTarget: &workload.HomogeneousTarget{
+					Target: workload.Target{
+						MetricSources: map[string]workload.MetricSource{
+							"rps": {Pod: &workload.PodMetricSource{
+								LabelSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"app": "myapp"},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "server-role", Namespace: "ns"},
+			Spec: workload.AutoscalingPolicySpec{
+				HomogeneousTarget: &workload.HomogeneousTarget{
+					Target: workload.Target{
+						MetricSources: map[string]workload.MetricSource{
+							"rps": {Pod: &workload.PodMetricSource{
+								LabelSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{workload.RoleLabelKey: "server"},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sortPoliciesByRolePriority(policies)
+
+	if roleOfPolicy(policies[0]) != "server" {
+		t.Errorf("expected first policy to be server, got %q", roleOfPolicy(policies[0]))
+	}
+	if roleOfPolicy(policies[1]) != "" {
+		t.Errorf("expected second policy to have no role, got %q", roleOfPolicy(policies[1]))
+	}
+}
+
 func httpHandlerWithBody(body string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) })
 }

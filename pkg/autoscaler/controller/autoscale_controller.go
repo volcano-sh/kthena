@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
@@ -149,6 +150,9 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 			delete(ac.optimizerMap, key)
 		}
 	}
+
+	// Decode-first: process decode policies before prefill so decode pods enter the scheduler queue first
+	sortPoliciesByRolePriority(policies)
 
 	for _, policy := range policies {
 		err := ac.schedule(ctx, policy)
@@ -313,4 +317,70 @@ func formatAutoscalerMapKey(policyNamespace, policyName string, targetRef *corev
 		key += "/" + targetNamespace + "/" + targetKind + "/" + targetRef.Name
 	}
 	return key
+}
+
+// sortPoliciesByRolePriority sorts policies so that decode is processed
+// before prefill. Policies without a recognized role sort last.
+func sortPoliciesByRolePriority(policies []*workload.AutoscalingPolicy) {
+	sort.Slice(policies, func(i, j int) bool {
+		ri := roleOfPolicy(policies[i])
+		rj := roleOfPolicy(policies[j])
+		oi := roleOrder(ri)
+		oj := roleOrder(rj)
+		if oi != oj {
+			return oi < oj
+		}
+		if ri != rj {
+			// Within the same order bucket, empty role sorts last
+			if ri == "" {
+				return false
+			}
+			if rj == "" {
+				return true
+			}
+			return ri < rj
+		}
+		if policies[i].Namespace != policies[j].Namespace {
+			return policies[i].Namespace < policies[j].Namespace
+		}
+		return policies[i].Name < policies[j].Name
+	})
+}
+
+// roleOfPolicy extracts the role name from a policy's metric source label
+// selector. It scans all PodMetricSources and deterministically picks the
+// role with the highest priority (lowest roleOrder); lexicographic order
+// breaks ties. This avoids non-deterministic map iteration causing
+// inconsistent sort comparisons.
+func roleOfPolicy(policy *workload.AutoscalingPolicy) string {
+	if policy.Spec.HomogeneousTarget == nil {
+		return ""
+	}
+	bestRole := ""
+	bestOrder := 3 // higher than any valid roleOrder (max=2)
+	for _, ms := range policy.Spec.HomogeneousTarget.Target.MetricSources {
+		if ms.Pod != nil && ms.Pod.LabelSelector != nil {
+			if role, ok := ms.Pod.LabelSelector.MatchLabels[workload.RoleLabelKey]; ok {
+				o := roleOrder(role)
+				if o < bestOrder || (o == bestOrder && role < bestRole) {
+					bestOrder = o
+					bestRole = role
+				}
+			}
+		}
+	}
+	return bestRole
+}
+
+// roleOrder returns a sort key for a role name. "decode" has the highest
+// priority (0), "prefill" second (1), everything else last (2).
+func roleOrder(role string) int {
+	switch role {
+	case workload.RoleNameDecode:
+		return 0
+	case workload.RoleNamePrefill:
+		return 1
+	default:
+		return 2
+	}
 }
