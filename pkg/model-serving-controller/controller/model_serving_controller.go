@@ -636,8 +636,10 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 		klog.V(2).Infof("manageServingGroupReplicas: scaling up modelServing=%s (%d -> %d)", utils.GetNamespaceName(ms), curReplicas, expectedCount)
 		// update pod groups if needed
 		for _, servingGroup := range servingGroupList {
-			if err := c.createOrUpdatePodGroupByServingGroup(ctx, ms, servingGroup.Name); err != nil {
-				return fmt.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
+			if servingGroup.Status != datastore.ServingGroupDeleting {
+				if err := c.createOrUpdatePodGroupByServingGroup(ctx, ms, servingGroup.Name); err != nil {
+					return fmt.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
+				}
 			}
 		}
 		if err := c.scaleUpServingGroups(ctx, ms, servingGroupList, expectedCount, newRevision); err != nil {
