@@ -2250,6 +2250,10 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 }
 
 func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, roleIndex int, servingGroupOrdinal int, revision string, roleTemplateHashOptional ...string) error {
+	if role.WorkerReplicas > 0 && role.WorkerTemplate == nil {
+		return fmt.Errorf("workerTemplate is required when workerReplicas is greater than 0 for role %s", role.Name)
+	}
+
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupOrdinal)
 	// TODO(hzxuzhonghu): build the plugin chain only once per ModelServing
 	// This is not critical now, so we leave it for future optimization.
@@ -2272,10 +2276,6 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	c.podGroupManager.AnnotatePodWithPodGroup(entryPod, ms, servingGroupName, taskName)
 	if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, entryPod, true, chain, "entry"); err != nil {
 		return err
-	}
-	if role.WorkerReplicas > 0 && role.WorkerTemplate == nil {
-		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s. This should have been caught by webhook validation.", role.Name)
-		return nil
 	}
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
