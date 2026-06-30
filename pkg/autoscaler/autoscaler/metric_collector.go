@@ -536,11 +536,3 @@ func (collector *MetricCollector) getPrometheusAPI(serverURL string, timeout tim
 	collector.promClients[serverURL] = client
 	return prometheusv1.NewAPI(client), nil
 }
-
-func addMetric(instanceMetricMap algorithm.Metrics, metricName string, metricValue float64) {
-	if oldValue, ok := instanceMetricMap[metricName]; ok {
-		instanceMetricMap[metricName] = oldValue + metricValue
-	} else {
-		instanceMetricMap[metricName] = metricValue
-	}
-}

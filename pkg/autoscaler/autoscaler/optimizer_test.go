@@ -28,6 +28,150 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
+// ---------------------------------------------------------------------------
+// isRatioMetric
+// ---------------------------------------------------------------------------
+
+func TestIsRatioMetric(t *testing.T) {
+	ratio := []string{
+		"gpu_utilization",
+		"cpu_utilization",
+		"memory_utilization",
+		"cache_usage",
+		"disk_usage",
+		"fill_ratio",
+		"load_percent",
+		"queue_saturation",
+		// Mixed-case and uppercase Prometheus metric names must also be detected.
+		"GPU_utilization",
+		"CPU_UTILIZATION",
+		"Cache_Usage",
+	}
+	for _, name := range ratio {
+		assert.True(t, isRatioMetric(name), "expected %q to be a ratio metric", name)
+	}
+
+	additive := []string{
+		"queue_length",
+		"request_count",
+		"token_rate",
+		"request_rate",
+		"throughput_rate",
+		"pending_requests",
+		"gpu_utilization_rate", // "rate" suffix wins over inner "_utilization"
+	}
+	for _, name := range additive {
+		assert.False(t, isRatioMetric(name), "expected %q to be an additive metric", name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// aggregateExternalSamples
+// ---------------------------------------------------------------------------
+
+func TestAggregateExternalSamples_Additive(t *testing.T) {
+	samples := []backendExternalSample{
+		{value: 100, replicas: 3},
+		{value: 200, replicas: 1},
+	}
+	got := aggregateExternalSamples("queue_length", samples)
+	assert.Equal(t, 300.0, got, "additive metrics must be summed")
+}
+
+func TestAggregateExternalSamples_AdditiveRateNotAverage(t *testing.T) {
+	// request_rate ends with "_rate" and must be summed, not averaged.
+	samples := []backendExternalSample{
+		{value: 50, replicas: 2},
+		{value: 70, replicas: 2},
+	}
+	got := aggregateExternalSamples("request_rate", samples)
+	assert.Equal(t, 120.0, got)
+}
+
+func TestAggregateExternalSamples_RatioWeightedAverage(t *testing.T) {
+	// Backend A: gpu_utilization=60%, 3 replicas
+	// Backend B: gpu_utilization=70%, 1 replica
+	// Expected: (60*3 + 70*1) / (3+1) = (180+70)/4 = 250/4 = 62.5
+	samples := []backendExternalSample{
+		{value: 60, replicas: 3},
+		{value: 70, replicas: 1},
+	}
+	got := aggregateExternalSamples("gpu_utilization", samples)
+	assert.InDelta(t, 62.5, got, 1e-9)
+}
+
+func TestAggregateExternalSamples_RatioEqualReplicas(t *testing.T) {
+	// Equal replica counts reduce to a simple average.
+	// Backend A: 60%, 2 replicas; Backend B: 70%, 2 replicas → (60+70)/2 = 65
+	samples := []backendExternalSample{
+		{value: 60, replicas: 2},
+		{value: 70, replicas: 2},
+	}
+	got := aggregateExternalSamples("memory_utilization", samples)
+	assert.InDelta(t, 65.0, got, 1e-9)
+}
+
+func TestAggregateExternalSamples_RatioHeterogeneousWeights(t *testing.T) {
+	// Reproduces the issue example: 60%+70% must NOT equal 130%.
+	// Backend A: 60%, 4 replicas; Backend B: 70%, 6 replicas
+	// Expected: (60*4 + 70*6) / (4+6) = (240+420)/10 = 66
+	samples := []backendExternalSample{
+		{value: 60, replicas: 4},
+		{value: 70, replicas: 6},
+	}
+	got := aggregateExternalSamples("gpu_utilization", samples)
+	assert.InDelta(t, 66.0, got, 1e-9)
+	assert.Less(t, got, 100.0, "ratio metric must never exceed 100%%")
+}
+
+func TestAggregateExternalSamples_RatioZeroReplicasFallback(t *testing.T) {
+	// When all backends report zero replicas the function falls back to the
+	// unweighted average so that the metric is not silently dropped.
+	samples := []backendExternalSample{
+		{value: 60, replicas: 0},
+		{value: 80, replicas: 0},
+	}
+	got := aggregateExternalSamples("cache_usage", samples)
+	assert.InDelta(t, 70.0, got, 1e-9)
+}
+
+func TestAggregateExternalSamples_RatioOneBackendZeroReplicas(t *testing.T) {
+	// One backend has replicas, one has zero.
+	// Only the backend with replicas contributes weight.
+	// (60*0 + 80*5) / (0+5) = 80
+	samples := []backendExternalSample{
+		{value: 60, replicas: 0},
+		{value: 80, replicas: 5},
+	}
+	got := aggregateExternalSamples("gpu_utilization", samples)
+	assert.InDelta(t, 80.0, got, 1e-9)
+}
+
+func TestAggregateExternalSamples_SingleBackendAdditive(t *testing.T) {
+	samples := []backendExternalSample{{value: 42, replicas: 3}}
+	got := aggregateExternalSamples("pending_requests", samples)
+	assert.Equal(t, 42.0, got)
+}
+
+func TestAggregateExternalSamples_SingleBackendRatio(t *testing.T) {
+	samples := []backendExternalSample{{value: 75, replicas: 2}}
+	got := aggregateExternalSamples("gpu_utilization", samples)
+	assert.InDelta(t, 75.0, got, 1e-9)
+}
+
+func TestAggregateExternalSamples_BackwardCompatAdditive(t *testing.T) {
+	// Existing additive metrics must continue to be summed regardless of
+	// replica counts, preserving pre-fix behaviour for queue-length style
+	// metrics.
+	samples := []backendExternalSample{
+		{value: 10, replicas: 1},
+		{value: 20, replicas: 4},
+		{value: 30, replicas: 2},
+	}
+	got := aggregateExternalSamples("queue_length", samples)
+	assert.Equal(t, 60.0, got)
+}
+
 func makePolicy(uid string, namespace string, costExpansionRate int32, params []workload.HeterogeneousTargetParam) *workload.AutoscalingPolicy {
 	return &workload.AutoscalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{
