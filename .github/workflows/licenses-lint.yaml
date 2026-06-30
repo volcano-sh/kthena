@@ -5,13 +5,10 @@ on:
     branches:
       - main
       - release-*
-    paths-ignore:
-      - "docs/**"
-      - "LICENSE"
-      - "OWNERS"
-      - "*.md"
-      - "python/**"
 
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   licenses-lint:
@@ -19,16 +16,39 @@ jobs:
     timeout-minutes: 40
     runs-on: ubuntu-24.04
     steps:
+      - name: Check license lint related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          predicate-quantifier: every
+          filters: |
+            licenses:
+              - "**"
+              - "!docs/**"
+              - "!LICENSE"
+              - "!OWNERS"
+              - "!*.md"
+              - "!python/**"
+
+      - name: Skip Licenses Lint
+        if: steps.filter.outputs.licenses != 'true'
+        run: echo "No license lint-related files changed; marking required check as passed."
+
       - name: Checkout code
+        if: steps.filter.outputs.licenses == 'true'
         uses: actions/checkout@v3
       - name: Install Go
+        if: steps.filter.outputs.licenses == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
       - name: generate license mirror
+        if: steps.filter.outputs.licenses == 'true'
         run: |
           make licenses-check
       - name: lint-licenses
+        if: steps.filter.outputs.licenses == 'true'
         # if restricted > 0, CI will report an error.
         run: |
           make lint-licenses

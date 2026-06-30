@@ -1,11 +1,10 @@
 name: Codespell
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches:
       - main
+      - "release-*"
 
 permissions:
   contents: read
