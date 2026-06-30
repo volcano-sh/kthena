@@ -2524,7 +2524,7 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 	controller.store.AddServingGroup(utils.GetNamespaceName(ms), groupOrdinal, oldRevision)
 	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision, "roleTemplateHash")
 
-	err = controller.syncRoleWithinServingGroups(context.Background(), ms, newRevision)
+	err = controller.syncRoleReplicas(context.Background(), ms, newRevision)
 	assert.NoError(t, err)
 
 	roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
@@ -2673,7 +2673,7 @@ func TestManageRoleReplicas(t *testing.T) {
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			controller.manageRoleReplicas(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -4142,6 +4142,67 @@ func TestScaleDownRoles(t *testing.T) {
 	}
 }
 
+func TestScaleDownRolesSkipsDeletingRolesWhenActiveCountMatchesExpected(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+	assert.NoError(t, err)
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-role-scaledown-skip-deleting",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:      ptr.To[int32](1),
+			SchedulerName: "volcano",
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptr.To[int32](2),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "prefill-container",
+										Image: "test-image:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+		},
+	}
+
+	nsn := utils.GetNamespaceName(ms)
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	targetRole := ms.Spec.Template.Roles[0]
+	controller.store.AddServingGroup(nsn, 0, "test-revision")
+	assert.NoError(t, controller.store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupRunning))
+
+	for _, roleID := range []string{"prefill-0", "prefill-1", "prefill-2"} {
+		controller.store.AddRole(nsn, groupName, "prefill", roleID, "test-revision", "test-roleTemplateHash")
+		assert.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "prefill", roleID, datastore.RoleRunning))
+	}
+	assert.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "prefill", "prefill-2", datastore.RoleDeleting))
+
+	roleList, err := controller.store.GetRoleList(nsn, groupName, "prefill")
+	assert.NoError(t, err)
+
+	controller.scaleDownRoles(context.Background(), ms, groupName, targetRole, roleList, 2)
+
+	assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(nsn, groupName))
+	assert.Equal(t, datastore.RoleRunning, controller.store.GetRoleStatus(nsn, groupName, "prefill", "prefill-0"))
+	assert.Equal(t, datastore.RoleRunning, controller.store.GetRoleStatus(nsn, groupName, "prefill", "prefill-1"))
+	assert.Equal(t, datastore.RoleDeleting, controller.store.GetRoleStatus(nsn, groupName, "prefill", "prefill-2"))
+}
+
 // TestScaleDownRolesWithPriorityAndDeletionCost tests the scaleDownRoles function with priority and deletion cost scenarios
 func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 	tests := []struct {
@@ -4206,14 +4267,14 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 			description:            "Not-ready status should take priority over deletion cost",
 		},
 		{
-			name:            "deletes not-found and deleting roles first then picks lowest cost among running",
+			name:            "skips deleting roles and deletes not-found roles first then picks lowest cost among running",
 			existingIndices: []int{0, 1, 2, 3, 4},
 			expectedCount:   2,
 			roleStatuses: map[int]datastore.RoleStatus{
 				0: datastore.RoleRunning,
 				1: datastore.RoleNotFound, // Not ready
 				2: datastore.RoleRunning,
-				3: datastore.RoleDeleting, // Not ready
+				3: datastore.RoleDeleting, // Already deleting, should be skipped
 				4: datastore.RoleRunning,
 			},
 			podDeletionCosts: map[int]int{
@@ -4223,8 +4284,8 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 				3: 0,
 				4: 200, // Highest cost among ready roles
 			},
-			expectedRemainingNames: []string{"prefill-0", "prefill-4"}, // Roles 1,3 (not ready) and 2 (lowest cost among ready) deleted
-			description:            "Complex scenario with mixed status and costs",
+			expectedRemainingNames: []string{"prefill-0", "prefill-4"}, // Role 3 is already deleting; roles 1 and 2 are newly deleted
+			description:            "Complex scenario with mixed status and costs skips already deleting roles",
 		},
 		{
 			name:            "falls back to deleting higher indices when all roles are not ready",
@@ -4380,8 +4441,13 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 			// Build the roleList to pass to scaleDownRoles
 			existingRoles := make([]datastore.Role, len(tt.existingIndices))
 			for i, ordinal := range tt.existingIndices {
+				status := datastore.RoleCreating
+				if roleStatus, exists := tt.roleStatuses[ordinal]; exists {
+					status = roleStatus
+				}
 				existingRoles[i] = datastore.Role{
-					Name: utils.GenerateRoleID("prefill", ordinal),
+					Name:   utils.GenerateRoleID("prefill", ordinal),
+					Status: status,
 				}
 			}
 
@@ -7417,8 +7483,7 @@ func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 			// Calculate expected role template hashes from ModelServing spec
 			expectedRoleTemplateHashes := make(map[string]string)
 			for _, role := range ms.Spec.Template.Roles {
-				copy := utils.RemoveRoleReplicasForRoleTemplateHash(role)
-				roleTemplateHash := utils.Revision(copy)
+				roleTemplateHash := utils.CalRoleTemplateHash(role)
 				expectedRoleTemplateHashes[role.Name] = roleTemplateHash
 			}
 

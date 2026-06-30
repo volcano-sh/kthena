@@ -612,8 +612,3 @@ func GetMaxUnavailableForRole(role workloadv1alpha1.Role) (int, bool, error) {
 	maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(role.MaxUnavailable, replicas, false)
 	return maxUnavailable, true, err
 }
-
-func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
-	copy := RemoveRoleReplicasForRoleTemplateHash(role)
-	return Revision(copy)
-}

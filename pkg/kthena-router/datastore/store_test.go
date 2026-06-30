@@ -17,6 +17,7 @@ limitations under the License.
 package datastore
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -2265,4 +2266,73 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 			assert.Equal(t, tt.expectedServer, server)
 		})
 	}
+}
+
+func TestStoreRunBoundedConcurrency(t *testing.T) {
+	const testPodCount = 150 // > maxConcurrentPodScrapes (100)
+
+	var inFlight atomic.Int32
+	var maxInFlight atomic.Int32
+	var metricsCalls, modelsCalls atomic.Int64
+
+	s := &store{
+		pods:                  sync.Map{},
+		modelServer:           sync.Map{},
+		initialSynced:         &atomic.Bool{},
+		metricsScrapeInterval: 10 * time.Millisecond,
+		podRuntimeInspector: &fakePodRuntimeInspector{
+			metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+				current := inFlight.Add(1)
+				defer inFlight.Add(-1)
+
+				// Track max concurrent goroutines
+				for {
+					max := maxInFlight.Load()
+					if current <= max {
+						break
+					}
+					if maxInFlight.CompareAndSwap(max, current) {
+						break
+					}
+				}
+
+				// Small sleep to ensure goroutines pile up and hit the cap
+				time.Sleep(2 * time.Millisecond)
+
+				metricsCalls.Add(1)
+				return nil, nil
+			},
+			modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
+				modelsCalls.Add(1)
+				return nil, nil
+			},
+		},
+	}
+
+	for i := 0; i < testPodCount; i++ {
+		podName := types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("pod%d", i)}
+		s.pods.Store(podName, &PodInfo{
+			Pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace},
+				Status:     corev1.PodStatus{PodIP: fmt.Sprintf("10.0.0.%d", i)},
+			},
+			engine:      "vLLM",
+			modelServer: sets.New[types.NamespacedName](types.NamespacedName{Namespace: "default", Name: "model"}),
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start the actual Run loop
+	s.Run(ctx)
+
+	// Wait for at least one full cycle of scrapes
+	assert.Eventually(t, func() bool {
+		return metricsCalls.Load() >= int64(testPodCount) && modelsCalls.Load() >= int64(testPodCount)
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Verify the bound was respected and parallelism actually occurred
+	assert.Greater(t, maxInFlight.Load(), int32(1), "expected at least some parallelism in scrapes")
+	assert.LessOrEqual(t, maxInFlight.Load(), int32(maxConcurrentPodScrapes), "in-flight requests should never exceed the semaphore cap")
 }

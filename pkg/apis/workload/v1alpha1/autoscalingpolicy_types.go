@@ -38,10 +38,8 @@ type AutoscalingPolicySpec struct {
 	// +kubebuilder:default=10
 	TolerancePercent int32 `json:"tolerancePercent"`
 	// Metrics defines the list of metrics used to evaluate scaling decisions.
-	// This is the uniform metric list applied to all scalable units. For
-	// DisaggregatedTarget, spec.metrics and per-role metrics are mutually
-	// exclusive: set spec.metrics to scale every role on the same signals, or
-	// set metrics on every role and leave spec.metrics empty.
+	// This is the default metric list applied to scalable units. For
+	// DisaggregatedTarget, role-level metrics override this list for that role.
 	// +optional
 	Metrics []AutoscalingPolicyMetric `json:"metrics,omitempty"`
 	// Behavior defines the scaling behavior configuration for both scale up and scale down operations.
@@ -482,14 +480,18 @@ type HeterogeneousTargetParam struct {
 
 // DisaggregatedTarget defines coordinated autoscaling for disaggregated
 // serving roles within a single ModelServing deployment.
+// +kubebuilder:validation:XValidation:rule="!has(self.ratioConstraint) || size(self.roles) >= 2",message="roles must contain at least two entries when ratioConstraint is configured"
 type DisaggregatedTarget struct {
 	// TargetRef references the ModelServing deployment that contains
 	// all scalable roles.
 	TargetRef corev1.ObjectReference `json:"targetRef"`
 
 	// Roles defines per-role scaling parameters. The map key is roleName
-	// from ModelServing.spec.template.roles[].name.
-	// +kubebuilder:validation:MinProperties=2
+	// from ModelServing.spec.template.roles[].name. A single role is allowed so
+	// users can autoscale one role independently without configuring a P/D pair.
+	// RatioConstraint, when set, still requires two distinct roles.
+	// +kubebuilder:validation:MinProperties=1
+	// +kubebuilder:validation:MaxProperties=2
 	Roles map[string]RoleScalingParam `json:"roles"`
 
 	// RatioConstraint defines the acceptable ratio range of a single role pair.
@@ -514,10 +516,10 @@ type RoleScalingParam struct {
 	// Metrics defines the list of metrics used to evaluate scaling decisions
 	// for this role, allowing different roles to scale on different signals.
 	//
-	// spec.metrics (policy-level) and per-role metrics are MUTUALLY EXCLUSIVE:
-	// either set spec.metrics to scale every role on the same signals, or set
-	// metrics on every role here and leave spec.metrics empty. They must not
-	// both be set.
+	// When set, these metrics override spec.metrics for this role. When omitted,
+	// the role inherits spec.metrics. A fixed role (minReplicas == maxReplicas)
+	// may omit metrics; the autoscaler keeps it at that fixed size and does not
+	// collect metrics for it.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
 	Metrics []AutoscalingPolicyMetric `json:"metrics,omitempty"`

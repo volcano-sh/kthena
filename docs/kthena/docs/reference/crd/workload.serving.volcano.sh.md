@@ -142,7 +142,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `tolerancePercent` _integer_ | TolerancePercent defines the percentage of deviation tolerated before scaling actions are triggered.<br />current_replicas represents the current number of instances, while target_replicas represents the expected number of instances calculated from monitoring metrics.<br />Scaling operations are performed only when \|current_replicas - target_replicas\| >= current_replicas * TolerancePercent / 100. | 10 | Maximum: 100 <br />Minimum: 0 <br /> |
-| `metrics` _[AutoscalingPolicyMetric](#autoscalingpolicymetric) array_ | Metrics defines the list of metrics used to evaluate scaling decisions.<br />This is the uniform metric list applied to all scalable units. For<br />DisaggregatedTarget, spec.metrics and per-role metrics are mutually<br />exclusive: set spec.metrics to scale every role on the same signals, or<br />set metrics on every role and leave spec.metrics empty. |  |  |
+| `metrics` _[AutoscalingPolicyMetric](#autoscalingpolicymetric) array_ | Metrics defines the list of metrics used to evaluate scaling decisions.<br />This is the default metric list applied to scalable units. For<br />DisaggregatedTarget, role-level metrics override this list for that role. |  |  |
 | `behavior` _[AutoscalingPolicyBehavior](#autoscalingpolicybehavior)_ | Behavior defines the scaling behavior configuration for both scale up and scale down operations. |  |  |
 | `homogeneousTarget` _[HomogeneousTarget](#homogeneoustarget)_ | HomogeneousTarget enables traditional metric-based scaling for a single<br />ModelServing deployment (whole-deployment granularity). |  |  |
 | `heterogeneousTarget` _[HeterogeneousTarget](#heterogeneoustarget)_ | HeterogeneousTarget enables optimization-based scaling across multiple<br />ModelServing deployments with different hardware capabilities. |  |  |
@@ -220,7 +220,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the ModelServing deployment that contains<br />all scalable roles. |  |  |
-| `roles` _object (keys:string, values:[RoleScalingParam](#rolescalingparam))_ | Roles defines per-role scaling parameters. The map key is roleName<br />from ModelServing.spec.template.roles[].name. |  | MinProperties: 2 <br /> |
+| `roles` _object (keys:string, values:[RoleScalingParam](#rolescalingparam))_ | Roles defines per-role scaling parameters. The map key is roleName<br />from ModelServing.spec.template.roles[].name. A single role is allowed so<br />users can autoscale one role independently without configuring a P/D pair.<br />RatioConstraint, when set, still requires two distinct roles. |  | MaxProperties: 2 <br />MinProperties: 1 <br /> |
 | `ratioConstraint` _[RoleRatioConstraint](#roleratioconstraint)_ | RatioConstraint defines the acceptable ratio range of a single role pair.<br />It enforces that replicas[numeratorRole] / replicas[denominatorRole] stays<br />within [minRatio, maxRatio] when denominator replica is non-zero. |  |  |
 
 
@@ -919,7 +919,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `minReplicas` _integer_ | MinReplicas defines the minimum number of replicas for this role. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
 | `maxReplicas` _integer_ | MaxReplicas defines the maximum number of replicas for this role. |  | Maximum: 1e+06 <br />Minimum: 1 <br /> |
-| `metrics` _[AutoscalingPolicyMetric](#autoscalingpolicymetric) array_ | Metrics defines the list of metrics used to evaluate scaling decisions<br />for this role, allowing different roles to scale on different signals.<br />spec.metrics (policy-level) and per-role metrics are MUTUALLY EXCLUSIVE:<br />either set spec.metrics to scale every role on the same signals, or set<br />metrics on every role here and leave spec.metrics empty. They must not<br />both be set. |  | MinItems: 1 <br /> |
+| `metrics` _[AutoscalingPolicyMetric](#autoscalingpolicymetric) array_ | Metrics defines the list of metrics used to evaluate scaling decisions<br />for this role, allowing different roles to scale on different signals.<br />When set, these metrics override spec.metrics for this role. When omitted,<br />the role inherits spec.metrics. A fixed role (minReplicas == maxReplicas)<br />may omit metrics; the autoscaler keeps it at that fixed size and does not<br />collect metrics for it. |  | MinItems: 1 <br /> |
 | `metricSources` _object (keys:string, values:[MetricSource](#metricsource))_ | MetricSources declares how each metric is fetched for this role.<br />Keys must match role-level metrics when present, otherwise top-level<br />spec.metrics[].name.<br />Missing keys are treated as missing metrics for that reconcile loop. |  |  |
 
 

@@ -22,9 +22,12 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -38,7 +41,9 @@ import (
 type HTTPRouteController struct {
 	httpRouteLister gatewaylisters.HTTPRouteLister
 	gatewayLister   gatewaylisters.GatewayLister
+	namespaceLister corelisters.NamespaceLister
 	httpRouteSynced cache.InformerSynced
+	namespaceSynced cache.InformerSynced
 	registration    cache.ResourceEventHandlerRegistration
 
 	workqueue   workqueue.TypedRateLimitingInterface[any]
@@ -48,15 +53,19 @@ type HTTPRouteController struct {
 
 func NewHTTPRouteController(
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
+	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
 ) *HTTPRouteController {
 	httpRouteInformer := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
+	namespaceInformer := kubeInformerFactory.Core().V1().Namespaces()
 
 	controller := &HTTPRouteController{
 		httpRouteLister: httpRouteInformer.Lister(),
 		gatewayLister:   gatewayInformer.Lister(),
+		namespaceLister: namespaceInformer.Lister(),
 		httpRouteSynced: httpRouteInformer.Informer().HasSynced,
+		namespaceSynced: namespaceInformer.Informer().HasSynced,
 		workqueue:       workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
 		initialSync:     &atomic.Bool{},
 		store:           store,
@@ -86,6 +95,12 @@ func NewHTTPRouteController(
 	}
 	_, _ = gatewayInformer.Informer().AddEventHandler(gatewayFilter)
 
+	_, _ = namespaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    controller.enqueueHTTPRoutesForNamespace,
+		UpdateFunc: func(_, new interface{}) { controller.enqueueHTTPRoutesForNamespace(new) },
+		DeleteFunc: controller.enqueueHTTPRoutesForNamespace,
+	})
+
 	return controller
 }
 
@@ -93,7 +108,7 @@ func (c *HTTPRouteController) Run(stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	if ok := cache.WaitForCacheSync(stopCh, c.httpRouteSynced); !ok {
+	if ok := cache.WaitForCacheSync(stopCh, c.httpRouteSynced, c.namespaceSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 	c.workqueue.Add(initialSyncSignal)
@@ -167,7 +182,7 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	// Check all parentRefs - process immediately if any matches, retry only if no match and a Gateway is pending
 	var gatewayPending bool
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
-		if parentRef.Kind == nil || *parentRef.Kind != "Gateway" {
+		if !isGatewayParentRef(parentRef) {
 			continue
 		}
 		gatewayNamespace := httpRoute.Namespace
@@ -183,7 +198,13 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 			continue
 		}
 		if string(gw.Spec.GatewayClassName) == DefaultGatewayClassName {
-			return c.store.AddOrUpdateHTTPRoute(httpRoute)
+			allowed, err := c.gatewayAllowsHTTPRoute(gw, httpRoute, parentRef)
+			if err != nil {
+				return err
+			}
+			if allowed {
+				return c.store.AddOrUpdateHTTPRoute(httpRoute)
+			}
 		}
 	}
 	if gatewayPending {
@@ -216,7 +237,7 @@ func (c *HTTPRouteController) enqueueHTTPRoutesForGateway(obj interface{}) {
 	}
 	for _, route := range routes {
 		for _, parentRef := range route.Spec.ParentRefs {
-			if parentRef.Kind != nil && *parentRef.Kind == "Gateway" {
+			if isGatewayParentRef(parentRef) {
 				ns := route.Namespace
 				if parentRef.Namespace != nil {
 					ns = string(*parentRef.Namespace)
@@ -227,5 +248,106 @@ func (c *HTTPRouteController) enqueueHTTPRoutesForGateway(obj interface{}) {
 				}
 			}
 		}
+	}
+}
+
+func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
+	if parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName {
+		return false
+	}
+	return parentRef.Kind == nil || *parentRef.Kind == "Gateway"
+}
+
+func (c *HTTPRouteController) gatewayAllowsHTTPRoute(gw *gatewayv1.Gateway, httpRoute *gatewayv1.HTTPRoute, parentRef gatewayv1.ParentReference) (bool, error) {
+	for _, listener := range gw.Spec.Listeners {
+		if !parentRefSelectsListener(parentRef, listener) {
+			continue
+		}
+		if !listenerAllowsHTTPRouteKind(listener) {
+			continue
+		}
+		allowed, err := c.listenerAllowsRouteNamespace(listener, gw.Namespace, httpRoute.Namespace)
+		if err != nil {
+			return false, err
+		}
+		if allowed {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func parentRefSelectsListener(parentRef gatewayv1.ParentReference, listener gatewayv1.Listener) bool {
+	if parentRef.SectionName != nil && *parentRef.SectionName != listener.Name {
+		return false
+	}
+	if parentRef.Port != nil && *parentRef.Port != listener.Port {
+		return false
+	}
+	return true
+}
+
+func listenerAllowsHTTPRouteKind(listener gatewayv1.Listener) bool {
+	if listener.AllowedRoutes == nil || len(listener.AllowedRoutes.Kinds) == 0 {
+		return listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType
+	}
+
+	for _, kind := range listener.AllowedRoutes.Kinds {
+		if kind.Group != nil && string(*kind.Group) != gatewayv1.GroupName {
+			continue
+		}
+		if kind.Kind == "HTTPRoute" {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *HTTPRouteController) listenerAllowsRouteNamespace(listener gatewayv1.Listener, gatewayNamespace, routeNamespace string) (bool, error) {
+	if listener.AllowedRoutes == nil || listener.AllowedRoutes.Namespaces == nil || listener.AllowedRoutes.Namespaces.From == nil {
+		return gatewayNamespace == routeNamespace, nil
+	}
+
+	switch *listener.AllowedRoutes.Namespaces.From {
+	case gatewayv1.NamespacesFromAll:
+		return true, nil
+	case gatewayv1.NamespacesFromSame:
+		return gatewayNamespace == routeNamespace, nil
+	case gatewayv1.NamespacesFromSelector:
+		if listener.AllowedRoutes.Namespaces.Selector == nil {
+			return false, nil
+		}
+		selector, err := metav1.LabelSelectorAsSelector(listener.AllowedRoutes.Namespaces.Selector)
+		if err != nil {
+			return false, err
+		}
+		namespace, err := c.namespaceLister.Get(routeNamespace)
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return selector.Matches(labels.Set(namespace.Labels)), nil
+	default:
+		return false, nil
+	}
+}
+
+func (c *HTTPRouteController) enqueueHTTPRoutesForNamespace(obj interface{}) {
+	if d, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = d.Obj
+	}
+	ns, ok := obj.(metav1.Object)
+	if !ok {
+		return
+	}
+	routes, err := c.httpRouteLister.HTTPRoutes(ns.GetName()).List(labels.Everything())
+	if err != nil {
+		klog.Errorf("failed to list HTTPRoutes for namespace %s: %v", ns.GetName(), err)
+		return
+	}
+	for _, route := range routes {
+		c.workqueue.Add(fmt.Sprintf("%s/%s", route.Namespace, route.Name))
 	}
 }

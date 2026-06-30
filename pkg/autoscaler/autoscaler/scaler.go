@@ -68,38 +68,92 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 		klog.Errorf("update metrics error: %v", err)
 		return -1, err
 	}
-	// minInstance <- AutoscaleScope, currentInstancesCount(replicas) <- workload
-	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
-		MinInstances:          autoscaler.Meta.Config.MinReplicas,
-		MaxInstances:          autoscaler.Meta.Config.MaxReplicas,
-		CurrentInstancesCount: currentInstancesCount,
-		Tolerance:             float64(autoscalePolicy.Spec.TolerancePercent) * 0.01,
+	result := scaleOneTarget(scaleOneTargetInput{
+		Status:                autoscaler.Status,
+		Behavior:              &autoscalePolicy.Spec.Behavior,
+		MinReplicas:           autoscaler.Meta.Config.MinReplicas,
+		MaxReplicas:           autoscaler.Meta.Config.MaxReplicas,
+		CurrentReplicas:       currentInstancesCount,
+		TolerancePercent:      autoscalePolicy.Spec.TolerancePercent,
 		MetricTargets:         autoscaler.Collector.MetricTargets,
 		UnreadyInstancesCount: unreadyInstancesCount,
-		ReadyInstancesMetrics: []algorithm.Metrics{readyInstancesMetrics},
+		ReadyInstancesMetrics: readyInstancesMetrics,
 		ExternalMetrics:       externalMetrics,
-	}
-	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
-	if skip {
+	})
+	if result.Skip {
 		klog.InfoS("skip recommended instances")
 		return -1, nil
 	}
-	if autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil && recommendedInstances*100 >= currentInstancesCount*(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
-		autoscaler.Status.RefreshPanicMode()
-	}
-	CorrectedInstancesAlgorithm := algorithm.CorrectedInstancesAlgorithm{
-		IsPanic:              autoscaler.Status.IsPanicMode(),
-		History:              autoscaler.Status.History,
-		Behavior:             &autoscalePolicy.Spec.Behavior,
-		MinInstances:         autoscaler.Meta.Config.MinReplicas,
-		MaxInstances:         autoscaler.Meta.Config.MaxReplicas,
-		CurrentInstances:     currentInstancesCount,
-		RecommendedInstances: recommendedInstances,
-	}
-	correctedInstances := CorrectedInstancesAlgorithm.GetCorrectedInstances()
+	recordScaleOneTargetResult(autoscaler.Status, result)
 
-	klog.InfoS("autoscale controller", "currentInstancesCount", currentInstancesCount, "recommendedInstances", recommendedInstances, "correctedInstances", correctedInstances)
-	autoscaler.Status.AppendRecommendation(recommendedInstances)
-	autoscaler.Status.AppendCorrected(correctedInstances)
-	return correctedInstances, nil
+	klog.InfoS("autoscale controller", "currentInstancesCount", currentInstancesCount, "recommendedInstances", result.RecommendedReplicas, "correctedInstances", result.CorrectedReplicas)
+	return result.CorrectedReplicas, nil
+}
+
+type scaleOneTargetInput struct {
+	Status                *Status
+	Behavior              *workload.AutoscalingPolicyBehavior
+	MinReplicas           int32
+	MaxReplicas           int32
+	CurrentReplicas       int32
+	TolerancePercent      int32
+	MetricTargets         algorithm.Metrics
+	UnreadyInstancesCount int32
+	ReadyInstancesMetrics algorithm.Metrics
+	ExternalMetrics       algorithm.Metrics
+}
+
+type scaleOneTargetResult struct {
+	RecommendedReplicas int32
+	CorrectedReplicas   int32
+	RefreshPanicMode    bool
+	Skip                bool
+}
+
+func scaleOneTarget(input scaleOneTargetInput) scaleOneTargetResult {
+	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
+		MinInstances:          input.MinReplicas,
+		MaxInstances:          input.MaxReplicas,
+		CurrentInstancesCount: input.CurrentReplicas,
+		Tolerance:             float64(input.TolerancePercent) * 0.01,
+		MetricTargets:         input.MetricTargets,
+		UnreadyInstancesCount: input.UnreadyInstancesCount,
+		ReadyInstancesMetrics: []algorithm.Metrics{input.ReadyInstancesMetrics},
+		ExternalMetrics:       input.ExternalMetrics,
+	}
+	recommendedReplicas, skip := instancesAlgorithm.GetRecommendedInstances()
+	if skip {
+		return scaleOneTargetResult{Skip: true}
+	}
+
+	isPanic := input.Status.IsPanicMode()
+	refreshPanicMode := false
+	if input.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil && recommendedReplicas*100 >= input.CurrentReplicas*(*input.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
+		refreshPanicMode = true
+		isPanic = input.Status.PanicModeHoldMilliseconds > 0
+	}
+	correctedAlgorithm := algorithm.CorrectedInstancesAlgorithm{
+		IsPanic:              isPanic,
+		History:              input.Status.History,
+		Behavior:             input.Behavior,
+		MinInstances:         input.MinReplicas,
+		MaxInstances:         input.MaxReplicas,
+		CurrentInstances:     input.CurrentReplicas,
+		RecommendedInstances: recommendedReplicas,
+	}
+	correctedReplicas := correctedAlgorithm.GetCorrectedInstances()
+
+	return scaleOneTargetResult{
+		RecommendedReplicas: recommendedReplicas,
+		CorrectedReplicas:   correctedReplicas,
+		RefreshPanicMode:    refreshPanicMode,
+	}
+}
+
+func recordScaleOneTargetResult(status *Status, result scaleOneTargetResult) {
+	if result.RefreshPanicMode {
+		status.RefreshPanicMode()
+	}
+	status.AppendRecommendation(result.RecommendedReplicas)
+	status.AppendCorrected(result.CorrectedReplicas)
 }

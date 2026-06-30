@@ -72,7 +72,7 @@ As an ML platform operator, I deploy a vLLM disaggregated model with prefill and
 
 ##### Story 3: Per-role metrics and sources
 
-As a platform engineer, I want each role (for example, prefill/decode now and rerank in the future) to define its own scaling metrics and metric sources independently in one policy.
+As a platform engineer, I want each configured role (for example, prefill and decode) to define its own scaling metrics and metric sources independently in one policy.
 
 ##### Story 4: Migration from Policy + Binding
 
@@ -81,7 +81,7 @@ As an existing user with an `AutoscalingPolicy` and one or more `AutoscalingPoli
 #### Risks and Mitigations
 
 | Risk | Mitigation |
-|------|------------|
+| ------ | ---------- |
 | Breaking change: removes `AutoscalingPolicyBinding` CRD | Both CRDs are alpha-level. Provide a migration guide and conversion tooling. The merged API is strictly simpler. |
 | Breaking change for users currently using `SubTarget` | `SubTarget` was alpha-level and only used for P/D roles — the replacement `DisaggregatedTarget` is strictly more capable. |
 | Loss of policy reuse across bindings | In practice policies are rarely shared. If reuse is needed, users can use templating tools (Helm, Kustomize). The UX win of a single resource outweighs the theoretical reuse loss. |
@@ -93,12 +93,12 @@ As an existing user with an `AutoscalingPolicy` and one or more `AutoscalingPoli
 #### API Changes Overview
 
 | Change | Description |
-|--------|-------------|
+| ------ | ----------- |
 | Delete `AutoscalingPolicyBinding` CRD | All target/binding fields move into `AutoscalingPolicy`. |
 | Delete `SubTarget` type | Replaced by `DisaggregatedTarget`. |
-| Expand `AutoscalingPolicySpec` | Add target fields (`homogeneousTarget`, `heterogeneousTarget`, `disaggregatedTarget`) directly. `spec.metrics` (uniform, applies to all roles) and per-role `metrics` are mutually exclusive. |
+| Expand `AutoscalingPolicySpec` | Add target fields (`homogeneousTarget`, `heterogeneousTarget`, `disaggregatedTarget`) directly. `spec.metrics` provides default metrics for scalable roles; per-role `metrics` override that default for the corresponding role. |
 | Preserve `MetricSource` model | Keep current `MetricSource` discriminated union (`Pod` / `Prometheus`) and move per-target/per-role `metricSources` into `AutoscalingPolicy`. |
-| Add `DisaggregatedTarget` | New first-class multi-role scaling type with `roles` and a single `ratioConstraint`. |
+| Add `DisaggregatedTarget` | New first-class role-level scaling type with one or two `roles` and an optional single `ratioConstraint` for a role pair. |
 | Simplify `Target` | Remove `SubTarget` field. |
 
 ##### 1. Merged `AutoscalingPolicy`
@@ -169,7 +169,11 @@ type DisaggregatedTarget struct {
 
     // Roles defines per-role scaling parameters. The map key is roleName
     // from ModelServing.spec.template.roles[].name.
-    // +kubebuilder:validation:MinProperties=2
+    // A single role is allowed so users can autoscale one role independently
+    // without configuring a P/D pair. RatioConstraint, when set, still requires
+    // two distinct roles.
+    // +kubebuilder:validation:MinProperties=1
+    // +kubebuilder:validation:MaxProperties=2
     Roles map[string]RoleScalingParam `json:"roles"`
 
     // RatioConstraint defines the acceptable ratio range of a single role pair.
@@ -196,10 +200,10 @@ type RoleScalingParam struct {
     // Metrics defines the list of metrics used to evaluate scaling decisions
     // for this role, allowing different roles to scale on different signals.
     //
-    // spec.metrics (policy-level) and per-role metrics are MUTUALLY EXCLUSIVE:
-    // either set spec.metrics to scale every role on the same signals, or set
-    // metrics on every role here and leave spec.metrics empty. They must not
-    // both be set (see Validation Rules).
+    // When set, these metrics override spec.metrics for this role. When omitted,
+    // the role inherits spec.metrics. A fixed role (minReplicas == maxReplicas)
+    // may omit metrics; the autoscaler keeps it at that fixed size and does not
+    // collect metrics for it.
     // +optional
     // +kubebuilder:validation:MinItems=1
     Metrics []AutoscalingPolicyMetric `json:"metrics,omitempty"`
@@ -271,10 +275,8 @@ type AutoscalingPolicyStatus struct {
 
     // Conditions represents the latest available observations of the policy's state.
     // Well-known condition types include:
-    //   - "Ready":                   the policy is actively reconciled.
-    //   - "TargetFound":             the referenced ModelServing (and roles) exist.
-    //   - "RatioConstraintViolated": the desired counts could not satisfy ratioConstraint
-    //                                given the per-role min/max bounds.
+    //   - "Ready":       the policy is actively reconciled.
+    //   - "TargetFound": the referenced ModelServing (and roles) exist.
     // +optional
     // +listType=map
     // +listMapKey=type
@@ -360,7 +362,7 @@ type RoleRatioStatus struct {
 Recommended printer columns for `kubectl get autoscalingpolicy`:
 
 | Column | Source |
-|--------|--------|
+| ------ | ------ |
 | `ROLES` | `len(status.disaggregatedStatus.roles)` |
 | `RATIO` | `status.disaggregatedStatus.ratioStatus.currentRatio` |
 | `READY` | `status.conditions[type=Ready].status` |
@@ -377,8 +379,8 @@ metadata:
   namespace: default
 spec:
   tolerancePercent: 10
-  # Each role defines its own metrics below, so policy-level spec.metrics is omitted
-  # (spec.metrics and per-role metrics are mutually exclusive).
+  # spec.metrics can define default metrics for roles. In this example, each
+  # role defines its own metrics below, so policy-level spec.metrics is omitted.
   behavior:
     scaleUp:
       stablePolicy:
@@ -402,7 +404,7 @@ spec:
       prefill:
         minReplicas: 1
         maxReplicas: 8
-        metrics:                           # this role's own metrics (no spec.metrics fallback)
+        metrics:                           # this role's own metrics override spec.metrics
           - name: num_requests_waiting
             targetValue: "5"
         metricSources:
@@ -417,7 +419,7 @@ spec:
       decode:
         minReplicas: 2
         maxReplicas: 16
-        metrics:                           # this role's own metrics (no spec.metrics fallback)
+        metrics:                           # this role's own metrics override spec.metrics
           - name: gpu_kv_cache_usage_percent
             targetValue: "80"
         metricSources:
@@ -489,51 +491,47 @@ spec:
 #### Validation Rules (CRD + Webhook)
 
 | Rule | Scope |
-|------|-------|
+| ---- | ----- |
 | Exactly one of `homogeneousTarget`, `heterogeneousTarget`, `disaggregatedTarget` must be set. | `AutoscalingPolicySpec` (CEL) |
-| `spec.metrics` and per-role `metrics` are mutually exclusive: set `spec.metrics` (uniform) **or** set `metrics` on every role, never both. | `AutoscalingPolicySpec` / `DisaggregatedTarget` (webhook) |
-| Whichever metrics list is used (`spec.metrics` or each role's `metrics`) must have at least one entry. | `AutoscalingPolicySpec` / `RoleScalingParam` |
-| `metricSources` keys must be a subset of the effective metric names for that scope. | `Target` / `RoleScalingParam` |
+| For a non-fixed disaggregated role, effective metrics must be non-empty: role-level `metrics` are used when present; otherwise the role inherits `spec.metrics`. Fixed roles (`minReplicas == maxReplicas`) may omit metrics. | `AutoscalingPolicySpec` / `RoleScalingParam` |
+| For each non-fixed role with effective metrics, `metricSources` must be set and its keys must be a subset of the effective metric names for that role. | `Target` / `RoleScalingParam` |
 | For each `MetricSource`, `type`/backend pairing must be valid (`Pod` -> `pod`, `Prometheus` -> `prometheus`). | `MetricSource` (CEL, preserved) |
-| `targetRef.kind` must be `ModelServing`. | `DisaggregatedTarget` |
-| `roles` map keys must reference existing roles in the referenced ModelServing and contain at least two entries. | `DisaggregatedTarget` |
+| `targetRef.name` must be set and `targetRef.kind`, when set, must be `ModelServing`. During reconcile, `targetRef.apiVersion`, when set, must also use the `workload.serving.volcano.sh` group. | `DisaggregatedTarget` |
+| `roles` map keys must reference existing roles in the referenced ModelServing and contain one or two entries. If `ratioConstraint` is configured, at least two roles are required. | `DisaggregatedTarget` |
 | `minReplicas <= maxReplicas` for each role. | `RoleScalingParam` |
-| If `ratioConstraint` is set: `numeratorRole != denominatorRole`, both roles exist in `roles`, and `minRatio <= maxRatio`. | `RoleRatioConstraint` (CEL) |
+| If `ratioConstraint` is set: `numeratorRole != denominatorRole`, both roles exist in `roles`, `minRatio <= maxRatio`, and ratio values must be finite with `minRatio >= 0` and `maxRatio > 0`. | `RoleRatioConstraint` (CEL + webhook) |
 | If `ratioConstraint` is set, bounds must be achievable given role min/max replicas: `numerator.minReplicas / denominator.maxReplicas <= maxRatio` **and** `numerator.maxReplicas / denominator.minReplicas >= minRatio` (when `denominator.minReplicas > 0`). | `DisaggregatedTarget` |
 | If `ratioConstraint` is set, the two referenced roles must be scalable-to-zero together: `roles[numeratorRole].minReplicas == 0` **iff** `roles[denominatorRole].minReplicas == 0`. | `DisaggregatedTarget` (CEL) |
-| `minRatio` / `maxRatio` must not carry a unit suffix (e.g., reject `"250m"`). | `RoleRatioConstraint` |
 
 #### Scaling Semantics (Controller Contract)
 
 > **Note**: Controller implementation is out of scope for this proposal. These semantics define the contract the controller must honor.
 
-1. **Effective metrics per role**: `spec.metrics` and per-role `metrics` are mutually exclusive. When `spec.metrics` is set, every role is evaluated against that shared list; when per-role `metrics` are set, each role is evaluated against its own list. The controller computes a desired replica count for each role independently.
+1. **Effective metrics per role**: For each non-fixed role, role-level `metrics` override `spec.metrics`; when role-level `metrics` are omitted, the role inherits `spec.metrics`. Fixed roles (`minReplicas == maxReplicas`) skip metric collection and keep the fixed replica count. The controller computes a desired replica count for each non-fixed role independently.
 2. **Multiple metrics combine by max**: When a role's effective list contains more than one metric, the controller computes a desired count for each metric independently and takes the **maximum** (the standard HPA rule), so the most demanding signal wins. For example, if `pending_requests` implies 1 replica but `num_requests_waiting` implies 10, the role scales to 10. This removes any ambiguity when two metrics disagree.
-3. **Metric source resolution**: For each effective metric name, the controller resolves `MetricSource` in this order: role-level `metricSources`, then target-level/default semantics. Resolved sources can be pod scraping or Prometheus query.
+3. **Metric source resolution**: For each effective metric name, the controller resolves `MetricSource` from that role's `metricSources`. Resolved sources can be pod scraping or Prometheus query; pod sources are scoped to the role during collection.
 4. **Per-role clamping**: Each desired count is clamped to `[minReplicas, maxReplicas]` of the corresponding role.
-5. **Coupled scale-to-zero**: When `ratioConstraint` is set, the two roles it references must reach zero together. The controller does not evaluate the ratio while either side is `0`.
-6. **Ratio enforcement**: For the configured role pair, when both roles are non-zero, after clamping the controller adjusts replica counts to satisfy `minRatio <= replicas[numeratorRole]/replicas[denominatorRole] <= maxRatio` (see [Ratio Enforcement Algorithm](#ratio-enforcement-algorithm)).
-7. **Atomic patch**: The controller patches both affected `spec.template.roles[*].replicas` in a single ModelServing update to avoid transient states that violate the ratio constraint.
+5. **Coupled scale-to-zero**: When `ratioConstraint` is set, the two roles it references must reach zero together. If both roles resolve to `0`, the controller preserves the coupled scale-to-zero state and skips ratio calculation.
+6. **Ratio enforcement**: For the configured role pair, after clamping the controller repairs single-sided zero states and adjusts replica counts to satisfy `minRatio <= replicas[numeratorRole]/replicas[denominatorRole] <= maxRatio` (see [Ratio Enforcement Algorithm](#ratio-enforcement-algorithm)).
+7. **Atomic patch**: The controller patches all changed `spec.template.roles[*].replicas` in a single JSON Patch request. Each role update is guarded by a `test` operation on the role name before an `add` operation on `replicas`, so a stale role index cannot update the wrong role and omitted `replicas` fields can be created.
 
 #### Ratio Enforcement Algorithm
 
 The webhook rejects an infeasible `ratioConstraint` at admission (see [Validation Rules](#validation-rules-crd--webhook)), so the controller always starts from a constraint whose feasible region is **non-empty**. Enforcement therefore reduces to *projecting* the two metric-derived replica counts into that region — never a search that might fail:
 
 1. **Start from clamped desire**: take `desired[numeratorRole]` and `desired[denominatorRole]`, each already clamped to its own `[minReplicas, maxReplicas]`.
-2. **Skip when either side is zero**: if either role resolved to `0`, the ratio is not evaluated (see coupled scale-to-zero above).
-3. **Scale-up–biased repair**: if the pair violates the range, fix it by *increasing* the deficient role rather than shrinking the other, so capacity is never reduced below what metrics asked for:
-   - if `num/den < minRatio`: raise `num` to `ceil(minRatio · den)`; if that exceeds `maxReplicas(num)`, instead lower `den` to `floor(num / minRatio)`.
-   - if `num/den > maxRatio`: raise `den` to `ceil(num / maxRatio)`; if that exceeds `maxReplicas(den)`, instead lower `num` to `floor(maxRatio · den)`.
+2. **Handle zero sides**: if both roles resolved to `0`, preserve the coupled scale-to-zero state and skip ratio calculation. If exactly one role resolved to `0`, raise that role to `1` within its bounds before ratio repair, because a P/D deployment with only one live role cannot serve traffic.
+3. **Scale-up–biased repair**: if the pair still violates the range, fix it by *increasing* the deficient role rather than shrinking the other whenever the role's max bound allows it. If `num/den < minRatio`, raise `num` to `ceil(minRatio · den)`; if that exceeds `maxReplicas(num)`, set `num = maxReplicas(num)` and lower `den` to `floor(num / minRatio)`. If `num/den > maxRatio`, raise `den` to `ceil(num / maxRatio)`; if that exceeds `maxReplicas(den)`, set `den = maxReplicas(den)` and lower `num` to `floor(maxRatio · den)`.
 4. **Report**: set `status.disaggregatedStatus.ratioAdjusted = true` when the repair changed any metric-derived count, and record the resulting ratio in `status.disaggregatedStatus.ratioStatus`.
 
-Because the admission webhook guarantees a non-empty integer feasible region within the role replica bounds, the single-pair projection always succeeds in one pass. This biases the result toward the smallest replica vector that is **≥ metric demand** and satisfies the constraint, so SLOs are protected at the cost of a few extra replicas rather than risking under-provisioning.
+Because the admission webhook guarantees a non-empty integer feasible region within the role replica bounds, the single-pair projection always succeeds in one pass. The result preserves metric-requested capacity whenever possible; only when the deficient role cannot be raised enough within its max bound does the repair reduce the other side after saturating the deficient role.
 
 #### Migration
 
 ##### From `AutoscalingPolicy` + `AutoscalingPolicyBinding`
 
 | Before | After |
-|--------|-------|
+| ------ | ----- |
 | `AutoscalingPolicy` with metrics + behavior | Same fields stay in `AutoscalingPolicy.spec` |
 | `AutoscalingPolicyBinding` with `policyRef` + target | Target fields (including `metricSources` with `Pod`/`Prometheus`) move into `AutoscalingPolicy.spec`; `policyRef` is deleted |
 | Two resources per scaling config | One resource |
@@ -541,7 +539,7 @@ Because the admission webhook guarantees a non-empty integer feasible region wit
 ##### From `SubTarget` P/D bindings
 
 | Before (policy + two bindings with SubTarget) | After (single policy) |
-|---|---|
+| --- | --- |
 | Policy: metrics + behavior | `spec.metrics` + `spec.behavior` (same policy) |
 | Binding A: `homogeneousTarget.target.subTargets: {kind: Role, name: prefill}` | `spec.disaggregatedTarget.roles.prefill` |
 | Binding B: `homogeneousTarget.target.subTargets: {kind: Role, name: decode}` | `spec.disaggregatedTarget.roles.decode` |
@@ -630,4 +628,4 @@ Example YAML:
 - **Diverges from existing convention** — `AutoscalingPolicyMetric.TargetValue` and other Kthena fields already use `resource.Quantity` for decimal values, so the integer pair would be the odd one out.
 - **CEL validation is marginally more complex** — comparisons require cross-multiplication rather than a direct `<=`.
 
-**Decision**: The proposal uses `resource.Quantity` for consistency with the rest of the Kthena API, mitigating the unit-ambiguity concern through documentation and webhook validation (rejecting values with non-empty suffixes). The integer-pair form is recorded here as a viable alternative should the unit ambiguity prove to be a frequent source of user error in practice.
+**Decision**: The proposal uses `resource.Quantity` for consistency with the rest of the Kthena API and mitigates the unit-ambiguity concern through documentation plus finite-value validation. The integer-pair form is recorded here as a viable alternative should the unit ambiguity prove to be a frequent source of user error in practice.

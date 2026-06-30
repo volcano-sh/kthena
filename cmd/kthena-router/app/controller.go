@@ -120,10 +120,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
 			inferencePoolController = controller.NewInferencePoolController(dynamicInformerFactory, store)
-			cacheSyncs = append(cacheSyncs,
-    kubeInformerFactory.Core().V1().Namespaces().Informer().HasSynced,
-    dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced,
-)
+			cacheSyncs = append(cacheSyncs, dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced)
 			dynamicInformerFactory.Start(stop)
 		}
 		gatewayInformerFactory.Start(stop)
@@ -250,6 +247,8 @@ func ensureDefaultGateway(gatewayClient gatewayclientset.Interface, defaultPort 
 		return fmt.Errorf("failed to check Gateway %s/%s: %w", namespace, name, err)
 	}
 
+	namespacesFromAll := gatewayv1.NamespacesFromAll
+
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -262,6 +261,7 @@ func ensureDefaultGateway(gatewayClient gatewayclientset.Interface, defaultPort 
 					Name:     gatewayv1.SectionName("default"),
 					Port:     gatewayv1.PortNumber(port),
 					Protocol: gatewayv1.HTTPProtocolType,
+					// Hostname is nil, meaning match all hostnames
 				},
 			},
 		},

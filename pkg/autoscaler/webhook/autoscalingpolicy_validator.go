@@ -99,11 +99,8 @@ func (v *AutoscalingPolicyValidator) validateAutoscalingPolicy(policy *registryv
 		}
 	}
 
-	// TODO(disaggregated): enforce the metrics contract documented on the type once
-	// DisaggregatedTarget is implemented:
-	//   - spec.metrics and per-role metrics are mutually exclusive, and
-	//   - a disaggregated policy must set exactly one of them (today a disaggregated
-	//     policy with no metrics anywhere incorrectly passes validation).
+	// Validate disaggregated target role-level metric and ratio configuration.
+	allErrs = append(allErrs, v.validateDisaggregatedTarget(policy)...)
 
 	// Validate scale down behavior
 	allErrs = append(allErrs, v.validateScaleDownBehavior(policy)...)
@@ -217,6 +214,111 @@ func (v *AutoscalingPolicyValidator) validateMetrics(policy *registryv1.Autoscal
 	}
 
 	return allErrs
+}
+
+func (v *AutoscalingPolicyValidator) validateDisaggregatedTarget(policy *registryv1.AutoscalingPolicy) field.ErrorList {
+	var allErrs field.ErrorList
+	target := policy.Spec.DisaggregatedTarget
+	if target == nil {
+		return allErrs
+	}
+
+	disaggregatedPath := field.NewPath("spec").Child("disaggregatedTarget")
+
+	for roleName, roleParam := range target.Roles {
+		if roleName == "" {
+			allErrs = append(allErrs, field.Invalid(disaggregatedPath.Child("roles"), roleName, "role name must refer to a ModelServing.spec.template.roles[].name and must not be empty"))
+			continue
+		}
+		rolePath := disaggregatedPath.Child("roles").Key(roleName)
+		fixedRole := isFixedRoleScalingParam(roleParam)
+		if roleParam.MinReplicas > roleParam.MaxReplicas {
+			allErrs = append(allErrs, field.Invalid(rolePath.Child("minReplicas"), roleParam.MinReplicas, "minReplicas must be <= maxReplicas"))
+		}
+		// Fixed roles are declared with equal min/max bounds. They are intentionally
+		// exempt from the metrics requirement because the autoscaler never computes a
+		// recommendation for them; it always returns the fixed replica count.
+		if !fixedRole && len(roleParam.Metrics) == 0 && len(policy.Spec.Metrics) == 0 {
+			allErrs = append(allErrs, field.Required(rolePath.Child("metrics"), "metrics must be set on every non-fixed role when spec.metrics is empty"))
+		}
+
+		effectiveMetricNames := make(map[string]struct{})
+		if len(roleParam.Metrics) == 0 && !fixedRole {
+			for _, metric := range policy.Spec.Metrics {
+				effectiveMetricNames[metric.Name] = struct{}{}
+			}
+		}
+		metricNames := make(map[string]struct{})
+		for idx, metric := range roleParam.Metrics {
+			metricPath := rolePath.Child("metrics").Index(idx)
+			if metric.TargetValue.AsFloat64Slow() <= 0 || math.IsInf(metric.TargetValue.AsFloat64Slow(), 0) {
+				allErrs = append(allErrs, field.Invalid(metricPath.Child("targetValue"), metric.TargetValue, "metric target value must be greater than 0 and not equal to infinity"))
+			}
+			if _, exists := metricNames[metric.Name]; exists {
+				allErrs = append(allErrs, field.Invalid(metricPath.Child("name"), metric.Name, fmt.Sprintf("duplicate metric name %s is not allowed", metric.Name)))
+			}
+			metricNames[metric.Name] = struct{}{}
+			effectiveMetricNames[metric.Name] = struct{}{}
+		}
+		if !fixedRole {
+			if len(roleParam.MetricSources) == 0 && len(effectiveMetricNames) > 0 {
+				allErrs = append(allErrs, field.Invalid(rolePath.Child("metricSources"), len(roleParam.MetricSources), "metricSources must be set on every non-fixed role when metrics are configured"))
+				continue
+			}
+			for sourceKey := range roleParam.MetricSources {
+				if _, exists := effectiveMetricNames[sourceKey]; !exists {
+					allErrs = append(allErrs, field.Invalid(rolePath.Child("metricSources").Key(sourceKey), sourceKey, "metricSources key must match an effective metric name"))
+				}
+			}
+		}
+	}
+
+	if target.RatioConstraint != nil {
+		constraint := target.RatioConstraint
+		ratioPath := disaggregatedPath.Child("ratioConstraint")
+		if constraint.NumeratorRole == constraint.DenominatorRole {
+			allErrs = append(allErrs, field.Invalid(ratioPath.Child("denominatorRole"), constraint.DenominatorRole, "numeratorRole and denominatorRole must differ"))
+		}
+		numeratorParam, numeratorExists := target.Roles[constraint.NumeratorRole]
+		denominatorParam, denominatorExists := target.Roles[constraint.DenominatorRole]
+		if !numeratorExists {
+			allErrs = append(allErrs, field.Invalid(ratioPath.Child("numeratorRole"), constraint.NumeratorRole, "numeratorRole must exist in roles"))
+		}
+		if !denominatorExists {
+			allErrs = append(allErrs, field.Invalid(ratioPath.Child("denominatorRole"), constraint.DenominatorRole, "denominatorRole must exist in roles"))
+		}
+		if constraint.MinRatio.Cmp(constraint.MaxRatio) > 0 {
+			allErrs = append(allErrs, field.Invalid(ratioPath.Child("minRatio"), constraint.MinRatio.String(), "minRatio must be <= maxRatio"))
+		}
+		if numeratorExists && denominatorExists {
+			if (numeratorParam.MinReplicas == 0) != (denominatorParam.MinReplicas == 0) {
+				allErrs = append(allErrs, field.Invalid(ratioPath, "scale-to-zero bounds", "ratio roles must be scalable-to-zero together"))
+			}
+			minRatio := constraint.MinRatio.AsFloat64Slow()
+			maxRatio := constraint.MaxRatio.AsFloat64Slow()
+			if math.IsNaN(minRatio) || math.IsNaN(maxRatio) || math.IsInf(minRatio, 0) || math.IsInf(maxRatio, 0) {
+				allErrs = append(allErrs, field.Invalid(ratioPath, "ratio", "ratio values must be finite"))
+			} else if minRatio < 0 || maxRatio <= 0 {
+				allErrs = append(allErrs, field.Invalid(ratioPath, "ratio", "minRatio must be >= 0 and maxRatio must be > 0"))
+			} else {
+				if denominatorParam.MaxReplicas > 0 && float64(numeratorParam.MinReplicas)/float64(denominatorParam.MaxReplicas) > maxRatio {
+					allErrs = append(allErrs, field.Invalid(ratioPath, "bounds", "ratioConstraint is not achievable within role replica bounds"))
+				}
+				if denominatorParam.MinReplicas > 0 && float64(numeratorParam.MaxReplicas)/float64(denominatorParam.MinReplicas) < minRatio {
+					allErrs = append(allErrs, field.Invalid(ratioPath, "bounds", "ratioConstraint is not achievable within role replica bounds"))
+				}
+			}
+		}
+	}
+
+	return allErrs
+}
+
+// isFixedRoleScalingParam mirrors the runtime fixed-role check in the webhook.
+// Keeping the definition here lets admission accept policies that intentionally
+// keep a role at a constant size without forcing dummy metrics or metric sources.
+func isFixedRoleScalingParam(roleParam registryv1.RoleScalingParam) bool {
+	return roleParam.MaxReplicas > 0 && roleParam.MinReplicas == roleParam.MaxReplicas
 }
 
 // validateScaleDownBehavior validates the scale down behavior configuration

@@ -174,6 +174,130 @@ func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 	assert.Empty(t, errorMsg)
 }
 
+func TestValidateAutoscalingPolicy_DisaggregatedTarget(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+
+	validPolicy := &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "pd-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			DisaggregatedTarget: &registryv1.DisaggregatedTarget{
+				TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "pd-model"},
+				Roles: map[string]registryv1.RoleScalingParam{
+					"prefill": {
+						MinReplicas: 1,
+						MaxReplicas: 8,
+						Metrics:     []registryv1.AutoscalingPolicyMetric{{Name: "prefill_load", TargetValue: resource.MustParse("5")}},
+						MetricSources: map[string]registryv1.MetricSource{
+							"prefill_load": {Prometheus: &registryv1.PrometheusMetricSource{ServerURL: "http://prometheus.default.svc:9090", Query: "prefill_load"}},
+						},
+					},
+					"decode": {
+						MinReplicas: 1,
+						MaxReplicas: 16,
+						Metrics:     []registryv1.AutoscalingPolicyMetric{{Name: "decode_load", TargetValue: resource.MustParse("80")}},
+						MetricSources: map[string]registryv1.MetricSource{
+							"decode_load": {Prometheus: &registryv1.PrometheusMetricSource{ServerURL: "http://prometheus.default.svc:9090", Query: "decode_load"}},
+						},
+					},
+				},
+				RatioConstraint: &registryv1.RoleRatioConstraint{
+					NumeratorRole:   "prefill",
+					DenominatorRole: "decode",
+					MinRatio:        resource.MustParse("0.25"),
+					MaxRatio:        resource.MustParse("1"),
+				},
+			},
+		},
+	}
+	allowed, msg := validator.validateAutoscalingPolicy(validPolicy)
+	assert.True(t, allowed, msg)
+
+	overridePolicy := validPolicy.DeepCopy()
+	overridePolicy.Spec.Metrics = []registryv1.AutoscalingPolicyMetric{{Name: "shared", TargetValue: resource.MustParse("1")}}
+	allowed, msg = validator.validateAutoscalingPolicy(overridePolicy)
+	assert.True(t, allowed, msg)
+
+	invalidPolicy := validPolicy.DeepCopy()
+	invalidPolicy.Spec.Metrics = []registryv1.AutoscalingPolicyMetric{{Name: "shared", TargetValue: resource.MustParse("1")}}
+	invalidPolicy.Spec.DisaggregatedTarget.Roles["prefill"] = registryv1.RoleScalingParam{
+		MinReplicas:   9,
+		MaxReplicas:   8,
+		Metrics:       []registryv1.AutoscalingPolicyMetric{{Name: "prefill_load", TargetValue: resource.MustParse("5")}},
+		MetricSources: map[string]registryv1.MetricSource{"unknown": {Prometheus: &registryv1.PrometheusMetricSource{ServerURL: "http://prometheus.default.svc:9090", Query: "unknown"}}},
+	}
+	allowed, msg = validator.validateAutoscalingPolicy(invalidPolicy)
+	assert.False(t, allowed)
+	assert.NotContains(t, msg, "spec.metrics and per-role metrics are mutually exclusive")
+	assert.Contains(t, msg, "minReplicas must be <= maxReplicas")
+	assert.Contains(t, msg, "metricSources key must match an effective metric name")
+
+	missingSourcesPolicy := validPolicy.DeepCopy()
+	missingSourcesPolicy.Spec.DisaggregatedTarget.Roles["prefill"] = registryv1.RoleScalingParam{
+		MinReplicas: 1,
+		MaxReplicas: 8,
+		Metrics:     []registryv1.AutoscalingPolicyMetric{{Name: "prefill_load", TargetValue: resource.MustParse("5")}},
+	}
+	allowed, msg = validator.validateAutoscalingPolicy(missingSourcesPolicy)
+	assert.False(t, allowed)
+	assert.Contains(t, msg, "metricSources must be set on every non-fixed role when metrics are configured")
+
+	missingInheritedSourcesPolicy := validPolicy.DeepCopy()
+	missingInheritedSourcesPolicy.Spec.Metrics = []registryv1.AutoscalingPolicyMetric{{Name: "shared", TargetValue: resource.MustParse("1")}}
+	missingInheritedSourcesPolicy.Spec.DisaggregatedTarget.Roles["prefill"] = registryv1.RoleScalingParam{MinReplicas: 1, MaxReplicas: 8}
+	allowed, msg = validator.validateAutoscalingPolicy(missingInheritedSourcesPolicy)
+	assert.False(t, allowed)
+	assert.Contains(t, msg, "metricSources must be set on every non-fixed role when metrics are configured")
+}
+
+func TestValidateAutoscalingPolicy_DisaggregatedSingleRoleAndFixedRole(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+
+	singleRolePolicy := &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "single-role-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			DisaggregatedTarget: &registryv1.DisaggregatedTarget{
+				TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "pd-model"},
+				Roles: map[string]registryv1.RoleScalingParam{
+					"prefill": {
+						MinReplicas: 1,
+						MaxReplicas: 8,
+						Metrics:     []registryv1.AutoscalingPolicyMetric{{Name: "prefill_load", TargetValue: resource.MustParse("5")}},
+						MetricSources: map[string]registryv1.MetricSource{
+							"prefill_load": {Prometheus: &registryv1.PrometheusMetricSource{ServerURL: "http://prometheus.default.svc:9090", Query: "prefill_load"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	allowed, msg := validator.validateAutoscalingPolicy(singleRolePolicy)
+	assert.True(t, allowed, msg)
+
+	fixedPeerPolicy := singleRolePolicy.DeepCopy()
+	fixedPeerPolicy.Spec.DisaggregatedTarget.Roles["decode"] = registryv1.RoleScalingParam{MinReplicas: 2, MaxReplicas: 2}
+	allowed, msg = validator.validateAutoscalingPolicy(fixedPeerPolicy)
+	assert.True(t, allowed, msg)
+
+	missingMetricsPolicy := singleRolePolicy.DeepCopy()
+	missingMetricsPolicy.Spec.DisaggregatedTarget.Roles["prefill"] = registryv1.RoleScalingParam{MinReplicas: 1, MaxReplicas: 8}
+	allowed, msg = validator.validateAutoscalingPolicy(missingMetricsPolicy)
+	assert.False(t, allowed)
+	assert.Contains(t, msg, "metrics must be set on every non-fixed role when spec.metrics is empty")
+
+	ratioSingleRolePolicy := singleRolePolicy.DeepCopy()
+	ratioSingleRolePolicy.Spec.DisaggregatedTarget.RatioConstraint = &registryv1.RoleRatioConstraint{
+		NumeratorRole:   "prefill",
+		DenominatorRole: "decode",
+		MinRatio:        resource.MustParse("0.25"),
+		MaxRatio:        resource.MustParse("1"),
+	}
+	allowed, msg = validator.validateAutoscalingPolicy(ratioSingleRolePolicy)
+	assert.False(t, allowed)
+	assert.Contains(t, msg, "denominatorRole must exist in roles")
+}
+
 func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
 

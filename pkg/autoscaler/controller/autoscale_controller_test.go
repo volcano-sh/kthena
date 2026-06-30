@@ -45,7 +45,16 @@ import (
 type fakePodNamespaceLister struct{ pods []*corev1.Pod }
 
 func (f fakePodNamespaceLister) List(selector labels.Selector) ([]*corev1.Pod, error) {
-	return f.pods, nil
+	if !strings.Contains(selector.String(), workload.RoleLabelKey) {
+		return f.pods, nil
+	}
+	res := []*corev1.Pod{}
+	for _, pod := range f.pods {
+		if selector.Matches(labels.Set(pod.Labels)) {
+			res = append(res, pod)
+		}
+	}
+	return res, nil
 }
 func (f fakePodNamespaceLister) Get(name string) (*corev1.Pod, error) {
 	for _, p := range f.pods {
@@ -61,7 +70,15 @@ type fakePodLister struct{ podsByNs map[string][]*corev1.Pod }
 func (f fakePodLister) List(selector labels.Selector) ([]*corev1.Pod, error) {
 	res := []*corev1.Pod{}
 	for _, ps := range f.podsByNs {
-		res = append(res, ps...)
+		if !strings.Contains(selector.String(), workload.RoleLabelKey) {
+			res = append(res, ps...)
+			continue
+		}
+		for _, pod := range ps {
+			if selector.Matches(labels.Set(pod.Labels)) {
+				res = append(res, pod)
+			}
+		}
 	}
 	return res, nil
 }
@@ -233,6 +250,310 @@ func toInt32(s string) int32  { v, _ := strconv.Atoi(s); return int32(v) }
 type autoscalerAutoscaler = autoscaler.Autoscaler
 type autoscalerOptimizer = autoscaler.Optimizer
 
+func TestDoDisaggregatedScale_RatioRaisesDecode(t *testing.T) {
+	ns := "ns"
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "ms-pd", Namespace: ns},
+		Spec: workload.ModelServingSpec{
+			Template: workload.ServingGroup{Roles: []workload.Role{
+				{Name: "prefill", Replicas: ptrInt32(1)},
+				{Name: "decode", Replicas: ptrInt32(2)},
+			}},
+		},
+	}
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE prefill_load gauge\nprefill_load 6\n# TYPE decode_load gauge\ndecode_load 2\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "ap-pd", Namespace: ns, Generation: 1},
+		Spec: workload.AutoscalingPolicySpec{
+			TolerancePercent: 0,
+			DisaggregatedTarget: &workload.DisaggregatedTarget{
+				TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-pd"},
+				Roles: map[string]workload.RoleScalingParam{
+					"prefill": {
+						MinReplicas: 1,
+						MaxReplicas: 8,
+						Metrics:     []workload.AutoscalingPolicyMetric{{Name: "prefill_load", TargetValue: resource.MustParse("1")}},
+						MetricSources: map[string]workload.MetricSource{
+							"prefill_load": {Pod: &workload.PodMetricSource{Name: "prefill_load", Uri: u.Path, Port: port}},
+						},
+					},
+					"decode": {
+						MinReplicas: 2,
+						MaxReplicas: 16,
+						Metrics:     []workload.AutoscalingPolicyMetric{{Name: "decode_load", TargetValue: resource.MustParse("1")}},
+						MetricSources: map[string]workload.MetricSource{
+							"decode_load": {Pod: &workload.PodMetricSource{Name: "decode_load", Uri: u.Path, Port: port}},
+						},
+					},
+				},
+				RatioConstraint: &workload.RoleRatioConstraint{
+					NumeratorRole:   "prefill",
+					DenominatorRole: "decode",
+					MinRatio:        resource.MustParse("0.25"),
+					MaxRatio:        resource.MustParse("1"),
+				},
+			},
+		},
+	}
+
+	client := clientfake.NewSimpleClientset(ms.DeepCopy(), policy.DeepCopy())
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms.DeepCopy()))
+	pods := []*corev1.Pod{
+		readyPod(ns, "pod-pd-prefill", host, map[string]string{
+			workload.ModelServingNameLabelKey: "ms-pd",
+			workload.EntryLabelKey:            "true",
+			workload.RoleLabelKey:             "prefill",
+		}),
+		readyPod(ns, "pod-pd-decode", host, map[string]string{
+			workload.ModelServingNameLabelKey: "ms-pd",
+			workload.EntryLabelKey:            "true",
+			workload.RoleLabelKey:             "decode",
+		}),
+	}
+	ac := &AutoscaleController{
+		client:                 client,
+		modelServingLister:     msLister,
+		podsLister:             fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
+		scalerMap:              map[string]*autoscalerAutoscaler{},
+		optimizerMap:           map[string]*autoscalerOptimizer{},
+		disaggregatedScalerMap: map[string]*autoscaler.DisaggregatedAutoscaler{},
+	}
+
+	if err := ac.doDisaggregatedScale(context.Background(), policy); err != nil {
+		t.Fatalf("doDisaggregatedScale error: %v", err)
+	}
+	updated, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-pd", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated modelserving error: %v", err)
+	}
+	got := map[string]int32{}
+	for _, role := range updated.Spec.Template.Roles {
+		got[role.Name] = *role.Replicas
+	}
+	if got["prefill"] != 6 || got["decode"] != 6 {
+		t.Fatalf("expected ratio-adjusted replicas prefill=6 decode=6, got %#v", got)
+	}
+	updatedPolicy, err := client.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), "ap-pd", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated policy error: %v", err)
+	}
+	if updatedPolicy.Status.DisaggregatedStatus == nil || !updatedPolicy.Status.DisaggregatedStatus.RatioAdjusted {
+		t.Fatalf("expected ratioAdjusted status, got %#v", updatedPolicy.Status.DisaggregatedStatus)
+	}
+	if updatedPolicy.Status.DisaggregatedStatus.RatioStatus == nil || updatedPolicy.Status.DisaggregatedStatus.RatioStatus.CurrentRatio != "1" {
+		t.Fatalf("expected current ratio 1, got %#v", updatedPolicy.Status.DisaggregatedStatus.RatioStatus)
+	}
+	statusByRole := map[string]workload.TargetScalingStatus{}
+	for _, roleStatus := range updatedPolicy.Status.DisaggregatedStatus.Roles {
+		statusByRole[roleStatus.Name] = roleStatus
+	}
+	if statusByRole["prefill"].CurrentReplicas != 1 || statusByRole["decode"].CurrentReplicas != 2 {
+		t.Fatalf("expected status current replicas to reflect observed replicas before patch, got %#v", statusByRole)
+	}
+}
+
+func TestUpdateTargetRoleReplicas_UsesMinimalJSONPatch(t *testing.T) {
+	ns := "default"
+	baseMS := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
+		Spec: workload.ModelServingSpec{
+			Template: workload.ServingGroup{Roles: []workload.Role{
+				{
+					Name:          "prefill",
+					EntryTemplate: workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Image: "model:v1", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0.2")}}}}}},
+				},
+				{
+					Name:          "decode",
+					Replicas:      ptrInt32(2),
+					EntryTemplate: workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Image: "model:v1", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0.5")}}}}}},
+				},
+			}},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		desired        map[string]int32
+		wantPatchRoles map[string]int
+	}{
+		{
+			name:           "creates missing replicas and updates existing replicas",
+			desired:        map[string]int32{"prefill": 3, "decode": 4},
+			wantPatchRoles: map[string]int{"prefill": 0, "decode": 1},
+		},
+		{
+			name:    "skips patch when all replicas are unchanged",
+			desired: map[string]int32{"prefill": 1, "decode": 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modelServing := baseMS.DeepCopy()
+			fakeClient := clientfake.NewSimpleClientset(modelServing.DeepCopy())
+			ac := &AutoscaleController{
+				client:             fakeClient,
+				modelServingLister: workloadLister.NewModelServingLister(newModelServingIndexer(modelServing.DeepCopy())),
+			}
+			target := &workload.DisaggregatedTarget{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "test-ms"}}
+			if err := ac.updateTargetRoleReplicas(context.Background(), target, ns, tt.desired); err != nil {
+				t.Fatalf("updateTargetRoleReplicas error: %v", err)
+			}
+
+			var patchAction k8stesting.PatchAction
+			for _, action := range fakeClient.Actions() {
+				if action.GetVerb() == "patch" {
+					patchAction = action.(k8stesting.PatchAction)
+					break
+				}
+			}
+			if len(tt.wantPatchRoles) == 0 {
+				if patchAction != nil {
+					t.Fatalf("expected no patch action, got %s", string(patchAction.GetPatch()))
+				}
+				return
+			}
+			if patchAction == nil {
+				t.Fatal("expected patch action")
+			}
+			patchBody := string(patchAction.GetPatch())
+			forbiddenFields := []string{"cpu", "memory", "resources", "limits", "requests", "image", "containers", "entryTemplate"}
+			for _, field := range forbiddenFields {
+				if strings.Contains(patchBody, field) {
+					t.Fatalf("patch body contains forbidden field %q: %s", field, patchBody)
+				}
+			}
+			for _, roleIndex := range tt.wantPatchRoles {
+				if !strings.Contains(patchBody, fmt.Sprintf("/spec/template/roles/%d/replicas", roleIndex)) {
+					t.Fatalf("patch body does not update role index %d replicas: %s", roleIndex, patchBody)
+				}
+			}
+
+			var patchOps []jsonPatchOperation
+			if err := json.Unmarshal(patchAction.GetPatch(), &patchOps); err != nil {
+				t.Fatalf("failed to unmarshal patch body: %v", err)
+			}
+			if len(patchOps) != len(tt.wantPatchRoles)*2 {
+				t.Fatalf("expected test+add operations for %d roles, got %d operations: %#v", len(tt.wantPatchRoles), len(patchOps), patchOps)
+			}
+			seenRoles := map[string]bool{}
+			for i := 0; i < len(patchOps); i += 2 {
+				testOp := patchOps[i]
+				addOp := patchOps[i+1]
+				roleName, ok := testOp.Value.(string)
+				if !ok {
+					t.Fatalf("expected role-name test value to be string, got %#v", testOp)
+				}
+				wantIndex, ok := tt.wantPatchRoles[roleName]
+				if !ok {
+					t.Fatalf("unexpected role %q in patch operations: %#v", roleName, patchOps)
+				}
+				if testOp.Op != "test" || testOp.Path != fmt.Sprintf("/spec/template/roles/%d/name", wantIndex) {
+					t.Fatalf("expected operation %d to test %s role name, got %#v", i, roleName, testOp)
+				}
+				if addOp.Op != "add" || addOp.Path != fmt.Sprintf("/spec/template/roles/%d/replicas", wantIndex) {
+					t.Fatalf("expected operation %d to add %s replicas, got %#v", i+1, roleName, addOp)
+				}
+				seenRoles[roleName] = true
+			}
+			for roleName := range tt.wantPatchRoles {
+				if !seenRoles[roleName] {
+					t.Fatalf("expected patch operations for role %s, got %#v", roleName, patchOps)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckModelServingTargetRefChecksGroup(t *testing.T) {
+	tests := []struct {
+		name      string
+		targetRef corev1.ObjectReference
+		wantErr   bool
+	}{
+		{
+			name:      "empty apiVersion keeps backward compatibility",
+			targetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Name: "test-ms"},
+		},
+		{
+			name:      "model serving group is accepted",
+			targetRef: corev1.ObjectReference{APIVersion: workload.SchemeGroupVersion.String(), Kind: workload.ModelServingKind.Kind, Name: "test-ms"},
+		},
+		{
+			name:      "wrong group is rejected",
+			targetRef: corev1.ObjectReference{APIVersion: "networking.serving.volcano.sh/v1alpha1", Kind: workload.ModelServingKind.Kind, Name: "test-ms"},
+			wantErr:   true,
+		},
+		{
+			name:      "wrong kind is rejected",
+			targetRef: corev1.ObjectReference{APIVersion: workload.SchemeGroupVersion.String(), Kind: "Other", Name: "test-ms"},
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkModelServingTargetRef(tt.targetRef)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkModelServingTargetRef() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestUpdateDisaggregatedPolicyStatus_TargetFoundIndependentFromReady(t *testing.T) {
+	ns := "default"
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns, Generation: 1}}
+	fakeClient := clientfake.NewSimpleClientset(policy.DeepCopy())
+	ac := &AutoscaleController{client: fakeClient}
+
+	if err := ac.updateDisaggregatedPolicyStatus(context.Background(), policy, nil, fmt.Errorf("metric collection failed"), true); err != nil {
+		t.Fatalf("updateDisaggregatedPolicyStatus error: %v", err)
+	}
+	updated, err := fakeClient.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), "ap", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated policy error: %v", err)
+	}
+	ready := findPolicyCondition(updated.Status.Conditions, "Ready")
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ReconcileFailed" {
+		t.Fatalf("expected Ready=False/ReconcileFailed, got %#v", ready)
+	}
+	targetFound := findPolicyCondition(updated.Status.Conditions, "TargetFound")
+	if targetFound == nil || targetFound.Status != metav1.ConditionTrue || targetFound.Reason != "TargetFound" {
+		t.Fatalf("expected TargetFound=True when target was resolved despite reconcile error, got %#v", targetFound)
+	}
+
+	policy = &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap-missing", Namespace: ns, Generation: 1}}
+	fakeClient = clientfake.NewSimpleClientset(policy.DeepCopy())
+	ac = &AutoscaleController{client: fakeClient}
+	if err := ac.updateDisaggregatedPolicyStatus(context.Background(), policy, nil, fmt.Errorf("role decode not found"), false); err != nil {
+		t.Fatalf("updateDisaggregatedPolicyStatus missing target error: %v", err)
+	}
+	updated, err = fakeClient.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), "ap-missing", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated missing policy error: %v", err)
+	}
+	targetFound = findPolicyCondition(updated.Status.Conditions, "TargetFound")
+	if targetFound == nil || targetFound.Status != metav1.ConditionFalse || targetFound.Reason != "TargetInvalid" {
+		t.Fatalf("expected TargetFound=False/TargetInvalid when target or role resolution failed, got %#v", targetFound)
+	}
+}
+
+func findPolicyCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
 func TestFormatAutoscalerMapKey_IncludesNamespaceAndTarget(t *testing.T) {
 	targetRef := &corev1.ObjectReference{Name: "same-target", Kind: workload.ModelServingKind.Kind}
 
@@ -388,7 +709,6 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 				t.Fatalf("updateTargetReplicas error: %v", err)
 			}
 
-			// Find the patch action
 			var patchAction k8stesting.PatchAction
 			for _, action := range fakeClient.Actions() {
 				if action.GetVerb() == "patch" {
@@ -407,7 +727,6 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 			patchBody := string(patchAction.GetPatch())
 			t.Logf("Patch body: %s", patchBody)
 
-			// The patch body must NOT contain any resource-related fields
 			forbiddenFields := []string{"cpu", "memory", "resources", "limits", "requests", "image", "containers", "entryTemplate"}
 			for _, field := range forbiddenFields {
 				if strings.Contains(patchBody, field) {
@@ -415,7 +734,6 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 				}
 			}
 
-			// The patch body MUST contain the replicas value
 			if !strings.Contains(patchBody, fmt.Sprintf("%d", tt.newReplicas)) {
 				t.Errorf("patch body does not contain the expected replicas value %d.\nPatch: %s", tt.newReplicas, patchBody)
 			}

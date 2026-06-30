@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: podinfo-pd
+    app.kubernetes.io/version: 6.12.0
+    release: kube-prometheus-stack
+  name: podinfo-pd
+  namespace: autoscale-demo
+spec:
+  endpoints:
+    - interval: 15s
+      path: /metrics
+      port: http-metrics
+  namespaceSelector:
+    matchNames:
+      - autoscale-demo
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: podinfo-pd

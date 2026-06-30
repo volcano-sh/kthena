@@ -30,6 +30,7 @@ import (
 
 // Store is an interface for storing and retrieving data
 type Store interface {
+	// GetServingGroupByModelServing returns the sorted serving groups
 	GetServingGroupByModelServing(modelServingName types.NamespacedName) ([]ServingGroup, error)
 	GetServingGroupRevision(modelServingName types.NamespacedName, groupName string) (string, bool)
 	GetRunningPodNumByServingGroup(modelServingName types.NamespacedName, groupName string) (int, error)
