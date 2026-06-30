@@ -676,17 +676,24 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 	podInfo.DecrOnFlightRequests()
 }
 
+// AddOrUpdateModelServer adds or updates a model server in the datastore.
+// NOTE: This function takes ownership of the provided 'pods' set for performance reasons.
+// Callers MUST NOT mutate the 'pods' set after passing it to this function.
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
 	name := utils.GetNamespaceName(ms)
-	var modelServerObj *modelServer
-	if value, ok := s.modelServer.Load(name); !ok {
-		modelServerObj = newModelServer(ms)
-		// New object — no concurrent access yet, safe to write without lock
+
+	actual, loaded := s.modelServer.Load(name)
+	if !loaded {
+		newObj := newModelServer(ms)
 		if len(pods) != 0 {
-			modelServerObj.pods = pods
+			newObj.pods = pods
 		}
-	} else {
-		modelServerObj = value.(*modelServer)
+		actual, loaded = s.modelServer.LoadOrStore(name, newObj)
+	}
+
+	modelServerObj := actual.(*modelServer)
+
+	if loaded {
 		// Existing object — concurrent readers may access modelServer and pods,
 		// so we must hold the lock to prevent data races.
 		modelServerObj.mutex.Lock()
@@ -697,7 +704,6 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		}
 		modelServerObj.mutex.Unlock()
 	}
-	s.modelServer.Store(name, modelServerObj)
 	return nil
 }
 
@@ -834,36 +840,38 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		}
 	}
 
-	if value, ok := s.pods.Load(podName); ok {
-		// Update existing pod in place — preserve runtime metrics and models.
-		oldPodInfo := value.(*PodInfo)
-		oldModelServers := oldPodInfo.GetModelServers()
-		// Handle the case where the pod no longer belongs to some model servers
-		oldPodLabels := oldPodInfo.GetPodLabels()
-		for msName := range oldModelServers.Difference(newModelServers) {
-			if value, ok := s.modelServer.Load(msName); ok {
-				ms := value.(*modelServer)
-				ms.deletePod(podName)
-				// Remove from PDGroup categorizations
-				ms.removePodFromPDGroups(podName, oldPodLabels)
-			}
+	actual, loaded := s.pods.Load(podName)
+	if !loaded {
+		newPodInfo := &PodInfo{
+			Pod:         pod,
+			engine:      engine,
+			modelServer: newModelServers,
+			models:      sets.New[string](),
 		}
-
-		oldPodInfo.UpdatePod(pod, engine, newModelServers)
-		return nil
+		actual, loaded = s.pods.LoadOrStore(podName, newPodInfo)
+		if !loaded {
+			// We were the one that successfully stored the new pod
+			s.updatePodMetrics(newPodInfo)
+			s.updatePodModels(newPodInfo)
+			return nil
+		}
 	}
 
-	// New pod — create PodInfo and fetch initial metrics.
-	newPodInfo := &PodInfo{
-		Pod:         pod,
-		engine:      engine,
-		modelServer: newModelServers,
-		models:      sets.New[string](),
+	// Update existing pod in place — preserve runtime metrics and models.
+	oldPodInfo := actual.(*PodInfo)
+	oldModelServers := oldPodInfo.GetModelServers()
+	// Handle the case where the pod no longer belongs to some model servers
+	oldPodLabels := oldPodInfo.GetPodLabels()
+	for msName := range oldModelServers.Difference(newModelServers) {
+		if value, ok := s.modelServer.Load(msName); ok {
+			ms := value.(*modelServer)
+			ms.deletePod(podName)
+			// Remove from PDGroup categorizations
+			ms.removePodFromPDGroups(podName, oldPodLabels)
+		}
 	}
-	s.pods.Store(podName, newPodInfo)
-	s.updatePodMetrics(newPodInfo)
-	s.updatePodModels(newPodInfo)
 
+	oldPodInfo.UpdatePod(pod, engine, newModelServers)
 	return nil
 }
 

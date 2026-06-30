@@ -2336,3 +2336,113 @@ func TestStoreRunBoundedConcurrency(t *testing.T) {
 	assert.Greater(t, maxInFlight.Load(), int32(1), "expected at least some parallelism in scrapes")
 	assert.LessOrEqual(t, maxInFlight.Load(), int32(maxConcurrentPodScrapes), "in-flight requests should never exceed the semaphore cap")
 }
+
+func TestStoreAddOrUpdateModelServer_ConcurrentAccess(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+	}
+
+	msName := types.NamespacedName{Namespace: "default", Name: "concurrent-model1"}
+	msInitial := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: msName.Namespace,
+			Name:      msName.Name,
+		},
+	}
+	s.AddOrUpdateModelServer(msInitial, nil)
+
+	// Simulate state mutation that would be lost in a TOCTOU race
+	val, _ := s.modelServer.Load(msName)
+	msObj := val.(*modelServer)
+	msObj.mutex.Lock()
+	msObj.pdGroups["decode"] = &PDGroupPods{}
+	msObj.mutex.Unlock()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 100)
+	// Simulate many concurrent goroutines trying to add the same ModelServer
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ms := &aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "concurrent-model1",
+				},
+			}
+			pods := sets.New[types.NamespacedName](types.NamespacedName{Namespace: "default", Name: "pod1"})
+			errCh <- s.AddOrUpdateModelServer(ms, pods)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		assert.NoError(t, err)
+	}
+
+	// Verify the model server is safely in the datastore and no panic occurred
+	value, ok := s.modelServer.Load(msName)
+	assert.True(t, ok)
+	msInfo := value.(*modelServer)
+	assert.NotNil(t, msInfo)
+	assert.True(t, msInfo.pods.Contains(types.NamespacedName{Namespace: "default", Name: "pod1"}))
+	assert.NotNil(t, msInfo.pdGroups["decode"], "Internal state (pdGroups) was lost due to TOCTOU overwrite!")
+}
+
+func TestStoreAddOrUpdatePod_ConcurrentAccess(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+	}
+
+	podName := types.NamespacedName{Namespace: "default", Name: "concurrent-pod1"}
+	podInitial := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: podName.Namespace,
+			Name:      podName.Name,
+		},
+	}
+	s.AddOrUpdatePod(podInitial, nil)
+
+	// Simulate state mutation that would be lost in a TOCTOU race
+	val, _ := s.pods.Load(podName)
+	podInfoInit := val.(*PodInfo)
+	podInfoInit.IncrOnFlightRequests() // Seed a non-zero runtime field
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 100)
+	// Simulate many concurrent goroutines trying to add the same Pod
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "concurrent-pod1",
+				},
+			}
+			ms := &aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "model1",
+				},
+			}
+			errCh <- s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		assert.NoError(t, err)
+	}
+
+	// Verify the pod is safely in the datastore and no panic occurred
+	value, ok := s.pods.Load(podName)
+	assert.True(t, ok)
+	podInfo := value.(*PodInfo)
+	assert.NotNil(t, podInfo)
+	assert.True(t, podInfo.modelServer.Contains(types.NamespacedName{Namespace: "default", Name: "model1"}))
+	assert.Equal(t, int64(1), podInfo.GetOnFlightRequestNum(), "Runtime state (IncrOnFlightRequests) was lost due to TOCTOU overwrite!")
+}
