@@ -24,7 +24,7 @@ spec:
     spec:
       containers:
       - name: mocker
-        image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+        image: ghcr.io/stleox/dynamo-mocker-sglang:v2026-04-23
         imagePullPolicy: IfNotPresent
         env:
         - name: MOCKER_MODELS
@@ -46,13 +46,13 @@ spec:
           httpGet:
             path: /v1/models
             port: 30000
-          initialDelaySeconds: 120
+          initialDelaySeconds: 10
           periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /v1/models
             port: 30000
-          initialDelaySeconds: 180
+          initialDelaySeconds: 15
           periodSeconds: 15
 ---
 # 同构 Mocker 的 Service（供 Router 使用）

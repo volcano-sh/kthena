@@ -12,16 +12,16 @@
 │  │   AIPerf     │      │  Kthena Router   │      │  Dynamo Mocker   │   │
 │  │  (Load Gen)  │─────►│   (Under Test)   │─────►│  (Mock Backend)  │   │
 │  │              │      │                  │      │                  │   │
-│  │ • QPS 控制   │      │ • 路由决策         │      │ • TTFT 模拟      │   │
-│  │ • 并发控制    │      │ • 连接池管理       │      │ • TPOT 模拟      │   │
-│  │ • 到达分布    │      │ • 负载均衡         │      │ • KV Cache 模拟  │   │
-│  │ • 追踪回放    │      │ • 故障转移         │      │ • Prometheus 指标│   │
+│  │ • QPS 控制   │      │ • 路由决策       │      │ • TTFT 模拟      │   │
+│  │ • 并发控制   │      │ • 连接池管理     │      │ • TPOT 模拟      │   │
+│  │ • 到达分布   │      │ • 负载均衡       │      │ • KV Cache 模拟  │   │
+│  │ • 追踪回放   │      │ • 故障转移       │      │ • Prometheus 指标│   │
 │  └──────────────┘      └──────────────────┘      └──────────────────┘   │
 │         │                      │                         │              │
 │         └──────────────────────┼─────────────────────────┘              │
 │                                │                                        │
 │                         Metrics Collector                               │
-│                    (AIPerf 内置 + Router Prometheus)                     │
+│                    (AIPerf 内置 + Router Prometheus)                    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -29,9 +29,40 @@
 
 | 组件 | 选择理由 |
 |------|----------|
-| **AIPerf** | NVIDIA 官方工具，支持多种到达模式（Poisson/Gamma/Constant）、Credit-Based 流控、实时 TUI Dashboard、详细的 TTFT/TPOT 指标 |
-| **Dynamo Mocker** | GPU-free 的高保真 LLM 推理模拟，支持 vLLM/SGLang 两种引擎模式、KV Cache 模拟、Prefix Caching、可配置延迟模型 |
-| **K8s 部署** | 复用 kthena 现有 Helm Charts 和 CRD 定义，与 E2E 测试基础设施一致 |
+| AIPerf | NVIDIA 官方工具，支持多种到达模式（Poisson/Gamma/Constant）、Credit-Based 流控、实时 TUI Dashboard、详细的 TTFT/TPOT 指标 |
+| Dynamo Mocker | GPU-free 的高保真 LLM 推理模拟，支持 vLLM/SGLang 两种引擎模式、KV Cache 模拟、Prefix Caching、可配置延迟模型 |
+| K8s 部署 | 复用 kthena 现有 Helm Charts 和 CRD 定义，与 E2E 测试基础设施一致 |
+
+## 当前模块化结构
+
+为了让当前的 `ab_test` 更容易 review，并逐步对齐 proposal 中的分层设计，脚本已经拆为如下结构：
+
+```
+router-ab-test/
+├── README.md
+├── k8s/
+│   ├── mocker-deployment.yaml
+│   ├── modelroute.yaml
+│   ├── modelserver.yaml
+│   ├── router-config-least-latency.yaml
+│   ├── router-config-least-request.yaml
+│   └── router-config-random.yaml
+├── scenarios/
+│   ├── smoke-test-s2.yaml
+│   ├── smoke-test-s7.yaml
+│   └── smoke-test-s8.yaml
+├── scripts/
+│   ├── ab_test.py                      # CLI 入口，兼容原有调用方式
+│   └── router_ab_test/
+│       ├── __init__.py                 # 对外 re-export 公共符号
+│       ├── models.py                   # ScenarioConfig / BenchmarkResult
+│       ├── kubernetes.py               # K8sManager：apply、rollout、probe、port-forward
+│       ├── load_generator.py           # AIPerfRunner：scenario -> aiperf CLI
+│       ├── orchestrator.py             # ABTestOrchestrator：执行 A/B 流程
+│       └── reporter.py                 # ResultReporter：compare / write / print report
+└── tests/
+    └── test_ab_test.py                 # 回归测试与 CLI/映射测试
+```
 
 ## 快速开始
 
@@ -46,7 +77,6 @@
 ### 1. 创建 Kind 集群并部署 Kthena
 
 ```bash
-# 使用 kthena 提供的脚本创建本地集群
 cd /path/to/kthena
 ./hack/local-up-kthena.sh
 ```
@@ -55,66 +85,40 @@ cd /path/to/kthena
 
 ```bash
 cd benchmark/router-ab-test
-
-# 部署 4 个 homogeneous mocker pods (TTFT=50ms, TPOT=15ms)
 kubectl apply -f k8s/mocker-deployment.yaml
-
-# 等待 pods 就绪
 kubectl wait --for=condition=ready pod -l app=mocker-llm --timeout=120s
 ```
 
-### 3. 部署 Kthena Router
+### 3. 部署 Kthena Router 相关模型资源
 
 ```bash
-# 部署 ModelServer + ModelRoute
 kubectl apply -f k8s/modelserver.yaml
 kubectl apply -f k8s/modelroute.yaml
 ```
 
-### 4. 运行 A/B 测试
+### 4. 安装 AIPerf
 
 ```bash
-# 安装 AIPerf
 pip install aiperf
+```
 
-# 运行 A/B 测试（比较 random vs least-latency 路由器调度配置）
+### 5. 运行 A/B 测试
+
+```bash
 python scripts/ab_test.py \
-    --scenario scenarios/smoke-test-s2.yaml \
-    --router-config-a k8s/router-config-random.yaml \
-    --router-config-b k8s/router-config-least-latency.yaml \
-    --output results/
-```
-
-## 目录结构
-
-```
-router-ab-test/
-├── README.md                    # 本文档
-├── k8s/                         # K8s 资源定义
-│   ├── mocker-deployment.yaml   # Dynamo Mocker Deployment
-│   ├── mocker-service.yaml      # Mocker Service
-│   ├── modelserver.yaml         # Kthena ModelServer CRD
-│   ├── modelroute.yaml           # Kthena ModelRoute CRD (routes to mocker ModelServer)
-│   ├── router-config-*.yaml      # Router scheduler ConfigMap（不同策略）
-│   └── aiperf-job.yaml          # AIPerf K8s Job 模板
-├── scenarios/                   # 测试场景配置
-│   ├── smoke-test-s1.yaml       # S1: Throughput Baseline
-│   ├── smoke-test-s2.yaml       # S2: Latency vs QPS
-│   └── ...
-├── scripts/                     # 测试脚本
-│   ├── ab_test.py               # A/B 测试编排器
-│   ├── collect_metrics.py       # 指标收集
-│   └── generate_report.py       # 报告生成
-└── results/                     # 测试结果输出目录
+  --scenario scenarios/smoke-test-s2.yaml \
+  --router-config-a k8s/router-config-random.yaml \
+  --router-config-b k8s/router-config-least-latency.yaml \
+  --output results/
 ```
 
 ## 场景配置
 
-场景配置遵循三明治模型，分为三部分，以 S2 为例：
+场景配置遵循三明治模型，分为三部分。以 `smoke-test-s2.yaml` 为例：
 
 ```yaml
-name: "latency-vs-qps-50qps"
-description: "50 QPS 下的延迟基线测试"
+name: "smoke-test-s2-latency-vs-qps"
+description: "s2 scenario: routing latency under different QPS"
 
 # 左侧：用户流量（AIPerf 配置）
 load:
@@ -148,27 +152,45 @@ backends:
   responseTokens: 128
   errorRate: 0.0
 
-# 中间：路由策略
+# 被测：路由策略
 routing:
   strategy: "least-latency"
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
 ```
 
 ## A/B 测试流程
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    A/B Test Orchestrator                         │
-├─────────────────────────────────────────────────────────────────┤
-│  1. 部署 Mock Backend (如果尚未部署)                             │
-│  2. 应用 Config A (如 random)                               │
-│  3. 等待 Router 重新加载配置                                     │
-│  4. 运行 AIPerf 负载测试 → 收集 Metrics A                       │
-│  5. 应用 Config B (如 least-latency)                             │
-│  6. 等待 Router 重新加载配置                                     │
-│  7. 运行 AIPerf 负载测试 → 收集 Metrics B                       │
-│  8. 生成对比报告                                                 │
-└─────────────────────────────────────────────────────────────────┘
+1. Apply router config A
+2. Restart and wait for router rollout
+3. Wait for backend deployment ready
+4. Start kubectl port-forward to router service
+5. Probe /v1/chat/completions until the route is really warm
+6. Run AIPerf and collect result A
+7. Apply router config B
+8. Repeat warmup + benchmark and collect result B
+9. Compare metrics and write report_<scenario>.json
+10. Exit non-zero if report contains regression
 ```
+
+## 输出结果
+
+结果会写入 `--output` 指定目录。当前输出包括：
+
+- `runs/config_a/` 与 `runs/config_b/`
+  - AIPerf 原始输出目录
+- `report_<scenario>.json`
+  - A/B 对比结果
+
+`reporter.py` 当前负责：
+- `compare()`：按指标计算 delta 与 regression
+- `build_report()`：组装统一 JSON 结构
+- `write_report()`：落盘 JSON
+- `print_report()`：打印终端摘要
 
 ## 测试场景
 
@@ -176,7 +198,7 @@ routing:
 
 | # | 场景 | 验证目标 | 关键参数 |
 |---|------|----------|----------|
-| S1 | Throughput Baseline | 最大可持续吞吐量 | 逐步增加 QPS 直到 50% 错误率 |
+| S1 | Throughput Baseline | 最大可持续吞吐量 | 逐步增加 QPS |
 | S2 | Latency vs QPS | 不同负载下的路由开销 | QPS: 10, 50, 100, 200, 500 |
 | S3 | Concurrency Scaling | 连接池行为 | Connections: 10, 100, 500, 1000 |
 | S4 | Backend Count Impact | 调度器随 pod 数扩展 | Backends: 1, 4, 16, 32 |
@@ -185,29 +207,9 @@ routing:
 | S7 | Backend Latency Variance | 异构后端调度行为 | 3 pods: TTFT 10/100/500ms |
 | S8 | Routing Strategy Comparison | 路由策略开销对比 | random vs least-latency vs least-request |
 
-## 指标说明
-
-### AIPerf 输出指标
-
-| 指标 | 说明 |
-|------|------|
-| Time to First Token (TTFT) | 从发送请求到收到第一个 token 的时间 |
-| Time Per Output Token (TPOT) | 相邻两个 output token 之间的间隔 |
-| Request Latency | 请求总延迟 |
-| Output Token Throughput | 每秒输出 token 数 |
-| Request Throughput | 每秒完成请求数 |
-
-### Router Prometheus 指标
-
-| 指标 | 说明 |
-|------|------|
-| `scheduler_plugin_duration_ms` | 调度插件执行耗时 |
-| `active_upstream_requests` | 活跃上游请求数 |
-| `fairness_queue_depth` | 公平队列深度 |
-
 ## 参考文档
 
-- [Kthena Router Benchmark Proposal](../../docs/proposal/router-benchmark.md)
+- [Kthena Router Benchmark Proposal](../../docs/proposal/kthena-router-benchmark.md)
 - [AIPerf Documentation](https://github.com/ai-dynamo/aiperf)
 - [Dynamo Mocker Documentation](https://github.com/ai-dynamo/dynamo/blob/main/docs/mocker/mocker.md)
 - [Kthena Architecture](../../docs/kthena/docs/architecture/)
