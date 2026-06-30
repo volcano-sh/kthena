@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 """
 A/B Test Orchestrator for Kthena Router Benchmarks.
 
@@ -31,11 +31,9 @@ Usage:
 import argparse
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -77,6 +75,7 @@ class K8sManager:
     ROUTER_DEPLOYMENT = "kthena-router"
     ROUTER_SVC_PORT = 80
     DEFAULT_LOCAL_PORT = 8080
+    MOCKER_DEPLOYMENT = "mocker-llm"
 
     def __init__(self, namespace: str = "default", local_port: int = DEFAULT_LOCAL_PORT):
         self.namespace = namespace
@@ -91,6 +90,8 @@ class K8sManager:
             text=True,
         )
 
+        time.sleep(5)
+
     def delete(self, manifest_path: str) -> None:
         subprocess.run(
             ["kubectl", "delete", "-f", manifest_path, "--ignore-not-found"],
@@ -99,8 +100,8 @@ class K8sManager:
             text=True,
         )
 
-    def wait_for_router_route_ready(
-        self, mocker_model_name: str, endpoint: str, timeout: int = 300
+    def wait_for_router_ready(
+            self, mocker_model_name: str, endpoint: str, timeout: int = 300
     ) -> None:
         """Probe the router to confirm the route table has the given model loaded."""
         print(f"  Probing router for model={mocker_model_name} at {endpoint}...")
@@ -112,9 +113,9 @@ class K8sManager:
                      "-X", "POST", f"http://{endpoint}/v1/chat/completions",
                      "-H", "Content-Type: application/json",
                      "-d", (
-                         '{"model":"' + mocker_model_name + '",'
-                         '"messages":[{"role":"user","content":"ping"}],'
-                         '"max_tokens":1}'
+                             '{"model":"' + mocker_model_name + '",'
+                                                                '"messages":[{"role":"user","content":"ping"}],'
+                                                                '"max_tokens":1}'
                      )],
                     capture_output=True, text=True, timeout=5,
                 )
@@ -161,39 +162,26 @@ class K8sManager:
             text=True,
         )
 
-        # Give the router a moment to sync with the new config
-        time.sleep(5)
+    def wait_for_backend_ready(self):
+        print(f"  Waiting for mocker-llm to be ready...")
+        subprocess.run(
+            [
+                "kubectl", "rollout", "status",
+                f"deployment/{self.MOCKER_DEPLOYMENT}",
+                f"--timeout=120s",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def get_router_endpoint(self) -> str:
         """Return a reachable <ip>:<port> for the router Service.
 
-        Primary: node's InternalIP + the Service's NodePort.
-        Fallback: starts a kubectl port-forward to the Service ClusterIP.
+        Uses kubectl port-forward directly (NodePort is unreliable in Kind cluster).
         """
-        # ── Primary: NodePort ──
-        node_ip = subprocess.run(
-            [
-                "kubectl", "get", "nodes",
-                "-o", r"jsonpath={.items[0].status.addresses[?(@.type=='InternalIP')].address}",
-            ],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-
-        node_port = subprocess.run(
-            [
-                "kubectl", "get", "svc", self.ROUTER_DEPLOYMENT,
-                "-n", self.ROUTER_NAMESPACE,
-                "-o", "jsonpath={.spec.ports[0].nodePort}",
-            ],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-
-        if node_ip and node_port:
-            return f"{node_ip}:{node_port}"
-
-        # ── Fallback: kubectl port-forward ──
         local = f"localhost:{self.local_port}"
-        print(f"  NodePort unavailable — starting port-forward ({local} → "
+        print(f"  Starting port-forward ({local} → "
               f"svc/{self.ROUTER_DEPLOYMENT}:{self.ROUTER_SVC_PORT})")
 
         self._pf_proc = subprocess.Popen(
@@ -203,8 +191,9 @@ class K8sManager:
                 f"{self.local_port}:{self.ROUTER_SVC_PORT}",
                 "-n", self.ROUTER_NAMESPACE,
             ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
 
         # Wait for port-forward to be ready (or die early).
@@ -212,13 +201,43 @@ class K8sManager:
         while time.monotonic() < deadline:
             ret = self._pf_proc.poll()
             if ret is not None:
-                raise RuntimeError(
-                    f"kubectl port-forward exited early with code {ret}"
-                )
-            time.sleep(0.5)
+                # Process exited — read stderr for error details
+                _, stderr = self._pf_proc.communicate(timeout=5)
+                error_msg = stderr.strip() if stderr else f"exit code {ret}"
+                raise RuntimeError(f"kubectl port-forward failed: {error_msg}")
 
-        print(f"  Port-forward ready: {local}")
-        return local
+            # Check if port is actually accepting connections
+            try:
+                import socket
+                with socket.create_connection(("localhost", self.local_port), timeout=1):
+                    pass
+                print(f"  Port-forward ready: {local}")
+                return local
+            except (socket.error, OSError):
+                # Port not ready yet, keep waiting
+                time.sleep(0.5)
+
+        # Timeout — port-forward still running but port not reachable
+        if self._pf_proc.poll() is None:
+            # Try to get any stderr output
+            stderr = ""
+            try:
+                import select
+                if self._pf_proc.stderr:
+                    ready, _, _ = select.select([self._pf_proc.stderr], [], [], 0.1)
+                    if ready:
+                        stderr = self._pf_proc.stderr.read()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Port-forward timeout after 15s — port {local} not reachable. "
+                f"stderr: {stderr.strip() if stderr else '<none>'}"
+            )
+        else:
+            _, stderr = self._pf_proc.communicate(timeout=5)
+            raise RuntimeError(
+                f"Port-forward exited unexpectedly: {stderr.strip() if stderr else 'unknown error'}"
+            )
 
     def cleanup_port_forward(self) -> None:
         """Stop the port-forward process if one was started."""
@@ -256,10 +275,10 @@ class AIPerfRunner:
         return value
 
     def build_aiperf_cmd(
-        self,
-        config_name: str,
-        scenario: "ScenarioConfig",
-        router_endpoint: str,
+            self,
+            config_name: str,
+            scenario: "ScenarioConfig",
+            router_endpoint: str,
     ) -> List[str]:
         """Build the aiperf profile command from a ScenarioConfig.
 
@@ -272,7 +291,7 @@ class AIPerfRunner:
         concurrency = load.get("concurrency", {})
 
         # Deterministic seed from scenario name (MD5 for cross-run stability).
-        seed = int(hashlib.md5(scenario.name.encode()).hexdigest()[:8], 16) % (2**31)
+        seed = int(hashlib.md5(scenario.name.encode()).hexdigest()[:8], 16) % (2 ** 31)
 
         cmd = [
             "aiperf", "profile",
@@ -337,11 +356,11 @@ class AIPerfRunner:
         return cmd
 
     def run(
-        self,
-        config_name: str,
-        scenario: "ScenarioConfig",
-        router_endpoint: str,
-        extra_args: Optional[list] = None,
+            self,
+            config_name: str,
+            scenario: "ScenarioConfig",
+            router_endpoint: str,
+            extra_args: Optional[list] = None,
     ) -> BenchmarkResult:
         cmd = self.build_aiperf_cmd(config_name, scenario, router_endpoint)
 
@@ -394,13 +413,13 @@ class ABTestOrchestrator:
     """Orchestrates A/B tests comparing two router scheduler configurations."""
 
     def __init__(
-        self,
-        scenario_path: str,
-        router_config_a_path: str,
-        router_config_b_path: str,
-        output_dir: str,
-        local_port: int = K8sManager.DEFAULT_LOCAL_PORT,
-        mocker_manifest: Optional[str] = None,
+            self,
+            scenario_path: str,
+            router_config_a_path: str,
+            router_config_b_path: str,
+            output_dir: str,
+            local_port: int = K8sManager.DEFAULT_LOCAL_PORT,
+            mocker_manifest: Optional[str] = None,
     ):
         self.scenario = ScenarioConfig.from_yaml(scenario_path)
         self.router_config_a_path = Path(router_config_a_path)
@@ -416,11 +435,15 @@ class ABTestOrchestrator:
     def run_single_config(self, config_path: str, config_name: str) -> BenchmarkResult:
         self.k8s.apply_router_config(config_path)
 
+        self.k8s.wait_for_backend_ready()
+
+        # get forwarded endpoint
         router_endpoint = self.k8s.get_router_endpoint()
 
-        # Wait until router's route table is warm before launching AIPerf
-        self.k8s.wait_for_router_route_ready("Qwen/Qwen3-0.6B", router_endpoint, timeout=300)
+        # Wait until router's route table is warm
+        self.k8s.wait_for_router_ready("Qwen/Qwen3-0.6B", router_endpoint, timeout=300)
 
+        #  launching AIPerf
         return self.runner.run(
             config_name=config_name,
             scenario=self.scenario,
@@ -464,17 +487,26 @@ class ABTestOrchestrator:
     def _compare(self, a: BenchmarkResult, b: BenchmarkResult) -> Dict[str, Any]:
         comparison = {}
 
-        for metric in ["ttft_avg_ms", "latency_avg_ms", "throughput_rps"]:
+        metric_specs = {
+            "ttft_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
+            "latency_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
+            "throughput_rps": {"higher_is_better": True, "regression_threshold": 10},
+        }
+
+        for metric, spec in metric_specs.items():
             val_a = a.metrics.get(metric)
             val_b = b.metrics.get(metric)
 
             if val_a is not None and val_b is not None and val_a != 0:
-                delta_pct = ((val_b - val_a) / val_a) * 100
+                if spec["higher_is_better"]:
+                    delta_pct = ((val_b - val_a) / val_a) * 100
+                else:
+                    delta_pct = ((val_a - val_b) / val_a) * 100
                 comparison[metric] = {
                     "config_a": val_a,
                     "config_b": val_b,
                     "delta_pct": round(delta_pct, 2),
-                    "regression": delta_pct > 10 if "throughput" in metric else delta_pct > 5,
+                    "regression": delta_pct < -spec["regression_threshold"],
                 }
 
         return comparison
@@ -493,7 +525,7 @@ class ABTestOrchestrator:
         for k, v in report["config_b"]["metrics"].items():
             print(f"  {k}: {v}")
 
-        print("\nComparison (B vs A):")
+        print("\nComparison (B vs A, positive delta means improvement):")
         for metric, data in report["comparison"].items():
             status = "REGRESSION" if data["regression"] else "OK"
             print(f"  {metric}: {data['delta_pct']:+.2f}% [{status}]")
