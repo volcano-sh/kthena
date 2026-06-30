@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the design and implementation of the fairness scheduling system in Kthena's inference router. The system ensures equitable resource allocation among users by prioritizing requests based on historical token usage, preventing any single user from monopolizing inference resources.
+This document describes the design and implementation of the fairness scheduling system in Kthena's inference router. Fairness scheduling is the **default priority strategy** of the router's per-model request priority queue; the queue can alternatively run the session-boost strategy described in the [Session Boost Strategy proposal](./session-boost-strategy.md). The two strategies are mutually exclusive and share the same queue machinery. The fairness strategy ensures equitable resource allocation among users by prioritizing requests based on historical token usage, preventing any single user from monopolizing inference resources.
 
 ## Background
 
@@ -80,7 +80,7 @@ type TokenTracker interface {
 
 The router orchestrates fairness scheduling through:
 
-- **Feature Flag**: `ENABLE_FAIRNESS_SCHEDULING` environment variable
+- **Feature Flag**: `ENABLE_FAIRNESS_SCHEDULING` environment variable (mutually exclusive with session boost)
 - **Request Flow**: Authentication → Rate Limiting → Fairness Queue → Load Balancing
 - **Token Recording**: Automatic token usage tracking after request completion
 

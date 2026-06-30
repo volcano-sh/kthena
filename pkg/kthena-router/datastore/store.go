@@ -242,6 +242,14 @@ type Store interface {
 	// Enqueue adds a request to the fair queue
 	Enqueue(*Request) error
 
+	// MarkSessionRequestCompleted records that a request with the given session ID
+	// has completed, enabling priority boosting for follow-up requests in the same session.
+	MarkSessionRequestCompleted(modelName, sessionID string)
+
+	// GetSessionIDHeader returns the configured HTTP header name used to identify
+	// conversation sessions. Returns empty string if session boost is not enabled.
+	GetSessionIDHeader() string
+
 	// GetRequestWaitingQueueStats returns per-model queue lengths
 	GetRequestWaitingQueueStats() []QueueStat
 
@@ -411,7 +419,11 @@ func (s *store) getPodRuntimeInspector() PodRuntimeInspector {
 	return s.podRuntimeInspector
 }
 
-// createFairnessQueueConfig reads fairness queue configuration from environment variables.
+// createFairnessQueueConfig reads the request queue configuration from
+// environment variables. This includes the user-fairness strategy settings
+// (FAIRNESS_*) and the independent session-boost strategy (SESSION_BOOST_*).
+// Fairness scheduling and session boost are mutually exclusive: enable one or
+// the other, not both.
 func createFairnessQueueConfig() FairnessQueueConfig {
 	cfg := DefaultFairnessQueueConfig()
 
@@ -463,7 +475,70 @@ func createFairnessQueueConfig() FairnessQueueConfig {
 		}
 	}
 
+	applySessionBoostConfigFromEnv(&cfg)
+
 	return cfg
+}
+
+// applySessionBoostConfigFromEnv enables session-boost mode on the queue config
+// when ENABLE_SESSION_BOOST=true and reads the session-boost specific options
+// from the environment. Session boost is an independent scheduling strategy: it
+// is mutually exclusive with user fairness. When both are enabled, fairness is
+// ignored in favor of session boost and a warning is logged.
+func applySessionBoostConfigFromEnv(cfg *FairnessQueueConfig) {
+	v := os.Getenv("ENABLE_SESSION_BOOST")
+	if v == "" {
+		return
+	}
+	enabled, err := strconv.ParseBool(v)
+	if err != nil || !enabled {
+		return
+	}
+
+	if isFairnessSchedulingEnabled() {
+		klog.Warningf("ENABLE_SESSION_BOOST=true and ENABLE_FAIRNESS_SCHEDULING=true are mutually exclusive; using session boost")
+	}
+
+	cfg.SessionBoostEnabled = true
+
+	if v := os.Getenv("SESSION_BOOST_HEADER"); v != "" {
+		cfg.SessionIDHeader = v
+	}
+
+	if v := os.Getenv("SESSION_BOOST_MAX_SESSIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.SessionBoostMaxSessions = n
+		} else {
+			klog.Warningf("Invalid SESSION_BOOST_MAX_SESSIONS: %q, using default %d", v, cfg.SessionBoostMaxSessions)
+		}
+	}
+
+	if v := os.Getenv("SESSION_BOOST_INFLIGHT_PER_POD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.InflightPerPod = n
+		} else {
+			klog.Warningf("Invalid SESSION_BOOST_INFLIGHT_PER_POD: %q, using default %d", v, cfg.InflightPerPod)
+		}
+	}
+
+	if v := os.Getenv("SESSION_BOOST_GRACE_PERIOD"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			cfg.SessionBoostGracePeriod = d
+		} else {
+			klog.Warningf("Invalid SESSION_BOOST_GRACE_PERIOD: %q, using default %v", v, cfg.SessionBoostGracePeriod)
+		}
+	}
+}
+
+// isFairnessSchedulingEnabled reports whether user-fairness scheduling is enabled
+// via the ENABLE_FAIRNESS_SCHEDULING environment variable.
+func isFairnessSchedulingEnabled() bool {
+	if v := os.Getenv("ENABLE_FAIRNESS_SCHEDULING"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			return enabled
+		}
+	}
+	return false
 }
 
 func isValidFairnessWeight(value float64) bool {
@@ -583,7 +658,17 @@ func (s *store) Enqueue(req *Request) error {
 	if ok {
 		queue, _ = val.(*RequestPriorityQueue)
 	} else {
-		newQueue := NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, s.tokenTracker)
+		var newQueue *RequestPriorityQueue
+		if s.fairnessQueueConfig.SessionBoostEnabled {
+			// Session-boost mode: gate dequeue on backend capacity. The total
+			// inflight limit is SESSION_BOOST_INFLIGHT_PER_POD multiplied by the
+			// number of backend pods serving the model.
+			checker := s.makeBackendWaitingChecker(modelName)
+			newQueue = NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, s.tokenTracker, checker)
+			newQueue.podCounter = s.makeBackendPodCounter(modelName)
+		} else {
+			newQueue = NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, s.tokenTracker, nil)
+		}
 		val, ok = s.requestWaitingQueue.LoadOrStore(modelName, newQueue)
 		if !ok {
 			queueCtx := s.rootCtx
@@ -601,6 +686,85 @@ func (s *store) Enqueue(req *Request) error {
 		return err
 	}
 	return nil
+}
+
+// makeBackendWaitingChecker returns a BackendWaitingChecker function that checks
+// whether any backend pod serving the given model has an empty waiting queue
+// (RequestWaitingNum == 0). Returns true when at least one such pod has capacity,
+// allowing the session boost queue to dequeue a request.
+func (s *store) makeBackendWaitingChecker(modelName string) BackendWaitingChecker {
+	return func() bool {
+		hasCapacity := false
+		podCount := 0
+		var totalWaiting float64
+		s.pods.Range(func(key, value any) bool {
+			podInfo, ok := value.(*PodInfo)
+			if !ok || podInfo == nil {
+				return true
+			}
+			if !podInfo.Contains(modelName) {
+				return true
+			}
+			podCount++
+			waitingNum := podInfo.GetRequestWaitingNum()
+			totalWaiting += waitingNum
+			if waitingNum == 0 {
+				hasCapacity = true
+				return false // stop iterating, found a pod with capacity
+			}
+			return true
+		})
+		// If no pods are registered yet, allow dequeue to avoid deadlock
+		if podCount == 0 {
+			return true
+		}
+		if !hasCapacity {
+			klog.Infof("[BackendWaitingChecker] model %s: all %d pods busy, totalWaiting=%.0f", modelName, podCount, totalWaiting)
+		}
+		return hasCapacity
+	}
+}
+
+// makeBackendPodCounter returns a PodCounter that counts how many backend pods
+// serve the given model. Session-boost mode uses it to scale the total inflight
+// limit (InflightPerPod * podCount).
+func (s *store) makeBackendPodCounter(modelName string) PodCounter {
+	return func() int {
+		podCount := 0
+		s.pods.Range(func(key, value any) bool {
+			podInfo, ok := value.(*PodInfo)
+			if !ok || podInfo == nil {
+				return true
+			}
+			if podInfo.Contains(modelName) {
+				podCount++
+			}
+			return true
+		})
+		return podCount
+	}
+}
+
+func (s *store) MarkSessionRequestCompleted(modelName, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	// Mark completion on the model's fair queue. Only effective when the queue
+	// is running in session-boost mode; otherwise it is a no-op.
+	if val, ok := s.requestWaitingQueue.Load(modelName); ok {
+		if queue, _ := val.(*RequestPriorityQueue); queue != nil {
+			queue.MarkSessionRequestCompleted(sessionID)
+		}
+	}
+}
+
+// GetSessionIDHeader returns the configured HTTP header name used to identify
+// conversation sessions. Returns empty string if session boost is not enabled.
+func (s *store) GetSessionIDHeader() string {
+	if !s.fairnessQueueConfig.SessionBoostEnabled {
+		return ""
+	}
+	return s.fairnessQueueConfig.SessionIDHeader
 }
 
 func (s *store) GetRequestWaitingQueueStats() []QueueStat {

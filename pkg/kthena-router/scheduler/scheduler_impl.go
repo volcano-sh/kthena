@@ -178,6 +178,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		if validPairs == 0 {
 			return fmt.Errorf("no valid prefill-decode pod pairs found")
 		}
+
 		return nil
 	}
 

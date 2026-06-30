@@ -68,15 +68,38 @@ networking:
         keyFile: /etc/tls/tls.key
         # -- Secret name for storing webhook certificates.
         secretName: kthena-router-webhook-certs
+    # fairness configures the per-model user-fairness queue, which orders requests
+    # by each user's recent token usage. It is mutually exclusive with sessionBoost.
     fairness:
-      # -- Enable fairness scheduling.
+      # -- Enable user-fairness scheduling. Mutually exclusive with sessionBoost.
       enabled: false
-      # -- Sliding window duration for token usage tracking.
+      # -- User-fairness strategy: sliding window duration for token usage tracking.
       windowSize: "1h"
-      # -- Weight multiplier for input tokens.
+      # -- User-fairness strategy: weight multiplier for input tokens.
       inputTokenWeight: 1.0
-      # -- Weight multiplier for output tokens.
+      # -- User-fairness strategy: weight multiplier for output tokens.
       outputTokenWeight: 2.0
+      # -- Global total inflight request limit admitted through the fairness gate.<br/>
+      # `0` or unset falls back to QPS-based rate limiting.
+      maxConcurrent: 0
+    # sessionBoost configures session-aware boosting to maximize prefix cache hits
+    # for multi-turn conversations. It is mutually exclusive with fairness.
+    sessionBoost:
+      # -- Enable session-boost scheduling. Mutually exclusive with fairness.
+      enabled: false
+      # -- HTTP header used to identify conversation sessions.
+      header: "X-Session-ID"
+      # -- Maximum number of recently-completed sessions kept warm for boosting.<br/>
+      # Bounds an LRU cache; the least-recently-used session is evicted automatically.<br/>
+      # Size it by the number of concurrent conversations to keep boosted.
+      maxSessions: 4096
+      # -- Maximum inflight requests admitted per backend pod.<br/>
+      # Total inflight limit is this value times the number of backend pods.<br/>
+      # `0` or unset uses the router default (16).
+      inflightPerPod: 16
+      # -- Wait time after a request completes for a same-session follow-up.<br/>
+      # Disabled by default (`0s`).
+      gracePeriod: "0s"
     gatewayAPI:
       # -- Enable Gateway API related features.
       enabled: false

@@ -108,6 +108,13 @@ type Metrics struct {
 	KVCacheRedisDuration    prometheus.HistogramVec
 	KVCacheTokenizeDuration prometheus.HistogramVec
 	KVCacheErrorsTotal      prometheus.CounterVec
+
+	// Session boost queue metrics
+	SessionBoostQueueSize           prometheus.GaugeVec
+	SessionBoostQueueDuration       prometheus.HistogramVec
+	SessionBoostQueueCancelledTotal prometheus.CounterVec
+	SessionBoostQueueDequeueTotal   prometheus.CounterVec
+	SessionBoostQueueInflight       prometheus.GaugeVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
@@ -305,6 +312,47 @@ func NewMetrics() *Metrics {
 			},
 			[]string{LabelModel, LabelStage},
 		),
+
+		SessionBoostQueueSize: *promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "kthena_router_session_boost_queue_size",
+				Help: "Current session boost queue size for pending requests",
+			},
+			[]string{LabelModel},
+		),
+
+		SessionBoostQueueDuration: *promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "kthena_router_session_boost_queue_duration_seconds",
+				Help:    "Time requests spend in session boost queue before processing",
+				Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+			},
+			[]string{LabelModel},
+		),
+
+		SessionBoostQueueCancelledTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_session_boost_queue_cancelled_total",
+				Help: "Total number of requests cancelled or timed out while in session boost queue",
+			},
+			[]string{LabelModel},
+		),
+
+		SessionBoostQueueDequeueTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_session_boost_queue_dequeue_total",
+				Help: "Total number of requests successfully dequeued from session boost queue",
+			},
+			[]string{LabelModel},
+		),
+
+		SessionBoostQueueInflight: *promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "kthena_router_session_boost_queue_inflight",
+				Help: "Current number of in-flight requests gated by session boost queue",
+			},
+			[]string{LabelModel},
+		),
 	}
 
 	m.ActiveRequests = promauto.NewGaugeFunc(
@@ -501,6 +549,41 @@ func (m *Metrics) RecordTokenizerUnsupportedEngine(model, engine string) {
 // IncFairnessQueueHeapRebuild increments the heap rebuild counter
 func (m *Metrics) IncFairnessQueueHeapRebuild(model string) {
 	m.FairnessQueueHeapRebuildTotal.WithLabelValues(model).Inc()
+}
+
+// IncSessionBoostQueueSize increments the session boost queue size
+func (m *Metrics) IncSessionBoostQueueSize(model string) {
+	m.SessionBoostQueueSize.WithLabelValues(model).Inc()
+}
+
+// DecSessionBoostQueueSize decrements the session boost queue size
+func (m *Metrics) DecSessionBoostQueueSize(model string) {
+	m.SessionBoostQueueSize.WithLabelValues(model).Dec()
+}
+
+// RecordSessionBoostQueueDuration records the time a request spent in session boost queue
+func (m *Metrics) RecordSessionBoostQueueDuration(model string, duration time.Duration) {
+	m.SessionBoostQueueDuration.WithLabelValues(model).Observe(duration.Seconds())
+}
+
+// IncSessionBoostQueueCancelled increments the session boost queue cancelled counter
+func (m *Metrics) IncSessionBoostQueueCancelled(model string) {
+	m.SessionBoostQueueCancelledTotal.WithLabelValues(model).Inc()
+}
+
+// IncSessionBoostQueueDequeue increments the session boost queue dequeue counter
+func (m *Metrics) IncSessionBoostQueueDequeue(model string) {
+	m.SessionBoostQueueDequeueTotal.WithLabelValues(model).Inc()
+}
+
+// IncSessionBoostQueueInflight increments the session boost queue inflight gauge
+func (m *Metrics) IncSessionBoostQueueInflight(model string) {
+	m.SessionBoostQueueInflight.WithLabelValues(model).Inc()
+}
+
+// DecSessionBoostQueueInflight decrements the session boost queue inflight gauge
+func (m *Metrics) DecSessionBoostQueueInflight(model string) {
+	m.SessionBoostQueueInflight.WithLabelValues(model).Dec()
 }
 
 // RequestMetricsRecorder is a helper struct to record detailed metrics for individual requests

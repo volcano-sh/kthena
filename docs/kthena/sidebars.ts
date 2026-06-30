@@ -80,6 +80,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/config-router',
             'user-guide/kvcache-aware',
             'user-guide/fairness-scheduling',
+            'user-guide/session-boost',
             'user-guide/rate-limit',
             "user-guide/gateway-api-support",
             'user-guide/gateway-inference-extension-support',

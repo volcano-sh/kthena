@@ -1417,7 +1417,7 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			router, store, backend := setupFairnessTestRouter(t, tt.backendHandler)
 			defer backend.Close()
 
-			router.fairnessTimeout = tt.fairnessTimeout
+			router.queueTimeout = tt.fairnessTimeout
 			if tt.storeWrapper != nil {
 				router.store = tt.storeWrapper(store)
 			}
