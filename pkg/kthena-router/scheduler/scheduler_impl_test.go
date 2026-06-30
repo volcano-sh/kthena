@@ -319,3 +319,141 @@ func createTestPodInfo(name string) *datastore.PodInfo {
 		},
 	}
 }
+
+// TestScheduleEPDGroup tests EPD scheduling behavior including encode pods and early validation.
+func TestScheduleEPDGroup(t *testing.T) {
+	pipelineModeEPD := aiv1alpha1.PipelineModeEPD
+	tests := []struct {
+		name                string
+		encodeLabels        map[string]string
+		includeEncodePod    bool
+		includePrefillPod   bool
+		wantErr             bool
+		errContains         string
+		expectedEncodeCount int
+	}{
+		{
+			name:              "missing encode labels returns error",
+			encodeLabels:      nil,
+			includeEncodePod:  false,
+			includePrefillPod: true,
+			wantErr:           true,
+			errContains:       "EPD mode requires pdGroup.encodeLabels",
+		},
+		{
+			name:              "missing encode pods returns error",
+			encodeLabels:      map[string]string{"role": "encode"},
+			includeEncodePod:  false,
+			includePrefillPod: true,
+			wantErr:           true,
+			errContains:       "no valid prefill-decode pod pairs found",
+		},
+		{
+			name:                "valid encode and prefill pod selected - happy path",
+			encodeLabels:        map[string]string{"role": "encode"},
+			includeEncodePod:    true,
+			includePrefillPod:   true,
+			wantErr:             false,
+			expectedEncodeCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := datastore.New()
+
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model-server",
+					Namespace: "default",
+				},
+				Spec: aiv1alpha1.ModelServerSpec{
+					PipelineMode: &pipelineModeEPD,
+					WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+						PDGroup: &aiv1alpha1.PDGroup{
+							GroupKey:      "pd-group",
+							DecodeLabels:  map[string]string{"role": "decode"},
+							PrefillLabels: map[string]string{"role": "prefill"},
+							EncodeLabels:  tt.encodeLabels,
+						},
+					},
+				},
+			}
+
+			modelServerName := types.NamespacedName{Namespace: "default", Name: "test-model-server"}
+			err := store.AddOrUpdateModelServer(modelServer, nil)
+			require.NoError(t, err)
+
+			decodePod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "decode-pod-0",
+					Namespace: "default",
+					Labels: map[string]string{
+						"pd-group": "group-1",
+						"role":     "decode",
+					},
+				},
+				Status: corev1.PodStatus{PodIP: "10.0.0.1"},
+			}
+			err = store.AddOrUpdatePod(decodePod, []*aiv1alpha1.ModelServer{modelServer})
+			require.NoError(t, err)
+
+			if tt.includePrefillPod {
+				prefillPod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "prefill-pod-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							"pd-group": "group-1",
+							"role":     "prefill",
+						},
+					},
+					Status: corev1.PodStatus{PodIP: "10.0.0.2"},
+				}
+				err = store.AddOrUpdatePod(prefillPod, []*aiv1alpha1.ModelServer{modelServer})
+				require.NoError(t, err)
+			}
+
+			if tt.includeEncodePod {
+				encodePod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "encode-pod-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							"pd-group": "group-1",
+							"role":     "encode",
+						},
+					},
+					Status: corev1.PodStatus{PodIP: "10.0.0.3"},
+				}
+				err = store.AddOrUpdatePod(encodePod, []*aiv1alpha1.ModelServer{modelServer})
+				require.NoError(t, err)
+			}
+
+			scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+
+			ctx := &framework.Context{
+				Prompt:          &common.ChatMessage{},
+				ModelServerName: modelServerName,
+				PDGroup:         modelServer.Spec.WorkloadSelector.PDGroup,
+			}
+
+			pods, err := store.GetPodsByModelServer(modelServerName)
+			require.NoError(t, err)
+
+			err = scheduler.Schedule(ctx, pods)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+				return
+			}
+			require.NoError(t, err)
+
+			require.Len(t, ctx.EncodePods, tt.expectedEncodeCount)
+			if tt.expectedEncodeCount > 0 {
+				require.NotNil(t, ctx.EncodePods[0])
+				assert.Equal(t, "encode-pod-0", ctx.EncodePods[0].Pod.Name)
+			}
+		})
+	}
+}

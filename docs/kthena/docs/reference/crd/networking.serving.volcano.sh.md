@@ -245,6 +245,7 @@ _Appears in:_
 | `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server. |  |  |
 | `trafficPolicy` _[TrafficPolicy](#trafficpolicy)_ | Traffic Policy for accessing the model server instance. |  |  |
 | `kvConnector` _[KVConnectorSpec](#kvconnectorspec)_ | KVConnector specifies the KV connector configuration for PD disaggregated routing |  |  |
+| `pipelineMode` _[PipelineMode](#pipelinemode)_ | PipelineMode specifies the native inference pipeline execution strategy |  | Enum: [vllm-epd sglang-epd pd-disaggregated] <br /> |
 
 
 #### ModelServerStatus
@@ -277,6 +278,25 @@ _Appears in:_
 | `groupKey` _string_ | GroupKey is the key to distinguish different PD groups.<br />Only PD instances with the same group key and value could be paired. |  |  |
 | `prefillLabels` _object (keys:string, values:string)_ | The labels to match the model serving instances for prefill. |  |  |
 | `decodeLabels` _object (keys:string, values:string)_ | The labels to match the model serving instances for decode. |  |  |
+| `encodeLabels` _object (keys:string, values:string)_ | The labels to match the model serving instances for encode (EPD mode). |  |  |
+
+
+#### PipelineMode
+
+_Underlying type:_ _string_
+
+PipelineMode defines the pipeline execution strategy
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description |
+| --- | --- |
+| `vllm-epd` | PipelineModeEPD indicates an Encode-Prefill-Decode execution mode<br /> |
+| `sglang-epd` | PipelineModeSGLangEPD indicates an Encode-Prefill-Decode execution mode for SGLang<br /> |
+| `pd-disaggregated` | PipelineModePDDisaggregated indicates standard Prefill-Decode disaggregation.<br />This is functionally identical to leaving the PipelineMode unset (it is the explicit form of the default).<br /> |
 
 
 #### RateLimit

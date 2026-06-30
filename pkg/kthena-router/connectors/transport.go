@@ -116,6 +116,24 @@ func buildPrefillRequest(req *http.Request, modelRequest map[string]interface{})
 	return reqCopy
 }
 
+func buildEncodeRequest(req *http.Request, modelRequest map[string]interface{}) *http.Request {
+	// For EPD disaggregated mode, we need to send an encode request to the encode pod with non stream mode.
+	preparePrefillBody(modelRequest)
+
+	body, err := json.Marshal(modelRequest)
+	if err != nil {
+		return nil
+	}
+
+	// build request
+	reqCopy := req.Clone(req.Context())
+	reqCopy.URL.Scheme = "http"
+	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
+	reqCopy.ContentLength = int64(len(body))
+
+	return reqCopy
+}
+
 func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) *http.Request {
 	modelRequest = addTokenUsage(c, modelRequest)
 	body, err := json.Marshal(modelRequest)

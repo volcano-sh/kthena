@@ -36,6 +36,8 @@ type Context struct {
 	ModelServerName types.NamespacedName
 	PDGroup         *aiv1alpha1.PDGroup
 	// 1. In PD Disaggregated mode, both DecodePods and PrefillPods are set.
+	// In EPD mode, EncodePods are additionally set.
+	EncodePods  []*datastore.PodInfo
 	DecodePods  []*datastore.PodInfo
 	PrefillPods []*datastore.PodInfo
 

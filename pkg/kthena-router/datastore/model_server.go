@@ -99,6 +99,14 @@ func (m *modelServer) categorizePodForPDGroup(podName types.NamespacedName, podL
 	isPrefillPod := matchesLabels(podLabels, pdGroup.PrefillLabels)
 	if isPrefillPod {
 		pdGroupPods.AddPrefillPod(podName)
+		return
+	}
+
+	// Check if pod matches encode labels (for EPD)
+	isEncodePod := matchesLabels(podLabels, pdGroup.EncodeLabels)
+	if isEncodePod {
+		pdGroupPods.AddEncodePod(podName)
+		return
 	}
 }
 
@@ -155,6 +163,18 @@ func (m *modelServer) getAllPrefillPods() []types.NamespacedName {
 	return result
 }
 
+// getAllEncodePods returns all encode pods across all PD groups
+func (m *modelServer) getAllEncodePods() []types.NamespacedName {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	var result []types.NamespacedName
+	for _, pdGroupPods := range m.pdGroups {
+		result = append(result, pdGroupPods.GetEncodePods()...)
+	}
+	return result
+}
+
 // getPrefillPodsForDecodeGroup returns prefill pods that match the same PD group as a decode pod
 func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.NamespacedName {
 	m.mutex.RLock()
@@ -174,6 +194,30 @@ func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.Namespa
 	// Return prefill pods for the same PD group value
 	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
 		return pdGroupPods.GetPrefillPods()
+	}
+
+	return nil
+}
+
+// getEncodePodsForDecodeGroup returns encode pods that match the same PD group as a decode pod
+func (m *modelServer) getEncodePodsForDecodeGroup(pod *PodInfo) []types.NamespacedName {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	// Check if this modelServer has PDGroup configuration
+	if m.modelServer.Spec.WorkloadSelector == nil || m.modelServer.Spec.WorkloadSelector.PDGroup == nil {
+		return nil
+	}
+
+	pdGroup := m.modelServer.Spec.WorkloadSelector.PDGroup
+	pdGroupValue, hasPDGroupKey := pod.GetPodLabels()[pdGroup.GroupKey]
+	if !hasPDGroupKey {
+		return nil
+	}
+
+	// Return encode pods for the same PD group value
+	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
+		return pdGroupPods.GetEncodePods()
 	}
 
 	return nil
