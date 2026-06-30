@@ -17,11 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -30,13 +34,16 @@ import (
 
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/networking/v1alpha1"
+	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	kthenaclient "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
 type ModelRouteController struct {
-	modelRouteLister listerv1alpha1.ModelRouteLister
-	modelRouteSynced cache.InformerSynced
-	registration     cache.ResourceEventHandlerRegistration
+	kthenaClient      kthenaclient.Interface
+	modelRouteLister  listerv1alpha1.ModelRouteLister
+	modelRouteSynced  cache.InformerSynced
+	registration      cache.ResourceEventHandlerRegistration
 
 	workqueue   workqueue.TypedRateLimitingInterface[any]
 	initialSync *atomic.Bool
@@ -44,17 +51,19 @@ type ModelRouteController struct {
 }
 
 func NewModelRouteController(
+	kthenaClient kthenaclient.Interface,
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	store datastore.Store,
 ) *ModelRouteController {
 	modelRouteInformer := kthenaInformerFactory.Networking().V1alpha1().ModelRoutes()
 
 	controller := &ModelRouteController{
-		modelRouteLister: modelRouteInformer.Lister(),
-		modelRouteSynced: modelRouteInformer.Informer().HasSynced,
-		workqueue:        workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
-		initialSync:      &atomic.Bool{},
-		store:            store,
+		kthenaClient:      kthenaClient,
+		modelRouteLister:  modelRouteInformer.Lister(),
+		modelRouteSynced:  modelRouteInformer.Informer().HasSynced,
+		workqueue:         workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
+		initialSync:       &atomic.Bool{},
+		store:             store,
 	}
 
 	controller.registration, _ = modelRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -75,7 +84,6 @@ func (c *ModelRouteController) Run(stopCh <-chan struct{}) error {
 	if ok := cache.WaitForCacheSync(stopCh, c.registration.HasSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
-	// add initialSync signal
 	c.workqueue.Add(initialSyncSignal)
 
 	go wait.Until(c.runWorker, time.Second, stopCh)
@@ -147,7 +155,40 @@ func (c *ModelRouteController) syncHandler(key string) error {
 		return err
 	}
 
-	return nil
+	return c.updateModelRouteStatus(mr)
+}
+
+func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute) error {
+	// Check if status is already up-to-date
+	if mr.Status.ObservedGeneration == mr.Generation {
+		if cond := meta.FindStatusCondition(mr.Status.Conditions, "Ready"); cond != nil &&
+			cond.Status == metav1.ConditionTrue &&
+			cond.Reason == "RouteRegistered" {
+			return nil
+		}
+	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get latest version from API server to avoid conflicts
+		ctx := context.Background()
+		latest, err := c.kthenaClient.NetworkingV1alpha1().ModelRoutes(mr.Namespace).Get(ctx, mr.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		mrCopy := latest.DeepCopy()
+		mrCopy.Status.ObservedGeneration = latest.Generation
+
+		meta.SetStatusCondition(&mrCopy.Status.Conditions, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionTrue,
+			Reason:  "RouteRegistered",
+			Message: "ModelRoute registered in router store",
+		})
+
+		_, err = c.kthenaClient.NetworkingV1alpha1().ModelRoutes(mr.Namespace).UpdateStatus(ctx, mrCopy, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (c *ModelRouteController) enqueueModelRoute(obj interface{}) {

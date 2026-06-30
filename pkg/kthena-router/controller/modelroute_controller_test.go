@@ -35,7 +35,7 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller := NewModelRouteController(kthenaInformerFactory, store)
+	controller := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -146,7 +146,7 @@ func TestModelRouteController_ErrorHandling(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller := NewModelRouteController(kthenaInformerFactory, store)
+	controller := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -171,7 +171,7 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller := NewModelRouteController(kthenaInformerFactory, store)
+	controller := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -181,7 +181,7 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 	// marks the controller as synced via HasSynced()
 	t.Run("InitialSyncSignal", func(t *testing.T) {
 		assert.False(t, controller.HasSynced())
-		controller.workqueue.Add(initialSyncSignal)
+		controller.workqueue.Add(struct{}{})
 		controller.processNextWorkItem()
 		assert.True(t, controller.HasSynced())
 	})

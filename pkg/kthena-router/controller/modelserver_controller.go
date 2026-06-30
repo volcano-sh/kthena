@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -24,9 +25,11 @@ import (
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -38,11 +41,11 @@ import (
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/networking/v1alpha1"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	kthenaclient "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
-// ResourceType represents the type of Kubernetes resource
 type ResourceType string
 
 const (
@@ -50,20 +53,19 @@ const (
 	ResourceTypePod         ResourceType = "Pod"
 )
 
-// QueueItem represents an item in the work queue
 type QueueItem struct {
 	ResourceType ResourceType
 	Key          string
 }
 
 type ModelServerController struct {
+	kthenaClient      kthenaclient.Interface
 	modelServerLister listerv1alpha1.ModelServerLister
 	podLister         corelisters.PodLister
 
 	modelServerSynced cache.InformerSynced
 	podSynced         cache.InformerSynced
 
-	// Event handler registrations
 	modelServerRegistration cache.ResourceEventHandlerRegistration
 	podRegistration         cache.ResourceEventHandlerRegistration
 
@@ -73,6 +75,7 @@ type ModelServerController struct {
 }
 
 func NewModelServerController(
+	kthenaClient kthenaclient.Interface,
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
@@ -81,6 +84,7 @@ func NewModelServerController(
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 
 	controller := &ModelServerController{
+		kthenaClient:      kthenaClient,
 		modelServerLister: modelServerInformer.Lister(),
 		podLister:         podInformer.Lister(),
 		modelServerSynced: modelServerInformer.Informer().HasSynced,
@@ -90,7 +94,6 @@ func NewModelServerController(
 		store:             store,
 	}
 
-	// Register ModelServer event handlers
 	controller.modelServerRegistration, _ = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueModelServer,
 		UpdateFunc: func(old, new interface{}) {
@@ -99,7 +102,6 @@ func NewModelServerController(
 		DeleteFunc: controller.enqueueModelServer,
 	})
 
-	// Register Pod event handlers
 	controller.podRegistration, _ = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueuePod,
 		UpdateFunc: func(old, new interface{}) {
@@ -118,7 +120,6 @@ func (c *ModelServerController) Run(stopCh <-chan struct{}) error {
 	if ok := cache.WaitForCacheSync(stopCh, c.modelServerSynced, c.podSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
-	// add initialSync signal
 	c.workqueue.Add(QueueItem{})
 
 	go wait.Until(c.runWorker, time.Second, stopCh)
@@ -143,7 +144,6 @@ func (c *ModelServerController) processNextWorkItem() bool {
 	}
 	defer c.workqueue.Done(obj)
 
-	// Handle initial sync signal
 	if obj.ResourceType == "" && obj.Key == "" {
 		klog.V(2).Info("initial modelServer and pod resources have been synced")
 		c.workqueue.Forget(obj)
@@ -208,15 +208,20 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		}
 	}
 
-	_ = c.store.AddOrUpdateModelServer(ms, pods)
+	if err := c.store.AddOrUpdateModelServer(ms, pods); err != nil {
+		return err
+	}
 
-	// Get already bound pods to avoid unnecessary updates
+	if err := c.updateModelServerStatus(ms, podList, pods); err != nil {
+		klog.Errorf("Failed to update ModelServer status for %s/%s: %v", ms.Namespace, ms.Name, err)
+		return err
+	}
+
 	existingPods, err := c.store.GetPodsByModelServer(utils.GetNamespaceName(ms))
 	if err != nil {
 		klog.V(4).Infof("failed to get existing pods for ModelServer %s/%s: %v", ms.Namespace, ms.Name, err)
 	}
 
-	// Build a set of existing pod names that are already bound to the model server
 	existingPodNames := sets.New[types.NamespacedName]()
 	for _, podInfo := range existingPods {
 		pod := podInfo.GetPod()
@@ -224,7 +229,6 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 			continue
 		}
 		if !podInfo.HasModelServer(utils.GetNamespaceName(ms)) {
-			// If the pod is not bound to the model server, establish the binding
 			if err := c.store.AppendModelServerToPod(pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
 				klog.Warningf("failed to append modelserver %s/%s to pod %s/%s: %v", ms.Namespace, ms.Name, pod.Namespace, pod.Name, err)
 				continue
@@ -233,14 +237,12 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		existingPodNames.Insert(utils.GetNamespaceName(pod))
 	}
 
-	// Add new pods that are not yet bound to the store
 	for _, pod := range podList {
 		if !isPodReady(pod) {
 			continue
 		}
 
 		podName := utils.GetNamespaceName(pod)
-		// Skip pods that are already properly bound
 		if existingPodNames.Contains(podName) {
 			continue
 		}
@@ -251,6 +253,59 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 	}
 
 	return nil
+}
+
+func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServer, podList []*corev1.Pod, readyPods sets.Set[types.NamespacedName]) error {
+	expectedReadyStatus := metav1.ConditionFalse
+	expectedReason := "NoReadyPods"
+	if readyPods.Len() > 0 {
+		expectedReadyStatus = metav1.ConditionTrue
+		expectedReason = "PodsReady"
+	}
+
+	// Check if status is already up-to-date
+	if ms.Status.ObservedGeneration == ms.Generation &&
+		ms.Status.MatchedReplicas == int32(len(podList)) &&
+		ms.Status.ReadyReplicas == int32(readyPods.Len()) {
+		if cond := meta.FindStatusCondition(ms.Status.Conditions, "Ready"); cond != nil &&
+			cond.Status == expectedReadyStatus &&
+			cond.Reason == expectedReason {
+			return nil
+		}
+	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get latest version from API server to avoid conflicts
+		ctx := context.Background()
+		latest, err := c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		msCopy := latest.DeepCopy()
+		msCopy.Status.ObservedGeneration = latest.Generation
+		msCopy.Status.MatchedReplicas = int32(len(podList))
+		msCopy.Status.ReadyReplicas = int32(readyPods.Len())
+
+		if readyPods.Len() > 0 {
+			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+				Type:    "Ready",
+				Status:  metav1.ConditionTrue,
+				Reason:  "PodsReady",
+				Message: fmt.Sprintf("%d ready pods matched", readyPods.Len()),
+			})
+		} else {
+			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+				Type:    "Ready",
+				Status:  metav1.ConditionFalse,
+				Reason:  "NoReadyPods",
+				Message: "No ready pods match workloadSelector",
+			})
+		}
+
+		_, err = c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).UpdateStatus(ctx, msCopy, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (c *ModelServerController) syncPodHandler(key string) error {
@@ -277,8 +332,6 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 	return c.addOrUpdatePod(pod)
 }
 
-// addOrUpdatePod finds all ModelServers that match the given pod
-// and adds or updates the pod-server binding in the data store
 func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 	modelServers, err := c.modelServerLister.ModelServers(pod.Namespace).List(labels.Everything())
 	if err != nil {
@@ -329,7 +382,6 @@ func (c *ModelServerController) enqueuePod(obj interface{}) {
 	})
 }
 
-// isPodReady checks if the pod is in a running state and has a PodReady condition set to true.
 func isPodReady(pod *corev1.Pod) bool {
 	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 		return false

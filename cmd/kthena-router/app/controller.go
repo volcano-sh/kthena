@@ -57,7 +57,6 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
 	}
-	// Set QPS and Burst if provided
 	if kubeAPIQPS > 0 {
 		cfg.QPS = kubeAPIQPS
 	}
@@ -78,8 +77,8 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := kthenaInformers.NewSharedInformerFactory(kthenaClient, 0)
 
-	modelRouteController := controller.NewModelRouteController(kthenaInformerFactory, store)
-	modelServerController := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+	modelRouteController := controller.NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
+	modelServerController := controller.NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
 
 	cacheSyncs := []cache.InformerSynced{
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
@@ -98,12 +97,10 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 			klog.Fatalf("Error building gateway clientset: %s", err.Error())
 		}
 
-		// Ensure default GatewayClass exists before starting controllers
 		if err := ensureDefaultGatewayClass(gatewayClient); err != nil {
 			klog.Fatalf("Failed to ensure default GatewayClass: %s", err.Error())
 		}
 
-		// Ensure default Gateway exists before starting controllers
 		if err := ensureDefaultGateway(gatewayClient, defaultPort); err != nil {
 			klog.Fatalf("Failed to ensure default Gateway: %s", err.Error())
 		}
@@ -123,10 +120,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
 			inferencePoolController = controller.NewInferencePoolController(dynamicInformerFactory, store)
-			cacheSyncs = append(cacheSyncs,
-				kubeInformerFactory.Core().V1().Namespaces().Informer().HasSynced,
-				dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced,
-			)
+			cacheSyncs = append(cacheSyncs, dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced)
 			dynamicInformerFactory.Start(stop)
 		}
 		gatewayInformerFactory.Start(stop)
@@ -163,7 +157,6 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 
 		controllers = append(controllers, gatewayController)
 
-		// Gateway API Inference Extension controllers are optional
 		if enableGatewayAPIInferenceExtension {
 			go func() {
 				if err := httpRouteController.Run(stop); err != nil {
@@ -195,11 +188,9 @@ func (c *aggregatedController) HasSynced() bool {
 	return true
 }
 
-// ensureDefaultGatewayClass creates the default GatewayClass if it doesn't exist
 func ensureDefaultGatewayClass(gatewayClient gatewayclientset.Interface) error {
 	ctx := context.Background()
 
-	// Check if GatewayClass already exists
 	_, err := gatewayClient.GatewayV1().GatewayClasses().Get(ctx, controller.DefaultGatewayClassName, metav1.GetOptions{})
 	if err == nil {
 		klog.V(2).Infof("Default GatewayClass %s already exists", controller.DefaultGatewayClassName)
@@ -210,7 +201,6 @@ func ensureDefaultGatewayClass(gatewayClient gatewayclientset.Interface) error {
 		return fmt.Errorf("failed to check GatewayClass %s: %w", controller.DefaultGatewayClassName, err)
 	}
 
-	// Create the default GatewayClass
 	gatewayClass := &gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: controller.DefaultGatewayClassName,
@@ -233,24 +223,20 @@ func ensureDefaultGatewayClass(gatewayClient gatewayclientset.Interface) error {
 	return nil
 }
 
-// ensureDefaultGateway creates the default Gateway if it doesn't exist
 func ensureDefaultGateway(gatewayClient gatewayclientset.Interface, defaultPort string) error {
 	ctx := context.Background()
 	namespace := "default"
 	name := "default"
 
-	// Get namespace from environment variable if available, otherwise use "default"
 	if podNamespace := os.Getenv("POD_NAMESPACE"); podNamespace != "" {
 		namespace = podNamespace
 	}
 
-	// Parse port
 	port, err := strconv.Atoi(defaultPort)
 	if err != nil {
 		return fmt.Errorf("invalid default port %s: %w", defaultPort, err)
 	}
 
-	// Check if Gateway already exists
 	_, err = gatewayClient.GatewayV1().Gateways(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		klog.V(2).Infof("Default Gateway %s/%s already exists", namespace, name)
@@ -263,7 +249,6 @@ func ensureDefaultGateway(gatewayClient gatewayclientset.Interface, defaultPort 
 
 	namespacesFromAll := gatewayv1.NamespacesFromAll
 
-	// Create the default Gateway
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -276,9 +261,6 @@ func ensureDefaultGateway(gatewayClient gatewayclientset.Interface, defaultPort 
 					Name:     gatewayv1.SectionName("default"),
 					Port:     gatewayv1.PortNumber(port),
 					Protocol: gatewayv1.HTTPProtocolType,
-					AllowedRoutes: &gatewayv1.AllowedRoutes{
-						Namespaces: &gatewayv1.RouteNamespaces{From: &namespacesFromAll},
-					},
 					// Hostname is nil, meaning match all hostnames
 				},
 			},
