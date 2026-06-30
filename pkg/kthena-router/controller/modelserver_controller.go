@@ -208,7 +208,9 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		}
 	}
 
-	_ = c.store.AddOrUpdateModelServer(ms, pods)
+	if err := c.store.AddOrUpdateModelServer(ms, pods); err != nil {
+		return err
+	}
 
 	if err := c.updateModelServerStatus(ms, podList, pods); err != nil {
 		klog.Errorf("Failed to update ModelServer status for %s/%s: %v", ms.Namespace, ms.Name, err)
@@ -273,8 +275,9 @@ func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServ
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Get latest version to avoid conflicts
-		latest, err := c.modelServerLister.ModelServers(ms.Namespace).Get(ms.Name)
+		// Get latest version from API server to avoid conflicts
+		ctx := context.Background()
+		latest, err := c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -300,7 +303,6 @@ func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServ
 			})
 		}
 
-		ctx := context.Background()
 		_, err = c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).UpdateStatus(ctx, msCopy, metav1.UpdateOptions{})
 		return err
 	})

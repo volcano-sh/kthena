@@ -84,7 +84,7 @@ func (c *ModelRouteController) Run(stopCh <-chan struct{}) error {
 	if ok := cache.WaitForCacheSync(stopCh, c.registration.HasSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
-	c.workqueue.Add(struct{}{})
+	c.workqueue.Add(initialSyncSignal)
 
 	go wait.Until(c.runWorker, time.Second, stopCh)
 
@@ -108,7 +108,7 @@ func (c *ModelRouteController) processNextWorkItem() bool {
 	}
 	defer c.workqueue.Done(obj)
 
-	if obj == struct{}{} {
+	if obj == initialSyncSignal {
 		klog.V(2).Info("initial model routes have been synced")
 		c.workqueue.Forget(obj)
 		c.initialSync.Store(true)
@@ -169,8 +169,9 @@ func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute)
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Get latest version to avoid conflicts
-		latest, err := c.modelRouteLister.ModelRoutes(mr.Namespace).Get(mr.Name)
+		// Get latest version from API server to avoid conflicts
+		ctx := context.Background()
+		latest, err := c.kthenaClient.NetworkingV1alpha1().ModelRoutes(mr.Namespace).Get(ctx, mr.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -185,7 +186,6 @@ func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute)
 			Message: "ModelRoute registered in router store",
 		})
 
-		ctx := context.Background()
 		_, err = c.kthenaClient.NetworkingV1alpha1().ModelRoutes(mr.Namespace).UpdateStatus(ctx, mrCopy, metav1.UpdateOptions{})
 		return err
 	})

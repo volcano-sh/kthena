@@ -41,6 +41,8 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 	defer close(stop)
 	kthenaInformerFactory.Start(stop)
 
+	// this block verifies that creating a ModelRoute via fake client causes it to
+	// appear in the informer cache and get synced into the datastore.
 	t.Run("ModelRouteCreate", func(t *testing.T) {
 		mr := &aiv1alpha1.ModelRoute{
 			ObjectMeta: metav1.ObjectMeta{
@@ -83,6 +85,8 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 		assert.Equal(t, "test-model", storedRoute.Spec.ModelName)
 	})
 
+	// this will verify that updating a ModelRoute spec is reflected in the
+	// informer cache and the datastore after syncHandler is called.
 	t.Run("ModelRouteUpdate", func(t *testing.T) {
 		existing, err := kthenaClient.NetworkingV1alpha1().ModelRoutes("default").Get(
 			context.Background(), "test-modelroute", metav1.GetOptions{})
@@ -116,6 +120,8 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 		assert.Equal(t, "updated-server", storedRoute.Spec.Rules[0].TargetModels[0].ModelServerName)
 	})
 
+	// verifies that deleting a ModelRoute removes it from the informer
+	// cache and datastore after syncHandler is called.
 	t.Run("ModelRouteDelete", func(t *testing.T) {
 		err := kthenaClient.NetworkingV1alpha1().ModelRoutes("default").Delete(
 			context.Background(), "test-modelroute", metav1.DeleteOptions{})
@@ -146,11 +152,14 @@ func TestModelRouteController_ErrorHandling(t *testing.T) {
 	defer close(stop)
 	kthenaInformerFactory.Start(stop)
 
+	// this will verify if a malformed key is handled without returning an error
 	t.Run("InvalidKey", func(t *testing.T) {
 		err := controller.syncHandler("invalid/key/format")
 		assert.NoError(t, err)
 	})
 
+	// this will verify that syncing a key for a resource that does not exist
+	// is a no-op and does not return an error
 	t.Run("NonExistentModelRoute", func(t *testing.T) {
 		err := controller.syncHandler("default/non-existent")
 		assert.NoError(t, err)
@@ -168,6 +177,8 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 	defer close(stop)
 	kthenaInformerFactory.Start(stop)
 
+	// verifies that processing the initialSyncSignal sentinel value
+	// marks the controller as synced via HasSynced()
 	t.Run("InitialSyncSignal", func(t *testing.T) {
 		assert.False(t, controller.HasSynced())
 		controller.workqueue.Add(struct{}{})
@@ -175,6 +186,7 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 		assert.True(t, controller.HasSynced())
 	})
 
+	// verifies that an unexpected type in the workqueue is dropped without crashing the worker
 	t.Run("UnknownResourceType", func(t *testing.T) {
 		controller.workqueue.Add(12345)
 		result := controller.processNextWorkItem()
