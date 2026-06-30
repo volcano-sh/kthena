@@ -99,6 +99,10 @@ func getKvConnectorSpec(backend workload.ModelBackend) (*networking.KVConnectorS
 			continue
 		}
 
+		if len(worker.Config.Raw) == 0 {
+			continue
+		}
+
 		kvTransferConfig, err := utils.TryGetField(worker.Config.Raw, "kv-transfer-config")
 		if err != nil {
 			return nil, fmt.Errorf("failed to get kv-transfer-config for worker %s: %w", worker.Type, err)
@@ -166,6 +170,9 @@ func getServedModelName(model *workload.ModelBooster, backend workload.ModelBack
 	for _, worker := range backend.Workers {
 		if worker.Type == workload.ModelWorkerTypeServer ||
 			worker.Type == workload.ModelWorkerTypeDecode {
+			if len(worker.Config.Raw) == 0 {
+				continue
+			}
 			valStr, err := utils.TryGetField(worker.Config.Raw, "served-model-name")
 			if err != nil {
 				return servedModelName

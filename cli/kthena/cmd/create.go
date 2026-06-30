@@ -28,6 +28,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/engine"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -287,7 +288,7 @@ func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *
 	// Convert unstructured to the appropriate typed resource
 	switch gvk.Kind {
 	case "ModelServing":
-		fmt.Printf("  Creating ModelServing: %s in namespace %s\n", resourceName, resourceNamespace)
+		fmt.Printf("  Applying ModelServing: %s in namespace %s\n", resourceName, resourceNamespace)
 		modelInfer := &workloadv1alpha1.ModelServing{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelInfer)
 		if err != nil {
@@ -296,11 +297,23 @@ func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *
 
 		_, err = client.WorkloadV1alpha1().ModelServings(resourceNamespace).Create(ctx, modelInfer, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create ModelServing: %v", err)
+			if apierrors.IsAlreadyExists(err) {
+				existing, getErr := client.WorkloadV1alpha1().ModelServings(resourceNamespace).Get(ctx, resourceName, metav1.GetOptions{})
+				if getErr != nil {
+					return fmt.Errorf("failed to get existing ModelServing: %v", getErr)
+				}
+				modelInfer.ResourceVersion = existing.ResourceVersion
+				_, updateErr := client.WorkloadV1alpha1().ModelServings(resourceNamespace).Update(ctx, modelInfer, metav1.UpdateOptions{})
+				if updateErr != nil {
+					return fmt.Errorf("failed to update ModelServing: %v", updateErr)
+				}
+			} else {
+				return fmt.Errorf("failed to create ModelServing: %v", err)
+			}
 		}
 
 	case "ModelBooster":
-		fmt.Printf("  Creating ModelBooster: %s in namespace %s\n", resourceName, resourceNamespace)
+		fmt.Printf("  Applying ModelBooster: %s in namespace %s\n", resourceName, resourceNamespace)
 		model := &workloadv1alpha1.ModelBooster{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, model)
 		if err != nil {
@@ -309,11 +322,23 @@ func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *
 
 		_, err = client.WorkloadV1alpha1().ModelBoosters(resourceNamespace).Create(ctx, model, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create ModelBooster: %v", err)
+			if apierrors.IsAlreadyExists(err) {
+				existing, getErr := client.WorkloadV1alpha1().ModelBoosters(resourceNamespace).Get(ctx, resourceName, metav1.GetOptions{})
+				if getErr != nil {
+					return fmt.Errorf("failed to get existing ModelBooster: %v", getErr)
+				}
+				model.ResourceVersion = existing.ResourceVersion
+				_, updateErr := client.WorkloadV1alpha1().ModelBoosters(resourceNamespace).Update(ctx, model, metav1.UpdateOptions{})
+				if updateErr != nil {
+					return fmt.Errorf("failed to update ModelBooster: %v", updateErr)
+				}
+			} else {
+				return fmt.Errorf("failed to create ModelBooster: %v", err)
+			}
 		}
 
 	case "AutoscalingPolicy":
-		fmt.Printf("  Creating AutoscalingPolicy: %s in namespace %s\n", resourceName, resourceNamespace)
+		fmt.Printf("  Applying AutoscalingPolicy: %s in namespace %s\n", resourceName, resourceNamespace)
 		policy := &workloadv1alpha1.AutoscalingPolicy{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, policy)
 		if err != nil {
@@ -322,7 +347,19 @@ func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *
 
 		_, err = client.WorkloadV1alpha1().AutoscalingPolicies(resourceNamespace).Create(ctx, policy, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create AutoscalingPolicy: %v", err)
+			if apierrors.IsAlreadyExists(err) {
+				existing, getErr := client.WorkloadV1alpha1().AutoscalingPolicies(resourceNamespace).Get(ctx, resourceName, metav1.GetOptions{})
+				if getErr != nil {
+					return fmt.Errorf("failed to get existing AutoscalingPolicy: %v", getErr)
+				}
+				policy.ResourceVersion = existing.ResourceVersion
+				_, updateErr := client.WorkloadV1alpha1().AutoscalingPolicies(resourceNamespace).Update(ctx, policy, metav1.UpdateOptions{})
+				if updateErr != nil {
+					return fmt.Errorf("failed to update AutoscalingPolicy: %v", updateErr)
+				}
+			} else {
+				return fmt.Errorf("failed to create AutoscalingPolicy: %v", err)
+			}
 		}
 
 	default:

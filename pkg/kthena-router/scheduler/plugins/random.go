@@ -18,7 +18,6 @@ package plugins
 
 import (
 	"math/rand"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -36,18 +35,11 @@ var _ framework.ScorePlugin = &Random{}
 // It is primarily intended for testing purposes to validate scheduler behavior with random pod selection.
 type Random struct {
 	name string
-	rng  *rand.Rand
 }
 
 func NewRandom(pluginArg runtime.RawExtension) *Random {
-	// Create a new random number generator with a time-based seed
-	// to ensure different random sequences across different instances
-	source := rand.NewSource(time.Now().UnixNano())
-	rng := rand.New(source)
-
 	return &Random{
 		name: RandomPluginName,
-		rng:  rng,
 	}
 }
 
@@ -65,7 +57,7 @@ func (r *Random) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*d
 
 	// Assign random scores between 0 and 100 to each pod
 	for _, pod := range pods {
-		score := r.rng.Intn(101) // Generate random number between 0-100 (inclusive)
+		score := rand.Intn(101) // Generate random number between 0-100 (inclusive)
 		scoreResults[pod] = score
 	}
 
