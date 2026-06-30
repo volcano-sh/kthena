@@ -32,7 +32,7 @@ The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/t
 - Design and implement a **reusable benchmark framework** (load generator, scenario configuration, metrics collection, result aggregation) that runs both locally and in CI
 - Define a **standardized benchmark scenario format** (YAML) built around the sandwich isolation model, covering both sides of the control plane:
   - **User traffic**: QPS levels, burstiness (Gamma distribution), ramp-up profiles (linear/exponential), prompt length distributions, concurrency
-  - **Backend response**: TTFT/TPOT latency profiles (homogeneous, heterogeneous, degrading), backend count, error rates, pod churn (crash/scale), metrics emission fidelity
+  - **Backend response**: TTFT/TPOT latency profiles (homogeneous, heterogeneous, degrading), backend count, and metrics emission fidelity under **steady-state backend conditions**
 - Define an **orthogonal condition matrix** identifying high-value test combinations that expose Router-unique failure modes (scheduler staleness, failover latency, cross-engine metrics, fair queue behavior under burst)
 - Retain the 8 original scenarios as a **Smoke Test Suite** for fast (~15 min) regression detection in CI
 - Adopt and integrate **Dynamo Mocker** as the mock LLM inference backend, providing configurable streaming token generation latency profiles **and Prometheus metric emission** matching real vLLM/SGLang engines
@@ -46,6 +46,7 @@ The existing [`benchmark/kthena-router/`](https://github.com/volcano-sh/kthena/t
 - **Production SLO monitoring** — The framework targets offline benchmarking, not continuous production monitoring. Integration with Prometheus/Grafana dashboards for ongoing SLO tracking is future work.
 - **Comparative benchmarks against other routers** — We benchmark Kthena Router against its own historical baselines, not against other projects (e.g., Envoy AI Gateway, LiteLLM proxy).
 - **gRPC routing benchmarks** — Initial scope covers HTTP/SSE routing only. gRPC streaming benchmarks are deferred to a future iteration.
+- **Backend fault injection / chaos scenarios** — Pod churn (`crash_recover`, scale-out/scale-in during measurement), backend failover experiments, and simulated backend `errorRate` injection are deferred to future work. The current phase assumes **steady-state backends**; any unexpected backend instability during the measurement window invalidates the run instead of becoming a benchmark dimension.
 - **Plugin optimization guarantee** — The optimization deliverable is conditional on the benchmark surfacing identifiable suboptimal plugin behavior. If all tested plugin combinations demonstrate near-optimal scheduling quality with no clear improvement opportunities, the optimization deliverable is replaced with a performance characterization report and recommendations for future optimization targets.
 
 ## Proposal
@@ -65,7 +66,7 @@ The benchmark framework centers on a **sandwich isolation model**: Router perfor
   │ • QPS / ramp │      │  │  Router Self-Metrics:             │  │      │ • TTFT (Gaussian)    │
   │ • burstiness │      │  │  scheduler_plugin_duration        │  │      │ • TPOT (Gaussian)    │
   │ • prompt dist│      │  │  active_upstream_requests         │  │      │ • response tokens    │
-  │ • concurrency│      │  │  fairness_queue_*                 │  │      │ • error_rate         │
+  │ • concurrency│      │  │  fairness_queue_*                 │  │      │ • stable SSE output  │
   └──────────────┘      │  └──────────────────────────────────┘  │      │ • Prometheus metrics │
                         │                                       │      └──────────────────────┘
                         └─────────────────────────────────────────┘
@@ -194,7 +195,7 @@ backends:
 
   # Behavior
   responseTokens: 500       # default when max_tokens not in request
-  errorRate: 0.0            # chaos testing: 0.0–1.0
+  errorRate: 0.0            # reserved for future chaos scenarios
 
   # Metrics emission (must match real vLLM/SGLang)
   metrics:
@@ -249,7 +250,7 @@ It simulates an OpenAI-compatible `/v1/chat/completions` endpoint with SSE strea
 | `TPOT_MEAN` | 15ms | Mean time-per-output-token |
 | `TPOT_STDDEV` | 5ms | Standard deviation of TPOT |
 | `DEFAULT_TOKENS` | 500 | Default token count when `max_tokens` not in request |
-| `ERROR_RATE` | 0.0 | Simulated error rate (0.0–1.0) for chaos testing |
+| `ERROR_RATE` | 0.0 | Reserved for future chaos scenarios |
 | `METRICS_PORT` | 8000 | Prometheus /metrics endpoint port (8000=vLLM, 30000=SGLang) |
 | `METRICS_ENGINE` | vllm | Metrics naming convention: `vllm` or `sglang` |
 
@@ -315,8 +316,6 @@ Every Tier 2 scenario is paired with instrumentation on a specific internal comp
 | **Concurrent Connections** | Goroutine model & memory footprint | `go runtime` — goroutine count, heap size per connection | Goroutine leak detection; memory pressure at 500+ concurrent SSE connections |
 | **Pod Count** (1→30) | Backend discovery & health checking | `pkg/kthena-router/discovery/` — endpoint watch & health probe loop | O(n) scaling in endpoint iteration; health-check CPU cost at high pod counts |
 | **TTFT/TPOT Profile** | Scheduler scoring accuracy | `pkg/kthena-router/plugins/least_latency.go` — TTFT histogram consumption | Scoring bias toward low-variance pods; percentile selection logic correctness |
-| **Error Rate** | Error propagation & retry logic | `pkg/kthena-router/proxy/` — upstream error handling | Retry storm overhead; error response allocation; circuit-breaker CPU cost |
-| **Pod Churn** | Failover & connection draining | `pkg/kthena-router/proxy/` — in-flight request draining on backend removal | Connection drain latency; orphaned goroutine detection; reconnect storm cost |
 | **Metrics Update Interval** | Scheduler decision freshness | `pkg/kthena-router/backend/vllm/metrics.go` — scrape interval effect on scheduler | Quantifies the staleness penalty: how much worse is routing with 10s-old vs. 1s-old metrics? |
 | **Engine Type** (vLLM/SGLang/mixed) | Cross-engine metric normalization | `pkg/kthena-router/backend/sglang/metrics.go` — SGLang → vLLM metric mapping | Per-call normalization overhead; correctness of cross-engine comparison in `least_latency` |
 
@@ -339,10 +338,10 @@ Every Tier 2 scenario is paired with instrumentation on a specific internal comp
 | **Pod Count** | 1, 3, 10, 30 | Number of mock backend replicas |
 | **TTFT Profile** | `homogeneous(50ms)`, `heterogeneous(10/100/500ms)`, `degrading(50→500ms ramp)` | Per-pod TTFT distribution |
 | **TPOT Profile** | `homogeneous(15ms)`, `heterogeneous(5/15/50ms)`, `high_variance(μ=20,σ=15)` | Per-pod TPOT distribution |
-| **Error Rate** | 0%, 1%, 5% | Fraction of requests returning 5xx errors |
-| **Pod Churn** | `static`, `crash_recover(1 pod)`, `scale_out(3→6)`, `scale_in(6→3)` | Pod lifecycle events during benchmark |
 | **Metrics Update Interval** | 1s, 5s, 10s | Backend /metrics scrape frequency → affects scheduler decision freshness |
 | **Engine Type** | `vllm`, `sglang`, `mixed(2 vllm + 2 sglang)` | Prometheus metric format on /metrics endpoint |
+
+In the current phase, backend-fault dimensions such as injected `errorRate` and pod churn are **deferred to future work**. The benchmark assumes steady-state backends and treats unexpected restarts, OOMKills, readiness loss, or backend 5xx spikes as run invalidation conditions rather than scenario parameters.
 
 ##### High-Value Combinations
 
@@ -352,35 +351,40 @@ Not all cross-combinations are equally valuable. The following matrix identifies
 |---|---|---|---|---|---|
 | **Homogeneous<br>Backends** | ✅ S1+S2 | ✅ S2+S3 | 🔶 P1.1 | 🔶 P1.2 |
 | **Heterogeneous<br>Backends** | ✅ S7 | 🔴 P0.1 | 🔴 P0.2 | 🔶 P1.3 |
-| **Pod Churn<br>(crash/scale)** | 🔶 P1.4 | 🔴 P0.3 | 🔶 P1.5 | — |
 | **Slow Metrics<br>Update** | — | 🔴 P0.4 | 🔶 P1.6 | — |
-| **High Error Rate** | ✅ S1 | 🔶 P1.7 | 🔶 P1.8 | 🔶 P1.9 |
 | **Engine Mix<br>(vllm+sglang)** | 🔶 P1.10 | 🔴 P0.5 | — | 🔶 P1.11 |
 
 > **Legend**: ✅ = covered by Smoke Test Suite | 🔴 P0 = must-test (directly exposes Router weakness) | 🔶 P1 = should-test (valuable characterization) | — = low value
 
 **P0 scenarios rationale** (each exposes a specific, Router-unique failure mode):
 
-| ID | User Traffic | Backend | Risk Exposed |
-|----|-------------|---------|-------------|
+| ID       | User Traffic | Backend | Risk Exposed |
+|----------|-------------|---------|-------------|
 | **P0.1** | High QPS (500) + Burst (γ=0.5) | 3 pods: TTFT 10/100/500ms | Scheduler saturation—can it still avoid the 500ms pod under burst? |
 | **P0.2** | High QPS (500) + Ramp (10→500) | 3 pods: TTFT 10/100/500ms | Scheduler adaptation—does it discover the slow pod quickly enough during ramp? |
-| **P0.3** | Burst traffic | 1 of 4 pods crashes mid-benchmark | Failover latency—are in-flight streaming requests dropped? How fast is reconnection? |
-| **P0.4** | High QPS | metrics interval=10s, degrading TTFT (50→500ms) | Stale metrics—does scheduler route to a newly-degraded pod based on 10s-old data? |
-| **P0.5** | Burst traffic | 2 vLLM + 2 SGLang pods, heterogeneous TTFT | Cross-engine scheduling—can least-latency correctly compare metrics from different engines? |
+| **P0.3** | High QPS | metrics interval=10s, degrading TTFT (50→500ms) | Stale metrics—does scheduler route to a newly-degraded pod based on 10s-old data? |
+| **P0.4** | Burst traffic | 2 vLLM + 2 SGLang pods, heterogeneous TTFT | Cross-engine scheduling—can least-latency correctly compare metrics from different engines? |
 | **P1.1** | Ramp 10→500 QPS | 4 homogeneous pods | Identifies the QPS level at which Router overhead becomes the bottleneck |
 | **P1.2** | Bimodal prompts (100+4000) | 4 homogeneous pods | Cost of large request body parsing on the hot path |
 | **P1.3** | Bimodal prompts | 3 heterogeneous pods | Does prompt length correlate with pod selection quality? |
-| **P1.4** | Uniform, low QPS | 1 pod crashes + recovers | Baseline failover behavior in isolation |
-| **P1.5** | Ramp traffic | Scale-out 3→6 pods | New pod discovery latency and initial routing accuracy |
-| **P1.6** | Ramp traffic | metrics interval=5s | Quantifies scheduler staleness penalty at moderate load |
-| **P1.7** | Burst | error_rate=5% | Error propagation—does Router correctly surface backend errors vs. masking them? |
-| **P1.8** | Ramp | error_rate=5% | Error rate at the boundary where throughput collapses |
-| **P1.9** | Bimodal | error_rate=5% | Do long-prompt requests fail differently than short ones? |
-| **P1.10** | Uniform, low QPS | 2 vLLM + 2 SGLang, homogeneous | Baseline cross-engine routing correctness |
-| **P1.11** | Bimodal | 2 vLLM + 2 SGLang, heterogeneous | Worst-case metrics normalization across engine types |
+| **P1.4** | Ramp traffic | metrics interval=5s | Quantifies scheduler staleness penalty at moderate load |
+| **P1.5** | Uniform, low QPS | 2 vLLM + 2 SGLang, homogeneous | Baseline cross-engine routing correctness |
+| **P1.6** | Bimodal | 2 vLLM + 2 SGLang, heterogeneous | Worst-case metrics normalization across engine types |
 
 This matrix is not meant to be run in its entirety—that would be a combinatorial explosion. Instead, the **smoke tests** give fast feedback in CI, while **selected P0/P1 combinations** are run as periodic characterization jobs or on-demand when investigating specific Router behaviors.
+
+##### Future Work: Backend Fault-Injection Scenarios
+
+The following scenarios remain valuable, but are intentionally **deferred** until the steady-state benchmark framework and run-validity checks are in place:
+
+| Deferred ID | User Traffic | Backend | Risk Exposed |
+|-------------|-------------|---------|-------------|
+| **F1** | Burst traffic | 1 of 4 pods crashes mid-benchmark | Failover latency—are in-flight streaming requests dropped? How fast is reconnection? |
+| **F2** | Uniform, low QPS | 1 pod crashes + recovers | Baseline failover behavior in isolation |
+| **F3** | Ramp traffic | Scale-out 3→6 pods | New pod discovery latency and initial routing accuracy |
+| **F4** | Burst | injected `errorRate=5%` | Error propagation—does Router correctly surface backend errors vs. masking them? |
+| **F5** | Ramp | injected `errorRate=5%` | Error rate at the boundary where throughput collapses |
+| **F6** | Bimodal | injected `errorRate=5%` | Do long-prompt requests fail differently than short ones? |
 
 ### CI Integration
 
