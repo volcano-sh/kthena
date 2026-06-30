@@ -336,9 +336,17 @@ type modelRouteInfo struct {
 	loras []string
 }
 
+type retryItem struct {
+	podName types.NamespacedName
+	delta   int64
+}
+
 type store struct {
 	modelServer sync.Map // map[types.NamespacedName]*modelServer
 	pods        sync.Map // map[types.NamespacedName]*PodInfo
+
+	// retry channel for async Redis increments/decrements
+	retryCh chan retryItem
 
 	// onFlightCounter is optional. When non-nil (Redis-backed), in-flight request
 	// counts are shared across all router replicas via Redis. When nil, only the
@@ -403,6 +411,7 @@ func New(opts ...Option) Store {
 		podRuntimeInspector:   realPodRuntimeInspector{},
 		fairnessQueueConfig:   createFairnessQueueConfig(),
 		metricsScrapeInterval: parseMetricsScrapeInterval(),
+		retryCh:               make(chan retryItem, 1000),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -558,6 +567,7 @@ func parseMetricsScrapeInterval() time.Duration {
 
 func (s *store) Run(ctx context.Context) {
 	s.rootCtx = ctx
+	go s.processRetries(ctx)
 	go func() {
 		ticker := time.NewTicker(s.metricsScrapeInterval)
 		defer ticker.Stop()
@@ -590,6 +600,46 @@ func (s *store) Run(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (s *store) processRetries(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item := <-s.retryCh:
+			backoff := 100 * time.Millisecond
+			for {
+				if _, ok := s.pods.Load(item.podName); !ok {
+					klog.V(4).Infof("Pod %s no longer in store, dropping in-flight retry", item.podName)
+					break
+				}
+				
+				var err error
+				retryCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+				if item.delta > 0 {
+					_, err = s.onFlightCounter.Incr(retryCtx, item.podName)
+				} else {
+					_, err = s.onFlightCounter.Decr(retryCtx, item.podName)
+				}
+				cancel()
+				
+				if err == nil {
+					klog.V(4).Infof("Successfully retried in-flight delta %d for pod %s", item.delta, item.podName)
+					break
+				}
+				
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+					if backoff < 5*time.Second {
+						backoff *= 2
+					}
+				}
+			}
+		}
+	}
 }
 
 // SyncOnFlightCounts fetches current on-flight counts for all tracked pods from
@@ -806,17 +856,21 @@ func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) {
 		return
 	}
 	podInfo := value.(*PodInfo)
+	podInfo.IncrOnFlightRequests() // ALWAYS increment local counter so scheduling is accurate locally
 	if s.onFlightCounter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if count, err := s.onFlightCounter.Incr(ctx, podName); err == nil {
-			podInfo.SetOnFlightRequestNum(count)
-			return
+			podInfo.SetOnFlightRequestNum(count) // sync with global count
 		} else {
-			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, falling back to local counter", podName, err)
+			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, queueing for retry", podName, err)
+			select {
+			case s.retryCh <- retryItem{podName: podName, delta: 1}:
+			default:
+				klog.Warningf("Retry channel full, dropping in-flight incr for pod %s", podName)
+			}
 		}
 	}
-	podInfo.IncrOnFlightRequests()
 }
 
 // DecrPodOnFlightRequests decrements the in-flight counter for the given pod.
@@ -827,17 +881,21 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 		return
 	}
 	podInfo := value.(*PodInfo)
+	podInfo.DecrOnFlightRequests() // ALWAYS decrement local counter
 	if s.onFlightCounter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if count, err := s.onFlightCounter.Decr(ctx, podName); err == nil {
-			podInfo.SetOnFlightRequestNum(count)
-			return
+			podInfo.SetOnFlightRequestNum(count) // sync with global count
 		} else {
-			klog.V(4).Infof("Redis on-flight decr failed for pod %s: %v, falling back to local counter", podName, err)
+			klog.V(4).Infof("Redis on-flight decr failed for pod %s: %v, queueing for retry", podName, err)
+			select {
+			case s.retryCh <- retryItem{podName: podName, delta: -1}:
+			default:
+				klog.Warningf("Retry channel full, dropping in-flight decr for pod %s", podName)
+			}
 		}
 	}
-	podInfo.DecrOnFlightRequests()
 }
 
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
