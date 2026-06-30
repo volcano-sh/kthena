@@ -494,6 +494,89 @@ func exclusiveConditionTypes(condition1 metav1.Condition, condition2 metav1.Cond
 	return false
 }
 
+// ExtractPodBlockingFailure inspects pods and returns the single most-relevant
+// blocking failure as a (reason, message) pair.
+// Priority is maintained globally across all pods:
+// scheduling failure > image pull > init container crash > runtime container crash.
+// Returns empty strings when no failure is detected.
+func ExtractPodBlockingFailure(pods []*corev1.Pod) (reason, message string) {
+	// Pass 1: scheduling failures (highest priority).
+	for _, pod := range pods {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Message != "" {
+				return "PodSchedulingFailed", cond.Message
+			}
+		}
+	}
+	// Pass 2: init container failures (image pull or downloader crash).
+	for _, pod := range pods {
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if r, m := extractContainerFailure(cs, "DownloaderFailed"); r != "" {
+				return r, m
+			}
+		}
+	}
+	// Pass 3: runtime container failures.
+	for _, pod := range pods {
+		for _, cs := range pod.Status.ContainerStatuses {
+			if r, m := extractContainerFailure(cs, "RuntimeContainerFailed"); r != "" {
+				return r, m
+			}
+		}
+	}
+	return "", ""
+}
+
+// extractContainerFailure returns a high-level failure reason from a single
+// container status. defaultReason is used for non-image-pull waiting states and
+// for terminated containers with a non-zero exit code.
+func extractContainerFailure(cs corev1.ContainerStatus, defaultReason string) (reason, message string) {
+	if cs.State.Waiting != nil {
+		switch cs.State.Waiting.Reason {
+		case "ImagePullBackOff", "ErrImagePull":
+			msg := cs.State.Waiting.Message
+			if msg == "" {
+				msg = cs.State.Waiting.Reason
+			}
+			return "ImagePullFailed", msg
+		}
+		if cs.State.Waiting.Message != "" {
+			return defaultReason, cs.State.Waiting.Message
+		}
+	}
+	if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+		msg := cs.State.Terminated.Message
+		if msg == "" {
+			msg = cs.State.Terminated.Reason
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("exit code %d", cs.State.Terminated.ExitCode)
+		}
+		return defaultReason, msg
+	}
+	return "", ""
+}
+
+// SetProgressingConditionFailure updates the Reason and Message of the active
+// Progressing or UpdateInProgress condition to reflect the given pod failure.
+// It does not change the condition Type or Status.
+// Returns true if the condition was actually modified.
+func SetProgressingConditionFailure(ms *workloadv1alpha1.ModelServing, reason, message string) bool {
+	for i := range ms.Status.Conditions {
+		t := ms.Status.Conditions[i].Type
+		if (t == string(workloadv1alpha1.ModelServingProgressing) || t == string(workloadv1alpha1.ModelServingUpdateInProgress)) &&
+			ms.Status.Conditions[i].Status == metav1.ConditionTrue {
+			if ms.Status.Conditions[i].Reason == reason && ms.Status.Conditions[i].Message == message {
+				return false
+			}
+			ms.Status.Conditions[i].Reason = reason
+			ms.Status.Conditions[i].Message = message
+			return true
+		}
+	}
+	return false
+}
+
 // ParseAdmissionRequest parses the HTTP request and extracts the AdmissionReview and ModelServing.
 func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview, *workloadv1alpha1.ModelServing, error) {
 	// Verify the content type is accurate

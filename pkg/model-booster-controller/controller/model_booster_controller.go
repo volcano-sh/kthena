@@ -216,6 +216,7 @@ func (mc *ModelBoosterController) reconcile(ctx context.Context, namespaceAndNam
 	}
 	modelServingActive, err := mc.isModelServingActive(model)
 	if err != nil || !modelServingActive {
+		mc.surfaceModelServingBlockingFailure(ctx, model)
 		return err
 	}
 	if err := mc.setModelActiveCondition(ctx, model); err != nil {

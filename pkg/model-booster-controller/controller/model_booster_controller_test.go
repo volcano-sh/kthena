@@ -239,6 +239,199 @@ func waitForControllerCacheSync(controller *ModelBoosterController) bool {
 	})
 }
 
+func TestPickBlockingFailureFromModelServing(t *testing.T) {
+	tests := []struct {
+		name        string
+		conditions  []metav1.Condition
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name:        "no conditions returns empty",
+			conditions:  nil,
+			wantReason:  "",
+			wantMessage: "",
+		},
+		{
+			name: "generic GroupProgressing reason returns empty",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(workload.ModelServingProgressing),
+					Status:  metav1.ConditionTrue,
+					Reason:  "GroupProgressing",
+					Message: "Some groups is progressing: [0]",
+				},
+			},
+			wantReason:  "",
+			wantMessage: "",
+		},
+		{
+			name: "generic GroupsUpdating reason returns empty",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(workload.ModelServingUpdateInProgress),
+					Status:  metav1.ConditionTrue,
+					Reason:  "GroupsUpdating",
+					Message: "groups updating",
+				},
+			},
+			wantReason:  "",
+			wantMessage: "",
+		},
+		{
+			name: "PodSchedulingFailed in Progressing condition is propagated",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(workload.ModelServingProgressing),
+					Status:  metav1.ConditionTrue,
+					Reason:  "PodSchedulingFailed",
+					Message: `0/34 nodes are available: persistentvolumeclaim "crater-storage" not found`,
+				},
+			},
+			wantReason:  "PodSchedulingFailed",
+			wantMessage: `0/34 nodes are available: persistentvolumeclaim "crater-storage" not found`,
+		},
+		{
+			name: "ImagePullFailed in UpdateInProgress condition is propagated",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(workload.ModelServingUpdateInProgress),
+					Status:  metav1.ConditionTrue,
+					Reason:  "ImagePullFailed",
+					Message: "Back-off pulling image",
+				},
+			},
+			wantReason:  "ImagePullFailed",
+			wantMessage: "Back-off pulling image",
+		},
+		{
+			name: "False Progressing condition is not propagated",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(workload.ModelServingProgressing),
+					Status:  metav1.ConditionFalse,
+					Reason:  "PodSchedulingFailed",
+					Message: "scheduling failure",
+				},
+			},
+			wantReason:  "",
+			wantMessage: "",
+		},
+		{
+			name: "Available condition is not propagated",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(workload.ModelServingAvailable),
+					Status:  metav1.ConditionTrue,
+					Reason:  "AllGroupsReady",
+					Message: "All Serving groups are ready",
+				},
+			},
+			wantReason:  "",
+			wantMessage: "",
+		},
+		{
+			name: "DownloaderFailed in Progressing condition is propagated",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(workload.ModelServingProgressing),
+					Status:  metav1.ConditionTrue,
+					Reason:  "DownloaderFailed",
+					Message: "PVC path does not exist: /data/model",
+				},
+			},
+			wantReason:  "DownloaderFailed",
+			wantMessage: "PVC path does not exist: /data/model",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := &workload.ModelServing{}
+			ms.Status.Conditions = tt.conditions
+			reason, message := pickBlockingFailureFromModelServing(ms)
+			assert.Equal(t, tt.wantReason, reason)
+			assert.Equal(t, tt.wantMessage, message)
+		})
+	}
+}
+
+func TestReconcile_SurfacesPodFailureViaModelServingCondition(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	kubeClient := fake.NewClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller := NewModelBoosterController(kubeClient, kthenaClient)
+	assert.NotNil(t, controller)
+	go controller.Run(ctx, 1)
+	assert.True(t, waitForControllerCacheSync(controller), "controller informers did not sync")
+
+	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
+	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	assert.NotNil(t, createdModel)
+
+	// Wait for ModelServing to be created.
+	assert.True(t, waitForCondition(func() bool {
+		list, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
+		return err == nil && len(list.Items) == 1
+	}), "ModelServing was not created")
+
+	// Simulate the ModelServing controller detecting a scheduling failure and
+	// setting the Progressing condition with a specific pod failure reason.
+	list, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
+	assert.NoError(t, err)
+	assert.Len(t, list.Items, 1)
+	ms := &list.Items[0]
+	meta.SetStatusCondition(&ms.Status.Conditions, newCondition(
+		string(workload.ModelServingProgressing),
+		metav1.ConditionTrue,
+		"PodSchedulingFailed",
+		`persistentvolumeclaim "crater-storage" not found`,
+	))
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).UpdateStatus(ctx, ms, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+
+	// The ModelBooster should propagate the pod failure reason to its Active condition.
+	assert.True(t, waitForCondition(func() bool {
+		mb, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		for _, cond := range mb.Status.Conditions {
+			if cond.Type == string(workload.ModelStatusConditionTypeActive) &&
+				cond.Status == metav1.ConditionFalse &&
+				cond.Reason == "PodSchedulingFailed" {
+				return true
+			}
+		}
+		return false
+	}), "ModelBooster did not surface PodSchedulingFailed from ModelServing")
+
+	// When the ModelServing later becomes available (pod failure cleared), the
+	// ModelBooster should reflect ModelAvailable, not the old failure reason.
+	ms, err = kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	meta.SetStatusCondition(&ms.Status.Conditions, newCondition(
+		string(workload.ModelServingAvailable),
+		metav1.ConditionTrue,
+		"AllGroupsReady",
+		"All Serving groups are ready",
+	))
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).UpdateStatus(ctx, ms, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+
+	assert.True(t, waitForCondition(func() bool {
+		mb, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		return meta.IsStatusConditionPresentAndEqual(mb.Status.Conditions,
+			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
+	}), "ModelBooster did not become Active after ModelServing became Available")
+}
+
 // waitForCondition repeatedly checks a condition function until it returns true or a timeout occurs.
 func waitForCondition(checkFunc func() bool) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
