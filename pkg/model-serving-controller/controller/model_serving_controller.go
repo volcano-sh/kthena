@@ -867,8 +867,17 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 	var roleScores []RoleWithScore
 
 	for _, role := range roleList {
+		if role.Status == datastore.RoleDeleting {
+			// Skip roles that are already being deleted
+			continue
+		}
 		scoreInfo := c.calculateRoleScore(ms, groupName, targetRole.Name, role.Name)
 		roleScores = append(roleScores, scoreInfo)
+	}
+
+	if len(roleScores) <= expectedCount {
+		klog.V(4).Infof("No need to scale down role %s in ServingGroup %s: current count=%d, expected count=%d", targetRole.Name, groupName, len(roleScores), expectedCount)
+		return
 	}
 
 	// Sort by priority tuple: (priority, deletionCost, index)
