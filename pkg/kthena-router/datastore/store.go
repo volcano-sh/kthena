@@ -843,10 +843,11 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
 	name := utils.GetNamespaceName(ms)
 	var modelServerObj *modelServer
+	oldPods := sets.New[types.NamespacedName]()
 	if value, ok := s.modelServer.Load(name); !ok {
 		modelServerObj = newModelServer(ms)
 		// New object — no concurrent access yet, safe to write without lock
-		if len(pods) != 0 {
+		if pods != nil {
 			modelServerObj.pods = pods
 		}
 	} else {
@@ -855,13 +856,29 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		// so we must hold the lock to prevent data races.
 		modelServerObj.mutex.Lock()
 		modelServerObj.modelServer = ms
-		if len(pods) != 0 {
-			// do not operate s.pods here, which are done within pod handler
+		if pods != nil {
+			for podName := range modelServerObj.pods {
+				oldPods.Insert(podName)
+			}
 			modelServerObj.pods = pods
 		}
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
+	if pods != nil {
+		for podName := range oldPods.Difference(pods) {
+			if value, ok := s.pods.Load(podName); ok {
+				podInfo := value.(*PodInfo)
+				if podInfo.GetModelServerCount() == 1 && podInfo.HasModelServer(name) {
+					_ = s.DeletePod(podName)
+					continue
+				}
+				podLabels := podInfo.GetPodLabels()
+				podInfo.RemoveModelServer(name)
+				modelServerObj.removePodFromPDGroups(podName, podLabels)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1001,6 +1018,9 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 	if value, ok := s.pods.Load(podName); ok {
 		// Update existing pod in place — preserve runtime metrics and models.
 		oldPodInfo := value.(*PodInfo)
+		if newModelServers.Len() == 0 {
+			return s.DeletePod(podName)
+		}
 		oldModelServers := oldPodInfo.GetModelServers()
 		// Handle the case where the pod no longer belongs to some model servers
 		oldPodLabels := oldPodInfo.GetPodLabels()

@@ -709,6 +709,66 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 	})
 }
 
+func TestModelServerController_PodLabelChangeRemovesBinding(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller := NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-modelserver-label-change",
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{
+					"app": "test-model",
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-pod-label-change",
+			Labels: map[string]string{
+				"app": "test-model",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
+	require.NoError(t, store.AddOrUpdateModelServer(ms, nil))
+	require.NoError(t, controller.addOrUpdatePod(pod))
+
+	pods, err := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	require.Len(t, pods, 1)
+
+	updatedPod := pod.DeepCopy()
+	updatedPod.Labels = map[string]string{"app": "other-model"}
+	require.NoError(t, controller.addOrUpdatePod(updatedPod))
+
+	pods, err = store.GetPodsByModelServer(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	assert.Empty(t, pods)
+	assert.Nil(t, store.GetPodInfo(utils.GetNamespaceName(updatedPod)))
+}
+
 func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 	// Create a comprehensive test that tests the full workflow
 	// with proper informer setup and timing
