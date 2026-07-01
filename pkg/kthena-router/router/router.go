@@ -1185,16 +1185,32 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		// so the queue drops it from the heap (via its cancellation check), release
 		// any permit if one was concurrently granted, and reject the client with 429.
 		cancel()
-		if queueReq.Release != nil {
-			queueReq.Release()
+		// The dequeue goroutine writes queueReq.Release before closing NotifyChan, so a
+		// closed NotifyChan is the only thing that establishes the happens-before needed
+		// to read Release without a data race. A non-blocking receive lets us observe an
+		// admission that raced with this timeout and release its permit; if NotifyChan is
+		// not closed, admission never happened and Release is still nil.
+		select {
+		case <-queueReq.NotifyChan:
+			if queueReq.Release != nil {
+				queueReq.Release()
+			}
+		default:
 		}
 		klog.Warningf("[SessionBoost] request rejected after exceeding max queue wait: reqID=%s sessionID=%s user=%s model=%s maxWait=%v",
 			requestID, sessionID, userId, modelName, r.sessionBoostMaxWait)
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, "Request rejected: exceeded maximum session boost queue wait time")
 		return fmt.Errorf("request rejected: exceeded session boost max queue wait")
 	case <-reqCtx.Done():
-		if queueReq.Release != nil {
-			queueReq.Release()
+		// Same happens-before requirement as the waitReject path: only a closed
+		// NotifyChan guarantees we observe the dequeue goroutine's write to Release, so
+		// gate the read on a non-blocking receive to avoid a data race.
+		select {
+		case <-queueReq.NotifyChan:
+			if queueReq.Release != nil {
+				queueReq.Release()
+			}
+		default:
 		}
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
 			klog.Errorf("[FairnessScheduling] request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
