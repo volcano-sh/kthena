@@ -70,9 +70,11 @@ class CompareMetricsTest(unittest.TestCase):
         self.assertTrue(comparison["latency_avg_ms"]["regression"])
         self.assertTrue(comparison["throughput_rps"]["regression"])
 
-    def test_report_builder_keeps_paths_metrics_and_comparison(self):
+    def test_report_builder_keeps_paths_metrics_artifacts_and_comparison(self):
         result_a = self.make_result(ttft_avg_ms=100.0, throughput_rps=50.0)
         result_b = self.make_result(ttft_avg_ms=80.0, throughput_rps=55.0)
+        result_a.artifacts = {"prometheus": {"sample_count": 12}}
+        result_b.artifacts = {"pprof": {"profiles": {"heap": "path"}}}
 
         report = ab_test.ResultReporter().build_report(
             scenario_name="smoke-test-s2-latency-vs-qps",
@@ -88,6 +90,8 @@ class CompareMetricsTest(unittest.TestCase):
         self.assertEqual(report["config_b"]["path"], "k8s/router-config-least-latency.yaml")
         self.assertEqual(report["config_a"]["metrics"], result_a.metrics)
         self.assertEqual(report["config_b"]["metrics"], result_b.metrics)
+        self.assertEqual(report["config_a"]["artifacts"], result_a.artifacts)
+        self.assertEqual(report["config_b"]["artifacts"], result_b.artifacts)
         self.assertIn("ttft_avg_ms", report["comparison"])
 
 
@@ -140,6 +144,87 @@ class AIPerfRunnerTest(unittest.TestCase):
         self.assertEqual(self.runner._parse_duration_seconds("60s"), 60)
         self.assertEqual(self.runner._parse_duration_seconds("5m"), 300)
         self.assertEqual(self.runner._parse_duration_seconds("2H"), 7200)
+
+
+class MetricsCollectorTest(unittest.TestCase):
+    def setUp(self):
+        self.output_dir = Path(tempfile.mkdtemp())
+        self.collector = ab_test.MetricsCollector(self.output_dir)
+
+    def test_collect_artifacts_fetches_prometheus_and_pprof_profiles(self):
+        scenario = ab_test.ScenarioConfig(
+            name="smoke-test-s2-latency-vs-qps",
+            description="scenario",
+            load={"duration": "60s"},
+            backends={},
+            routing={},
+            metrics={
+                "prometheus": True,
+                "pprof": True,
+                "cpuProfileSeconds": 7,
+                "profiles": ["heap", "goroutine"],
+            },
+        )
+        requested_urls = []
+
+        def fake_fetch_text(url):
+            requested_urls.append(url)
+            return "go_goroutines 17\nprocess_resident_memory_bytes 42\n"
+
+        def fake_fetch_bytes(url):
+            requested_urls.append(url)
+            return f"payload:{url}".encode()
+
+        with mock.patch.object(self.collector, "_fetch_text", side_effect=fake_fetch_text):
+            with mock.patch.object(self.collector, "_fetch_bytes", side_effect=fake_fetch_bytes):
+                artifacts = self.collector.collect_artifacts(
+                    config_name="config_a",
+                    scenario=scenario,
+                    router_metrics_endpoint="localhost:8080",
+                    router_debug_endpoint="localhost:18080",
+                )
+
+        self.assertEqual(artifacts["prometheus"]["key_metrics"]["go_goroutines"], 17.0)
+        self.assertEqual(artifacts["prometheus"]["key_metrics"]["process_resident_memory_bytes"], 42.0)
+        self.assertTrue((self.output_dir / "config_a" / "router_metrics.prom").exists())
+        self.assertTrue((self.output_dir / "config_a" / "pprof" / "cpu.pb.gz").exists())
+        self.assertTrue((self.output_dir / "config_a" / "pprof" / "heap.pb.gz").exists())
+        self.assertTrue((self.output_dir / "config_a" / "pprof" / "goroutine.pb.gz").exists())
+        self.assertIn("http://localhost:8080/metrics", requested_urls)
+        self.assertIn("http://localhost:18080/debug/pprof/profile?seconds=7", requested_urls)
+        self.assertIn("http://localhost:18080/debug/pprof/heap", requested_urls)
+        self.assertIn("http://localhost:18080/debug/pprof/goroutine", requested_urls)
+
+    def test_collect_artifacts_skips_when_metrics_collection_disabled(self):
+        scenario = ab_test.ScenarioConfig(
+            name="smoke-test-s2-latency-vs-qps",
+            description="scenario",
+            load={"duration": "60s"},
+            backends={},
+            routing={},
+        )
+
+        with mock.patch.object(self.collector, "_fetch_text") as fetch_text:
+            with mock.patch.object(self.collector, "_fetch_bytes") as fetch_bytes:
+                artifacts = self.collector.collect_artifacts(
+                    config_name="config_a",
+                    scenario=scenario,
+                    router_metrics_endpoint="localhost:8080",
+                    router_debug_endpoint="localhost:18080",
+                )
+
+        self.assertEqual(artifacts, {})
+        fetch_text.assert_not_called()
+        fetch_bytes.assert_not_called()
+
+    def test_build_router_debug_patch_exposes_debug_container_port(self):
+        patch = self.collector.build_router_debug_patch()
+
+        self.assertEqual(patch["spec"]["template"]["spec"]["containers"][0]["name"], "kthena-router")
+        self.assertEqual(
+            patch["spec"]["template"]["spec"]["containers"][0]["ports"],
+            [{"containerPort": 15000, "name": "debug"}],
+        )
 
 
 class MainTest(unittest.TestCase):

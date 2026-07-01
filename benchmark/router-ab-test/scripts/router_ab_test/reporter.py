@@ -50,10 +50,12 @@ class ResultReporter:
             "config_a": {
                 "path": config_a_path,
                 "metrics": result_a.metrics,
+                "artifacts": result_a.artifacts,
             },
             "config_b": {
                 "path": config_b_path,
                 "metrics": result_b.metrics,
+                "artifacts": result_b.artifacts,
             },
             "comparison": self.compare(result_a, result_b),
         }
@@ -73,9 +75,19 @@ class ResultReporter:
         for key, value in report["config_a"]["metrics"].items():
             print(f"  {key}: {value}")
 
+        if report["config_a"]["artifacts"]:
+            print("  artifacts:")
+            for key in report["config_a"]["artifacts"]:
+                print(f"    - {key}")
+
         print(f"\nRouter Config B: {report['config_b']['path']}")
         for key, value in report["config_b"]["metrics"].items():
             print(f"  {key}: {value}")
+
+        if report["config_b"]["artifacts"]:
+            print("  artifacts:")
+            for key in report["config_b"]["artifacts"]:
+                print(f"    - {key}")
 
         print("\nComparison (B vs A, positive delta means improvement):")
         for metric, data in report["comparison"].items():
