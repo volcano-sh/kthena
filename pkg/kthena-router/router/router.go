@@ -214,8 +214,13 @@ const defaultSessionBoostMaxWait = 30 * time.Second
 
 // parseSessionBoostMaxWait reads the session-boost max queue wait from the
 // SESSION_BOOST_MAX_WAIT environment variable. It only takes effect when
-// SESSION_BOOST_WAIT_REJECT_ENABLED is true.
+// SESSION_BOOST_WAIT_REJECT_ENABLED is true, so when wait-reject is disabled we
+// skip parsing entirely to avoid emitting confusing warnings for a value that
+// has no effect.
 func parseSessionBoostMaxWait() time.Duration {
+	if !getEnvBool("SESSION_BOOST_WAIT_REJECT_ENABLED", false) {
+		return defaultSessionBoostMaxWait
+	}
 	if s, ok := os.LookupEnv("SESSION_BOOST_MAX_WAIT"); ok {
 		if d, err := time.ParseDuration(s); err == nil && d > 0 {
 			return d
@@ -1155,8 +1160,10 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 
 	// Session-boost wait-reject: when enabled, a request that waits in the queue
 	// longer than sessionBoostMaxWait is rejected with HTTP 429 instead of waiting
-	// out the general queue timeout (which returns 504). The timer only arms in
-	// session-boost mode when the feature is enabled and a positive max wait is set.
+	// indefinitely for backend capacity (session-boost mode has no
+	// FAIRNESS_QUEUE_TIMEOUT deadline, so there is no 504 fallback). The timer only
+	// arms in session-boost mode when the feature is enabled and a positive max wait
+	// is set.
 	var waitRejectCh <-chan time.Time
 	if EnableSessionBoost && r.sessionBoostWaitRejectEnabled && r.sessionBoostMaxWait > 0 {
 		waitRejectTimer := time.NewTimer(r.sessionBoostMaxWait)
@@ -1197,7 +1204,10 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 			}
 		default:
 		}
-		klog.Warningf("[SessionBoost] request rejected after exceeding max queue wait: reqID=%s sessionID=%s user=%s model=%s maxWait=%v",
+		// 429 backpressure is expected behavior when wait-reject is enabled, and under
+		// sustained overload this path can fire for many requests, so log at a verbose
+		// level (like the rate-limit 429 path) to avoid flooding warning logs.
+		klog.V(2).Infof("[SessionBoost] request rejected after exceeding max queue wait: reqID=%s sessionID=%s user=%s model=%s maxWait=%v",
 			requestID, sessionID, userId, modelName, r.sessionBoostMaxWait)
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, "Request rejected: exceeded maximum session boost queue wait time")
 		return fmt.Errorf("request rejected: exceeded session boost max queue wait")

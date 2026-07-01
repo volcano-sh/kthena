@@ -71,12 +71,12 @@ kthenaRouter:
     # the latency trade-off for non-boosted requests.
     gracePeriod: "0s"
     # waitRejectEnabled controls whether requests that wait in the session-boost
-    # queue longer than maxWait are rejected with HTTP 429 instead of continuing to
-    # wait for the general queue timeout. Disabled by default.
+    # queue longer than maxWait are rejected with HTTP 429 instead of waiting
+    # indefinitely for backend capacity. Disabled by default.
     waitRejectEnabled: false
     # maxWait is the maximum time a request may wait in the session-boost queue
     # before it is rejected with HTTP 429. Only effective when waitRejectEnabled is
-    # true. Keep it below the general queue timeout so 429 fires before a 504.
+    # true.
     maxWait: "30s"
   # accessLog configuration for request logging
   accessLog:
