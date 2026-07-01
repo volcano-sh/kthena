@@ -82,6 +82,11 @@ func (m *MockStore) AddOrUpdatePod(pod *corev1.Pod, modelServer []*aiv1alpha1.Mo
 	return args.Error(0)
 }
 
+func (m *MockStore) AddOrUpdateInferencePoolPod(pod *corev1.Pod) error {
+	args := m.Called(pod)
+	return args.Error(0)
+}
+
 func (m *MockStore) AppendModelServerToPod(pod *corev1.Pod, modelServers []*aiv1alpha1.ModelServer) error {
 	args := m.Called(pod, modelServers)
 	return args.Error(0)
