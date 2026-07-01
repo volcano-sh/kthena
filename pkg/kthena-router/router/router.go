@@ -1108,8 +1108,20 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	klog.V(4).Infof("[FairnessScheduling] incoming request: reqID=%s user=%s model=%s",
 		requestID, userId, modelName)
 
-	// Create request-scoped context that unifies client disconnect and server timeout
-	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	// Create the request-scoped context that also drives the queue's cancellation
+	// cleanup (CancelCh). The general queue-wait deadline differs by strategy:
+	//   - Fairness mode: bounded by FAIRNESS_QUEUE_TIMEOUT; exceeding it returns 504.
+	//   - Session-boost mode: FAIRNESS_QUEUE_TIMEOUT does NOT apply. Session boost has
+	//     its own independent wait control via SESSION_BOOST_MAX_WAIT (returns 429 when
+	//     SESSION_BOOST_WAIT_REJECT_ENABLED is set); otherwise the request is bounded
+	//     only by client disconnect.
+	var reqCtx context.Context
+	var cancel context.CancelFunc
+	if EnableSessionBoost {
+		reqCtx, cancel = context.WithCancel(c.Request.Context())
+	} else {
+		reqCtx, cancel = context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	}
 	defer cancel()
 
 	var pri float64

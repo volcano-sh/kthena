@@ -127,7 +127,7 @@ env:
 | `FAIRNESS_WINDOW_SIZE`         | Sliding window used to track recent usage             | runtime default `5m` | The Helm chart default sets this to `1h` when fairness is enabled     |
 | `FAIRNESS_INPUT_TOKEN_WEIGHT`  | Weight applied to input tokens when recording usage   | `1.0`                | Used by the token tracker                                             |
 | `FAIRNESS_OUTPUT_TOKEN_WEIGHT` | Weight applied to output tokens when recording usage  | `2.0`                | Used by the token tracker                                             |
-| `FAIRNESS_QUEUE_TIMEOUT`       | Maximum time a request may wait in the fairness queue | `60s`                | Waiting longer returns a timeout to the client                        |
+| `FAIRNESS_QUEUE_TIMEOUT`       | Maximum time a request may wait in the fairness queue | `60s`                | Waiting longer returns a timeout (504) to the client. Applies only to the user-fairness queue, not session boost |
 
 ### Queue Policy Settings
 
