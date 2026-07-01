@@ -74,6 +74,49 @@ func (mc *ModelBoosterController) setModelActiveCondition(ctx context.Context, m
 	return nil
 }
 
+// surfaceModelServingBlockingFailure propagates a blocking pod failure from the
+// child ModelServing's Progressing condition into the ModelBooster's Active
+// condition. It is a no-op when the ModelServing has not yet computed a failure.
+func (mc *ModelBoosterController) surfaceModelServingBlockingFailure(ctx context.Context, model *workloadv1alpha1.ModelBooster) {
+	modelServings, err := mc.listModelServingsByLabel(model)
+	if err != nil || len(modelServings) != 1 {
+		return
+	}
+	reason, message := pickBlockingFailureFromModelServing(modelServings[0])
+	if reason == "" {
+		return
+	}
+	meta.SetStatusCondition(&model.Status.Conditions, newCondition(
+		string(workloadv1alpha1.ModelStatusConditionTypeActive),
+		metav1.ConditionFalse,
+		reason,
+		message,
+	))
+	if err := mc.updateModelBoosterStatus(ctx, model); err != nil {
+		klog.Errorf("update ModelBooster status failed: %v", err)
+	}
+}
+
+// pickBlockingFailureFromModelServing extracts a pod-level failure reason from a
+// ModelServing's Progressing or UpdateInProgress condition, returning empty
+// strings for the generic GroupProgressing/GroupsUpdating reasons that indicate
+// normal progression rather than a blocking error.
+func pickBlockingFailureFromModelServing(ms *workloadv1alpha1.ModelServing) (reason, message string) {
+	for _, cond := range ms.Status.Conditions {
+		if cond.Status != metav1.ConditionTrue {
+			continue
+		}
+		if cond.Type != string(workloadv1alpha1.ModelServingProgressing) && cond.Type != string(workloadv1alpha1.ModelServingUpdateInProgress) {
+			continue
+		}
+		if cond.Reason == "GroupProgressing" || cond.Reason == "GroupsUpdating" {
+			continue
+		}
+		return cond.Reason, cond.Message
+	}
+	return "", ""
+}
+
 // newCondition returns a condition
 func newCondition(conditionType string, status metav1.ConditionStatus, reason string, message string) metav1.Condition {
 	return metav1.Condition{

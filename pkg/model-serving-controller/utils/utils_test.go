@@ -361,3 +361,363 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractPodBlockingFailure(t *testing.T) {
+	tests := []struct {
+		name          string
+		pods          []*corev1.Pod
+		wantReason    string
+		wantMsgSubstr string
+	}{
+		{
+			name:       "no pods returns empty",
+			pods:       nil,
+			wantReason: "",
+		},
+		{
+			name: "healthy running pod returns empty",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			},
+			wantReason: "",
+		},
+		{
+			name: "scheduling failure",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{
+								Type:    corev1.PodScheduled,
+								Status:  corev1.ConditionFalse,
+								Message: `0/34 nodes are available: persistentvolumeclaim "crater-storage" not found`,
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "PodSchedulingFailed",
+			wantMsgSubstr: "crater-storage",
+		},
+		{
+			name: "init container image pull failure",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason:  "ImagePullBackOff",
+										Message: "Back-off pulling image",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "ImagePullFailed",
+			wantMsgSubstr: "Back-off",
+		},
+		{
+			name: "init container crash (downloader failure)",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 1,
+										Message:  "PVC path does not exist: /data/model",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "DownloaderFailed",
+			wantMsgSubstr: "PVC path",
+		},
+		{
+			name: "init container crash without message uses exit code",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 2,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "DownloaderFailed",
+			wantMsgSubstr: "exit code 2",
+		},
+		{
+			name: "init container ErrImagePull",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason:  "ErrImagePull",
+										Message: "rpc error: image not found",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "ImagePullFailed",
+			wantMsgSubstr: "rpc error",
+		},
+		{
+			name: "runtime container crash",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 137,
+										Message:  "OOMKilled",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "RuntimeContainerFailed",
+			wantMsgSubstr: "OOMKilled",
+		},
+		{
+			name: "runtime container waiting with message",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason:  "CrashLoopBackOff",
+										Message: "back-off 5m0s restarting failed container",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "RuntimeContainerFailed",
+			wantMsgSubstr: "back-off",
+		},
+		{
+			name: "scheduling failure takes priority over init container failure in same pod",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{
+								Type:    corev1.PodScheduled,
+								Status:  corev1.ConditionFalse,
+								Message: "scheduling failure message",
+							},
+						},
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 1,
+										Message:  "init container failure",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "PodSchedulingFailed",
+			wantMsgSubstr: "scheduling failure message",
+		},
+		{
+			name: "scheduling failure in pod B takes priority over init failure in pod A",
+			pods: []*corev1.Pod{
+				{
+					// Pod A: init container failure, no scheduling issue.
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						},
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 1,
+										Message:  "downloader failed",
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					// Pod B: unschedulable, no container failures yet.
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{
+								Type:    corev1.PodScheduled,
+								Status:  corev1.ConditionFalse,
+								Message: "insufficient memory",
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "PodSchedulingFailed",
+			wantMsgSubstr: "insufficient memory",
+		},
+		{
+			name: "returns empty when waiting reason has no message",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason: "ContainerCreating",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason: "",
+		},
+		{
+			name: "successful reconciliation - all ready, no failure",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+							{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			},
+			wantReason: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, msg := ExtractPodBlockingFailure(tt.pods)
+			assert.Equal(t, tt.wantReason, reason)
+			if tt.wantReason != "" && tt.wantMsgSubstr != "" {
+				assert.Contains(t, msg, tt.wantMsgSubstr)
+			}
+		})
+	}
+}
+
+func TestSetProgressingConditionFailure(t *testing.T) {
+	tests := []struct {
+		name         string
+		initialConds []metav1.Condition
+		reason       string
+		message      string
+		wantReason   string
+		wantMessage  string
+		wantCondType string
+	}{
+		{
+			name: "updates Progressing condition reason and message",
+			initialConds: []metav1.Condition{
+				{
+					Type:    string(workloadv1alpha1.ModelServingProgressing),
+					Status:  metav1.ConditionTrue,
+					Reason:  "GroupProgressing",
+					Message: "Some groups is progressing",
+				},
+			},
+			reason:       "PodSchedulingFailed",
+			message:      `persistentvolumeclaim "crater-storage" not found`,
+			wantReason:   "PodSchedulingFailed",
+			wantMessage:  `persistentvolumeclaim "crater-storage" not found`,
+			wantCondType: string(workloadv1alpha1.ModelServingProgressing),
+		},
+		{
+			name: "updates UpdateInProgress condition reason and message",
+			initialConds: []metav1.Condition{
+				{
+					Type:    string(workloadv1alpha1.ModelServingUpdateInProgress),
+					Status:  metav1.ConditionTrue,
+					Reason:  "GroupsUpdating",
+					Message: "groups updating",
+				},
+			},
+			reason:       "ImagePullFailed",
+			message:      "Back-off pulling image",
+			wantReason:   "ImagePullFailed",
+			wantMessage:  "Back-off pulling image",
+			wantCondType: string(workloadv1alpha1.ModelServingUpdateInProgress),
+		},
+		{
+			name: "does not update False Progressing condition",
+			initialConds: []metav1.Condition{
+				{
+					Type:    string(workloadv1alpha1.ModelServingProgressing),
+					Status:  metav1.ConditionFalse,
+					Reason:  "GroupProgressing",
+					Message: "old message",
+				},
+			},
+			reason:       "PodSchedulingFailed",
+			message:      "new message",
+			wantReason:   "GroupProgressing",
+			wantMessage:  "old message",
+			wantCondType: string(workloadv1alpha1.ModelServingProgressing),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := &workloadv1alpha1.ModelServing{}
+			ms.Status.Conditions = tt.initialConds
+
+			SetProgressingConditionFailure(ms, tt.reason, tt.message)
+
+			for _, cond := range ms.Status.Conditions {
+				if cond.Type == tt.wantCondType {
+					assert.Equal(t, tt.wantReason, cond.Reason)
+					assert.Equal(t, tt.wantMessage, cond.Message)
+					return
+				}
+			}
+			t.Errorf("condition type %s not found", tt.wantCondType)
+		})
+	}
+}

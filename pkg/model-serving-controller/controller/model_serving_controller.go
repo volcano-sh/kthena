@@ -1781,6 +1781,31 @@ func (c *ModelServingController) isRoleDeleted(ms *workloadv1alpha1.ModelServing
 	return len(pods) == 0 && len(services) == 0
 }
 
+// getBlockingPodFailure inspects pods belonging to non-deleting progressing
+// ServingGroups and returns the single most-relevant pod failure reason and
+// message. It returns empty strings when no blocking failure is found.
+func (c *ModelServingController) getBlockingPodFailure(ms *workloadv1alpha1.ModelServing, groups []datastore.ServingGroup, progressingGroupIndices []int) (reason, message string) {
+	for _, idx := range progressingGroupIndices {
+		if idx >= len(groups) {
+			continue
+		}
+		group := groups[idx]
+		if group.Status == datastore.ServingGroupDeleting {
+			continue
+		}
+		groupKey := fmt.Sprintf("%s/%s", ms.Namespace, group.Name)
+		pods, err := c.getPodsByIndex(GroupNameKey, groupKey)
+		if err != nil {
+			klog.Warningf("getBlockingPodFailure: failed to list pods for group %s: %v", groupKey, err)
+			continue
+		}
+		if r, m := utils.ExtractPodBlockingFailure(pods); r != "" {
+			return r, m
+		}
+	}
+	return "", ""
+}
+
 // getPodsByIndex filter pods using the informer indexer.
 func (c *ModelServingController) getPodsByIndex(indexName, indexValue string) ([]*corev1.Pod, error) {
 	indexer := c.podsInformer.GetIndexer()
@@ -1940,6 +1965,13 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 
 		copy := latestMS.DeepCopy()
 		shouldUpdate := utils.SetCondition(copy, progressingGroups, updatedGroups, currentGroups)
+		if len(progressingGroups) > 0 {
+			if failureReason, failureMsg := c.getBlockingPodFailure(latestMS, groups, progressingGroups); failureReason != "" {
+				if utils.SetProgressingConditionFailure(copy, failureReason, failureMsg) {
+					shouldUpdate = true
+				}
+			}
+		}
 		if copy.Status.Replicas != int32(len(groups)) || copy.Status.AvailableReplicas != int32(available) || copy.Status.UpdatedReplicas != int32(updated) || copy.Status.CurrentReplicas != int32(current) {
 			shouldUpdate = true
 			copy.Status.Replicas = int32(len(groups))
