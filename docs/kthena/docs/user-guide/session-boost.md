@@ -117,7 +117,7 @@ env:
 | `SESSION_BOOST_MAX_SESSIONS`        | Max number of recently-completed sessions kept "warm" for boosting (LRU-bounded) | `4096`         | When the cache is full, the least-recently-used session is evicted automatically. Size it by the number of concurrent conversations you want to keep boosted—no time-based tuning required |
 | `SESSION_BOOST_INFLIGHT_PER_POD`    | Inflight requests admitted per backend pod                                       | `16`           | The total inflight limit is this value multiplied by the number of backend pods. Size it from the per-pod concurrency (e.g., vLLM's `--max-num-seqs`)                                      |
 | `SESSION_BOOST_WAIT_REJECT_ENABLED` | Reject requests that wait too long in the queue with HTTP 429                    | `false`        | When `true`, a request queued longer than `SESSION_BOOST_MAX_WAIT` is rejected with `429 Too Many Requests` instead of continuing to wait                                                  |
-| `SESSION_BOOST_MAX_WAIT`            | Maximum time a request may wait in the queue before it is rejected with 429      | `30s`          | Only effective when `SESSION_BOOST_WAIT_REJECT_ENABLED=true`. Keep it below `FAIRNESS_QUEUE_TIMEOUT` so the 429 fires before the general queue timeout (504)                               |
+| `SESSION_BOOST_MAX_WAIT`            | Maximum time a request may wait in the queue before it is rejected with 429      | `30s`          | Only effective when `SESSION_BOOST_WAIT_REJECT_ENABLED=true`. This is the only server-side queue-wait bound in session-boost mode; `FAIRNESS_QUEUE_TIMEOUT` does not apply                  |
 
 > `SESSION_BOOST_GRACE_PERIOD` is intentionally omitted from the table above. It is an advanced, scenario-specific knob that is disabled by default; see [Advanced: Grace Period](#advanced-grace-period-use-with-caution).
 
@@ -186,16 +186,16 @@ When a request completes, the queue immediately attempts to dequeue the next req
 
 ### Queue Wait Timeout (429 Rejection)
 
-Under heavy load a request may sit in the queue for a long time before backend capacity frees up. By default the router waits until the general queue timeout (`FAIRNESS_QUEUE_TIMEOUT`) expires and then returns `504 Gateway Timeout`. For latency-sensitive front ends it is often better to **fail fast** and let the client retry or shed load.
+Under heavy load a request may sit in the queue for a long time before backend capacity frees up. Session boost does **not** apply the fairness queue timeout (`FAIRNESS_QUEUE_TIMEOUT` only governs the user-fairness queue); by default a queued request in session-boost mode waits until backend capacity frees up or the client disconnects. For latency-sensitive front ends it is often better to **fail fast** and let the client retry or shed load.
 
-Session boost provides an optional **wait timeout** that rejects over-queued requests early with `429 Too Many Requests`:
+Session boost provides its own optional **wait timeout** that rejects over-queued requests early with `429 Too Many Requests`:
 
 - Enable it with `SESSION_BOOST_WAIT_REJECT_ENABLED=true`.
 - Set the threshold with `SESSION_BOOST_MAX_WAIT` (default `30s`).
 
-When enabled, if a request waits in the queue longer than `SESSION_BOOST_MAX_WAIT`, the router removes it from the queue and responds with `429 Too Many Requests`. This is distinct from the general queue timeout: the 429 signals *backpressure* (the queue is saturated and the client should back off or retry), whereas the `504` from `FAIRNESS_QUEUE_TIMEOUT` signals a general processing timeout.
+When enabled, if a request waits in the queue longer than `SESSION_BOOST_MAX_WAIT`, the router removes it from the queue and responds with `429 Too Many Requests`. The 429 signals *backpressure* (the queue is saturated and the client should back off or retry).
 
-> Keep `SESSION_BOOST_MAX_WAIT` **below** `FAIRNESS_QUEUE_TIMEOUT`. If it is larger, the general queue timeout (504) fires first and the 429 rejection never takes effect. The feature only applies when session boost is enabled; it has no effect in user-fairness mode.
+> `SESSION_BOOST_MAX_WAIT` is the only server-side queue-wait bound in session-boost mode. `FAIRNESS_QUEUE_TIMEOUT` has no effect here—it applies exclusively to the user-fairness strategy. Without `SESSION_BOOST_WAIT_REJECT_ENABLED`, a session-boost request is bounded only by client disconnect.
 
 ## Session Boost vs User Fairness
 
@@ -277,8 +277,8 @@ Each tracked session consumes minimal memory (just a session ID). The tracker is
 When `SESSION_BOOST_WAIT_REJECT_ENABLED=true`, the router returns `429 Too Many Requests` for requests that wait in the queue longer than `SESSION_BOOST_MAX_WAIT`. This is expected backpressure behavior under sustained overload—it means the backends cannot keep up with demand. If you see more 429s than desired:
 
 1. Confirm the backends are healthy and scaled appropriately; add capacity if they are saturated.
-2. Increase `SESSION_BOOST_MAX_WAIT` to allow requests to wait longer before rejection (but keep it below `FAIRNESS_QUEUE_TIMEOUT`).
-3. Disable the feature (`SESSION_BOOST_WAIT_REJECT_ENABLED=false`) to fall back to the general queue timeout (504) behavior.
+2. Increase `SESSION_BOOST_MAX_WAIT` to allow requests to wait longer before rejection.
+3. Disable the feature (`SESSION_BOOST_WAIT_REJECT_ENABLED=false`) so requests are no longer rejected on a wait timeout (they then wait until backend capacity frees up or the client disconnects).
 
 ## Advanced: Grace Period (Use With Caution)
 
