@@ -100,6 +100,13 @@ networking:
       # -- Wait time after a request completes for a same-session follow-up.<br/>
       # Disabled by default (`0s`).
       gracePeriod: "0s"
+      # -- Reject requests that wait longer than `maxWait` in the session-boost<br/>
+      # queue with HTTP 429 instead of waiting indefinitely for backend capacity.<br/>
+      # Disabled by default.
+      waitRejectEnabled: false
+      # -- Maximum time a request may wait in the session-boost queue before it is<br/>
+      # rejected with HTTP 429. Only effective when `waitRejectEnabled` is `true`.
+      maxWait: "30s"
     gatewayAPI:
       # -- Enable Gateway API related features.
       enabled: false

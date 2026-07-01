@@ -1363,6 +1363,10 @@ func TestHandleFairnessScheduling(t *testing.T) {
 		wantErrMsg       string
 		wantHTTPStatus   int
 		wantBodyContains string
+		// Session-boost wait-reject configuration for the test case.
+		enableSessionBoost  bool
+		waitRejectEnabled   bool
+		sessionBoostMaxWait time.Duration
 	}{
 		{
 			name:             "happy path with userId",
@@ -1410,6 +1414,18 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			wantErrMsg:      "failed to enqueue request",
 			wantHTTPStatus:  http.StatusInternalServerError,
 		},
+		{
+			name:                "session boost wait-reject returns 429",
+			fairnessTimeout:     10 * time.Second,
+			setUserID:           true,
+			storeWrapper:        func(real datastore.Store) datastore.Store { return &blockingEnqueueStore{Store: real} },
+			enableSessionBoost:  true,
+			waitRejectEnabled:   true,
+			sessionBoostMaxWait: 50 * time.Millisecond,
+			wantErr:             true,
+			wantErrMsg:          "exceeded session boost max queue wait",
+			wantHTTPStatus:      http.StatusTooManyRequests,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1418,6 +1434,15 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			defer backend.Close()
 
 			router.queueTimeout = tt.fairnessTimeout
+			router.sessionBoostWaitRejectEnabled = tt.waitRejectEnabled
+			if tt.sessionBoostMaxWait > 0 {
+				router.sessionBoostMaxWait = tt.sessionBoostMaxWait
+			}
+			// Set the package-level flag explicitly for every case (and restore it)
+			// so subtests stay isolated regardless of execution order.
+			prevEnableSessionBoost := EnableSessionBoost
+			EnableSessionBoost = tt.enableSessionBoost
+			defer func() { EnableSessionBoost = prevEnableSessionBoost }()
 			if tt.storeWrapper != nil {
 				router.store = tt.storeWrapper(store)
 			}
