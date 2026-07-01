@@ -219,14 +219,14 @@ The net effect is a strict precedence: **grace timing → inflight gate → back
 
 #### Configuration
 
-| Environment Variable                | Default        | Description                                                                                                                                                                            |
-| ----------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ENABLE_SESSION_BOOST`              | `false`        | Enable the session-boost scheduling strategy (mutually exclusive with `ENABLE_FAIRNESS_SCHEDULING`)                                                                                    |
-| `SESSION_BOOST_HEADER`              | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                     |
-| `SESSION_BOOST_MAX_SESSIONS`        | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time  |
-| `SESSION_BOOST_GRACE_PERIOD`        | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                         |
-| `SESSION_BOOST_INFLIGHT_PER_POD`    | `16`           | Inflight requests admitted per backend pod; total inflight = perPod x backend pod count. Size it from the estimated per-pod concurrency (e.g. vLLM's --max-num-seqs)                   |
-| `SESSION_BOOST_WAIT_REJECT_ENABLED` | `false`        | Reject requests that wait in the queue longer than `SESSION_BOOST_MAX_WAIT` with HTTP 429. `FAIRNESS_QUEUE_TIMEOUT` does not apply in session-boost mode                                |
+| Environment Variable                | Default        | Description                                                                                                                                                                                                 |
+| ----------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENABLE_SESSION_BOOST`              | `false`        | Enable the session-boost scheduling strategy (mutually exclusive with `ENABLE_FAIRNESS_SCHEDULING`)                                                                                                         |
+| `SESSION_BOOST_HEADER`              | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                                          |
+| `SESSION_BOOST_MAX_SESSIONS`        | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time                       |
+| `SESSION_BOOST_GRACE_PERIOD`        | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                                              |
+| `SESSION_BOOST_INFLIGHT_PER_POD`    | `16`           | Inflight requests admitted per backend pod; total inflight = perPod x backend pod count. Size it from the estimated per-pod concurrency (e.g. vLLM's --max-num-seqs)                                        |
+| `SESSION_BOOST_WAIT_REJECT_ENABLED` | `false`        | Reject requests that wait in the queue longer than `SESSION_BOOST_MAX_WAIT` with HTTP 429. `FAIRNESS_QUEUE_TIMEOUT` does not apply in session-boost mode                                                    |
 | `SESSION_BOOST_MAX_WAIT`            | `30s`          | Maximum time a request may wait in the queue before it is rejected with HTTP 429. Only effective when `SESSION_BOOST_WAIT_REJECT_ENABLED=true`; the only server-side queue-wait bound in session-boost mode |
 
 ### Design Details
