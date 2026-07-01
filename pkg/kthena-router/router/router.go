@@ -56,9 +56,18 @@ import (
 
 const (
 	// Context keys for gin context
-	GatewayKey = "gatewayKey"
-	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
+	GatewayKey            = "gatewayKey"
+	PromptKey             = "promptKey" // store parsed ChatMessage, which will be reused
+	MatchedRouteResultKey = "matchedRouteResult"
 )
+
+// MatchedRouteResult holds the results of early route matching to be passed down the request context
+type MatchedRouteResult struct {
+	ModelServerName types.NamespacedName
+	IsLora          bool
+	ModelRoute      *v1alpha1.ModelRoute
+	MatchError      error
+}
 
 func getEnvBool(key string, fallback bool) bool {
 	if value, ok := os.LookupEnv(key); ok {
@@ -116,21 +125,27 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	tokenizerInstance := tokenizer.NewSimpleEstimateTokenizer()
 
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
+		routeKey := fmt.Sprintf("%s/%s",
+			data.ModelRoute.Namespace,
+			data.ModelRoute.Name,
+		)
 		switch data.EventType {
 		case datastore.EventAdd, datastore.EventUpdate:
 			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
 				return
 			}
-			klog.Infof("add or update rate limit for model %s", data.ModelName)
+			// Use namespace/routename as the rate limit key
+			klog.Infof("add or update rate limit for route %s", routeKey)
 
-			// Configure the unified rate limiter for this model
-			if err := loadRateLimiter.AddOrUpdateLimiter(data.ModelName, data.ModelRoute.Spec.RateLimit); err != nil {
-				klog.Errorf("failed to configure rate limiter for model %s: %v", data.ModelName, err)
+			// Configure the unified rate limiter for this route
+			if err := loadRateLimiter.AddOrUpdateLimiter(routeKey, data.ModelRoute.Spec.RateLimit); err != nil {
+				klog.Errorf("failed to configure rate limiter for route %s: %v", routeKey, err)
 			}
 
 		case datastore.EventDelete:
-			klog.Infof("delete rate limit for model %s", data.ModelName)
-			loadRateLimiter.DeleteLimiter(data.ModelName)
+			// Use namespace/routename as the rate limit key
+			klog.Infof("delete rate limit for route %s", routeKey)
+			loadRateLimiter.DeleteLimiter(routeKey)
 		}
 	})
 
@@ -246,6 +261,26 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Store model name in context for metrics middleware
 		c.Set("model", modelName)
 
+		// Get gateway key from context if available (set by Gateway listener)
+		var gatewayKey string
+		if key, exists := c.Get(GatewayKey); exists {
+			if k, ok := key.(string); ok {
+				gatewayKey = k
+			}
+		}
+		if gatewayKey != "" {
+			accesslog.SetGatewayAPIInfo(c, gatewayKey, "", "")
+		}
+
+		// Early route matching
+		matchedModelServerName, matchedIsLora, matchedModelRoute, matchedMatchError := r.store.MatchModelServer(modelName, c.Request, gatewayKey)
+		c.Set(MatchedRouteResultKey, &MatchedRouteResult{
+			ModelServerName: matchedModelServerName,
+			IsLora:          matchedIsLora,
+			ModelRoute:      matchedModelRoute,
+			MatchError:      matchedMatchError,
+		})
+
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
 		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, modelName, path)
@@ -292,8 +327,19 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
+		// Determine rate limit key
+		var rateLimitKey string
+
+		if matchedModelRoute != nil {
+			rateLimitKey = fmt.Sprintf("%s/%s", matchedModelRoute.Namespace, matchedModelRoute.Name)
+			c.Set("rateLimitKey", rateLimitKey)
+		} else {
+			// HTTPRoute or fallback: use model-scoped
+			rateLimitKey = modelName
+		}
+
 		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
+		if err := r.loadRateLimiter.RateLimit(rateLimitKey, promptStr); err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string
@@ -368,8 +414,19 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 
 	var isLora bool
 	var err error
-	// Try to match ModelRoute first
-	modelServerName, isLora, modelRoute, err = r.store.MatchModelServer(modelName, c.Request, gatewayKey)
+	// Retrieve cached ModelRoute matching results from the context
+	if val, exists := c.Get(MatchedRouteResultKey); exists {
+		if result, ok := val.(*MatchedRouteResult); ok {
+			modelServerName = result.ModelServerName
+			isLora = result.IsLora
+			modelRoute = result.ModelRoute
+			err = result.MatchError
+		}
+	} else {
+		// Fallback to match if not cached
+		modelServerName, isLora, modelRoute, err = r.store.MatchModelServer(modelName, c.Request, gatewayKey)
+	}
+
 	if err != nil {
 		accesslog.SetError(c, "model_server_matching", fmt.Sprintf("can't find corresponding model server: %v", err))
 	}
@@ -729,9 +786,11 @@ func (r *Router) proxyModelEndpoint(
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
-			// Record output tokens for rate limiting
+			// Record output tokens for rate limiting using the route key
 			if r.loadRateLimiter != nil {
-				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
+				if rateLimitKeyVal, ok := c.Get("rateLimitKey"); ok {
+					r.loadRateLimiter.RecordOutputTokens(rateLimitKeyVal.(string), resp.Usage.CompletionTokens)
+				}
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
@@ -1033,7 +1092,9 @@ func (r *Router) proxyToPDDisaggregated(
 
 		// Record output tokens for rate limiting
 		if outputTokens > 0 && r.loadRateLimiter != nil {
-			r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens)
+			if rateLimitKeyVal, ok := c.Get("rateLimitKey"); ok {
+				r.loadRateLimiter.RecordOutputTokens(rateLimitKeyVal.(string), outputTokens)
+			}
 		}
 
 		// Record output token metrics
