@@ -136,6 +136,17 @@ python scripts/ab_test.py \
   --output results/
 ```
 
+#### Router Endpoint 访问模式
+
+支持两种访问 Router 端点的模式，通过 `--endpoint-mode` 参数选择：
+
+| 模式       | 适用场景      | 说明                                                                        |
+|----------|-----------|---------------------------------------------------------------------------|
+| `pf`（默认） | Kind 测试集群 | 使用 `kubectl port-forward` 将 Router Service 端口转发到 `localhost:<local_port>` |
+| `lb`     | 生产集群      | 从 LoadBalancer 获取 EXTERNAL-IP，组成 `<external_ip>:<node_port>`              |
+
+> 备注：Debug port (15000) 未通过 Service 暴露，两种模式下均使用 port-forward。
+
 ## 场景配置
 
 场景配置遵循三明治模型，分为三部分。以 `smoke-test-s2.yaml` 为例：

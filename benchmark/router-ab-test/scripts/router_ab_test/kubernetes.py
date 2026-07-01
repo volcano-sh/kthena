@@ -6,12 +6,20 @@ import subprocess
 import time
 
 
+class EndpointMode:
+    """Endpoint access mode for router service."""
+
+    PORT_FORWARD = "pf"
+    LB = "lb"
+
+
 class K8sManager:
     """Manage Kubernetes resources needed by the benchmark."""
 
     ROUTER_NAMESPACE = "kthena-system"
     ROUTER_DEPLOYMENT = "kthena-router"
     ROUTER_SVC_PORT = 80
+    ROUTER_SVC_NAME = "kthena-router"
     ROUTER_DEBUG_PORT = 15000
     DEFAULT_LOCAL_PORT = 8080
     DEFAULT_DEBUG_LOCAL_PORT = 18080
@@ -22,10 +30,12 @@ class K8sManager:
         namespace: str = "default",
         local_port: int = DEFAULT_LOCAL_PORT,
         debug_local_port: int = DEFAULT_DEBUG_LOCAL_PORT,
+        endpoint_mode: str = EndpointMode.PORT_FORWARD,
     ):
         self.namespace = namespace
         self.local_port = local_port
         self.debug_local_port = debug_local_port
+        self.endpoint_mode = endpoint_mode
         self._pf_proc: subprocess.Popen[str] | None = None
         self._debug_pf_proc: subprocess.Popen[str] | None = None
 
@@ -142,13 +152,69 @@ class K8sManager:
         raise RuntimeError(f"Router route for '{mocker_model_name}' not ready within {timeout}s.")
 
     def get_router_endpoint(self) -> str:
-        """Return a reachable localhost:<port> for the router Service."""
+        """Return a reachable endpoint for the router Service.
+
+        In port-forward mode, returns localhost:<port> via kubectl port-forward.
+        In lb mode, returns <external_ip>:<port> from LoadBalancer Service status.
+        """
+        if self.endpoint_mode == EndpointMode.LB:
+            return self._get_lb_endpoint()
         return self._start_port_forward(
             process_attr="_pf_proc",
             local_port=self.local_port,
             remote_port=self.ROUTER_SVC_PORT,
-            description=f"svc/{self.ROUTER_DEPLOYMENT}:{self.ROUTER_SVC_PORT}",
+            description=f"svc/{self.ROUTER_SVC_NAME}:{self.ROUTER_SVC_PORT}",
         )
+
+    def _get_lb_endpoint(self) -> str:
+        """Get router endpoint from LoadBalancer Service EXTERNAL-IP.
+
+        For multi-node clusters where the router Service type is LoadBalancer.
+        Returns <external_ip>:<service_port>.
+        """
+        result = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "svc",
+                self.ROUTER_SVC_NAME,
+                "-n",
+                self.ROUTER_NAMESPACE,
+                "-o",
+                "jsonpath={.status.loadBalancer.ingress[0].ip}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        external_ip = result.stdout.strip()
+
+        if not external_ip:
+            raise RuntimeError(
+                f"LoadBalancer Service {self.ROUTER_SVC_NAME} has no EXTERNAL-IP. "
+            )
+
+        # Get the node port from the Service
+        result = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "svc",
+                self.ROUTER_SVC_NAME,
+                "-n",
+                self.ROUTER_NAMESPACE,
+                "-o",
+                "jsonpath={.spec.ports[0].nodePort}",
+                ],
+            capture_output=True,
+            text=True,
+        )
+        node_port = result.stdout.strip()
+        if not node_port:
+            raise RuntimeError("Failed to get nodePort from router Service")
+
+        endpoint = f"{external_ip}:{node_port}"
+        print(f"  Using LB endpoint: {endpoint}")
+        return endpoint
 
     def get_router_debug_endpoint(self) -> str:
         """Return a reachable localhost:<port> for the router debug server."""
@@ -161,8 +227,13 @@ class K8sManager:
         )
 
     def cleanup_port_forward(self) -> None:
-        """Stop all port-forward processes started by the benchmark."""
-        self._stop_port_forward("_pf_proc")
+        """Stop all port-forward processes started by the benchmark.
+
+        In port-forward mode, stops both main and debug port-forward.
+        In lb mode, only debug port-forward needs cleanup.
+        """
+        if self.endpoint_mode == EndpointMode.PORT_FORWARD:
+            self._stop_port_forward("_pf_proc")
         self._stop_port_forward("_debug_pf_proc")
 
     def _start_port_forward(
