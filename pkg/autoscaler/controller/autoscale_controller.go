@@ -39,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -95,6 +94,52 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 	return ac
 }
 
+// scalingOutcome summarises the net direction of a single reconcile cycle
+// across all autoscaling policies. It drives the next reconcile interval.
+type scalingOutcome int
+
+const (
+	outcomeStable scalingOutcome = iota
+	outcomeScaleUp
+	outcomeScaleDown
+)
+
+// mergeOutcome returns the higher-priority outcome. Scale-up takes priority
+// over scale-down so that a mixed cycle reacts as fast as possible.
+func mergeOutcome(a, b scalingOutcome) scalingOutcome {
+	if a == outcomeScaleUp || b == outcomeScaleUp {
+		return outcomeScaleUp
+	}
+	if a == outcomeScaleDown || b == outcomeScaleDown {
+		return outcomeScaleDown
+	}
+	return outcomeStable
+}
+
+// outcomeFromChange derives the scaling direction from a before/after replica
+// comparison. When recommended < 0 the scaler decided to skip, treated as stable.
+func outcomeFromChange(current, recommended int32) scalingOutcome {
+	if recommended < 0 || recommended == current {
+		return outcomeStable
+	}
+	if recommended > current {
+		return outcomeScaleUp
+	}
+	return outcomeScaleDown
+}
+
+// nextInterval maps a reconcile outcome to the adaptive sync period.
+func nextInterval(o scalingOutcome) time.Duration {
+	switch o {
+	case outcomeScaleUp:
+		return util.AutoscalingScaleUpSyncPeriodSeconds * time.Second
+	case outcomeScaleDown:
+		return util.AutoscalingScaleDownSyncPeriodSeconds * time.Second
+	default:
+		return util.AutoscalingSyncPeriodSeconds * time.Second
+	}
+}
+
 func (ac *AutoscaleController) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
 
@@ -109,24 +154,35 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 	)
 
 	klog.Info("start autoscale controller")
-	go wait.Until(func() {
-		ac.Reconcile(ctx)
-	}, util.AutoscalingSyncPeriodSeconds*time.Second, nil)
 
-	<-ctx.Done()
-	klog.Info("shut down autoscale controller")
+	// Use a zero-duration timer so the first reconcile fires immediately,
+	// matching the previous wait.Until behaviour.
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			klog.Info("shut down autoscale controller")
+			return
+		case <-timer.C:
+			next := ac.Reconcile(ctx)
+			timer.Reset(next)
+		}
+	}
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (ac *AutoscaleController) Reconcile(ctx context.Context) {
+// It returns the interval to wait before the next reconcile cycle.
+func (ac *AutoscaleController) Reconcile(ctx context.Context) time.Duration {
 	klog.V(4).Info("start to reconcile")
 	ctx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
 	policies, err := ac.autoscalingPoliciesLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list autoscaling policies, err: %v", err)
-		return
+		return nextInterval(outcomeStable)
 	}
 
 	scalerSet := sets.New[string]()
@@ -163,13 +219,19 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 		}
 	}
 
+	overall := outcomeStable
 	for _, policy := range policies {
-		err := ac.schedule(ctx, policy)
+		o, err := ac.schedule(ctx, policy)
 		if err != nil {
 			klog.Errorf("failed to process autoscale,err: %v", err)
 			continue
 		}
+		overall = mergeOutcome(overall, o)
 	}
+
+	interval := nextInterval(overall)
+	klog.V(4).Infof("reconcile complete, next interval: %s", interval)
+	return interval
 }
 
 func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, defaultNamespace string, replicas int32) error {
@@ -218,31 +280,35 @@ func (ac *AutoscaleController) getTargetReplicas(target *workload.Target, defaul
 	return 1, nil
 }
 
-func (ac *AutoscaleController) schedule(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) error {
+func (ac *AutoscaleController) schedule(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) (scalingOutcome, error) {
 	klog.V(2).Infof("start to process autoscaling policy %s", klog.KObj(autoscalePolicy))
 	if autoscalePolicy.Spec.HeterogeneousTarget != nil {
-		if err := ac.doOptimize(ctx, autoscalePolicy); err != nil {
+		o, err := ac.doOptimize(ctx, autoscalePolicy)
+		if err != nil {
 			klog.Errorf("failed to do optimize, err: %v", err)
-			return err
+			return outcomeStable, err
 		}
+		return o, nil
 	} else if autoscalePolicy.Spec.HomogeneousTarget != nil {
-		if err := ac.doScale(ctx, autoscalePolicy); err != nil {
+		o, err := ac.doScale(ctx, autoscalePolicy)
+		if err != nil {
 			klog.Errorf("failed to do scale, err: %v", err)
-			return err
+			return outcomeStable, err
 		}
+		return o, nil
 	} else if autoscalePolicy.Spec.DisaggregatedTarget != nil {
-		if err := ac.doDisaggregatedScale(ctx, autoscalePolicy); err != nil {
+		o, err := ac.doDisaggregatedScale(ctx, autoscalePolicy)
+		if err != nil {
 			klog.Errorf("failed to do disaggregated scale, err: %v", err)
-			return err
+			return outcomeStable, err
 		}
-	} else {
-		klog.Warningf("policy %s has no target configuration", autoscalePolicy.Name)
+		return o, nil
 	}
-
-	return nil
+	klog.Warningf("policy %s has no target configuration", autoscalePolicy.Name)
+	return outcomeStable, nil
 }
 
-func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) error {
+func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) (scalingOutcome, error) {
 	key := formatAutoscalerMapKey(autoscalePolicy.Namespace, autoscalePolicy.Name, nil)
 	optimizer, ok := ac.optimizerMap[key]
 	if !ok || optimizer.NeedUpdate(autoscalePolicy) {
@@ -256,7 +322,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 		currentInstancesCount, err := ac.getTargetReplicas(&param.Target, autoscalePolicy.Namespace)
 		if err != nil {
 			klog.Errorf("failed to get current replicas, err: %v", err)
-			return err
+			return outcomeStable, err
 		}
 		replicasMap[param.Target.TargetRef.Name] = currentInstancesCount
 	}
@@ -265,25 +331,27 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 	recommendedInstances, err := optimizer.Optimize(ctx, ac.podsLister, autoscalePolicy, replicasMap)
 	if err != nil {
 		klog.Errorf("failed to do optimize, err: %v", err)
-		return err
+		return outcomeStable, err
 	}
 	// Do update replicas
+	outcome := outcomeStable
 	for _, param := range optimizer.Meta.Config.Params {
 		instancesCount, exists := recommendedInstances[param.Target.TargetRef.Name]
 		if !exists {
 			klog.Warningf("recommended instances not exists, target ref name: %s", param.Target.TargetRef.Name)
 			continue
 		}
+		outcome = mergeOutcome(outcome, outcomeFromChange(replicasMap[param.Target.TargetRef.Name], instancesCount))
 		if err := ac.updateTargetReplicas(ctx, &param.Target, autoscalePolicy.Namespace, instancesCount); err != nil {
 			klog.Errorf("failed to update target kind:%s name: %s replicas:%d, err: %v", param.Target.TargetRef.Kind, param.Target.TargetRef.Name, instancesCount, err)
-			return err
+			return outcomeStable, err
 		}
 	}
 
-	return nil
+	return outcome, nil
 }
 
-func (ac *AutoscaleController) doScale(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) error {
+func (ac *AutoscaleController) doScale(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) (scalingOutcome, error) {
 	target := autoscalePolicy.Spec.HomogeneousTarget.Target
 	key := formatAutoscalerMapKey(autoscalePolicy.Namespace, autoscalePolicy.Name, &target.TargetRef)
 	scaler, ok := ac.scalerMap[key]
@@ -296,38 +364,38 @@ func (ac *AutoscaleController) doScale(ctx context.Context, autoscalePolicy *wor
 	currentInstancesCount, err := ac.getTargetReplicas(&target, autoscalePolicy.Namespace)
 	if err != nil {
 		klog.Errorf("failed to get current replicas, err: %v", err)
-		return err
+		return outcomeStable, err
 	}
 	// Get recommended replicas
 	klog.InfoS("do homogeneous scaling for target", "targetRef", target.TargetRef, "currentInstancesCount", currentInstancesCount)
 	recommendedInstances, err := scaler.Scale(ctx, ac.podsLister, autoscalePolicy, currentInstancesCount)
 	if err != nil {
 		klog.Errorf("failed to do homogeneous scaling for target %s, err: %v", target.TargetRef.Name, err)
-		return err
+		return outcomeStable, err
 	}
 	if recommendedInstances < 0 {
-		return nil
+		return outcomeStable, nil
 	}
 	// Do update replicas
 	if err := ac.updateTargetReplicas(ctx, &target, autoscalePolicy.Namespace, recommendedInstances); err != nil {
 		klog.Errorf("failed to update target replicas %s, err: %v", target.TargetRef.Name, err)
-		return err
+		return outcomeStable, err
 	}
 	klog.InfoS("successfully update target replicas", "targetRef", target.TargetRef, "recommendedInstances", recommendedInstances)
-	return nil
+	return outcomeFromChange(currentInstancesCount, recommendedInstances), nil
 }
 
 // doDisaggregatedScale runs one reconcile cycle for a DisaggregatedTarget: read
 // current role replicas, compute final role replicas, patch all changed roles in
 // one request, and publish AutoscalingPolicy status.
-func (ac *AutoscaleController) doDisaggregatedScale(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) error {
+func (ac *AutoscaleController) doDisaggregatedScale(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) (scalingOutcome, error) {
 	target := autoscalePolicy.Spec.DisaggregatedTarget
 	key := formatAutoscalerMapKey(autoscalePolicy.Namespace, autoscalePolicy.Name, &target.TargetRef)
 	disaggregatedScaler, ok := ac.disaggregatedScalerMap[key]
 	if !ok || disaggregatedScaler.NeedUpdate(autoscalePolicy) {
 		disaggregatedScaler = autoscaler.NewDisaggregatedAutoscaler(autoscalePolicy)
 		if disaggregatedScaler == nil {
-			return fmt.Errorf("failed to create disaggregated scaler: policy or target is nil")
+			return outcomeStable, fmt.Errorf("failed to create disaggregated scaler: policy or target is nil")
 		}
 		ac.disaggregatedScalerMap[key] = disaggregatedScaler
 		klog.Infof("asp: %s changed, create new disaggregated scaler", autoscalePolicy.Name)
@@ -338,14 +406,14 @@ func (ac *AutoscaleController) doDisaggregatedScale(ctx context.Context, autosca
 		if err := ac.updateDisaggregatedPolicyStatus(ctx, autoscalePolicy, nil, err, false); err != nil {
 			klog.Warningf("failed to update disaggregated autoscaling policy status %s/%s: %v", autoscalePolicy.Namespace, autoscalePolicy.Name, err)
 		}
-		return err
+		return outcomeStable, err
 	}
 	currentReplicas, err := getCurrentRoleReplicas(modelServing, target.Roles)
 	if err != nil {
 		if err := ac.updateDisaggregatedPolicyStatus(ctx, autoscalePolicy, nil, err, false); err != nil {
 			klog.Warningf("failed to update disaggregated autoscaling policy status %s/%s: %v", autoscalePolicy.Namespace, autoscalePolicy.Name, err)
 		}
-		return err
+		return outcomeStable, err
 	}
 
 	result, err := disaggregatedScaler.Scale(ctx, ac.podsLister, autoscalePolicy, currentReplicas)
@@ -353,22 +421,27 @@ func (ac *AutoscaleController) doDisaggregatedScale(ctx context.Context, autosca
 		if err := ac.updateDisaggregatedPolicyStatus(ctx, autoscalePolicy, nil, err, true); err != nil {
 			klog.Warningf("failed to update disaggregated autoscaling policy status %s/%s: %v", autoscalePolicy.Namespace, autoscalePolicy.Name, err)
 		}
-
-		return err
+		return outcomeStable, err
 	}
 	if result == nil {
-		return nil
+		return outcomeStable, nil
 	}
+
+	outcome := outcomeStable
+	for _, role := range result.Roles {
+		outcome = mergeOutcome(outcome, outcomeFromChange(role.CurrentReplicas, role.FinalReplicas))
+	}
+
 	if err := ac.updateTargetRoleReplicas(ctx, target, autoscalePolicy.Namespace, finalReplicasByRole(result.Roles)); err != nil {
 		if err := ac.updateDisaggregatedPolicyStatus(ctx, autoscalePolicy, result, err, true); err != nil {
 			klog.Warningf("failed to update disaggregated autoscaling policy status %s/%s: %v", autoscalePolicy.Namespace, autoscalePolicy.Name, err)
 		}
-		return err
+		return outcomeStable, err
 	}
 	if err := ac.updateDisaggregatedPolicyStatus(ctx, autoscalePolicy, result, nil, true); err != nil {
 		klog.Warningf("failed to update disaggregated autoscaling policy status %s/%s: %v", autoscalePolicy.Namespace, autoscalePolicy.Name, err)
 	}
-	return nil
+	return outcome, nil
 }
 
 // finalReplicasByRole derives the patch input from RoleScaleResult instead of
