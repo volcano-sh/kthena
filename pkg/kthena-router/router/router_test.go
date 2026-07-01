@@ -92,6 +92,43 @@ func setupTestRouter(t *testing.T, backendHandler http.Handler) (*Router, datast
 	return router, store, backend
 }
 
+func TestRouter_ModelRouteRateLimitForLoraOnlyRoute(t *testing.T) {
+	router, store, backend := setupTestRouter(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer backend.Close()
+
+	limit := uint32(1)
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "lora-route", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			LoraAdapters: []string{"math-lora"},
+			RateLimit:    &aiv1alpha1.RateLimit{InputTokensPerUnit: &limit, Unit: aiv1alpha1.Second},
+			Rules: []*aiv1alpha1.Rule{
+				{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "lora-server"}}},
+			},
+		},
+	}
+
+	assert.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+	modelRoute2 := modelRoute.DeepCopy()
+	modelRoute2.Name = "lora-route-2"
+	assert.NoError(t, store.AddOrUpdateModelRoute(modelRoute2))
+
+	prompt := "hello world"
+	assert.Eventually(t, func() bool {
+		return router.loadRateLimiter.RateLimit("math-lora", prompt) != nil
+	}, time.Second, 10*time.Millisecond)
+
+	assert.NoError(t, store.DeleteModelRoute("default/lora-route"))
+	assert.Eventually(t, func() bool {
+		return router.loadRateLimiter.RateLimit("math-lora", prompt) != nil
+	}, time.Second, 10*time.Millisecond)
+
+	assert.NoError(t, store.DeleteModelRoute("default/lora-route-2"))
+	assert.Eventually(t, func() bool {
+		return router.loadRateLimiter.RateLimit("math-lora", prompt) == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestRouter_HandleHTTPRoute_PathPrefix(t *testing.T) {
 	pathType := gatewayv1.PathMatchPathPrefix
 	kind := gatewayv1.Kind("Gateway")
