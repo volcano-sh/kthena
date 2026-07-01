@@ -1438,11 +1438,11 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			if tt.sessionBoostMaxWait > 0 {
 				router.sessionBoostMaxWait = tt.sessionBoostMaxWait
 			}
-			if tt.enableSessionBoost {
-				prev := EnableSessionBoost
-				EnableSessionBoost = true
-				defer func() { EnableSessionBoost = prev }()
-			}
+			// Set the package-level flag explicitly for every case (and restore it)
+			// so subtests stay isolated regardless of execution order.
+			prevEnableSessionBoost := EnableSessionBoost
+			EnableSessionBoost = tt.enableSessionBoost
+			defer func() { EnableSessionBoost = prevEnableSessionBoost }()
 			if tt.storeWrapper != nil {
 				router.store = tt.storeWrapper(store)
 			}
