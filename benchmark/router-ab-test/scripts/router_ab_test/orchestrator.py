@@ -5,6 +5,7 @@ from typing import Any
 
 from router_ab_test.kubernetes import K8sManager
 from router_ab_test.load_generator import AIPerfRunner
+from router_ab_test.metrics_collector import MetricsCollector
 from router_ab_test.models import BenchmarkResult, ScenarioConfig
 from router_ab_test.reporter import ResultReporter
 
@@ -28,6 +29,7 @@ class ABTestOrchestrator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.k8s = K8sManager(local_port=local_port)
         self.runner = AIPerfRunner(self.output_dir / "runs")
+        self.collector = MetricsCollector(self.output_dir / "artifacts")
         self.reporter = ResultReporter()
         self.mocker_manifest = mocker_manifest
 
@@ -35,13 +37,21 @@ class ABTestOrchestrator:
         self.k8s.apply_router_config(config_path)
         self.k8s.wait_for_backend_ready()
         router_endpoint = self.k8s.get_router_endpoint()
+        router_debug_endpoint = self.k8s.get_router_debug_endpoint()
         self.k8s.wait_for_router_ready("Qwen/Qwen3-0.6B", router_endpoint, timeout=300)
-        return self.runner.run(
+        result = self.runner.run(
             config_name=config_name,
             scenario=self.scenario,
             router_endpoint=router_endpoint,
             extra_args=self.scenario.aiperf.get("extraArgs"),
         )
+        result.artifacts = self.collector.collect_artifacts(
+            config_name=config_name,
+            scenario=self.scenario,
+            router_metrics_endpoint=router_endpoint,
+            router_debug_endpoint=router_debug_endpoint,
+        )
+        return result
 
     def run(self) -> dict[str, Any]:
         try:

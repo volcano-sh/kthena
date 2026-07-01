@@ -46,6 +46,16 @@ backends:
 routing:
   strategy: "least-request"
 
+metrics:
+  prometheus: true
+  pprof: true
+  cpuProfileSeconds: 15
+  profiles:
+    - heap
+    - goroutine
+    - allocs
+    - mutex
+
 aiperf:
   extraArgs:
     - "--tokenizer"

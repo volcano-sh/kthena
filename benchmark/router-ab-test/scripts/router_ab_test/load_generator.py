@@ -95,6 +95,7 @@ class AIPerfRunner:
             timestamp=datetime.now().isoformat(),
             metrics=self._read_metrics_from_output(run_dir),
             raw_output=f"metrics read from {run_dir}",
+            artifacts={},
         )
 
     def _append_schedule_args(self, cmd: list[str], schedule: dict[str, Any]) -> None:

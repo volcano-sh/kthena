@@ -37,6 +37,7 @@ from router_ab_test import (
     AIPerfRunner,
     BenchmarkResult,
     K8sManager,
+    MetricsCollector,
     ResultReporter,
     ScenarioConfig,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "AIPerfRunner",
     "BenchmarkResult",
     "K8sManager",
+    "MetricsCollector",
     "ResultReporter",
     "ScenarioConfig",
     "build_parser",

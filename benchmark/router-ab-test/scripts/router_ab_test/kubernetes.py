@@ -12,13 +12,22 @@ class K8sManager:
     ROUTER_NAMESPACE = "kthena-system"
     ROUTER_DEPLOYMENT = "kthena-router"
     ROUTER_SVC_PORT = 80
+    ROUTER_DEBUG_PORT = 15000
     DEFAULT_LOCAL_PORT = 8080
+    DEFAULT_DEBUG_LOCAL_PORT = 18080
     MOCKER_DEPLOYMENT = "mocker-llm"
 
-    def __init__(self, namespace: str = "default", local_port: int = DEFAULT_LOCAL_PORT):
+    def __init__(
+        self,
+        namespace: str = "default",
+        local_port: int = DEFAULT_LOCAL_PORT,
+        debug_local_port: int = DEFAULT_DEBUG_LOCAL_PORT,
+    ):
         self.namespace = namespace
         self.local_port = local_port
+        self.debug_local_port = debug_local_port
         self._pf_proc: subprocess.Popen[str] | None = None
+        self._debug_pf_proc: subprocess.Popen[str] | None = None
 
     def apply(self, manifest_path: str) -> None:
         subprocess.run(
@@ -134,18 +143,50 @@ class K8sManager:
 
     def get_router_endpoint(self) -> str:
         """Return a reachable localhost:<port> for the router Service."""
-        local_endpoint = f"localhost:{self.local_port}"
-        print(
-            f"  Starting port-forward ({local_endpoint} → "
-            f"svc/{self.ROUTER_DEPLOYMENT}:{self.ROUTER_SVC_PORT})"
+        return self._start_port_forward(
+            process_attr="_pf_proc",
+            local_port=self.local_port,
+            remote_port=self.ROUTER_SVC_PORT,
+            description=f"svc/{self.ROUTER_DEPLOYMENT}:{self.ROUTER_SVC_PORT}",
         )
 
-        self._pf_proc = subprocess.Popen(
+    def get_router_debug_endpoint(self) -> str:
+        """Return a reachable localhost:<port> for the router debug server."""
+        return self._start_port_forward(
+            process_attr="_debug_pf_proc",
+            local_port=self.debug_local_port,
+            remote_port=self.ROUTER_DEBUG_PORT,
+            description=f"deployment/{self.ROUTER_DEPLOYMENT}:{self.ROUTER_DEBUG_PORT}",
+            target_type="deployment",
+        )
+
+    def cleanup_port_forward(self) -> None:
+        """Stop all port-forward processes started by the benchmark."""
+        self._stop_port_forward("_pf_proc")
+        self._stop_port_forward("_debug_pf_proc")
+
+    def _start_port_forward(
+        self,
+        process_attr: str,
+        local_port: int,
+        remote_port: int,
+        description: str,
+        target_type: str = "svc",
+    ) -> str:
+        existing_proc = getattr(self, process_attr)
+        if existing_proc is not None and existing_proc.poll() is None:
+            return f"localhost:{local_port}"
+
+        local_endpoint = f"localhost:{local_port}"
+        print(f"  Starting port-forward ({local_endpoint} → {description})")
+
+        target = f"{target_type}/{self.ROUTER_DEPLOYMENT}"
+        proc = subprocess.Popen(
             [
                 "kubectl",
                 "port-forward",
-                f"svc/{self.ROUTER_DEPLOYMENT}",
-                f"{self.local_port}:{self.ROUTER_SVC_PORT}",
+                target,
+                f"{local_port}:{remote_port}",
                 "-n",
                 self.ROUTER_NAMESPACE,
             ],
@@ -153,16 +194,17 @@ class K8sManager:
             stderr=subprocess.PIPE,
             text=True,
         )
+        setattr(self, process_attr, proc)
 
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            if self._pf_proc.poll() is not None:
-                _, stderr = self._pf_proc.communicate(timeout=5)
-                error_msg = stderr.strip() if stderr else f"exit code {self._pf_proc.returncode}"
+            if proc.poll() is not None:
+                _, stderr = proc.communicate(timeout=5)
+                error_msg = stderr.strip() if stderr else f"exit code {proc.returncode}"
                 raise RuntimeError(f"kubectl port-forward failed: {error_msg}")
 
             try:
-                with socket.create_connection(("localhost", self.local_port), timeout=1):
+                with socket.create_connection(("localhost", local_port), timeout=1):
                     pass
             except OSError:
                 time.sleep(0.5)
@@ -171,37 +213,38 @@ class K8sManager:
             print(f"  Port-forward ready: {local_endpoint}")
             return local_endpoint
 
-        if self._pf_proc.poll() is None:
-            stderr = self._read_available_stderr()
+        if proc.poll() is None:
+            stderr = self._read_available_stderr(proc)
             raise RuntimeError(
                 f"Port-forward timeout after 15s — port {local_endpoint} not reachable. "
                 f"stderr: {stderr if stderr else '<none>'}"
             )
 
-        _, stderr = self._pf_proc.communicate(timeout=5)
+        _, stderr = proc.communicate(timeout=5)
         error_msg = stderr.strip() if stderr else "unknown error"
         raise RuntimeError(f"Port-forward exited unexpectedly: {error_msg}")
 
-    def cleanup_port_forward(self) -> None:
-        """Stop the port-forward process if one was started."""
-        if self._pf_proc is None:
+    def _stop_port_forward(self, process_attr: str) -> None:
+        proc = getattr(self, process_attr)
+        if proc is None:
             return
-        if self._pf_proc.poll() is None:
-            self._pf_proc.terminate()
+        if proc.poll() is None:
+            proc.terminate()
             try:
-                self._pf_proc.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._pf_proc.kill()
-                self._pf_proc.wait()
-        self._pf_proc = None
+                proc.kill()
+                proc.wait()
+        setattr(self, process_attr, None)
 
-    def _read_available_stderr(self) -> str:
-        if self._pf_proc is None or self._pf_proc.stderr is None:
+    @staticmethod
+    def _read_available_stderr(proc: subprocess.Popen[str]) -> str:
+        if proc.stderr is None:
             return ""
         try:
-            ready, _, _ = select.select([self._pf_proc.stderr], [], [], 0.1)
+            ready, _, _ = select.select([proc.stderr], [], [], 0.1)
         except (OSError, ValueError):
             return ""
         if not ready:
             return ""
-        return self._pf_proc.stderr.read().strip()
+        return proc.stderr.read().strip()

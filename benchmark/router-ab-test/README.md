@@ -21,7 +21,7 @@
 │         └──────────────────────┼─────────────────────────┘              │
 │                                │                                        │
 │                         Metrics Collector                               │
-│                    (AIPerf 内置 + Router Prometheus)                    │
+│               (AIPerf Output + Router Prometheus + Router pprof)        │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,17 +52,41 @@ router-ab-test/
 │   ├── smoke-test-s7.yaml
 │   └── smoke-test-s8.yaml
 ├── scripts/
-│   ├── ab_test.py                      # CLI 入口，兼容原有调用方式
+│   ├── ab_test.py                         # CLI 入口
 │   └── router_ab_test/
-│       ├── __init__.py                 # 对外 re-export 公共符号
-│       ├── models.py                   # ScenarioConfig / BenchmarkResult
-│       ├── kubernetes.py               # K8sManager：apply、rollout、probe、port-forward
-│       ├── load_generator.py           # AIPerfRunner：scenario -> aiperf CLI
-│       ├── orchestrator.py             # ABTestOrchestrator：执行 A/B 流程
-│       └── reporter.py                 # ResultReporter：compare / write / print report
+│       ├── __init__.py                    
+│       ├── models.py                      # ScenarioConfig / BenchmarkResult
+│       ├── kubernetes.py                  # K8sManager：apply、rollout、probe、port-forward
+│       ├── load_generator.py              # AIPerfRunner：scenario -> aiperf CLI
+│       ├── metrics_collector.py           # MetricsCollector：Prometheus / pprof 采集
+│       ├── orchestrator.py                # ABTestOrchestrator：执行 A/B 流程
+│       └── reporter.py                    # ResultReporter：compare / write / print report
 └── tests/
-    └── test_ab_test.py                 # 回归测试与 CLI/映射测试
+    └── test_ab_test.py                    
 ```
+
+### 模块职责
+
+- `scripts/ab_test.py`
+  - 保留原始入口路径，避免已有命令、文档或测试失效
+  - 提供 CLI parser 和 `main()`
+- `scripts/router_ab_test/models.py`
+  - benchmark 领域模型与场景配置加载
+  - `ScenarioConfig.metrics` 定义每个场景是否采集 Prometheus / pprof
+  - `BenchmarkResult.artifacts` 保存额外采集结果
+- `scripts/router_ab_test/kubernetes.py`
+  - 负责 Kubernetes 资源操作、router rollout、service/debug 端口转发、route ready probe
+- `scripts/router_ab_test/load_generator.py`
+  - 负责把 scenario YAML 映射为 AIPerf CLI 参数
+- `scripts/router_ab_test/metrics_collector.py`
+  - 负责抓取 router `/metrics`
+  - 负责抓取 router `/debug/pprof/profile` 与其他 profile
+  - 负责把指标与 profile 文件写入 `artifacts/<config>/`
+- `scripts/router_ab_test/orchestrator.py`
+  - 负责串联 A/B 执行流程
+  - 在每轮 AIPerf 结束后触发 Metrics Collector
+- `scripts/router_ab_test/reporter.py`
+  - 负责比较指标、生成报告结构、写 JSON、打印 summary
 
 ## 快速开始
 
@@ -99,7 +123,7 @@ kubectl apply -f k8s/modelroute.yaml
 ### 4. 安装 AIPerf
 
 ```bash
-pip install aiperf
+pip install 'aiperf>=0.9,<0.11'
 ```
 
 ### 5. 运行 A/B 测试
@@ -120,13 +144,12 @@ python scripts/ab_test.py \
 name: "smoke-test-s2-latency-vs-qps"
 description: "s2 scenario: routing latency under different QPS"
 
-# 左侧：用户流量（AIPerf 配置）
 load:
   schedule:
     mode: "rate"
     rate: 50
   traffic:
-    burstiness: 1.0        # Poisson 到达
+    burstiness: 1.0
     ramp:
       strategy: "none"
   concurrency:
@@ -139,7 +162,6 @@ load:
       weight: 10
   duration: "60s"
 
-# 右侧：后端响应（Mocker 配置）
 backends:
   count: 4
   profiles:
@@ -152,15 +174,31 @@ backends:
   responseTokens: 128
   errorRate: 0.0
 
-# 被测：路由策略
 routing:
   strategy: "least-latency"
+
+metrics:
+  prometheus: true
+  pprof: true
+  cpuProfileSeconds: 15
+  profiles:
+    - heap
+    - goroutine
+    - allocs
+    - mutex
 
 aiperf:
   extraArgs:
     - "--tokenizer"
     - "Qwen/Qwen3-0.6B"
 ```
+
+其中：
+
+- `metrics.prometheus: true`
+  - 采集 `http://<router-endpoint>/metrics`
+- `metrics.pprof: true`
+  - 采集 `http://<router-debug-endpoint>/debug/pprof/*`
 
 ## A/B 测试流程
 
@@ -169,12 +207,14 @@ aiperf:
 2. Restart and wait for router rollout
 3. Wait for backend deployment ready
 4. Start kubectl port-forward to router service
-5. Probe /v1/chat/completions until the route is really warm
-6. Run AIPerf and collect result A
-7. Apply router config B
-8. Repeat warmup + benchmark and collect result B
-9. Compare metrics and write report_<scenario>.json
-10. Exit non-zero if report contains regression
+5. Start kubectl port-forward to router debug port
+6. Probe /v1/chat/completions until the route is really warm
+7. Run AIPerf and collect result A
+8. Scrape router /metrics and fetch pprof artifacts for config A
+9. Apply router config B
+10. Repeat warmup + benchmark + metrics collection for config B
+11. Compare metrics and write report_<scenario>.json
+12. Exit non-zero if report contains regression
 ```
 
 ## 输出结果
@@ -183,14 +223,10 @@ aiperf:
 
 - `runs/config_a/` 与 `runs/config_b/`
   - AIPerf 原始输出目录
+- `artifacts/config_a/` 与 `artifacts/config_b/`
+  - Router Prometheus 与 pprof 采集结果
 - `report_<scenario>.json`
   - A/B 对比结果
-
-`reporter.py` 当前负责：
-- `compare()`：按指标计算 delta 与 regression
-- `build_report()`：组装统一 JSON 结构
-- `write_report()`：落盘 JSON
-- `print_report()`：打印终端摘要
 
 ## 测试场景
 

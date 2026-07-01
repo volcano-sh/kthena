@@ -15,6 +15,7 @@ class ScenarioConfig:
     backends: dict[str, Any]
     routing: dict[str, Any]
     aiperf: dict[str, Any] = field(default_factory=dict)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ScenarioConfig":
@@ -30,3 +31,4 @@ class BenchmarkResult:
     timestamp: str
     metrics: dict[str, Any]
     raw_output: str
+    artifacts: dict[str, Any] = field(default_factory=dict)
