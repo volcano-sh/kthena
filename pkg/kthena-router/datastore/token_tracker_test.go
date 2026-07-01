@@ -16,6 +16,7 @@ limitations under the License.
 package datastore
 
 import (
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -119,6 +120,20 @@ func TestTokenWeightsConfiguration(t *testing.T) {
 			name:             "negative weights (should be ignored)",
 			inputWeight:      -1.0,
 			outputWeight:     -2.0,
+			wantInputWeight:  defaultInputTokenWeight,
+			wantOutputWeight: defaultOutputTokenWeight,
+		},
+		{
+			name:             "nan input weight (should be ignored)",
+			inputWeight:      math.NaN(),
+			outputWeight:     3.0,
+			wantInputWeight:  defaultInputTokenWeight,
+			wantOutputWeight: defaultOutputTokenWeight,
+		},
+		{
+			name:             "infinite output weight (should be ignored)",
+			inputWeight:      1.5,
+			outputWeight:     math.Inf(1),
 			wantInputWeight:  defaultInputTokenWeight,
 			wantOutputWeight: defaultOutputTokenWeight,
 		},

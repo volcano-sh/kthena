@@ -134,6 +134,30 @@ func TestCreateFairnessQueueConfig_RejectsInvalidWeights(t *testing.T) {
 	}
 }
 
+func TestCreateTokenTrackerRejectsInvalidWeights(t *testing.T) {
+	t.Setenv("FAIRNESS_INPUT_TOKEN_WEIGHT", "NaN")
+	t.Setenv("FAIRNESS_OUTPUT_TOKEN_WEIGHT", strconv.FormatFloat(math.Inf(1), 'f', -1, 64))
+
+	tracker := createTokenTracker().(*InMemorySlidingWindowTokenTracker)
+	if tracker.inputTokenWeight != defaultInputTokenWeight {
+		t.Fatalf("Expected default input token weight %v, got %v", defaultInputTokenWeight, tracker.inputTokenWeight)
+	}
+	if tracker.outputTokenWeight != defaultOutputTokenWeight {
+		t.Fatalf("Expected default output token weight %v, got %v", defaultOutputTokenWeight, tracker.outputTokenWeight)
+	}
+
+	t.Setenv("FAIRNESS_INPUT_TOKEN_WEIGHT", "1.5")
+	t.Setenv("FAIRNESS_OUTPUT_TOKEN_WEIGHT", "-2")
+
+	tracker = createTokenTracker().(*InMemorySlidingWindowTokenTracker)
+	if tracker.inputTokenWeight != 1.5 {
+		t.Fatalf("Expected configured input token weight 1.5, got %v", tracker.inputTokenWeight)
+	}
+	if tracker.outputTokenWeight != defaultOutputTokenWeight {
+		t.Fatalf("Expected default output token weight for negative value, got %v", tracker.outputTokenWeight)
+	}
+}
+
 func Test_updateHistogramMetrics(t *testing.T) {
 	sum1 := float64(2)
 	count1 := uint64(2)

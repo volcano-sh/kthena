@@ -18,6 +18,7 @@ package datastore
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -84,13 +85,17 @@ func WithWindowSize(size time.Duration) TokenTrackerOption {
 // WithTokenWeights overrides the default token weights
 func WithTokenWeights(inputWeight, outputWeight float64) TokenTrackerOption {
 	return func(t *InMemorySlidingWindowTokenTracker) {
-		if inputWeight < 0 || outputWeight < 0 {
-			klog.Warningf("Invalid token weights: input=%v, output=%v. Weights must be non-negative", inputWeight, outputWeight)
+		if !isValidTokenWeight(inputWeight) || !isValidTokenWeight(outputWeight) {
+			klog.Warningf("Invalid token weights: input=%v, output=%v. Weights must be finite and non-negative", inputWeight, outputWeight)
 			return
 		}
 		t.inputTokenWeight = inputWeight
 		t.outputTokenWeight = outputWeight
 	}
+}
+
+func isValidTokenWeight(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
 }
 
 // NewInMemorySlidingWindowTokenTracker creates a new tracker with optional configuration

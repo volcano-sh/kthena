@@ -98,18 +98,18 @@ func createTokenTracker() TokenTracker {
 		outputWeight := defaultOutputTokenWeight
 
 		if inputWeightStr != "" {
-			if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil {
+			if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil && isValidTokenWeight(w) {
 				inputWeight = w
 			} else {
-				klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %v, using default", err)
+				klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %q, using default", inputWeightStr)
 			}
 		}
 
 		if outputWeightStr != "" {
-			if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil {
+			if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil && isValidTokenWeight(w) {
 				outputWeight = w
 			} else {
-				klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %v, using default", err)
+				klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %q, using default", outputWeightStr)
 			}
 		}
 
