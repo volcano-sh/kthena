@@ -36,6 +36,7 @@ from router_ab_test import (
     ABTestOrchestrator,
     AIPerfRunner,
     BenchmarkResult,
+    EndpointMode,
     K8sManager,
     MetricsCollector,
     ResultReporter,
@@ -46,6 +47,7 @@ __all__ = [
     "ABTestOrchestrator",
     "AIPerfRunner",
     "BenchmarkResult",
+    "EndpointMode",
     "K8sManager",
     "MetricsCollector",
     "ResultReporter",
@@ -66,7 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--local-port",
         type=int,
         default=K8sManager.DEFAULT_LOCAL_PORT,
-        help=f"Local port for kubectl port-forward fallback (default: {K8sManager.DEFAULT_LOCAL_PORT})",
+        help=f"Local port for kubectl port-forward (default: {K8sManager.DEFAULT_LOCAL_PORT})",
+    )
+    parser.add_argument(
+        "--endpoint-mode",
+        choices=[EndpointMode.PORT_FORWARD, EndpointMode.LB],
+        default=EndpointMode.PORT_FORWARD,
+        help="Router endpoint access mode: 'port-forward' for Kind clusters (default), 'lb' for clusters with LoadBalancer support",
     )
     return parser
 
@@ -80,6 +88,7 @@ def main() -> None:
         output_dir=args.output,
         local_port=args.local_port,
         mocker_manifest=args.mocker_manifest,
+        endpoint_mode=args.endpoint_mode,
     )
     report = orchestrator.run()
     has_regression = any(metric.get("regression", False) for metric in report["comparison"].values())

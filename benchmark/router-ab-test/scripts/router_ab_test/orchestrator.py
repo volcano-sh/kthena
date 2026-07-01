@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.kubernetes import K8sManager
+from router_ab_test.kubernetes import EndpointMode, K8sManager
 from router_ab_test.load_generator import AIPerfRunner
 from router_ab_test.metrics_collector import MetricsCollector
 from router_ab_test.models import BenchmarkResult, ScenarioConfig
@@ -21,13 +21,14 @@ class ABTestOrchestrator:
         output_dir: str,
         local_port: int = K8sManager.DEFAULT_LOCAL_PORT,
         mocker_manifest: str | None = None,
+        endpoint_mode: str = EndpointMode.PORT_FORWARD,
     ):
         self.scenario = ScenarioConfig.from_yaml(scenario_path)
         self.router_config_a_path = Path(router_config_a_path)
         self.router_config_b_path = Path(router_config_b_path)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.k8s = K8sManager(local_port=local_port)
+        self.k8s = K8sManager(local_port=local_port, endpoint_mode=endpoint_mode)
         self.runner = AIPerfRunner(self.output_dir / "runs")
         self.collector = MetricsCollector(self.output_dir / "artifacts")
         self.reporter = ResultReporter()

@@ -1,4 +1,4 @@
-from router_ab_test.kubernetes import K8sManager
+from router_ab_test.kubernetes import EndpointMode, K8sManager
 from router_ab_test.load_generator import AIPerfRunner
 from router_ab_test.metrics_collector import MetricsCollector
 from router_ab_test.models import BenchmarkResult, ScenarioConfig
@@ -9,6 +9,7 @@ __all__ = [
     "ABTestOrchestrator",
     "AIPerfRunner",
     "BenchmarkResult",
+    "EndpointMode",
     "K8sManager",
     "MetricsCollector",
     "ResultReporter",
