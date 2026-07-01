@@ -92,6 +92,13 @@ type Router struct {
 	queueTimeout     time.Duration
 	tokenWeight      float64 // Weight for token-based priority in the fairness strategy (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority in the fairness strategy (default 0.0)
+
+	// Session-boost wait-reject configuration. When sessionBoostWaitRejectEnabled
+	// is true, a request that waits in the session-boost queue longer than
+	// sessionBoostMaxWait is rejected with HTTP 429 instead of continuing to wait
+	// for the general queue timeout.
+	sessionBoostWaitRejectEnabled bool
+	sessionBoostMaxWait           time.Duration
 }
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
@@ -182,6 +189,9 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		queueTimeout:     parseQueueTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+
+		sessionBoostWaitRejectEnabled: getEnvBool("SESSION_BOOST_WAIT_REJECT_ENABLED", false),
+		sessionBoostMaxWait:           parseSessionBoostMaxWait(),
 	}
 }
 
@@ -195,6 +205,24 @@ func parseQueueTimeout() time.Duration {
 		klog.Warningf("Invalid FAIRNESS_QUEUE_TIMEOUT %q, using default %v", s, defaultQueueTimeout)
 	}
 	return defaultQueueTimeout
+}
+
+// defaultSessionBoostMaxWait is the maximum time a request may wait in the
+// session-boost queue before it is rejected with HTTP 429, used when
+// SESSION_BOOST_MAX_WAIT is not set or invalid and wait-reject is enabled.
+const defaultSessionBoostMaxWait = 30 * time.Second
+
+// parseSessionBoostMaxWait reads the session-boost max queue wait from the
+// SESSION_BOOST_MAX_WAIT environment variable. It only takes effect when
+// SESSION_BOOST_WAIT_REJECT_ENABLED is true.
+func parseSessionBoostMaxWait() time.Duration {
+	if s, ok := os.LookupEnv("SESSION_BOOST_MAX_WAIT"); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+		klog.Warningf("Invalid SESSION_BOOST_MAX_WAIT %q, using default %v", s, defaultSessionBoostMaxWait)
+	}
+	return defaultSessionBoostMaxWait
 }
 
 func parseEnvFloat(key string, fallback float64) float64 {
@@ -1113,6 +1141,17 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		return fmt.Errorf("failed to enqueue request: %v", err)
 	}
 
+	// Session-boost wait-reject: when enabled, a request that waits in the queue
+	// longer than sessionBoostMaxWait is rejected with HTTP 429 instead of waiting
+	// out the general queue timeout (which returns 504). The timer only arms in
+	// session-boost mode when the feature is enabled and a positive max wait is set.
+	var waitRejectCh <-chan time.Time
+	if EnableSessionBoost && r.sessionBoostWaitRejectEnabled && r.sessionBoostMaxWait > 0 {
+		waitRejectTimer := time.NewTimer(r.sessionBoostMaxWait)
+		defer waitRejectTimer.Stop()
+		waitRejectCh = waitRejectTimer.C
+	}
+
 	select {
 	case <-queueReq.NotifyChan:
 		if queueReq.Release != nil {
@@ -1129,6 +1168,18 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 			r.store.MarkSessionRequestCompleted(modelName, sessionID)
 		}
 		return nil
+	case <-waitRejectCh:
+		// Exceeded the session-boost maximum queue wait. Cancel the request context
+		// so the queue drops it from the heap (via its cancellation check), release
+		// any permit if one was concurrently granted, and reject the client with 429.
+		cancel()
+		if queueReq.Release != nil {
+			queueReq.Release()
+		}
+		klog.Warningf("[SessionBoost] request rejected after exceeding max queue wait: reqID=%s sessionID=%s user=%s model=%s maxWait=%v",
+			requestID, sessionID, userId, modelName, r.sessionBoostMaxWait)
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, "Request rejected: exceeded maximum session boost queue wait time")
+		return fmt.Errorf("request rejected: exceeded session boost max queue wait")
 	case <-reqCtx.Done():
 		if queueReq.Release != nil {
 			queueReq.Release()

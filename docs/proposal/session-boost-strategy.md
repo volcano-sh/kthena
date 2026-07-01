@@ -39,6 +39,7 @@ Enabling session boost therefore reconfigures the same per-model priority queue 
 3. **KV cache optimization**: Prioritize follow-up requests from recently completed sessions to maximize warm cache hits.
 4. **Grace period (advanced, off by default)**: An optional, tricky tuning knob that, after a request completes, briefly holds the dequeue slot for a potential follow-up from the same session before dispatching unrelated requests. It is **disabled by default** and should only be enabled by operators who fully understand that it deliberately delays unrelated requests in exchange for a higher same-session prefix-cache hit rate.
 5. **Backpressure-aware**: Respect backend pod capacity to avoid flooding, using two-level admission control (inflight limit + backend metrics).
+6. **Fail-fast queue wait timeout (optional, off by default)**: Optionally reject requests that wait in the queue longer than a configurable threshold with HTTP 429, so latency-sensitive clients shed load or retry instead of blocking until the general queue timeout returns a 504.
 
 #### Non-Goals
 
@@ -218,13 +219,15 @@ The net effect is a strict precedence: **grace timing → inflight gate → back
 
 #### Configuration
 
-| Environment Variable             | Default        | Description                                                                                                                                                                           |
-| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ENABLE_SESSION_BOOST`           | `false`        | Enable the session-boost scheduling strategy (mutually exclusive with `ENABLE_FAIRNESS_SCHEDULING`)                                                                                   |
-| `SESSION_BOOST_HEADER`           | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                    |
-| `SESSION_BOOST_MAX_SESSIONS`     | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time |
-| `SESSION_BOOST_GRACE_PERIOD`     | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                        |
-| `SESSION_BOOST_INFLIGHT_PER_POD` | `16`           | Inflight requests admitted per backend pod; total inflight = perPod x backend pod count. Size it from the estimated per-pod concurrency (e.g. vLLM's --max-num-seqs)                  |
+| Environment Variable                | Default        | Description                                                                                                                                                                            |
+| ----------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENABLE_SESSION_BOOST`              | `false`        | Enable the session-boost scheduling strategy (mutually exclusive with `ENABLE_FAIRNESS_SCHEDULING`)                                                                                    |
+| `SESSION_BOOST_HEADER`              | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                     |
+| `SESSION_BOOST_MAX_SESSIONS`        | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time  |
+| `SESSION_BOOST_GRACE_PERIOD`        | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                         |
+| `SESSION_BOOST_INFLIGHT_PER_POD`    | `16`           | Inflight requests admitted per backend pod; total inflight = perPod x backend pod count. Size it from the estimated per-pod concurrency (e.g. vLLM's --max-num-seqs)                   |
+| `SESSION_BOOST_WAIT_REJECT_ENABLED` | `false`        | Reject requests that wait in the queue longer than `SESSION_BOOST_MAX_WAIT` with HTTP 429 instead of waiting for the general queue timeout                                             |
+| `SESSION_BOOST_MAX_WAIT`            | `30s`          | Maximum time a request may wait in the queue before it is rejected with HTTP 429. Only effective when `SESSION_BOOST_WAIT_REJECT_ENABLED=true`; keep it below `FAIRNESS_QUEUE_TIMEOUT` |
 
 ### Design Details
 
@@ -296,6 +299,24 @@ The queue uses two-level admission control:
 2. **Backend metrics check**: The `BackendWaitingChecker` reads the backend pod metrics already scraped by the store (e.g., vLLM's `RequestWaitingNum`) to confirm at least one pod has capacity. It does not scrape backends itself.
 
 When a request completes (Release), the queue immediately attempts to dequeue the next request (release-driven dequeue), ensuring minimal latency between sequential requests. The loop is fully event-driven — there is no independent polling timer. In single-router operation every moment a backend frees capacity coincides with one of our own requests completing (a release), so release and arrival events alone cover every dequeue opportunity; the capacity check simply reads the pod metrics already scraped by the store (`METRICS_SCRAPE_INTERVAL`).
+
+#### Queue Wait Timeout (429 Rejection)
+
+Under sustained overload the two-level admission control legitimately holds requests in the queue until backend capacity frees up. By default a queued request waits until the router's general queue timeout (`FAIRNESS_QUEUE_TIMEOUT`) expires, at which point the request context is cancelled and the client receives `504 Gateway Timeout`. For latency-sensitive front ends this coarse timeout can be undesirable: the client would rather be told *quickly* that the system is saturated so it can retry elsewhere or shed load.
+
+The optional queue wait timeout provides this fail-fast behavior:
+
+- It is enabled with `SESSION_BOOST_WAIT_REJECT_ENABLED=true` and disabled by default.
+- The threshold is configured with `SESSION_BOOST_MAX_WAIT` (default `30s`).
+- When a request has been waiting in the queue longer than `SESSION_BOOST_MAX_WAIT`, the router stops waiting, removes the request from the queue, and responds with `429 Too Many Requests`.
+
+It is implemented in the router's request-handling path rather than in the queue's dequeue loop, mirroring how the existing `FAIRNESS_QUEUE_TIMEOUT` (504) is handled. When session boost is enabled and the feature is on, the handler arms a timer for `SESSION_BOOST_MAX_WAIT` alongside the admission (`NotifyChan`) and cancellation (`reqCtx.Done()`) signals it already waits on:
+
+- **Admitted first**: the request proceeds to the backend as usual (no rejection).
+- **Wait timer fires first**: the handler cancels the request context — which makes the queue drop the request from the heap via its existing cancellation check (`isCancelled` / `drainCancelledLocked`), reusing the same cleanup path as client disconnects and the general timeout — releases any permit that may have been granted concurrently, and returns `429 Too Many Requests`.
+- **General timeout / client disconnect fires first**: the existing behavior is unchanged (504 or 503 respectively).
+
+Because it reuses the queue's cancellation cleanup, the wait timeout adds no new state to the queue and no extra polling. It is orthogonal to the inflight and backend capacity gates: those gates decide *whether* a request may run, while the wait timeout only bounds *how long* a request is willing to wait before giving up. Operators should keep `SESSION_BOOST_MAX_WAIT` below `FAIRNESS_QUEUE_TIMEOUT`; otherwise the general 504 timeout fires first and the 429 rejection never takes effect. The feature only applies in session-boost mode.
 
 ### Multi-Turn Conversation Advantages
 
