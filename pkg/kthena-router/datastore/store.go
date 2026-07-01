@@ -843,26 +843,47 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
 	name := utils.GetNamespaceName(ms)
 	var modelServerObj *modelServer
+	var oldPods sets.Set[types.NamespacedName]
+	var newPods sets.Set[types.NamespacedName]
 	if value, ok := s.modelServer.Load(name); !ok {
 		modelServerObj = newModelServer(ms)
-		// New object — no concurrent access yet, safe to write without lock
-		if len(pods) != 0 {
-			modelServerObj.pods = pods
+		if pods != nil {
+			newPods = pods.Copy()
+			modelServerObj.pods = newPods
 		}
 	} else {
 		modelServerObj = value.(*modelServer)
-		// Existing object — concurrent readers may access modelServer and pods,
-		// so we must hold the lock to prevent data races.
 		modelServerObj.mutex.Lock()
+		oldPods = modelServerObj.pods.Copy()
 		modelServerObj.modelServer = ms
-		if len(pods) != 0 {
-			// do not operate s.pods here, which are done within pod handler
-			modelServerObj.pods = pods
+		if pods != nil {
+			newPods = pods.Copy()
+			modelServerObj.pods = newPods
+			modelServerObj.pdGroups = make(map[string]*PDGroupPods)
 		}
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
+	if pods != nil {
+		s.updateModelServerPodBindings(name, modelServerObj, oldPods, newPods)
+	}
 	return nil
+}
+
+func (s *store) updateModelServerPodBindings(modelServerName types.NamespacedName, modelServerObj *modelServer, oldPods, newPods sets.Set[types.NamespacedName]) {
+	for podName := range oldPods.Difference(newPods) {
+		if value, ok := s.pods.Load(podName); ok {
+			podInfo := value.(*PodInfo)
+			podInfo.RemoveModelServer(modelServerName)
+		}
+	}
+	for podName := range newPods {
+		if value, ok := s.pods.Load(podName); ok {
+			podInfo := value.(*PodInfo)
+			podInfo.AddModelServer(modelServerName)
+			modelServerObj.categorizePodForPDGroup(podName, podInfo.Pod.Labels)
+		}
+	}
 }
 
 func (s *store) DeleteModelServer(ms types.NamespacedName) error {

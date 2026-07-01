@@ -1062,6 +1062,141 @@ func TestModelServerController_SharedPods(t *testing.T) {
 	assert.True(t, pod2Info.HasModelServer(ms2Name), "pod2 should reference ms2")
 }
 
+func TestModelServerController_ModelServerSelectorUpdateClearsOldPods(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "old"},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pod",
+			Labels:    map[string]string{"app": "old"},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller := NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+
+	require.True(t, waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced))
+	require.NoError(t, controller.syncModelServerHandler("default/model"))
+	pods, err := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	require.Len(t, pods, 1)
+
+	updated := ms.DeepCopy()
+	updated.Spec.WorkloadSelector.MatchLabels = map[string]string{"app": "new"}
+	_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Update(context.Background(), updated, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.True(t, waitForObjectInCache(t, 2*time.Second, func() bool {
+		got, err := controller.modelServerLister.ModelServers("default").Get("model")
+		return err == nil && got.Spec.WorkloadSelector.MatchLabels["app"] == "new"
+	}))
+
+	require.NoError(t, controller.syncModelServerHandler("default/model"))
+	pods, err = store.GetPodsByModelServer(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	assert.Empty(t, pods)
+
+	podInfo := store.GetPodInfo(utils.GetNamespaceName(pod))
+	require.NotNil(t, podInfo)
+	assert.False(t, podInfo.HasModelServer(utils.GetNamespaceName(ms)))
+}
+
+func TestModelServerController_PodLabelUpdateClearsOldModelServer(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "model"},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pod",
+			Labels:    map[string]string{"app": "model"},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller := NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+
+	require.True(t, waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced))
+	require.NoError(t, controller.syncModelServerHandler("default/model"))
+	require.NoError(t, controller.syncPodHandler("default/pod"))
+	pods, err := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	require.Len(t, pods, 1)
+
+	updatedPod := pod.DeepCopy()
+	updatedPod.Labels = map[string]string{"app": "other"}
+	_, err = kubeClient.CoreV1().Pods("default").Update(context.Background(), updatedPod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.True(t, waitForObjectInCache(t, 2*time.Second, func() bool {
+		got, err := controller.podLister.Pods("default").Get("pod")
+		return err == nil && got.Labels["app"] == "other"
+	}))
+
+	require.NoError(t, controller.syncPodHandler("default/pod"))
+	pods, err = store.GetPodsByModelServer(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	assert.Empty(t, pods)
+
+	podInfo := store.GetPodInfo(utils.GetNamespaceName(pod))
+	require.NotNil(t, podInfo)
+	assert.False(t, podInfo.HasModelServer(utils.GetNamespaceName(ms)))
+}
+
 // Helper functions for testing
 
 // waitForCacheSync waits for the informer caches to sync with a timeout
