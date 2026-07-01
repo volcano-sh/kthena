@@ -388,6 +388,14 @@ func TestStoreAddOrUpdatePod(t *testing.T) {
 		ms2Info := value.(*modelServer)
 		assert.Equal(t, ms2Info.pods.Len(), 0, "model server 2 should not reference the pod")
 	}
+
+	err = s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{})
+	assert.NoError(t, err)
+	assert.Nil(t, s.GetPodInfo(podName))
+	if value, ok := s.modelServer.Load(utils.GetNamespaceName(ms1)); ok {
+		ms1Info := value.(*modelServer)
+		assert.Equal(t, ms1Info.pods.Len(), 0, "model server 1 should not reference the pod")
+	}
 }
 
 func TestStoreDeletePod(t *testing.T) {
@@ -491,6 +499,51 @@ func TestStoreAddOrUpdateModelServer(t *testing.T) {
 		assert.True(t, msInfo.pods.Contains(types.NamespacedName{Namespace: "default", Name: "pod2"}))
 		assert.False(t, msInfo.pods.Contains(types.NamespacedName{Namespace: "default", Name: "pod1"}))
 	}
+}
+
+func TestStoreAddOrUpdateModelServerClearsPods(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]CallbackFunc),
+	}
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "model1",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pod1",
+		},
+	}
+
+	msName := utils.GetNamespaceName(ms)
+	podName := utils.GetNamespaceName(pod)
+	var deleteCallbackCalled atomic.Bool
+	s.RegisterCallback("Pod", func(data EventData) {
+		if data.EventType == EventDelete && data.Pod == podName {
+			deleteCallbackCalled.Store(true)
+		}
+	})
+
+	err := s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName](podName))
+	assert.NoError(t, err)
+	err = s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
+	assert.NoError(t, err)
+
+	err = s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
+	assert.NoError(t, err)
+
+	pods, err := s.GetPodsByModelServer(msName)
+	assert.NoError(t, err)
+	assert.Empty(t, pods)
+	assert.Nil(t, s.GetPodInfo(podName))
+	assert.Eventually(t, func() bool {
+		return deleteCallbackCalled.Load()
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestStoreDeleteModelServer(t *testing.T) {
