@@ -283,26 +283,11 @@ func (ac *AutoscaleController) getTargetReplicas(target *workload.Target, defaul
 func (ac *AutoscaleController) schedule(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) (scalingOutcome, error) {
 	klog.V(2).Infof("start to process autoscaling policy %s", klog.KObj(autoscalePolicy))
 	if autoscalePolicy.Spec.HeterogeneousTarget != nil {
-		o, err := ac.doOptimize(ctx, autoscalePolicy)
-		if err != nil {
-			klog.Errorf("failed to do optimize, err: %v", err)
-			return outcomeStable, err
-		}
-		return o, nil
+		return ac.doOptimize(ctx, autoscalePolicy)
 	} else if autoscalePolicy.Spec.HomogeneousTarget != nil {
-		o, err := ac.doScale(ctx, autoscalePolicy)
-		if err != nil {
-			klog.Errorf("failed to do scale, err: %v", err)
-			return outcomeStable, err
-		}
-		return o, nil
+		return ac.doScale(ctx, autoscalePolicy)
 	} else if autoscalePolicy.Spec.DisaggregatedTarget != nil {
-		o, err := ac.doDisaggregatedScale(ctx, autoscalePolicy)
-		if err != nil {
-			klog.Errorf("failed to do disaggregated scale, err: %v", err)
-			return outcomeStable, err
-		}
-		return o, nil
+		return ac.doDisaggregatedScale(ctx, autoscalePolicy)
 	}
 	klog.Warningf("policy %s has no target configuration", autoscalePolicy.Name)
 	return outcomeStable, nil
@@ -332,6 +317,9 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 	if err != nil {
 		klog.Errorf("failed to do optimize, err: %v", err)
 		return outcomeStable, err
+	}
+	if recommendedInstances == nil {
+		return outcomeStable, nil
 	}
 	// Do update replicas
 	outcome := outcomeStable
