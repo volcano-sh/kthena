@@ -186,6 +186,7 @@ type Store interface {
 
 	// Refresh Store and ModelServer when add a new pod or update a pod
 	AddOrUpdatePod(pod *corev1.Pod, modelServer []*aiv1alpha1.ModelServer) error
+	AddOrUpdateInferencePoolPod(pod *corev1.Pod) error
 	// AppendModelServerToPod appends new modelservers to the podInfo without replacing existing ones
 	AppendModelServerToPod(pod *corev1.Pod, modelServers []*aiv1alpha1.ModelServer) error
 	// Refresh Store and ModelServer when delete a pod
@@ -841,22 +842,20 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
 	name := utils.GetNamespaceName(ms)
 	var modelServerObj *modelServer
+	if len(pods) == 0 {
+		pods = sets.New[types.NamespacedName]()
+	}
 	if value, ok := s.modelServer.Load(name); !ok {
 		modelServerObj = newModelServer(ms)
 		// New object — no concurrent access yet, safe to write without lock
-		if len(pods) != 0 {
-			modelServerObj.pods = pods
-		}
+		modelServerObj.pods = pods
 	} else {
 		modelServerObj = value.(*modelServer)
 		// Existing object — concurrent readers may access modelServer and pods,
 		// so we must hold the lock to prevent data races.
 		modelServerObj.mutex.Lock()
 		modelServerObj.modelServer = ms
-		if len(pods) != 0 {
-			// do not operate s.pods here, which are done within pod handler
-			modelServerObj.pods = pods
-		}
+		modelServerObj.pods = pods
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
@@ -997,8 +996,37 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 	}
 
 	if value, ok := s.pods.Load(podName); ok {
-		// Update existing pod in place — preserve runtime metrics and models.
+		// Update existing pod in place, preserving runtime metrics and models.
 		oldPodInfo := value.(*PodInfo)
+		if newModelServers.Len() == 0 {
+			selectedByInferencePool := false
+			s.inferencePoolMutex.RLock()
+			for _, inferencePool := range s.inferencePools {
+				if inferencePool.Namespace != pod.Namespace {
+					continue
+				}
+				matchLabels := make(map[string]string)
+				for k, v := range inferencePool.Spec.Selector.MatchLabels {
+					matchLabels[string(k)] = string(v)
+				}
+				selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+					MatchLabels: matchLabels,
+				})
+				if err != nil {
+					s.inferencePoolMutex.RUnlock()
+					return fmt.Errorf("invalid selector: %w", err)
+				}
+				if selector.Matches(labels.Set(pod.Labels)) {
+					selectedByInferencePool = true
+					break
+				}
+			}
+			s.inferencePoolMutex.RUnlock()
+			if !selectedByInferencePool {
+				return s.DeletePod(podName)
+			}
+			engine = oldPodInfo.GetEngine()
+		}
 		oldModelServers := oldPodInfo.GetModelServers()
 		// Handle the case where the pod no longer belongs to some model servers
 		oldPodLabels := oldPodInfo.GetPodLabels()
@@ -1014,8 +1042,11 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		oldPodInfo.UpdatePod(pod, engine, newModelServers)
 		return nil
 	}
+	if newModelServers.Len() == 0 {
+		return nil
+	}
 
-	// New pod — create PodInfo and fetch initial metrics.
+	// New pod, create PodInfo and fetch initial metrics.
 	newPodInfo := &PodInfo{
 		Pod:         pod,
 		engine:      engine,
@@ -1026,6 +1057,22 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 	s.updatePodMetrics(newPodInfo)
 	s.updatePodModels(newPodInfo)
 
+	return nil
+}
+
+func (s *store) AddOrUpdateInferencePoolPod(pod *corev1.Pod) error {
+	podName := utils.GetNamespaceName(pod)
+	if value, ok := s.pods.Load(podName); ok {
+		podInfo := value.(*PodInfo)
+		podInfo.UpdatePod(pod, podInfo.GetEngine(), podInfo.GetModelServers())
+		return nil
+	}
+
+	s.pods.Store(podName, &PodInfo{
+		Pod:         pod,
+		modelServer: sets.New[types.NamespacedName](),
+		models:      sets.New[string](),
+	})
 	return nil
 }
 
@@ -1571,6 +1618,30 @@ func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
 			if ms != nil && ms.Spec.WorkloadPort.Port > 0 {
 				return uint32(ms.Spec.WorkloadPort.Port)
 			}
+		}
+	}
+	pod := podInfo.GetPod()
+	if pod == nil {
+		return 0
+	}
+	s.inferencePoolMutex.RLock()
+	defer s.inferencePoolMutex.RUnlock()
+	for _, inferencePool := range s.inferencePools {
+		if inferencePool.Namespace != pod.Namespace || len(inferencePool.Spec.TargetPorts) == 0 {
+			continue
+		}
+		matchLabels := make(map[string]string)
+		for k, v := range inferencePool.Spec.Selector.MatchLabels {
+			matchLabels[string(k)] = string(v)
+		}
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+			MatchLabels: matchLabels,
+		})
+		if err != nil {
+			continue
+		}
+		if selector.Matches(labels.Set(podInfo.GetPodLabels())) {
+			return uint32(inferencePool.Spec.TargetPorts[0].Number)
 		}
 	}
 	return 0

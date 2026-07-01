@@ -214,16 +214,40 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		}
 	}
 
-	_ = c.store.AddOrUpdateModelServer(ms, pods)
-
-	// Bind every ready pod selected by this ModelServer. Pods that already have
-	// an entry in the store get the binding appended so their runtime metrics and
-	// bindings to other ModelServers are preserved; brand-new pods are created
-	// with the binding. We check each pod against the store directly instead of
-	// re-reading GetPodsByModelServer, which would only echo back the pod set that
-	// AddOrUpdateModelServer just wrote and cannot distinguish existing pods from
-	// new ones.
 	msName := utils.GetNamespaceName(ms)
+	oldPods, err := c.store.GetPodsByModelServer(msName)
+	if err != nil {
+		klog.V(4).Infof("failed to get existing pods for ModelServer %s/%s: %v", ms.Namespace, ms.Name, err)
+	}
+
+	// Reconcile pods this ModelServer used to select before replacing the stored pod set.
+	for _, podInfo := range oldPods {
+		oldPod := podInfo.GetPod()
+		if oldPod == nil {
+			continue
+		}
+		podName := utils.GetNamespaceName(oldPod)
+		if pods.Contains(podName) {
+			continue
+		}
+
+		pod, err := c.podLister.Pods(podName.Namespace).Get(podName.Name)
+		if err != nil {
+			return fmt.Errorf("failed to get pod %s from lister: %v", podName, err)
+		}
+		if !isPodReady(pod) {
+			continue
+		}
+		if err := c.addOrUpdatePod(pod); err != nil {
+			return err
+		}
+	}
+
+	if err := c.store.AddOrUpdateModelServer(ms, pods); err != nil {
+		return err
+	}
+
+	// Bind the current pod set after stale bindings have been reconciled.
 	for _, pod := range podList {
 		if !isPodReady(pod) {
 			continue
@@ -286,10 +310,10 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 		servers = append(servers, item)
 	}
 
-	if len(servers) > 0 {
-		if err := c.store.AddOrUpdatePod(pod, servers); err != nil {
-			return fmt.Errorf("failed to add or update pod %s/%s in data store: %v", pod.Namespace, pod.Name, err)
-		}
+	// Empty servers is meaningful here: the store clears stale ModelServer bindings
+	// and deletes the pod only when no other routing resource still selects it.
+	if err := c.store.AddOrUpdatePod(pod, servers); err != nil {
+		return fmt.Errorf("failed to add or update pod %s/%s in data store: %v", pod.Namespace, pod.Name, err)
 	}
 
 	return nil

@@ -21,10 +21,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/client-go/informers"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -35,7 +38,9 @@ import (
 
 type InferencePoolController struct {
 	inferencePoolInformer cache.SharedIndexInformer
+	podLister             corelisters.PodLister
 	inferencePoolSynced   cache.InformerSynced
+	podSynced             cache.InformerSynced
 	registration          cache.ResourceEventHandlerRegistration
 
 	workqueue   workqueue.TypedRateLimitingInterface[any]
@@ -45,14 +50,18 @@ type InferencePoolController struct {
 
 func NewInferencePoolController(
 	dynamicInformerFactory dynamicinformer.DynamicSharedInformerFactory,
+	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
 ) (*InferencePoolController, error) {
 	gvr := inferencev1.SchemeGroupVersion.WithResource("inferencepools")
 	inferencePoolInformer := dynamicInformerFactory.ForResource(gvr).Informer()
+	podInformer := kubeInformerFactory.Core().V1().Pods()
 
 	controller := &InferencePoolController{
 		inferencePoolInformer: inferencePoolInformer,
+		podLister:             podInformer.Lister(),
 		inferencePoolSynced:   inferencePoolInformer.HasSynced,
+		podSynced:             podInformer.Informer().HasSynced,
 		workqueue:             workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
 		initialSync:           &atomic.Bool{},
 		store:                 store,
@@ -75,7 +84,7 @@ func (c *InferencePoolController) Run(stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	if ok := cache.WaitForCacheSync(stopCh, c.registration.HasSynced); !ok {
+	if ok := cache.WaitForCacheSync(stopCh, c.registration.HasSynced, c.podSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 	c.workqueue.Add(initialSyncSignal)
@@ -155,7 +164,33 @@ func (c *InferencePoolController) syncHandler(key string) error {
 		return fmt.Errorf("failed to convert unstructured to InferencePool: %w", err)
 	}
 
-	return c.store.AddOrUpdateInferencePool(inferencePool)
+	if err := c.store.AddOrUpdateInferencePool(inferencePool); err != nil {
+		return err
+	}
+
+	matchLabels := make(map[string]string)
+	for k, v := range inferencePool.Spec.Selector.MatchLabels {
+		matchLabels[string(k)] = string(v)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+		MatchLabels: matchLabels,
+	})
+	if err != nil {
+		return fmt.Errorf("invalid selector: %w", err)
+	}
+	pods, err := c.podLister.Pods(inferencePool.Namespace).List(selector)
+	if err != nil {
+		return err
+	}
+	for _, pod := range pods {
+		if !isPodReady(pod) {
+			continue
+		}
+		if err := c.store.AddOrUpdateInferencePoolPod(pod); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *InferencePoolController) enqueueInferencePool(obj interface{}) {

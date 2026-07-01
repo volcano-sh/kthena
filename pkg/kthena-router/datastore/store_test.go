@@ -34,6 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -412,6 +413,91 @@ func TestStoreAddOrUpdatePod(t *testing.T) {
 		ms2Info := value.(*modelServer)
 		assert.Equal(t, ms2Info.pods.Len(), 0, "model server 2 should not reference the pod")
 	}
+
+	err = s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{})
+	assert.NoError(t, err)
+	assert.Nil(t, s.GetPodInfo(podName))
+	if value, ok := s.modelServer.Load(utils.GetNamespaceName(ms1)); ok {
+		ms1Info := value.(*modelServer)
+		assert.Equal(t, ms1Info.pods.Len(), 0, "model server 1 should not reference the pod")
+	}
+
+	emptyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pod2",
+		},
+	}
+	emptyPodName := utils.GetNamespaceName(emptyPod)
+	err = s.AddOrUpdatePod(emptyPod, []*aiv1alpha1.ModelServer{})
+	assert.NoError(t, err)
+	assert.Nil(t, s.GetPodInfo(emptyPodName))
+}
+
+func TestStoreAddOrUpdatePodKeepsInferencePoolPod(t *testing.T) {
+	s := &store{
+		modelServer:    sync.Map{},
+		pods:           sync.Map{},
+		inferencePools: make(map[string]*inferencev1.InferencePool),
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pod1",
+			Labels: map[string]string{
+				"model": "llama",
+				"pool":  "chat",
+			},
+		},
+	}
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "model1",
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+		},
+	}
+	inferencePool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pool1",
+		},
+		Spec: inferencev1.InferencePoolSpec{
+			Selector: inferencev1.LabelSelector{
+				MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+					"pool": "chat",
+				},
+			},
+		},
+	}
+
+	s.AddOrUpdateModelServer(ms, nil)
+	assert.NoError(t, s.AddOrUpdateInferencePool(inferencePool))
+	assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+
+	updatedPod := pod.DeepCopy()
+	updatedPod.Labels = map[string]string{
+		"model": "other",
+		"pool":  "chat",
+	}
+	podName := utils.GetNamespaceName(updatedPod)
+	assert.NoError(t, s.AddOrUpdatePod(updatedPod, []*aiv1alpha1.ModelServer{}))
+
+	podInfo := s.GetPodInfo(podName)
+	assert.NotNil(t, podInfo)
+	assert.Equal(t, 0, podInfo.GetModelServerCount())
+	assert.Equal(t, string(aiv1alpha1.VLLM), podInfo.GetEngine())
+	if value, ok := s.modelServer.Load(utils.GetNamespaceName(ms)); ok {
+		msInfo := value.(*modelServer)
+		assert.Equal(t, 0, msInfo.pods.Len())
+	}
+
+	pods, err := s.GetPodsByInferencePool(utils.GetNamespaceName(inferencePool))
+	assert.NoError(t, err)
+	assert.Len(t, pods, 1)
+	assert.Equal(t, podName, pods[0].GetPodNamespacedName())
 }
 
 func TestStoreDeletePod(t *testing.T) {
@@ -514,6 +600,13 @@ func TestStoreAddOrUpdateModelServer(t *testing.T) {
 		msInfo := value.(*modelServer)
 		assert.True(t, msInfo.pods.Contains(types.NamespacedName{Namespace: "default", Name: "pod2"}))
 		assert.False(t, msInfo.pods.Contains(types.NamespacedName{Namespace: "default", Name: "pod1"}))
+	}
+
+	err = s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
+	assert.NoError(t, err)
+	if value, ok := s.modelServer.Load(msName); ok {
+		msInfo := value.(*modelServer)
+		assert.Equal(t, 0, msInfo.pods.Len())
 	}
 }
 
@@ -2380,4 +2473,29 @@ func TestStoreRunBoundedConcurrency(t *testing.T) {
 	// Verify the bound was respected and parallelism actually occurred
 	assert.Greater(t, maxInFlight.Load(), int32(1), "expected at least some parallelism in scrapes")
 	assert.LessOrEqual(t, maxInFlight.Load(), int32(maxConcurrentPodScrapes), "in-flight requests should never exceed the semaphore cap")
+}
+
+func TestGetPodWorkloadPortUsesInferencePoolTargetPort(t *testing.T) {
+	s := newStore()
+	pod := createTestPod("default", "pod1")
+	pod.Labels = map[string]string{"pool": "chat"}
+	podInfo := NewPodInfo(pod, string(aiv1alpha1.VLLM))
+	podInfo.modelServer = sets.New[types.NamespacedName]()
+
+	inferencePool := &inferencev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pool1",
+		},
+		Spec: inferencev1.InferencePoolSpec{
+			Selector: inferencev1.LabelSelector{
+				MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+					"pool": "chat",
+				},
+			},
+			TargetPorts: []inferencev1.Port{{Number: 9000}},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateInferencePool(inferencePool))
+	assert.Equal(t, uint32(9000), s.getPodWorkloadPort(podInfo))
 }
