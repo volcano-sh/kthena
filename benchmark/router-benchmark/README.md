@@ -108,8 +108,7 @@ cd /path/to/kthena
 ### 2. 部署 Mock Backend
 
 ```bash
-cd benchmark/router-ab-test
-kubectl apply -f k8s/mocker-deployment.yaml
+kubectl apply -f k8s/mocker-deployment.yaml # HF 无法访问，可使用 k8s/mocker-deployment-local-hf.yaml
 kubectl wait --for=condition=ready pod -l app=mocker-llm --timeout=120s
 ```
 
@@ -133,7 +132,7 @@ python scripts/ab_test.py \
   --scenario scenarios/smoke-test-s2.yaml \
   --router-config-a k8s/router-config-random.yaml \
   --router-config-b k8s/router-config-least-latency.yaml \
-  --output results/
+  --output /tmp/results/
 ```
 
 #### Router Endpoint 访问模式

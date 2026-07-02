@@ -1,4 +1,4 @@
-# Kthena ModelServer - 注册 Mocker 作为推理后端
+# Kthena ModelServer
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:
@@ -8,7 +8,7 @@ metadata:
     app: mocker-model-server
 spec:
   model: "Qwen/Qwen3-0.6B"
-  inferenceEngine: vLLM
+  inferenceEngine: SGLang
   workloadSelector:
     matchLabels:
       app: mocker-llm
