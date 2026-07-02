@@ -1523,11 +1523,11 @@ func TestModelServingPartitionScaleDown(t *testing.T) {
 
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, scaledReplicas, *finalMS.Spec.Replicas)
-	assert.Equal(t, scaledReplicas, finalMS.Status.Replicas)
-	assert.Equal(t, int32(0), finalMS.Status.UpdatedReplicas)
-	assert.Equal(t, scaledReplicas, finalMS.Status.CurrentReplicas)
-	assert.Equal(t, scaledReplicas, finalMS.Status.AvailableReplicas)
+	require.Equal(t, scaledReplicas, *finalMS.Spec.Replicas)
+	require.Equal(t, scaledReplicas, finalMS.Status.Replicas)
+	require.Equal(t, int32(0), finalMS.Status.UpdatedReplicas)
+	require.Equal(t, scaledReplicas, finalMS.Status.CurrentReplicas)
+	require.Equal(t, scaledReplicas, finalMS.Status.AvailableReplicas)
 
 	t.Log("ModelServing partition scale down test passed successfully")
 }
@@ -2080,6 +2080,136 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	t.Log("ModelServing role-based rolling update test passed successfully")
 }
 
+// TestModelServingRoleRollingUpdateMaxUnavailable verifies RoleRollingUpdate respects
+// role-level maxUnavailable and leaves unaffected roles untouched.
+func TestModelServingRoleRollingUpdateMaxUnavailable(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const badImage = "nginx:role-rollingupdate-maxunavailable-bad-image"
+	replicas := int32(1)
+	prefillReplicas := int32(4)
+	decodeReplicas := int32(1)
+
+	maxUnavailable := intstr.FromInt(2)
+	modelServing := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-role-rolling-maxunavailable",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas:       &replicas,
+			RecoveryPolicy: workload.RoleRecreate,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.RoleRollingUpdate,
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:           "prefill",
+						Replicas:       &prefillReplicas,
+						MaxUnavailable: &maxUnavailable,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "test-container",
+									Image: nginxImage,
+									Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
+								}},
+							},
+						},
+					},
+					{
+						Name:     "decode",
+						Replicas: &decodeReplicas,
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "test-container",
+									Image: nginxImage,
+									Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Creating ModelServing for RoleRollingUpdate maxUnavailable test")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	decodeUIDs := map[string]string{}
+	decodeSelector := fmt.Sprintf("%s,%s=decode", modelServingLabelSelector(modelServing.Name), workload.RoleLabelKey)
+	decodePods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: decodeSelector})
+	require.NoError(t, err)
+	require.Len(t, decodePods.Items, int(decodeReplicas), "unexpected initial decode pod count")
+	for _, pod := range decodePods.Items {
+		decodeUIDs[pod.Name] = string(pod.UID)
+	}
+
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	updatedMS := initialMS.DeepCopy()
+	for i := range updatedMS.Spec.Template.Roles {
+		if updatedMS.Spec.Template.Roles[i].Name == "prefill" {
+			updatedMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = badImage
+		}
+	}
+
+	t.Log("Updating prefill role to a bad image; only maxUnavailable prefill replicas should be replaced")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	countRolePods := func() (oldPrefillRunning, badPrefill, decodeUnchanged int, ok bool) {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: modelServingLabelSelector(modelServing.Name),
+		})
+		if err != nil {
+			t.Logf("Failed to list pods: %v", err)
+			return 0, 0, 0, false
+		}
+
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil || len(pod.Spec.Containers) == 0 {
+				continue
+			}
+			switch pod.Labels[workload.RoleLabelKey] {
+			case "prefill":
+				if pod.Spec.Containers[0].Image == nginxImage && pod.Status.Phase == corev1.PodRunning {
+					oldPrefillRunning++
+				}
+				if pod.Spec.Containers[0].Image == badImage {
+					badPrefill++
+				}
+			case "decode":
+				if pod.Spec.Containers[0].Image != nginxImage {
+					continue
+				}
+				if uid, exists := decodeUIDs[pod.Name]; exists && uid == string(pod.UID) {
+					decodeUnchanged++
+				}
+			}
+		}
+		return oldPrefillRunning, badPrefill, decodeUnchanged, true
+	}
+
+	require.Eventually(t, func() bool {
+		oldPrefillRunning, badPrefill, decodeUnchanged, ok := countRolePods()
+		t.Logf("oldPrefillRunning=%d badPrefill=%d decodeUnchanged=%d", oldPrefillRunning, badPrefill, decodeUnchanged)
+		return ok && oldPrefillRunning == 2 && badPrefill == 2 && decodeUnchanged == int(decodeReplicas)
+	}, 2*time.Minute, 2*time.Second, "RoleRollingUpdate should replace only maxUnavailable prefill replicas")
+
+	stableUntil := time.Now().Add(30 * time.Second)
+	for time.Now().Before(stableUntil) {
+		oldPrefillRunning, badPrefill, decodeUnchanged, ok := countRolePods()
+		t.Logf("stable check: oldPrefillRunning=%d badPrefill=%d decodeUnchanged=%d", oldPrefillRunning, badPrefill, decodeUnchanged)
+		require.True(t, ok && oldPrefillRunning >= 2 && badPrefill <= 2 && decodeUnchanged == int(decodeReplicas),
+			"RoleRollingUpdate should not exceed role maxUnavailable while updated pods are unavailable")
+		time.Sleep(2 * time.Second)
+	}
+}
+
 // TestModelServingBinPackScaleDownServingGroup tests bin pack scale down at ServingGroup level
 func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
@@ -2282,13 +2412,21 @@ func TestModelServingBinPackScaleDownCombined(t *testing.T) {
 }
 
 // TestModelServingStatusAwarePriorityScaleDownServingGroup verifies that when one ServingGroup is
-// not ready (pod deleted under default RoleRecreate), scale-down prefers removing that group before healthy groups.
+// not ready, scale-down prefers removing that group before healthy groups.
 func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	modelServing := createBasicModelServing("test-status-sg-priority", 4, 0)
-	t.Log("Creating ModelServing with 4 servingGroup replicas for status-aware scale down test")
-	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	// Inject a readiness gate to control pod readiness deterministically via K8s API
+	gateType := corev1.PodConditionType("kthena.e2e/test-ready")
+	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.ReadinessGates = []corev1.PodReadinessGate{
+		{ConditionType: gateType},
+	}
+
+	t.Log("Creating ModelServing with 4 servingGroups (pods will start NotReady due to ReadinessGate)")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 4, 3*time.Minute)
 
 	labelSelector := modelServingLabelSelector(modelServing.Name)
@@ -2296,22 +2434,39 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 		LabelSelector: labelSelector,
 	})
 	require.NoError(t, err, "Failed to list pods")
-	require.NotEmpty(t, podList.Items, "Expected pods before simulating disruption")
+	require.Len(t, podList.Items, 4, "Expected exactly 4 pods")
 
+	t.Log("Patching 3 out of 4 pods to satisfy the ReadinessGate so they become Ready")
+	patchTrue := []byte(fmt.Sprintf(`{"status":{"conditions":[{"type":"%s","status":"True"}]}}`, gateType))
+	// We intentionally skip the first pod to keep its group permanently NotReady
 	targetPod := podList.Items[0]
 	unhealthyGroup := targetPod.Labels[workload.GroupNameLabelKey]
 	require.NotEmpty(t, unhealthyGroup, "Pod should have GroupName label")
+	t.Logf("Leaving pod %s in serving group %s NotReady to permanently disrupt that group", targetPod.Name, unhealthyGroup)
 
-	t.Logf("Deleting pod %s in serving group %s to leave that group not ready", targetPod.Name, unhealthyGroup)
-	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{})
-	require.NoError(t, err, "Failed to delete pod")
+	for i := 1; i < len(podList.Items); i++ {
+		pod := podList.Items[i]
+		patchCtx, cancel := context.WithTimeout(ctx, utils.DefaultAPICallTimeout)
+		_, err := kubeClient.CoreV1().Pods(testNamespace).Patch(patchCtx, pod.Name, types.StrategicMergePatchType, patchTrue, metav1.PatchOptions{}, "status")
+		cancel()
+		require.NoError(t, err, "Failed to patch readiness gate for pod %s", pod.Name)
+	}
+
+	t.Log("Waiting for controller to observe the state (3 Ready, 1 NotReady)")
+	require.Eventually(t, func() bool {
+		ms, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return false
+		}
+		return ms.Status.AvailableReplicas == 3
+	}, 30*time.Second, 2*time.Second, "Expected AvailableReplicas to stabilize at 3")
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing before scale down")
 	scaleDownMS := initialMS.DeepCopy()
 	scaleDownMS.Spec.Replicas = ptr.To(int32(3))
 
-	t.Log("Scaling down ModelServing from 4 to 3 servingGroups (expect disrupted group to be removed first)")
+	t.Log("Scaling down ModelServing from 4 to 3 servingGroups (expect unready group to be removed first)")
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
 	require.NoError(t, err, "Failed to scale down ModelServing")
 
@@ -2323,13 +2478,13 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 	})
 	require.NoError(t, err, "Failed to list pods after scale down")
 
+	unhealthyCount := 0
 	for _, pod := range finalPods.Items {
-		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-			continue
+		if pod.Labels[workload.GroupNameLabelKey] == unhealthyGroup {
+			unhealthyCount++
 		}
-		assert.NotEqual(t, unhealthyGroup, pod.Labels[workload.GroupNameLabelKey],
-			"Running pods should not belong to the disrupted serving group after status-aware scale down")
 	}
+	require.Equal(t, 0, unhealthyCount, "Expected 0 pods in the unready serving group after status-aware scale down")
 	t.Log("Status-aware priority scale down ServingGroup test passed successfully")
 }
 
@@ -2341,8 +2496,16 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 	const initialRoleReplicas = int32(4)
 
 	modelServing := createBasicModelServing("test-status-role-priority", 1, initialRoleReplicas)
-	t.Log("Creating ModelServing with role replicas=4 for status-aware role scale down test")
-	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	// Inject a readiness gate to control pod readiness deterministically via K8s API
+	gateType := corev1.PodConditionType("kthena.e2e/test-ready")
+	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.ReadinessGates = []corev1.PodReadinessGate{
+		{ConditionType: gateType},
+	}
+
+	t.Log("Creating ModelServing with role replicas=4 (pods will start NotReady due to ReadinessGate)")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
 
 	labelSelector := modelServingLabelSelector(modelServing.Name)
@@ -2350,24 +2513,55 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 		LabelSelector: labelSelector,
 	})
 	require.NoError(t, err, "Failed to list pods")
-	require.NotEmpty(t, podList.Items, "Expected pods before simulating disruption")
+	require.Len(t, podList.Items, 4, "Expected exactly 4 pods")
+
+	t.Log("Patching 3 out of 4 pods to satisfy the ReadinessGate so they become Ready")
+	patchTrue := []byte(fmt.Sprintf(`{"status":{"conditions":[{"type":"%s","status":"True"}]}}`, gateType))
 
 	targetPod := podList.Items[0]
 	unhealthyRoleID := targetPod.Labels[workload.RoleIDKey]
 	require.NotEmpty(t, unhealthyRoleID, "Pod should have role id label")
+	t.Logf("Leaving pod %s (role id %s) NotReady to permanently disrupt that role replica", targetPod.Name, unhealthyRoleID)
 
-	t.Logf("Deleting pod %s (role id %s) to leave that role replica not ready", targetPod.Name, unhealthyRoleID)
-	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, targetPod.Name, metav1.DeleteOptions{})
-	require.NoError(t, err, "Failed to delete pod")
+	for i := 1; i < len(podList.Items); i++ {
+		pod := podList.Items[i]
+		patchCtx, cancel := context.WithTimeout(ctx, utils.DefaultAPICallTimeout)
+		_, err := kubeClient.CoreV1().Pods(testNamespace).Patch(patchCtx, pod.Name, types.StrategicMergePatchType, patchTrue, metav1.PatchOptions{}, "status")
+		cancel()
+		require.NoError(t, err, "Failed to patch readiness gate for pod %s", pod.Name)
+	}
+
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing for event watch")
+
+	t.Log("Waiting for controller to observe the patched Ready pods")
+	// AvailableReplicas stays 0 while one role is NotReady, so it cannot signal that the
+	// controller processed the patches. Wait for RoleRunning events instead.
+	require.Eventually(t, func() bool {
+		eventList, listErr := kubeClient.CoreV1().Events(testNamespace).List(ctx, metav1.ListOptions{})
+		if listErr != nil {
+			return false
+		}
+		runningRoleEvents := 0
+		for _, ev := range eventList.Items {
+			if ev.InvolvedObject.Kind != "ModelServing" || ev.InvolvedObject.UID != ms.UID {
+				continue
+			}
+			if ev.Reason == "RoleRunning" {
+				runningRoleEvents++
+			}
+		}
+		return runningRoleEvents >= 3
+	}, 30*time.Second, 2*time.Second, "Expected 3 roles to transition to Running state")
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing before scale down")
 	scaleDownMS := initialMS.DeepCopy()
 	scaleDownMS.Spec.Template.Roles[0].Replicas = ptr.To(int32(3))
 
-	t.Log("Scaling down role from 4 to 3 replicas (expect disrupted replica to be removed first)")
+	t.Log("Scaling down role from 4 to 3 replicas (expect unready role to be removed first)")
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
-	require.NoError(t, err, "Failed to scale down role")
+	require.NoError(t, err, "Failed to scale down ModelServing")
 
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 3, 3*time.Minute)
@@ -2377,12 +2571,12 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 	})
 	require.NoError(t, err, "Failed to list pods after scale down")
 
+	unhealthyCount := 0
 	for _, pod := range finalPods.Items {
-		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-			continue
+		if pod.Labels[workload.RoleIDKey] == unhealthyRoleID {
+			unhealthyCount++
 		}
-		assert.NotEqual(t, unhealthyRoleID, pod.Labels[workload.RoleIDKey],
-			"Running pods should not keep the disrupted role id after status-aware scale down")
 	}
+	require.Equal(t, 0, unhealthyCount, "Expected 0 pods in the unready role after status-aware scale down")
 	t.Log("Status-aware priority scale down Role test passed successfully")
 }

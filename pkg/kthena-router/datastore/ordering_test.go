@@ -59,14 +59,14 @@ func createTestModelServer(namespace, name string, engine aiv1alpha1.InferenceEn
 
 func newStoreWithMockBackend() *store {
 	return New(WithPodRuntimeInspector(&fakePodRuntimeInspector{
-		metricsFn: func(_ string, _ *corev1.Pod, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+		metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 			return map[string]float64{
 				utils.KVCacheUsage:      0.5,
 				utils.RequestWaitingNum: 10,
 				utils.RequestRunningNum: 5,
 			}, nil
 		},
-		modelsFn: func(_ string, _ *corev1.Pod) ([]string, error) {
+		modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
 			return []string{"test-model"}, nil
 		},
 	})).(*store)

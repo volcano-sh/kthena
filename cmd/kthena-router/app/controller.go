@@ -116,14 +116,17 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		)
 
 		if enableGatewayAPIInferenceExtension {
-			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, store)
+			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
 			dynamicClient, err := dynamic.NewForConfig(cfg)
 			if err != nil {
 				klog.Fatalf("Error building dynamic client: %s", err.Error())
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
 			inferencePoolController = controller.NewInferencePoolController(dynamicInformerFactory, store)
-			cacheSyncs = append(cacheSyncs, dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced)
+			cacheSyncs = append(cacheSyncs,
+				kubeInformerFactory.Core().V1().Namespaces().Informer().HasSynced,
+				dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced,
+			)
 			dynamicInformerFactory.Start(stop)
 		}
 		gatewayInformerFactory.Start(stop)
@@ -258,6 +261,8 @@ func ensureDefaultGateway(gatewayClient gatewayclientset.Interface, defaultPort 
 		return fmt.Errorf("failed to check Gateway %s/%s: %w", namespace, name, err)
 	}
 
+	namespacesFromAll := gatewayv1.NamespacesFromAll
+
 	// Create the default Gateway
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -271,6 +276,9 @@ func ensureDefaultGateway(gatewayClient gatewayclientset.Interface, defaultPort 
 					Name:     gatewayv1.SectionName("default"),
 					Port:     gatewayv1.PortNumber(port),
 					Protocol: gatewayv1.HTTPProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{From: &namespacesFromAll},
+					},
 					// Hostname is nil, meaning match all hostnames
 				},
 			},

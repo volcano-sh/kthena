@@ -79,7 +79,6 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 
 	allErrs = append(allErrs, validateBackendReplicaBounds(model)...)
 	allErrs = append(allErrs, validateWorkerImages(model)...)
-	allErrs = append(allErrs, validateAutoScalingPolicyScope(model)...)
 	allErrs = append(allErrs, validateBackendWorkerTypes(model)...)
 
 	if len(allErrs) > 0 {
@@ -155,19 +154,11 @@ func validateBackendReplicaBounds(model *registryv1alpha1.ModelBooster) field.Er
 	path := field.NewPath("spec").Child("backend")
 	const maxTotalReplicas = 1000000
 	backend := model.Spec.Backend
-	if backend.MinReplicas > backend.MaxReplicas {
+	if backend.Replicas > maxTotalReplicas {
 		allErrs = append(allErrs, field.Invalid(
-			path.Child("minReplicas"),
-			backend.MinReplicas,
-			"minReplicas cannot be greater than maxReplicas",
-		))
-	}
-
-	if backend.MaxReplicas > maxTotalReplicas {
-		allErrs = append(allErrs, field.Invalid(
-			path,
-			backend.MaxReplicas,
-			fmt.Sprintf("sum of maxReplicas across all backends (%d) cannot exceed %d", backend.MaxReplicas, maxTotalReplicas),
+			path.Child("replicas"),
+			backend.Replicas,
+			fmt.Sprintf("replicas (%d) cannot exceed %d", backend.Replicas, maxTotalReplicas),
 		))
 	}
 	return allErrs
@@ -212,32 +203,4 @@ func validateImageField(image string) error {
 	}
 
 	return nil
-}
-
-// validateAutoScalingPolicyScope validates the autoscaling field usage rules for ModelBooster.
-func validateAutoScalingPolicyScope(model *registryv1alpha1.ModelBooster) field.ErrorList {
-	spec := model.Spec
-	var allErrs field.ErrorList
-
-	modelAutoScalingEmpty := spec.AutoscalingPolicy == nil
-	backend := spec.Backend
-
-	if modelAutoScalingEmpty {
-		if backend.MinReplicas != backend.MaxReplicas {
-			allErrs = append(allErrs, field.Invalid(
-				field.NewPath("spec").Child("backend"),
-				fmt.Sprintf("minReplicas=%d, maxReplicas=%d", backend.MinReplicas, backend.MaxReplicas),
-				"minReplicas and maxReplicas must be equal and > 0 when no autoscaling is set",
-			))
-		}
-	} else {
-		if backend.MinReplicas < 0 {
-			allErrs = append(allErrs, field.Invalid(
-				field.NewPath("spec").Child("backend").Child("minReplicas"),
-				backend.MinReplicas,
-				"minReplicas must be >= 0 when model-level autoscaling is set",
-			))
-		}
-	}
-	return allErrs
 }

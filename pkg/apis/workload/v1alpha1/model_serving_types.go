@@ -136,12 +136,13 @@ type RolloutStrategy struct {
 	// Type defines the rollout strategy. Supported values are
 	// "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
 	// it defaults to "ServingGroupRollingUpdate".
+	// For `RoleRollingUpdate`, the `maxUnavailable` field in each Role will be used to determine the maximum number of role instances that can be unavailable during the update.
 	//
 	// +kubebuilder:default=ServingGroupRollingUpdate
 	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}
 	Type RolloutStrategyType `json:"type"`
 
-	// RollingUpdateConfiguration defines the parameters to be used when type is RollingUpdateStrategyType.
+	// RollingUpdateConfiguration defines the parameters to be used when type is ServingGroupRollingUpdate.
 	// optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
 }
@@ -159,7 +160,7 @@ const (
 	RoleRollingUpdate RolloutStrategyType = "RoleRollingUpdate"
 )
 
-// RollingUpdateConfiguration defines the parameters to be used for RollingUpdateStrategyType.
+// RollingUpdateConfiguration defines the parameters to be used for ServingGroupRollingUpdate.
 type RollingUpdateConfiguration struct {
 	// The maximum number of replicas that can be unavailable during the update.
 	// Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).

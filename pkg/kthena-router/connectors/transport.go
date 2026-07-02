@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -70,10 +71,18 @@ func decoderProxy(c *gin.Context, req *http.Request) (int, error) {
 
 	if stream {
 		// Handle streaming response
-		return handleStreamingResponse(c, resp)
+		outputTokens, err := handleStreamingResponse(c, resp)
+		if err != nil {
+			return outputTokens, fmt.Errorf("streaming decode interrupted: %w", err)
+		}
+		return outputTokens, nil
 	} else {
 		// Handle non-streaming response
-		return handleNonStreamingResponse(c, resp)
+		outputTokens, err := handleNonStreamingResponse(c, resp)
+		if err != nil {
+			return 0, fmt.Errorf("non-streaming decode interrupted: %w", err)
+		}
+		return outputTokens, nil
 	}
 }
 
@@ -166,16 +175,22 @@ func isTokenUsageEnabled(modelRequest map[string]interface{}) bool {
 	return false
 }
 
-// isStreamingResponse checks if the response is a streaming response
+// isStreamingResponse checks if the response is a streaming response.
+// It uses mime.ParseMediaType so that parameters such as charset are ignored,
+// e.g. "text/event-stream; charset=utf-8" is correctly recognised as streaming.
 func isStreamingResponse(resp *http.Response) bool {
-	contentType := resp.Header.Get("Content-Type")
-	return contentType == "text/event-stream" || contentType == "application/x-ndjson"
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	return mediaType == "text/event-stream" || mediaType == "application/x-ndjson"
 }
 
 // handleStreamingResponse handles streaming responses
 func handleStreamingResponse(c *gin.Context, resp *http.Response) (int, error) {
 	totalOutputTokens := 0
 	reader := bufio.NewReader(resp.Body)
+	var streamErr error
 	c.Stream(func(w io.Writer) bool {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -196,12 +211,13 @@ func handleStreamingResponse(c *gin.Context, resp *http.Response) (int, error) {
 		if err != nil {
 			if err != io.EOF {
 				klog.Errorf("error reading stream body: %v", err)
+				streamErr = err
 			}
 			return false
 		}
 		return true
 	})
-	return totalOutputTokens, nil
+	return totalOutputTokens, streamErr
 }
 
 // handleNonStreamingResponse handles non-streaming responses
@@ -216,7 +232,12 @@ func handleNonStreamingResponse(c *gin.Context, resp *http.Response) (int, error
 	}
 
 	// Parse usage if present
-	parsed, _ := handlers.ParseOpenAIResponseBody(buf.Bytes())
+	parsed, err := handlers.ParseOpenAIResponseBody(buf.Bytes())
+	if err != nil {
+		klog.V(4).Infof("failed to parse non-streaming response usage: %v", err)
+		return 0, nil
+	}
+
 	if parsed != nil && parsed.Usage.CompletionTokens > 0 {
 		klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 		return parsed.Usage.CompletionTokens, nil

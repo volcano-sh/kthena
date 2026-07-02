@@ -51,7 +51,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues (prefill request)
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
+		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -147,7 +147,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
+		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -241,7 +241,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
+		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -285,7 +285,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
+		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -342,7 +342,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001")
+		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -418,9 +418,9 @@ func TestNIXLConnectorRetryBodyNotDrained(t *testing.T) {
 	decodeAddr := "127.0.0.1:1" // nothing listening here; decode will fail
 
 	// First call — simulates retry iteration 0
-	connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr)
+	connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr, nil)
 	// Second call — simulates retry iteration 1 on the same connector instance
-	connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr)
+	connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr, nil)
 
 	if bodyLengths[0] == 0 {
 		t.Error("first Proxy call sent empty body to prefill backend")
@@ -454,7 +454,7 @@ func TestNIXLConnectorReqBodyNotMutated(t *testing.T) {
 		keysBefore[k] = struct{}{}
 	}
 
-	connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2")
+	connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", nil)
 
 	for k := range reqBody {
 		if _, existed := keysBefore[k]; !existed {

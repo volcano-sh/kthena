@@ -25,7 +25,9 @@ type KVConnector interface {
 	// Name returns the connector type name
 	Name() string
 
-	// Proxy executes the complete prefill-decode flow with KV cache coordination
-	// Returns the number of output tokens consumed, or error if the operation fails
-	Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string) (int, error)
+	// Proxy executes the complete prefill-decode flow with KV cache coordination.
+	// hooks carries optional on-flight counter callbacks for the prefill and decode
+	// pods; pass nil when not needed.
+	// Returns the number of output tokens consumed, or error if the operation fails.
+	Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error)
 }

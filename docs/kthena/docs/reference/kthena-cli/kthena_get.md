@@ -32,7 +32,6 @@ Examples:
 
 * [kthena](kthena.md)	 - Kthena CLI for managing AI inference workloads
 * [kthena get autoscaling-policies](kthena_get_autoscaling-policies.md)	 - List autoscaling policies
-* [kthena get autoscaling-policy-bindings](kthena_get_autoscaling-policy-bindings.md)	 - List autoscaling policy bindings
 * [kthena get model-boosters](kthena_get_model-boosters.md)	 - List registered models
 * [kthena get model-routes](kthena_get_model-routes.md)	 - List model routes
 * [kthena get model-servers](kthena_get_model-servers.md)	 - List model servers

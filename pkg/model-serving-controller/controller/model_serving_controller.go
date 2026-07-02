@@ -545,26 +545,29 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
-	// only fields in roles can be modified in rolling updates.
-	// and only modifying the role.replicas field will not affect the revision.
-	copy := utils.RemoveRoleReplicasForRevision(ms)
-	revision := utils.Revision(copy.Spec.Template.Roles)
-	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
-		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
+	revision := utils.ModelServingRevision(ms)
+
+	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
+	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
+		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
 	}
 
-	if err := c.manageRole(ctx, ms, revision); err != nil {
-		return fmt.Errorf("cannot manage role replicas: %v", err)
+	// 2. Sync the roles and their replicas within each ServingGroup, handling partitioned scaling and revisions.
+	if err := c.syncRoleReplicas(ctx, ms, revision); err != nil {
+		return fmt.Errorf("failed to sync role replicas: %v", err)
 	}
 
-	if err := c.manageServingGroupRollingUpdate(ctx, ms, revision); err != nil {
-		return fmt.Errorf("cannot manage ServingGroup rollingUpdate: %v", err)
+	// 3. Handle the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
+	if err := c.manageRollingUpdate(ctx, ms, revision); err != nil {
+		return fmt.Errorf("failed to handle rollingUpdate: %v", err)
 	}
 
-	if err := c.manageHeadlessService(ctx, ms); err != nil {
-		return fmt.Errorf("cannot manage ModelServing: %v", err)
+	// 4. Create and update Headless Services for internal networking between entry and worker pods.
+	if err := c.syncHeadlessServices(ctx, ms); err != nil {
+		return fmt.Errorf("failed to sync headless services: %v", err)
 	}
 
+	// 5. Calculate and update the overall condition and replica status fields of the ModelServing.
 	if err := c.UpdateModelServingStatus(ms, revision); err != nil {
 		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
 	}
@@ -624,7 +627,14 @@ func (c *ModelServingController) syncAll() {
 	c.initialSync = true
 }
 
-func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
+// syncServingGroupReplicas scales up or down whole ServingGroups to meet the top-level
+// `Spec.Replicas` count of the ModelServing resource.
+// Main processing steps:
+// 1. Retrieve the list of active ServingGroups for the current ModelServing from the data store.
+// 2. Compare the current count of ServingGroups with the expected replicas.
+// 3. If scaling up: sequentially initialize needed group states, create PodGroups, and scale up groups.
+// 4. If scaling down: sort the groups by priority/deletion-cost and delete the excess groups.
+func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get servingGroup of modelServing: %s from map: %v", ms.GetName(), err)
@@ -637,8 +647,10 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 		klog.V(2).Infof("manageServingGroupReplicas: scaling up modelServing=%s (%d -> %d)", utils.GetNamespaceName(ms), curReplicas, expectedCount)
 		// update pod groups if needed
 		for _, servingGroup := range servingGroupList {
-			if err := c.createOrUpdatePodGroupByServingGroup(ctx, ms, servingGroup.Name); err != nil {
-				return fmt.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
+			if servingGroup.Status != datastore.ServingGroupDeleting {
+				if err := c.createOrUpdatePodGroupByServingGroup(ctx, ms, servingGroup.Name); err != nil {
+					return fmt.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
+				}
 			}
 		}
 		if err := c.scaleUpServingGroups(ctx, ms, servingGroupList, expectedCount, newRevision); err != nil {
@@ -794,7 +806,16 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	return nil
 }
 
-func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
+// syncRoleReplicas coordinates role replicas within each active ServingGroup,
+// deciding to use either the older revision if bound by the partition rules, or adopting
+// the new revision otherwise. It traverses every Role to align actual pods to expected status.
+//
+// Main processing steps:
+// 1. Iterate over all existing ServingGroups and skip those already marked as "Deleting".
+// 2. Identify if the current ServingGroup falls under the rollout Partition protection.
+// 3. Fallback to an older revision (ControllerRevision) if the group is protected by the partition.
+// 4. Update memory caches and use `manageRoleReplicas` to add/remove out-of-sync Pods and Services for each role.
+func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
@@ -834,7 +855,7 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 		}
 
 		for _, targetRole := range rolesToManage {
-			c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse)
+			c.manageRoleReplicasPerGroup(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse)
 		}
 	}
 	return nil
@@ -848,8 +869,17 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 	var roleScores []RoleWithScore
 
 	for _, role := range roleList {
+		if role.Status == datastore.RoleDeleting {
+			// Skip roles that are already being deleted
+			continue
+		}
 		scoreInfo := c.calculateRoleScore(ms, groupName, targetRole.Name, role.Name)
 		roleScores = append(roleScores, scoreInfo)
+	}
+
+	if len(roleScores) <= expectedCount {
+		klog.V(4).Infof("No need to scale down role %s in ServingGroup %s: current count=%d, expected count=%d", targetRole.Name, groupName, len(roleScores), expectedCount)
+		return
 	}
 
 	// Sort by priority tuple: (priority, deletionCost, index)
@@ -930,19 +960,18 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	}
 }
 
-// manageRoleReplicas manages the replicas of a specific role within an Serving group
+// manageRoleReplicasPerGroup manages the replicas of a specific role within an Serving group
 // It handles both scale up and scale down operations for the role
-func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) {
+func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) {
 	// TODO: add podGroup update after gang scheduler finished
 	// Get all replicas of a role from storage, for example, prefill-0, prefill-1...
 	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, targetRole.Name)
 	if err != nil {
-		klog.Errorf("manageRoleReplicas: cannot get role %s in ServingGroup %s, err:%v", targetRole.Name, groupName, err)
+		klog.Errorf("manageRoleReplicasPerGroup: cannot get role %s in ServingGroup %s, err:%v", targetRole.Name, groupName, err)
 		return
 	}
 
-	// TODO: need to check the pod spec match the modelserving spec, if not, recreate the pod
-
+	var roleTemplateHash string
 	expectedCount := int(*targetRole.Replicas)
 	expectedPods := 1 + int(targetRole.WorkerReplicas)
 	for _, roleObj := range roleList {
@@ -952,33 +981,36 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, targetRole.Name, roleObj.Name)
 		pods, err := c.getPodsByIndex(RoleIDKey, roleIDValue)
 		if err != nil {
-			klog.Warningf("manageRoleReplicas: failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+			klog.Warningf("manageRoleReplicasPerGroup: failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			continue
 		}
 		for _, pod := range pods {
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 				// If the pod is not owned by the ModelServing, we do not need to handle it.
-				klog.Warningf("manageRoleReplicas: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
+				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
 					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
 				c.enqueueModelServingAfter(ms, 1*time.Second)
 				break
 			}
 		}
 		if len(pods) < expectedPods {
-			klog.V(2).Infof("manageRoleReplicas: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+			if roleTemplateHash == "" {
+				roleTemplateHash = utils.CalRoleTemplateHash(targetRole)
+			}
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
-			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
-				klog.Errorf("manageRoleReplicas: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision, roleTemplateHash); err != nil {
+				klog.Errorf("manageRoleReplicasPerGroup: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			}
 		}
 	}
 
 	// Determine whether it is a scale-up or scale-down scenario
 	if len(roleList) < expectedCount {
-		klog.V(2).Infof("manageRoleReplicas: scaling UP role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
+		klog.V(2).Infof("manageRoleReplicasPerGroup: scaling UP role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
 		c.scaleUpRoles(ctx, ms, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, newRevision)
 	} else if len(roleList) > expectedCount {
-		klog.V(2).Infof("manageRoleReplicas: scaling DOWN role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
+		klog.V(2).Infof("manageRoleReplicasPerGroup: scaling DOWN role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
 		c.scaleDownRoles(ctx, ms, groupName, targetRole, roleList, expectedCount)
 	}
 }
@@ -1089,12 +1121,16 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	}
 }
 
-func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
-	maxUnavailable, err := utils.GetMaxUnavailable(ms)
-	if err != nil {
-		return fmt.Errorf("failed to calculate maxUnavailable: %v", err)
-	}
-
+// manageRollingUpdate resolves the lifecycle aspect of an update, checking outdated sets,
+// enforcing strict Unavailable quota constraints, and actively evicting ServingGroups
+// or respective Role workloads falling outside the current partition to enforce the rollback/rollforward.
+//
+// Main processing steps:
+//  1. Identify the boundary for the currently active rollout partition.
+//  2. Filter outdated groups (mismatched revision) that are allowed to be updated.
+//  3. For ServingGroupRollingUpdate, enforce the ServingGroup-level maxUnavailable budget.
+//  4. For RoleRollingUpdate, update outdated roles using each Role's maxUnavailable budget.
+func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil {
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
@@ -1124,22 +1160,32 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 		}
 	}
 
-	// Calculate the minimum number of available ServingGroups required
-	// Refer to https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/rolling.go
-	// Check if we can scale down. We can scale down in the following 2 cases:
-	// * Some old servingGroups are unhealthy, we could safely scale down those unhealthy servingGroups
-	//   since that won't further increase unavailability.
-	// * New servingGroup has scaled up and its replicas become ready, then we can scale down old servingGroups
-	//   in a further step.
-	minAvailable := int(*ms.Spec.Replicas) - maxUnavailable
-	maxScaleDown := len(servingGroupList) - minAvailable - newServingGroupUnavailableCount
-	if maxScaleDown <= 0 {
-		klog.V(4).Infof("No ServingGroups can be updated for ModelServing %s/%s: maxScaleDown=%d",
-			ms.Namespace, ms.Name, maxScaleDown)
-		return nil
+	maxScaleDown := 0
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
+		maxUnavailable, err := utils.GetMaxUnavailable(ms)
+		if err != nil {
+			return fmt.Errorf("failed to calculate maxUnavailable: %v", err)
+		}
+
+		// TODO(hzxuzhonghu): reuse calMaxScaleDown
+
+		// Calculate the minimum number of available ServingGroups required
+		// Refer to https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/rolling.go
+		// Check if we can scale down. We can scale down in the following 2 cases:
+		// * Some old servingGroups are unhealthy, we could safely scale down those unhealthy servingGroups
+		//   since that won't further increase unavailability.
+		// * New servingGroup has scaled up and its replicas become ready, then we can scale down old servingGroups
+		//   in a further step.
+		minAvailable := int(*ms.Spec.Replicas) - maxUnavailable
+		maxScaleDown = len(servingGroupList) - minAvailable - newServingGroupUnavailableCount
+		if maxScaleDown <= 0 {
+			klog.V(4).Infof("No ServingGroups can be updated for ModelServing %s/%s: maxScaleDown=%d",
+				ms.Namespace, ms.Name, maxScaleDown)
+			return nil
+		}
 	}
 
-	// Delete outdated groups respecting the maxUnavailable constraint
+	// Delete outdated groups or roles according to the selected rollout strategy.
 	updateCount, err := c.deleteOutdatedResourcesForRollingUpdate(ctx, ms, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups, revision)
 	if err != nil {
 		return err
@@ -1166,26 +1212,26 @@ func (c *ModelServingController) deleteOutdatedResourcesForRollingUpdate(
 	// Therefore, servingGroups in notRunning status should be placed at the end.
 	allOutdatedGroups := append(runningOutdatedGroups, notRunningOutdatedGroups...)
 
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
-		return c.deleteOutdatedServingGroupsForServingGroupRollingUpdate(ctx, ms, maxScaleDown, allOutdatedGroups)
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
+		return c.deleteOutdatedServingGroups(ctx, ms, maxScaleDown, allOutdatedGroups)
 	}
 
-	return c.deleteOutdatedRolesForRoleRollingUpdate(ctx, ms, maxScaleDown, allOutdatedGroups, revision)
+	return c.deleteOutdatedRoles(ctx, ms, allOutdatedGroups, revision)
 }
 
-// deleteOutdatedServingGroupsForServingGroupRollingUpdate deletes outdated ServingGroups
+// deleteOutdatedServingGroups deletes outdated ServingGroups
 // for `ServingGroupRollingUpdate`.
-func (c *ModelServingController) deleteOutdatedServingGroupsForServingGroupRollingUpdate(
+func (c *ModelServingController) deleteOutdatedServingGroups(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
 	maxScaleDown int,
-	allOutdatedGroups []datastore.ServingGroup,
+	groups []datastore.ServingGroup,
 ) (int, error) {
 	updateCount := 0
 
 	// Iterate from end to start to delete largest ordinals first.
-	for i := len(allOutdatedGroups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
-		sg := allOutdatedGroups[i]
+	for i := len(groups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
+		sg := groups[i]
 		klog.V(2).Infof("ServingGroup %s will be terminated for update (status=%s)", sg.Name, sg.Status)
 		if err := c.deleteServingGroup(ctx, ms, sg.Name); err != nil {
 			return updateCount, err
@@ -1196,46 +1242,151 @@ func (c *ModelServingController) deleteOutdatedServingGroupsForServingGroupRolli
 	return updateCount, nil
 }
 
-// deleteOutdatedRolesForRoleRollingUpdate deletes outdated Roles for `RoleRollingUpdate`.
-func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
+// deleteOutdatedRoles deletes outdated Roles for `RoleRollingUpdate`.
+func (c *ModelServingController) deleteOutdatedRoles(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
-	maxScaleDown int,
-	allOutdatedGroups []datastore.ServingGroup,
+	groups []datastore.ServingGroup,
 	revision string,
 ) (int, error) {
 	updateCount := 0
 
-	// Find outdated roles in all serving groups.
-	outdatedRolesMap := c.findOutdatedRolesInServingGroups(ms, allOutdatedGroups, revision)
-
 	// Iterate from end to start to delete largest ordinals first.
-	for i := len(allOutdatedGroups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
-		sg := allOutdatedGroups[i]
-		outdatedRoleNames, exists := outdatedRolesMap[sg.Name]
-		hasDeletedRoles := false
-		if exists && len(outdatedRoleNames) > 0 {
-			for _, roleName := range outdatedRoleNames {
-				outdatedRoles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleName)
-				if err != nil {
-					klog.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleName, err)
-					continue
-				}
-				klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", roleName, sg.Name)
-				for i := range outdatedRoles {
-					c.DeleteRole(ctx, ms, sg.Name, roleName, outdatedRoles[i].Name)
-					hasDeletedRoles = true
-				}
-			}
+	for i := len(groups) - 1; i >= 0; i-- {
+		sg := groups[i]
+		rolesToDelete, hasOutdatedRoles, err := c.rolesToDeleteForRoleRollingUpdate(ms, sg)
+		if err != nil {
+			return updateCount, err
 		}
-
-		// Only increment updateCount if we actually deleted roles.
-		if hasDeletedRoles {
-			updateCount++
+		if !hasOutdatedRoles {
+			c.updateServingGroupRevisionIfNoOutdatedRoles(ms, sg.Name, revision)
+			continue
 		}
+		if len(rolesToDelete) == 0 {
+			continue
+		}
+		for _, role := range rolesToDelete {
+			klog.V(2).Infof("Role %s/%s in ServingGroup %s will be terminated for update", role.roleName, role.roleID, sg.Name)
+			c.DeleteRole(ctx, ms, sg.Name, role.roleName, role.roleID)
+		}
+		updateCount++
 	}
 
 	return updateCount, nil
+}
+
+func (c *ModelServingController) updateServingGroupRevisionIfNoOutdatedRoles(ms *workloadv1alpha1.ModelServing, groupName, revision string) {
+	if err := c.store.UpdateServingGroupRevision(utils.GetNamespaceName(ms), groupName, revision); err != nil {
+		klog.Errorf("failed to update ServingGroup %s revision: %v", groupName, err)
+		return
+	}
+	klog.V(2).Infof("Updated ServingGroup %s revision to latest: %s", groupName, revision)
+}
+
+type roleToDelete struct {
+	roleName string
+	roleID   string
+}
+
+func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv1alpha1.ModelServing, sg datastore.ServingGroup) ([]roleToDelete, bool, error) {
+	roleSpecByName := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		roleSpecByName[role.Name] = role
+	}
+
+	allRoles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), sg.Name)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get roles for ServingGroup %s: %v", sg.Name, err)
+	}
+
+	var rolesToDelete []roleToDelete
+	hasOutdatedRoles := false
+	for _, roleSpec := range ms.Spec.Template.Roles {
+		roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleSpec.Name)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleSpec.Name, err)
+		}
+
+		outdatedRoles, newUnavailable := c.outdatedRoles(ms, sg, roleSpec, roleList)
+		if len(outdatedRoles) == 0 {
+			continue
+		}
+		hasOutdatedRoles = true
+		maxScaleDown, err := calMaxScaleDown(roleSpec, outdatedRoles, len(roleList), newUnavailable)
+		if err != nil {
+			klog.Errorf("failed to calculate maxScaleDown for role %s in ServingGroup %s: %v", roleSpec.Name, sg.Name, err)
+		}
+
+		selectedRoles, err := selectOutdatedRolesToDelete(roleSpec.Name, outdatedRoles, maxScaleDown)
+		if err != nil {
+			return nil, false, err
+		}
+		rolesToDelete = append(rolesToDelete, selectedRoles...)
+	}
+
+	// handle the case when there are roles whose roleSpec has been deleted in the new revision. Those roles should be deleted directly since they are all outdated.
+	for roleName, roles := range allRoles {
+		if _, ok := roleSpecByName[roleName]; ok {
+			continue
+		}
+		for roleID, role := range roles {
+			if role.Status == datastore.RoleDeleting {
+				continue
+			}
+			hasOutdatedRoles = true
+			rolesToDelete = append(rolesToDelete, roleToDelete{roleName: roleName, roleID: roleID})
+		}
+	}
+
+	return rolesToDelete, hasOutdatedRoles, nil
+}
+
+func (c *ModelServingController) outdatedRoles(ms *workloadv1alpha1.ModelServing, sg datastore.ServingGroup, roleSpec workloadv1alpha1.Role, roleList []datastore.Role) ([]datastore.Role, int) {
+	expectedHash := utils.CalRoleTemplateHash(roleSpec)
+	outdatedRoles := make([]datastore.Role, 0, len(roleList))
+	// record the number of roles that is in rollingupdate but not ready yet.
+	newUnavailable := 0
+	for _, role := range roleList {
+		if role.Status == datastore.RoleDeleting {
+			newUnavailable++
+			continue
+		}
+		observedHash, ok := c.resolveRoleTemplateHashForComparison(ms, sg, roleSpec.Name, role)
+		if !ok {
+			klog.Warningf("skip outdated check for role %s/%s in ServingGroup %s because roleTemplateHash is missing and cannot be inferred", roleSpec.Name, role.Name, sg.Name)
+			continue
+		}
+		if observedHash != expectedHash {
+			outdatedRoles = append(outdatedRoles, role)
+		} else if role.Status != datastore.RoleRunning {
+			newUnavailable++
+		}
+	}
+
+	slices.SortFunc(outdatedRoles, func(a, b datastore.Role) int {
+		if a.Status != b.Status {
+			if a.Status != datastore.RoleRunning {
+				return -1
+			}
+			return 1
+		}
+		_, aOrdinal := utils.GetParentNameAndOrdinal(a.Name)
+		_, bOrdinal := utils.GetParentNameAndOrdinal(b.Name)
+		return cmp.Compare(bOrdinal, aOrdinal)
+	})
+	return outdatedRoles, newUnavailable
+}
+
+func selectOutdatedRolesToDelete(roleName string, outdatedRoles []datastore.Role, maxScaleDown int) ([]roleToDelete, error) {
+	rolesToDelete := make([]roleToDelete, 0, len(outdatedRoles))
+	for _, role := range outdatedRoles {
+		if maxScaleDown == 0 {
+			break
+		}
+		maxScaleDown--
+		rolesToDelete = append(rolesToDelete, roleToDelete{roleName: roleName, roleID: role.Name})
+	}
+	return rolesToDelete, nil
 }
 
 func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, newPod *corev1.Pod) error {
@@ -1304,14 +1455,13 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
 	// pod is already in the grace period and does not need to be processed for the time being.
-	_, exists := c.graceMap.Load(utils.GetNamespaceName(errPod))
+	key := utils.GetNamespaceName(errPod)
 	now := time.Now()
-	if exists {
-		klog.V(4).Infof("Pod %v failed, waiting for grace time", utils.GetNamespaceName(errPod))
+	_, loaded := c.graceMap.LoadOrStore(key, now)
+	if loaded {
+		klog.V(4).Infof("Pod %v already in grace period", key)
 		return nil
 	}
-	// add pod to the grace period map
-	c.graceMap.Store(utils.GetNamespaceName(errPod), now)
 	c.store.DeleteRunningPodFromServingGroup(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
@@ -2016,7 +2166,15 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 	return nil
 }
 
-func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+// syncHeadlessServices manages headless services bridging communication across components
+// like assigning specific intra-domain entries targeting each underlying WorkerTemplate in Role instances.
+//
+// Main processing steps:
+// 1. Iterate over every active ServingGroup in the data store.
+// 2. Iterate over the internal Roles for those groups.
+// 3. For any role carrying a `workerTemplate`, check the index for existing `Services`.
+// 4. In case the service is missing or deleted, construct and create the Headless Service
+func (c *ModelServingController) syncHeadlessServices(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
 	servingGroups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get servingGroups: %v", err)
@@ -2102,7 +2260,7 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 	return nil
 }
 
-func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, roleIndex int, servingGroupOrdinal int, revision string, roleTemplateHashOptional ...string) error {
+func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, roleIndex int, servingGroupOrdinal int, revision string, roleTemplateHash string) error {
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupOrdinal)
 	// TODO(hzxuzhonghu): build the plugin chain only once per ModelServing
 	// This is not critical now, so we leave it for future optimization.
@@ -2111,15 +2269,6 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		return fmt.Errorf("build plugin chain: %w", err)
 	}
 	roleID := utils.GenerateRoleID(role.Name, roleIndex)
-	roleTemplateHash := ""
-
-	// If roleTemplateHash is provided, use it directly; otherwise calculate it from the role spec
-	if len(roleTemplateHashOptional) > 0 && roleTemplateHashOptional[0] != "" {
-		roleTemplateHash = roleTemplateHashOptional[0]
-	} else {
-		roleTemplateHash = utils.CalRoleTemplateHash(role)
-	}
-
 	entryPod := utils.GenerateEntryPod(role, ms, servingGroupName, roleIndex, revision, roleTemplateHash)
 	taskName := c.podGroupManager.GenerateTaskName(role.Name, roleIndex)
 	c.podGroupManager.AnnotatePodWithPodGroup(entryPod, ms, servingGroupName, taskName)
@@ -2471,4 +2620,27 @@ func (c *ModelServingController) handleModelServingDatastoreCacheDump(w http.Res
 // RegisterModelServingDebugEndpoints registers debug endpoints for the ModelServingController
 func (c *ModelServingController) RegisterModelServingDebugEndpoints(mux *http.ServeMux) {
 	mux.HandleFunc("/debug/modelserving/cache", c.handleModelServingDatastoreCacheDump)
+}
+
+func calMaxScaleDown(role workloadv1alpha1.Role, outdatedRoles []datastore.Role, allReplicas, newUnavailable int) (int, error) {
+	maxUnavailable, configured, err := utils.GetMaxUnavailableForRole(role)
+	if err != nil {
+		return 0, fmt.Errorf("failed to calculate maxUnavailable for role %s: %v", role.Name, err)
+	}
+	if !configured {
+		return len(outdatedRoles), nil
+	}
+	expectedReplicas := 1
+	if role.Replicas != nil {
+		expectedReplicas = int(*role.Replicas)
+	}
+	minAvailable := expectedReplicas - maxUnavailable
+	if minAvailable < 0 {
+		minAvailable = 0
+	}
+	maxScaleDown := allReplicas - minAvailable - newUnavailable
+	if maxScaleDown < 0 {
+		maxScaleDown = 0
+	}
+	return maxScaleDown, nil
 }

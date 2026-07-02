@@ -4,6 +4,8 @@ Kthena Router fairness scheduling prevents a single user from dominating a model
 
 This guide explains how fairness scheduling works, how to enable it, which configuration knobs are available, and how to verify that it is behaving as expected.
 
+Fairness scheduling and [Session Boost](./session-boost) are **mutually exclusive** scheduling strategies. Enable user fairness with `ENABLE_FAIRNESS_SCHEDULING=true`, or session boost with `ENABLE_SESSION_BOOST=true`, but not both. Enabling both is a configuration error.
+
 ## Overview
 
 When fairness scheduling is enabled, the router does the following for each request:
@@ -48,10 +50,10 @@ In practice this means:
 
 ## Queue Behavior
 
-Kthena currently supports two dequeue modes:
+The priority queue currently supports two dequeue modes:
 
 - **QPS mode**: when `FAIRNESS_MAX_CONCURRENT=0`, the queue releases requests at a fixed maximum dequeue rate controlled by `FAIRNESS_MAX_QPS`.
-- **Concurrency-gated mode**: when `FAIRNESS_MAX_CONCURRENT>0`, the queue allows only that many in-flight requests through the fairness gate for a model at a time.
+- **Concurrency-gated mode**: when `FAIRNESS_MAX_CONCURRENT>0`, the queue allows only that many in-flight requests through the gate for a model at a time.
 
 The queue also supports the following runtime protections:
 
@@ -119,29 +121,29 @@ env:
 
 ### Core Settings
 
-| Environment Variable | Purpose | Default | Notes |
-| --- | --- | --- | --- |
-| `ENABLE_FAIRNESS_SCHEDULING` | Enables fairness scheduling in the router | `false` | Global feature switch |
-| `FAIRNESS_WINDOW_SIZE` | Sliding window used to track recent usage | runtime default `5m` | The Helm chart default sets this to `1h` when fairness is enabled |
-| `FAIRNESS_INPUT_TOKEN_WEIGHT` | Weight applied to input tokens when recording usage | `1.0` | Used by the token tracker |
-| `FAIRNESS_OUTPUT_TOKEN_WEIGHT` | Weight applied to output tokens when recording usage | `2.0` | Used by the token tracker |
-| `FAIRNESS_QUEUE_TIMEOUT` | Maximum time a request may wait in the fairness queue | `60s` | Waiting longer returns a timeout to the client |
+| Environment Variable           | Purpose                                               | Default              | Notes                                                                 |
+| ------------------------------ | ----------------------------------------------------- | -------------------- | --------------------------------------------------------------------- |
+| `ENABLE_FAIRNESS_SCHEDULING`   | Enables fairness scheduling in the router             | `false`              | Global feature switch. Mutually exclusive with `ENABLE_SESSION_BOOST` |
+| `FAIRNESS_WINDOW_SIZE`         | Sliding window used to track recent usage             | runtime default `5m` | The Helm chart default sets this to `1h` when fairness is enabled     |
+| `FAIRNESS_INPUT_TOKEN_WEIGHT`  | Weight applied to input tokens when recording usage   | `1.0`                | Used by the token tracker                                             |
+| `FAIRNESS_OUTPUT_TOKEN_WEIGHT` | Weight applied to output tokens when recording usage  | `2.0`                | Used by the token tracker                                             |
+| `FAIRNESS_QUEUE_TIMEOUT`       | Maximum time a request may wait in the fairness queue | `60s`                | Waiting longer returns a timeout to the client                        |
 
 ### Queue Policy Settings
 
-| Environment Variable | Purpose | Default | Notes |
-| --- | --- | --- | --- |
-| `FAIRNESS_MAX_CONCURRENT` | Maximum in-flight requests admitted per model through the fairness gate | `0` | `0` disables semaphore mode and falls back to QPS mode |
-| `FAIRNESS_MAX_QPS` | Maximum dequeue rate in QPS mode | `100` | Used only when `FAIRNESS_MAX_CONCURRENT=0` |
-| `FAIRNESS_PRIORITY_REFRESH_RETRIES` | Max dequeue-time refresh/reinsert attempts before heap rebuild | `0` | `0` disables dequeue-time refresh |
-| `FAIRNESS_REBUILD_THRESHOLD` | Queue size threshold controlling when heap rebuild is allowed | `64` | Helps bound rebuild cost |
+| Environment Variable                | Purpose                                                                 | Default | Notes                                                  |
+| ----------------------------------- | ----------------------------------------------------------------------- | ------- | ------------------------------------------------------ |
+| `FAIRNESS_MAX_CONCURRENT`           | Maximum in-flight requests admitted per model through the fairness gate | `0`     | `0` disables semaphore mode and falls back to QPS mode |
+| `FAIRNESS_MAX_QPS`                  | Maximum dequeue rate in QPS mode                                        | `100`   | Used only when `FAIRNESS_MAX_CONCURRENT=0`             |
+| `FAIRNESS_PRIORITY_REFRESH_RETRIES` | Max dequeue-time refresh/reinsert attempts before heap rebuild          | `0`     | `0` disables dequeue-time refresh                      |
+| `FAIRNESS_REBUILD_THRESHOLD`        | Queue size threshold controlling when heap rebuild is allowed           | `64`    | Helps bound rebuild cost                               |
 
 ### Priority Score Settings
 
-| Environment Variable | Purpose | Default | Notes |
-| --- | --- | --- | --- |
-| `FAIRNESS_PRIORITY_TOKEN_WEIGHT` | Weight of tracked token usage in the final queue score | `1.0` | Multiplies the tracked weighted token total |
-| `FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT` | Weight of request count in the final queue score | `0.0` | Enables composite token + request-count priority |
+| Environment Variable                   | Purpose                                                | Default | Notes                                            |
+| -------------------------------------- | ------------------------------------------------------ | ------- | ------------------------------------------------ |
+| `FAIRNESS_PRIORITY_TOKEN_WEIGHT`       | Weight of tracked token usage in the final queue score | `1.0`   | Multiplies the tracked weighted token total      |
+| `FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT` | Weight of request count in the final queue score       | `0.0`   | Enables composite token + request-count priority |
 
 ## Choosing Good Settings
 
@@ -234,6 +236,7 @@ Reduce `FAIRNESS_WINDOW_SIZE` for more responsiveness, or enable dequeue-time re
 
 ## Related Guides
 
+- [Session Boost Queue](./session-boost) — the mutually exclusive prefix-cache strategy
 - [Router Routing](./router-routing)
 - [Router Rate Limiting](./rate-limit)
 - [Router Observability](./router-observability)

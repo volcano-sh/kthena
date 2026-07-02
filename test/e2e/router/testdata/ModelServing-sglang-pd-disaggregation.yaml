@@ -1,0 +1,61 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek-r1-1-5b-sglang-pd
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/faust-benchou/sglang-inference-sim:0.1.1
+                imagePullPolicy: IfNotPresent
+                args:
+                  - --model=kthena-mock-1.5b-prefill
+                  - --served-model-name=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+                  - --port=30000
+                  - --mode=echo
+                  - --time-to-first-token=0ms
+                  - --inter-token-latency=0ms
+                  - --disaggregation-mode=prefill
+                ports:
+                  - containerPort: 30000
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 30000
+                  initialDelaySeconds: 2
+                  periodSeconds: 2
+        workerReplicas: 0
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/faust-benchou/sglang-inference-sim:0.1.1
+                imagePullPolicy: IfNotPresent
+                args:
+                  - --model=kthena-mock-1.5b-decode
+                  - --served-model-name=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+                  - --port=30000
+                  - --mode=echo
+                  - --time-to-first-token=0ms
+                  - --inter-token-latency=0ms
+                  - --kv-cache-transfer-latency=1ms
+                  - --disaggregation-mode=decode
+                ports:
+                  - containerPort: 30000
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 30000
+                  initialDelaySeconds: 2
+                  periodSeconds: 2
+        workerReplicas: 0

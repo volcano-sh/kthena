@@ -1,6 +1,6 @@
 module github.com/volcano-sh/kthena
 
-go 1.24.0
+go 1.26.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.35.0

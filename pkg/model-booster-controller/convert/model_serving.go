@@ -167,12 +167,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"VOLUME_MOUNTS": []corev1.VolumeMount{{
@@ -183,7 +178,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 			cacheVolume,
 		},
 		"MODEL_NAME":             model.Name,
-		"BACKEND_REPLICAS":       backend.MinReplicas, // todo: backend replicas
+		"BACKEND_REPLICAS":       backend.Replicas,
 		"INIT_CONTAINERS":        initContainers,
 		"MODEL_DOWNLOAD_ENVFROM": backend.EnvFrom,
 		"ENGINE_PREFILL_COMMAND": preFillCommand,
@@ -207,6 +202,10 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		"ENGINE_PREFILL_IMAGE":               workersMap[workload.ModelWorkerTypePrefill].Image,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
 		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+		"PREFILL_AFFINITY":                   workersMap[workload.ModelWorkerTypePrefill].Affinity,
+		"DECODE_AFFINITY":                    workersMap[workload.ModelWorkerTypeDecode].Affinity,
+		"PREFILL_TOLERATIONS":                workersMap[workload.ModelWorkerTypePrefill].Tolerations,
+		"DECODE_TOLERATIONS":                 workersMap[workload.ModelWorkerTypeDecode].Tolerations,
 	}
 	return loadModelServingTemplate(VllmDisaggregatedTemplatePath, &data)
 }
@@ -279,17 +278,12 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"MODEL_NAME":       model.Name,
 		"BACKEND_NAME":     strings.ToLower(backend.Name),
-		"BACKEND_REPLICAS": backend.MinReplicas, // todo: backend replicas
+		"BACKEND_REPLICAS": backend.Replicas,
 		"BACKEND_TYPE":     strings.ToLower(string(backend.Type)),
 		"ENGINE_ENV":       engineEnv,
 		"WORKER_ENV":       backend.Env,
@@ -332,6 +326,8 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"WORKER_REPLICAS":                    workersMap[workload.ModelWorkerTypeServer].Pods - 1,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
 		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+		"SERVER_AFFINITY":                    workersMap[workload.ModelWorkerTypeServer].Affinity,
+		"SERVER_TOLERATIONS":                 workersMap[workload.ModelWorkerTypeServer].Tolerations,
 	}
 	return loadModelServingTemplate(VllmTemplatePath, &data)
 }

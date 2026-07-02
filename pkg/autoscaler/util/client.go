@@ -46,10 +46,13 @@ func GetModelServingTarget(lister workloadLister.ModelServingLister, namespace s
 	}
 }
 
-func GetMetricPods(lister listerv1.PodLister, namespace string, target *workload.Target) ([]*corev1.Pod, error) {
-	selector, err := GetTargetLabels(target)
+func GetMetricPods(lister listerv1.PodLister, namespace string, target *workload.Target, podSource *workload.PodMetricSource) ([]*corev1.Pod, error) {
+	selector, err := GetTargetLabels(target, podSource)
 	if err != nil {
 		return nil, err
+	}
+	if selector == nil {
+		return nil, nil
 	}
 	if podList, err := lister.Pods(namespace).List(*selector); err != nil {
 		return nil, err
@@ -86,7 +89,7 @@ func GetRoleName(targetRef *corev1.ObjectReference) (string, string, error) {
 	return strs[0], strs[1], nil
 }
 
-func GetTargetLabels(target *workload.Target) (*labels.Selector, error) {
+func GetTargetLabels(target *workload.Target, podSource *workload.PodMetricSource) (*labels.Selector, error) {
 	if target == nil || target.TargetRef.Name == "" {
 		return nil, nil
 	}
@@ -96,17 +99,14 @@ func GetTargetLabels(target *workload.Target) (*labels.Selector, error) {
 
 	selector := metav1.LabelSelector{}
 	if target.TargetRef.Kind == workload.ModelServingKind.Kind {
-		if target.MetricEndpoint.LabelSelector != nil {
-			selector = *target.MetricEndpoint.LabelSelector
+		if podSource != nil && podSource.LabelSelector != nil {
+			selector = *podSource.LabelSelector
 		}
 		if selector.MatchLabels == nil {
 			selector.MatchLabels = map[string]string{}
 		}
 		selector.MatchLabels[workload.ModelServingNameLabelKey] = target.TargetRef.Name
 		selector.MatchLabels[workload.EntryLabelKey] = Entry
-		if target.SubTarget != nil && target.SubTarget.Kind == ModelServingRoleKind {
-			selector.MatchLabels[workload.RoleLabelKey] = target.SubTarget.Name
-		}
 	} else {
 		return nil, fmt.Errorf("unsupported target ref kind: %s", target.TargetRef.Kind)
 	}

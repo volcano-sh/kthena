@@ -166,7 +166,7 @@ func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.Namespa
 	}
 
 	pdGroup := m.modelServer.Spec.WorkloadSelector.PDGroup
-	pdGroupValue, hasPDGroupKey := pod.Pod.Labels[pdGroup.GroupKey]
+	pdGroupValue, hasPDGroupKey := pod.GetPodLabels()[pdGroup.GroupKey]
 	if !hasPDGroupKey {
 		return nil
 	}

@@ -19,7 +19,8 @@ from typing import List, Optional, Dict
 
 from kthena.runtime.events import (
     EventHandler, EventType, EventData, VLLMEventData,
-    VLLMBlockStoredEvent, VLLMBlockRemovedEvent
+    VLLMBlockStoredEvent, VLLMBlockRemovedEvent,
+    SGLangEventData, SGLangBlockStoredEvent, SGLangBlockRemovedEvent,
 )
 from kthena.runtime.redis_client import RedisClient, get_redis_client
 
@@ -32,6 +33,10 @@ def get_matrix_key_prefix() -> str:
 
 def get_vllm_mapping_key_prefix() -> str:
     return "vllm:kv:block"
+
+
+def get_sglang_mapping_key_prefix() -> str:
+    return "sglang:kv:block"
 
 
 def compute_standardized_hash(token_ids: List[int]) -> int:
@@ -47,6 +52,8 @@ def compute_standardized_hash(token_ids: List[int]) -> int:
 
 class VLLMKVCacheRedisManager:
 
+    MAPPING_KEY_PREFIX: str = "vllm:kv:block"
+
     def __init__(self, redis_client: Optional[RedisClient] = None):
         self.redis_client = redis_client or get_redis_client()
         self.hash_mapping: Dict[int, int] = {}
@@ -55,9 +62,9 @@ class VLLMKVCacheRedisManager:
     def _get_matrix_block_key(model_name: str, chunk_hash: int) -> str:
         return f"{get_matrix_key_prefix()}:{model_name}@{chunk_hash}"
 
-    @staticmethod
-    def _get_hash_mapping_key(vllm_hash: int, pod_identifier: str) -> str:
-        return f"{get_vllm_mapping_key_prefix()}:{pod_identifier}@{vllm_hash}"
+    @classmethod
+    def _get_hash_mapping_key(cls, engine_hash: int, pod_identifier: str) -> str:
+        return f"{cls.MAPPING_KEY_PREFIX}:{pod_identifier}@{engine_hash}"
 
     async def add_blocks(self, model_name: str, block_hashes: List[int],
                          pod_identifier: str, token_ids: Optional[List[int]] = None) -> bool:
@@ -89,19 +96,19 @@ class VLLMKVCacheRedisManager:
             logger.error(f"Error adding blocks to Redis: {e}")
             return False
 
-    async def _process_token_blocks_with_mapping(self, model_name: str, vllm_hashes: List[int],
+    async def _process_token_blocks_with_mapping(self, model_name: str, engine_hashes: List[int],
                                                  token_ids: List[int], pod_identifier: str,
                                                  timestamp: str, pipe) -> bool:
-        if not vllm_hashes:
+        if not engine_hashes:
             return False
 
         # Calculate block size: len(token_ids) / len(block_hashes)
-        block_size = len(token_ids) // len(vllm_hashes)
-        if len(token_ids) % len(vllm_hashes) != 0:
-            logger.error(f"Token count ({len(token_ids)}) cannot match block size with {len(vllm_hashes)} hashes")
+        block_size = len(token_ids) // len(engine_hashes)
+        if len(token_ids) % len(engine_hashes) != 0:
+            logger.error(f"Token count ({len(token_ids)}) cannot match block size with {len(engine_hashes)} hashes")
             return False
 
-        for i, vllm_hash in enumerate(vllm_hashes):
+        for i, engine_hash in enumerate(engine_hashes):
             start_idx = i * block_size
             end_idx = min(start_idx + block_size, len(token_ids))
             block_tokens = token_ids[start_idx:end_idx]
@@ -109,8 +116,8 @@ class VLLMKVCacheRedisManager:
                 continue
             std_hash = compute_standardized_hash(block_tokens)
             matrix_block_key = self._get_matrix_block_key(model_name, std_hash)
-            self.hash_mapping[vllm_hash] = std_hash
-            mapping_key = self._get_hash_mapping_key(vllm_hash, pod_identifier)
+            self.hash_mapping[engine_hash] = std_hash
+            mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
             pipe.set(mapping_key, str(std_hash))
             pipe.expire(mapping_key, 86400)
             pipe.hset(matrix_block_key, pod_identifier, timestamp)
@@ -130,17 +137,17 @@ class VLLMKVCacheRedisManager:
 
             removed_count = 0
 
-            for vllm_hash in block_hashes:
-                std_hash = await self._get_std_hash(client, vllm_hash, pod_identifier)
+            for engine_hash in block_hashes:
+                std_hash = await self._get_std_hash(client, engine_hash, pod_identifier)
 
                 if std_hash is not None:
                     matrix_block_key = self._get_matrix_block_key(model_name, std_hash)
-                    mapping_key = self._get_hash_mapping_key(vllm_hash, pod_identifier)
+                    mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
 
                     pipe.hdel(matrix_block_key, pod_identifier)
                     pipe.delete(mapping_key)
 
-                    self.hash_mapping.pop(vllm_hash, None)
+                    self.hash_mapping.pop(engine_hash, None)
                     removed_count += 1
 
             await pipe.execute()
@@ -151,24 +158,24 @@ class VLLMKVCacheRedisManager:
             logger.error(f"Error removing blocks from Redis: {e}")
             return 0
 
-    async def _get_std_hash(self, client, vllm_hash: int, pod_identifier: str = None) -> Optional[int]:
-        std_hash = self.hash_mapping.get(vllm_hash)
+    async def _get_std_hash(self, client, engine_hash: int, pod_identifier: str = None) -> Optional[int]:
+        std_hash = self.hash_mapping.get(engine_hash)
 
         if std_hash is None:
             if pod_identifier:
-                mapping_key = self._get_hash_mapping_key(vllm_hash, pod_identifier)
+                mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
                 std_hash_str = await client.get(mapping_key)
                 if std_hash_str:
                     std_hash = int(std_hash_str)
-                    self.hash_mapping[vllm_hash] = std_hash
+                    self.hash_mapping[engine_hash] = std_hash
             else:
-                pattern = f"{get_vllm_mapping_key_prefix()}:*@{vllm_hash}"
+                pattern = f"{self.MAPPING_KEY_PREFIX}:*@{engine_hash}"
                 keys = await self.redis_client.keys(pattern)
                 if keys:
                     std_hash_str = await client.get(keys[0])
                     if std_hash_str:
                         std_hash = int(std_hash_str)
-                        self.hash_mapping[vllm_hash] = std_hash
+                        self.hash_mapping[engine_hash] = std_hash
 
         return std_hash
 
@@ -208,7 +215,7 @@ class VLLMKVCacheRedisManager:
         try:
             pod_field = pod_identifier
             matrix_pattern = f"{get_matrix_key_prefix()}:{model_name}@*"
-            mapping_pattern = f"{get_vllm_mapping_key_prefix()}:{pod_identifier}@*"
+            mapping_pattern = f"{self.MAPPING_KEY_PREFIX}:{pod_identifier}@*"
 
             matrix_keys = await self.redis_client.keys(matrix_pattern)
             mapping_keys = await self.redis_client.keys(mapping_pattern)
@@ -307,3 +314,73 @@ class VLLMKVCacheEventHandler(EventHandler):
 
 def get_vllm_kv_cache_handler() -> VLLMKVCacheEventHandler:
     return VLLMKVCacheEventHandler()
+
+
+class SGLangKVCacheRedisManager(VLLMKVCacheRedisManager):
+    "KV cache Redis manager for SGLang. Reuses the vLLM logic."
+
+    MAPPING_KEY_PREFIX: str = "sglang:kv:block"
+
+
+class SGLangKVCacheEventHandler(EventHandler):
+
+    def __init__(self, redis_manager: Optional[SGLangKVCacheRedisManager] = None):
+        self.redis_manager = redis_manager or SGLangKVCacheRedisManager()
+
+    async def handle(self, event_data: EventData) -> None:
+        if not event_data:
+            return
+
+        try:
+            if not isinstance(event_data, SGLangEventData):
+                return
+
+            logger.info(
+                f"Handling SGLang event: {event_data.event_type.value} "
+                f"for model={event_data.model_name}, pod={event_data.pod_identifier}")
+
+            if event_data.event_type == EventType.SGLANG_BLOCK_STORED:
+                await self._handle_block_stored(event_data)
+            elif event_data.event_type == EventType.SGLANG_BLOCK_REMOVED:
+                await self._handle_block_removed(event_data)
+            elif event_data.event_type == EventType.SGLANG_ALL_BLOCKS_CLEARED:
+                await self._handle_all_blocks_cleared(event_data)
+
+            logger.info(f"Successfully handled SGLang event: {event_data.event_type.value}")
+
+        except Exception as e:
+            event_type = getattr(event_data, 'event_type', 'unknown')
+            logger.error(f"Error handling SGLang event {event_type}: {e}")
+
+    async def _handle_block_stored(self, event_data: SGLangEventData) -> None:
+        if not isinstance(event_data.sglang_event, SGLangBlockStoredEvent):
+            return
+
+        block_event = event_data.sglang_event
+        await self.redis_manager.add_blocks(
+            model_name=event_data.model_name,
+            block_hashes=block_event.block_hashes,
+            pod_identifier=event_data.pod_identifier,
+            token_ids=block_event.token_ids,
+        )
+
+    async def _handle_block_removed(self, event_data: SGLangEventData) -> None:
+        if not isinstance(event_data.sglang_event, SGLangBlockRemovedEvent):
+            return
+
+        block_event = event_data.sglang_event
+        await self.redis_manager.remove_blocks(
+            model_name=event_data.model_name,
+            block_hashes=block_event.block_hashes,
+            pod_identifier=event_data.pod_identifier,
+        )
+
+    async def _handle_all_blocks_cleared(self, event_data: SGLangEventData) -> None:
+        await self.redis_manager.clear_all_blocks(
+            model_name=event_data.model_name,
+            pod_identifier=event_data.pod_identifier,
+        )
+
+
+def get_sglang_kv_cache_handler() -> SGLangKVCacheEventHandler:
+    return SGLangKVCacheEventHandler()

@@ -32,10 +32,14 @@ from kthena.downloader.app import load_config
 from kthena.downloader.downloader import download_model
 from kthena.runtime.collect import process_metrics
 from kthena.runtime.events import get_event_publisher, EventType
-from kthena.runtime.kv_cache_manager import get_vllm_kv_cache_handler
+from kthena.runtime.kv_cache_manager import (
+    get_vllm_kv_cache_handler,
+    get_sglang_kv_cache_handler,
+)
 from kthena.runtime.redis_client import get_redis_client
 from kthena.runtime.standard import MetricStandard, EngineType
 from kthena.runtime.zmq_subscriber import get_vllm_zmq_subscriber
+from kthena.runtime.sglang_zmq_subscriber import get_sglang_zmq_subscriber
 
 
 class AppState:
@@ -44,6 +48,7 @@ class AppState:
         self.redis_client = None
         self.event_publisher = None
         self.vllm_zmq_subscriber = None
+        self.sglang_zmq_subscriber = None
         self.metric_standard: Optional[MetricStandard] = None
         self.engine_metrics_url: Optional[str] = None
         self.pod_identifier: Optional[str] = None
@@ -53,6 +58,20 @@ class AppState:
 TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
 
 logging.basicConfig(level=logging.INFO)
+
+
+def _log_subscriber_task_exception(name: str):
+    def _callback(task: "asyncio.Task") -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logging.getLogger(__name__).error(
+                "%s background task exited with exception: %s", name, exc, exc_info=exc)
+
+    return _callback
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -93,19 +112,26 @@ async def lifespan(app: FastAPI):
         pod_identifier = state.pod_identifier
         model_name = state.model_name
 
-        if pod_identifier and model_name:
-            vllm_kv_cache_handler = get_vllm_kv_cache_handler()
+        engine = state.metric_standard.engine if state.metric_standard else None
 
-            event_types = [
+        if pod_identifier and model_name and engine == EngineType.VLLM:
+            vllm_kv_cache_handler = get_vllm_kv_cache_handler()
+            for event_type in (
                 EventType.VLLM_BLOCK_STORED,
                 EventType.VLLM_BLOCK_REMOVED,
-                EventType.VLLM_ALL_BLOCKS_CLEARED
-            ]
-
-            for event_type in event_types:
+                EventType.VLLM_ALL_BLOCKS_CLEARED,
+            ):
                 event_publisher.subscribe(event_type, vllm_kv_cache_handler)
-
-            logger.info("Event handlers registered successfully")
+            logger.info("vLLM KV-cache event handler registered")
+        elif pod_identifier and model_name and engine == EngineType.SGLANG:
+            sglang_kv_cache_handler = get_sglang_kv_cache_handler()
+            for event_type in (
+                EventType.SGLANG_BLOCK_STORED,
+                EventType.SGLANG_BLOCK_REMOVED,
+                EventType.SGLANG_ALL_BLOCKS_CLEARED,
+            ):
+                event_publisher.subscribe(event_type, sglang_kv_cache_handler)
+            logger.info("SGLang KV-cache event handler registered")
         else:
             logger.info("Pod identifier or model name not provided, skipping event handler registration")
 
@@ -117,6 +143,7 @@ async def lifespan(app: FastAPI):
         state.event_publisher = None
 
     state.vllm_zmq_subscriber = None
+    state.sglang_zmq_subscriber = None
 
     if (state.metric_standard and
             state.metric_standard.engine == EngineType.VLLM and
@@ -128,11 +155,27 @@ async def lifespan(app: FastAPI):
                 state.pod_identifier,
                 state.model_name
             )
-            asyncio.create_task(vllm_zmq_subscriber.start())
+            vllm_task = asyncio.create_task(vllm_zmq_subscriber.start())
+            vllm_task.add_done_callback(_log_subscriber_task_exception("vLLM ZMQ subscriber"))
             state.vllm_zmq_subscriber = vllm_zmq_subscriber
             logger.info("vLLM ZMQ subscriber initialized successfully")
         except Exception as e:
             logger.warning("Failed to initialize vLLM ZMQ subscriber: %s", e)
+    elif (state.metric_standard and
+          state.metric_standard.engine == EngineType.SGLANG and
+          state.pod_identifier and
+          state.model_name):
+        try:
+            sglang_zmq_subscriber = get_sglang_zmq_subscriber(
+                state.pod_identifier,
+                state.model_name
+            )
+            sglang_task = asyncio.create_task(sglang_zmq_subscriber.start())
+            sglang_task.add_done_callback(_log_subscriber_task_exception("SGLang ZMQ subscriber"))
+            state.sglang_zmq_subscriber = sglang_zmq_subscriber
+            logger.info("SGLang ZMQ subscriber initialized successfully")
+        except Exception as e:
+            logger.warning("Failed to initialize SGLang ZMQ subscriber: %s", e)
 
     yield
 
@@ -140,6 +183,9 @@ async def lifespan(app: FastAPI):
 
     if state.vllm_zmq_subscriber:
         cleanup_tasks.append(('vLLM ZMQ subscriber', state.vllm_zmq_subscriber.stop()))
+
+    if state.sglang_zmq_subscriber:
+        cleanup_tasks.append(('SGLang ZMQ subscriber', state.sglang_zmq_subscriber.stop()))
 
     if state.event_publisher:
         cleanup_tasks.append(('Event system', state.event_publisher.stop()))

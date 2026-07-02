@@ -177,6 +177,10 @@ spec:
                 sizeLimit: 15Gi
 ```
 
+:::tip
+`ENTRY_ADDRESS` is an environment variable that Kthena automatically injects into every worker pod. Its value is set to the headless service address of the corresponding entry pod (e.g., `llama-multinode-0-405b-0-0.default`). You do not need to define it yourself. When multiple Role replicas exist, each worker pod receives the correct entry address for its own replica, so Ray workers always connect to the right head node. See the [Labels and Environment Variables](../architecture/model-serving-controller.mdx#environment-variables) section for the full list of injected variables.
+:::
+
 ### Tensor and Pipeline Parallelism Configuration
 
 The multi‑node example configures tensor parallelism and pipeline parallelism through the command‑line arguments of the inference engine. In the `multi‑node.yaml` manifest, the entry‑point container includes:

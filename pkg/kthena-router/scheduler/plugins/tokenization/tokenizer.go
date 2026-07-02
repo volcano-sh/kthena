@@ -27,7 +27,19 @@ type remoteTokenizerImpl struct {
 }
 
 func NewRemoteTokenizer(config RemoteTokenizerConfig) (Tokenizer, error) {
-	adapter := newVLLMAdapter(config.Model)
+	engine, err := normalizeEngine(config.Engine)
+	if err != nil {
+		return nil, err
+	}
+
+	var adapter engineAdapter
+	switch engine {
+	case EngineSGLang:
+		adapter = newSGLangAdapter(config.Model)
+	case EngineVLLM:
+		adapter = newVLLMAdapter(config.Model)
+	}
+
 	client := newHTTPClient(config.Endpoint)
 	return &remoteTokenizerImpl{
 		config:  config,

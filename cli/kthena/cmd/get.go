@@ -107,15 +107,6 @@ var getAutoscalingPoliciesCmd = &cobra.Command{
 	RunE:    runGetAutoscalingPolicies,
 }
 
-// getAutoscalingPolicyBindingsCmd represents the get autoscaling-policy-bindings command
-var getAutoscalingPolicyBindingsCmd = &cobra.Command{
-	Use:     "autoscaling-policy-bindings",
-	Aliases: []string{"aspb", "autoscaling-policy-binding"},
-	Short:   "List autoscaling policy bindings",
-	Long:    `List AutoscalingPolicyBinding resources in the cluster.`,
-	RunE:    runGetAutoscalingPolicyBindings,
-}
-
 func init() {
 	rootCmd.AddCommand(getCmd)
 	getCmd.AddCommand(getTemplatesCmd)
@@ -123,7 +114,6 @@ func init() {
 	getCmd.AddCommand(getModelBoostersCmd)
 	getCmd.AddCommand(getModelServingsCmd)
 	getCmd.AddCommand(getAutoscalingPoliciesCmd)
-	getCmd.AddCommand(getAutoscalingPolicyBindingsCmd)
 	getCmd.AddCommand(getModelRoutesCmd)
 	getCmd.AddCommand(getModelServersCmd)
 
@@ -432,50 +422,6 @@ func runGetAutoscalingPolicies(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(w, "%s\t%s\t%s\n", policy.Namespace, policy.Name, age)
 		} else {
 			fmt.Fprintf(w, "%s\t%s\n", policy.Name, age)
-		}
-	}
-
-	return w.Flush()
-}
-
-func runGetAutoscalingPolicyBindings(cmd *cobra.Command, args []string) error {
-	client, err := getKthenaClient()
-	if err != nil {
-		return err
-	}
-
-	namespace := resolveGetNamespace()
-	ctx := context.Background()
-
-	bindings, err := client.WorkloadV1alpha1().AutoscalingPolicyBindings(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list AutoscalingPolicyBindings: %v", err)
-	}
-
-	if len(bindings.Items) == 0 {
-		if getAllNamespaces {
-			fmt.Println("No AutoscalingPolicyBindings found across all namespaces.")
-		} else {
-			fmt.Printf("No AutoscalingPolicyBindings found in namespace %s.\n", namespace)
-		}
-		return nil
-	}
-
-	// Print header
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	if getAllNamespaces {
-		fmt.Fprintln(w, "NAMESPACE\tNAME\tAGE")
-	} else {
-		fmt.Fprintln(w, "NAME\tAGE")
-	}
-
-	// Print AutoscalingPolicyBindings
-	for _, binding := range bindings.Items {
-		age := time.Since(binding.CreationTimestamp.Time).Truncate(time.Second)
-		if getAllNamespaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", binding.Namespace, binding.Name, age)
-		} else {
-			fmt.Fprintf(w, "%s\t%s\n", binding.Name, age)
 		}
 	}
 

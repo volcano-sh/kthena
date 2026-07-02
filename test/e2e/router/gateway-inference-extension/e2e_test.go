@@ -383,12 +383,20 @@ func TestGatewayCreatedLaterThanHTTPRoute(t *testing.T) {
 
 	// 3. Create Gateway (triggers HTTPRoute re-enqueue)
 	t.Log("Creating Gateway...")
+	namespacesFromAll := gatewayv1.NamespacesFromAll
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: gatewayName, Namespace: kthenaNamespace},
 		Spec: gatewayv1.GatewaySpec{
 			GatewayClassName: gatewayv1.ObjectName("kthena-router"),
 			Listeners: []gatewayv1.Listener{
-				{Name: gatewayv1.SectionName("http"), Port: gatewayv1.PortNumber(8082), Protocol: gatewayv1.HTTPProtocolType},
+				{
+					Name:     gatewayv1.SectionName("http"),
+					Port:     gatewayv1.PortNumber(8082),
+					Protocol: gatewayv1.HTTPProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{From: &namespacesFromAll},
+					},
+				},
 			},
 		},
 	}

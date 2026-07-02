@@ -11,8 +11,7 @@ spec:
     modelURI: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend
     cacheURI: hostpath:///tmp/test
     runtimeClassName: nvidia
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
       - image: vllm-server:latest
         pods: 1

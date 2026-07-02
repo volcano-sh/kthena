@@ -13,8 +13,7 @@ spec:
     modelURI: s3://aios_models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
     cacheURI: hostpath:///cache
     schedulerName: volcano
-    maxReplicas: 2
-    minReplicas: 1
+    replicas: 1
     env:
       - name: ENDPOINT
         value: "https://obs.test.com"

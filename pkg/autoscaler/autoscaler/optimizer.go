@@ -67,16 +67,16 @@ func (meta *OptimizerMeta) RestoreReplicasOfEachBackend(replicas int32) map[stri
 	return replicasMap
 }
 
-func NewOptimizerMeta(binding *workload.AutoscalingPolicyBinding) *OptimizerMeta {
-	if binding.Spec.HeterogeneousTarget == nil {
-		klog.Warningf("OptimizerConfig not configured in binding: %s", binding.Name)
+func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
+	if policy.Spec.HeterogeneousTarget == nil {
+		klog.Warningf("OptimizerConfig not configured in policy: %s", policy.Name)
 		return nil
 	}
-	costExpansionRatePercent := binding.Spec.HeterogeneousTarget.CostExpansionRatePercent
+	costExpansionRatePercent := policy.Spec.HeterogeneousTarget.CostExpansionRatePercent
 	minReplicas := int32(0)
 	maxReplicas := int32(0)
 	var scalingOrder []*ReplicaBlock
-	for index, param := range binding.Spec.HeterogeneousTarget.Params {
+	for index, param := range policy.Spec.HeterogeneousTarget.Params {
 		minReplicas += param.MinReplicas
 		maxReplicas += param.MaxReplicas
 		replicas := param.MaxReplicas - param.MinReplicas
@@ -112,25 +112,25 @@ func NewOptimizerMeta(binding *workload.AutoscalingPolicyBinding) *OptimizerMeta
 		return scalingOrder[i].index < scalingOrder[j].index
 	})
 	return &OptimizerMeta{
-		Config:       binding.Spec.HeterogeneousTarget,
+		Config:       policy.Spec.HeterogeneousTarget,
 		MinReplicas:  minReplicas,
 		MaxReplicas:  maxReplicas,
 		ScalingOrder: scalingOrder,
 		Scope: Scope{
-			OwnedBindingId: binding.UID,
-			Namespace:      binding.Namespace,
+			OwnedPolicyId: policy.UID,
+			Namespace:     policy.Namespace,
 		},
 	}
 }
 
-func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) *Optimizer {
+func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy) *Optimizer {
 	metricTargets := GetMetricTargets(autoscalePolicy)
 	collectors := make(map[string]*MetricCollector)
-	for _, param := range binding.Spec.HeterogeneousTarget.Params {
-		collectors[param.Target.TargetRef.Name] = NewMetricCollector(&param.Target, binding, metricTargets)
+	for _, param := range autoscalePolicy.Spec.HeterogeneousTarget.Params {
+		collectors[param.Target.TargetRef.Name] = NewMetricCollector(&param.Target, autoscalePolicy, metricTargets)
 	}
 
-	meta := NewOptimizerMeta(binding)
+	meta := NewOptimizerMeta(autoscalePolicy)
 	meta.MetricTargets = metricTargets
 	return &Optimizer{
 		Meta:       meta,
@@ -138,20 +138,19 @@ func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy, binding *workload
 		Status:     NewStatus(&autoscalePolicy.Spec.Behavior),
 		Generations: Generations{
 			AutoscalePolicyGeneration: autoscalePolicy.Generation,
-			BindingGeneration:         binding.Generation,
 		},
 	}
 }
 
-func (optimizer *Optimizer) NeedUpdate(policy *workload.AutoscalingPolicy, binding *workload.AutoscalingPolicyBinding) bool {
-	return optimizer.Generations.AutoscalePolicyGeneration != policy.Generation ||
-		optimizer.Generations.BindingGeneration != binding.Generation
+func (optimizer *Optimizer) NeedUpdate(policy *workload.AutoscalingPolicy) bool {
+	return optimizer.Generations.AutoscalePolicyGeneration != policy.Generation
 }
 
 func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCounts map[string]int32) (map[string]int32, error) {
 	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
+	externalMetrics := make(algorithm.Metrics)
 	instancesCountSum := int32(0)
 	// Update all model serving instances' metrics
 	for _, param := range optimizer.Meta.Config.Params {
@@ -162,13 +161,21 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		}
 
 		instancesCountSum += currentInstancesCounts[param.Target.TargetRef.Name]
-		currentUnreadyInstancesCount, currentReadyInstancesMetrics, err := collector.UpdateMetrics(ctx, podLister)
+		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
 			continue
 		}
 		unreadyInstancesCount += currentUnreadyInstancesCount
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
+		// TODO: External metrics are aggregated with a plain sum across targets.
+		// This is correct for additive metrics (for example queue length), but it
+		// is semantically wrong for ratio metrics such as GPU utilization.
+		// Introduce per-metric aggregation strategy (sum/avg/max/weighted) in a
+		// follow-up change and apply it here instead of unconditional summation.
+		for metricName, metricValue := range currentExternalMetrics {
+			addMetric(externalMetrics, metricName, metricValue)
+		}
 	}
 	// Get recommended replicas of all model serving instances
 	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
@@ -179,7 +186,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		MetricTargets:         optimizer.Meta.MetricTargets,
 		UnreadyInstancesCount: unreadyInstancesCount,
 		ReadyInstancesMetrics: readyInstancesMetrics,
-		ExternalMetrics:       make(algorithm.Metrics),
+		ExternalMetrics:       externalMetrics,
 	}
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {

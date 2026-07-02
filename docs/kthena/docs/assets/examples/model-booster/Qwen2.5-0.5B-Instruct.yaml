@@ -8,8 +8,7 @@ spec:
     type: "vLLM"
     modelURI: "hf://Qwen/Qwen2.5-0.5B-Instruct"
     cacheURI: "hostpath:///tmp/cache"
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     env:
       - name: "HF_ENDPOINT" # Optional: Use a Hugging Face mirror if you have network issues
         value: "https://hf-mirror.com"

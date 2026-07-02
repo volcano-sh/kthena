@@ -35,12 +35,11 @@ func TestValidateModel_ErrorFormatting(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: registryv1alpha1.ModelBoosterSpec{
-			// This will trigger validation errors for autoscaling-related fields
+			// This will trigger validation errors for replica bounds.
 			Backend: registryv1alpha1.ModelBackend{
-				Name:        "backend1",
-				Type:        registryv1alpha1.ModelBackendTypeVLLM,
-				MinReplicas: 1,
-				MaxReplicas: 3,
+				Name:     "backend1",
+				Type:     registryv1alpha1.ModelBackendTypeVLLM,
+				Replicas: 1000001,
 				Workers: []registryv1alpha1.ModelWorker{
 					{
 						Type:  registryv1alpha1.ModelWorkerTypeServer,
@@ -93,10 +92,9 @@ func TestValidateModel_NoErrors(t *testing.T) {
 		},
 		Spec: registryv1alpha1.ModelBoosterSpec{
 			Backend: registryv1alpha1.ModelBackend{
-				Name:        "backend1",
-				Type:        registryv1alpha1.ModelBackendTypeVLLM,
-				MinReplicas: 1,
-				MaxReplicas: 1,
+				Name:     "backend1",
+				Type:     registryv1alpha1.ModelBackendTypeVLLM,
+				Replicas: 1,
 				Workers: []registryv1alpha1.ModelWorker{
 					{
 						Type:  registryv1alpha1.ModelWorkerTypeServer,

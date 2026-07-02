@@ -107,7 +107,7 @@ spec:
                 properties:
                   rollingUpdateConfiguration:
                     description: |-
-                      RollingUpdateConfiguration defines the parameters to be used when type is RollingUpdateStrategyType.
+                      RollingUpdateConfiguration defines the parameters to be used when type is ServingGroupRollingUpdate.
                       optional
                     properties:
                       maxUnavailable:
@@ -141,6 +141,7 @@ spec:
                       Type defines the rollout strategy. Supported values are
                       "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
                       it defaults to "ServingGroupRollingUpdate".
+                      For `RoleRollingUpdate`, the `maxUnavailable` field in each Role will be used to determine the maximum number of role instances that can be unavailable during the update.
                     enum:
                     - ServingGroupRollingUpdate
                     - RoleRollingUpdate
@@ -8877,6 +8878,17 @@ spec:
                               - containers
                               type: object
                           type: object
+                        maxUnavailable:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: |-
+                            MaxUnavailable is the maximum number of replicas of this Role that can be
+                            unavailable during a RoleRollingUpdate. Value can be an absolute number (ex: 2)
+                            or a percentage of this Role's replicas (ex: 50%). Percentages are rounded down.
+                            This field is only valid when rolloutStrategy.type is RoleRollingUpdate.
+                            When unset, all outdated replicas of this Role are recreated at once.
+                          x-kubernetes-int-or-string: true
                         name:
                           description: The name of a role. Name must be unique within
                             an ServingGroup

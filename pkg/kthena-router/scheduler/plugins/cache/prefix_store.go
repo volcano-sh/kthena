@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 )
 
 // hashModelKey represents a composite key combining hash and model name
@@ -151,10 +152,7 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 	// pods in the scheduling candidate pool are returned.
 	candidatePods := sets.New[types.NamespacedName]()
 	for _, pod := range pods {
-		candidatePods.Insert(types.NamespacedName{
-			Namespace: pod.Pod.Namespace,
-			Name:      pod.Pod.Name,
-		})
+		candidatePods.Insert(pod.GetPodNamespacedName())
 	}
 
 	matches := make(map[types.NamespacedName]int, s.topK)
@@ -196,17 +194,17 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 
 // Add adds new hash->pod mappings to cache, using LRU for eviction
 func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.PodInfo) {
-	nsName := types.NamespacedName{
-		Namespace: pod.Pod.Namespace,
-		Name:      pod.Pod.Name,
-	}
+	nsName := pod.GetPodNamespacedName()
 
 	s.podHashesMu.Lock()
 	podLRU, exists := s.podHashes[nsName]
 	if !exists {
 		podLRU, _ = NewLRUCache(s.hashCapacity, func(key hashModelKey, value struct{}) {
-			// onEvict callback need to acquire `modelCache.mu.Lock()` as well, so start a goroutine to run it async.
-			go s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
+			// Only capacity-driven evictions reach this callback; pod deletion removes
+			// entries via onHashEvicted directly, so this is the right place to count them.
+			metrics.DefaultMetrics.RecordPrefixCacheEviction(key.model)
+			// Safe to call synchronously: podLRU.Add() is invoked after shard.mu.Unlock().
+			s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
 		})
 		s.podHashes[nsName] = podLRU
 	}
@@ -235,6 +233,17 @@ func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.Pod
 		shard.mu.Unlock()
 		podLRU.Add(hashModelKey{hash: hash, model: model}, struct{}{})
 	}
+}
+
+// EntryCount sums the number of (block-hash, pod) entries across all per-pod caches; read by the prefix_cache_entries gauge at scrape time.
+func (s *ModelPrefixStore) EntryCount() float64 {
+	s.podHashesMu.RLock()
+	defer s.podHashesMu.RUnlock()
+	total := 0
+	for _, podLRU := range s.podHashes {
+		total += podLRU.Len()
+	}
+	return float64(total)
 }
 
 // onHashEvicted handles the eviction of a hash from a pod's LRU cache

@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-prefill
+  namespace: autoscale-demo
+  labels:
+    app.kubernetes.io/name: podinfo-pd
+    app.kubernetes.io/component: prefill
+spec:
+  type: ClusterIP
+  selector:
+    modelserving.volcano.sh/name: podinfo-pd-ms
+    modelserving.volcano.sh/role: prefill
+  ports:
+    - name: http
+      port: 9898
+      protocol: TCP
+      targetPort: http
+    - name: http-metrics
+      port: 9797
+      protocol: TCP
+      targetPort: http-metrics
+    - name: grpc
+      port: 9999
+      protocol: TCP
+      targetPort: grpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-decode
+  namespace: autoscale-demo
+  labels:
+    app.kubernetes.io/name: podinfo-pd
+    app.kubernetes.io/component: decode
+spec:
+  type: ClusterIP
+  selector:
+    modelserving.volcano.sh/name: podinfo-pd-ms
+    modelserving.volcano.sh/role: decode
+  ports:
+    - name: http
+      port: 9898
+      protocol: TCP
+      targetPort: http
+    - name: http-metrics
+      port: 9797
+      protocol: TCP
+      targetPort: http-metrics
+    - name: grpc
+      port: 9999
+      protocol: TCP
+      targetPort: grpc

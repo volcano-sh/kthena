@@ -1,0 +1,59 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicy
+metadata:
+  name: podinfo-pd-prom-policy
+  namespace: autoscale-demo
+spec:
+  tolerancePercent: 10
+  behavior:
+    scaleDown:
+      period: 15s
+      stabilizationWindow: 30s
+      instances: 1
+      percent: 100
+      selectPolicy: Or
+    scaleUp:
+      stablePolicy:
+        period: 15s
+        stabilizationWindow: 0s
+        instances: 2
+        percent: 100
+        selectPolicy: Or
+      panicPolicy:
+        period: 5s
+        percent: 200
+        panicThresholdPercent: 200
+        panicModeHold: 30s
+  disaggregatedTarget:
+    targetRef:
+      apiVersion: workload.serving.volcano.sh/v1alpha1
+      kind: ModelServing
+      name: podinfo-pd-ms
+    roles:
+      prefill:
+        minReplicas: 1
+        maxReplicas: 8
+        metrics:
+          - name: prefill_rps
+            targetValue: "0.5"
+        metricSources:
+          prefill_rps:
+            prometheus:
+              serverURL: http://kube-prometheus-stack-prometheus.test.svc.cluster.local:9090
+              query: sum(rate(http_requests_total{namespace="autoscale-demo", service="podinfo-prefill"}[2m]))
+      decode:
+        minReplicas: 1
+        maxReplicas: 16
+        metrics:
+          - name: decode_rps
+            targetValue: "0.5"
+        metricSources:
+          decode_rps:
+            prometheus:
+              serverURL: http://kube-prometheus-stack-prometheus.test.svc.cluster.local:9090
+              query: sum(rate(http_requests_total{namespace="autoscale-demo", service="podinfo-decode"}[2m]))
+    ratioConstraint:
+      numeratorRole: prefill
+      denominatorRole: decode
+      minRatio: "0.25"
+      maxRatio: "1"

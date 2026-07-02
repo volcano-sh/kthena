@@ -21,16 +21,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"k8s.io/klog/v2"
 )
 
+// Remote tokenization is always attempted when an engine template exists
 type TokenizerManagerConfig struct {
-	EnableVLLMRemote bool
-	EndpointTemplate string
+	EndpointTemplates map[string]string
 }
 
 type TokenizerManager struct {
@@ -57,15 +59,34 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 	// Randomly select a pod to start with
 	startIdx := rand.Intn(len(pods))
 
+	// Track unsupported engines so we can emit a metric if ALL pods fail
+	// due to incompatible engines
+	unsupportedEngines := make(map[string]struct{})
+
 	// Try pods starting from random index, wrapping around if needed
 	for i := 0; i < len(pods); i++ {
 		podIdx := (startIdx + i) % len(pods)
 		podInfo := pods[podIdx]
+		pod := podInfo.GetPod()
+		if pod == nil {
+			continue
+		}
 
-		endpoint := fmt.Sprintf(m.config.EndpointTemplate, podInfo.Pod.Status.PodIP)
+		engine, err := normalizeEngine(podInfo.GetEngine())
+		if err != nil {
+			klog.Warningf("TokenizerManager: invalid engine for pod %s: %v", pod.Name, err)
+			unsupportedEngines[podInfo.GetEngine()] = struct{}{}
+			continue
+		}
+		template, ok := m.config.EndpointTemplates[engine]
+		if !ok || template == "" {
+			klog.Warningf("TokenizerManager: no endpoint template for engine %q, skipping pod %s", engine, pod.Name)
+			continue
+		}
+		endpoint := fmt.Sprintf(template, pod.Status.PodIP)
 
 		config := RemoteTokenizerConfig{
-			Engine:             "vllm",
+			Engine:             engine,
 			Endpoint:           endpoint,
 			Model:              model,
 			AddSpecialTokens:   true,
@@ -74,22 +95,40 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 
 		tok, err := NewRemoteTokenizer(config)
 		if err != nil {
-			klog.Warningf("Failed to create vLLM tokenizer for model %s at endpoint %s: %v", model, endpoint, err)
+			klog.Warningf("Failed to create %s tokenizer for model %s at %s: %v", engine, model, endpoint, err)
 			continue
 		}
 
-		klog.V(4).Infof("TokenizerManager: successfully created tokenizer for model %s at endpoint %s", model, endpoint)
+		klog.V(4).Infof("TokenizerManager: created %s tokenizer for model %s at %s", engine, model, endpoint)
 		return tok
 	}
 
+	// All pods exhausted
+	// record a failure metric per unsupported engine
+	for engine := range unsupportedEngines {
+		metrics.DefaultMetrics.RecordTokenizerUnsupportedEngine(model, engine)
+	}
 	klog.Warningf("Failed to create tokenizer for model %s after trying %d pods", model, len(pods))
 	return nil
+}
+
+func normalizeEngine(engine string) (string, error) {
+	switch strings.ToLower(engine) {
+	case EngineSGLang:
+		return EngineSGLang, nil
+	case EngineVLLM:
+		return EngineVLLM, nil
+	case "":
+		return "", ErrInvalidConfig{Message: "empty engine string"}
+	default:
+		return "", ErrInvalidConfig{Message: fmt.Sprintf("unsupported engine: %q", engine)}
+	}
 }
 
 // TokenizePrompt tokenizes a prompt (text or chat messages) and returns uint32 tokens
 func (m *TokenizerManager) TokenizePrompt(
 	model string,
-	prompt common.ChatMessage,
+	prompt *common.ChatMessage,
 	pods []*datastore.PodInfo,
 ) ([]uint32, error) {
 	tokenizer := m.GetTokenizer(model, pods)

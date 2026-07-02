@@ -29,7 +29,6 @@ import (
 type WorkloadV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	AutoscalingPoliciesGetter
-	AutoscalingPolicyBindingsGetter
 	ModelBoostersGetter
 	ModelServingsGetter
 }
@@ -41,10 +40,6 @@ type WorkloadV1alpha1Client struct {
 
 func (c *WorkloadV1alpha1Client) AutoscalingPolicies(namespace string) AutoscalingPolicyInterface {
 	return newAutoscalingPolicies(c, namespace)
-}
-
-func (c *WorkloadV1alpha1Client) AutoscalingPolicyBindings(namespace string) AutoscalingPolicyBindingInterface {
-	return newAutoscalingPolicyBindings(c, namespace)
 }
 
 func (c *WorkloadV1alpha1Client) ModelBoosters(namespace string) ModelBoosterInterface {

@@ -28,9 +28,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r python/kthena/downloader/requirements.txt
           pip install -r python/kthena/runtime/requirements.txt
+          pip install -r python/kthena/runtime/requirements-dev.txt
       - name: Run tests
         run: |
-          pip install coverage pytest
+          pip install coverage
           coverage run -m pytest
       - name: Check coverage threshold
         run: |

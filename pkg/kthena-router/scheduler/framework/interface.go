@@ -28,7 +28,11 @@ import (
 // Context stores information which maybe useful in Filter or Score plugins.
 type Context struct {
 	Model  string
-	Prompt common.ChatMessage
+	Prompt *common.ChatMessage
+
+	// SessionID is the session identifier extracted from the HTTP header configured
+	// via the SESSION_BOOST_HEADER environment variable.
+	SessionID string
 
 	Hashes []uint64
 

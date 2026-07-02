@@ -20,8 +20,7 @@ spec:
         value: "8200"
       - name: "RUNTIME_URL"   # default http://localhost:8000/metrics
         value: "http://localhost:8100/metrics"
-    minReplicas: 1
-    maxReplicas: 2
+    replicas: 1
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest

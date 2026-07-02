@@ -1,7 +1,5 @@
-# This example shows how to deploy a DS1.5B model server.
-# The DS1.5B server will provide inference services for the DS1.5B model.
-#
-# NOTE: Update the image to the correct DS1.5B model image once it's available.
+# DS1.5B mock backend for router e2e tests.
+# Uses llm-d-inference-sim (SimpleTokenizer) with a non-HF internal model name.
 
 apiVersion: apps/v1
 kind: Deployment
@@ -19,10 +17,20 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/faust-benchou/dynamo-mocker-vllm:latest
+          image: ghcr.io/llm-d/llm-d-inference-sim:latest
           imagePullPolicy: IfNotPresent
-          env:
-            # specify the model name to mock
-            - name: MODEL_NAME
-              value: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-
+          args:
+            - --model=kthena-mock-1.5b
+            - --served-model-name=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+            - --port=8000
+            - --mode=echo
+            - --time-to-first-token=0
+            - --inter-token-latency=0
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 2

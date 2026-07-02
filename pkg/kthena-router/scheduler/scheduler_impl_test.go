@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 )
@@ -211,6 +212,7 @@ func TestSchedulePDGroup(t *testing.T) {
 
 			// Create scheduling context with PDGroup enabled
 			ctx := &framework.Context{
+				Prompt:          &common.ChatMessage{},
 				ModelServerName: modelServerName,
 				PDGroup: &aiv1alpha1.PDGroup{
 					GroupKey:      "pd-group",
@@ -253,6 +255,7 @@ func TestScheduleNonPDGroupWithEmptyScores(t *testing.T) {
 	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
 
 	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
 		ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
 		PDGroup:         nil, // Non-PD scheduling
 	}
@@ -290,6 +293,7 @@ func TestRunScorePluginsEdgeCases(t *testing.T) {
 			scheduler := NewScheduler(store, nil).(*SchedulerImpl)
 
 			ctx := &framework.Context{
+				Prompt:          &common.ChatMessage{},
 				ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
 			}
 

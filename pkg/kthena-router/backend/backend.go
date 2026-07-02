@@ -28,8 +28,8 @@ import (
 )
 
 type MetricsProvider interface {
-	GetPodMetrics(pod *corev1.Pod) (map[string]*dto.MetricFamily, error)
-	GetPodModels(pod *corev1.Pod) ([]string, error)
+	GetPodMetrics(pod *corev1.Pod, port uint32) (map[string]*dto.MetricFamily, error)
+	GetPodModels(pod *corev1.Pod, port uint32) ([]string, error)
 	GetCountMetricsInfo(allMetrics map[string]*dto.MetricFamily) map[string]float64
 	GetHistogramPodMetrics(allMetrics map[string]*dto.MetricFamily, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
 }
@@ -39,14 +39,14 @@ var engineRegistry = map[string]MetricsProvider{
 	"vLLM":   vllm.NewVllmEngine(),
 }
 
-func GetPodMetrics(engine string, pod *corev1.Pod, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+func GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
 		klog.Errorf("Failed to get inference engine: %v", err)
 		return nil, nil
 	}
 
-	allMetrics, err := provider.GetPodMetrics(pod)
+	allMetrics, err := provider.GetPodMetrics(pod, port)
 	if err != nil {
 		klog.V(4).Infof("failed to get metrics of pod: %s/%s: %v", pod.GetNamespace(), pod.GetName(), err)
 		return nil, nil
@@ -71,12 +71,12 @@ func GetMetricsProvider(engine string) (MetricsProvider, error) {
 	return nil, fmt.Errorf("unsupported engine: %s", engine)
 }
 
-func GetPodModels(engine string, pod *corev1.Pod) ([]string, error) {
+func GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
 		klog.Errorf("Failed to get inference engine: %v", err)
 		return nil, nil
 	}
 
-	return provider.GetPodModels(pod)
+	return provider.GetPodModels(pod, port)
 }

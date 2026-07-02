@@ -80,6 +80,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/config-router',
             'user-guide/kvcache-aware',
             'user-guide/fairness-scheduling',
+            'user-guide/session-boost',
             'user-guide/rate-limit',
             "user-guide/gateway-api-support",
             'user-guide/gateway-inference-extension-support',
@@ -112,7 +113,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'General',
-      items: ['general/cert-manager', 'general/faq', 'general/prometheus', 'general/data-parallel-deployment'],
+      items: ['general/cert-manager', 'general/faq', 'general/data-parallel-deployment'],
     },
     {
       type: 'category',
@@ -184,7 +185,6 @@ const sidebars: SidebarsConfig = {
               },
               items: [
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_autoscaling-policies', label: 'Get autoscaling-policies' },
-                { type: 'doc', id: 'reference/kthena-cli/kthena_get_autoscaling-policy-bindings', label: 'Get autoscaling-policy-bindings' },
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_model-boosters', label: 'Get model-boosters' },
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_model-servings', label: 'Get model-servings' },
                 { type: 'doc', id: 'reference/kthena-cli/kthena_get_template', label: 'Get template' },

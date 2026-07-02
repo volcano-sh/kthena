@@ -36,12 +36,7 @@ func BuildModelRoute(model *workload.ModelBooster) *networking.ModelRoute {
 			Name:      routeName,
 			Namespace: model.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		Spec: networking.ModelRouteSpec{

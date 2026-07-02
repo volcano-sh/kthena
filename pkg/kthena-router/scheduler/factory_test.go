@@ -38,6 +38,7 @@ func TestNewPluginRegistry(t *testing.T) {
 
 func TestRegisterDefaultPlugins(t *testing.T) {
 	registry := NewPluginRegistry()
+	store := datastore.New()
 
 	// Before registration
 	assert.Equal(t, 0, len(registry.scorePluginBuilders))
@@ -61,14 +62,9 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		assert.NotNil(t, builder, "Score plugin builder for %s should not be nil", pluginName)
 
 		// Test that the builder actually creates a plugin
-		plugin := builder(runtime.RawExtension{})
+		plugin := builder(store, runtime.RawExtension{})
 		assert.NotNil(t, plugin, "Plugin %s should be created successfully", pluginName)
-
-		// PrefixCache plugin from registry is not properly initialized (empty struct)
-		// It needs special initialization with datastore in actual usage
-		if pluginName != plugins.PrefixCachePluginName {
-			assert.Equal(t, pluginName, plugin.Name(), "Plugin name should match")
-		}
+		assert.Equal(t, pluginName, plugin.Name(), "Plugin name should match")
 	}
 
 	// Test that all expected filter plugins are registered
@@ -157,9 +153,7 @@ func TestGetScorePlugins(t *testing.T) {
 	registry := NewPluginRegistry()
 	registerDefaultPlugins(registry)
 
-	// Create a mock prefix cache for testing
-	mockStore := datastore.New()
-	prefixCache := plugins.NewPrefixCache(mockStore, runtime.RawExtension{Raw: []byte(`{"blockSizeToHash": 64}`)})
+	store := datastore.New()
 
 	tests := []struct {
 		name            string
@@ -205,7 +199,7 @@ func TestGetScorePlugins(t *testing.T) {
 			},
 		},
 		{
-			name: "prefix cache plugin special handling",
+			name: "prefix cache plugin from registry",
 			scorePluginMap: map[string]int{
 				plugins.PrefixCachePluginName: 10,
 			},
@@ -249,7 +243,7 @@ func TestGetScorePlugins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scorePlugins := getScorePlugins(registry, prefixCache, tt.scorePluginMap, tt.pluginsArgMap)
+			scorePlugins := getScorePlugins(registry, store, tt.scorePluginMap, tt.pluginsArgMap)
 
 			assert.Equal(t, tt.expectedCount, len(scorePlugins))
 
@@ -263,4 +257,22 @@ func TestGetScorePlugins(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetPostScheduleHooks(t *testing.T) {
+	registry := NewPluginRegistry()
+	registerDefaultPlugins(registry)
+
+	scorePlugins := getScorePlugins(registry, datastore.New(), map[string]int{
+		plugins.LeastRequestPluginName: 1,
+		plugins.PrefixCachePluginName:  1,
+	}, map[string]runtime.RawExtension{
+		plugins.LeastRequestPluginName: {Raw: []byte(`{"maxWaitingRequests": 10}`)},
+		plugins.PrefixCachePluginName:  {Raw: []byte(`{"blockSizeToHash": 64}`)},
+	})
+
+	hooks := getPostScheduleHooks(scorePlugins)
+
+	assert.Len(t, hooks, 1)
+	assert.Equal(t, plugins.PrefixCachePluginName, hooks[0].Name())
 }

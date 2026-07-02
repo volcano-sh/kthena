@@ -18,6 +18,11 @@ package tokenization
 
 import "github.com/volcano-sh/kthena/pkg/kthena-router/common"
 
+const (
+	EngineVLLM   = "vllm"
+	EngineSGLang = "sglang"
+)
+
 type TokenizeInputType string
 
 const (
@@ -34,6 +39,8 @@ type TokenizeInput struct {
 	AddGenerationPrompt bool
 }
 
+// TokenStrings is only populated by vLLM. SGLang's /tokenize response does not
+// include token_strs, so this field will always be nil for SGLang-backed pods.
 type TokenizeResult struct {
 	Count        int      `json:"count"`
 	MaxModelLen  int      `json:"max_model_len"`
@@ -74,4 +81,28 @@ type vllmTokenizeResponse struct {
 	MaxModelLen int      `json:"max_model_len"`
 	Tokens      []int    `json:"tokens"`
 	TokenStrs   []string `json:"token_strs,omitempty"`
+}
+
+type sglangTokenizeCompletionRequest struct {
+	Model            string `json:"model,omitempty"`
+	Prompt           string `json:"prompt"`
+	AddSpecialTokens *bool  `json:"add_special_tokens,omitempty"`
+}
+
+type sglangTokenizeChatRequest struct {
+	Model            string           `json:"model,omitempty"`
+	Messages         []common.Message `json:"messages"`
+	AddSpecialTokens *bool            `json:"add_special_tokens,omitempty"`
+	// Reserved — passed through from request when supported.
+	Tools                []interface{}          `json:"tools,omitempty"`
+	ToolChoice           interface{}            `json:"tool_choice,omitempty"`
+	ReasoningEffort      *string                `json:"reasoning_effort,omitempty"`
+	ContinueFinalMessage *bool                  `json:"continue_final_message,omitempty"`
+	ChatTemplateKwargs   map[string]interface{} `json:"chat_template_kwargs,omitempty"`
+}
+
+type sglangTokenizeResponse struct {
+	Count       int   `json:"count"`
+	MaxModelLen int   `json:"max_model_len"`
+	Tokens      []int `json:"tokens"`
 }

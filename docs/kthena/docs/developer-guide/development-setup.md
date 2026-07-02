@@ -8,7 +8,7 @@ Kthena components have only a few external dependencies that you need to set up 
 
 All Kthena components are written in the [Go](https://golang.org) programming language. To build, you'll need a Go development environment. If you haven't set up a Go development environment, please follow [these instructions](https://golang.org/doc/install) to install the Go tools.
 
-Kthena currently builds with Go 1.24.0.
+Kthena currently builds with Go 1.26.4.
 
 ## Setting up Docker
 

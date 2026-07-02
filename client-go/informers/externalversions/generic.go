@@ -62,8 +62,6 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		// Group=workload.serving.volcano.sh, Version=v1alpha1
 	case workloadv1alpha1.SchemeGroupVersion.WithResource("autoscalingpolicies"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Workload().V1alpha1().AutoscalingPolicies().Informer()}, nil
-	case workloadv1alpha1.SchemeGroupVersion.WithResource("autoscalingpolicybindings"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Workload().V1alpha1().AutoscalingPolicyBindings().Informer()}, nil
 	case workloadv1alpha1.SchemeGroupVersion.WithResource("modelboosters"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Workload().V1alpha1().ModelBoosters().Informer()}, nil
 	case workloadv1alpha1.SchemeGroupVersion.WithResource("modelservings"):

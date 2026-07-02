@@ -78,13 +78,13 @@ func TestSGLangConnectorRetryBodyNotDrained(t *testing.T) {
 	decodeAddr := decodeServer.Listener.Addr().String()
 
 	// First call — simulates retry iteration 0.
-	if _, err := connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr); err != nil {
+	if _, err := connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr, nil); err != nil {
 		t.Fatalf("first Proxy call failed: %v", err)
 	}
 	// Second call with the SAME prefill addr — simulates the scheduler reselecting
 	// the same prefill pod for a different decode pod on retry. This is the path
 	// where the previous (cached) request would have a drained body.
-	if _, err := connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr); err != nil {
+	if _, err := connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr, nil); err != nil {
 		t.Fatalf("second Proxy call failed: %v", err)
 	}
 
@@ -125,7 +125,7 @@ func TestSGLangConnectorReqBodyNotMutated(t *testing.T) {
 		keysBefore[k] = struct{}{}
 	}
 
-	_, _ = connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2")
+	_, _ = connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", nil)
 
 	for k := range reqBody {
 		if _, existed := keysBefore[k]; !existed {

@@ -23,6 +23,7 @@ import (
 
 	"github.com/volcano-sh/kthena/test/e2e/framework"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
+	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
@@ -64,6 +65,14 @@ func TestMain(m *testing.M) {
 	// Setup common components
 	if err := testCtx.SetupCommonComponents(); err != nil {
 		fmt.Printf("Failed to setup common components: %v\n", err)
+		_ = testCtx.DeleteTestNamespace()
+		_ = framework.UninstallKthena(config.Namespace)
+		os.Exit(1)
+	}
+
+	if err := plugincontext.SetupPluginComponents(testCtx.KubeClient, testCtx.KthenaClient, testNamespace); err != nil {
+		fmt.Printf("Failed to setup plugin components: %v\n", err)
+		_ = testCtx.CleanupCommonComponents()
 		_ = testCtx.DeleteTestNamespace()
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
@@ -114,6 +123,12 @@ func TestModelRouteMultiModels(t *testing.T) {
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	TestModelRoutePrefillDecodeDisaggregationShared(t, testCtx, testNamespace, false, "")
+}
+
+// TestModelRouteSglangPrefillDecodeDisaggregation tests SGLang PD disaggregation with ModelServing, ModelServer, and ModelRoute.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestModelRouteSglangPrefillDecodeDisaggregation(t *testing.T) {
+	TestModelRouteSglangPrefillDecodeDisaggregationShared(t, testCtx, testNamespace, false, "")
 }
 
 // TestModelRouteSubset tests ModelRoute with subset routing.

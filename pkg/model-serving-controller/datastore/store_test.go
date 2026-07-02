@@ -184,6 +184,19 @@ func TestGetRoleList(t *testing.T) {
 	assert.Nil(t, roles)
 }
 
+func TestGetRolesByGroupReturnsRoleCopies(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+	s := New()
+	s.AddServingGroup(key, 0, "revision")
+	s.AddRole(key, "model1-0", "prefill", "prefill-0", "revision", "hash")
+
+	roles, err := s.GetRolesByGroup(key, "model1-0")
+	assert.NoError(t, err)
+	roles["prefill"]["prefill-0"].Status = RoleRunning
+
+	assert.Equal(t, RoleCreating, s.GetRoleStatus(key, "model1-0", "prefill", "prefill-0"))
+}
+
 func TestUpdateRoleStatus(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
 
