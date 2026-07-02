@@ -1,3 +1,5 @@
+# !/usr/bin/env python3
+
 # Copyright The Volcano Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# !/usr/bin/env python3
 """
 A/B Test Orchestrator for Kthena Router Benchmarks.
 
@@ -74,7 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--endpoint-mode",
         choices=[EndpointMode.PORT_FORWARD, EndpointMode.LB],
         default=EndpointMode.PORT_FORWARD,
-        help="Router endpoint access mode: 'port-forward' for Kind clusters (default), 'lb' for clusters with LoadBalancer support",
+        help="Router endpoint access mode: 'port-forward' for Kind clusters (default), "
+             "'lb' for clusters with LoadBalancer support",
     )
     return parser
 

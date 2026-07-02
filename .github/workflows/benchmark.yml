@@ -7,7 +7,7 @@ on:
     branches:
       - main
     paths:
-      - "benchmark/router-ab-test/**"
+      - "benchmark/router-benchmark/**"
       - "pkg/kthena-router/**"
       - "charts/kthena/**"
       - ".github/workflows/benchmark.yml"
@@ -17,7 +17,7 @@ on:
       - feat/router-benchmark
       - feat/benchmark-prototype
     paths:
-      - "benchmark/router-ab-test/**"
+      - "benchmark/router-benchmark/**"
       - "pkg/kthena-router/**"
       - "charts/kthena/**"
       - ".github/workflows/benchmark.yml"
@@ -98,13 +98,13 @@ jobs:
           kubectl rollout status deployment/kthena-router -n kthena-system --timeout=300s
 
       - name: Deploy Mock Backends
-        working-directory: benchmark/router-ab-test
+        working-directory: benchmark/router-benchmark
         run: |
           kubectl apply -f k8s/mocker-deployment.yaml
           kubectl rollout status deployment/mocker-llm --timeout=300s
 
       - name: Deploy ModelServer and ModelRoute
-        working-directory: benchmark/router-ab-test
+        working-directory: benchmark/router-benchmark
         run: |
           kubectl apply -f k8s/modelserver.yaml
           kubectl apply -f k8s/modelroute.yaml
@@ -116,17 +116,17 @@ jobs:
 
       - name: Run A/B Test
         id: benchmark
-        working-directory: benchmark/router-ab-test
+        working-directory: benchmark/router-benchmark
         run: |
           python scripts/ab_test.py \
             --scenario "scenarios/${{ matrix.scenario }}.yaml" \
             --router-config-a "k8s/${{ matrix.router-config-a }}.yaml" \
             --router-config-b "k8s/${{ matrix.router-config-b }}.yaml" \
-            --output results/ \
+            --output results/
 
       - name: Collect Results
         if: always()
-        working-directory: benchmark/router-ab-test
+        working-directory: benchmark/router-benchmark
         run: |
           echo "=== Benchmark Results ==="
           ls -la results/ || echo "No results directory"
@@ -140,7 +140,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ github.run_id }}
-          path: benchmark/router-ab-test/results/
+          path: benchmark/router-benchmark/results/
           retention-days: 30
           if-no-files-found: warn
 

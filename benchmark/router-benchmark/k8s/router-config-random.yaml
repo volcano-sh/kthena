@@ -1,4 +1,4 @@
-# Router scheduler config — Round Robin (random plugin only for uniform distribution)
+# Router scheduler config — Random
 apiVersion: v1
 kind: ConfigMap
 metadata:
