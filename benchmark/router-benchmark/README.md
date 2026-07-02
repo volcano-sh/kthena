@@ -38,7 +38,7 @@
 为了让当前的 `ab_test` 更容易 review，并逐步对齐 proposal 中的分层设计，脚本已经拆为如下结构：
 
 ```
-router-ab-test/
+router-benchmark/
 ├── README.md
 ├── k8s/
 │   ├── mocker-deployment.yaml

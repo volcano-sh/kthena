@@ -1,6 +1,6 @@
 # Todo
 
-1. load_generator: ramp strategy implement: algin to `*ramp*` in [cli-options](/Users/leo/Source/Volcano/aiperf/docs/cli-options.md)
+1. load_generator: implement ramp strategy according to `*ramp*` in cli-options.md
 
 2. need to pass mocker config from scenario file to k8s/mocker-deployment.yaml 
 

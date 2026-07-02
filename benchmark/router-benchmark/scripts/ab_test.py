@@ -1,5 +1,3 @@
-# !/usr/bin/env python3
-
 # Copyright The Volcano Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -64,7 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--router-config-a", required=True, help="Path to router scheduler ConfigMap for config A")
     parser.add_argument("--router-config-b", required=True, help="Path to router scheduler ConfigMap for config B")
     parser.add_argument("--output", default="./results", help="Output directory")
-    parser.add_argument("--mocker-manifest", help="Path to mocker deployment YAML")
     parser.add_argument(
         "--local-port",
         type=int,
@@ -75,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--endpoint-mode",
         choices=[EndpointMode.PORT_FORWARD, EndpointMode.LB],
         default=EndpointMode.PORT_FORWARD,
-        help="Router endpoint access mode: 'port-forward' for Kind clusters (default), "
+        help="Router endpoint access mode: 'pf' for Kind clusters (default), "
              "'lb' for clusters with LoadBalancer support",
     )
     return parser
