@@ -37,6 +37,7 @@ import (
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
@@ -125,7 +126,7 @@ func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doScale(context.Background(), policy); err != nil {
+	if _, err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
 	if len(client.Fake.Actions()) != 0 {
@@ -152,7 +153,7 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, lbs)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doScale(context.Background(), policy); err != nil {
+	if _, err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
 	updated, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-up", metav1.GetOptions{})
@@ -187,7 +188,7 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbsA), readyPod(ns, "pod-b", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doOptimize(context.Background(), policy); err != nil {
+	if _, err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
 	}
 	updates := 0
@@ -224,7 +225,7 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	pods := []*corev1.Pod{readyPod(ns, "pod-a2", host, lbsA), readyPod(ns, "pod-b2", host, lbsB)}
 	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
-	if err := ac.doOptimize(context.Background(), policy); err != nil {
+	if _, err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
 	}
 	updatedA, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-a2", metav1.GetOptions{})
@@ -325,7 +326,7 @@ func TestDoDisaggregatedScale_RatioRaisesDecode(t *testing.T) {
 		disaggregatedScalerMap: map[string]*autoscaler.DisaggregatedAutoscaler{},
 	}
 
-	if err := ac.doDisaggregatedScale(context.Background(), policy); err != nil {
+	if _, err := ac.doDisaggregatedScale(context.Background(), policy); err != nil {
 		t.Fatalf("doDisaggregatedScale error: %v", err)
 	}
 	updated, err := client.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), "ms-pd", metav1.GetOptions{})
@@ -946,5 +947,252 @@ func TestPatchDoesNotMutateResourcesInFakeClient(t *testing.T) {
 				gotPrefillCPU.String(), gotPrefillMem.String(),
 				gotDecodeCPU.String(), gotDecodeMem.String(), gotImage)
 		})
+	}
+}
+
+// TestOutcomeFromChange covers all three scaling directions.
+func TestOutcomeFromChange(t *testing.T) {
+	tests := []struct {
+		name        string
+		current     int32
+		recommended int32
+		want        scalingOutcome
+	}{
+		{"scale up", 2, 5, outcomeScaleUp},
+		{"scale down", 5, 2, outcomeScaleDown},
+		{"stable", 3, 3, outcomeStable},
+		{"skip (-1)", 3, -1, outcomeStable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := outcomeFromChange(tt.current, tt.recommended)
+			if got != tt.want {
+				t.Fatalf("outcomeFromChange(%d, %d) = %d, want %d", tt.current, tt.recommended, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMergeOutcome verifies that scale-up takes priority over scale-down,
+// and scale-down takes priority over stable.
+func TestMergeOutcome(t *testing.T) {
+	tests := []struct {
+		a, b scalingOutcome
+		want scalingOutcome
+	}{
+		{outcomeStable, outcomeStable, outcomeStable},
+		{outcomeStable, outcomeScaleDown, outcomeScaleDown},
+		{outcomeScaleDown, outcomeStable, outcomeScaleDown},
+		{outcomeStable, outcomeScaleUp, outcomeScaleUp},
+		{outcomeScaleUp, outcomeStable, outcomeScaleUp},
+		{outcomeScaleDown, outcomeScaleUp, outcomeScaleUp},
+		{outcomeScaleUp, outcomeScaleDown, outcomeScaleUp},
+	}
+	for _, tt := range tests {
+		got := mergeOutcome(tt.a, tt.b)
+		if got != tt.want {
+			t.Fatalf("mergeOutcome(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// TestNextInterval maps each outcome to the expected adaptive period.
+func TestNextInterval(t *testing.T) {
+	tests := []struct {
+		outcome scalingOutcome
+		wantSec float64
+	}{
+		{outcomeScaleUp, 5},
+		{outcomeStable, 15},
+		{outcomeScaleDown, 30},
+	}
+	for _, tt := range tests {
+		got := nextInterval(tt.outcome)
+		if got.Seconds() != tt.wantSec {
+			t.Fatalf("nextInterval(%d) = %v, want %vs", tt.outcome, got, tt.wantSec)
+		}
+	}
+}
+
+// TestDoScale_AdaptiveOutcome verifies that doScale returns the correct
+// scaling outcome based on the direction of the replica change.
+func TestDoScale_AdaptiveOutcome(t *testing.T) {
+	ns := "ns"
+
+	tests := []struct {
+		name        string
+		current     int32
+		metricBody  string
+		wantOutcome scalingOutcome
+	}{
+		{
+			name:        "scale up when load exceeds target",
+			current:     1,
+			metricBody:  "# TYPE load gauge\nload 10\n",
+			wantOutcome: outcomeScaleUp,
+		},
+		{
+			name:        "stable when load equals target",
+			current:     1,
+			metricBody:  "# TYPE load gauge\nload 1\n",
+			wantOutcome: outcomeStable,
+		},
+		{
+			// 10 pods, metric=0.1 per pod, target=1 → recommended=ceil(10*0.1)=1 → scaleDown
+			name:        "scale down when replicas exceed demand",
+			current:     10,
+			metricBody:  "# TYPE load gauge\nload 0.1\n",
+			wantOutcome: outcomeScaleDown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-adaptive", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(tt.current)}}
+			client := clientfake.NewSimpleClientset(ms)
+			msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+
+			srv := httptest.NewServer(httpHandlerWithBody(tt.metricBody))
+			defer srv.Close()
+			u, _ := url.Parse(srv.URL)
+			host, portStr, _ := net.SplitHostPort(u.Host)
+			port := toInt32(portStr)
+
+			target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-adaptive"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
+			policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap-adaptive", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10}}}
+
+			pods := []*corev1.Pod{readyPod(ns, "pod-adaptive", host, map[string]string{})}
+			ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+
+			got, err := ac.doScale(context.Background(), policy)
+			if err != nil {
+				t.Fatalf("doScale error: %v", err)
+			}
+			if got != tt.wantOutcome {
+				t.Fatalf("doScale outcome = %d, want %d", got, tt.wantOutcome)
+			}
+		})
+	}
+}
+
+// TestReconcile_ReturnsAdaptiveInterval verifies that Reconcile returns the
+// appropriate duration based on the scaling direction observed in the cycle.
+func TestReconcile_ReturnsAdaptiveInterval(t *testing.T) {
+	ns := "ns"
+
+	scaleUpMS := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-up", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	client := clientfake.NewSimpleClientset(scaleUpMS)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(scaleUpMS))
+
+	policyIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 10\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-up"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap-up", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10}}}
+	_ = policyIndexer.Add(policy)
+
+	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, map[string]string{})}
+	ac := &AutoscaleController{
+		client:                    client,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(policyIndexer),
+		modelServingLister:        msLister,
+		podsLister:                fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
+		scalerMap:                 map[string]*autoscalerAutoscaler{},
+		optimizerMap:              map[string]*autoscalerOptimizer{},
+		disaggregatedScalerMap:    map[string]*autoscaler.DisaggregatedAutoscaler{},
+	}
+
+	interval := ac.Reconcile(context.Background())
+	wantSec := float64(5)
+	if interval.Seconds() != wantSec {
+		t.Fatalf("Reconcile interval = %v, want %vs (scale-up period)", interval, wantSec)
+	}
+}
+
+// TestReconcile_StableInterval verifies that Reconcile returns the default
+// stable period when no scaling action is taken.
+func TestReconcile_StableInterval(t *testing.T) {
+	ns := "ns"
+
+	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-stable", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	client := clientfake.NewSimpleClientset(ms)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+
+	policyIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 1\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-stable"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap-stable", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10}}}
+	_ = policyIndexer.Add(policy)
+
+	pods := []*corev1.Pod{readyPod(ns, "pod-stable", host, map[string]string{})}
+	ac := &AutoscaleController{
+		client:                    client,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(policyIndexer),
+		modelServingLister:        msLister,
+		podsLister:                fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
+		scalerMap:                 map[string]*autoscalerAutoscaler{},
+		optimizerMap:              map[string]*autoscalerOptimizer{},
+		disaggregatedScalerMap:    map[string]*autoscaler.DisaggregatedAutoscaler{},
+	}
+
+	interval := ac.Reconcile(context.Background())
+	wantSec := float64(15)
+	if interval.Seconds() != wantSec {
+		t.Fatalf("Reconcile interval = %v, want %vs (stable period)", interval, wantSec)
+	}
+}
+
+// TestReconcile_EmptyPolicies_DefaultInterval verifies that a cycle with no
+// policies returns the default stable interval.
+func TestReconcile_EmptyPolicies_DefaultInterval(t *testing.T) {
+	policyIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	ac := &AutoscaleController{
+		client:                    clientfake.NewSimpleClientset(),
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(policyIndexer),
+		scalerMap:                 map[string]*autoscalerAutoscaler{},
+		optimizerMap:              map[string]*autoscalerOptimizer{},
+		disaggregatedScalerMap:    map[string]*autoscaler.DisaggregatedAutoscaler{},
+	}
+
+	interval := ac.Reconcile(context.Background())
+	wantSec := float64(15)
+	if interval.Seconds() != wantSec {
+		t.Fatalf("Reconcile interval = %v, want %vs (default period)", interval, wantSec)
+	}
+}
+
+// TestRun_ShutdownOnContextCancel verifies that Run returns cleanly when the
+// context is cancelled and does not leak the timer goroutine.
+func TestRun_ShutdownOnContextCancel(t *testing.T) {
+	k8sClient := k8sfake.NewSimpleClientset()
+	crClient := clientfake.NewSimpleClientset()
+	ac := NewAutoscaleController(k8sClient, crClient)
+	if ac == nil {
+		t.Fatal("NewAutoscaleController returned nil")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ac.Run(ctx)
+		close(done)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after context cancellation")
 	}
 }
