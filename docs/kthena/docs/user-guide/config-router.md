@@ -96,6 +96,32 @@ data:
             weight: 1
 ```
 
+### Session Affinity Example
+
+Session affinity is configured on `ModelRoute.spec.sessionSticky`, not as a scheduler plugin. The router evaluates `sources` in order and uses the first non-empty header, query parameter, cookie, or JWT claim value as the session key. The router process store defaults to in-memory; use the parent chart Helm `networking.kthenaRouter.sessionSticky.store=redis` setting to share bindings across router replicas.
+
+For e2e tests and controlled debugging, the router can expose the selected backend Pod in the `X-Kthena-Backend-Pod` response header with `--debug-backend-pod-header=true` or Helm value `networking.kthenaRouter.debugBackendPodHeader=true`. Leave this disabled for production traffic.
+
+```yaml showLineNumbers
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-route
+  namespace: default
+spec:
+  modelName: deepseek
+  sessionSticky:
+    sessionAffinitySeconds: 10800
+    sources:
+      - type: Header
+        name: X-Session-ID
+      - type: Query
+        name: session_id
+  rules:
+    - targetModels:
+        - modelServerName: deepseek-server
+```
+
 If you want to use Authentication feature of router. Here is an example:
 
 ```yaml showLineNumbers
