@@ -310,6 +310,10 @@ type PodInfo struct {
 	// kept in sync with the global Redis counter so it reflects cross-router traffic.
 	onFlightRequestNum atomic.Int64
 
+	// pendingOnFlightDelta accumulates failed Redis increments/decrements (+1 or -1)
+	// to be pushed asynchronously, ensuring eventual consistency when Redis recovers.
+	pendingOnFlightDelta atomic.Int64
+
 	mutex sync.RWMutex // Protects concurrent access to Pod, engine, metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
 	models      sets.Set[string]               // running models. Including base model and lora adapters.
@@ -559,6 +563,39 @@ func parseMetricsScrapeInterval() time.Duration {
 func (s *store) Run(ctx context.Context) {
 	s.rootCtx = ctx
 	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if s.onFlightCounter == nil {
+					continue
+				}
+				s.pods.Range(func(key, value any) bool {
+					podName := key.(types.NamespacedName)
+					podInfo := value.(*PodInfo)
+					delta := podInfo.pendingOnFlightDelta.Load()
+					if delta != 0 {
+						deltaToApply := podInfo.pendingOnFlightDelta.Swap(0)
+						if deltaToApply != 0 {
+							retryCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+							_, err := s.onFlightCounter.Add(retryCtx, podName, deltaToApply)
+							cancel()
+							if err != nil {
+								podInfo.pendingOnFlightDelta.Add(deltaToApply) // failed, revert
+							} else {
+								klog.V(4).Infof("Successfully retried in-flight delta %d for pod %s", deltaToApply, podName)
+							}
+						}
+					}
+					return true
+				})
+			}
+		}
+	}()
+	go func() {
 		ticker := time.NewTicker(s.metricsScrapeInterval)
 		defer ticker.Stop()
 		for {
@@ -635,7 +672,11 @@ func (s *store) SyncOnFlightCounts() {
 	}
 	for podName, count := range counts {
 		if value, ok := s.pods.Load(podName); ok {
-			value.(*PodInfo).SetOnFlightRequestNum(count)
+			podInfo := value.(*PodInfo)
+			// Skip sync if local has unflushed deltas to avoid backward drift
+			if podInfo.pendingOnFlightDelta.Load() == 0 {
+				podInfo.SetOnFlightRequestNum(count)
+			}
 		}
 	}
 }
@@ -806,17 +847,20 @@ func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) {
 		return
 	}
 	podInfo := value.(*PodInfo)
+	podInfo.IncrOnFlightRequests() // ALWAYS increment local counter so scheduling is accurate locally
 	if s.onFlightCounter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if count, err := s.onFlightCounter.Incr(ctx, podName); err == nil {
-			podInfo.SetOnFlightRequestNum(count)
-			return
+			// Skip sync if local has unflushed deltas to avoid backward drift
+			if podInfo.pendingOnFlightDelta.Load() == 0 {
+				podInfo.SetOnFlightRequestNum(count) // sync with global count
+			}
 		} else {
-			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, falling back to local counter", podName, err)
+			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, queueing for retry", podName, err)
+			podInfo.pendingOnFlightDelta.Add(1)
 		}
 	}
-	podInfo.IncrOnFlightRequests()
 }
 
 // DecrPodOnFlightRequests decrements the in-flight counter for the given pod.
@@ -827,17 +871,20 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 		return
 	}
 	podInfo := value.(*PodInfo)
+	podInfo.DecrOnFlightRequests() // ALWAYS decrement local counter
 	if s.onFlightCounter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if count, err := s.onFlightCounter.Decr(ctx, podName); err == nil {
-			podInfo.SetOnFlightRequestNum(count)
-			return
+			// Skip sync if local has unflushed deltas to avoid backward drift
+			if podInfo.pendingOnFlightDelta.Load() == 0 {
+				podInfo.SetOnFlightRequestNum(count) // sync with global count
+			}
 		} else {
-			klog.V(4).Infof("Redis on-flight decr failed for pod %s: %v, falling back to local counter", podName, err)
+			klog.V(4).Infof("Redis on-flight decr failed for pod %s: %v, queueing for retry", podName, err)
+			podInfo.pendingOnFlightDelta.Add(-1)
 		}
 	}
-	podInfo.DecrOnFlightRequests()
 }
 
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
@@ -1861,7 +1908,15 @@ func (p *PodInfo) IncrOnFlightRequests() int64 {
 // DecrOnFlightRequests atomically decrements the local in-flight counter and
 // returns the new value.
 func (p *PodInfo) DecrOnFlightRequests() int64 {
-	return p.onFlightRequestNum.Add(-1)
+	for {
+		old := p.onFlightRequestNum.Load()
+		if old <= 0 {
+			return 0
+		}
+		if p.onFlightRequestNum.CompareAndSwap(old, old-1) {
+			return old - 1
+		}
+	}
 }
 
 // SetOnFlightRequestNum atomically stores a new value for the in-flight counter
