@@ -57,13 +57,22 @@ type Limiter interface {
 	Tokens() float64
 }
 
+// LimiterConfig stores the configuration for a rate limiter to detect changes
+type LimiterConfig struct {
+	Limiter            Limiter
+	TokensPerUnit      uint32 // copied value (not pointer)
+	Unit               networkingv1alpha1.RateLimitUnit
+	IsGlobal           bool
+	GlobalRedisAddress string // empty if local
+}
+
 // TokenRateLimiter provides rate limiting functionality for both input and output tokens
 type TokenRateLimiter struct {
 	mutex sync.RWMutex
 
-	// Unified rate limiters using Limiter interface
-	inputLimiter  map[string]Limiter
-	outputLimiter map[string]Limiter
+	// Store input and output limiters separately for independent change detection
+	inputLimiters  map[string]*LimiterConfig
+	outputLimiters map[string]*LimiterConfig
 
 	// Redis client for global rate limiting
 	redisClient *redis.Client
@@ -91,9 +100,9 @@ func (l *LocalLimiter) Tokens() float64 {
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
 func NewTokenRateLimiter() *TokenRateLimiter {
 	return &TokenRateLimiter{
-		inputLimiter:  make(map[string]Limiter),
-		outputLimiter: make(map[string]Limiter),
-		tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
+		inputLimiters:  make(map[string]*LimiterConfig),
+		outputLimiters: make(map[string]*LimiterConfig),
+		tokenizer:      tokenizer.NewSimpleEstimateTokenizer(),
 	}
 }
 
@@ -107,19 +116,23 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 	}
 
 	r.mutex.RLock()
-	inputLimiter, hasInputLimit := r.inputLimiter[model]
-	outputLimiter, hasOutputLimit := r.outputLimiter[model]
+	inputConfig, hasInputLimit := r.inputLimiters[model]
+	outputConfig, hasOutputLimit := r.outputLimiters[model]
 	r.mutex.RUnlock()
 
 	// Check input token rate limit
-	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
+	if hasInputLimit && inputConfig.Limiter != nil &&
+		!inputConfig.Limiter.AllowN(time.Now(), tokens) {
 		return &InputRateLimitExceededError{}
 	}
 
-	// Check output token rate limit - we conservatively check if there's at least 1 token available
-	// This prevents starting requests that likely won't be able to complete
-	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
-		return &OutputRateLimitExceededError{}
+	// Check output token rate limit - verify tokens are available
+	// Actual consumption happens in RecordOutputTokens() with proper reservation handling
+	if hasOutputLimit && outputConfig.Limiter != nil {
+		// Non-consuming check: ensure at least 1 token available
+		if outputConfig.Limiter.Tokens() < 1 {
+			return &OutputRateLimitExceededError{}
+		}
 	}
 
 	return nil
@@ -128,15 +141,35 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 // RecordOutputTokens records the actual output tokens consumed after response generation
 func (r *TokenRateLimiter) RecordOutputTokens(model string, tokenCount int) {
 	r.mutex.RLock()
-	outputLimiter, exists := r.outputLimiter[model]
+	outputConfig, exists := r.outputLimiters[model]
 	r.mutex.RUnlock()
 
-	if exists {
-		outputLimiter.AllowN(time.Now(), tokenCount)
+	if !exists || outputConfig.Limiter == nil {
+		return
 	}
+	if localLimiter, ok := outputConfig.Limiter.(*LocalLimiter); ok {
+		// Reserve the actual number of tokens consumed
+		res := localLimiter.Limiter.ReserveN(time.Now(), tokenCount)
+		if !res.OK() {
+			res.Cancel()
+			return
+		}
+		// Reservation confirmed - tokens are consumed and will be properly tracked
+		return
+	}
+
+	if tokenCount == 0 {
+		outputConfig.Limiter.AllowN(time.Now(), -1)
+	} else if tokenCount > 1 {
+		// Consume remaining tokens beyond the 1 already reserved
+		outputConfig.Limiter.AllowN(time.Now(), tokenCount-1)
+	}
+	// If tokenCount == 1, pre-reserved token covers it exactly
 }
 
 // AddOrUpdateLimiter adds or updates rate limiter for a model
+// Only recreates limiters if the configuration has actually changed,
+// preserving limiter state across reconciliation events
 func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkingv1alpha1.RateLimit) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
@@ -144,60 +177,139 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	// Determine if we should use global or local rate limiting
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
 
-	if useGlobal {
-		// Initialize Redis client if not already done
-		if r.redisClient == nil {
-			r.redisClient = redis.NewClient(&redis.Options{
-				Addr: ratelimit.Global.Redis.Address,
-			})
+	// Initialize Redis client if needed (only happens once per pod lifetime)
+	if useGlobal && r.redisClient == nil {
+		r.redisClient = redis.NewClient(&redis.Options{
+			Addr: ratelimit.Global.Redis.Address,
+		})
 
-			// Test connection
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := r.redisClient.Ping(ctx).Err(); err != nil {
-				return fmt.Errorf("failed to connect to redis: %w", err)
+		// Test connection
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := r.redisClient.Ping(ctx).Err(); err != nil {
+			r.redisClient = nil
+			return fmt.Errorf("failed to connect to redis: %w", err)
+		}
+	}
+
+	// Derive redisAddr for comparison in config change detection
+	redisAddr := ""
+	if useGlobal {
+		redisAddr = ratelimit.Global.Redis.Address
+	}
+
+	// Helper: check if input config has changed
+	inputConfigChanged := func(oldConfig *LimiterConfig) bool {
+		if oldConfig == nil {
+			return ratelimit.InputTokensPerUnit != nil // changed if new limit added
+		}
+		if ratelimit.InputTokensPerUnit == nil {
+			return true // changed if limit removed
+		}
+		// Compare copied values (not pointers)
+		if oldConfig.TokensPerUnit != *ratelimit.InputTokensPerUnit ||
+			oldConfig.Unit != ratelimit.Unit ||
+			oldConfig.IsGlobal != useGlobal ||
+			oldConfig.GlobalRedisAddress != redisAddr {
+			return true
+		}
+		return false
+	}
+
+	// Helper: check if output config has changed
+	outputConfigChanged := func(oldConfig *LimiterConfig) bool {
+		if oldConfig == nil {
+			return ratelimit.OutputTokensPerUnit != nil // changed if new limit added
+		}
+		if ratelimit.OutputTokensPerUnit == nil {
+			return true // changed if limit removed
+		}
+		// Compare copied values (not pointers)
+		if oldConfig.TokensPerUnit != *ratelimit.OutputTokensPerUnit ||
+			oldConfig.Unit != ratelimit.Unit ||
+			oldConfig.IsGlobal != useGlobal ||
+			oldConfig.GlobalRedisAddress != redisAddr {
+			return true
+		}
+		return false
+	}
+
+	// Process input rate limiter
+	if ratelimit.InputTokensPerUnit != nil {
+		oldInputConfig, exists := r.inputLimiters[model]
+		if !exists || inputConfigChanged(oldInputConfig) {
+			// Config changed or doesn't exist - create new limiter
+			var newLimiter Limiter
+
+			if useGlobal {
+				newLimiter = NewGlobalRateLimiter(
+					r.redisClient,
+					"kthena:ratelimit",
+					model,
+					"input",
+					*ratelimit.InputTokensPerUnit,
+					ratelimit.Unit,
+				)
+			} else {
+				// Create local rate limiter
+				duration := getTimeUnitDuration(ratelimit.Unit)
+				newLimiter = NewLocalLimiter(
+					rate.Limit(float64(*ratelimit.InputTokensPerUnit)/duration.Seconds()),
+					int(*ratelimit.InputTokensPerUnit),
+				)
+			}
+
+			r.inputLimiters[model] = &LimiterConfig{
+				Limiter:            newLimiter,
+				TokensPerUnit:      *ratelimit.InputTokensPerUnit, // copied value
+				Unit:               ratelimit.Unit,
+				IsGlobal:           useGlobal,
+				GlobalRedisAddress: redisAddr,
 			}
 		}
-
-		// Create global rate limiters
-		if ratelimit.InputTokensPerUnit != nil {
-			r.inputLimiter[model] = NewGlobalRateLimiter(
-				r.redisClient,
-				"kthena:ratelimit",
-				model,
-				"input",
-				*ratelimit.InputTokensPerUnit,
-				ratelimit.Unit,
-			)
-		}
-
-		if ratelimit.OutputTokensPerUnit != nil {
-			r.outputLimiter[model] = NewGlobalRateLimiter(
-				r.redisClient,
-				"kthena:ratelimit",
-				model,
-				"output",
-				*ratelimit.OutputTokensPerUnit,
-				ratelimit.Unit,
-			)
-		}
+		// If config hasn't changed, keep existing limiter with its state
 	} else {
-		// Create local rate limiters
-		duration := getTimeUnitDuration(ratelimit.Unit)
+		// Input rate limit removed
+		delete(r.inputLimiters, model)
+	}
 
-		if ratelimit.InputTokensPerUnit != nil {
-			r.inputLimiter[model] = NewLocalLimiter(
-				rate.Limit(float64(*ratelimit.InputTokensPerUnit)/duration.Seconds()),
-				int(*ratelimit.InputTokensPerUnit),
-			)
-		}
+	// Process output rate limiter
+	if ratelimit.OutputTokensPerUnit != nil {
+		oldOutputConfig, exists := r.outputLimiters[model]
+		if !exists || outputConfigChanged(oldOutputConfig) {
+			// Config changed or doesn't exist - create new limiter
+			var newLimiter Limiter
 
-		if ratelimit.OutputTokensPerUnit != nil {
-			r.outputLimiter[model] = NewLocalLimiter(
-				rate.Limit(float64(*ratelimit.OutputTokensPerUnit)/duration.Seconds()),
-				int(*ratelimit.OutputTokensPerUnit),
-			)
+			if useGlobal {
+				newLimiter = NewGlobalRateLimiter(
+					r.redisClient,
+					"kthena:ratelimit",
+					model,
+					"output",
+					*ratelimit.OutputTokensPerUnit,
+					ratelimit.Unit,
+				)
+			} else {
+				// Create local rate limiter
+				duration := getTimeUnitDuration(ratelimit.Unit)
+				newLimiter = NewLocalLimiter(
+					rate.Limit(float64(*ratelimit.OutputTokensPerUnit)/duration.Seconds()),
+					int(*ratelimit.OutputTokensPerUnit),
+				)
+			}
+
+			r.outputLimiters[model] = &LimiterConfig{
+				Limiter:            newLimiter,
+				TokensPerUnit:      *ratelimit.OutputTokensPerUnit, // copied value
+				Unit:               ratelimit.Unit,
+				IsGlobal:           useGlobal,
+				GlobalRedisAddress: redisAddr,
+			}
 		}
+		// If config hasn't changed, keep existing limiter with its state
+	} else {
+		// Output rate limit removed
+		delete(r.outputLimiters, model)
 	}
 
 	return nil
@@ -208,8 +320,8 @@ func (r *TokenRateLimiter) DeleteLimiter(model string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	delete(r.inputLimiter, model)
-	delete(r.outputLimiter, model)
+	delete(r.inputLimiters, model)
+	delete(r.outputLimiters, model)
 }
 
 func getTimeUnitDuration(unit networkingv1alpha1.RateLimitUnit) time.Duration {
