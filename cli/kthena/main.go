@@ -21,6 +21,8 @@ package main
 
 import (
 	"embed"
+	"fmt"
+	"os"
 
 	"github.com/volcano-sh/kthena/cli/kthena/cmd"
 )
@@ -30,5 +32,13 @@ var templatesFS embed.FS
 
 func main() {
 	cmd.InitTemplates(templatesFS)
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("Recovered:", r)
+			os.Exit(1)
+		}
+	}()
 	cmd.Execute()
+	os.Exit(0)
 }
