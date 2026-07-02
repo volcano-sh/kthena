@@ -1,0 +1,14 @@
+# ModelRoute - routes traffic to mocker ModelServer
+# Routing strategy is controlled by the router scheduler config (ConfigMap), not this resource.
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: mocker-model-route
+  namespace: default
+  labels:
+    app: model-route
+spec:
+  modelName: "Qwen/Qwen3-0.6B"
+  rules:
+  - targetModels:
+    - modelServerName: mocker-model-server
