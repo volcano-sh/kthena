@@ -310,6 +310,10 @@ type PodInfo struct {
 	// kept in sync with the global Redis counter so it reflects cross-router traffic.
 	onFlightRequestNum atomic.Int64
 
+	// pendingOnFlightDelta accumulates failed Redis increments/decrements (+1 or -1)
+	// to be pushed asynchronously, ensuring eventual consistency when Redis recovers.
+	pendingOnFlightDelta atomic.Int64
+
 	mutex sync.RWMutex // Protects concurrent access to Pod, engine, metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
 	models      sets.Set[string]               // running models. Including base model and lora adapters.
@@ -336,17 +340,9 @@ type modelRouteInfo struct {
 	loras []string
 }
 
-type retryItem struct {
-	podName types.NamespacedName
-	delta   int64
-}
-
 type store struct {
 	modelServer sync.Map // map[types.NamespacedName]*modelServer
 	pods        sync.Map // map[types.NamespacedName]*PodInfo
-
-	// retry channel for async Redis increments/decrements
-	retryCh chan retryItem
 
 	// onFlightCounter is optional. When non-nil (Redis-backed), in-flight request
 	// counts are shared across all router replicas via Redis. When nil, only the
@@ -411,7 +407,6 @@ func New(opts ...Option) Store {
 		podRuntimeInspector:   realPodRuntimeInspector{},
 		fairnessQueueConfig:   createFairnessQueueConfig(),
 		metricsScrapeInterval: parseMetricsScrapeInterval(),
-		retryCh:               make(chan retryItem, 1000),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -567,7 +562,39 @@ func parseMetricsScrapeInterval() time.Duration {
 
 func (s *store) Run(ctx context.Context) {
 	s.rootCtx = ctx
-	go s.processRetries(ctx)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if s.onFlightCounter == nil {
+					continue
+				}
+				s.pods.Range(func(key, value any) bool {
+					podName := key.(types.NamespacedName)
+					podInfo := value.(*PodInfo)
+					delta := podInfo.pendingOnFlightDelta.Load()
+					if delta != 0 {
+						deltaToApply := podInfo.pendingOnFlightDelta.Swap(0)
+						if deltaToApply != 0 {
+							retryCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+							_, err := s.onFlightCounter.Add(retryCtx, podName, deltaToApply)
+							cancel()
+							if err != nil {
+								podInfo.pendingOnFlightDelta.Add(deltaToApply) // failed, revert
+							} else {
+								klog.V(4).Infof("Successfully retried in-flight delta %d for pod %s", deltaToApply, podName)
+							}
+						}
+					}
+					return true
+				})
+			}
+		}
+	}()
 	go func() {
 		ticker := time.NewTicker(s.metricsScrapeInterval)
 		defer ticker.Stop()
@@ -600,46 +627,6 @@ func (s *store) Run(ctx context.Context) {
 			}
 		}
 	}()
-}
-
-func (s *store) processRetries(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case item := <-s.retryCh:
-			backoff := 100 * time.Millisecond
-			for {
-				if _, ok := s.pods.Load(item.podName); !ok {
-					klog.V(4).Infof("Pod %s no longer in store, dropping in-flight retry", item.podName)
-					break
-				}
-				
-				var err error
-				retryCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-				if item.delta > 0 {
-					_, err = s.onFlightCounter.Incr(retryCtx, item.podName)
-				} else {
-					_, err = s.onFlightCounter.Decr(retryCtx, item.podName)
-				}
-				cancel()
-				
-				if err == nil {
-					klog.V(4).Infof("Successfully retried in-flight delta %d for pod %s", item.delta, item.podName)
-					break
-				}
-				
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-					if backoff < 5*time.Second {
-						backoff *= 2
-					}
-				}
-			}
-		}
-	}
 }
 
 // SyncOnFlightCounts fetches current on-flight counts for all tracked pods from
@@ -685,7 +672,11 @@ func (s *store) SyncOnFlightCounts() {
 	}
 	for podName, count := range counts {
 		if value, ok := s.pods.Load(podName); ok {
-			value.(*PodInfo).SetOnFlightRequestNum(count)
+			podInfo := value.(*PodInfo)
+			// Skip sync if local has unflushed deltas to avoid backward drift
+			if podInfo.pendingOnFlightDelta.Load() == 0 {
+				podInfo.SetOnFlightRequestNum(count)
+			}
 		}
 	}
 }
@@ -861,14 +852,13 @@ func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if count, err := s.onFlightCounter.Incr(ctx, podName); err == nil {
-			podInfo.SetOnFlightRequestNum(count) // sync with global count
+			// Skip sync if local has unflushed deltas to avoid backward drift
+			if podInfo.pendingOnFlightDelta.Load() == 0 {
+				podInfo.SetOnFlightRequestNum(count) // sync with global count
+			}
 		} else {
 			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, queueing for retry", podName, err)
-			select {
-			case s.retryCh <- retryItem{podName: podName, delta: 1}:
-			default:
-				klog.Warningf("Retry channel full, dropping in-flight incr for pod %s", podName)
-			}
+			podInfo.pendingOnFlightDelta.Add(1)
 		}
 	}
 }
@@ -886,14 +876,13 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if count, err := s.onFlightCounter.Decr(ctx, podName); err == nil {
-			podInfo.SetOnFlightRequestNum(count) // sync with global count
+			// Skip sync if local has unflushed deltas to avoid backward drift
+			if podInfo.pendingOnFlightDelta.Load() == 0 {
+				podInfo.SetOnFlightRequestNum(count) // sync with global count
+			}
 		} else {
 			klog.V(4).Infof("Redis on-flight decr failed for pod %s: %v, queueing for retry", podName, err)
-			select {
-			case s.retryCh <- retryItem{podName: podName, delta: -1}:
-			default:
-				klog.Warningf("Retry channel full, dropping in-flight decr for pod %s", podName)
-			}
+			podInfo.pendingOnFlightDelta.Add(-1)
 		}
 	}
 }
@@ -1919,7 +1908,15 @@ func (p *PodInfo) IncrOnFlightRequests() int64 {
 // DecrOnFlightRequests atomically decrements the local in-flight counter and
 // returns the new value.
 func (p *PodInfo) DecrOnFlightRequests() int64 {
-	return p.onFlightRequestNum.Add(-1)
+	for {
+		old := p.onFlightRequestNum.Load()
+		if old <= 0 {
+			return 0
+		}
+		if p.onFlightRequestNum.CompareAndSwap(old, old-1) {
+			return old - 1
+		}
+	}
 }
 
 // SetOnFlightRequestNum atomically stores a new value for the in-flight counter
