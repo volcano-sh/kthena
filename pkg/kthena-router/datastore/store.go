@@ -2182,9 +2182,29 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 	key := fmt.Sprintf("%s/%s", httpRoute.Namespace, httpRoute.Name)
 
 	s.httpRouteMutex.Lock()
+	oldRoute := s.httpRoutes[key]
 	s.httpRoutes[key] = httpRoute
 
 	// Update gateway routes mapping
+	if oldRoute != nil {
+		for _, parentRef := range oldRoute.Spec.ParentRefs {
+			if isGatewayParentRef(parentRef) {
+				gatewayName := string(parentRef.Name)
+				gatewayNamespace := oldRoute.Namespace
+				if parentRef.Namespace != nil {
+					gatewayNamespace = string(*parentRef.Namespace)
+				}
+				gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, gatewayName)
+
+				if routeSet, exists := s.gatewayRoutes[gatewayKey]; exists {
+					routeSet.Delete(key)
+					if routeSet.IsEmpty() {
+						delete(s.gatewayRoutes, gatewayKey)
+					}
+				}
+			}
+		}
+	}
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
 		if isGatewayParentRef(parentRef) {
 			gatewayName := string(parentRef.Name)

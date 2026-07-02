@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
@@ -67,23 +68,23 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 
 		_, err := gatewayClient.GatewayV1().Gateways("default").Create(
 			context.Background(), gw, metav1.CreateOptions{})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		if !waitForCacheSync(t, 5*time.Second, controller.gatewaySynced) {
 			t.Fatal("Failed to sync caches within timeout")
 		}
 
-		found := waitForObjectInCache(t, 2*time.Second, func() bool {
+		found := waitForObjectInCache(t, 5*time.Second, func() bool {
 			_, err := controller.gatewayLister.Gateways("default").Get("test-gateway")
 			return err == nil
 		})
-		assert.True(t, found, "Gateway should be in cache")
+		require.True(t, found, "Gateway should be in cache")
 
 		err = controller.syncHandler("default/test-gateway")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		stored := store.GetGateway("default/test-gateway")
-		assert.NotNil(t, stored)
+		require.NotNil(t, stored)
 		assert.Equal(t, "test-gateway", stored.Name)
 	})
 
@@ -92,26 +93,26 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 		// informer cache and datastore after syncHandler is called
 		existing, err := gatewayClient.GatewayV1().Gateways("default").Get(
 			context.Background(), "test-gateway", metav1.GetOptions{})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		updated := existing.DeepCopy()
 		updated.Spec.Listeners[0].Port = 8080
 
 		_, err = gatewayClient.GatewayV1().Gateways("default").Update(
 			context.Background(), updated, metav1.UpdateOptions{})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		found := waitForObjectInCache(t, 2*time.Second, func() bool {
+		found := waitForObjectInCache(t, 5*time.Second, func() bool {
 			gw, err := controller.gatewayLister.Gateways("default").Get("test-gateway")
 			return err == nil && gw.Spec.Listeners[0].Port == 8080
 		})
-		assert.True(t, found, "Gateway update should be reflected in cache")
+		require.True(t, found, "Gateway update should be reflected in cache")
 
 		err = controller.syncHandler("default/test-gateway")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		stored := store.GetGateway("default/test-gateway")
-		assert.NotNil(t, stored)
+		require.NotNil(t, stored)
 		assert.Equal(t, gatewayv1.PortNumber(8080), stored.Spec.Listeners[0].Port)
 	})
 
@@ -120,16 +121,16 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 		// cache and the datastore after syncHandler is called.
 		err := gatewayClient.GatewayV1().Gateways("default").Delete(
 			context.Background(), "test-gateway", metav1.DeleteOptions{})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		found := waitForObjectInCache(t, 2*time.Second, func() bool {
+		found := waitForObjectInCache(t, 5*time.Second, func() bool {
 			_, err := controller.gatewayLister.Gateways("default").Get("test-gateway")
 			return err != nil
 		})
-		assert.True(t, found, "Gateway should be removed from cache")
+		require.True(t, found, "Gateway should be removed from cache")
 
 		err = controller.syncHandler("default/test-gateway")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		stored := store.GetGateway("default/test-gateway")
 		assert.Nil(t, stored)

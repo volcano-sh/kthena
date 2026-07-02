@@ -192,10 +192,12 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 		gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, string(parentRef.Name))
 		gw := c.store.GetGateway(gatewayKey)
 		if gw == nil {
-			if _, err := c.gatewayLister.Gateways(gatewayNamespace).Get(string(parentRef.Name)); err == nil {
+			informerGateway, err := c.gatewayLister.Gateways(gatewayNamespace).Get(string(parentRef.Name))
+			if err != nil {
 				gatewayPending = true
+				continue
 			}
-			continue
+			gw = informerGateway
 		}
 		if string(gw.Spec.GatewayClassName) == DefaultGatewayClassName {
 			allowed, err := c.gatewayAllowsHTTPRoute(gw, httpRoute, parentRef)

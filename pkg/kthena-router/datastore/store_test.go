@@ -1567,6 +1567,27 @@ func newStore(inspector ...PodRuntimeInspector) *store {
 	return New(WithPodRuntimeInspector(inspector[0])).(*store)
 }
 
+func TestAddOrUpdateHTTPRoute_UpdatesGatewayRoutes(t *testing.T) {
+	s := newStore()
+
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gateway-a"}},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(route))
+
+	route = route.DeepCopy()
+	route.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: "gateway-b"}}
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(route))
+
+	assert.Empty(t, s.GetHTTPRoutesByGateway("default/gateway-a"))
+	assert.Len(t, s.GetHTTPRoutesByGateway("default/gateway-b"), 1)
+}
+
 func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 	sampleCount := uint64(100)
 	sampleSum := 0.42

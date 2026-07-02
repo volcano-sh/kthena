@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -47,7 +48,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	ctrl := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
 	stop := make(chan struct{})
 	defer close(stop)
-	gatewayInformerFactory.Start(stop)
 
 	ctx := context.Background()
 	ns := "default"
@@ -99,6 +99,8 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	_, err = gatewayClient.GatewayV1().HTTPRoutes("other-ns").Create(ctx, httpRoute3, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
+	gatewayInformerFactory.Start(stop)
+
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
 	if !cache.WaitForCacheSync(stop, gatewayInformer.Informer().HasSynced) {
 		t.Fatal("gateway cache sync timeout")
@@ -108,7 +110,13 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 		t.Fatal("httproute cache sync timeout")
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	found := waitForObjectInCache(t, 5*time.Second, func() bool {
+		_, err1 := ctrl.httpRouteLister.HTTPRoutes(ns).Get("route-1")
+		_, err2 := ctrl.httpRouteLister.HTTPRoutes("other-ns").Get("route-3")
+		return err1 == nil && err2 == nil
+	})
+	require.True(t, found, "HTTPRoutes should be in cache")
+
 	for ctrl.workqueue.Len() > 0 {
 		obj, _ := ctrl.workqueue.Get()
 		ctrl.workqueue.Done(obj)
@@ -129,7 +137,6 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	ctrl := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
 	stop := make(chan struct{})
 	defer close(stop)
-	gatewayInformerFactory.Start(stop)
 
 	ctx := context.Background()
 	ns := "default"
@@ -155,11 +162,18 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
+	gatewayInformerFactory.Start(stop)
+
 	if !cache.WaitForCacheSync(stop, gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced) {
 		t.Fatal("cache sync timeout")
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	found := waitForObjectInCache(t, 5*time.Second, func() bool {
+		_, err := ctrl.httpRouteLister.HTTPRoutes(ns).Get("route-1")
+		return err == nil
+	})
+	require.True(t, found, "HTTPRoute should be in cache")
+
 	for ctrl.workqueue.Len() > 0 {
 		obj, _ := ctrl.workqueue.Get()
 		ctrl.workqueue.Done(obj)
@@ -359,4 +373,126 @@ func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 	err = ctrl.syncHandler(ns + "/route-multi")
 	assert.NoError(t, err)
 	assert.NotNil(t, store.GetHTTPRoute(ns+"/route-multi"))
+}
+
+func TestHTTPRouteController_SyncHandler_MovesRouteWithGatewayOnlyInInformer(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
+	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
+	store := datastore.New()
+
+	ctx := context.Background()
+	ns := "default"
+
+	oldRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway-a")},
+				},
+			},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(oldRoute))
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "gateway-b"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: gatewayv1.ObjectName(DefaultGatewayClassName),
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     gatewayv1.SectionName("http"),
+					Port:     gatewayv1.PortNumber(80),
+					Protocol: gatewayv1.HTTPProtocolType,
+				},
+			},
+		},
+	}
+	_, err := gatewayClient.GatewayV1().Gateways(ns).Create(ctx, gw, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	httpRoute := oldRoute.DeepCopy()
+	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
+		{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway-b")},
+	}
+	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	ctrl := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	stop := make(chan struct{})
+	defer close(stop)
+	gatewayInformerFactory.Start(stop)
+
+	if !cache.WaitForCacheSync(stop, gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced, gatewayInformerFactory.Gateway().V1().Gateways().Informer().HasSynced) {
+		t.Fatal("cache sync timeout")
+	}
+
+	err = ctrl.syncHandler(ns + "/route")
+	assert.NoError(t, err)
+	assert.Empty(t, store.GetHTTPRoutesByGateway(ns+"/gateway-a"))
+	assert.Len(t, store.GetHTTPRoutesByGateway(ns+"/gateway-b"), 1)
+}
+
+func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
+	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
+	store := datastore.New()
+
+	ctx := context.Background()
+	ns := "default"
+	httpRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway")},
+				},
+			},
+		},
+	}
+	_, err := gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	ctrl := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	stop := make(chan struct{})
+	defer close(stop)
+	gatewayInformerFactory.Start(stop)
+
+	if !cache.WaitForCacheSync(stop, gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced, gatewayInformerFactory.Gateway().V1().Gateways().Informer().HasSynced) {
+		t.Fatal("cache sync timeout")
+	}
+
+	err = ctrl.syncHandler(ns + "/route")
+	assert.Error(t, err)
+	assert.Nil(t, store.GetHTTPRoute(ns+"/route"))
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "gateway"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: gatewayv1.ObjectName(DefaultGatewayClassName),
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     gatewayv1.SectionName("http"),
+					Port:     gatewayv1.PortNumber(80),
+					Protocol: gatewayv1.HTTPProtocolType,
+				},
+			},
+		},
+	}
+	_, err = gatewayClient.GatewayV1().Gateways(ns).Create(ctx, gw, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	found := waitForObjectInCache(t, 5*time.Second, func() bool {
+		_, err := ctrl.gatewayLister.Gateways(ns).Get("gateway")
+		return err == nil
+	})
+	require.True(t, found, "Gateway should be in cache")
+
+	err = ctrl.syncHandler(ns + "/route")
+	assert.NoError(t, err)
+	assert.Len(t, store.GetHTTPRoutesByGateway(ns+"/gateway"), 1)
 }
