@@ -321,7 +321,7 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 	if recommendedInstances == nil {
 		return outcomeStable, nil
 	}
-	// Do update replicas
+	// Do update replicas; compute direction only after a successful update.
 	outcome := outcomeStable
 	for _, param := range optimizer.Meta.Config.Params {
 		instancesCount, exists := recommendedInstances[param.Target.TargetRef.Name]
@@ -329,11 +329,11 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 			klog.Warningf("recommended instances not exists, target ref name: %s", param.Target.TargetRef.Name)
 			continue
 		}
-		outcome = mergeOutcome(outcome, outcomeFromChange(replicasMap[param.Target.TargetRef.Name], instancesCount))
 		if err := ac.updateTargetReplicas(ctx, &param.Target, autoscalePolicy.Namespace, instancesCount); err != nil {
 			klog.Errorf("failed to update target kind:%s name: %s replicas:%d, err: %v", param.Target.TargetRef.Kind, param.Target.TargetRef.Name, instancesCount, err)
 			return outcomeStable, err
 		}
+		outcome = mergeOutcome(outcome, outcomeFromChange(replicasMap[param.Target.TargetRef.Name], instancesCount))
 	}
 
 	return outcome, nil
