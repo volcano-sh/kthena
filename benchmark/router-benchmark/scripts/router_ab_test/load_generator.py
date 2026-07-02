@@ -1,3 +1,16 @@
+# Copyright The Volcano Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from __future__ import annotations
 
 import hashlib
@@ -26,8 +39,14 @@ class AIPerfRunner:
 
     @staticmethod
     def _parse_duration_seconds(duration: str) -> int:
-        """Parse a duration string like '60s', '5m', '1h' to seconds."""
-        match = re.fullmatch(r"(\d+)\s*(s|m|h)", duration.strip().lower())
+        """Parse a duration string like '60s', '5m', '1h' to seconds.
+        Or directly '60' in seconds."""
+        if isinstance(duration, int):
+            return duration
+        duration_str = str(duration).strip().lower()
+        if duration_str.isdigit():
+            return int(duration_str)
+        match = re.fullmatch(r"(\d+)\s*(s|m|h)", duration_str)
         if not match:
             raise ValueError(f"Invalid duration format: {duration!r}")
         value = int(match.group(1))

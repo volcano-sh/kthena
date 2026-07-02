@@ -1,3 +1,16 @@
+# Copyright The Volcano Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from __future__ import annotations
 
 import select
@@ -17,20 +30,21 @@ class K8sManager:
     """Manage Kubernetes resources needed by the benchmark."""
 
     ROUTER_NAMESPACE = "kthena-system"
-    ROUTER_DEPLOYMENT = "kthena-router"
+    ROUTER_DEPLOYMENT = "kthena-router"  # SVC uses the same name
     ROUTER_SVC_PORT = 80
     ROUTER_SVC_NAME = "kthena-router"
     ROUTER_DEBUG_PORT = 15000
     DEFAULT_LOCAL_PORT = 8080
     DEFAULT_DEBUG_LOCAL_PORT = 18080
+    MOCKER_NAMESPACE = "default"
     MOCKER_DEPLOYMENT = "mocker-llm"
 
     def __init__(
-        self,
-        namespace: str = "default",
-        local_port: int = DEFAULT_LOCAL_PORT,
-        debug_local_port: int = DEFAULT_DEBUG_LOCAL_PORT,
-        endpoint_mode: str = EndpointMode.PORT_FORWARD,
+            self,
+            namespace: str = "default",
+            local_port: int = DEFAULT_LOCAL_PORT,
+            debug_local_port: int = DEFAULT_DEBUG_LOCAL_PORT,
+            endpoint_mode: str = EndpointMode.PORT_FORWARD,
     ):
         self.namespace = namespace
         self.local_port = local_port
@@ -99,6 +113,8 @@ class K8sManager:
                 "rollout",
                 "status",
                 f"deployment/{self.MOCKER_DEPLOYMENT}",
+                "-n",
+                self.MOCKER_NAMESPACE,
                 "--timeout=120s",
             ],
             check=True,
@@ -111,9 +127,9 @@ class K8sManager:
         print(f"  Probing router for model={mocker_model_name} at {endpoint}...")
         deadline = time.monotonic() + timeout
         request_body = (
-            '{"model":"'
-            + mocker_model_name
-            + '","messages":[{"role":"user","content":"ping"}],"max_tokens":1}'
+                '{"model":"'
+                + mocker_model_name
+                + '","messages":[{"role":"user","content":"ping"}],"max_tokens":1}'
         )
         while time.monotonic() < deadline:
             try:
@@ -193,7 +209,7 @@ class K8sManager:
                 f"LoadBalancer Service {self.ROUTER_SVC_NAME} has no EXTERNAL-IP. "
             )
 
-        # Get the node port from the Service
+        # Get the service port from the Service
         result = subprocess.run(
             [
                 "kubectl",
@@ -203,16 +219,16 @@ class K8sManager:
                 "-n",
                 self.ROUTER_NAMESPACE,
                 "-o",
-                "jsonpath={.spec.ports[0].nodePort}",
-                ],
+                "jsonpath={.spec.ports[0].port}",
+            ],
             capture_output=True,
             text=True,
         )
-        node_port = result.stdout.strip()
-        if not node_port:
-            raise RuntimeError("Failed to get nodePort from router Service")
+        port = result.stdout.strip()
+        if not port:
+            raise RuntimeError("Failed to get port from router Service")
 
-        endpoint = f"{external_ip}:{node_port}"
+        endpoint = f"{external_ip}:{port}"
         print(f"  Using LB endpoint: {endpoint}")
         return endpoint
 
@@ -237,12 +253,12 @@ class K8sManager:
         self._stop_port_forward("_debug_pf_proc")
 
     def _start_port_forward(
-        self,
-        process_attr: str,
-        local_port: int,
-        remote_port: int,
-        description: str,
-        target_type: str = "svc",
+            self,
+            process_attr: str,
+            local_port: int,
+            remote_port: int,
+            description: str,
+            target_type: str = "svc",
     ) -> str:
         existing_proc = getattr(self, process_attr)
         if existing_proc is not None and existing_proc.poll() is None:
@@ -261,7 +277,7 @@ class K8sManager:
                 "-n",
                 self.ROUTER_NAMESPACE,
             ],
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )

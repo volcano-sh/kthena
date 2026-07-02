@@ -108,7 +108,7 @@ jobs:
         run: |
           kubectl apply -f k8s/modelserver.yaml
           kubectl apply -f k8s/modelroute.yaml
-          # `kubectl wait` unimplement 
+          # `kubectl wait` unimplemented
 
       - name: Install AIPerf
         run: |
