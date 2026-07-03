@@ -86,7 +86,6 @@ def main() -> None:
         router_config_b_path=args.router_config_b,
         output_dir=args.output,
         local_port=args.local_port,
-        mocker_manifest=args.mocker_manifest,
         endpoint_mode=args.endpoint_mode,
     )
     report = orchestrator.run()

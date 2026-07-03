@@ -31,18 +31,15 @@ backends:
   responseTokens: 128
   errorRate: 0.0
 
-routing:
-  strategy: "least-latency"
-
 metrics:
   prometheus: true
   pprof: false
-  cpuProfileSeconds: 15
-  profiles:
-    - heap
-    - goroutine
-    - allocs
-    - mutex
+#  cpuProfileSeconds: 15
+#  profiles:
+#    - heap
+#    - goroutine
+#    - allocs
+#    - mutex
 
 aiperf:
   extraArgs:

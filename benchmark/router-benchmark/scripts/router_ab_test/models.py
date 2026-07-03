@@ -26,7 +26,6 @@ class ScenarioConfig:
     description: str
     load: dict[str, Any]
     backends: dict[str, Any]
-    routing: dict[str, Any]
     aiperf: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
 

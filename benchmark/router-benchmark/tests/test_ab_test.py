@@ -249,7 +249,6 @@ class MainTest(unittest.TestCase):
             router_config_b="config-b.yaml",
             output="./results",
             local_port=ab_test.K8sManager.DEFAULT_LOCAL_PORT,
-            mocker_manifest=None,
         )
         parser = mock.Mock()
         parser.parse_args.return_value = args

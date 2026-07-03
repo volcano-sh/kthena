@@ -4,7 +4,7 @@ description: "s8 scenario: schedule strategy comparison"
 load:
   schedule:
     mode: "rate"
-    rate: 100
+    rate: 50
   traffic:
     burstiness: 1.0
     ramp:
@@ -43,18 +43,9 @@ backends:
   responseTokens: 128
   errorRate: 0.0
 
-routing:
-  strategy: "least-request"
-
 metrics:
   prometheus: true
-  pprof: true
-  cpuProfileSeconds: 15
-  profiles:
-    - heap
-    - goroutine
-    - allocs
-    - mutex
+  pprof: false
 
 aiperf:
   extraArgs:

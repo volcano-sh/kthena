@@ -137,10 +137,8 @@ class K8sManager:
                     [
                         "curl",
                         "-s",
-                        "-o",
-                        "/dev/null",
                         "-w",
-                        "%{http_code}",
+                        "\n%{http_code}",
                         "-X",
                         "POST",
                         f"http://{endpoint}/v1/chat/completions",
@@ -157,13 +155,19 @@ class K8sManager:
                 time.sleep(2)
                 continue
 
-            status_code = result.stdout.strip()
+            output = result.stdout
+            if "\n" in output:
+                body, status_code = output.rsplit("\n", 1)
+            else:
+                body, status_code = "", output
+
+            status_code = status_code.strip()
             if status_code == "200":
                 print(f"  Router route for '{mocker_model_name}' is ready")
                 return
-            if status_code != "404":
-                print(f"  Router probe returned {status_code}, retrying...")
-            time.sleep(2)
+            body_preview = body.strip()[:200]
+            print(f"  Router probe returned {status_code}: {body_preview}")
+            time.sleep(5)
 
         raise RuntimeError(f"Router route for '{mocker_model_name}' not ready within {timeout}s.")
 

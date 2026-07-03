@@ -43,8 +43,9 @@ backends:
   responseTokens: 128
   errorRate: 0.0
 
-routing:
-  strategy: "least-latency"
+metrics:
+  prometheus: true
+  pprof: false
 
 aiperf:
   extraArgs:
