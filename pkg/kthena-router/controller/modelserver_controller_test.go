@@ -76,7 +76,6 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 		kubeInformerFactory,
 		store,
 	)
-	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -106,13 +105,15 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			t.Fatal("Failed to sync caches within timeout")
 		}
 
-		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
-		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver")
+		// write through fake API so status update can Get
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		// Simulate controller receiving the event
-		controller.enqueueModelServer(ms)
-		assert.Equal(t, 1, controller.workqueue.Len())
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver")
+			return err == nil
+		})
 
 		// Process the queue item
 		err = controller.syncModelServerHandler("default/test-modelserver")
@@ -147,35 +148,31 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
-		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+		// update via fake API, verify store reflects changes
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		// Process initial creation
-		controller.enqueueModelServer(ms)
-		err = controller.syncModelServerHandler("default/test-modelserver-update")
-		assert.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+			return err == nil
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/test-modelserver-update"))
 
 		// Update ModelServer
 		updatedMS := ms.DeepCopy()
 		updatedMS.Labels["version"] = "v2"
 		updatedMS.Spec.WorkloadSelector.MatchLabels["environment"] = "production"
 
-		require.NoError(t, modelServerIndexer.Update(updatedMS.DeepCopy()))
-		cachedMS, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+		_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Update(
+			context.Background(), updatedMS, metav1.UpdateOptions{})
 		require.NoError(t, err)
-		assert.Equal(t, "v2", cachedMS.Labels["version"])
 
-		// Simulate controller receiving update event
-		controller.enqueueModelServer(updatedMS)
-		// Clear any previous items from queue
-		for controller.workqueue.Len() > 0 {
-			item, _ := controller.workqueue.Get()
-			controller.workqueue.Done(item)
-			controller.workqueue.Forget(item)
-		}
-		controller.enqueueModelServer(updatedMS)
-		assert.Equal(t, 1, controller.workqueue.Len())
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			cached, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+			return err == nil && cached.Labels["version"] == "v2"
+		})
 
 		// Process the update
 		err = controller.syncModelServerHandler("default/test-modelserver-update")
@@ -208,9 +205,15 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
-		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+		// delete via fake API, verify removed from store
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+			return err == nil
+		})
 
 		// Process creation
 		err = controller.syncModelServerHandler("default/test-modelserver-delete")
@@ -223,9 +226,14 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 		})
 		require.NotNil(t, storedMS, "ModelServer should be found in store before deletion")
 
-		require.NoError(t, modelServerIndexer.Delete(ms.DeepCopy()))
-		_, err = controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
-		assert.Error(t, err)
+		err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Delete(
+			context.Background(), "test-modelserver-delete", metav1.DeleteOptions{})
+		assert.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+			return err != nil
+		})
 
 		// Process the deletion - this should handle the NotFound error gracefully
 		err = controller.syncModelServerHandler("default/test-modelserver-delete")
