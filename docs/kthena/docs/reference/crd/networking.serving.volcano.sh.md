@@ -188,6 +188,9 @@ ModelRouteStatus defines the observed state of ModelRoute.
 _Appears in:_
 - [ModelRoute](#modelroute)
 
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | observedGeneration is the most recent generation observed for this ModelRoute. |  |  |
 
 
 #### ModelServer
@@ -258,6 +261,11 @@ ModelServerStatus defines the observed state of ModelServer.
 _Appears in:_
 - [ModelServer](#modelserver)
 
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | observedGeneration is the most recent generation observed for this ModelServer. |  |  |
+| `readyReplicas` _integer_ | readyReplicas is the number of ready pods that are currently matched by the<br />workloadSelector and have been successfully registered in the router's store. |  |  |
+| `matchedReplicas` _integer_ | matchedReplicas is the total number of pods (ready or not) that match the<br />workloadSelector. |  |  |
 
 
 #### PDGroup

@@ -46,10 +46,14 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &networkingv1alpha1.ModelRouteApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelRouteSpec"):
 		return &networkingv1alpha1.ModelRouteSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("ModelRouteStatus"):
+		return &networkingv1alpha1.ModelRouteStatusApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelServer"):
 		return &networkingv1alpha1.ModelServerApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelServerSpec"):
 		return &networkingv1alpha1.ModelServerSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("ModelServerStatus"):
+		return &networkingv1alpha1.ModelServerStatusApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("PDGroup"):
 		return &networkingv1alpha1.PDGroupApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("RateLimit"):
