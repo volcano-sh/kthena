@@ -46,6 +46,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
+// ResourceType represents the type of Kubernetes resource
 type ResourceType string
 
 const (
@@ -53,6 +54,7 @@ const (
 	ResourceTypePod         ResourceType = "Pod"
 )
 
+// QueueItem represents an item in the work queue
 type QueueItem struct {
 	ResourceType ResourceType
 	Key          string
@@ -66,6 +68,7 @@ type ModelServerController struct {
 	modelServerSynced cache.InformerSynced
 	podSynced         cache.InformerSynced
 
+	// Event handler registrations
 	modelServerRegistration cache.ResourceEventHandlerRegistration
 	podRegistration         cache.ResourceEventHandlerRegistration
 
@@ -94,6 +97,7 @@ func NewModelServerController(
 		store:             store,
 	}
 
+	// Register ModelServer event handlers
 	controller.modelServerRegistration, _ = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueModelServer,
 		UpdateFunc: func(old, new interface{}) {
@@ -102,6 +106,7 @@ func NewModelServerController(
 		DeleteFunc: controller.enqueueModelServer,
 	})
 
+	// Register Pod event handlers
 	controller.podRegistration, _ = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueuePod,
 		UpdateFunc: func(old, new interface{}) {
@@ -120,6 +125,7 @@ func (c *ModelServerController) Run(stopCh <-chan struct{}) error {
 	if ok := cache.WaitForCacheSync(stopCh, c.modelServerSynced, c.podSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
+	// add initialSync signal
 	c.workqueue.Add(QueueItem{})
 
 	go wait.Until(c.runWorker, time.Second, stopCh)
@@ -144,6 +150,7 @@ func (c *ModelServerController) processNextWorkItem() bool {
 	}
 	defer c.workqueue.Done(obj)
 
+	// Handle initial sync signal
 	if obj.ResourceType == "" && obj.Key == "" {
 		klog.V(2).Info("initial modelServer and pod resources have been synced")
 		c.workqueue.Forget(obj)
@@ -323,6 +330,9 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 	pod, err := c.podLister.Pods(namespace).Get(name)
 	if errors.IsNotFound(err) {
 		_ = c.store.DeletePod(types.NamespacedName{Namespace: namespace, Name: name})
+		// When a pod is deleted, enqueue all ModelServers in the namespace
+		// to refresh their status (we no longer have the pod to check labels).
+		c.enqueueModelServersInNamespace(namespace)
 		return nil
 	}
 	if err != nil {
@@ -331,27 +341,25 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 
 	if !isPodReady(pod) {
 		_ = c.store.DeletePod(types.NamespacedName{Namespace: namespace, Name: name})
+		// Pod became not ready: enqueue matching ModelServers to refresh status
+		c.enqueueMatchingModelServers(pod)
 		return nil
 	}
 
-	return c.addOrUpdatePod(pod)
+	if err := c.addOrUpdatePod(pod); err != nil {
+		return err
+	}
+	// Pod became ready: enqueue matching ModelServers to refresh status
+	c.enqueueMatchingModelServers(pod)
+	return nil
 }
 
 // addOrUpdatePod finds all ModelServers that match the given pod
 // and adds or updates the pod-server binding in the data store
 func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
-	modelServers, err := c.modelServerLister.ModelServers(pod.Namespace).List(labels.Everything())
+	servers, err := c.getMatchingModelServers(pod)
 	if err != nil {
-		return fmt.Errorf("failed to list ModelServers for pod %s/%s: %v", pod.Namespace, pod.Name, err)
-	}
-
-	servers := []*aiv1alpha1.ModelServer{}
-	for _, item := range modelServers {
-		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: item.Spec.WorkloadSelector.MatchLabels})
-		if err != nil || !selector.Matches(labels.Set(pod.Labels)) {
-			continue
-		}
-		servers = append(servers, item)
+		return err
 	}
 
 	if len(servers) > 0 {
@@ -361,6 +369,51 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 	}
 
 	return nil
+}
+
+// getMatchingModelServers returns all ModelServers in the same namespace whose
+// workloadSelector matches the pod's labels.
+func (c *ModelServerController) getMatchingModelServers(pod *corev1.Pod) ([]*aiv1alpha1.ModelServer, error) {
+	modelServers, err := c.modelServerLister.ModelServers(pod.Namespace).List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ModelServers for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+	}
+
+	var matching []*aiv1alpha1.ModelServer
+	for _, item := range modelServers {
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: item.Spec.WorkloadSelector.MatchLabels})
+		if err != nil || !selector.Matches(labels.Set(pod.Labels)) {
+			continue
+		}
+		matching = append(matching, item)
+	}
+	return matching, nil
+}
+
+// enqueueMatchingModelServers enqueues all ModelServers whose workloadSelector
+// matches the pod, triggering a status re-evaluation.
+func (c *ModelServerController) enqueueMatchingModelServers(pod *corev1.Pod) {
+	matching, err := c.getMatchingModelServers(pod)
+	if err != nil {
+		klog.V(4).Infof("failed to find matching ModelServers for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return
+	}
+	for _, ms := range matching {
+		c.enqueueModelServer(ms)
+	}
+}
+
+// enqueueModelServersInNamespace enqueues all ModelServers in the given namespace.
+// Used when a pod is deleted and we no longer have pod labels to narrow the search.
+func (c *ModelServerController) enqueueModelServersInNamespace(namespace string) {
+	msList, err := c.modelServerLister.ModelServers(namespace).List(labels.Everything())
+	if err != nil {
+		klog.V(4).Infof("failed to list ModelServers in namespace %s: %v", namespace, err)
+		return
+	}
+	for _, ms := range msList {
+		c.enqueueModelServer(ms)
+	}
 }
 
 func (c *ModelServerController) enqueueModelServer(obj interface{}) {
