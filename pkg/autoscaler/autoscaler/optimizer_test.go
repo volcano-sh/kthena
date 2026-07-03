@@ -17,6 +17,7 @@ limitations under the License.
 package autoscaler
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -191,4 +192,18 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOptimizer_Optimize_NilPanicThreshold_NoPanic(t *testing.T) {
+	policy := makePolicy("uid-6", "ns-1", 100, []workload.HeterogeneousTargetParam{
+		makeParam("h100", 10, 1, 4), // MinReplicas = 1
+	})
+	// Explicitly ensure PanicThresholdPercent is nil
+	policy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent = nil
+
+	optimizer := NewOptimizer(policy)
+	// Pass an empty currentInstancesCounts map so CurrentInstancesCount = 0.
+	// Since 0 < MinInstances (1), it returns early and reaches the nil check safely.
+	_, err := optimizer.Optimize(context.Background(), nil, policy, map[string]int32{})
+	assert.NoError(t, err)
 }
