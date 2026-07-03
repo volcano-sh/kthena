@@ -3,19 +3,18 @@ name: Router Benchmark
 on:
   workflow_dispatch:
 
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "benchmark/router-benchmark/**"
-      - "pkg/kthena-router/**"
-      - "charts/kthena/**"
-      - ".github/workflows/benchmark.yml"
+#  pull_request:
+#    branches:
+#      - main
+#    paths:
+#      - "benchmark/router-benchmark/**"
+#      - "pkg/kthena-router/**"
+#      - "charts/kthena/**"
+#      - ".github/workflows/benchmark.yml"
 
   push:
     branches:
       - feat/router-benchmark
-      - feat/benchmark-prototype
     paths:
       - "benchmark/router-benchmark/**"
       - "pkg/kthena-router/**"

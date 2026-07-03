@@ -33,7 +33,6 @@ class ABTestOrchestrator:
         router_config_b_path: str,
         output_dir: str,
         local_port: int = K8sManager.DEFAULT_LOCAL_PORT,
-        mocker_manifest: str | None = None,
         endpoint_mode: str = EndpointMode.PORT_FORWARD,
     ):
         self.scenario = ScenarioConfig.from_yaml(scenario_path)
