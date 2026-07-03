@@ -124,9 +124,10 @@ async def test_block_stored_writes_matrix_and_mapping_keys():
     # Pod registered against each matrix block (engine-agnostic namespace).
     hset_calls = [c for c in pipeline.calls if c[0] == "hset"]
     assert len(hset_calls) == 2
-    for (_, key, field, _), std_hash in zip(hset_calls, expected_std_hashes):
+    for (_, key, field, value), std_hash in zip(hset_calls, expected_std_hashes):
         assert key == f"matrix:kv:block:qwen@{std_hash}"
         assert field == "pod-1"
+        assert value.endswith("|GPU")
 
 
 @pytest.mark.asyncio
