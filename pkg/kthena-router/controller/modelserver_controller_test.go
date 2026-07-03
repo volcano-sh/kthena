@@ -1103,3 +1103,202 @@ func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() 
 		}
 	}
 }
+
+// drainModelServerKeys drains the workqueue and returns keys of enqueued ModelServer items.
+func drainModelServerKeys(controller *ModelServerController) []string {
+	var keys []string
+	for controller.workqueue.Len() > 0 {
+		item, _ := controller.workqueue.Get()
+		controller.workqueue.Done(item)
+		controller.workqueue.Forget(item)
+		if item.ResourceType == ResourceTypeModelServer {
+			keys = append(keys, item.Key)
+		}
+	}
+	return keys
+}
+
+// TestModelServerController_PodEnqueuesModelServer verifies that syncPodHandler
+// enqueues matching ModelServers after pod state changes.
+func TestModelServerController_PodEnqueuesModelServer(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms-enq"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "enq-test"},
+			},
+		},
+	}
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller := NewModelServerController(
+		kthenaClient, kthenaInformerFactory, kubeInformerFactory, store,
+	)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced)
+	waitForObjectInCache(t, 2*time.Second, func() bool {
+		_, err := controller.modelServerLister.ModelServers("default").Get("test-ms-enq")
+		return err == nil
+	})
+
+	// ready pod sync enqueues its matching ModelServer
+	t.Run("ReadyPodEnqueuesMatchingModelServer", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "ready-pod-enq",
+				Labels:    map[string]string{"app": "enq-test"},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_, err := kubeClient.CoreV1().Pods("default").Create(
+			context.Background(), pod, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("ready-pod-enq")
+			return e == nil && p.Name == "ready-pod-enq"
+		})
+		// drain any pending items before sync
+		drainModelServerKeys(controller)
+
+		err = controller.syncPodHandler("default/ready-pod-enq")
+		assert.NoError(t, err)
+
+		keys := drainModelServerKeys(controller)
+		assert.Contains(t, keys, "default/test-ms-enq")
+	})
+
+	// not-ready pod sync deletes from store and enqueues matching ModelServer
+	t.Run("NotReadyPodEnqueuesMatchingModelServer", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "notready-pod-enq",
+				Labels:    map[string]string{"app": "enq-test"},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+				},
+			},
+		}
+		_, err := kubeClient.CoreV1().Pods("default").Create(
+			context.Background(), pod, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("notready-pod-enq")
+			return e == nil && p.Name == "notready-pod-enq"
+		})
+		drainModelServerKeys(controller)
+
+		err = controller.syncPodHandler("default/notready-pod-enq")
+		assert.NoError(t, err)
+
+		keys := drainModelServerKeys(controller)
+		assert.Contains(t, keys, "default/test-ms-enq")
+	})
+
+	// deleted pod (not found in lister) enqueues all namespace ModelServers
+	t.Run("DeletedPodEnqueuesAllNamespaceModelServers", func(t *testing.T) {
+		drainModelServerKeys(controller)
+
+		err := controller.syncPodHandler("default/non-existent-pod-enq")
+		assert.NoError(t, err)
+
+		keys := drainModelServerKeys(controller)
+		assert.Contains(t, keys, "default/test-ms-enq")
+	})
+}
+
+// TestModelServerController_GetMatchingModelServers verifies the helper
+// returns correct ModelServers based on pod label matching.
+func TestModelServerController_GetMatchingModelServers(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	ms1 := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-match"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "myapp"},
+			},
+		},
+	}
+	ms2 := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-nomatch"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "other"},
+			},
+		},
+	}
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms1, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms2, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubefake.NewSimpleClientset(), 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	controller := NewModelServerController(
+		kthenaClient, kthenaInformerFactory, kubeInformerFactory, newStoreWithMockBackend(),
+	)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced)
+
+	// pod labels match one ModelServer's workloadSelector
+	t.Run("MatchingLabelsReturnsModelServer", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "matching-pod",
+				Labels:    map[string]string{"app": "myapp"},
+			},
+		}
+		result, err := controller.getMatchingModelServers(pod)
+		assert.NoError(t, err)
+		assert.Len(t, result, 1)
+		assert.Equal(t, "ms-match", result[0].Name)
+	})
+
+	// pod labels match no ModelServer
+	t.Run("NonMatchingLabelsReturnsEmpty", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "other-pod",
+				Labels:    map[string]string{"app": "nonexistent"},
+			},
+		}
+		result, err := controller.getMatchingModelServers(pod)
+		assert.NoError(t, err)
+		assert.Empty(t, result)
+	})
+}
