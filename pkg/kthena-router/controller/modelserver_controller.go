@@ -29,19 +29,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	kthenaclient "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/networking/v1alpha1"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	kthenaclient "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
@@ -217,11 +217,13 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		return err
 	}
 
+	// Get already bound pods to avoid unnecessary updates
 	existingPods, err := c.store.GetPodsByModelServer(utils.GetNamespaceName(ms))
 	if err != nil {
 		klog.V(4).Infof("failed to get existing pods for ModelServer %s/%s: %v", ms.Namespace, ms.Name, err)
 	}
 
+	// Build a set of existing pod names that are already bound to the model server
 	existingPodNames := sets.New[types.NamespacedName]()
 	for _, podInfo := range existingPods {
 		pod := podInfo.GetPod()
@@ -229,6 +231,7 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 			continue
 		}
 		if !podInfo.HasModelServer(utils.GetNamespaceName(ms)) {
+			// If the pod is not bound to the model server, establish the binding
 			if err := c.store.AppendModelServerToPod(pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
 				klog.Warningf("failed to append modelserver %s/%s to pod %s/%s: %v", ms.Namespace, ms.Name, pod.Namespace, pod.Name, err)
 				continue
@@ -237,12 +240,14 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		existingPodNames.Insert(utils.GetNamespaceName(pod))
 	}
 
+	// Add new pods that are not yet bound to the store
 	for _, pod := range podList {
 		if !isPodReady(pod) {
 			continue
 		}
 
 		podName := utils.GetNamespaceName(pod)
+		// Skip pods that are already properly bound
 		if existingPodNames.Contains(podName) {
 			continue
 		}
@@ -332,6 +337,8 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 	return c.addOrUpdatePod(pod)
 }
 
+// addOrUpdatePod finds all ModelServers that match the given pod
+// and adds or updates the pod-server binding in the data store
 func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 	modelServers, err := c.modelServerLister.ModelServers(pod.Namespace).List(labels.Everything())
 	if err != nil {
@@ -382,6 +389,7 @@ func (c *ModelServerController) enqueuePod(obj interface{}) {
 	})
 }
 
+// isPodReady checks if the pod is in a running state and has a PodReady condition set to true.
 func isPodReady(pod *corev1.Pod) bool {
 	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 		return false

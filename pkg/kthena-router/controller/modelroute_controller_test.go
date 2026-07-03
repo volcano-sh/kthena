@@ -181,7 +181,7 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 	// marks the controller as synced via HasSynced()
 	t.Run("InitialSyncSignal", func(t *testing.T) {
 		assert.False(t, controller.HasSynced())
-		controller.workqueue.Add(struct{}{})
+		controller.workqueue.Add(initialSyncSignal)
 		controller.processNextWorkItem()
 		assert.True(t, controller.HasSynced())
 	})

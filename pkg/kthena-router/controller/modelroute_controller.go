@@ -25,25 +25,25 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	kthenaclient "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/networking/v1alpha1"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	kthenaclient "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
 type ModelRouteController struct {
-	kthenaClient      kthenaclient.Interface
-	modelRouteLister  listerv1alpha1.ModelRouteLister
-	modelRouteSynced  cache.InformerSynced
-	registration      cache.ResourceEventHandlerRegistration
+	kthenaClient     kthenaclient.Interface
+	modelRouteLister listerv1alpha1.ModelRouteLister
+	modelRouteSynced cache.InformerSynced
+	registration     cache.ResourceEventHandlerRegistration
 
 	workqueue   workqueue.TypedRateLimitingInterface[any]
 	initialSync *atomic.Bool
@@ -58,12 +58,12 @@ func NewModelRouteController(
 	modelRouteInformer := kthenaInformerFactory.Networking().V1alpha1().ModelRoutes()
 
 	controller := &ModelRouteController{
-		kthenaClient:      kthenaClient,
-		modelRouteLister:  modelRouteInformer.Lister(),
-		modelRouteSynced:  modelRouteInformer.Informer().HasSynced,
-		workqueue:         workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
-		initialSync:       &atomic.Bool{},
-		store:             store,
+		kthenaClient:     kthenaClient,
+		modelRouteLister: modelRouteInformer.Lister(),
+		modelRouteSynced: modelRouteInformer.Informer().HasSynced,
+		workqueue:        workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
+		initialSync:      &atomic.Bool{},
+		store:            store,
 	}
 
 	controller.registration, _ = modelRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -84,6 +84,7 @@ func (c *ModelRouteController) Run(stopCh <-chan struct{}) error {
 	if ok := cache.WaitForCacheSync(stopCh, c.registration.HasSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
+	// add initialSync signal
 	c.workqueue.Add(initialSyncSignal)
 
 	go wait.Until(c.runWorker, time.Second, stopCh)
