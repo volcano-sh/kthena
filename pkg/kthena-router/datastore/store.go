@@ -66,10 +66,8 @@ const (
 	// defaultMetricsScrapeInterval is the default polling interval for pod metrics.
 	defaultMetricsScrapeInterval = 1 * time.Second
 	metricsScrapeIntervalEnv     = "METRICS_SCRAPE_INTERVAL"
-
 	// maxConcurrentPodScrapes caps goroutines spawned per metrics scrape cycle.
 	maxConcurrentPodScrapes = 100
-
 	// onFlightSyncInterval caps Redis read traffic from SyncOnFlightCounts.
 	// At most one HMGET is issued per interval regardless of request rate;
 	// all other callers use the local atomic values maintained by Incr/Decr.
@@ -1493,8 +1491,6 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("no weights provided")
 	}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
 	totalWeight := 0
 	for _, weight := range weights {
 		totalWeight += int(weight)
@@ -1504,7 +1500,7 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("total weight is zero")
 	}
 
-	randomNum := rng.Intn(totalWeight)
+	randomNum := rand.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
