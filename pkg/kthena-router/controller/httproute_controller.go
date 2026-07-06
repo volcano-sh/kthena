@@ -55,7 +55,7 @@ func NewHTTPRouteController(
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
-) *HTTPRouteController {
+) (*HTTPRouteController, error) {
 	httpRouteInformer := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
 	namespaceInformer := kubeInformerFactory.Core().V1().Namespaces()
@@ -71,11 +71,15 @@ func NewHTTPRouteController(
 		store:           store,
 	}
 
-	controller.registration, _ = httpRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	var err error
+	controller.registration, err = httpRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueHTTPRoute,
 		UpdateFunc: func(old, new interface{}) { controller.enqueueHTTPRoute(new) },
 		DeleteFunc: controller.enqueueHTTPRoute,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add event handler for httproute controller: %w", err)
+	}
 
 	gatewayFilter := &cache.FilteringResourceEventHandler{
 		FilterFunc: func(obj interface{}) bool {
@@ -93,15 +97,19 @@ func NewHTTPRouteController(
 			},
 		},
 	}
-	_, _ = gatewayInformer.Informer().AddEventHandler(gatewayFilter)
+	if _, err = gatewayInformer.Informer().AddEventHandler(gatewayFilter); err != nil {
+		return nil, fmt.Errorf("failed to add gateway event handler for httproute controller: %w", err)
+	}
 
-	_, _ = namespaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err = namespaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueHTTPRoutesForNamespace,
 		UpdateFunc: func(_, new interface{}) { controller.enqueueHTTPRoutesForNamespace(new) },
 		DeleteFunc: controller.enqueueHTTPRoutesForNamespace,
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("failed to add namespace event handler for httproute controller: %w", err)
+	}
 
-	return controller
+	return controller, nil
 }
 
 func (c *HTTPRouteController) Run(stopCh <-chan struct{}) error {
