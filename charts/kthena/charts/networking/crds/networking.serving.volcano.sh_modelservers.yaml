@@ -44,6 +44,7 @@ spec:
                 enum:
                 - vLLM
                 - SGLang
+                - MindIE
                 type: string
               kvConnector:
                 description: KVConnector specifies the KV connector configuration

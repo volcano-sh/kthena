@@ -51,7 +51,7 @@ type ModelServerSpec struct {
 
 // InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
 //
-// +kubebuilder:validation:Enum=vLLM;SGLang
+// +kubebuilder:validation:Enum=vLLM;SGLang;MindIE
 type InferenceEngine string
 
 const (
@@ -59,6 +59,8 @@ const (
 	VLLM InferenceEngine = "vLLM"
 	// https://github.com/sgl-project/sglang
 	SGLang InferenceEngine = "SGLang"
+	// https://www.mindspore.cn/mindie/
+	MindIE InferenceEngine = "MindIE"
 )
 
 // WorkloadSelector is used to match the model serving instances.

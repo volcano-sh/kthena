@@ -54,7 +54,7 @@ _Underlying type:_ _string_
 InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
 
 _Validation:_
-- Enum: [vLLM SGLang]
+- Enum: [vLLM SGLang MindIE]
 
 _Appears in:_
 - [ModelServerSpec](#modelserverspec)
@@ -63,6 +63,7 @@ _Appears in:_
 | --- | --- |
 | `vLLM` | https://github.com/vllm-project/vllm<br /> |
 | `SGLang` | https://github.com/sgl-project/sglang<br /> |
+| `MindIE` | https://www.mindspore.cn/mindie/<br /> |
 
 
 #### KVConnectorSpec
@@ -240,7 +241,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | The real model that the modelServers are running.<br />If the `model` in LLM inference request is different from this field, it should be overwritten by this field.<br />Otherwise, the `model` in LLM inference request will not be mutated. |  | MaxLength: 256 <br /> |
-| `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang] <br />Required: \{\} <br /> |
+| `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang MindIE] <br />Required: \{\} <br /> |
 | `workloadSelector` _[WorkloadSelector](#workloadselector)_ | WorkloadSelector is used to match the model serving instances.<br />Currently, they must be pods within the same namespace as modelServer object. |  | Required: \{\} <br /> |
 | `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server. |  |  |
 | `trafficPolicy` _[TrafficPolicy](#trafficpolicy)_ | Traffic Policy for accessing the model server instance. |  |  |
