@@ -173,6 +173,11 @@ func (mc *ModelBoosterController) updateModelBooster(old any, new any) {
 }
 
 func (mc *ModelBoosterController) deleteModelBooster(obj any) {
+	obj, ok := unwrapTombstone(obj)
+	if !ok {
+		klog.Error("failed to unwrap tombstone when deleteModelBooster")
+		return
+	}
 	model, ok := obj.(*workload.ModelBooster)
 	if !ok {
 		klog.Error("failed to parse ModelBooster when deleteModelBooster")
