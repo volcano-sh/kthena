@@ -289,3 +289,44 @@ func (g *GlobalRateLimiter) Tokens() float64 {
 
 	return tokens
 }
+
+func (g *GlobalRateLimiter) ReconcileN(now time.Time, delta int) (bool, error) {
+	key := fmt.Sprintf("%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	luaScript := `
+		local key = KEYS[1]
+		local delta = tonumber(ARGV[1])         -- can be negative (refund) or positive (extra debit)
+		local capacity = tonumber(ARGV[2])
+		local refill_rate = tonumber(ARGV[3])
+		local expire_seconds = tonumber(ARGV[4])
+
+		local time_result = redis.call('time')
+		local current_time = tonumber(time_result[1]) + tonumber(time_result[2]) / 1000000
+
+		local current_tokens = tonumber(redis.call('hget', key, 'tokens')) or capacity
+		local last_update = tonumber(redis.call('hget', key, 'last_update')) or current_time
+
+		local time_passed = math.max(0, current_time - last_update)
+		local tokens_to_add = time_passed * refill_rate
+		current_tokens = math.min(capacity, current_tokens + tokens_to_add)
+
+		-- apply the true-up; cap at capacity, allow negative for temporary debt
+		current_tokens = math.min(capacity, current_tokens - delta)
+
+		redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
+		redis.call('expire', key, expire_seconds)
+
+		return current_tokens
+	`
+
+	refillRate := g.getRefillRate()
+	expireSeconds := g.getExpireSeconds()
+
+	result := g.client.Eval(ctx, luaScript, []string{key}, delta, g.burst, refillRate, expireSeconds)
+	if result.Err() != nil {
+		return false, fmt.Errorf("failed to reconcile tokens: %w", result.Err())
+	}
+	return true, nil
+}

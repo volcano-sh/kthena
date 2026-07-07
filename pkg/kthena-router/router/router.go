@@ -69,6 +69,15 @@ func getEnvBool(key string, fallback bool) bool {
 	return fallback
 }
 
+func getDefaultMaxTokens() int {
+	if s, ok := os.LookupEnv("DEFAULT_MAX_TOKENS"); ok {
+		if val, err := strconv.Atoi(s); err == nil && val > 0 {
+			return val
+		}
+	}
+	return 2048
+}
+
 var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
 
 type Router struct {
@@ -281,8 +290,19 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
+		// Parse max_tokens if present in modelRequest, fallback to environment variable or 2048
+		maxTokens := getDefaultMaxTokens()
+		if val, ok := modelRequest["max_tokens"]; ok {
+			if floatVal, ok := val.(float64); ok && floatVal > 0 {
+				maxTokens = int(floatVal)
+			}
+		}
+
+		// Store reserved max tokens in context for refund logic later
+		c.Set("reservedOutputTokens", maxTokens)
+
 		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
+		if err := r.loadRateLimiter.RateLimit(modelName, promptStr, maxTokens); err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string
@@ -708,9 +728,16 @@ func (r *Router) proxyModelEndpoint(
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
-			// Record output tokens for rate limiting
+			// Refund unused output tokens
 			if r.loadRateLimiter != nil {
-				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
+				reserved := 2048
+				if val, exists := c.Get("reservedOutputTokens"); exists {
+					if rVal, ok := val.(int); ok {
+						reserved = rVal
+					}
+				}
+				refund := reserved - resp.Usage.CompletionTokens
+				r.loadRateLimiter.RefundOutputTokens(modelName, refund)
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
@@ -1010,9 +1037,16 @@ func (r *Router) proxyToPDDisaggregated(
 			continue
 		}
 
-		// Record output tokens for rate limiting
-		if outputTokens > 0 && r.loadRateLimiter != nil {
-			r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens)
+		// Refund unused output tokens
+		if r.loadRateLimiter != nil {
+			reserved := 2048
+			if val, exists := c.Get("reservedOutputTokens"); exists {
+				if rVal, ok := val.(int); ok {
+					reserved = rVal
+				}
+			}
+			refund := reserved - outputTokens
+			r.loadRateLimiter.RefundOutputTokens(ctx.Model, refund)
 		}
 
 		// Record output token metrics
