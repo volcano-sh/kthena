@@ -424,7 +424,8 @@ func TestHTTPRouteController_SyncHandler_MovesRouteWithGatewayOnlyInInformer(t *
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)
@@ -461,7 +462,8 @@ func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.
 	_, err := gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	ctrl := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
 	gatewayInformerFactory.Start(stop)
