@@ -124,27 +124,40 @@ func (pq *RequestPriorityQueue) GetInflightCount() int64 {
 }
 
 // admitSessionBoost marks a request as inflight, installs its release callback and
-// unblocks the waiting caller by closing its NotifyChan.
-func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) {
-	pq.inflightCount.Add(1)
-	// req.Release returns the inflight permit this admission consumed. The request
-	// handler invokes it (via defer) once the backend response is fully proxied or
-	// the request fails/times out. It decrements the inflight count, signals
-	// releaseCh so the dequeue loop can immediately admit the next waiting request,
-	// and updates the inflight metric. sync.Once makes it idempotent so capacity is
-	// never released twice on overlapping exit paths.
-	releaseOnce := sync.Once{}
-	req.Release = func() {
-		releaseOnce.Do(func() {
-			pq.inflightCount.Add(-1)
-			select {
-			case pq.releaseCh <- struct{}{}:
-			default:
-			}
-			pq.metricDecInflight(req.ModelName)
-		})
+// unblocks the waiting caller by closing its NotifyChan. It returns false without
+// admitting when the caller has already abandoned the request (timed out or
+// cancelled): in that case the request has already left the queue and admitting it
+// would leak an inflight permit that no one will release.
+func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) bool {
+	// Commit the inflight accounting and Release installation atomically with
+	// respect to a concurrent Abandon(). If the caller abandoned first, skip
+	// admission entirely so the inflight permit is never consumed.
+	admitted := req.commitAdmission(func() {
+		pq.inflightCount.Add(1)
+		// req.Release returns the inflight permit this admission consumed. The request
+		// handler invokes it (via defer) once the backend response is fully proxied or
+		// the request fails/times out. It decrements the inflight count, signals
+		// releaseCh so the dequeue loop can immediately admit the next waiting request,
+		// and updates the inflight metric. sync.Once makes it idempotent so capacity is
+		// never released twice on overlapping exit paths.
+		releaseOnce := sync.Once{}
+		req.Release = func() {
+			releaseOnce.Do(func() {
+				pq.inflightCount.Add(-1)
+				select {
+				case pq.releaseCh <- struct{}{}:
+				default:
+				}
+				pq.metricDecInflight(req.ModelName)
+			})
+		}
+		pq.metricIncInflight(req.ModelName)
+	})
+	if !admitted {
+		klog.V(4).Infof("[SessionBoost] admission skipped, request abandoned before admission: user=%s model=%s",
+			req.UserID, req.ModelName)
+		return false
 	}
-	pq.metricIncInflight(req.ModelName)
 	// Closing NotifyChan is the admission signal: the caller blocked in Enqueue is
 	// waiting on this channel and proceeds to the backend only once it is closed.
 	// We notify here because admission (a free inflight slot plus backend capacity)
@@ -153,6 +166,7 @@ func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) {
 	if req.NotifyChan != nil {
 		close(req.NotifyChan)
 	}
+	return true
 }
 
 // runSessionBoostMode is the session-boost dequeue loop. It dequeues requests only
@@ -347,7 +361,12 @@ func (pq *RequestPriorityQueue) tryBackpressureDequeue(ctx context.Context) {
 			return
 		}
 
-		pq.admitSessionBoost(req)
+		if !pq.admitSessionBoost(req) {
+			// The request was abandoned (timed out / cancelled) between the
+			// cancellation check and admission; it consumed no inflight slot, so
+			// continue admitting the next queued request.
+			continue
+		}
 
 		klog.V(4).Infof("[SessionBoost] backpressure dequeue: user=%s model=%s sessionBoost=%v inflight=%d/%d",
 			req.UserID, req.ModelName, req.SessionBoost, pq.inflightCount.Load(), maxInflight)
