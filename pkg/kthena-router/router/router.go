@@ -95,7 +95,7 @@ type Router struct {
 
 	// Session-boost wait-reject configuration. When sessionBoostWaitRejectEnabled
 	// is true, a request that waits in the session-boost queue longer than
-	// sessionBoostMaxWait is rejected with HTTP 429 instead of continuing to wait
+	// sessionBoostMaxWait is rejected with HTTP 504 instead of continuing to wait
 	// for the general queue timeout.
 	sessionBoostWaitRejectEnabled bool
 	sessionBoostMaxWait           time.Duration
@@ -208,7 +208,7 @@ func parseQueueTimeout() time.Duration {
 }
 
 // defaultSessionBoostMaxWait is the maximum time a request may wait in the
-// session-boost queue before it is rejected with HTTP 429, used when
+// session-boost queue before it is rejected with HTTP 504, used when
 // SESSION_BOOST_MAX_WAIT is not set or invalid and wait-reject is enabled.
 const defaultSessionBoostMaxWait = 30 * time.Second
 
@@ -1117,7 +1117,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	// cleanup (CancelCh). The general queue-wait deadline differs by strategy:
 	//   - Fairness mode: bounded by FAIRNESS_QUEUE_TIMEOUT; exceeding it returns 504.
 	//   - Session-boost mode: FAIRNESS_QUEUE_TIMEOUT does NOT apply. Session boost has
-	//     its own independent wait control via SESSION_BOOST_MAX_WAIT (returns 429 when
+	//     its own independent wait control via SESSION_BOOST_MAX_WAIT (returns 504 when
 	//     SESSION_BOOST_WAIT_REJECT_ENABLED is set); otherwise the request is bounded
 	//     only by client disconnect.
 	var reqCtx context.Context
@@ -1159,11 +1159,11 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	}
 
 	// Session-boost wait-reject: when enabled, a request that waits in the queue
-	// longer than sessionBoostMaxWait is rejected with HTTP 429 instead of waiting
+	// longer than sessionBoostMaxWait is rejected with HTTP 504 instead of waiting
 	// indefinitely for backend capacity (session-boost mode has no
-	// FAIRNESS_QUEUE_TIMEOUT deadline, so there is no 504 fallback). The timer only
-	// arms in session-boost mode when the feature is enabled and a positive max wait
-	// is set.
+	// FAIRNESS_QUEUE_TIMEOUT deadline, so this wait-reject timer is the only
+	// queue-wait bound). The timer only arms in session-boost mode when the feature
+	// is enabled and a positive max wait is set.
 	var waitRejectCh <-chan time.Time
 	if EnableSessionBoost && r.sessionBoostWaitRejectEnabled && r.sessionBoostMaxWait > 0 {
 		waitRejectTimer := time.NewTimer(r.sessionBoostMaxWait)
@@ -1190,7 +1190,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	case <-waitRejectCh:
 		// Exceeded the session-boost maximum queue wait. Cancel the request context
 		// so the queue drops it from the heap (via its cancellation check), then
-		// abandon it to reject the client with 429.
+		// abandon it to reject the client with 504.
 		cancel()
 		// Abandon() atomically coordinates with the dequeue loop: if admission raced
 		// in first it returns true and we own the inflight permit, so release it here;
@@ -1201,12 +1201,13 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		if queueReq.Abandon() {
 			queueReq.Release()
 		}
-		// 429 backpressure is expected behavior when wait-reject is enabled, and under
-		// sustained overload this path can fire for many requests, so log at a verbose
-		// level (like the rate-limit 429 path) to avoid flooding warning logs.
+		// A session-boost wait timeout is expected load-shedding when wait-reject is
+		// enabled, and under sustained overload this path can fire for many requests, so
+		// log at a verbose level to avoid flooding the logs (the fairness 504 timeout,
+		// by contrast, is unexpected and logs at error level).
 		klog.V(2).Infof("[SessionBoost] request rejected after exceeding max queue wait: reqID=%s sessionID=%s user=%s model=%s maxWait=%v",
 			requestID, sessionID, userId, modelName, r.sessionBoostMaxWait)
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, "Request rejected: exceeded maximum session boost queue wait time")
+		c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request rejected: exceeded maximum session boost queue wait time")
 		return fmt.Errorf("request rejected: exceeded session boost max queue wait")
 	case <-reqCtx.Done():
 		// Same admission/abandonment coordination as the waitReject path: Abandon()

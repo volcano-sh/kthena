@@ -64,8 +64,8 @@ kthenaRouter:
 | `kthenaRouter.sessionBoost.maxSessions`       | int     | `4096`           | Max recently-completed sessions kept warm (LRU-evicted)            |
 | `kthenaRouter.sessionBoost.inflightPerPod`    | int     | `16`             | Inflight requests per backend pod; total = perPod x pod count      |
 | `kthenaRouter.sessionBoost.gracePeriod`       | string  | `"0s"`           | Wait time for a same-session follow-up (disabled by default)       |
-| `kthenaRouter.sessionBoost.waitRejectEnabled` | boolean | `false`          | Reject requests waiting longer than `maxWait` with HTTP 429        |
-| `kthenaRouter.sessionBoost.maxWait`           | string  | `"30s"`          | Max queue wait before 429 (only when `waitRejectEnabled: true`)    |
+| `kthenaRouter.sessionBoost.waitRejectEnabled` | boolean | `false`          | Reject requests waiting longer than `maxWait` with HTTP 504        |
+| `kthenaRouter.sessionBoost.maxWait`           | string  | `"30s"`          | Max queue wait before 504 (only when `waitRejectEnabled: true`)    |
 
 #### Session Boost Configuration
 
