@@ -37,8 +37,8 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.sessionBoost.header | string | `"X-Session-ID"` | HTTP header used to identify conversation sessions. |
 | networking.kthenaRouter.sessionBoost.inflightPerPod | int | `16` | Maximum inflight requests admitted per backend pod.<br/> Total inflight limit is this value times the number of backend pods.<br/> `0` or unset uses the router default (16). |
 | networking.kthenaRouter.sessionBoost.maxSessions | int | `4096` | Maximum number of recently-completed sessions kept warm for boosting.<br/> Bounds an LRU cache; the least-recently-used session is evicted automatically.<br/> Size it by the number of concurrent conversations to keep boosted. |
-| networking.kthenaRouter.sessionBoost.maxWait | string | `"30s"` | Maximum time a request may wait in the session-boost queue before it is<br/> rejected with HTTP 429. Only effective when `waitRejectEnabled` is `true`. |
-| networking.kthenaRouter.sessionBoost.waitRejectEnabled | bool | `false` | Reject requests that wait longer than `maxWait` in the session-boost<br/> queue with HTTP 429 instead of waiting indefinitely for backend capacity.<br/> Disabled by default. |
+| networking.kthenaRouter.sessionBoost.maxWait | string | `"30s"` | Maximum time a request may wait in the session-boost queue before it is<br/> rejected with HTTP 504. Only effective when `waitRejectEnabled` is `true`. |
+| networking.kthenaRouter.sessionBoost.waitRejectEnabled | bool | `false` | Reject requests that wait longer than `maxWait` in the session-boost<br/> queue with HTTP 504 instead of waiting indefinitely for backend capacity.<br/> Disabled by default. |
 | networking.kthenaRouter.terminationGracePeriodSeconds | int | `330` | The router will drain all in-flight requests before forcefully closing connections. |
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |
