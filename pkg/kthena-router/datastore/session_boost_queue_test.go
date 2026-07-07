@@ -18,6 +18,7 @@ package datastore
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -554,5 +555,125 @@ func TestSessionBoostQueue_Len(t *testing.T) {
 
 	if q.Len() != 5 {
 		t.Errorf("Expected len=5, got %d", q.Len())
+	}
+}
+
+// TestSessionBoost_AbandonBeforeAdmissionBlocksAdmission verifies that a request
+// abandoned by the caller before the dequeue loop admits it consumes no inflight
+// slot: admitSessionBoost must observe the abandonment and skip.
+func TestSessionBoost_AbandonBeforeAdmissionBlocksAdmission(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	req := &Request{
+		UserID:     "user-A",
+		ModelName:  "model-1",
+		NotifyChan: make(chan struct{}),
+	}
+
+	// Caller gives up first.
+	if admitted := req.Abandon(); admitted {
+		t.Fatal("Abandon() should report not-yet-admitted before admission")
+	}
+
+	// The dequeue loop then tries to admit; it must skip.
+	if q.admitSessionBoost(req) {
+		t.Fatal("admitSessionBoost should skip an already-abandoned request")
+	}
+	if got := q.GetInflightCount(); got != 0 {
+		t.Fatalf("inflight count should stay 0 after skipped admission, got %d", got)
+	}
+	select {
+	case <-req.NotifyChan:
+		t.Fatal("NotifyChan must not be closed for a skipped admission")
+	default:
+	}
+}
+
+// TestSessionBoost_AdmissionBeforeAbandonReleases verifies that when admission wins
+// the race, the caller's Abandon() reports the admission and can release the permit,
+// returning the inflight count to zero.
+func TestSessionBoost_AdmissionBeforeAbandonReleases(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	req := &Request{
+		UserID:     "user-A",
+		ModelName:  "model-1",
+		NotifyChan: make(chan struct{}),
+	}
+
+	if !q.admitSessionBoost(req) {
+		t.Fatal("admitSessionBoost should admit a live request")
+	}
+	select {
+	case <-req.NotifyChan:
+	default:
+		t.Fatal("NotifyChan should be closed after admission")
+	}
+	if got := q.GetInflightCount(); got != 1 {
+		t.Fatalf("inflight count should be 1 after admission, got %d", got)
+	}
+
+	// Caller times out after admission raced in: Abandon() must report admitted so
+	// the caller releases the permit.
+	if admitted := req.Abandon(); !admitted {
+		t.Fatal("Abandon() should report admitted after admission")
+	}
+	if req.Release == nil {
+		t.Fatal("Release must be installed once Abandon() reports admitted")
+	}
+	req.Release()
+	if got := q.GetInflightCount(); got != 0 {
+		t.Fatalf("inflight count should return to 0 after Release, got %d", got)
+	}
+}
+
+// TestSessionBoost_ConcurrentAdmitAbandonNoLeak stresses the admission/abandonment
+// race directly: for each request one goroutine admits while another abandons. No
+// matter which wins, the inflight count must return to zero, proving the permit is
+// never leaked and never double-released. Run with -race to catch data races.
+func TestSessionBoost_ConcurrentAdmitAbandonNoLeak(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	const iterations = 2000
+	for i := 0; i < iterations; i++ {
+		req := &Request{
+			UserID:     "user-A",
+			ModelName:  "model-1",
+			NotifyChan: make(chan struct{}),
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// Dequeue-loop side: attempt admission.
+		go func() {
+			defer wg.Done()
+			q.admitSessionBoost(req)
+		}()
+		// Handler side: time out and abandon; release if admission raced in. This
+		// mirrors the router's waitReject/timeout handling.
+		go func() {
+			defer wg.Done()
+			if req.Abandon() {
+				req.Release()
+			}
+		}()
+		wg.Wait()
+
+		// After both settle, drain any releaseCh signal the release may have posted so
+		// it does not affect the next iteration's assertions.
+		select {
+		case <-q.releaseCh:
+		default:
+		}
+
+		if got := q.GetInflightCount(); got != 0 {
+			t.Fatalf("iteration %d: inflight leaked, count=%d", i, got)
+		}
 	}
 }
