@@ -25,6 +25,7 @@ import (
 	"time"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -32,8 +33,11 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -76,6 +80,7 @@ type ModelBoosterController struct {
 	// loraUpdateCache stores the previous model version for LoRA adapter comparison
 	loraUpdateCacheMu sync.Mutex
 	loraUpdateCache   map[string]*workload.ModelBooster
+	recorder          record.EventRecorder
 }
 
 func (mc *ModelBoosterController) Run(ctx context.Context, workers int) {
@@ -221,6 +226,7 @@ func (mc *ModelBoosterController) reconcile(ctx context.Context, namespaceAndNam
 	}
 	modelServingActive, err := mc.isModelServingActive(model)
 	if err != nil || !modelServingActive {
+		mc.surfaceModelServingBlockingFailure(ctx, model)
 		return err
 	}
 	if err := mc.setModelActiveCondition(ctx, model); err != nil {
@@ -335,6 +341,19 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 		},
 	}
 
+	if err := workload.Install(scheme.Scheme); err != nil {
+		klog.Errorf("failed to register workload API scheme for event recording: %v", err)
+	}
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartStructuredLogging(0)
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
+		Interface: kubeClient.CoreV1().Events(""),
+	})
+	recorder := eventBroadcaster.NewRecorder(
+		scheme.Scheme,
+		corev1.EventSource{Component: "modelbooster-controller"},
+	)
+
 	mc := &ModelBoosterController{
 		kubeClient:           kubeClient,
 		client:               client,
@@ -351,6 +370,7 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 		podsInformer:         podsInformer,
 		kubeInformerFactory:  kubeInformerFactory,
 		loraUpdateCache:      make(map[string]*workload.ModelBooster),
+		recorder:             recorder,
 
 		workQueue: workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.DefaultTypedControllerRateLimiter[any](),
 			workqueue.TypedRateLimitingQueueConfig[any]{}),

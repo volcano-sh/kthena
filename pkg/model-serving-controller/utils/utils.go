@@ -494,6 +494,65 @@ func exclusiveConditionTypes(condition1 metav1.Condition, condition2 metav1.Cond
 	return false
 }
 
+// ExtractPodBlockingFailure inspects pods and returns the single most-relevant
+// blocking failure as a (reason, message) pair.
+// Priority order: scheduling failure > image pull > init container crash > runtime container crash.
+// Returns empty strings when no actionable failure is detected.
+func ExtractPodBlockingFailure(pods []*corev1.Pod) (reason, message string) {
+	for _, pod := range pods {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Message != "" {
+				return "PodSchedulingFailed", cond.Message
+			}
+		}
+	}
+	for _, pod := range pods {
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if r, m := extractContainerFailure(cs, "DownloaderFailed"); r != "" {
+				return r, m
+			}
+		}
+	}
+	for _, pod := range pods {
+		for _, cs := range pod.Status.ContainerStatuses {
+			if r, m := extractContainerFailure(cs, "RuntimeContainerFailed"); r != "" {
+				return r, m
+			}
+		}
+	}
+	return "", ""
+}
+
+// extractContainerFailure maps a container status to a high-level failure reason.
+// defaultReason is used for non-image-pull waiting states and for terminated containers
+// with a non-zero exit code.
+func extractContainerFailure(cs corev1.ContainerStatus, defaultReason string) (reason, message string) {
+	if cs.State.Waiting != nil {
+		switch cs.State.Waiting.Reason {
+		case "ImagePullBackOff", "ErrImagePull":
+			msg := cs.State.Waiting.Message
+			if msg == "" {
+				msg = cs.State.Waiting.Reason
+			}
+			return "ImagePullFailed", msg
+		}
+		if cs.State.Waiting.Message != "" {
+			return defaultReason, cs.State.Waiting.Message
+		}
+	}
+	if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+		msg := cs.State.Terminated.Message
+		if msg == "" {
+			msg = cs.State.Terminated.Reason
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("exit code %d", cs.State.Terminated.ExitCode)
+		}
+		return defaultReason, msg
+	}
+	return "", ""
+}
+
 // ParseAdmissionRequest parses the HTTP request and extracts the AdmissionReview and ModelServing.
 func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview, *workloadv1alpha1.ModelServing, error) {
 	// Verify the content type is accurate

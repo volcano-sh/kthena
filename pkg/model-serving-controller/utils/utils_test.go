@@ -367,3 +367,190 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractPodBlockingFailure(t *testing.T) {
+	tests := []struct {
+		name          string
+		pods          []*corev1.Pod
+		wantReason    string
+		wantMsgSubstr string
+	}{
+		{
+			name:       "no pods returns empty",
+			pods:       nil,
+			wantReason: "",
+		},
+		{
+			name: "healthy running pod returns empty",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			},
+			wantReason: "",
+		},
+		{
+			name: "scheduling failure",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{
+								Type:    corev1.PodScheduled,
+								Status:  corev1.ConditionFalse,
+								Message: `0/34 nodes are available: persistentvolumeclaim "crater-storage" not found`,
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "PodSchedulingFailed",
+			wantMsgSubstr: "crater-storage",
+		},
+		{
+			name: "init container image pull failure",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason:  "ImagePullBackOff",
+										Message: "Back-off pulling image",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "ImagePullFailed",
+			wantMsgSubstr: "Back-off",
+		},
+		{
+			name: "init container crash (downloader failure)",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 1,
+										Message:  "PVC path does not exist: /data/model",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "DownloaderFailed",
+			wantMsgSubstr: "PVC path",
+		},
+		{
+			name: "init container crash without message uses exit code",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 2,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "DownloaderFailed",
+			wantMsgSubstr: "exit code 2",
+		},
+		{
+			name: "scheduling failure takes priority over init container failure",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{
+								Type:    corev1.PodScheduled,
+								Status:  corev1.ConditionFalse,
+								Message: "insufficient memory",
+							},
+						},
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 1,
+										Message:  "init failure",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "PodSchedulingFailed",
+			wantMsgSubstr: "insufficient memory",
+		},
+		{
+			name: "runtime container crash",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 137,
+										Message:  "OOMKilled",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "RuntimeContainerFailed",
+			wantMsgSubstr: "OOMKilled",
+		},
+		{
+			name: "returns empty when waiting reason has no message",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason: "ContainerCreating",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, msg := ExtractPodBlockingFailure(tt.pods)
+			assert.Equal(t, tt.wantReason, reason)
+			if tt.wantReason != "" && tt.wantMsgSubstr != "" {
+				assert.Contains(t, msg, tt.wantMsgSubstr)
+			}
+		})
+	}
+}
