@@ -472,8 +472,13 @@ func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.
 		t.Fatal("cache sync timeout")
 	}
 
+	for ctrl.workqueue.Len() > 0 {
+		obj, _ := ctrl.workqueue.Get()
+		ctrl.workqueue.Done(obj)
+	}
+
 	err = ctrl.syncHandler(ns + "/route")
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.Nil(t, store.GetHTTPRoute(ns+"/route"))
 
 	gw := &gatewayv1.Gateway{
@@ -489,16 +494,14 @@ func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.
 			},
 		},
 	}
-	_, err = gatewayClient.GatewayV1().Gateways(ns).Create(ctx, gw, metav1.CreateOptions{})
+	err = store.AddOrUpdateGateway(gw)
 	assert.NoError(t, err)
 
 	found := waitForObjectInCache(t, 5*time.Second, func() bool {
-		_, err := ctrl.gatewayLister.Gateways(ns).Get("gateway")
-		return err == nil
+		return ctrl.workqueue.Len() == 1
 	})
-	require.True(t, found, "Gateway should be in cache")
+	require.True(t, found, "Gateway add should enqueue waiting HTTPRoute")
 
-	err = ctrl.syncHandler(ns + "/route")
-	assert.NoError(t, err)
+	assert.True(t, ctrl.processNextWorkItem())
 	assert.Len(t, store.GetHTTPRoutesByGateway(ns+"/gateway"), 1)
 }

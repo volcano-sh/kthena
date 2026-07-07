@@ -100,6 +100,15 @@ func NewHTTPRouteController(
 	if _, err = gatewayInformer.Informer().AddEventHandler(gatewayFilter); err != nil {
 		return nil, fmt.Errorf("failed to add gateway event handler for httproute controller: %w", err)
 	}
+	store.RegisterCallback("Gateway", func(data datastore.EventData) {
+		if data.EventType != datastore.EventAdd {
+			return
+		}
+		key := fmt.Sprintf("%s/%s", data.Gateway.Namespace, data.Gateway.Name)
+		if gw := store.GetGateway(key); gw != nil {
+			controller.enqueueHTTPRoutesForGateway(gw)
+		}
+	})
 
 	if _, err = namespaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueHTTPRoutesForNamespace,
@@ -187,7 +196,7 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	}
 
 	// Only process HTTPRoutes that reference kthena-router GatewayClass
-	// Check all parentRefs - process immediately if any matches, retry only if no match and a Gateway is pending
+	// Check all parentRefs - process immediately if any matches, wait for Gateway events if a Gateway is pending
 	var gatewayPending bool
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
 		if !isGatewayParentRef(parentRef) {
@@ -201,9 +210,12 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 		gw := c.store.GetGateway(gatewayKey)
 		if gw == nil {
 			informerGateway, err := c.gatewayLister.Gateways(gatewayNamespace).Get(string(parentRef.Name))
-			if err != nil {
+			if apierrors.IsNotFound(err) {
 				gatewayPending = true
 				continue
+			}
+			if err != nil {
+				return err
 			}
 			gw = informerGateway
 		}
@@ -218,7 +230,7 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 		}
 	}
 	if gatewayPending {
-		return fmt.Errorf("gateway not synced yet")
+		return nil
 	}
 	klog.V(4).Infof("Skipping HTTPRoute %s/%s: does not reference kthena-router Gateway", namespace, name)
 	_ = c.store.DeleteHTTPRoute(key)
