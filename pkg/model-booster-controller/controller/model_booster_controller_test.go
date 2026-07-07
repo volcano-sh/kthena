@@ -26,10 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/yaml"
@@ -243,10 +241,10 @@ func waitForControllerCacheSync(controller *ModelBoosterController) bool {
 	})
 }
 
-// TestReconcile_SurfacesPodFailureViaEvent verifies that when a child ModelServing's pods
-// have a blocking failure, the ModelBooster controller emits a Kubernetes Warning Event
-// on the ModelBooster — without mutating its status conditions.
-func TestReconcile_SurfacesPodFailureViaEvent(t *testing.T) {
+// TestReconcile_SurfacesModelServingNotReadyEvent verifies that when a child ModelServing
+// is not yet available, the ModelBooster controller emits a ModelServingNotReady Warning
+// Event directing users to the ModelServing — without inspecting Pods itself.
+func TestReconcile_SurfacesModelServingNotReadyEvent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -265,63 +263,17 @@ func TestReconcile_SurfacesPodFailureViaEvent(t *testing.T) {
 	_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	assert.True(t, waitForCondition(func() bool {
-		list, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
-		return err == nil && len(list.Items) == 1
-	}), "ModelServing was not created")
-
-	list, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
-	assert.NoError(t, err)
-	ms := &list.Items[0]
-
-	// Create a pod labeled for this ModelServing that is stuck due to a scheduling failure.
-	failingPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-scheduling-failure-pod",
-			Namespace: ms.Namespace,
-			Labels: map[string]string{
-				workload.ModelServingNameLabelKey: ms.Name,
-			},
-		},
-		Status: corev1.PodStatus{
-			Conditions: []corev1.PodCondition{
-				{
-					Type:    corev1.PodScheduled,
-					Status:  corev1.ConditionFalse,
-					Message: `persistentvolumeclaim "crater-storage" not found`,
-				},
-			},
-		},
-	}
-	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(ctx, failingPod, metav1.CreateOptions{})
-	assert.NoError(t, err)
-
-	// Wait for the pod to appear in the controller's local informer cache before
-	// triggering a reconcile, to avoid a race between pod creation and reconcile.
-	podSelector := labels.SelectorFromSet(labels.Set{workload.ModelServingNameLabelKey: ms.Name})
-	assert.True(t, waitForCondition(func() bool {
-		pods, err := controller.podsLister.Pods(ms.Namespace).List(podSelector)
-		return err == nil && len(pods) > 0
-	}), "pod did not appear in informer cache")
-
-	// Trigger a reconcile of the ModelBooster by updating the ModelServing status.
-	// The modelServingInformer's UpdateFunc (triggerModel) enqueues the owning ModelBooster.
-	ms, err = kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
-	assert.NoError(t, err)
-	ms.Status.Replicas = 1
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).UpdateStatus(ctx, ms, metav1.UpdateOptions{})
-	assert.NoError(t, err)
-
-	// The controller should emit a Warning event with reason PodSchedulingFailed on the ModelBooster.
+	// The ModelBooster should emit a ModelServingNotReady Warning event as soon as the
+	// child ModelServing is created but not yet active (the default state).
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
 		case event := <-fakeRecorder.Events:
-			if strings.Contains(event, "PodSchedulingFailed") && strings.Contains(event, "Warning") {
+			if strings.Contains(event, "ModelServingNotReady") && strings.Contains(event, "Warning") {
 				return
 			}
 		case <-deadline:
-			t.Fatal("timed out waiting for PodSchedulingFailed Warning event on ModelBooster")
+			t.Fatal("timed out waiting for ModelServingNotReady Warning event on ModelBooster")
 		}
 	}
 }

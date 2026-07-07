@@ -20,11 +20,9 @@ import (
 	"context"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	msUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 )
 
@@ -77,10 +75,11 @@ func (mc *ModelBoosterController) setModelActiveCondition(ctx context.Context, m
 	return nil
 }
 
-// surfaceModelServingBlockingFailure emits a Kubernetes Warning Event on the
-// ModelBooster when the child ModelServing's pods have an actionable blocking
-// failure. It queries pods directly so that the ModelServing's own conditions
-// remain coarse-grained (like Deployment/StatefulSet status).
+// surfaceModelServingBlockingFailure emits a Warning Event on the ModelBooster
+// directing users to the child ModelServing for pod-level failure details.
+// Pod inspection is intentionally kept in ModelServingController only; this
+// function avoids a duplicate pod lookup and follows the Kubernetes convention
+// that owners do not re-inspect their children's pods.
 func (mc *ModelBoosterController) surfaceModelServingBlockingFailure(ctx context.Context, model *workloadv1alpha1.ModelBooster) {
 	if mc.recorder == nil {
 		return
@@ -90,18 +89,9 @@ func (mc *ModelBoosterController) surfaceModelServingBlockingFailure(ctx context
 		return
 	}
 	ms := modelServings[0]
-	podSelector := labels.SelectorFromSet(labels.Set{
-		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-	})
-	pods, err := mc.podsLister.Pods(ms.Namespace).List(podSelector)
-	if err != nil || len(pods) == 0 {
-		return
-	}
-	reason, message := msUtils.ExtractPodBlockingFailure(pods)
-	if reason == "" {
-		return
-	}
-	mc.recorder.Event(model, corev1.EventTypeWarning, reason, message)
+	mc.recorder.Eventf(model, corev1.EventTypeWarning, "ModelServingNotReady",
+		"child ModelServing %q is not yet available; check events on ModelServing for pod-level failure details",
+		ms.Name)
 }
 
 // newCondition returns a condition
