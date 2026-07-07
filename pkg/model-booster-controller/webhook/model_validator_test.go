@@ -112,3 +112,13 @@ func TestValidateModel_NoErrors(t *testing.T) {
 	assert.True(t, valid)
 	assert.Empty(t, errorMsg)
 }
+
+func TestValidateImageFieldRejectsWhitespace(t *testing.T) {
+	assert.NoError(t, validateImageField("registry.example.com/model-worker:v1"))
+
+	for _, image := range []string{"model worker:v1", "model\tworker:v1", "model\nworker:v1", "\t\n"} {
+		t.Run(image, func(t *testing.T) {
+			assert.Error(t, validateImageField(image))
+		})
+	}
+}
