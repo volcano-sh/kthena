@@ -1415,7 +1415,7 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			wantHTTPStatus:  http.StatusInternalServerError,
 		},
 		{
-			name:                "session boost wait-reject returns 429",
+			name:                "session boost wait-reject returns 504",
 			fairnessTimeout:     10 * time.Second,
 			setUserID:           true,
 			storeWrapper:        func(real datastore.Store) datastore.Store { return &blockingEnqueueStore{Store: real} },
@@ -1424,7 +1424,7 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			sessionBoostMaxWait: 50 * time.Millisecond,
 			wantErr:             true,
 			wantErrMsg:          "exceeded session boost max queue wait",
-			wantHTTPStatus:      http.StatusTooManyRequests,
+			wantHTTPStatus:      http.StatusGatewayTimeout,
 		},
 	}
 

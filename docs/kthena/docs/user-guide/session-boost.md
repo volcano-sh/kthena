@@ -31,7 +31,7 @@ flowchart TD
     F -- Yes --> G[Dispatch to backend]
     F -- No --> H[Wait / backpressure]
     H --> K{Waited longer than<br/>SESSION_BOOST_MAX_WAIT?}
-    K -- Yes, wait-reject enabled --> R[Reject with HTTP 429]
+    K -- Yes, wait-reject enabled --> R[Reject with HTTP 504]
     K -- No --> F
     G --> I[Request completes]
     I --> J[Mark session completed<br/>promote in LRU cache]
@@ -75,8 +75,8 @@ networking:
       header: "X-Session-ID"
       maxSessions: 4096          # LRU cache of recently-completed sessions kept warm
       inflightPerPod: 16         # total inflight = inflightPerPod x backend pod count
-      waitRejectEnabled: true    # reject requests that wait too long with HTTP 429
-      maxWait: "30s"             # max queue wait before a 429 is returned
+      waitRejectEnabled: true    # reject requests that wait too long with HTTP 504
+      maxWait: "30s"             # max queue wait before a 504 is returned
 ```
 
 Apply with Helm:
@@ -103,9 +103,9 @@ env:
 - name: SESSION_BOOST_INFLIGHT_PER_POD
   value: "16"                 # total inflight = perPod x backend pod count
 - name: SESSION_BOOST_WAIT_REJECT_ENABLED
-  value: "true"              # reject requests that wait too long with HTTP 429
+  value: "true"              # reject requests that wait too long with HTTP 504
 - name: SESSION_BOOST_MAX_WAIT
-  value: "30s"              # max queue wait before a 429 is returned
+  value: "30s"              # max queue wait before a 504 is returned
 ```
 
 ## Configuration Reference
@@ -116,8 +116,8 @@ env:
 | `SESSION_BOOST_HEADER`              | HTTP header used to identify conversation sessions                               | `X-Session-ID` | Must match what your clients send                                                                                                                                                          |
 | `SESSION_BOOST_MAX_SESSIONS`        | Max number of recently-completed sessions kept "warm" for boosting (LRU-bounded) | `4096`         | When the cache is full, the least-recently-used session is evicted automatically. Size it by the number of concurrent conversations you want to keep boosted—no time-based tuning required |
 | `SESSION_BOOST_INFLIGHT_PER_POD`    | Inflight requests admitted per backend pod                                       | `16`           | The total inflight limit is this value multiplied by the number of backend pods. Size it from the per-pod concurrency (e.g., vLLM's `--max-num-seqs`)                                      |
-| `SESSION_BOOST_WAIT_REJECT_ENABLED` | Reject requests that wait too long in the queue with HTTP 429                    | `false`        | When `true`, a request queued longer than `SESSION_BOOST_MAX_WAIT` is rejected with `429 Too Many Requests` instead of continuing to wait                                                  |
-| `SESSION_BOOST_MAX_WAIT`            | Maximum time a request may wait in the queue before it is rejected with 429      | `30s`          | Only effective when `SESSION_BOOST_WAIT_REJECT_ENABLED=true`. This is the only server-side queue-wait bound in session-boost mode; `FAIRNESS_QUEUE_TIMEOUT` does not apply                 |
+| `SESSION_BOOST_WAIT_REJECT_ENABLED` | Reject requests that wait too long in the queue with HTTP 504                    | `false`        | When `true`, a request queued longer than `SESSION_BOOST_MAX_WAIT` is rejected with `504 Gateway Timeout` instead of continuing to wait                                                    |
+| `SESSION_BOOST_MAX_WAIT`            | Maximum time a request may wait in the queue before it is rejected with 504      | `30s`          | Only effective when `SESSION_BOOST_WAIT_REJECT_ENABLED=true`. This is the only server-side queue-wait bound in session-boost mode; `FAIRNESS_QUEUE_TIMEOUT` does not apply                 |
 
 > `SESSION_BOOST_GRACE_PERIOD` is intentionally omitted from the table above. It is an advanced, scenario-specific knob that is disabled by default; see [Advanced: Grace Period](#advanced-grace-period-use-with-caution).
 
@@ -184,16 +184,16 @@ The queue uses two-level admission control to avoid flooding backends:
 
 When a request completes, the queue immediately attempts to dequeue the next request (release-driven dequeue) rather than waiting for the next metrics refresh.
 
-### Queue Wait Timeout (429 Rejection)
+### Queue Wait Timeout (504 Rejection)
 
 Under heavy load a request may sit in the queue for a long time before backend capacity frees up. Session boost does **not** apply the fairness queue timeout (`FAIRNESS_QUEUE_TIMEOUT` only governs the user-fairness queue); by default a queued request in session-boost mode waits until backend capacity frees up or the client disconnects. For latency-sensitive front ends it is often better to **fail fast** and let the client retry or shed load.
 
-Session boost provides its own optional **wait timeout** that rejects over-queued requests early with `429 Too Many Requests`:
+Session boost provides its own optional **wait timeout** that rejects over-queued requests early with `504 Gateway Timeout`:
 
 - Enable it with `SESSION_BOOST_WAIT_REJECT_ENABLED=true`.
 - Set the threshold with `SESSION_BOOST_MAX_WAIT` (default `30s`).
 
-When enabled, if a request waits in the queue longer than `SESSION_BOOST_MAX_WAIT`, the router removes it from the queue and responds with `429 Too Many Requests`. The 429 signals *backpressure* (the queue is saturated and the client should back off or retry).
+When enabled, if a request waits in the queue longer than `SESSION_BOOST_MAX_WAIT`, the router removes it from the queue and responds with `504 Gateway Timeout`. The 504 signals that the request *timed out* waiting for backend capacity (the queue is saturated); the client can retry later or shed load.
 
 > `SESSION_BOOST_MAX_WAIT` is the only server-side queue-wait bound in session-boost mode. `FAIRNESS_QUEUE_TIMEOUT` has no effect here—it applies exclusively to the user-fairness strategy. Without `SESSION_BOOST_WAIT_REJECT_ENABLED`, a session-boost request is bounded only by client disconnect.
 
@@ -272,9 +272,9 @@ Session boost only controls queue ordering. If the boosted request is routed to 
 
 Each tracked session consumes minimal memory (just a session ID). The tracker is a bounded LRU cache, so total memory is capped at `SESSION_BOOST_MAX_SESSIONS` entries regardless of how much traffic flows through the router. If memory is a concern, reduce `SESSION_BOOST_MAX_SESSIONS`.
 
-### Clients receive HTTP 429 responses
+### Clients receive HTTP 504 responses
 
-When `SESSION_BOOST_WAIT_REJECT_ENABLED=true`, the router returns `429 Too Many Requests` for requests that wait in the queue longer than `SESSION_BOOST_MAX_WAIT`. This is expected backpressure behavior under sustained overload—it means the backends cannot keep up with demand. If you see more 429s than desired:
+When `SESSION_BOOST_WAIT_REJECT_ENABLED=true`, the router returns `504 Gateway Timeout` for requests that wait in the queue longer than `SESSION_BOOST_MAX_WAIT`. This is expected load-shedding under sustained overload—it means the backends cannot keep up with demand. If you see more 504s than desired:
 
 1. Confirm the backends are healthy and scaled appropriately; add capacity if they are saturated.
 2. Increase `SESSION_BOOST_MAX_WAIT` to allow requests to wait longer before rejection.
