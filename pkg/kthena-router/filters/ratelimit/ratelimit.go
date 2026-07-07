@@ -105,6 +105,9 @@ func (l *LocalLimiter) Tokens() float64 {
 }
 
 func (l *LocalLimiter) refill(now time.Time) float64 {
+	if now.Before(l.last) {
+		return l.tokens
+	}
 	elapsed := now.Sub(l.last)
 
 	l.tokens += elapsed.Seconds() * float64(l.limit)
@@ -181,16 +184,23 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
 
 	if useGlobal {
-		// Initialize Redis client if not already done
-		if r.redisClient == nil {
+		// Initialize or update Redis client if address changed
+		newAddr := ratelimit.Global.Redis.Address
+		if r.redisClient == nil || r.redisClient.Options().Addr != newAddr {
+			if r.redisClient != nil {
+				// Close old client to prevent connection leaks
+				r.redisClient.Close()
+			}
 			r.redisClient = redis.NewClient(&redis.Options{
-				Addr: ratelimit.Global.Redis.Address,
+				Addr: newAddr,
 			})
 
 			// Test connection
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := r.redisClient.Ping(ctx).Err(); err != nil {
+				r.redisClient.Close()
+				r.redisClient = nil
 				return fmt.Errorf("failed to connect to redis: %w", err)
 			}
 		}

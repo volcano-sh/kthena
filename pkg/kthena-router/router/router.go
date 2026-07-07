@@ -298,11 +298,9 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			}
 		}
 
-		// Store reserved max tokens in context for refund logic later
-		c.Set("reservedOutputTokens", maxTokens)
-
 		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr, maxTokens); err != nil {
+		reserved, err := r.loadRateLimiter.RateLimit(modelName, promptStr, maxTokens)
+		if err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string
@@ -328,6 +326,9 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.Set("finishReason", "rate_limit")
 			return
 		}
+
+		// Store reserved max tokens in context for refund/true-up logic later
+		c.Set("reservedOutputTokens", reserved)
 
 		requestID := uuid.New().String()
 		if c.Request.Header.Get("x-request-id") == "" {
@@ -728,7 +729,7 @@ func (r *Router) proxyModelEndpoint(
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
-			// Refund unused output tokens
+			// Record actual output tokens used and true-up
 			if r.loadRateLimiter != nil {
 				reserved := 2048
 				if val, exists := c.Get("reservedOutputTokens"); exists {
@@ -736,8 +737,7 @@ func (r *Router) proxyModelEndpoint(
 						reserved = rVal
 					}
 				}
-				refund := reserved - resp.Usage.CompletionTokens
-				r.loadRateLimiter.RefundOutputTokens(modelName, refund)
+				r.loadRateLimiter.RecordOutputTokens(modelName, reserved, resp.Usage.CompletionTokens)
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
@@ -1037,7 +1037,7 @@ func (r *Router) proxyToPDDisaggregated(
 			continue
 		}
 
-		// Refund unused output tokens
+		// Record actual output tokens used and true-up
 		if r.loadRateLimiter != nil {
 			reserved := 2048
 			if val, exists := c.Get("reservedOutputTokens"); exists {
@@ -1045,8 +1045,7 @@ func (r *Router) proxyToPDDisaggregated(
 					reserved = rVal
 				}
 			}
-			refund := reserved - outputTokens
-			r.loadRateLimiter.RefundOutputTokens(ctx.Model, refund)
+			r.loadRateLimiter.RecordOutputTokens(ctx.Model, reserved, outputTokens)
 		}
 
 		// Record output token metrics
