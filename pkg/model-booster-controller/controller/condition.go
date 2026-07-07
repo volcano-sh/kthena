@@ -19,8 +19,8 @@ package controller
 import (
 	"context"
 
-	msUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	msUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
