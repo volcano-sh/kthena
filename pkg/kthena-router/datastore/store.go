@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -924,8 +925,15 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 
 // Model routing methods
 func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
-	s.routeMutex.Lock()
 	key := mr.Namespace + "/" + mr.Name
+	oldMR := s.GetModelRoute(key)
+	if oldMR != nil {
+		if reflect.DeepEqual(oldMR.Spec, mr.Spec) {
+			return nil // No changes, skip update
+		}
+	}
+
+	s.routeMutex.Lock()
 	s.routeInfo[key] = &modelRouteInfo{
 		model: mr.Spec.ModelName,
 		loras: mr.Spec.LoraAdapters,
