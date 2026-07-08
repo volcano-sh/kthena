@@ -2015,8 +2015,12 @@ func (c *ModelServingController) isRoleDeleted(ms *workloadv1alpha1.ModelServing
 
 // getBlockingPodFailure inspects pods belonging to non-deleting progressing
 // ServingGroups and returns the single most-relevant pod failure reason and
-// message. It returns empty strings when no blocking failure is found.
+// message. Pods from all progressing groups are collected before the failure
+// class priority is evaluated, so a lower-priority failure in one group can
+// never mask a higher-priority failure in another group. It returns empty
+// strings when no blocking failure is found.
 func (c *ModelServingController) getBlockingPodFailure(ms *workloadv1alpha1.ModelServing, groups []datastore.ServingGroup, progressingGroupIndices []int) (reason, message string) {
+	var pods []*corev1.Pod
 	for _, idx := range progressingGroupIndices {
 		if idx >= len(groups) {
 			continue
@@ -2026,16 +2030,14 @@ func (c *ModelServingController) getBlockingPodFailure(ms *workloadv1alpha1.Mode
 			continue
 		}
 		groupKey := fmt.Sprintf("%s/%s", ms.Namespace, group.Name)
-		pods, err := c.getPodsByIndex(GroupNameKey, groupKey)
+		groupPods, err := c.getPodsByIndex(GroupNameKey, groupKey)
 		if err != nil {
 			klog.Warningf("getBlockingPodFailure: failed to list pods for group %s: %v", groupKey, err)
 			continue
 		}
-		if r, m := utils.ExtractPodBlockingFailure(pods); r != "" {
-			return r, m
-		}
+		pods = append(pods, groupPods...)
 	}
-	return "", ""
+	return utils.ExtractPodBlockingFailure(pods)
 }
 
 // getPodsByIndex filter pods using the informer indexer.

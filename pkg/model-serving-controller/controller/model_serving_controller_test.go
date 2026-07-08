@@ -37,6 +37,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -7715,4 +7716,140 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
+}
+
+// TestUpdateModelServingStatusBlockingFailureEventGlobalPriority proves that the
+// Pods -> getBlockingPodFailure -> emitRoleStatusEvent pipeline emits exactly one
+// Warning Event, with the reason/message chosen according to the documented global
+// priority (scheduling > image pull > init container > runtime container) across
+// ALL progressing ServingGroups, not just the first group encountered.
+func TestUpdateModelServingStatusBlockingFailureEventGlobalPriority(t *testing.T) {
+	ns := "default"
+	msName := "test-ms-priority"
+	roleName := "prefill"
+	roleID := utils.GenerateRoleID(roleName, 0)
+	revision := "rev-1"
+
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	require.NoError(t, err)
+
+	// Replace the real recorder with a FakeRecorder so emitted events can be
+	// asserted deterministically without depending on the broadcaster's
+	// asynchronous delivery to the fake clientset.
+	fakeRecorder := record.NewFakeRecorder(10)
+	controller.recorder = fakeRecorder
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      msName,
+			UID:       "test-ms-priority-uid",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ns).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+
+	// Two progressing groups: group 0 is iterated first but only has a
+	// lower-priority runtime crash; group 1 is iterated second and has a
+	// higher-priority scheduling failure. Neither has roles registered in the
+	// store, so checkServingGroupReady reports both as not-ready (progressing).
+	msKey := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(msKey, 0, revision)
+	controller.store.AddServingGroup(msKey, 1, revision)
+
+	group0Name := utils.GenerateServingGroupName(msName, 0)
+	group1Name := utils.GenerateServingGroupName(msName, 1)
+
+	podLabels := func(groupName string) map[string]string {
+		return map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: msName,
+			workloadv1alpha1.GroupNameLabelKey:        groupName,
+			workloadv1alpha1.RoleLabelKey:             roleName,
+			workloadv1alpha1.RoleIDKey:                roleID,
+			workloadv1alpha1.RevisionLabelKey:         revision,
+		}
+	}
+
+	runtimeCrashPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      group0Name + "-" + roleID + "-0",
+			Labels:    podLabels(group0Name),
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "main",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 137,
+							Message:  "OOMKilled in group 0",
+						},
+					},
+				},
+			},
+		},
+	}
+	schedulingFailurePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      group1Name + "-" + roleID + "-0",
+			Labels:    podLabels(group1Name),
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodScheduled,
+					Status:  corev1.ConditionFalse,
+					Message: "0/3 nodes are available: insufficient memory in group 1",
+				},
+			},
+		},
+	}
+
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(runtimeCrashPod))
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(schedulingFailurePod))
+
+	err = controller.UpdateModelServingStatus(ms, revision)
+	require.NoError(t, err)
+
+	select {
+	case event := <-fakeRecorder.Events:
+		assert.Equal(t,
+			fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, "PodSchedulingFailed", "0/3 nodes are available: insufficient memory in group 1"),
+			event,
+			"the higher-priority scheduling failure in group 1 must win over the runtime crash in group 0",
+		)
+	default:
+		t.Fatal("expected a Warning event to be recorded for the blocking pod failure")
+	}
+
+	select {
+	case unexpected := <-fakeRecorder.Events:
+		t.Fatalf("expected exactly one blocking-failure event, got an extra one: %s", unexpected)
+	default:
+	}
 }
