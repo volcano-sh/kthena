@@ -18,15 +18,11 @@ limitations under the License.
 
 package v1alpha1
 
-import (
-	v1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
-)
-
 // NetworkTopologyApplyConfiguration represents a declarative configuration of the NetworkTopology type for use
 // with apply.
 type NetworkTopologyApplyConfiguration struct {
-	GroupPolicy *v1beta1.NetworkTopologySpec `json:"groupPolicy,omitempty"`
-	RolePolicy  *v1beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
+	GroupPolicy *NetworkTopologySpecApplyConfiguration `json:"groupPolicy,omitempty"`
+	RolePolicy  *NetworkTopologySpecApplyConfiguration `json:"rolePolicy,omitempty"`
 }
 
 // NetworkTopologyApplyConfiguration constructs a declarative configuration of the NetworkTopology type for use with
@@ -38,15 +34,15 @@ func NetworkTopology() *NetworkTopologyApplyConfiguration {
 // WithGroupPolicy sets the GroupPolicy field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the GroupPolicy field is set to the value of the last call.
-func (b *NetworkTopologyApplyConfiguration) WithGroupPolicy(value v1beta1.NetworkTopologySpec) *NetworkTopologyApplyConfiguration {
-	b.GroupPolicy = &value
+func (b *NetworkTopologyApplyConfiguration) WithGroupPolicy(value *NetworkTopologySpecApplyConfiguration) *NetworkTopologyApplyConfiguration {
+	b.GroupPolicy = value
 	return b
 }
 
 // WithRolePolicy sets the RolePolicy field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the RolePolicy field is set to the value of the last call.
-func (b *NetworkTopologyApplyConfiguration) WithRolePolicy(value v1beta1.NetworkTopologySpec) *NetworkTopologyApplyConfiguration {
-	b.RolePolicy = &value
+func (b *NetworkTopologyApplyConfiguration) WithRolePolicy(value *NetworkTopologySpecApplyConfiguration) *NetworkTopologyApplyConfiguration {
+	b.RolePolicy = value
 	return b
 }

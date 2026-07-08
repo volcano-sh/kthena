@@ -25,12 +25,13 @@ import (
 // RoleApplyConfiguration represents a declarative configuration of the Role type for use
 // with apply.
 type RoleApplyConfiguration struct {
-	Name                                         *string                            `json:"name,omitempty"`
-	Replicas                                     *int32                             `json:"replicas,omitempty"`
-	EntryTemplate                                *PodTemplateSpecApplyConfiguration `json:"entryTemplate,omitempty"`
-	WorkerReplicas                               *int32                             `json:"workerReplicas,omitempty"`
-	WorkerTemplate                               *PodTemplateSpecApplyConfiguration `json:"workerTemplate,omitempty"`
+	Name                                         *string                                `json:"name,omitempty"`
+	Replicas                                     *int32                                 `json:"replicas,omitempty"`
+	EntryTemplate                                *PodTemplateSpecApplyConfiguration     `json:"entryTemplate,omitempty"`
+	WorkerReplicas                               *int32                                 `json:"workerReplicas,omitempty"`
+	WorkerTemplate                               *PodTemplateSpecApplyConfiguration     `json:"workerTemplate,omitempty"`
 	RollingUpdateConfigurationApplyConfiguration `json:",omitempty,inline"`
+	NetworkTopology                              *NetworkTopologySpecApplyConfiguration `json:"networkTopology,omitempty"`
 }
 
 // RoleApplyConfiguration constructs a declarative configuration of the Role type for use with
@@ -92,5 +93,13 @@ func (b *RoleApplyConfiguration) WithMaxUnavailable(value intstr.IntOrString) *R
 // If called multiple times, the Partition field is set to the value of the last call.
 func (b *RoleApplyConfiguration) WithPartition(value intstr.IntOrString) *RoleApplyConfiguration {
 	b.RollingUpdateConfigurationApplyConfiguration.Partition = &value
+	return b
+}
+
+// WithNetworkTopology sets the NetworkTopology field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the NetworkTopology field is set to the value of the last call.
+func (b *RoleApplyConfiguration) WithNetworkTopology(value *NetworkTopologySpecApplyConfiguration) *RoleApplyConfiguration {
+	b.NetworkTopology = value
 	return b
 }
