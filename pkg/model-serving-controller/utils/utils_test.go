@@ -542,6 +542,114 @@ func TestExtractPodBlockingFailure(t *testing.T) {
 			},
 			wantReason: "",
 		},
+		{
+			// Global priority: an init-container crash in one pod must not mask a
+			// higher-priority image pull failure in another pod.
+			name: "image pull failure in another pod outranks init container crash",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 1,
+										Message:  "init failure on pod A",
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason:  "ImagePullBackOff",
+										Message: "Back-off pulling image on pod B",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "ImagePullFailed",
+			wantMsgSubstr: "pod B",
+		},
+		{
+			// Global priority: a runtime crash in one pod must not mask a
+			// higher-priority scheduling failure in another pod.
+			name: "scheduling failure in another pod outranks runtime crash",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 137,
+										Message:  "OOMKilled on pod A",
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{
+								Type:    corev1.PodScheduled,
+								Status:  corev1.ConditionFalse,
+								Message: "insufficient memory on pod B",
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "PodSchedulingFailed",
+			wantMsgSubstr: "pod B",
+		},
+		{
+			// Global priority: a runtime crash in one pod must not mask a
+			// higher-priority image pull failure in another pod.
+			name: "image pull failure in another pod outranks runtime crash",
+			pods: []*corev1.Pod{
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Waiting: &corev1.ContainerStateWaiting{
+										Reason:  "ImagePullBackOff",
+										Message: "Back-off pulling image on pod A",
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{
+										ExitCode: 137,
+										Message:  "OOMKilled on pod B",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantReason:    "ImagePullFailed",
+			wantMsgSubstr: "pod A",
+		},
 	}
 
 	for _, tt := range tests {
