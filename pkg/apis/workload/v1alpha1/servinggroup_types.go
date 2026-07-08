@@ -18,7 +18,6 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	volcanoV1Beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 // GangPolicy defines the gang scheduling configuration.
@@ -42,13 +41,37 @@ type GangPolicy struct {
 	MinRoleReplicas map[string]int32 `json:"minRoleReplicas,omitempty"`
 }
 
-// NetworkTopologySpec defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
+// NetworkTopologySpec defines the network topology scheduling policy exposed by Kthena.
+// It is converted to the scheduler-specific representation by the controller, keeping
+// the Kthena workload API stable if the underlying scheduler API changes incompatibly.
+type NetworkTopologySpec struct {
+	// Mode specifies the mode of the network topology constraint.
+	// +kubebuilder:validation:Enum=hard;soft
+	// +kubebuilder:default=hard
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// HighestTierAllowed specifies the highest tier that a job is allowed to cross when scheduling.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	HighestTierAllowed *int32 `json:"highestTierAllowed,omitempty"`
+
+	// HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.
+	// HighestTierName and HighestTierAllowed cannot be set simultaneously.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	HighestTierName string `json:"highestTierName,omitempty"`
+}
+
+// NetworkTopology defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
 type NetworkTopology struct {
 	// GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`.
-	GroupPolicy *volcanoV1Beta1.NetworkTopologySpec `json:"groupPolicy,omitempty"`
+	GroupPolicy *NetworkTopologySpec `json:"groupPolicy,omitempty"`
 
-	// RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`.
-	RolePolicy *volcanoV1Beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
+	// RolePolicy defines the default network topology scheduling requirement for roles.
+	// Deprecated: use roles[*].networkTopology instead. This field is retained for backward
+	// compatibility only and must not be configured together with any role-level networkTopology.
+	RolePolicy *NetworkTopologySpec `json:"rolePolicy,omitempty"`
 }
 
 // Role defines the specific pod instance role that performs the inference task.
@@ -83,6 +106,13 @@ type Role struct {
 	// For `partition`, the first N role replicas sorted by ordinal are protected from updates.
 	// +optional
 	RollingUpdateConfiguration `json:",inline,omitempty"`
+
+	// NetworkTopology defines the network topology scheduling requirement for this role.
+	// When set, it takes precedence over spec.template.networkTopology.rolePolicy for this
+	// role. It must not be configured together with spec.template.networkTopology.rolePolicy
+	// in the same ServingGroup.
+	// +optional
+	NetworkTopology *NetworkTopologySpec `json:"networkTopology,omitempty"`
 }
 
 // PodTemplateSpec describes the data a pod should have when created from a template

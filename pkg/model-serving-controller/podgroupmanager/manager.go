@@ -600,10 +600,43 @@ func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
 // from ModelServing spec.template.networkTopology.groupPolicy.
 func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedulingv1beta1.PodGroupSpec) {
 	if ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
-		spec.NetworkTopology = ms.Spec.Template.NetworkTopology.GroupPolicy
+		spec.NetworkTopology = toSchedulerNetworkTopologySpec(ms.Spec.Template.NetworkTopology.GroupPolicy)
 		return
 	}
 	spec.NetworkTopology = nil
+}
+
+// toSchedulerNetworkTopologySpec converts Kthena's NetworkTopologySpec adapter type to the
+// scheduler-specific PodGroup representation. Isolating the conversion here means future
+// Volcano API changes only need to update this function, not the ModelServing API.
+func toSchedulerNetworkTopologySpec(policy *workloadv1alpha1.NetworkTopologySpec) *schedulingv1beta1.NetworkTopologySpec {
+	if policy == nil {
+		return nil
+	}
+
+	var highestTierAllowed *int
+	if policy.HighestTierAllowed != nil {
+		highestTierAllowed = ptr.To(int(*policy.HighestTierAllowed))
+	}
+
+	return &schedulingv1beta1.NetworkTopologySpec{
+		Mode:               schedulingv1beta1.NetworkTopologyMode(policy.Mode),
+		HighestTierAllowed: highestTierAllowed,
+		HighestTierName:    policy.HighestTierName,
+	}
+}
+
+// resolveRoleNetworkTopology returns the effective Kthena NetworkTopologySpec for a role:
+// the role's own policy takes precedence; otherwise the legacy ModelServing-level
+// rolePolicy applies (preserved for backward compatibility); otherwise none.
+func resolveRoleNetworkTopology(ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role) *workloadv1alpha1.NetworkTopologySpec {
+	if role.NetworkTopology != nil {
+		return role.NetworkTopology
+	}
+	if ms.Spec.Template.NetworkTopology != nil {
+		return ms.Spec.Template.NetworkTopology.RolePolicy
+	}
+	return nil
 }
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
@@ -636,20 +669,13 @@ func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulin
 					workloadv1alpha1.RoleLabelKey:             role.Name,
 				},
 			},
-			MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
-			SubGroupSize:   &minSubgroupSize,
-			MinSubGroups:   ptr.To(int32(minReplicas)),
+			MatchLabelKeys:  []string{workloadv1alpha1.RoleIDKey},
+			SubGroupSize:    &minSubgroupSize,
+			MinSubGroups:    ptr.To(int32(minReplicas)),
+			NetworkTopology: toSchedulerNetworkTopologySpec(resolveRoleNetworkTopology(ms, role)),
 		})
 	}
 
-	if ms.Spec.Template.NetworkTopology != nil {
-		// set SubGroupPolicy if configured in ModelServing
-		if ms.Spec.Template.NetworkTopology.RolePolicy != nil {
-			for i := range subGroupPolicy {
-				subGroupPolicy[i].NetworkTopology = ms.Spec.Template.NetworkTopology.RolePolicy
-			}
-		}
-	}
 	podGroup.Spec.SubGroupPolicy = subGroupPolicy
 	return podGroup
 }

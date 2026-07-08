@@ -1498,6 +1498,136 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 	}
 }
 
+func TestValidateNetworkTopologyPolicy(t *testing.T) {
+	replicas := int32(2)
+
+	type args struct {
+		ms *workloadv1alpha1.ModelServing
+	}
+	tests := []struct {
+		name string
+		args args
+		want field.ErrorList
+	}{
+		{
+			name: "no rolePolicy and no role-level policy - valid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "role1", Replicas: &replicas},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "only legacy rolePolicy set - valid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "role1", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RolePolicy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "only role-level policy set - valid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas, NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"}},
+								{Name: "lb", Replicas: &replicas},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "rolePolicy and role-level policy set together - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas, NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"}},
+								{Name: "lb", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RolePolicy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("networkTopology"),
+					"spec.template.networkTopology.rolePolicy and spec.template.roles[*].networkTopology are mutually exclusive",
+				),
+			},
+		},
+		{
+			name: "rolePolicy with multiple conflicting roles reports each",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas, NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"}},
+								{Name: "decode", Replicas: &replicas, NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"}},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RolePolicy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("networkTopology"),
+					"spec.template.networkTopology.rolePolicy and spec.template.roles[*].networkTopology are mutually exclusive",
+				),
+				field.Forbidden(
+					field.NewPath("spec").Child("template").Child("roles").Index(1).Child("networkTopology"),
+					"spec.template.networkTopology.rolePolicy and spec.template.roles[*].networkTopology are mutually exclusive",
+				),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateNetworkTopologyPolicy(tt.args.ms)
+
+			if len(got) != len(tt.want) {
+				t.Errorf("validateNetworkTopologyPolicy() = %v, want %v", got, tt.want)
+				return
+			}
+
+			for i := range got {
+				assert.Equalf(t, tt.want[i].Error(), got[i].Error(), "Error mismatch at index %d", i)
+			}
+		})
+	}
+}
+
 func int32Ptr(i int32) *int32 {
 	return &i
 }

@@ -91,6 +91,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
+	allErrs = append(allErrs, validateNetworkTopologyPolicy(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -311,6 +312,32 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 				fmt.Sprintf("minRoleReplicas for role %s must be non-negative", roleName),
 			))
 		}
+	}
+
+	return allErrs
+}
+
+// validateNetworkTopologyPolicy rejects manifests that configure both the compatibility
+// spec.template.networkTopology.rolePolicy field and a role-level networkTopology policy,
+// since the two are mutually exclusive per the accepted role-scoped network topology design.
+func validateNetworkTopologyPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+
+	rolePolicyConfigured := ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.RolePolicy != nil
+	if !rolePolicyConfigured {
+		return allErrs
+	}
+
+	templatePath := field.NewPath("spec").Child("template")
+	for i, role := range ms.Spec.Template.Roles {
+		if role.NetworkTopology == nil {
+			continue
+		}
+
+		allErrs = append(allErrs, field.Forbidden(
+			templatePath.Child("roles").Index(i).Child("networkTopology"),
+			"spec.template.networkTopology.rolePolicy and spec.template.roles[*].networkTopology are mutually exclusive",
+		))
 	}
 
 	return allErrs
