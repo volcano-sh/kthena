@@ -290,17 +290,8 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
-		// Parse max_tokens if present in modelRequest, fallback to environment variable or 2048
-		maxTokens := getDefaultMaxTokens()
-		if val, ok := modelRequest["max_tokens"]; ok {
-			if floatVal, ok := val.(float64); ok && floatVal > 0 {
-				maxTokens = int(floatVal)
-			}
-		}
-
 		// Apply rate limiting using the unified rate limiter
-		reserved, err := r.loadRateLimiter.RateLimit(modelName, promptStr, maxTokens)
-		if err != nil {
+		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string
@@ -326,9 +317,6 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.Set("finishReason", "rate_limit")
 			return
 		}
-
-		// Store reserved max tokens in context for refund/true-up logic later
-		c.Set("reservedOutputTokens", reserved)
 
 		requestID := uuid.New().String()
 		if c.Request.Header.Get("x-request-id") == "" {
@@ -729,15 +717,9 @@ func (r *Router) proxyModelEndpoint(
 			if resp.Usage.TotalTokens <= 0 {
 				return
 			}
-			// Record actual output tokens used and true-up
+			// Record actual output tokens used
 			if r.loadRateLimiter != nil {
-				reserved := 2048
-				if val, exists := c.Get("reservedOutputTokens"); exists {
-					if rVal, ok := val.(int); ok {
-						reserved = rVal
-					}
-				}
-				r.loadRateLimiter.RecordOutputTokens(modelName, reserved, resp.Usage.CompletionTokens)
+				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
@@ -1037,15 +1019,9 @@ func (r *Router) proxyToPDDisaggregated(
 			continue
 		}
 
-		// Record actual output tokens used and true-up
+		// Record actual output tokens used
 		if r.loadRateLimiter != nil {
-			reserved := 2048
-			if val, exists := c.Get("reservedOutputTokens"); exists {
-				if rVal, ok := val.(int); ok {
-					reserved = rVal
-				}
-			}
-			r.loadRateLimiter.RecordOutputTokens(ctx.Model, reserved, outputTokens)
+			r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens)
 		}
 
 		// Record output token metrics

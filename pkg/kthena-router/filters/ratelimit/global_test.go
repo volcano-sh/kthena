@@ -64,12 +64,12 @@ func TestTokenRateLimiter_Global(t *testing.T) {
 
 	// Should allow multiple requests within limit
 	for i := 0; i < 3; i++ {
-		_, err := rl.RateLimit(model, prompt, 0)
+		err := rl.RateLimit(model, prompt)
 		assert.NoError(t, err, "Request %d should be allowed", i)
 	}
 
 	// Should be rate limited after exceeding limit
-	_, err = rl.RateLimit(model, prompt, 0)
+	err = rl.RateLimit(model, prompt)
 	assert.Error(t, err, "Should be rate limited after exceeding limit")
 	assert.IsType(t, &InputRateLimitExceededError{}, err)
 }
@@ -108,18 +108,18 @@ func TestTokenRateLimiter_LocalVsGlobal(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both should allow initial requests
-	_, err = rl.RateLimit(localModel, prompt, 0)
+	err = rl.RateLimit(localModel, prompt)
 	assert.NoError(t, err)
 
-	_, err = rl.RateLimit(globalModel, prompt, 0)
+	err = rl.RateLimit(globalModel, prompt)
 	assert.NoError(t, err)
 
 	// Use up local tokens
-	_, err = rl.RateLimit(localModel, prompt, 0)
+	err = rl.RateLimit(localModel, prompt)
 	assert.Error(t, err, "Local model should be rate limited")
 
 	// Use up global tokens
-	_, err = rl.RateLimit(globalModel, prompt, 0)
+	err = rl.RateLimit(globalModel, prompt)
 	assert.Error(t, err, "Global model should be rate limited")
 }
 
@@ -145,8 +145,8 @@ func TestTokenRateLimiter_OutputTokens(t *testing.T) {
 	require.NoError(t, err)
 
 	// Record output tokens (should not block since it's async)
-	rl.RecordOutputTokens(model, 0, 25)
-	rl.RecordOutputTokens(model, 0, 30) // Total: 55, over limit
+	rl.RecordOutputTokens(model, 25)
+	rl.RecordOutputTokens(model, 30) // Total: 55, over limit
 
 	// Give some time for async recording
 	time.Sleep(100 * time.Millisecond)
@@ -179,7 +179,7 @@ func TestTokenRateLimiter_GlobalDeleteLimiter(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify it works
-	_, err = rl.RateLimit(model, "test", 0)
+	err = rl.RateLimit(model, "test")
 	assert.NoError(t, err)
 
 	// Delete the limiter
@@ -187,7 +187,7 @@ func TestTokenRateLimiter_GlobalDeleteLimiter(t *testing.T) {
 
 	// Should now allow unlimited requests (no limiter configured)
 	for i := 0; i < 10; i++ {
-		_, err = rl.RateLimit(model, "test", 0)
+		err = rl.RateLimit(model, "test")
 		assert.NoError(t, err, "Request %d should be allowed after deletion", i)
 	}
 }

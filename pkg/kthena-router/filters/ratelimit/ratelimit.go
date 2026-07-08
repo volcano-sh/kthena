@@ -128,8 +128,8 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 	}
 }
 
-// RateLimit checks limits and returns the number of tokens reserved for output.
-func (r *TokenRateLimiter) RateLimit(model, prompt string, estimatedOutputTokens int) (int, error) {
+// RateLimit checks if the request is within rate limits for both input and output tokens.
+func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
 	if err != nil {
 		klog.Errorf("failed to calculate token number: %v", err)
@@ -142,36 +142,22 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string, estimatedOutputTokens
 	r.mutex.RUnlock()
 
 	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
-		return 0, &InputRateLimitExceededError{}
+		return &InputRateLimitExceededError{}
 	}
-
-	reserved := 0
-	if hasOutputLimit {
-		if !outputLimiter.AllowN(time.Now(), estimatedOutputTokens) {
-			// Input tokens were already consumed above — refund them (see fix #2).
-			if hasInputLimit {
-				if _, refundErr := inputLimiter.ReconcileN(time.Now(), -tokens); refundErr != nil {
-					klog.Errorf("failed to refund input tokens for model %s: %v", model, refundErr)
-				}
-			}
-			return 0, &OutputRateLimitExceededError{}
-		}
-		reserved = estimatedOutputTokens
+	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
+		return &OutputRateLimitExceededError{}
 	}
-	return reserved, nil
+	return nil
 }
 
-// RecordOutputTokens true-ups the bucket for the difference between what was
-// reserved (estimated) and what was actually used. Pass the value returned by
-// RateLimit as `reserved`.
-func (r *TokenRateLimiter) RecordOutputTokens(model string, reserved, actual int) {
+// RecordOutputTokens records the actual output tokens consumed after response generation.
+func (r *TokenRateLimiter) RecordOutputTokens(model string, actual int) {
 	r.mutex.RLock()
 	outputLimiter, exists := r.outputLimiter[model]
 	r.mutex.RUnlock()
 
 	if exists {
-		delta := actual - reserved // positive = debit more, negative = refund
-		outputLimiter.ReconcileN(time.Now(), delta)
+		outputLimiter.ReconcileN(time.Now(), actual)
 	}
 }
 
