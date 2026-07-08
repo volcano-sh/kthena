@@ -161,7 +161,7 @@ func (t *InMemorySlidingWindowTokenTracker) pruneExpiredBuckets(user, model stri
 }
 
 // getActiveTotal computes the total tokens for the active window
-func (t *InMemorySlidingWindowTokenTracker) getActiveTotal(bucketData *userBucketData) float64 {
+func (t *InMemorySlidingWindowTokenTracker) getActiveTotal(bucketData *userBucketData, cutoff int64) float64 {
 	if bucketData == nil || bucketData.start >= len(bucketData.buckets) {
 		return 0
 	}
@@ -171,15 +171,24 @@ func (t *InMemorySlidingWindowTokenTracker) getActiveTotal(bucketData *userBucke
 		return 0
 	}
 
+	startIdx := bucketData.start
+	for startIdx <= end && bucketData.buckets[startIdx].timestamp < cutoff {
+		startIdx++
+	}
+
+	if startIdx > end {
+		return 0
+	}
+
 	total := bucketData.buckets[end].cumSum
-	if bucketData.start > 0 {
-		total -= bucketData.buckets[bucketData.start-1].cumSum
+	if startIdx > 0 {
+		total -= bucketData.buckets[startIdx-1].cumSum
 	}
 	return total
 }
 
 // getActiveRequestCount computes the total request count for the active window
-func (t *InMemorySlidingWindowTokenTracker) getActiveRequestCount(bucketData *userBucketData) int {
+func (t *InMemorySlidingWindowTokenTracker) getActiveRequestCount(bucketData *userBucketData, cutoff int64) int {
 	if bucketData == nil || bucketData.start >= len(bucketData.buckets) {
 		return 0
 	}
@@ -189,9 +198,18 @@ func (t *InMemorySlidingWindowTokenTracker) getActiveRequestCount(bucketData *us
 		return 0
 	}
 
+	startIdx := bucketData.start
+	for startIdx <= end && bucketData.buckets[startIdx].timestamp < cutoff {
+		startIdx++
+	}
+
+	if startIdx > end {
+		return 0
+	}
+
 	total := bucketData.buckets[end].reqCumSum
-	if bucketData.start > 0 {
-		total -= bucketData.buckets[bucketData.start-1].reqCumSum
+	if startIdx > 0 {
+		total -= bucketData.buckets[startIdx-1].reqCumSum
 	}
 	return total
 }
@@ -202,49 +220,21 @@ func (t *InMemorySlidingWindowTokenTracker) GetTokenCount(user, model string) (f
 		return 0, nil
 	}
 
+	cutoff := t.getCutoffTimestamp()
+
 	t.mu.RLock()
+	defer t.mu.RUnlock()
+
 	modelBuckets, userOk := t.userBucketStore[user]
 	if !userOk || modelBuckets == nil {
-		t.mu.RUnlock()
 		return 0, nil
 	}
 	bucketData, modelOk := modelBuckets[model]
 	if !modelOk || bucketData == nil || bucketData.start >= len(bucketData.buckets) {
-		t.mu.RUnlock()
 		return 0, nil
 	}
 
-	cutoff := t.getCutoffTimestamp()
-	needsPruning := false
-
-	if bucketData.start < len(bucketData.buckets) {
-		oldestTs := bucketData.buckets[bucketData.start].timestamp
-		if oldestTs < cutoff {
-			needsPruning = true
-		}
-	}
-	t.mu.RUnlock()
-
-	// Only acquire write lock if we need to prune
-	if needsPruning {
-		t.mu.Lock()
-		// Re-check user data existence in case it was deleted between RUnlock and Lock
-		if modelBuckets, userOk := t.userBucketStore[user]; userOk {
-			if _, modelOk := modelBuckets[model]; modelOk {
-				t.pruneExpiredBuckets(user, model, cutoff)
-			}
-		}
-		t.mu.Unlock()
-	}
-
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if modelBuckets, userOk := t.userBucketStore[user]; userOk {
-		if bucketData, modelOk := modelBuckets[model]; modelOk {
-			return t.getActiveTotal(bucketData), nil
-		}
-	}
-	return 0, nil
+	return t.getActiveTotal(bucketData, cutoff), nil
 }
 
 func (t *InMemorySlidingWindowTokenTracker) UpdateTokenCount(user, model string, inputTokens, outputTokens float64) error {
@@ -317,45 +307,19 @@ func (t *InMemorySlidingWindowTokenTracker) GetRequestCount(user, model string) 
 		return 0, nil
 	}
 
+	cutoff := t.getCutoffTimestamp()
+
 	t.mu.RLock()
+	defer t.mu.RUnlock()
+
 	modelBuckets, userOk := t.userBucketStore[user]
 	if !userOk || modelBuckets == nil {
-		t.mu.RUnlock()
 		return 0, nil
 	}
 	bucketData, modelOk := modelBuckets[model]
 	if !modelOk || bucketData == nil || bucketData.start >= len(bucketData.buckets) {
-		t.mu.RUnlock()
 		return 0, nil
 	}
 
-	cutoff := t.getCutoffTimestamp()
-	needsPruning := false
-
-	if bucketData.start < len(bucketData.buckets) {
-		oldestTs := bucketData.buckets[bucketData.start].timestamp
-		if oldestTs < cutoff {
-			needsPruning = true
-		}
-	}
-	t.mu.RUnlock()
-
-	if needsPruning {
-		t.mu.Lock()
-		if modelBuckets, userOk := t.userBucketStore[user]; userOk {
-			if _, modelOk := modelBuckets[model]; modelOk {
-				t.pruneExpiredBuckets(user, model, cutoff)
-			}
-		}
-		t.mu.Unlock()
-	}
-
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if modelBuckets, userOk := t.userBucketStore[user]; userOk {
-		if bucketData, modelOk := modelBuckets[model]; modelOk {
-			return t.getActiveRequestCount(bucketData), nil
-		}
-	}
-	return 0, nil
+	return t.getActiveRequestCount(bucketData, cutoff), nil
 }

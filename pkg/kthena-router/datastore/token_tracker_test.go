@@ -44,10 +44,10 @@ func TestPruneExpiredBuckets_RebasesCumulativeCountsAfterCompaction(t *testing.T
 	if len(bucketData.buckets) != 2 {
 		t.Fatalf("Expected 2 remaining buckets after compaction, got %d", len(bucketData.buckets))
 	}
-	if got := tracker.getActiveTotal(bucketData); got != 7 {
+	if got := tracker.getActiveTotal(bucketData, 3); got != 7 {
 		t.Fatalf("Expected active token total 7 after compaction, got %v", got)
 	}
-	if got := tracker.getActiveRequestCount(bucketData); got != 2 {
+	if got := tracker.getActiveRequestCount(bucketData, 3); got != 2 {
 		t.Fatalf("Expected active request total 2 after compaction, got %d", got)
 	}
 }
@@ -586,11 +586,13 @@ func TestGetActiveTotal(t *testing.T) {
 	tests := []struct {
 		name       string
 		bucketData *userBucketData
+		cutoff     int64
 		expected   float64
 	}{
 		{
 			name:       "nil bucket data",
 			bucketData: nil,
+			cutoff:     0,
 			expected:   0,
 		},
 		{
@@ -599,6 +601,7 @@ func TestGetActiveTotal(t *testing.T) {
 				buckets: []bucketNode{},
 				start:   0,
 			},
+			cutoff:   0,
 			expected: 0,
 		},
 		{
@@ -607,6 +610,7 @@ func TestGetActiveTotal(t *testing.T) {
 				buckets: []bucketNode{{timestamp: 100, cumSum: 50}},
 				start:   2,
 			},
+			cutoff:   0,
 			expected: 0,
 		},
 		{
@@ -615,6 +619,7 @@ func TestGetActiveTotal(t *testing.T) {
 				buckets: []bucketNode{{timestamp: 100, cumSum: 50}},
 				start:   0,
 			},
+			cutoff:   0,
 			expected: 50,
 		},
 		{
@@ -627,6 +632,7 @@ func TestGetActiveTotal(t *testing.T) {
 				},
 				start: 0,
 			},
+			cutoff:   0,
 			expected: 150,
 		},
 		{
@@ -639,13 +645,27 @@ func TestGetActiveTotal(t *testing.T) {
 				},
 				start: 1,
 			},
+			cutoff:   0,
 			expected: 100, // 150 - 50 = 100
+		},
+		{
+			name: "dynamic cutoff filters old buckets",
+			bucketData: &userBucketData{
+				buckets: []bucketNode{
+					{timestamp: 100, cumSum: 50},
+					{timestamp: 200, cumSum: 100},
+					{timestamp: 300, cumSum: 150},
+				},
+				start: 0,
+			},
+			cutoff:   250, // Only 300 is valid
+			expected: 50,  // 150 - 100 = 50
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := tracker.getActiveTotal(tt.bucketData)
+			result := tracker.getActiveTotal(tt.bucketData, tt.cutoff)
 			if result != tt.expected {
 				t.Errorf("getActiveTotal() = %v, want %v", result, tt.expected)
 			}
