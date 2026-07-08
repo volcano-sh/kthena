@@ -366,6 +366,7 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 		return nil
 	}
 	_, err = modelServingInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    mc.createModelServing,
 		UpdateFunc: mc.triggerModel,
 		DeleteFunc: mc.deleteModelServing,
 	})
@@ -417,16 +418,37 @@ func (mc *ModelBoosterController) loadConfigFromConfigMap() {
 	}
 }
 
-// When model serving status changed, model reconciles
+func (mc *ModelBoosterController) createModelServing(obj any) {
+	modelServing, ok := obj.(*workload.ModelServing)
+	if !ok {
+		klog.Error("failed to parse ModelServing when createModelServing")
+		return
+	}
+	if !meta.IsStatusConditionPresentAndEqual(modelServing.Status.Conditions, string(workload.ModelServingAvailable), metav1.ConditionTrue) {
+		return
+	}
+	if len(modelServing.OwnerReferences) > 0 {
+		if model, err := mc.modelBoosterLister.ModelBoosters(modelServing.Namespace).Get(modelServing.OwnerReferences[0].Name); err == nil {
+			mc.enqueueModelBooster(model)
+		}
+	}
+}
+
+// When model serving availability changed, model reconciles
 func (mc *ModelBoosterController) triggerModel(old any, new any) {
 	modelServing, ok := new.(*workload.ModelServing)
 	if !ok {
 		klog.Error("failed to parse new ModelServing")
 		return
 	}
-	_, ok = old.(*workload.ModelServing)
+	oldModelServing, ok := old.(*workload.ModelServing)
 	if !ok {
 		klog.Error("failed to parse old ModelServing")
+		return
+	}
+	modelServingAvailable := meta.IsStatusConditionPresentAndEqual(modelServing.Status.Conditions, string(workload.ModelServingAvailable), metav1.ConditionTrue)
+	oldModelServingAvailable := meta.IsStatusConditionPresentAndEqual(oldModelServing.Status.Conditions, string(workload.ModelServingAvailable), metav1.ConditionTrue)
+	if modelServingAvailable == oldModelServingAvailable {
 		return
 	}
 	if len(modelServing.OwnerReferences) > 0 {
