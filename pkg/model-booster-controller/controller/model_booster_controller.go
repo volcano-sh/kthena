@@ -342,7 +342,11 @@ func NewModelBoosterController(kubeClient kubernetes.Interface, client clientset
 	}
 
 	if err := workload.Install(scheme.Scheme); err != nil {
+		// Consistent with NewModelServingController: event recording depends on the
+		// scheme being able to resolve the involved object's GVK, so a registration
+		// failure must abort construction rather than silently dropping events later.
 		klog.Errorf("failed to register workload API scheme for event recording: %v", err)
+		return nil
 	}
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartStructuredLogging(0)
