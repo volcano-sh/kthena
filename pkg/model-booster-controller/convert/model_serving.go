@@ -222,8 +222,8 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		return nil, err
 	}
 	modelDownloadPath := GetCachePath(backend.CacheURI) + GetMountPath(backend.ModelURI)
-	// only one worker in such circumstance so get the first worker's config as commands
-	commands, err := buildCommands(backend, &backend.Workers[0].Config, modelDownloadPath, workersMap)
+	serverWorkerConfig := workersMap[workload.ModelWorkerTypeServer].Config
+	commands, err := buildCommands(backend, &serverWorkerConfig, modelDownloadPath, workersMap)
 	if err != nil {
 		return nil, err
 	}

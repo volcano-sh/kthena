@@ -26,6 +26,7 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/env"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 )
 
@@ -406,6 +407,115 @@ func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildVllmModelServingUsesServerWorkerConfig(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+	serverWorker := model.Spec.Backend.Workers[0]
+	serverWorker.Image = "vllm-server:server"
+	serverWorker.Replicas = 2
+	serverWorker.Pods = 3
+	serverWorker.Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
+		},
+	}
+	serverWorker.Config.Raw = []byte(`{"served-model-name":"server-model","max-model-len":222}`)
+
+	prefillWorker := serverWorker
+	prefillWorker.Type = workload.ModelWorkerTypePrefill
+	prefillWorker.Image = "vllm-server:prefill"
+	prefillWorker.Replicas = 9
+	prefillWorker.Pods = 7
+	prefillWorker.Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("8"),
+			corev1.ResourceMemory: resource.MustParse("16Gi"),
+		},
+	}
+	prefillWorker.Config.Raw = []byte(`{"served-model-name":"prefill-model","max-model-len":111}`)
+
+	model.Spec.Backend.Workers = []workload.ModelWorker{prefillWorker, serverWorker}
+
+	serving, err := BuildModelServing(model)
+	assert.NoError(t, err)
+
+	role := modelServingRole(t, serving, "leader")
+	if role.Replicas == nil {
+		t.Fatal("leader role replicas not set")
+	}
+	if serving.Spec.Template.GangPolicy == nil {
+		t.Fatal("leader gang policy not set")
+	}
+	assert.Equal(t, int32(2), *role.Replicas)
+	assert.Equal(t, int32(2), serving.Spec.Template.GangPolicy.MinRoleReplicas["leader"])
+	assert.Equal(t, int32(2), role.WorkerReplicas)
+
+	engine := entryContainer(t, role, "engine")
+	assert.Equal(t, "vllm-server:server", engine.Image)
+	assert.Equal(t, serverWorker.Resources, engine.Resources)
+
+	command := strings.Join(engine.Command, " ")
+	assert.Contains(t, command, "--served-model-name server-model")
+	assert.Contains(t, command, "--max-model-len 222")
+	assert.Contains(t, command, "--ray_cluster_size=3")
+	assert.NotContains(t, command, "prefill-model")
+	assert.NotContains(t, command, "--max-model-len 111")
+
+	worker := workerContainer(t, role)
+	assert.Equal(t, "vllm-server:server", worker.Image)
+	assert.Equal(t, serverWorker.Resources, worker.Resources)
+}
+
+func TestBuildVllmModelServingRequiresServerWorker(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+	prefillWorker := model.Spec.Backend.Workers[0]
+	prefillWorker.Type = workload.ModelWorkerTypePrefill
+	model.Spec.Backend.Workers = []workload.ModelWorker{prefillWorker}
+
+	serving, err := BuildModelServing(model)
+
+	assert.Nil(t, serving)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "server worker not found")
+	}
+}
+
+func modelServingRole(t *testing.T, serving *workload.ModelServing, name string) workload.Role {
+	t.Helper()
+
+	for _, role := range serving.Spec.Template.Roles {
+		if role.Name == name {
+			return role
+		}
+	}
+	t.Fatalf("role %q not found", name)
+	return workload.Role{}
+}
+
+func entryContainer(t *testing.T, role workload.Role, name string) corev1.Container {
+	t.Helper()
+
+	for _, container := range role.EntryTemplate.Spec.Containers {
+		if container.Name == name {
+			return container
+		}
+	}
+	t.Fatalf("entry container %q not found", name)
+	return corev1.Container{}
+}
+
+func workerContainer(t *testing.T, role workload.Role) corev1.Container {
+	t.Helper()
+
+	if role.WorkerTemplate == nil {
+		t.Fatal("worker template not found")
+	}
+	if len(role.WorkerTemplate.Spec.Containers) == 0 {
+		t.Fatal("worker container not found")
+	}
+	return role.WorkerTemplate.Spec.Containers[0]
 }
 
 func TestBuildCacheVolume(t *testing.T) {
