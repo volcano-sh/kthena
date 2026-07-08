@@ -550,7 +550,7 @@ func findImagePullFailure(pods []*corev1.Pod) (reason, message string, found boo
 func findInitContainerFailure(pods []*corev1.Pod) (reason, message string, found bool) {
 	for _, pod := range pods {
 		for _, cs := range pod.Status.InitContainerStatuses {
-			if r, m := extractContainerCrashFailure(cs, "DownloaderFailed"); r != "" {
+			if r, m := extractContainerCrashFailure(cs, "InitContainerFailed"); r != "" {
 				return r, m, true
 			}
 		}

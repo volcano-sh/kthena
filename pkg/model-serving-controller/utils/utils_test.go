@@ -434,7 +434,7 @@ func TestExtractPodBlockingFailure(t *testing.T) {
 			wantMsgSubstr: "Back-off",
 		},
 		{
-			name: "init container crash (downloader failure)",
+			name: "init container crash",
 			pods: []*corev1.Pod{
 				{
 					Status: corev1.PodStatus{
@@ -451,7 +451,7 @@ func TestExtractPodBlockingFailure(t *testing.T) {
 					},
 				},
 			},
-			wantReason:    "DownloaderFailed",
+			wantReason:    "InitContainerFailed",
 			wantMsgSubstr: "PVC path",
 		},
 		{
@@ -471,7 +471,7 @@ func TestExtractPodBlockingFailure(t *testing.T) {
 					},
 				},
 			},
-			wantReason:    "DownloaderFailed",
+			wantReason:    "InitContainerFailed",
 			wantMsgSubstr: "exit code 2",
 		},
 		{
