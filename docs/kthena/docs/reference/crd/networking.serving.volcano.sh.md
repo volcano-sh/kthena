@@ -140,6 +140,8 @@ _Appears in:_
 | `status` _[ModelRouteStatus](#modelroutestatus)_ |  |  |  |
 
 
+
+
 #### ModelRouteList
 
 
@@ -210,6 +212,8 @@ _Appears in:_
 | `kind` _string_ | `ModelServer` | | |
 | `spec` _[ModelServerSpec](#modelserverspec)_ |  |  |  |
 | `status` _[ModelServerStatus](#modelserverstatus)_ |  |  |  |
+
+
 
 
 #### ModelServerList

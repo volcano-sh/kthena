@@ -279,7 +279,7 @@ func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServ
 	if ms.Status.ObservedGeneration == ms.Generation &&
 		ms.Status.MatchedReplicas == int32(len(podList)) &&
 		ms.Status.ReadyReplicas == int32(readyPods.Len()) {
-		if cond := meta.FindStatusCondition(ms.Status.Conditions, "Ready"); cond != nil &&
+		if cond := meta.FindStatusCondition(ms.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady)); cond != nil &&
 			cond.Status == expectedReadyStatus &&
 			cond.Reason == expectedReason {
 			return nil
@@ -301,14 +301,14 @@ func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServ
 
 		if readyPods.Len() > 0 {
 			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
-				Type:    "Ready",
+				Type:    string(aiv1alpha1.ModelServerConditionReady),
 				Status:  metav1.ConditionTrue,
 				Reason:  "PodsReady",
 				Message: fmt.Sprintf("%d ready pods matched", readyPods.Len()),
 			})
 		} else {
 			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
-				Type:    "Ready",
+				Type:    string(aiv1alpha1.ModelServerConditionReady),
 				Status:  metav1.ConditionFalse,
 				Reason:  "NoReadyPods",
 				Message: "No ready pods match workloadSelector",

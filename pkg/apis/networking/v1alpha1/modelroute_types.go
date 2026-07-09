@@ -165,6 +165,14 @@ const (
 	Month  RateLimitUnit = "month"
 )
 
+// ModelRouteConditionType is the type of a status condition on a ModelRoute.
+type ModelRouteConditionType string
+
+const (
+	// ModelRouteConditionReady indicates the route has been registered in the router store.
+	ModelRouteConditionReady ModelRouteConditionType = "Ready"
+)
+
 // ModelRouteStatus defines the observed state of ModelRoute.
 type ModelRouteStatus struct {
 	// observedGeneration is the most recent generation observed for this ModelRoute.

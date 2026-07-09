@@ -162,7 +162,7 @@ func (c *ModelRouteController) syncHandler(key string) error {
 func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute) error {
 	// Check if status is already up-to-date
 	if mr.Status.ObservedGeneration == mr.Generation {
-		if cond := meta.FindStatusCondition(mr.Status.Conditions, "Ready"); cond != nil &&
+		if cond := meta.FindStatusCondition(mr.Status.Conditions, string(aiv1alpha1.ModelRouteConditionReady)); cond != nil &&
 			cond.Status == metav1.ConditionTrue &&
 			cond.Reason == "RouteRegistered" {
 			return nil
@@ -181,7 +181,7 @@ func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute)
 		mrCopy.Status.ObservedGeneration = latest.Generation
 
 		meta.SetStatusCondition(&mrCopy.Status.Conditions, metav1.Condition{
-			Type:    "Ready",
+			Type:    string(aiv1alpha1.ModelRouteConditionReady),
 			Status:  metav1.ConditionTrue,
 			Reason:  "RouteRegistered",
 			Message: "ModelRoute registered in router store",

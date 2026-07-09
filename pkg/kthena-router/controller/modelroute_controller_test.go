@@ -247,7 +247,7 @@ func TestModelRouteController_StatusUpdate(t *testing.T) {
 			context.Background(), "test-status-route", metav1.GetOptions{})
 		assert.NoError(t, err)
 
-		cond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+		cond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelRouteConditionReady))
 		require.NotNil(t, cond)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Equal(t, "RouteRegistered", cond.Reason)

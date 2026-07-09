@@ -110,6 +110,14 @@ const (
 	ConnectorTypeMoonCake KVConnectorType = "mooncake" // Indicates `MoonCakeConnector` in vllm-ascend
 )
 
+// ModelServerConditionType is the type of a status condition on a ModelServer.
+type ModelServerConditionType string
+
+const (
+	// ModelServerConditionReady indicates at least one ready pod is registered in the router store.
+	ModelServerConditionReady ModelServerConditionType = "Ready"
+)
+
 // KVConnectorSpec defines KV connector configuration for PD disaggregated routing
 type KVConnectorSpec struct {
 	// Type specifies the connector type.
