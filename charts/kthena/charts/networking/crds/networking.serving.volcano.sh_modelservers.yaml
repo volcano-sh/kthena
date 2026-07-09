@@ -165,8 +165,9 @@ spec:
                   Conditions track the lifecycle of this ModelServer.
                   Types:
                     - "Ready": true when at least one ready pod is matched and the ModelServer has been
-                      registered with the router store. Signals that `kubectl wait --for=condition=ready`
-                      can be used.
+                      registered with the router store. Signals that the ModelServer can serve traffic.
+                    - "AllPodsReady": true when at least one pod is matched and every matched pod is ready
+                      and registered with the router store.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

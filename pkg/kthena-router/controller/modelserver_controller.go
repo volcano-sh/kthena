@@ -54,6 +54,15 @@ const (
 	ResourceTypePod         ResourceType = "Pod"
 )
 
+// Condition reasons for ModelServer status.
+const (
+	ReasonNoReadyPods       = "NoReadyPods"
+	ReasonPodsReady         = "PodsReady"
+	ReasonNoMatchedPods     = "NoMatchedPods"
+	ReasonPodsNotFullyReady = "PodsNotFullyReady"
+	ReasonAllPodsReady      = "AllPodsReady"
+)
+
 // QueueItem represents an item in the work queue
 type QueueItem struct {
 	ResourceType ResourceType
@@ -268,20 +277,41 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 }
 
 func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServer, podList []*corev1.Pod, readyPods sets.Set[types.NamespacedName]) error {
-	expectedReadyStatus := metav1.ConditionFalse
-	expectedReason := "NoReadyPods"
-	if readyPods.Len() > 0 {
-		expectedReadyStatus = metav1.ConditionTrue
-		expectedReason = "PodsReady"
+	matchedReplicas := int32(len(podList))
+	readyReplicas := int32(readyPods.Len())
+
+	// Ready condition (at least one pod ready)
+	readyStatus := metav1.ConditionFalse
+	readyReason := ReasonNoReadyPods
+	readyMessage := "No ready pods match workloadSelector"
+	if readyReplicas > 0 {
+		readyStatus = metav1.ConditionTrue
+		readyReason = ReasonPodsReady
+		readyMessage = fmt.Sprintf("%d ready pods matched", readyReplicas)
+	}
+
+	// AllPodsReady condition (every matched pod ready)
+	allPodsReadyStatus := metav1.ConditionFalse
+	allPodsReadyReason := ReasonNoMatchedPods
+	allPodsReadyMessage := "No pods match workloadSelector"
+	if matchedReplicas > 0 {
+		allPodsReadyReason = ReasonPodsNotFullyReady
+		allPodsReadyMessage = fmt.Sprintf("%d of %d matched pods are ready", readyReplicas, matchedReplicas)
+		if readyReplicas == matchedReplicas {
+			allPodsReadyStatus = metav1.ConditionTrue
+			allPodsReadyReason = ReasonAllPodsReady
+			allPodsReadyMessage = fmt.Sprintf("All %d matched pods are ready", matchedReplicas)
+		}
 	}
 
 	// Check if status is already up-to-date
 	if ms.Status.ObservedGeneration == ms.Generation &&
-		ms.Status.MatchedReplicas == int32(len(podList)) &&
-		ms.Status.ReadyReplicas == int32(readyPods.Len()) {
-		if cond := meta.FindStatusCondition(ms.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady)); cond != nil &&
-			cond.Status == expectedReadyStatus &&
-			cond.Reason == expectedReason {
+		ms.Status.MatchedReplicas == matchedReplicas &&
+		ms.Status.ReadyReplicas == readyReplicas {
+		readyCond := meta.FindStatusCondition(ms.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		allReadyCond := meta.FindStatusCondition(ms.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		if readyCond != nil && readyCond.Status == readyStatus && readyCond.Reason == readyReason &&
+			allReadyCond != nil && allReadyCond.Status == allPodsReadyStatus && allReadyCond.Reason == allPodsReadyReason {
 			return nil
 		}
 	}
@@ -296,24 +326,22 @@ func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServ
 
 		msCopy := latest.DeepCopy()
 		msCopy.Status.ObservedGeneration = latest.Generation
-		msCopy.Status.MatchedReplicas = int32(len(podList))
-		msCopy.Status.ReadyReplicas = int32(readyPods.Len())
+		msCopy.Status.MatchedReplicas = matchedReplicas
+		msCopy.Status.ReadyReplicas = readyReplicas
 
-		if readyPods.Len() > 0 {
-			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
-				Type:    string(aiv1alpha1.ModelServerConditionReady),
-				Status:  metav1.ConditionTrue,
-				Reason:  "PodsReady",
-				Message: fmt.Sprintf("%d ready pods matched", readyPods.Len()),
-			})
-		} else {
-			meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
-				Type:    string(aiv1alpha1.ModelServerConditionReady),
-				Status:  metav1.ConditionFalse,
-				Reason:  "NoReadyPods",
-				Message: "No ready pods match workloadSelector",
-			})
-		}
+		meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+			Type:    string(aiv1alpha1.ModelServerConditionReady),
+			Status:  readyStatus,
+			Reason:  readyReason,
+			Message: readyMessage,
+		})
+
+		meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+			Type:    string(aiv1alpha1.ModelServerConditionAllPodsReady),
+			Status:  allPodsReadyStatus,
+			Reason:  allPodsReadyReason,
+			Message: allPodsReadyMessage,
+		})
 
 		_, err = c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).UpdateStatus(ctx, msCopy, metav1.UpdateOptions{})
 		return err

@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -1308,5 +1309,327 @@ func TestModelServerController_GetMatchingModelServers(t *testing.T) {
 		result, err := controller.getMatchingModelServers(pod)
 		assert.NoError(t, err)
 		assert.Empty(t, result)
+	})
+}
+
+func helperPod(name string, labels map[string]string, ready bool) *corev1.Pod {
+	phase := corev1.PodPending
+	condStatus := corev1.ConditionFalse
+	if ready {
+		phase = corev1.PodRunning
+		condStatus = corev1.ConditionTrue
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      name,
+			Labels:    labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: phase,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: condStatus},
+			},
+		},
+	}
+}
+
+// TestModelServerController_ReadinessConditions verifies that the new AllPodsReady
+// condition is set alongside Ready for empty / partial / full pod readiness.
+func TestModelServerController_ReadinessConditions(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced)
+
+	// zero matched pods: Ready=False, AllPodsReady=False
+	t.Run(ReasonNoMatchedPods, func(t *testing.T) {
+		noMatchLabels := map[string]string{"app": "readiness-no-match"}
+		ms := &aiv1alpha1.ModelServer{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-no-pods"},
+			Spec: aiv1alpha1.ModelServerSpec{
+				InferenceEngine: aiv1alpha1.VLLM,
+				WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+					MatchLabels: noMatchLabels,
+				},
+			},
+		}
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, e := controller.modelServerLister.ModelServers("default").Get("ms-no-pods")
+			return e == nil
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-no-pods"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-no-pods", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, int32(0), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(0), updated.Status.ReadyReplicas)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+		assert.Equal(t, ReasonNoReadyPods, readyCond.Reason)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonNoMatchedPods, allReadyCond.Reason)
+	})
+
+	// 1/2 pods ready: Ready=True, AllPodsReady=False
+	t.Run("PartialReadiness", func(t *testing.T) {
+		partialLabels := map[string]string{"app": "readiness-partial"}
+		ms := &aiv1alpha1.ModelServer{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-partial"},
+			Spec: aiv1alpha1.ModelServerSpec{
+				InferenceEngine: aiv1alpha1.VLLM,
+				WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+					MatchLabels: partialLabels,
+				},
+			},
+		}
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, e := controller.modelServerLister.ModelServers("default").Get("ms-partial")
+			return e == nil
+		})
+
+		// Create 1 ready + 1 not-ready pod
+		readyPod := helperPod("ready-a", partialLabels, true)
+		notReadyPod := helperPod("notready-a", partialLabels, false)
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), readyPod, metav1.CreateOptions{})
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), notReadyPod, metav1.CreateOptions{})
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("notready-a")
+			return e == nil && p.Name == "notready-a"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-partial"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-partial", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(1), updated.Status.ReadyReplicas)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+		assert.Equal(t, ReasonPodsReady, readyCond.Reason)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonPodsNotFullyReady, allReadyCond.Reason)
+	})
+
+	// 2/2 pods ready: Ready=True, AllPodsReady=True
+	t.Run("FullReadiness", func(t *testing.T) {
+		fullLabels := map[string]string{"app": "readiness-full"}
+		ms := &aiv1alpha1.ModelServer{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-full"},
+			Spec: aiv1alpha1.ModelServerSpec{
+				InferenceEngine: aiv1alpha1.VLLM,
+				WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+					MatchLabels: fullLabels,
+				},
+			},
+		}
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, e := controller.modelServerLister.ModelServers("default").Get("ms-full")
+			return e == nil
+		})
+
+		pod1 := helperPod("ready-full-1", fullLabels, true)
+		pod2 := helperPod("ready-full-2", fullLabels, true)
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), pod1, metav1.CreateOptions{})
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), pod2, metav1.CreateOptions{})
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("ready-full-2")
+			return e == nil && p.Name == "ready-full-2"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-full"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-full", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(2), updated.Status.ReadyReplicas)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionTrue, allReadyCond.Status)
+		assert.Equal(t, ReasonAllPodsReady, allReadyCond.Reason)
+	})
+}
+
+// TestModelServerController_ReadinessConditionTransitions verifies condition
+// values across a lifecycle: 0 pods → 1/1 ready → 1/2 ready → 2/2 ready.
+func TestModelServerController_ReadinessConditionTransitions(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced)
+
+	tLabels := map[string]string{"app": "readiness-trans"}
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-trans"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: tLabels,
+			},
+		},
+	}
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	waitForObjectInCache(t, 2*time.Second, func() bool {
+		_, e := controller.modelServerLister.ModelServers("default").Get("ms-trans")
+		return e == nil
+	})
+
+	// Step 1: no matching pods
+	t.Run("Step1_NoMatchingPods", func(t *testing.T) {
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+		assert.Equal(t, ReasonNoReadyPods, readyCond.Reason)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonNoMatchedPods, allReadyCond.Reason)
+		assert.Equal(t, int32(0), updated.Status.MatchedReplicas)
+	})
+
+	// Step 2: add one ready pod → Ready=True, AllPodsReady=True (only 1 matched)
+	t.Run("Step2_AllPodsReadyWithOnePod", func(t *testing.T) {
+		readyPod := helperPod("trans-pod-1", tLabels, true)
+		_, err := kubeClient.CoreV1().Pods("default").Create(context.Background(), readyPod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("trans-pod-1")
+			return e == nil && p.Name == "trans-pod-1"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionTrue, allReadyCond.Status)
+		assert.Equal(t, ReasonAllPodsReady, allReadyCond.Reason)
+
+		assert.Equal(t, int32(1), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(1), updated.Status.ReadyReplicas)
+	})
+
+	// Step 3: add one not-ready pod → Ready=True, AllPodsReady=False (1/2)
+	t.Run("Step3_PartialAfterNotReady", func(t *testing.T) {
+		notReadyPod := helperPod("trans-pod-2", tLabels, false)
+		_, err := kubeClient.CoreV1().Pods("default").Create(context.Background(), notReadyPod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("trans-pod-2")
+			return e == nil && p.Name == "trans-pod-2"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonPodsNotFullyReady, allReadyCond.Reason)
+
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(1), updated.Status.ReadyReplicas)
+	})
+
+	// Step 4: make the second pod ready → Ready=True, AllPodsReady=True (2/2)
+	t.Run("Step4_FullReadyAfterTransition", func(t *testing.T) {
+		// Update not-ready pod to ready
+		notReadyPod, err := kubeClient.CoreV1().Pods("default").Get(context.Background(), "trans-pod-2", metav1.GetOptions{})
+		require.NoError(t, err)
+		updatedPod := notReadyPod.DeepCopy()
+		updatedPod.Status.Phase = corev1.PodRunning
+		updatedPod.Status.Conditions[0].Status = corev1.ConditionTrue
+		_, err = kubeClient.CoreV1().Pods("default").Update(context.Background(), updatedPod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("trans-pod-2")
+			return e == nil && isPodReady(p)
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionTrue, allReadyCond.Status)
+		assert.Equal(t, ReasonAllPodsReady, allReadyCond.Reason)
+
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(2), updated.Status.ReadyReplicas)
 	})
 }

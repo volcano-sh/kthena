@@ -116,6 +116,9 @@ type ModelServerConditionType string
 const (
 	// ModelServerConditionReady indicates at least one ready pod is registered in the router store.
 	ModelServerConditionReady ModelServerConditionType = "Ready"
+
+	// ModelServerConditionAllPodsReady indicates every matched pod is ready and registered in the router store.
+	ModelServerConditionAllPodsReady ModelServerConditionType = "AllPodsReady"
 )
 
 // KVConnectorSpec defines KV connector configuration for PD disaggregated routing
@@ -168,8 +171,9 @@ type ModelServerStatus struct {
 	// Conditions track the lifecycle of this ModelServer.
 	// Types:
 	//   - "Ready": true when at least one ready pod is matched and the ModelServer has been
-	//     registered with the router store. Signals that `kubectl wait --for=condition=ready`
-	//     can be used.
+	//     registered with the router store. Signals that the ModelServer can serve traffic.
+	//   - "AllPodsReady": true when at least one pod is matched and every matched pod is ready
+	//     and registered with the router store.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
