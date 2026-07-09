@@ -184,19 +184,23 @@ func (r *Request) commitAdmission(fn func()) bool {
 }
 
 // Abandon marks the request as given up by the waiting caller (queue timeout,
-// wait-reject, or client cancellation). It returns true if the request had
-// already been admitted, in which case the caller owns the inflight permit and
-// MUST call Release to avoid leaking capacity. When it returns false, admission is
-// guaranteed not to proceed (commitAdmission observes abandoned and skips), so no
-// permit can leak.
-func (r *Request) Abandon() bool {
+// wait-reject, or client cancellation). If the request had already been admitted,
+// the caller owned the inflight permit, so Abandon releases it to avoid leaking
+// capacity. Otherwise it marks the request abandoned so admission is guaranteed
+// not to proceed (commitAdmission observes abandoned and skips) and no permit can
+// leak.
+func (r *Request) Abandon() {
 	r.admitMu.Lock()
-	defer r.admitMu.Unlock()
-	if r.admitted {
-		return true
+	if !r.admitted {
+		r.abandoned = true
+		r.admitMu.Unlock()
+		return
 	}
-	r.abandoned = true
-	return false
+	r.admitMu.Unlock()
+	// Admission raced in first, so we own the inflight permit; release it here.
+	// Release is guaranteed non-nil once admitted is set (installed by fn before
+	// commitAdmission sets admitted).
+	r.Release()
 }
 
 // RequestPriorityQueue implements the heap.Interface
@@ -540,14 +544,10 @@ func (pq *RequestPriorityQueue) runSemaphoreMode(ctx context.Context) {
 			req.Release = func() {
 				releaseOnce.Do(func() {
 					<-pq.sem
-					if pq.metrics != nil {
-						pq.metrics.DecFairnessQueueInflight(req.ModelName)
-					}
+					pq.metricDecInflight(req.ModelName)
 				})
 			}
-			if pq.metrics != nil {
-				pq.metrics.IncFairnessQueueInflight(req.ModelName)
-			}
+			pq.metricIncInflight(req.ModelName)
 		})
 		if !admitted {
 			// Caller abandoned before admission; return the just-acquired permit and
