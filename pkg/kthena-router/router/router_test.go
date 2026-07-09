@@ -1363,10 +1363,9 @@ func TestHandleFairnessScheduling(t *testing.T) {
 		wantErrMsg       string
 		wantHTTPStatus   int
 		wantBodyContains string
-		// Session-boost wait-reject configuration for the test case.
+		// Session-boost queue-wait timeout configuration for the test case.
 		enableSessionBoost  bool
-		waitRejectEnabled   bool
-		sessionBoostMaxWait time.Duration
+		sessionBoostTimeout time.Duration
 	}{
 		{
 			name:             "happy path with userId",
@@ -1415,15 +1414,14 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			wantHTTPStatus:  http.StatusInternalServerError,
 		},
 		{
-			name:                "session boost wait-reject returns 504",
+			name:                "session boost queue-wait timeout returns 504",
 			fairnessTimeout:     10 * time.Second,
 			setUserID:           true,
 			storeWrapper:        func(real datastore.Store) datastore.Store { return &blockingEnqueueStore{Store: real} },
 			enableSessionBoost:  true,
-			waitRejectEnabled:   true,
-			sessionBoostMaxWait: 50 * time.Millisecond,
+			sessionBoostTimeout: 50 * time.Millisecond,
 			wantErr:             true,
-			wantErrMsg:          "exceeded session boost max queue wait",
+			wantErrMsg:          "timed out",
 			wantHTTPStatus:      http.StatusGatewayTimeout,
 		},
 	}
@@ -1434,10 +1432,7 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			defer backend.Close()
 
 			router.queueTimeout = tt.fairnessTimeout
-			router.sessionBoostWaitRejectEnabled = tt.waitRejectEnabled
-			if tt.sessionBoostMaxWait > 0 {
-				router.sessionBoostMaxWait = tt.sessionBoostMaxWait
-			}
+			router.sessionBoostTimeout = tt.sessionBoostTimeout
 			// Set the package-level flag explicitly for every case (and restore it)
 			// so subtests stay isolated regardless of execution order.
 			prevEnableSessionBoost := EnableSessionBoost

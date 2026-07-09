@@ -656,7 +656,7 @@ func TestSessionBoost_ConcurrentAdmitAbandonNoLeak(t *testing.T) {
 			q.admitSessionBoost(req)
 		}()
 		// Handler side: time out and abandon; release if admission raced in. This
-		// mirrors the router's waitReject/timeout handling.
+		// mirrors the router's queue-wait timeout handling.
 		go func() {
 			defer wg.Done()
 			if req.Abandon() {

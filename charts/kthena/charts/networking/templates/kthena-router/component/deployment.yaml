@@ -106,11 +106,9 @@ spec:
             {{- end }}
             - name: SESSION_BOOST_GRACE_PERIOD
               value: {{ .gracePeriod | quote }}
-            {{- if .waitRejectEnabled }}
-            - name: SESSION_BOOST_WAIT_REJECT_ENABLED
-              value: "true"
-            - name: SESSION_BOOST_MAX_WAIT
-              value: {{ .maxWait | quote }}
+            {{- if .timeout }}
+            - name: SESSION_BOOST_TIMEOUT
+              value: {{ .timeout | quote }}
             {{- end }}
             {{- end }}
             {{- end }}
