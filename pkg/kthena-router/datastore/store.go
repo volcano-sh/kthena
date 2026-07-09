@@ -132,8 +132,9 @@ type EventData struct {
 	Pod       types.NamespacedName
 	Gateway   types.NamespacedName
 
-	ModelName  string
-	ModelRoute *aiv1alpha1.ModelRoute
+	ModelName     string
+	ModelRoute    *aiv1alpha1.ModelRoute
+	OldModelRoute *aiv1alpha1.ModelRoute
 }
 
 // CallbackFunc is the type of function that can be registered as a callback
@@ -1108,6 +1109,7 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		model: mr.Spec.ModelName,
 		loras: mr.Spec.LoraAdapters,
 	}
+	var oldRoute *aiv1alpha1.ModelRoute
 
 	if mr.Spec.ModelName != "" {
 		// Check if this ModelRoute already exists in the slice
@@ -1115,6 +1117,7 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range routes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
+				oldRoute = route.DeepCopy()
 				routes[i] = mr // Update existing
 				sortModelRoutesInPlace(routes)
 				s.routes[mr.Spec.ModelName] = routes // Update the map
@@ -1135,6 +1138,7 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range loraRoutes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
+				oldRoute = route.DeepCopy()
 				loraRoutes[i] = mr // Update existing
 				sortModelRoutesInPlace(loraRoutes)
 				s.loraRoutes[lora] = loraRoutes // Update the map
@@ -1169,9 +1173,10 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	s.routeMutex.Unlock()
 
 	s.triggerCallbacks("ModelRoute", EventData{
-		EventType:  EventUpdate,
-		ModelName:  mr.Spec.ModelName,
-		ModelRoute: mr,
+		EventType:     EventUpdate,
+		ModelName:     mr.Spec.ModelName,
+		ModelRoute:    mr,
+		OldModelRoute: oldRoute,
 	})
 	return nil
 }

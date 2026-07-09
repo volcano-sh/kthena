@@ -129,7 +129,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 				return
 			}
 
-			oldRoute := store.GetModelRoute(data.ModelRoute.Namespace + "/" + data.ModelRoute.Name)
+			oldRoute := data.OldModelRoute
 			if oldRoute != nil && reflect.DeepEqual(oldRoute.Spec.RateLimit, data.ModelRoute.Spec.RateLimit) {
 				return // RateLimit unchanged, nothing to do
 			}
