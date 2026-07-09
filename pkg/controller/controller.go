@@ -96,7 +96,7 @@ func SetupController(ctx context.Context, cc Config) {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
 			case AutoscalerController:
-				ac = autoscaler.NewAutoscaleController(kubeClient, client)
+				ac = autoscaler.NewAutoscaleController(kubeClient, client, cc.AutoscalingSyncPeriodSeconds)
 			}
 		}
 	}

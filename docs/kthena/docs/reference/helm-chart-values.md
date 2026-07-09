@@ -47,6 +47,7 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.webhook.tls.certFile | string | `"/etc/tls/tls.crt"` | Certificate file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.keyFile | string | `"/etc/tls/tls.key"` | Key file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.secretName | string | `"kthena-router-webhook-certs"` | Secret name for storing webhook certificates. |
+| workload.controllerManager.autoscalingSyncPeriodSeconds | int | `0` | Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 uses the binary default (15). |
 | workload.controllerManager.debugPort | int | `0` | Debug server port for Controller Manager (set 0 to disable). |
 | workload.controllerManager.downloaderImage.repository | string | `"ghcr.io/volcano-sh/downloader"` | Image repository for the Downloader. |
 | workload.controllerManager.downloaderImage.tag | string | `"latest"` | Image tag for the Downloader. |

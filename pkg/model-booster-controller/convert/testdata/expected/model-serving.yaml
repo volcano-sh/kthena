@@ -18,7 +18,6 @@ metadata:
       uid: randomUID
 spec:
   replicas: 0
-  schedulerName: ""
   template:
     restartGracePeriodSeconds: 60
     gangPolicy:

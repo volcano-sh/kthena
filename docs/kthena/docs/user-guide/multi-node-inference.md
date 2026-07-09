@@ -180,6 +180,66 @@ spec:
 `ENTRY_ADDRESS` is an environment variable that Kthena automatically injects into every worker pod. Its value is set to the headless service address of the corresponding entry pod (e.g., `llama-multinode-0-405b-0-0.default`). You do not need to define it yourself. When multiple Role replicas exist, each worker pod receives the correct entry address for its own replica, so Ray workers always connect to the right head node. See the [Labels and Environment Variables](../architecture/model-serving-controller.mdx#environment-variables) section for the full list of injected variables.
 :::
 
+### Combined PD-Disaggregation and Multi-Node Layout
+
+If your deployment needs both prefill/decode disaggregation and multi-node execution, you can combine the two patterns by defining separate `prefill` and `decode` roles and using leader/worker pods inside each role. A full example is available at [vllm-pd-multinode.yaml](../assets/examples/model-serving/vllm-pd-multinode.yaml).
+
+The example creates one ServingGroup with four pods: a prefill leader and worker, plus a decode leader and worker. Each leader starts the vLLM multi-node Ray head before the OpenAI API server, and each worker joins the corresponding leader through the `ENTRY_ADDRESS` injected by Kthena.
+
+Before applying this layout, make sure your cluster has:
+
+- enough GPU capacity for every leader and worker pod in the ServingGroup
+- pod-to-pod connectivity for Ray, NCCL/Gloo, and the configured KV-transfer connector
+- the correct `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, and RDMA-related environment values for your nodes
+- access to the model source from both leader and worker pods; the example uses per-pod downloader init containers and `emptyDir` volumes, but production deployments usually replace that with shared storage or an image-local model cache
+
+Pair the `ModelServing` with a `ModelServer` that selects the same workload and defines the PD group. Because the `ModelServing` example configures vLLM with `NixlConnector`, set `kvConnector.type: nixl` on the `ModelServer` as well. This layout has worker pods, so the PD selectors include `modelserving.volcano.sh/entry: "true"` and router traffic only targets the leader pods that expose the OpenAI API:
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: vllm-pd-multinode
+  namespace: default
+spec:
+  kvConnector:
+    type: nixl
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: vllm-pd-multinode
+      modelserving.volcano.sh/entry: "true"
+    pdGroup:
+      groupKey: "modelserving.volcano.sh/group-name"
+      prefillLabels:
+        modelserving.volcano.sh/role: prefill
+        modelserving.volcano.sh/entry: "true"
+      decodeLabels:
+        modelserving.volcano.sh/role: decode
+        modelserving.volcano.sh/entry: "true"
+  workloadPort:
+    port: 8000
+  model: "Qwen/Qwen3-8B"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s
+```
+
+Then route requests for the served model to that `ModelServer`:
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: vllm-pd-multinode
+  namespace: default
+spec:
+  modelName: "Qwen/Qwen3-8B"
+  rules:
+    - name: "default"
+      targetModels:
+        - modelServerName: "vllm-pd-multinode"
+```
+
 ### Tensor and Pipeline Parallelism Configuration
 
 The multi‑node example configures tensor parallelism and pipeline parallelism through the command‑line arguments of the inference engine. In the `multi-node.yaml` manifest, the entry‑point container includes:

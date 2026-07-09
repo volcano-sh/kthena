@@ -61,9 +61,13 @@ type AutoscaleController struct {
 	scalerMap                   map[string]*autoscaler.Autoscaler
 	optimizerMap                map[string]*autoscaler.Optimizer
 	disaggregatedScalerMap      map[string]*autoscaler.DisaggregatedAutoscaler
+	syncPeriodSeconds           int
 }
 
-func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
+func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface, syncPeriodSeconds int) *AutoscaleController {
+	if syncPeriodSeconds <= 0 {
+		syncPeriodSeconds = util.AutoscalingSyncPeriodSeconds
+	}
 	informerFactory := informersv1alpha1.NewSharedInformerFactory(client, 0)
 	modelInferInformer := informerFactory.Workload().V1alpha1().ModelServings()
 	autoscalingPoliciesInformer := informerFactory.Workload().V1alpha1().AutoscalingPolicies()
@@ -91,6 +95,7 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 		scalerMap:                   make(map[string]*autoscaler.Autoscaler),
 		optimizerMap:                make(map[string]*autoscaler.Optimizer),
 		disaggregatedScalerMap:      make(map[string]*autoscaler.DisaggregatedAutoscaler),
+		syncPeriodSeconds:           syncPeriodSeconds,
 	}
 	return ac
 }
@@ -111,7 +116,7 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 	klog.Info("start autoscale controller")
 	go wait.Until(func() {
 		ac.Reconcile(ctx)
-	}, util.AutoscalingSyncPeriodSeconds*time.Second, nil)
+	}, time.Duration(ac.syncPeriodSeconds)*time.Second, nil)
 
 	<-ctx.Done()
 	klog.Info("shut down autoscale controller")

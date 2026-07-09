@@ -45,7 +45,7 @@ type ModelServingSpec struct {
 	//
 	// +optional
 	// +kubebuilder:default=volcano
-	SchedulerName string `json:"schedulerName"`
+	SchedulerName string `json:"schedulerName,omitempty"`
 
 	// Plugins defines optional plugin chain to customize serving pods.
 	// +optional

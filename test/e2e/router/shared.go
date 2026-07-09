@@ -58,6 +58,9 @@ const (
 	modelServingVLLMPDDisaggregationFixture   = "ModelServing-ds1.5b-pd-disaggregation.yaml"
 	modelServerVLLMPDDisaggregationFixture    = "ModelServer-ds1.5b-pd-disaggregation.yaml"
 	modelRouteVLLMPDDisaggregationFixture     = "ModelRoute-ds1.5b-pd-disaggregation.yaml"
+	modelServingVLLMPDMultinodeFixture        = "ModelServing-ds1.5b-pd-multinode.yaml"
+	modelServerVLLMPDMultinodeFixture         = "ModelServer-ds1.5b-pd-multinode.yaml"
+	modelRouteVLLMPDMultinodeFixture          = "ModelRoute-ds1.5b-pd-multinode.yaml"
 	modelServingSGLangPDDisaggregationFixture = "ModelServing-sglang-pd-disaggregation.yaml"
 	modelServerSGLangPDDisaggregationFixture  = "ModelServer-sglang-pd-disaggregation.yaml"
 	modelRouteSGLangPDDisaggregationFixture   = "ModelRoute-sglang-pd-disaggregation.yaml"
@@ -341,6 +344,18 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 			modelServing: modelServingVLLMPDDisaggregationFixture,
 			modelServer:  modelServerVLLMPDDisaggregationFixture,
 			modelRoute:   modelRouteVLLMPDDisaggregationFixture,
+		},
+	)
+}
+
+// TestModelRoutePrefillDecodeMultinodeShared verifies PD disaggregation on a multi-node ModelServing.
+func TestModelRoutePrefillDecodeMultinodeShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	testModelRoutePrefillDecodeDisaggregationSharedWithFixtures(
+		t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+		pdDisaggregationFixtures{
+			modelServing: modelServingVLLMPDMultinodeFixture,
+			modelServer:  modelServerVLLMPDMultinodeFixture,
+			modelRoute:   modelRouteVLLMPDMultinodeFixture,
 		},
 	)
 }

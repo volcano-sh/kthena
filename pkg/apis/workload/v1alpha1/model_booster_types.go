@@ -52,10 +52,31 @@ type ModelBackend struct {
 	Name string `json:"name"`
 	// Type is the type of the backend.
 	Type ModelBackendType `json:"type"`
-	// ModelURI is the URI where you download the model. Support hf://, s3://, pvc://, ms://.
-	// +kubebuilder:validation:Pattern=`^(hf://|s3://|pvc://|ms://).+`
+	// ModelURI is the source from which the model is fetched by the downloader init container.
+	// Supported schemes:
+	//   hf://NAMESPACE/REPO         — Hugging Face Hub repository
+	//   ms://NAMESPACE/REPO         — ModelScope repository
+	//   s3://BUCKET/PATH            — S3-compatible object storage
+	//   obs://BUCKET/PATH           — Huawei Object Storage Service (OBS)
+	//   pvc:///CLAIM_NAME/PATH      — path inside a PVC already mounted via CacheURI
+	//
+	// When using pvc://, the downloader reads the given path from the container filesystem.
+	// The downloader init container only mounts the volume specified by CacheURI, so the
+	// modelURI path must be reachable through that mount.  Both CacheURI and modelURI must
+	// reference the same PVC, and the modelURI path must start with the CacheURI mount point.
+	// Example: CacheURI: pvc://model-storage, ModelURI: pvc:///model-storage/models/Qwen
+	// +kubebuilder:validation:Pattern=`^(hf://|s3://|obs://|pvc://|ms://).+`
 	ModelURI string `json:"modelURI"`
-	// CacheURI is the URI where the downloaded model stored. Support hostpath://, pvc://.
+	// CacheURI specifies where the downloaded model is stored and how the storage volume is
+	// mounted inside every pod (both the downloader init container and the inference engine).
+	// Supported schemes:
+	//   pvc://CLAIM_NAME    — PersistentVolumeClaim; the PVC is mounted at /CLAIM_NAME
+	//   hostpath://PATH     — host-local directory; mounted at /PATH
+	//   (empty)             — an ephemeral EmptyDir volume is used (no persistence)
+	//
+	// The downloader writes model files under a hashed sub-directory of this mount path.
+	// The inference engine reads from the same path.  When ModelURI uses pvc://, CacheURI
+	// must also use pvc:// and reference the same PVC so the source path is visible.
 	// +kubebuilder:validation:Pattern=`^(hostpath://|pvc://).+`
 	CacheURI string `json:"cacheURI,omitempty"`
 	// List of sources to populate environment variables in the container.

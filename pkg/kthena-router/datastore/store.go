@@ -66,10 +66,8 @@ const (
 	// defaultMetricsScrapeInterval is the default polling interval for pod metrics.
 	defaultMetricsScrapeInterval = 1 * time.Second
 	metricsScrapeIntervalEnv     = "METRICS_SCRAPE_INTERVAL"
-
 	// maxConcurrentPodScrapes caps goroutines spawned per metrics scrape cycle.
 	maxConcurrentPodScrapes = 100
-
 	// onFlightSyncInterval caps Redis read traffic from SyncOnFlightCounts.
 	// At most one HMGET is issued per interval regardless of request rate;
 	// all other callers use the local atomic values maintained by Incr/Decr.
@@ -98,18 +96,18 @@ func createTokenTracker() TokenTracker {
 		outputWeight := defaultOutputTokenWeight
 
 		if inputWeightStr != "" {
-			if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil {
+			if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil && isValidTokenWeight(w) {
 				inputWeight = w
 			} else {
-				klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %v, using default", err)
+				klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %q, using default", inputWeightStr)
 			}
 		}
 
 		if outputWeightStr != "" {
-			if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil {
+			if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil && isValidTokenWeight(w) {
 				outputWeight = w
 			} else {
-				klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %v, using default", err)
+				klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %q, using default", outputWeightStr)
 			}
 		}
 
@@ -1493,8 +1491,6 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("no weights provided")
 	}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
 	totalWeight := 0
 	for _, weight := range weights {
 		totalWeight += int(weight)
@@ -1504,7 +1500,7 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("total weight is zero")
 	}
 
-	randomNum := rng.Intn(totalWeight)
+	randomNum := rand.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
@@ -2182,9 +2178,29 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 	key := fmt.Sprintf("%s/%s", httpRoute.Namespace, httpRoute.Name)
 
 	s.httpRouteMutex.Lock()
+	oldRoute := s.httpRoutes[key]
 	s.httpRoutes[key] = httpRoute
 
 	// Update gateway routes mapping
+	if oldRoute != nil {
+		for _, parentRef := range oldRoute.Spec.ParentRefs {
+			if isGatewayParentRef(parentRef) {
+				gatewayName := string(parentRef.Name)
+				gatewayNamespace := oldRoute.Namespace
+				if parentRef.Namespace != nil {
+					gatewayNamespace = string(*parentRef.Namespace)
+				}
+				gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, gatewayName)
+
+				if routeSet, exists := s.gatewayRoutes[gatewayKey]; exists {
+					routeSet.Delete(key)
+					if routeSet.IsEmpty() {
+						delete(s.gatewayRoutes, gatewayKey)
+					}
+				}
+			}
+		}
+	}
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
 		if isGatewayParentRef(parentRef) {
 			gatewayName := string(parentRef.Name)

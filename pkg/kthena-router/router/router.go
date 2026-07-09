@@ -513,12 +513,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 		return nil, err
 	}
 	var modelRequest ModelRequest
 	if err := json.Unmarshal(bodyBytes, &modelRequest); err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, err)
+		c.AbortWithStatusJSON(http.StatusBadRequest, err.Error())
 		return nil, err
 	}
 

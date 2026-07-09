@@ -17,6 +17,7 @@ limitations under the License.
 package convert
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -406,6 +407,30 @@ func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildModelServingSchedulerNameSerialization(t *testing.T) {
+	t.Run("omits empty schedulerName", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		data, err := json.Marshal(serving)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), `"schedulerName"`)
+	})
+
+	t.Run("keeps explicit schedulerName", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+		model.Spec.Backend.SchedulerName = "volcano"
+
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		data, err := json.Marshal(serving)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"schedulerName":"volcano"`)
+	})
 }
 
 func TestBuildCacheVolume(t *testing.T) {

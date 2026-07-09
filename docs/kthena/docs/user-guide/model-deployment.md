@@ -443,6 +443,113 @@ spec:
 
 You can find more examples of model booster CR [here](https://github.com/volcano-sh/kthena/tree/main/examples/model-booster), and model serving CR [here](https://github.com/volcano-sh/kthena/tree/main/examples/model-serving).
 
+## ModelBooster URI Semantics
+
+### How `modelURI` and `cacheURI` work together
+
+ModelBooster uses two URI fields to describe **where to fetch a model from** and **where to store it**:
+
+| Field | Role |
+|---|---|
+| `modelURI` | Source passed to the downloader init container (`--source`) |
+| `cacheURI` | Storage volume mounted into every pod; the model is written here |
+
+The downloader writes files to a hashed sub-directory under the `cacheURI` mount point:
+
+```
+model path = GetCachePath(cacheURI) + "/" + MD5(modelURI)
+```
+
+For example, with `cacheURI: pvc://model-cache` and `modelURI: hf://Qwen/Qwen2.5-7B`:
+
+- The PVC `model-cache` is mounted at `/model-cache` in every pod.
+- The downloader writes files to `/model-cache/<md5-of-modelURI>/`.
+- The inference engine starts with `--model /model-cache/<md5-of-modelURI>/`.
+
+### URI scheme reference
+
+**`modelURI` schemes**
+
+| Scheme | Description | Example |
+|---|---|---|
+| `hf://` | Hugging Face Hub repository | `hf://Qwen/Qwen2.5-7B-Instruct` |
+| `ms://` | ModelScope repository | `ms://Qwen/Qwen2.5-7B-Instruct` |
+| `s3://` | S3-compatible object storage | `s3://my-bucket/models/Qwen` |
+| `obs://` | Huawei Object Storage Service | `obs://my-bucket/models/Qwen` |
+| `pvc://` | Path inside a PVC mounted via `cacheURI` | `pvc:///crater-storage/models/Qwen` |
+
+**`cacheURI` schemes**
+
+| Scheme | Description | Mount point |
+|---|---|---|
+| `pvc://<claimName>` | Kubernetes PersistentVolumeClaim | `/<claimName>` |
+| `hostpath://<path>` | Host-local directory | `/<path>` |
+| *(omitted)* | *(currently not supported by ModelBooster; always specify `pvc://` or `hostpath://`)* | N/A |
+
+### Configuration examples
+
+#### Case 1 — Hugging Face model cached on a PVC
+
+The downloader fetches the model from Hugging Face and writes it to the PVC.
+On subsequent pod restarts the model is already present and no download occurs.
+
+```yaml
+backend:
+  modelURI: "hf://Qwen/Qwen2.5-7B-Instruct"
+  cacheURI: "pvc://model-cache"
+```
+
+#### Case 2 — Platform-managed model already on a PVC
+
+When the model files already exist on a PVC (for example, pre-staged by an
+external platform such as Crater), point both `modelURI` and `cacheURI` at the
+same PVC. The downloader copies the files into its hashed cache directory; the
+inference engine then reads from that directory.
+
+**Why the same PVC for both fields?** The downloader init container only mounts
+the volume specified by `cacheURI`. For `modelURI: pvc://...` to work, the source
+path must be visible inside that container, which requires the same PVC to be
+mounted there.
+
+```yaml
+backend:
+  # The PVC "crater-storage" is mounted at /crater-storage inside the pod.
+  cacheURI: "pvc://crater-storage"
+  # The downloader reads from /crater-storage/models/Qwen (visible via the mount above).
+  modelURI: "pvc:///crater-storage/models/Qwen"
+```
+
+The path segments work out as follows:
+
+- `cacheURI: pvc://crater-storage` → PVC `crater-storage` mounted at `/crater-storage`
+- `modelURI: pvc:///crater-storage/models/Qwen` → downloader reads `/crater-storage/models/Qwen`
+- `/crater-storage/models/Qwen` is inside the mount → the source is visible ✓
+
+#### Case 3 — Incorrect configuration (source PVC not mounted)
+
+The following configuration will fail at runtime because the downloader can only
+see the `hostpath` volume, not the `shared` PVC:
+
+```yaml
+backend:
+  modelURI: "pvc:///shared/models/Qwen"   # reads /shared/models/Qwen
+  cacheURI: "hostpath:///tmp/cache"        # only /tmp/cache is mounted
+```
+
+The webhook admission controller rejects this configuration before any pod is
+created, with an error message explaining the mismatch.
+
+#### Case 4 — Platform-managed models (no direct-mount support)
+
+There is currently no way to instruct ModelBooster to mount a PVC directly into
+the inference engine without staging through the cache directory. The downloader
+always copies or syncs model files into the hashed cache sub-directory, and the
+engine always loads from that path.
+
+If you need the engine to load a model directly from an arbitrary path, use the
+lower-level `ModelServing` API where you can define init containers and volume
+mounts explicitly.
+
 ## Advanced features
 
 ### Gang Scheduling

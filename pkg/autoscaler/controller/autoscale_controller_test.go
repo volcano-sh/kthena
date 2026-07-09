@@ -33,10 +33,12 @@ import (
 	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	corev1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
@@ -104,6 +106,29 @@ func newModelServingIndexer(objs ...interface{}) cache.Indexer {
 		_ = idx.Add(o)
 	}
 	return idx
+}
+
+func TestNewAutoscaleControllerSyncPeriodFallback(t *testing.T) {
+	kubeClient := k8sfake.NewSimpleClientset()
+	client := clientfake.NewSimpleClientset()
+
+	// 0 falls back to the compiled default (15s).
+	ac := NewAutoscaleController(kubeClient, client, 0)
+	if ac == nil {
+		t.Fatal("expected non-nil controller for zero period")
+	}
+	if ac.syncPeriodSeconds != util.AutoscalingSyncPeriodSeconds {
+		t.Errorf("expected fallback syncPeriodSeconds=%d, got %d", util.AutoscalingSyncPeriodSeconds, ac.syncPeriodSeconds)
+	}
+
+	// Explicit positive value is respected.
+	ac2 := NewAutoscaleController(kubeClient, client, 5)
+	if ac2 == nil {
+		t.Fatal("expected non-nil controller for explicit period")
+	}
+	if ac2.syncPeriodSeconds != 5 {
+		t.Errorf("expected syncPeriodSeconds=5, got %d", ac2.syncPeriodSeconds)
+	}
 }
 
 func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {

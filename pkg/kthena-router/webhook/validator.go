@@ -224,7 +224,51 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 }
 
 // validateModelServer validates the ModelServer resource
-func (v *KthenaRouterValidator) validateModelServer(*networkingv1alpha1.ModelServer) (bool, string) {
+func (v *KthenaRouterValidator) validateModelServer(modelServer *networkingv1alpha1.ModelServer) (bool, string) {
+	var allErrs field.ErrorList
+	specField := field.NewPath("spec")
+	workloadSelectorField := specField.Child("workloadSelector")
+
+	if modelServer.Spec.WorkloadSelector == nil {
+		allErrs = append(allErrs, field.Required(workloadSelectorField, "workloadSelector must be specified"))
+	} else {
+		matchLabelsField := workloadSelectorField.Child("matchLabels")
+		if len(modelServer.Spec.WorkloadSelector.MatchLabels) == 0 {
+			allErrs = append(allErrs, field.Required(matchLabelsField, "labels must contain at least one label"))
+		} else if _, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: modelServer.Spec.WorkloadSelector.MatchLabels}); err != nil {
+			allErrs = append(allErrs, field.Invalid(matchLabelsField, modelServer.Spec.WorkloadSelector.MatchLabels, fmt.Sprintf("invalid selector: %v", err)))
+		}
+
+		if modelServer.Spec.WorkloadSelector.PDGroup != nil {
+			pdGroup := modelServer.Spec.WorkloadSelector.PDGroup
+			pdGroupField := workloadSelectorField.Child("pdGroup")
+
+			if pdGroup.GroupKey == "" {
+				allErrs = append(allErrs, field.Required(pdGroupField.Child("groupKey"), "groupKey must be specified"))
+			}
+			prefillLabelsField := pdGroupField.Child("prefillLabels")
+			if len(pdGroup.PrefillLabels) == 0 {
+				allErrs = append(allErrs, field.Required(prefillLabelsField, "labels must contain at least one label"))
+			} else if _, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: pdGroup.PrefillLabels}); err != nil {
+				allErrs = append(allErrs, field.Invalid(prefillLabelsField, pdGroup.PrefillLabels, fmt.Sprintf("invalid selector: %v", err)))
+			}
+
+			decodeLabelsField := pdGroupField.Child("decodeLabels")
+			if len(pdGroup.DecodeLabels) == 0 {
+				allErrs = append(allErrs, field.Required(decodeLabelsField, "labels must contain at least one label"))
+			} else if _, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: pdGroup.DecodeLabels}); err != nil {
+				allErrs = append(allErrs, field.Invalid(decodeLabelsField, pdGroup.DecodeLabels, fmt.Sprintf("invalid selector: %v", err)))
+			}
+		}
+	}
+
+	if len(allErrs) > 0 {
+		var messages []string
+		for _, err := range allErrs {
+			messages = append(messages, fmt.Sprintf("  - %s", err.Error()))
+		}
+		return false, fmt.Sprintf("validation failed: %s", strings.Join(messages, ""))
+	}
 	return true, ""
 }
 

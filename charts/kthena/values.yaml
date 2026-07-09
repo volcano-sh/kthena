@@ -11,6 +11,9 @@ workload:
       pullPolicy: IfNotPresent
     # -- Debug server port for Controller Manager (set 0 to disable).
     debugPort: 0
+    # -- Reconcile interval in seconds for the autoscaler. Smaller values react
+    # faster to traffic spikes but increase API server load. 0 uses the binary default (15).
+    autoscalingSyncPeriodSeconds: 0
     downloaderImage:
       # -- Image repository for the Downloader.
       repository: ghcr.io/volcano-sh/downloader

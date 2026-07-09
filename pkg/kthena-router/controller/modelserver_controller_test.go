@@ -71,12 +71,14 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	require.NoError(t, err)
+	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -281,12 +283,13 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -498,12 +501,13 @@ func TestModelServerController_ErrorHandling(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	require.NoError(t, err)
 
 	// Test Case 1: Invalid ModelServer Key
 	t.Run("InvalidModelServerKey", func(t *testing.T) {
@@ -543,12 +547,13 @@ func TestModelServerController_WorkQueueProcessing(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	require.NoError(t, err)
 
 	// Test Case 1: Initial Sync Signal
 	t.Run("InitialSyncSignal", func(t *testing.T) {
@@ -619,12 +624,13 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -808,12 +814,13 @@ func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 
 	// Create controller and store
 	store := newStoreWithMockBackend()
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	require.NoError(t, err)
 
 	kthenaInformerFactory.Start(stopCh)
 	kubeInformerFactory.Start(stopCh)
@@ -985,12 +992,13 @@ func TestModelServerController_SharedPods(t *testing.T) {
 	store := newStoreWithMockBackend()
 
 	// Create controller
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
