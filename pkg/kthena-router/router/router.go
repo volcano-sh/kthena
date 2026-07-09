@@ -1186,12 +1186,9 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		return nil
 	case <-reqCtx.Done():
 		// Abandon() atomically coordinates with the dequeue loop: if admission raced
-		// in first it returns true and we own the inflight permit, so release it here;
-		// otherwise it marks the request abandoned so the loop skips admission and no
-		// permit can leak.
-		if queueReq.Abandon() {
-			queueReq.Release()
-		}
+		// in first it releases the inflight permit we own; otherwise it marks the
+		// request abandoned so the loop skips admission and no permit can leak.
+		queueReq.Abandon()
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
 			// Exceeded the queue-wait timeout. In session-boost mode this is expected
 			// load-shedding when SESSION_BOOST_TIMEOUT is set, and under sustained

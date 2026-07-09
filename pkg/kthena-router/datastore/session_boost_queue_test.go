@@ -573,9 +573,7 @@ func TestSessionBoost_AbandonBeforeAdmissionBlocksAdmission(t *testing.T) {
 	}
 
 	// Caller gives up first.
-	if admitted := req.Abandon(); admitted {
-		t.Fatal("Abandon() should report not-yet-admitted before admission")
-	}
+	req.Abandon()
 
 	// The dequeue loop then tries to admit; it must skip.
 	if q.admitSessionBoost(req) {
@@ -592,8 +590,8 @@ func TestSessionBoost_AbandonBeforeAdmissionBlocksAdmission(t *testing.T) {
 }
 
 // TestSessionBoost_AdmissionBeforeAbandonReleases verifies that when admission wins
-// the race, the caller's Abandon() reports the admission and can release the permit,
-// returning the inflight count to zero.
+// the race, the caller's Abandon() releases the permit it owns, returning the
+// inflight count to zero.
 func TestSessionBoost_AdmissionBeforeAbandonReleases(t *testing.T) {
 	cfg := sessionBoostConfig()
 	q := newSessionBoostQueue(cfg, nil)
@@ -617,17 +615,11 @@ func TestSessionBoost_AdmissionBeforeAbandonReleases(t *testing.T) {
 		t.Fatalf("inflight count should be 1 after admission, got %d", got)
 	}
 
-	// Caller times out after admission raced in: Abandon() must report admitted so
-	// the caller releases the permit.
-	if admitted := req.Abandon(); !admitted {
-		t.Fatal("Abandon() should report admitted after admission")
-	}
-	if req.Release == nil {
-		t.Fatal("Release must be installed once Abandon() reports admitted")
-	}
-	req.Release()
+	// Caller times out after admission raced in: Abandon() must release the permit
+	// it owns.
+	req.Abandon()
 	if got := q.GetInflightCount(); got != 0 {
-		t.Fatalf("inflight count should return to 0 after Release, got %d", got)
+		t.Fatalf("inflight count should return to 0 after Abandon, got %d", got)
 	}
 }
 
@@ -655,13 +647,11 @@ func TestSessionBoost_ConcurrentAdmitAbandonNoLeak(t *testing.T) {
 			defer wg.Done()
 			q.admitSessionBoost(req)
 		}()
-		// Handler side: time out and abandon; release if admission raced in. This
-		// mirrors the router's queue-wait timeout handling.
+		// Handler side: time out and abandon; Abandon releases if admission raced in.
+		// This mirrors the router's queue-wait timeout handling.
 		go func() {
 			defer wg.Done()
-			if req.Abandon() {
-				req.Release()
-			}
+			req.Abandon()
 		}()
 		wg.Wait()
 
