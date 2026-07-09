@@ -152,6 +152,55 @@ type Request struct {
 	NotifyChan   chan struct{}
 	CancelCh     <-chan struct{} // Request-scoped cancellation signal
 	Release      func()          // Set by the queue when a permit is acquired
+
+	// admitMu serializes admission (by the dequeue loop) against abandonment (by
+	// the waiting caller on timeout/cancel), closing the race where the loop has
+	// popped the request and passed its cancellation check but has not yet
+	// installed Release / closed NotifyChan. Guards admitted and abandoned.
+	admitMu   sync.Mutex
+	admitted  bool // admission committed: Release is set and about to be signalled
+	abandoned bool // caller gave up before admission; the loop must not admit
+}
+
+// commitAdmission runs fn under the request lock, but only if the caller has not
+// already abandoned the request. fn performs the admission side effects that must
+// be fully visible before the request is considered admitted: acquiring the
+// inflight permit, installing Release, and incrementing the inflight metric.
+// It returns true if admission was committed. When it returns false the request
+// was abandoned first, so the dequeue loop must not mark it inflight or signal it.
+//
+// Because fn (including installing Release) completes before admitted is set, any
+// caller that observes admitted via abandon() is guaranteed to see a non-nil
+// Release, so the permit can always be returned.
+func (r *Request) commitAdmission(fn func()) bool {
+	r.admitMu.Lock()
+	defer r.admitMu.Unlock()
+	if r.abandoned {
+		return false
+	}
+	fn()
+	r.admitted = true
+	return true
+}
+
+// Abandon marks the request as given up by the waiting caller (queue timeout,
+// wait-reject, or client cancellation). If the request had already been admitted,
+// the caller owned the inflight permit, so Abandon releases it to avoid leaking
+// capacity. Otherwise it marks the request abandoned so admission is guaranteed
+// not to proceed (commitAdmission observes abandoned and skips) and no permit can
+// leak.
+func (r *Request) Abandon() {
+	r.admitMu.Lock()
+	if !r.admitted {
+		r.abandoned = true
+		r.admitMu.Unlock()
+		return
+	}
+	r.admitMu.Unlock()
+	// Admission raced in first, so we own the inflight permit; release it here.
+	// Release is guaranteed non-nil once admitted is set (installed by fn before
+	// commitAdmission sets admitted).
+	r.Release()
 }
 
 // RequestPriorityQueue implements the heap.Interface
@@ -485,21 +534,27 @@ func (pq *RequestPriorityQueue) runSemaphoreMode(ctx context.Context) {
 			// Permit acquired
 		}
 
-		releaseOnce := sync.Once{}
-		trackedInflight := false
-		req.Release = func() {
-			releaseOnce.Do(func() {
-				<-pq.sem
-				if trackedInflight && pq.metrics != nil {
-					pq.metrics.DecFairnessQueueInflight(req.ModelName)
-				}
-			})
+		// Commit admission atomically with respect to a concurrent Abandon(): install
+		// Release and increment the inflight metric under the request lock so the
+		// waiting caller either observes the admission (and releases the permit on
+		// timeout) or blocks admission entirely. Increment the metric inside the
+		// committed section so a racing Release always has a matching increment.
+		admitted := req.commitAdmission(func() {
+			releaseOnce := sync.Once{}
+			req.Release = func() {
+				releaseOnce.Do(func() {
+					<-pq.sem
+					pq.metricDecInflight(req.ModelName)
+				})
+			}
+			pq.metricIncInflight(req.ModelName)
+		})
+		if !admitted {
+			// Caller abandoned before admission; return the just-acquired permit and
+			// drop the request without signalling it.
+			<-pq.sem
+			continue
 		}
-
-		if pq.metrics != nil {
-			pq.metrics.IncFairnessQueueInflight(req.ModelName)
-		}
-		trackedInflight = true
 		close(req.NotifyChan)
 	}
 }

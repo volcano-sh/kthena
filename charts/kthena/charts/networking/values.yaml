@@ -70,6 +70,11 @@ kthenaRouter:
     # follow-up to arrive. Disabled by default (0s); enable only if you understand
     # the latency trade-off for non-boosted requests.
     gracePeriod: "0s"
+    # timeout is the maximum time a request may wait in the session-boost queue
+    # before it is rejected with HTTP 504. Defaults to 30s; set it to a non-positive
+    # duration (e.g. "0s") to disable the timeout, in which case a request is bounded
+    # only by client disconnect.
+    timeout: "30s"
   # accessLog configuration for request logging
   accessLog:
     # enabled controls whether access logging is active

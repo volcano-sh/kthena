@@ -106,6 +106,10 @@ spec:
             {{- end }}
             - name: SESSION_BOOST_GRACE_PERIOD
               value: {{ .gracePeriod | quote }}
+            {{- if .timeout }}
+            - name: SESSION_BOOST_TIMEOUT
+              value: {{ .timeout | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             # Access log configuration

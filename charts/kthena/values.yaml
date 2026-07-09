@@ -100,6 +100,10 @@ networking:
       # -- Wait time after a request completes for a same-session follow-up.<br/>
       # Disabled by default (`0s`).
       gracePeriod: "0s"
+      # -- Maximum time a request may wait in the session-boost queue before it is<br/>
+      # rejected with HTTP 504. Defaults to `30s`; set a non-positive duration<br/>
+      # (e.g. `0s`) to disable it (bounded only by client disconnect).
+      timeout: "30s"
     gatewayAPI:
       # -- Enable Gateway API related features.
       enabled: false

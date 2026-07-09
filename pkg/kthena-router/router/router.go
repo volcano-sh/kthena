@@ -92,6 +92,12 @@ type Router struct {
 	queueTimeout     time.Duration
 	tokenWeight      float64 // Weight for token-based priority in the fairness strategy (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority in the fairness strategy (default 0.0)
+
+	// Session-boost queue-wait timeout. A request that waits in the session-boost
+	// queue longer than sessionBoostTimeout is rejected with HTTP 504 instead of
+	// waiting indefinitely for backend capacity. It defaults to 30s; a non-positive
+	// value disables the timeout (the request is bounded only by client disconnect).
+	sessionBoostTimeout time.Duration
 }
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
@@ -182,6 +188,8 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		queueTimeout:     parseQueueTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+
+		sessionBoostTimeout: parseSessionBoostTimeout(),
 	}
 }
 
@@ -195,6 +203,29 @@ func parseQueueTimeout() time.Duration {
 		klog.Warningf("Invalid FAIRNESS_QUEUE_TIMEOUT %q, using default %v", s, defaultQueueTimeout)
 	}
 	return defaultQueueTimeout
+}
+
+// defaultSessionBoostTimeout is the session-boost queue-wait timeout applied
+// when SESSION_BOOST_TIMEOUT is not set. It is enabled by default so that a
+// session-boost request does not wait indefinitely for backend capacity.
+const defaultSessionBoostTimeout = 30 * time.Second
+
+// parseSessionBoostTimeout reads the session-boost queue-wait timeout from the
+// SESSION_BOOST_TIMEOUT environment variable. A request that waits in the
+// session-boost queue longer than the timeout is rejected with HTTP 504. The
+// timeout defaults to defaultSessionBoostTimeout (30s) when the variable is
+// unset. Setting it to a non-positive duration (e.g. "0s") disables the timeout,
+// in which case a session-boost request is bounded only by client disconnect. An
+// invalid value falls back to the default.
+func parseSessionBoostTimeout() time.Duration {
+	if s, ok := os.LookupEnv("SESSION_BOOST_TIMEOUT"); ok {
+		if d, err := time.ParseDuration(s); err == nil {
+			// A non-positive duration explicitly disables the timeout.
+			return d
+		}
+		klog.Warningf("Invalid SESSION_BOOST_TIMEOUT %q, using default %v", s, defaultSessionBoostTimeout)
+	}
+	return defaultSessionBoostTimeout
 }
 
 func parseEnvFloat(key string, fallback float64) float64 {
@@ -1077,11 +1108,35 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		klog.Warningf("user ID not found in request %s", requestID)
 	}
 
-	klog.V(4).Infof("[FairnessScheduling] incoming request: reqID=%s user=%s model=%s",
-		requestID, userId, modelName)
+	// logPrefix reflects the active scheduling strategy so log lines emitted from
+	// this shared handler are attributed to the right queue (session boost vs
+	// user fairness).
+	logPrefix := "[FairnessScheduling]"
+	if EnableSessionBoost {
+		logPrefix = "[SessionBoost]"
+	}
 
-	// Create request-scoped context that unifies client disconnect and server timeout
-	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	klog.V(4).Infof("%s incoming request: reqID=%s user=%s model=%s",
+		logPrefix, requestID, userId, modelName)
+
+	// Create the request-scoped context that also drives the queue's cancellation
+	// cleanup (CancelCh). The queue-wait deadline differs by strategy:
+	//   - Fairness mode: bounded by FAIRNESS_QUEUE_TIMEOUT; exceeding it returns 504.
+	//   - Session-boost mode: FAIRNESS_QUEUE_TIMEOUT does NOT apply. SESSION_BOOST_TIMEOUT
+	//     (default 30s) bounds the wait and exceeding it returns 504; setting it to a
+	//     non-positive value disables the timeout, leaving the request bounded only by
+	//     client disconnect.
+	var reqCtx context.Context
+	var cancel context.CancelFunc
+	if EnableSessionBoost {
+		if r.sessionBoostTimeout > 0 {
+			reqCtx, cancel = context.WithTimeout(c.Request.Context(), r.sessionBoostTimeout)
+		} else {
+			reqCtx, cancel = context.WithCancel(c.Request.Context())
+		}
+	} else {
+		reqCtx, cancel = context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	}
 	defer cancel()
 
 	var pri float64
@@ -1107,8 +1162,8 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	}
 
 	if err := r.store.Enqueue(queueReq); err != nil {
-		klog.Errorf("[FairnessScheduling] failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
-			requestID, sessionID, userId, modelName, err)
+		klog.Errorf("%s failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
+			logPrefix, requestID, sessionID, userId, modelName, err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to enqueue request: %v", err))
 		return fmt.Errorf("failed to enqueue request: %v", err)
 	}
@@ -1118,8 +1173,8 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		if queueReq.Release != nil {
 			defer queueReq.Release()
 		}
-		klog.V(4).Infof("[FairnessScheduling] request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
-			requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
+		klog.V(4).Infof("%s request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
+			logPrefix, requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
 		lbErr := r.doLoadbalance(c, modelRequest)
 
 		// After a successful proxy, mark the session request as completed so follow-up
@@ -1130,18 +1185,29 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		return nil
 	case <-reqCtx.Done():
-		if queueReq.Release != nil {
-			queueReq.Release()
-		}
+		// Abandon() atomically coordinates with the dequeue loop: if admission raced
+		// in first it releases the inflight permit we own; otherwise it marks the
+		// request abandoned so the loop skips admission and no permit can leak.
+		queueReq.Abandon()
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
-			klog.Errorf("[FairnessScheduling] request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
-				requestID, sessionID, userId, modelName, r.queueTimeout)
-			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out")
-			return fmt.Errorf("request processing timed out in fairness queue")
+			// Exceeded the queue-wait timeout. In session-boost mode this is expected
+			// load-shedding when SESSION_BOOST_TIMEOUT is set, and under sustained
+			// overload it can fire for many requests, so log at a verbose level to avoid
+			// flooding the logs. In fairness mode the FAIRNESS_QUEUE_TIMEOUT is unexpected
+			// and logs at error level.
+			if EnableSessionBoost {
+				klog.V(2).Infof("%s request rejected after exceeding queue-wait timeout: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
+					logPrefix, requestID, sessionID, userId, modelName, r.sessionBoostTimeout)
+			} else {
+				klog.Errorf("%s request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
+					logPrefix, requestID, sessionID, userId, modelName, r.queueTimeout)
+			}
+			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out in queue")
+			return fmt.Errorf("request processing timed out in queue")
 		}
-		klog.V(4).Infof("[FairnessScheduling] request cancelled (client disconnected): reqID=%s sessionID=%s user=%s model=%s",
-			requestID, sessionID, userId, modelName)
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in fairness queue")
-		return fmt.Errorf("client disconnected while waiting in fairness queue")
+		klog.V(4).Infof("%s request cancelled (client disconnected): reqID=%s sessionID=%s user=%s model=%s",
+			logPrefix, requestID, sessionID, userId, modelName)
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in queue")
+		return fmt.Errorf("client disconnected while waiting in queue")
 	}
 }
