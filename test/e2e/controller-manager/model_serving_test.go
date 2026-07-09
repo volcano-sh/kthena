@@ -2349,7 +2349,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 
 		imageByOrdinal := map[int32]string{}
 		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || len(pod.Spec.Containers) == 0 {
+			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || len(pod.Spec.Containers) == 0 {
 				continue
 			}
 			roleID := pod.Labels[workload.RoleIDKey]
@@ -2357,7 +2357,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			imageByOrdinal[int32(ordinal)] = pod.Spec.Containers[0].Image
 		}
 		if len(imageByOrdinal) != int(targetRoleReplicas) {
-			t.Logf("Observed ordinals=%d, expecting %d", len(imageByOrdinal), targetRoleReplicas)
+			t.Logf("Observed running ordinals=%d, expecting %d", len(imageByOrdinal), targetRoleReplicas)
 			return false
 		}
 
@@ -2386,7 +2386,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			updatedCorrect++
 		}
 		if updatedCorrect != int(targetRoleReplicas-partition) {
-			t.Logf("Updated replicas=%d, expecting %d", updatedCorrect, targetRoleReplicas-partition)
+			t.Logf("Updated replicas=%d, expecting %d; images=%v", updatedCorrect, targetRoleReplicas-partition, imageByOrdinal)
 			return false
 		}
 		return true
@@ -2394,8 +2394,8 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 }
 
 // TestModelServingRolePartitionScaleUp verifies that when a partition-protected role replica is
-// deleted under RoleRecreate, scale-up recreates the missing ordinal with the historical revision
-// instead of creating a new replica at maxOrdinal+1 with the update revision.
+// deleted under RoleRecreate, scale-up recreates the missing protected ordinal with the historical
+// revision. Non-protected replicas may use non-contiguous ordinals as long as replica count is met.
 func TestModelServingRolePartitionScaleUp(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -2477,8 +2477,23 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 		if len(imageByOrdinal) != int(roleReplicas) {
 			return false
 		}
-		if imageByOrdinal[0] != nginxImage || imageByOrdinal[1] != nginxAlpineImage || imageByOrdinal[2] != nginxAlpineImage {
-			t.Logf("Partition state not ready: ordinal images=%v", imageByOrdinal)
+		if imageByOrdinal[0] != nginxImage {
+			t.Logf("Partition state not ready: protected prefill-0 image=%s", imageByOrdinal[0])
+			return false
+		}
+		updatedCount := 0
+		for ord, img := range imageByOrdinal {
+			if ord == 0 {
+				continue
+			}
+			if img != nginxAlpineImage {
+				t.Logf("Partition state not ready: non-protected prefill-%d image=%s", ord, img)
+				return false
+			}
+			updatedCount++
+		}
+		if updatedCount != int(roleReplicas)-int(partition) {
+			t.Logf("Partition state not ready: updated replicas=%d, expecting %d, images=%v", updatedCount, roleReplicas-partition, imageByOrdinal)
 			return false
 		}
 		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -2538,10 +2553,6 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 			t.Logf("Observed ordinals=%d, expecting %d", len(imageByOrdinal), roleReplicas)
 			return false
 		}
-		if _, ok := imageByOrdinal[3]; ok {
-			t.Log("Unexpected prefill-3 created instead of recreating prefill-0")
-			return false
-		}
 		if imageByOrdinal[0] != nginxImage {
 			t.Logf("Recreated prefill-0 image=%s, expecting old image=%s", imageByOrdinal[0], nginxImage)
 			return false
@@ -2554,12 +2565,23 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 			t.Log("prefill-0 was not recreated with a new UID")
 			return false
 		}
-		if imageByOrdinal[1] != nginxAlpineImage || imageByOrdinal[2] != nginxAlpineImage {
-			t.Logf("Updated replicas changed unexpectedly: images=%v", imageByOrdinal)
-			return false
+		updatedCount := 0
+		for ord, img := range imageByOrdinal {
+			if ord == 0 {
+				continue
+			}
+			if img != nginxAlpineImage {
+				t.Logf("Non-protected prefill-%d image=%s, expecting %s", ord, img, nginxAlpineImage)
+				return false
+			}
+			if revisionByOrdinal[ord] != updateRevision {
+				t.Logf("Non-protected prefill-%d revision=%s, expecting %s", ord, revisionByOrdinal[ord], updateRevision)
+				return false
+			}
+			updatedCount++
 		}
-		if revisionByOrdinal[1] != updateRevision || revisionByOrdinal[2] != updateRevision {
-			t.Logf("Updated replicas revision changed unexpectedly: revisions=%v", revisionByOrdinal)
+		if updatedCount != int(roleReplicas)-int(partition) {
+			t.Logf("Non-protected replicas=%d, expecting %d; images=%v", updatedCount, roleReplicas-partition, imageByOrdinal)
 			return false
 		}
 		return true
