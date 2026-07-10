@@ -79,11 +79,12 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │  ┌──────────────────┐     ┌─────────────────────────┐    │
 │  │ SessionTracker   │<────│ MarkSessionRequest      │    │
 │  │ (bounded LRU)    │     │ Completed()             │    │
-│  │ keys: sessionID  │     │ (after response sent)   │    │
-│  │ cap: 4096 default│     └─────────────────────────┘    │
+│  │ key:   sessionID │     │ (after response sent)   │    │
+│  │ value: completeAt│     └─────────────────────────┘    │
+│  │ cap: 4096 default│                                    │
 │  └────────┬─────────┘                                    │
 │            │                                             │
-│            │ HasRecentCompletion(sessionID)?             │
+│            │ CompletionTime(sessionID)?                  │
 │            ▼                                             │
 │  ┌──────────────────┐                                    │
 │  │  PushRequest()   │                                    │
@@ -98,9 +99,10 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │  │                                      │                │
 │  │  Ordering:                           │                │
 │  │  1. SessionBoost=true > false        │                │
-│  │  2. Within boosted: newest first     │                │
+│  │  2. Within boosted: most recently     │                │
+│  │     completed session first          │                │
 │  │                                      │                │
-│  │  [Boosted-new] [Boosted-old] [Normal]│                │
+│  │  [Boosted-warm][Boosted-cooler][Norm]│                │
 │  └──────────────────────────────────────┘                │
 │            │                                             │
 │            ▼                                             │
@@ -178,13 +180,13 @@ It is important that grace is **triggered only by release events**, because a re
 
 1. A request finishes → `Release()` runs → `inflightCount` is decremented → a signal is sent on `releaseCh`.
 2. The freed slot would normally be claimed immediately by the current heap head (which may be an unrelated, non-boosted request). The grace wait instead **holds that just-freed slot for up to `SessionBoostGracePeriod`**, betting that a same-session follow-up is about to arrive and reuse the warm prefix cache.
-3. When the wait resolves, `tryBackpressureDequeue` runs and re-checks **both** capacity gates before admitting anyone. A boosted follow-up that arrived during grace is admitted first because boosted requests outrank others in the heap and, among boosted requests, the most-recently-arrived one is at the head — and only when `inflight < MaxConcurrent` **and** at least one backend pod reports capacity.
+3. When the wait resolves, `tryBackpressureDequeue` runs and re-checks **both** capacity gates before admitting anyone. A boosted follow-up that arrived during grace is admitted first because boosted requests outrank others in the heap and, among boosted requests, the one whose session completed most recently is at the head — and only when `inflight < MaxConcurrent` **and** at least one backend pod reports capacity.
 
 The grace wait always runs for the full window (subject to shutdown), and in every case the two capacity gates are the final arbiter:
 
-| Outcome           | Trigger                      | What happens next                                                                                                                                                                                                                                                              |
-| ----------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Grace expires** | The timer fires (`timer.C`). | Stop holding the slot and fall through to the capacity gates, which admit the heap head. If a same-session follow-up arrived during the wait it is now boosted and sits at the head (newest boosted first), so it wins automatically (subject to inflight + backend capacity). |
+| Outcome           | Trigger                      | What happens next                                                                                                                                                                                                                                                                                       |
+| ----------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Grace expires** | The timer fires (`timer.C`). | Stop holding the slot and fall through to the capacity gates, which admit the heap head. If a same-session follow-up arrived during the wait it is now boosted and sits at the head (session with the most recent completion first), so it wins automatically (subject to inflight + backend capacity). |
 
 > There is no "head already boosted" fast path. The queue holds the freed slot for the full grace window even when a boosted request is already at the head, because a still-newer same-session follow-up may yet arrive during the window and should be the one to ride the warm prefix cache.
 
@@ -267,8 +269,8 @@ type RequestPriorityQueue struct {
 
 // Session-boost ordering (RequestPriorityQueue.Less when sessionBoost == true):
 // 1. SessionBoost=true comes before SessionBoost=false
-// 2. Within boosted requests: later RequestTime comes first (newest-first / LIFO),
-//    so a freshly boosted follow-up jumps to the head
+// 2. Within boosted requests: the session whose previous turn completed most
+//    recently comes first (warmest prefix cache); ties broken FIFO by RequestTime
 // 3. Within non-boosted requests: earlier RequestTime comes first (FIFO)
 ```
 

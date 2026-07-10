@@ -217,10 +217,10 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 		t.Errorf("Last two should not be boosted: third=%v fourth=%v", third.SessionBoost, fourth.SessionBoost)
 	}
 
-	// Among boosted: newest arrival wins (LIFO), so boost-B (later arrival) is
-	// dequeued before boost-A.
+	// Among boosted: the session that completed most recently wins. conv-B was
+	// marked completed after conv-A, so boost-B (u3) is dequeued before boost-A (u2).
 	if first.UserID != "u3" {
-		t.Errorf("Expected boost-B first (latest arrival), got %s", first.UserID)
+		t.Errorf("Expected boost-B first (most recently completed session), got %s", first.UserID)
 	}
 	if second.UserID != "u2" {
 		t.Errorf("Expected boost-A second, got %s", second.UserID)
@@ -232,6 +232,49 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 	}
 	if fourth.UserID != "u4" {
 		t.Errorf("Expected normal-2 fourth, got %s", fourth.UserID)
+	}
+}
+
+// TestSessionBoostQueue_OrderedByCompletionTime verifies that boosted requests are
+// dequeued by their session's completion time (most recently completed first),
+// independent of the order in which the requests arrived in the queue.
+func TestSessionBoostQueue_OrderedByCompletionTime(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	// Completion order: conv-A, then conv-B, then conv-C (conv-C most recent).
+	q.MarkSessionRequestCompleted("conv-A")
+	q.MarkSessionRequestCompleted("conv-B")
+	q.MarkSessionRequestCompleted("conv-C")
+
+	now := time.Now()
+	// Arrival order deliberately differs from completion order: B arrives first,
+	// then C, then A. This distinguishes completion-time ordering from both FIFO
+	// (which would yield B, C, A) and LIFO (which would yield A, C, B).
+	requests := []*Request{
+		{UserID: "u-B", ModelName: "m", SessionID: "conv-B", RequestTime: now},
+		{UserID: "u-C", ModelName: "m", SessionID: "conv-C", RequestTime: now.Add(time.Millisecond)},
+		{UserID: "u-A", ModelName: "m", SessionID: "conv-A", RequestTime: now.Add(2 * time.Millisecond)},
+	}
+	for _, r := range requests {
+		if err := q.PushRequest(r); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	// Expect dequeue order by most-recent completion: C, then B, then A.
+	for i, expected := range []string{"u-C", "u-B", "u-A"} {
+		got, err := q.popWhenAvailable(context.Background())
+		if err != nil {
+			t.Fatalf("Pop %d failed: %v", i, err)
+		}
+		if !got.SessionBoost {
+			t.Errorf("Position %d: expected boosted request, got non-boosted %s", i, got.UserID)
+		}
+		if got.UserID != expected {
+			t.Errorf("Position %d: expected %s (by completion time), got %s", i, expected, got.UserID)
+		}
 	}
 }
 

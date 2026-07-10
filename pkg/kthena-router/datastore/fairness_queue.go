@@ -148,10 +148,14 @@ type Request struct {
 	SessionID    string  // Session identifier for multi-turn conversations
 	Priority     float64 // Priority (lower value means higher priority)
 	SessionBoost bool    // Whether this request has session priority boost (recently completed session)
-	RequestTime  time.Time
-	NotifyChan   chan struct{}
-	CancelCh     <-chan struct{} // Request-scoped cancellation signal
-	Release      func()          // Set by the queue when a permit is acquired
+	// SessionCompletedAt is the time the session's previous turn completed, captured
+	// when the request is boosted. Boosted requests are ordered by this timestamp
+	// (most recent first) so the session with the warmest prefix cache runs first.
+	SessionCompletedAt time.Time
+	RequestTime        time.Time
+	NotifyChan         chan struct{}
+	CancelCh           <-chan struct{} // Request-scoped cancellation signal
+	Release            func()          // Set by the queue when a permit is acquired
 
 	// admitMu serializes admission (by the dequeue loop) against abandonment (by
 	// the waiting caller on timeout/cancel), closing the race where the loop has
@@ -273,16 +277,19 @@ func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg Fai
 func (pq *RequestPriorityQueue) Len() int { return len(pq.heap) }
 
 func (pq *RequestPriorityQueue) Less(i, j int) bool {
-	// Session-boost mode: boosted requests outrank others. Among boosted requests
-	// the most-recently-arrived one wins (LIFO): a freshly boosted follow-up always
-	// jumps to the head so it can reuse the still-warm prefix cache before earlier
-	// boosted requests. Non-boosted requests keep FIFO ordering.
+	// Session-boost mode: boosted requests outrank others. Among boosted requests,
+	// the session whose previous turn completed most recently wins, because its
+	// prefix cache is the most likely to still be warm on the backend; ties are
+	// broken FIFO by arrival time. Non-boosted requests keep FIFO ordering.
 	if pq.sessionBoost {
 		if pq.heap[i].SessionBoost != pq.heap[j].SessionBoost {
 			return pq.heap[i].SessionBoost
 		}
 		if pq.heap[i].SessionBoost {
-			return pq.heap[i].RequestTime.After(pq.heap[j].RequestTime)
+			if !pq.heap[i].SessionCompletedAt.Equal(pq.heap[j].SessionCompletedAt) {
+				return pq.heap[i].SessionCompletedAt.After(pq.heap[j].SessionCompletedAt)
+			}
+			return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
 		}
 		return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
 	}
@@ -323,9 +330,13 @@ func (pq *RequestPriorityQueue) PushRequest(r *Request) error {
 	defer pq.mu.Unlock()
 
 	// In session-boost mode, promote requests whose session recently completed.
-	if pq.sessionBoost && pq.sessionTracker != nil && r.SessionID != "" &&
-		pq.sessionTracker.HasRecentCompletion(r.SessionID) {
-		r.SessionBoost = true
+	// Capture the session's completion time so boosted requests can be ordered by
+	// prefix-cache warmth (most recently completed first).
+	if pq.sessionBoost && pq.sessionTracker != nil && r.SessionID != "" {
+		if completedAt, ok := pq.sessionTracker.CompletionTime(r.SessionID); ok {
+			r.SessionBoost = true
+			r.SessionCompletedAt = completedAt
+		}
 	}
 
 	heap.Push(pq, r)
