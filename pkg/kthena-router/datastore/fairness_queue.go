@@ -273,10 +273,16 @@ func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg Fai
 func (pq *RequestPriorityQueue) Len() int { return len(pq.heap) }
 
 func (pq *RequestPriorityQueue) Less(i, j int) bool {
-	// Session-boost mode: boosted requests outrank others; ties broken FIFO.
+	// Session-boost mode: boosted requests outrank others. Among boosted requests
+	// the most-recently-arrived one wins (LIFO): a freshly boosted follow-up always
+	// jumps to the head so it can reuse the still-warm prefix cache before earlier
+	// boosted requests. Non-boosted requests keep FIFO ordering.
 	if pq.sessionBoost {
 		if pq.heap[i].SessionBoost != pq.heap[j].SessionBoost {
 			return pq.heap[i].SessionBoost
+		}
+		if pq.heap[i].SessionBoost {
+			return pq.heap[i].RequestTime.After(pq.heap[j].RequestTime)
 		}
 		return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
 	}
