@@ -63,6 +63,11 @@ type SessionTracker struct {
 	// session whose previous turn completed most recently—and is therefore most
 	// likely to still have a warm prefix cache—is served first.
 	cache *lru.Cache[string, time.Time]
+
+	// now returns the current time when a completion is recorded. It defaults to
+	// time.Now and is only overridden in tests to make completion timestamps
+	// deterministic.
+	now func() time.Time
 }
 
 // NewSessionTracker creates a new session tracker that remembers up to capacity
@@ -79,7 +84,7 @@ func NewSessionTracker(capacity int) *SessionTracker {
 		// capacity is guaranteed positive above, so this is unreachable in practice.
 		klog.Errorf("[SessionTracker] failed to create LRU cache (capacity=%d): %v", capacity, err)
 	}
-	return &SessionTracker{cache: cache}
+	return &SessionTracker{cache: cache, now: time.Now}
 }
 
 // MarkRequestCompleted records that a request from the given session has completed,
@@ -89,7 +94,7 @@ func (st *SessionTracker) MarkRequestCompleted(sessionID string) {
 	if sessionID == "" {
 		return
 	}
-	st.cache.Add(sessionID, time.Now())
+	st.cache.Add(sessionID, st.now())
 }
 
 // HasRecentCompletion reports whether the given session ID is currently tracked

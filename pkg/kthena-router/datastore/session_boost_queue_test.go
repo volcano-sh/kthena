@@ -187,8 +187,16 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
-	q.MarkSessionRequestCompleted("conv-A")
-	q.MarkSessionRequestCompleted("conv-B")
+	// Use a controllable clock so conv-B's completion is strictly after conv-A's,
+	// keeping the completion-time ordering below deterministic.
+	st := q.GetSessionTracker()
+	base := time.Now()
+	markCompletedAt := func(sessionID string, completedAt time.Time) {
+		st.now = func() time.Time { return completedAt }
+		q.MarkSessionRequestCompleted(sessionID)
+	}
+	markCompletedAt("conv-A", base)
+	markCompletedAt("conv-B", base.Add(time.Second))
 
 	now := time.Now()
 	requests := []*Request{
@@ -243,10 +251,21 @@ func TestSessionBoostQueue_OrderedByCompletionTime(t *testing.T) {
 	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
+	// Drive the tracker with a controllable clock so each completion gets a
+	// strictly increasing, distinct timestamp regardless of the wall clock's
+	// resolution or how fast the test executes. This keeps the completion-time
+	// ordering deterministic instead of falling back to the RequestTime tiebreak.
+	st := q.GetSessionTracker()
+	base := time.Now()
+	markCompletedAt := func(sessionID string, completedAt time.Time) {
+		st.now = func() time.Time { return completedAt }
+		q.MarkSessionRequestCompleted(sessionID)
+	}
+
 	// Completion order: conv-A, then conv-B, then conv-C (conv-C most recent).
-	q.MarkSessionRequestCompleted("conv-A")
-	q.MarkSessionRequestCompleted("conv-B")
-	q.MarkSessionRequestCompleted("conv-C")
+	markCompletedAt("conv-A", base)
+	markCompletedAt("conv-B", base.Add(time.Second))
+	markCompletedAt("conv-C", base.Add(2*time.Second))
 
 	now := time.Now()
 	// Arrival order deliberately differs from completion order: B arrives first,
