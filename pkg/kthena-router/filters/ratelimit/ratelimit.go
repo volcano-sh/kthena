@@ -66,7 +66,8 @@ type TokenRateLimiter struct {
 	outputLimiter map[string]Limiter
 
 	// Redis client for global rate limiting
-	redisClient *redis.Client
+	redisClient   *redis.Client
+	appliedLimits map[string]*networkingv1alpha1.RateLimit
 
 	tokenizer tokenizer.Tokenizer
 }
@@ -94,6 +95,7 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 		inputLimiter:  make(map[string]Limiter),
 		outputLimiter: make(map[string]Limiter),
 		tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
+		appliedLimits: make(map[string]*networkingv1alpha1.RateLimit),
 	}
 }
 
@@ -145,18 +147,23 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
 
 	if useGlobal {
-		// Initialize Redis client if not already done
-		if r.redisClient == nil {
+		// Initialize Redis client if not already done or if the address changed
+		if r.redisClient == nil || r.redisClient.Options().Addr != ratelimit.Global.Redis.Address {
+			if r.redisClient != nil {
+				_ = r.redisClient.Close()
+			}
 			r.redisClient = redis.NewClient(&redis.Options{
 				Addr: ratelimit.Global.Redis.Address,
 			})
+		}
 
-			// Test connection
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := r.redisClient.Ping(ctx).Err(); err != nil {
-				return fmt.Errorf("failed to connect to redis: %w", err)
-			}
+		// Test connection
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := r.redisClient.Ping(ctx).Err(); err != nil {
+			_ = r.redisClient.Close()
+			r.redisClient = nil
+			return fmt.Errorf("failed to connect to redis: %w", err)
 		}
 
 		// Create global rate limiters
@@ -200,6 +207,7 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 		}
 	}
 
+	r.appliedLimits[model] = ratelimit
 	return nil
 }
 
@@ -210,6 +218,14 @@ func (r *TokenRateLimiter) DeleteLimiter(model string) {
 
 	delete(r.inputLimiter, model)
 	delete(r.outputLimiter, model)
+	delete(r.appliedLimits, model)
+}
+
+// GetAppliedLimiter returns the applied rate limit configuration for a model
+func (r *TokenRateLimiter) GetAppliedLimiter(model string) *networkingv1alpha1.RateLimit {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return r.appliedLimits[model]
 }
 
 func getTimeUnitDuration(unit networkingv1alpha1.RateLimitUnit) time.Duration {
