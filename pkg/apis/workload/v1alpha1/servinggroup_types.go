@@ -44,6 +44,7 @@ type GangPolicy struct {
 // NetworkTopologySpec defines the network topology scheduling policy exposed by Kthena.
 // It is converted to the scheduler-specific representation by the controller, keeping
 // the Kthena workload API stable if the underlying scheduler API changes incompatibly.
+// +kubebuilder:validation:XValidation:rule="!(has(self.highestTierAllowed) && has(self.highestTierName))", message="highestTierAllowed and highestTierName cannot be set simultaneously"
 type NetworkTopologySpec struct {
 	// Mode specifies the mode of the network topology constraint.
 	// +kubebuilder:validation:Enum=hard;soft
@@ -54,7 +55,7 @@ type NetworkTopologySpec struct {
 	// HighestTierAllowed specifies the highest tier that a job is allowed to cross when scheduling.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	HighestTierAllowed *int32 `json:"highestTierAllowed,omitempty"`
+	HighestTierAllowed *int `json:"highestTierAllowed,omitempty"`
 
 	// HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.
 	// HighestTierName and HighestTierAllowed cannot be set simultaneously.

@@ -195,48 +195,58 @@ spec:
                         properties:
                           highestTierAllowed:
                             description: HighestTierAllowed specifies the highest
-                              tier that a job allowed to cross when scheduling.
+                              tier that a job is allowed to cross when scheduling.
                             minimum: 0
                             type: integer
                           highestTierName:
                             description: |-
-                              HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
+                              HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.
                               HighestTierName and HighestTierAllowed cannot be set simultaneously.
                             maxLength: 253
                             type: string
                           mode:
                             default: hard
                             description: Mode specifies the mode of the network topology
-                              constrain.
+                              constraint.
                             enum:
                             - hard
                             - soft
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: highestTierAllowed and highestTierName cannot be
+                            set simultaneously
+                          rule: '!(has(self.highestTierAllowed) && has(self.highestTierName))'
                       rolePolicy:
-                        description: RolePolicy defines the fine-grained network topology
-                          scheduling requirement for instances of a `role`.
+                        description: |-
+                          RolePolicy defines the default network topology scheduling requirement for roles.
+                          Deprecated: use roles[*].networkTopology instead. This field is retained for backward
+                          compatibility only and must not be configured together with any role-level networkTopology.
                         properties:
                           highestTierAllowed:
                             description: HighestTierAllowed specifies the highest
-                              tier that a job allowed to cross when scheduling.
+                              tier that a job is allowed to cross when scheduling.
                             minimum: 0
                             type: integer
                           highestTierName:
                             description: |-
-                              HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
+                              HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.
                               HighestTierName and HighestTierAllowed cannot be set simultaneously.
                             maxLength: 253
                             type: string
                           mode:
                             default: hard
                             description: Mode specifies the mode of the network topology
-                              constrain.
+                              constraint.
                             enum:
                             - hard
                             - soft
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: highestTierAllowed and highestTierName cannot be
+                            set simultaneously
+                          rule: '!(has(self.highestTierAllowed) && has(self.highestTierName))'
                     type: object
                   restartGracePeriodSeconds:
                     default: 0
@@ -8896,6 +8906,37 @@ spec:
                           maxLength: 12
                           pattern: ^[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
                           type: string
+                        networkTopology:
+                          description: |-
+                            NetworkTopology defines the network topology scheduling requirement for this role.
+                            When set, it takes precedence over spec.template.networkTopology.rolePolicy for this
+                            role. It must not be configured together with spec.template.networkTopology.rolePolicy
+                            in the same ServingGroup.
+                          properties:
+                            highestTierAllowed:
+                              description: HighestTierAllowed specifies the highest
+                                tier that a job is allowed to cross when scheduling.
+                              minimum: 0
+                              type: integer
+                            highestTierName:
+                              description: |-
+                                HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.
+                                HighestTierName and HighestTierAllowed cannot be set simultaneously.
+                              maxLength: 253
+                              type: string
+                            mode:
+                              default: hard
+                              description: Mode specifies the mode of the network
+                                topology constraint.
+                              enum:
+                              - hard
+                              - soft
+                              type: string
+                          type: object
+                          x-kubernetes-validations:
+                          - message: highestTierAllowed and highestTierName cannot
+                              be set simultaneously
+                            rule: '!(has(self.highestTierAllowed) && has(self.highestTierName))'
                         partition:
                           anyOf:
                           - type: integer
