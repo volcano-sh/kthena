@@ -9,7 +9,7 @@ class EncodeRequest(BaseModel):
 
 class LoadRequest(BaseModel):
     model_server_id: str
-    model_uri: str
+    model_repo_id: str
     modelrevision: str | None = None
 
 

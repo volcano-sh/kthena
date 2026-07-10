@@ -2,20 +2,20 @@ package tokenizer
 
 import "context"
 
-type SidecarTokenizer struct {
+type localTokenizer struct {
 	client *Client
 }
 
-func NewSidecarTokenizer(endpoint string) LocalTokenizer {
-	return &SidecarTokenizer{
-		client: NewClient(endpoint),
+func NewlocalTokenizer() Tokenizer {
+	return &localTokenizer{
+		client: NewClient("http://localhost:8000"),
 	}
 }
 
-func (s *SidecarTokenizer) Load(modelServerID, modelID string) error {
+func (s *localTokenizer) Load(modelServerID, modelID string) error {
 	req := LoadRequest{
 		ModelServerID: modelServerID,
-		ModelID:       modelID,
+		ModelrepoID:   modelID,
 	}
 	_, err := s.client.post(
 		context.Background(),
@@ -26,7 +26,7 @@ func (s *SidecarTokenizer) Load(modelServerID, modelID string) error {
 	return err
 }
 
-func (s *SidecarTokenizer) Unload(modelServerID string) error {
+func (s *localTokenizer) Unload(modelServerID string) error {
 	req := UnloadRequest{
 		ModelServerID: modelServerID,
 	}
@@ -39,7 +39,7 @@ func (s *SidecarTokenizer) Unload(modelServerID string) error {
 	return err
 }
 
-func (s *SidecarTokenizer) CountTokens(modelServerID, prompt string) (int, error) {
+func (s *localTokenizer) CountTokens(modelServerID, prompt string) (int, error) {
 	req := EncodeRequest{
 		ModelServerID: modelServerID,
 		Text:          prompt,

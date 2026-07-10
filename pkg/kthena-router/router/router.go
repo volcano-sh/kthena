@@ -113,7 +113,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	metricsInstance := metrics.DefaultMetrics
 
 	// Initialize tokenizer
-	tokenizerInstance := tokenizer.NewSimpleEstimateTokenizer()
+	tokenizerInstance := tokenizer.NewLocalTokenizerClient("http://localhost:8000")
 
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
 		switch data.EventType {
@@ -131,6 +131,51 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		case datastore.EventDelete:
 			klog.Infof("delete rate limit for model %s", data.ModelName)
 			loadRateLimiter.DeleteLimiter(data.ModelName)
+		}
+	})
+
+	store.RegisterCallback("ModelServer", func(data datastore.EventData) {
+		if data.ModelServer == nil {
+			return
+		}
+		// Unique ID derived from the CRD Namespace & Name
+		modelServerID := fmt.Sprintf("%s/%s", data.ModelServer.Namespace, data.ModelServer.Name)
+		switch data.EventType {
+		case datastore.EventAdd, datastore.EventUpdate:
+			// Check the annotation
+			enabled := data.ModelServer.Annotations["kthena.volcano.sh/tokenizer-enabled"] == "true"
+			if enabled {
+				// Extract the modelURI from the annotation we propagated earlier
+				modelURI := data.ModelServer.Annotations["kthena.volcano.sh/model-uri"]
+				if modelURI == "" && data.ModelServer.Spec.Model != nil {
+					modelURI = *data.ModelServer.Spec.Model
+				}
+				if modelURI != "" {
+					klog.Infof("Loading tokenizer for model server %s (URI: %s)", modelServerID, modelURI)
+					// Run in a goroutine to prevent blocking the datastore callback thread
+					go func() {
+						if err := tokenizerInstance.Load(modelServerID, modelURI); err != nil {
+							klog.Errorf("Failed to load tokenizer for model server %s: %v", modelServerID, err)
+						}
+					}()
+				}
+			} else {
+				// If annotation was removed or disabled, unload it
+				klog.Infof("Unloading tokenizer for model server %s", modelServerID)
+				go func() {
+					if err := tokenizerInstance.Unload(modelServerID); err != nil {
+						klog.Errorf("Failed to unload tokenizer for model server %s: %v", modelServerID, err)
+					}
+				}()
+			}
+		case datastore.EventDelete:
+			// Unload tokenizer when ModelServer resource is deleted
+			klog.Infof("ModelServer %s deleted, unloading tokenizer", modelServerID)
+			go func() {
+				if err := tokenizerInstance.Unload(modelServerID); err != nil {
+					klog.Errorf("Failed to unload tokenizer for deleted model server %s: %v", modelServerID, err)
+				}
+			}()
 		}
 	})
 

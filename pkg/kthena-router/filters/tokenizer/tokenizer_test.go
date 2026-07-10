@@ -74,7 +74,7 @@ func TestSimpleEstimateTokenizer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tokenizer.CalculateTokenNum(tt.prompt)
+			got, err := tokenizer.CountTokens("", tt.prompt)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {

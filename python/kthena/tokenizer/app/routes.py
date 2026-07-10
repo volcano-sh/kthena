@@ -14,18 +14,18 @@ downloader = TokenizerDownloader()
 
 @router.post("/v1/encode")
 async def encode(req: EncodeRequest):
-    encoded, num_tokens = encoder(req.model_server_id,req.text )
+    encoded, token_count = encoder(req.model_server_id,req.text )
 
     if req.return_tokens:
         return {
             "encoded_tokens": encoded.tokens,
             "encoded_ids": encoded.ids,
-            "num_tokens": num_tokens
+            "token_count": token_count
         }
 
     return {
         "encoded_ids": encoded.ids,
-        "num_tokens": num_tokens
+        "token_count": token_count
     }
 
 
@@ -79,7 +79,7 @@ def encoder(model_server_id: str, text: str):
         logger.exception(f"Encoding failed for tokenizer '{model_server_id}'")
         raise HTTPException(status_code=500,detail=f"Tokenizer encoding failed: {e}")
 
-    num_tokens = len(encoded.ids)
+    token_count = len(encoded.ids)
 
-    return encoded, num_tokens
+    return encoded, token_count
 

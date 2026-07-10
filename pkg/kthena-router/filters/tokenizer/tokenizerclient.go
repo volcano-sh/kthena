@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultEndpoint = "http://localhost:50051"
+	defaultEndpoint = "http://localhost:8000"
 )
 
 type Client struct {

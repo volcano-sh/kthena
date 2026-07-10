@@ -17,10 +17,6 @@ limitations under the License.
 package tokenizer
 
 type Tokenizer interface {
-	CalculateTokenNum(string) (int, error)
-}
-
-type LocalTokenizer interface {
 	Load(modelServerID, modelID string) error
 	Unload(modelServerID string) error
 	CountTokens(modelServerID, prompt string) (int, error)

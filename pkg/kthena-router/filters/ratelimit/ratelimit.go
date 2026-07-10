@@ -89,18 +89,18 @@ func (l *LocalLimiter) Tokens() float64 {
 }
 
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
-func NewTokenRateLimiter() *TokenRateLimiter {
+func NewTokenRateLimiter(url string) *TokenRateLimiter {
 	return &TokenRateLimiter{
 		inputLimiter:  make(map[string]Limiter),
 		outputLimiter: make(map[string]Limiter),
-		tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
+		tokenizer:     tokenizer.NewlocalTokenizer(url),
 	}
 }
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
 func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 	// Estimate input tokens
-	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
+	tokens, err := r.tokenizer.CountTokens(model, prompt)
 	if err != nil {
 		klog.Errorf("failed to calculate token number: %v", err)
 		tokens = len(prompt) / 4 // fallback estimation
