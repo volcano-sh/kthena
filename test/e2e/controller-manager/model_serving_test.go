@@ -1517,7 +1517,7 @@ func TestModelServingPartitionScaleDown(t *testing.T) {
 			return false
 		}
 
-		// verify ModelServing status feilds have also converged
+		// verify ModelServing status fields have also converged
 		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 		if err != nil {
 			t.Logf("Failed to get ModelServing: %v", err)
