@@ -22,7 +22,7 @@ package v1alpha1
 // with apply.
 type NetworkTopologySpecApplyConfiguration struct {
 	Mode               *string `json:"mode,omitempty"`
-	HighestTierAllowed *int32  `json:"highestTierAllowed,omitempty"`
+	HighestTierAllowed *int    `json:"highestTierAllowed,omitempty"`
 	HighestTierName    *string `json:"highestTierName,omitempty"`
 }
 
@@ -43,7 +43,7 @@ func (b *NetworkTopologySpecApplyConfiguration) WithMode(value string) *NetworkT
 // WithHighestTierAllowed sets the HighestTierAllowed field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the HighestTierAllowed field is set to the value of the last call.
-func (b *NetworkTopologySpecApplyConfiguration) WithHighestTierAllowed(value int32) *NetworkTopologySpecApplyConfiguration {
+func (b *NetworkTopologySpecApplyConfiguration) WithHighestTierAllowed(value int) *NetworkTopologySpecApplyConfiguration {
 	b.HighestTierAllowed = &value
 	return b
 }

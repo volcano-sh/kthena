@@ -778,7 +778,7 @@ func (in *NetworkTopologySpec) DeepCopyInto(out *NetworkTopologySpec) {
 	*out = *in
 	if in.HighestTierAllowed != nil {
 		in, out := &in.HighestTierAllowed, &out.HighestTierAllowed
-		*out = new(int32)
+		*out = new(int)
 		**out = **in
 	}
 }

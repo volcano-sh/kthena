@@ -599,7 +599,7 @@ func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
 // syncPodGroupNetworkTopology sets or clears PodGroup group-level NetworkTopology
 // from ModelServing spec.template.networkTopology.groupPolicy.
 func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedulingv1beta1.PodGroupSpec) {
-	if ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
+	if ms != nil && ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
 		spec.NetworkTopology = toSchedulerNetworkTopologySpec(ms.Spec.Template.NetworkTopology.GroupPolicy)
 		return
 	}
@@ -616,7 +616,7 @@ func toSchedulerNetworkTopologySpec(policy *workloadv1alpha1.NetworkTopologySpec
 
 	var highestTierAllowed *int
 	if policy.HighestTierAllowed != nil {
-		highestTierAllowed = ptr.To(int(*policy.HighestTierAllowed))
+		highestTierAllowed = ptr.To(*policy.HighestTierAllowed)
 	}
 
 	return &schedulingv1beta1.NetworkTopologySpec{
@@ -628,15 +628,17 @@ func toSchedulerNetworkTopologySpec(policy *workloadv1alpha1.NetworkTopologySpec
 
 // resolveRoleNetworkTopology returns the effective Kthena NetworkTopologySpec for a role:
 // the role's own policy takes precedence; otherwise the legacy ModelServing-level
-// rolePolicy applies (preserved for backward compatibility); otherwise none.
+// rolePolicy applies (preserved for backward compatibility); otherwise none. ms and
+// ms.Spec.Template.NetworkTopology are both optional and checked explicitly so this
+// function is safe to call on its own, independent of what its current callers guarantee.
 func resolveRoleNetworkTopology(ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role) *workloadv1alpha1.NetworkTopologySpec {
 	if role.NetworkTopology != nil {
 		return role.NetworkTopology
 	}
-	if ms.Spec.Template.NetworkTopology != nil {
-		return ms.Spec.Template.NetworkTopology.RolePolicy
+	if ms == nil || ms.Spec.Template.NetworkTopology == nil {
+		return nil
 	}
-	return nil
+	return ms.Spec.Template.NetworkTopology.RolePolicy
 }
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {

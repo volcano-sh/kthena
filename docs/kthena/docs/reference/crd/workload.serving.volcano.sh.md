@@ -648,7 +648,7 @@ _Appears in:_
 
 
 
-NetworkTopologySpec defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
+NetworkTopology defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
 
 
 
@@ -658,7 +658,28 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `groupPolicy` _[NetworkTopologySpec](#networktopologyspec)_ | GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`. |  |  |
-| `rolePolicy` _[NetworkTopologySpec](#networktopologyspec)_ | RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`. |  |  |
+| `rolePolicy` _[NetworkTopologySpec](#networktopologyspec)_ | RolePolicy defines the default network topology scheduling requirement for roles.<br />Deprecated: use roles[*].networkTopology instead. This field is retained for backward<br />compatibility only and must not be configured together with any role-level networkTopology. |  |  |
+
+
+#### NetworkTopologySpec
+
+
+
+NetworkTopologySpec defines the network topology scheduling policy exposed by Kthena.
+It is converted to the scheduler-specific representation by the controller, keeping
+the Kthena workload API stable if the underlying scheduler API changes incompatibly.
+
+
+
+_Appears in:_
+- [NetworkTopology](#networktopology)
+- [Role](#role)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mode` _string_ | Mode specifies the mode of the network topology constraint. | hard | Enum: [hard soft] <br /> |
+| `highestTierAllowed` _integer_ | HighestTierAllowed specifies the highest tier that a job is allowed to cross when scheduling. |  | Minimum: 0 <br /> |
+| `highestTierName` _string_ | HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.<br />HighestTierName and HighestTierAllowed cannot be set simultaneously. |  | MaxLength: 253 <br /> |
 
 
 #### PluginScope
@@ -866,6 +887,7 @@ _Appears in:_
 | `workerTemplate` _[PodTemplateSpec](#podtemplatespec)_ | WorkerTemplate defines the template for the worker pod of a role. |  |  |
 | `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | The maximum number of replicas that can be unavailable during the update.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).<br />Absolute number is calculated from percentage by rounding down.<br />This can not be 0.<br />By default, a fixed value of 1 is used. | 1 | XIntOrString: \{\} <br /> |
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition indicates the ordinal at which the ModelServing should be partitioned<br />for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to<br />Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
+| `networkTopology` _[NetworkTopologySpec](#networktopologyspec)_ | NetworkTopology defines the network topology scheduling requirement for this role.<br />When set, it takes precedence over spec.template.networkTopology.rolePolicy for this<br />role. It must not be configured together with spec.template.networkTopology.rolePolicy<br />in the same ServingGroup. |  |  |
 
 
 #### RoleRatioConstraint

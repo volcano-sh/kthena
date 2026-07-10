@@ -25,11 +25,11 @@ import (
 // RoleApplyConfiguration represents a declarative configuration of the Role type for use
 // with apply.
 type RoleApplyConfiguration struct {
-	Name                                         *string                                `json:"name,omitempty"`
-	Replicas                                     *int32                                 `json:"replicas,omitempty"`
-	EntryTemplate                                *PodTemplateSpecApplyConfiguration     `json:"entryTemplate,omitempty"`
-	WorkerReplicas                               *int32                                 `json:"workerReplicas,omitempty"`
-	WorkerTemplate                               *PodTemplateSpecApplyConfiguration     `json:"workerTemplate,omitempty"`
+	Name                                         *string                            `json:"name,omitempty"`
+	Replicas                                     *int32                             `json:"replicas,omitempty"`
+	EntryTemplate                                *PodTemplateSpecApplyConfiguration `json:"entryTemplate,omitempty"`
+	WorkerReplicas                               *int32                             `json:"workerReplicas,omitempty"`
+	WorkerTemplate                               *PodTemplateSpecApplyConfiguration `json:"workerTemplate,omitempty"`
 	RollingUpdateConfigurationApplyConfiguration `json:",omitempty,inline"`
 	NetworkTopology                              *NetworkTopologySpecApplyConfiguration `json:"networkTopology,omitempty"`
 }
