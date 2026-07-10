@@ -67,7 +67,7 @@ func TestModelCR(t *testing.T) {
 		}
 		return meta.IsStatusConditionPresentAndEqual(m.Status.Conditions,
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
-	}, 10*time.Minute, 5*time.Second, "Model did not become Active")
+	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
 
 	// Test chat via port-forward
 	messages := []utils.ChatMessage{
@@ -263,7 +263,7 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 		}
 		return meta.IsStatusConditionPresentAndEqual(m.Status.Conditions,
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
-	}, 10*time.Minute, 5*time.Second, "Model did not become Active")
+	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
 
 	t.Log("Model is active. Testing self-healing of ModelServing...")
 

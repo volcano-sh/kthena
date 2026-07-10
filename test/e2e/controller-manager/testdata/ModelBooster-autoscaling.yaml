@@ -13,7 +13,7 @@ spec:
     replicas: 1
     workers:
       - type: server
-        image: ghcr.io/huntersman/vllm-cpu-env:latest
+        image: vllm-server:latest
         replicas: 1
         pods: 1
         config:
