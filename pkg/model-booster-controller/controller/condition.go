@@ -80,6 +80,11 @@ func (mc *ModelBoosterController) setModelActiveCondition(ctx context.Context, m
 // Pod inspection is intentionally kept in ModelServingController only; this
 // function avoids a duplicate pod lookup and follows the Kubernetes convention
 // that owners do not re-inspect their children's pods.
+//
+// The ModelServing is routinely not-yet-Available during ordinary startup, so that
+// alone is not a failure signal. Instead, this only fires once ModelServingController
+// has itself recorded a blocking-failure Warning Event on the child ModelServing;
+// until then, an unavailable child is treated as normal progress and no event is emitted.
 func (mc *ModelBoosterController) surfaceModelServingBlockingFailure(ctx context.Context, model *workloadv1alpha1.ModelBooster) {
 	if mc.recorder == nil {
 		return
@@ -89,9 +94,32 @@ func (mc *ModelBoosterController) surfaceModelServingBlockingFailure(ctx context
 		return
 	}
 	ms := modelServings[0]
+	if !mc.hasBlockingFailureEvent(ctx, ms) {
+		return
+	}
 	mc.recorder.Eventf(model, corev1.EventTypeWarning, "ModelServingNotReady",
 		"child ModelServing %q is not yet available; check events on ModelServing for pod-level failure details",
 		ms.Name)
+}
+
+// hasBlockingFailureEvent reports whether the child ModelServing already carries a
+// Warning Event, i.e. whether ModelServingController has detected an actual blocking
+// pod failure (as opposed to ordinary, still-in-progress startup).
+func (mc *ModelBoosterController) hasBlockingFailureEvent(ctx context.Context, ms *workloadv1alpha1.ModelServing) bool {
+	events, err := mc.kubeClient.CoreV1().Events(ms.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Warningf("failed to list events for ModelServing %s/%s: %v", ms.Namespace, ms.Name, err)
+		return false
+	}
+	for _, event := range events.Items {
+		if event.Type == corev1.EventTypeWarning &&
+			event.InvolvedObject.Kind == workloadv1alpha1.ModelServingKind.Kind &&
+			event.InvolvedObject.Namespace == ms.Namespace &&
+			event.InvolvedObject.Name == ms.Name {
+			return true
+		}
+	}
+	return false
 }
 
 // newCondition returns a condition
