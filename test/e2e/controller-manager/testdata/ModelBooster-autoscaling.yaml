@@ -7,7 +7,7 @@ spec:
   backend:
     name: backend1
     type: vLLM
-    schedulerName:
+    schedulerName: ""
     modelURI: hf://Qwen/Qwen2.5-0.5B-Instruct
     cacheURI: hostpath:///tmp/cache
     replicas: 1
