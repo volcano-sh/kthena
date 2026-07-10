@@ -494,6 +494,14 @@ func exclusiveConditionTypes(condition1 metav1.Condition, condition2 metav1.Cond
 	return false
 }
 
+// HasBlockingPodFailure reports whether a single pod is showing a blocking
+// failure signal (scheduling, image pull, or container crash), per the same
+// detection rules as ExtractPodBlockingFailure.
+func HasBlockingPodFailure(pod *corev1.Pod) bool {
+	reason, _ := ExtractPodBlockingFailure([]*corev1.Pod{pod})
+	return reason != ""
+}
+
 // ExtractPodBlockingFailure inspects pods and returns the single most-relevant
 // blocking failure as a (reason, message) pair.
 // Priority order: scheduling failure > image pull > init container crash > runtime container crash.

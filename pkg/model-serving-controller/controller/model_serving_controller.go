@@ -367,6 +367,14 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 				Name:      ms.Name,
 			}, servingGroupName, utils.ObjectRevision(newPod), roleTemplateHash, roleName, utils.GetRoleID(newPod))
 		}
+		// Pending pods with a blocking failure (scheduling, image pull, init container
+		// crash) never reach the Failed or ContainerRestarted branches above, since the
+		// phase stays Pending and RestartCount stays 0. Without this, the owning
+		// ModelServing is never reconciled and the failure is never surfaced as an Event.
+		if utils.HasBlockingPodFailure(newPod) {
+			klog.V(4).Infof("blocking pod failure detected on %s/%s, enqueuing ModelServing %s/%s", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name)
+			c.enqueueModelServing(ms)
+		}
 	}
 }
 

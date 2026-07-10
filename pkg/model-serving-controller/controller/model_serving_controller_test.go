@@ -323,6 +323,127 @@ func TestDeletePodGroupOwnerMismatchDoesNotEnqueue(t *testing.T) {
 	assertQueueStaysEmpty(t, controller.workqueue, 200*time.Millisecond)
 }
 
+// newPendingPodForBlockingFailureTest builds a Pending pod owned by ms, suitable for
+// exercising the updatePod informer handler's default branch (Ready/Failed/ContainerRestarted
+// all require a non-Pending signal that a scheduling or image-pull failure never produces).
+func newPendingPodForBlockingFailureTest(ms *workloadv1alpha1.ModelServing, podName, groupName string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+}
+
+// TestUpdatePodEnqueuesOwnerOnBlockingPendingFailure exercises the updatePod handler exactly
+// as the pods informer's UpdateFunc invokes it. Pending pods with a scheduling or image-pull
+// failure previously fell into the default branch and never enqueued the owning ModelServing,
+// so the failure detected by getBlockingPodFailure/ExtractPodBlockingFailure during the next
+// reconcile was never reached because no reconcile was ever triggered.
+func TestUpdatePodEnqueuesOwnerOnBlockingPendingFailure(t *testing.T) {
+	ms := newModelServingForDeleteTest("default", "ms")
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	require.Eventually(t, func() bool {
+		_, err := controller.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	drainWorkqueue(t, controller.workqueue)
+	assertQueueEmpty(t, controller.workqueue)
+
+	tests := []struct {
+		description string
+		mutate      func(pod *corev1.Pod)
+	}{
+		{
+			description: "pod unschedulable",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.Conditions = []corev1.PodCondition{
+					{
+						Type:    corev1.PodScheduled,
+						Status:  corev1.ConditionFalse,
+						Reason:  "Unschedulable",
+						Message: "0/3 nodes are available: insufficient memory",
+					},
+				}
+			},
+		},
+		{
+			description: "image pull backoff",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name: "main",
+						State: corev1.ContainerState{
+							Waiting: &corev1.ContainerStateWaiting{
+								Reason:  "ImagePullBackOff",
+								Message: "Back-off pulling image \"nginx:bad-tag\"",
+							},
+						},
+					},
+				}
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.description, func(t *testing.T) {
+			pod := newPendingPodForBlockingFailureTest(ms, fmt.Sprintf("pod-%d", i), "ms-0")
+			tc.mutate(pod)
+
+			controller.updatePod(nil, pod)
+
+			h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+		})
+	}
+}
+
+// TestUpdatePodOrdinaryPendingDoesNotEnqueue verifies that a Pending pod with no blocking
+// failure signal (e.g. still waiting on ContainerCreating during normal startup) does not
+// enqueue the owner, so the fix for blocking failures does not reintroduce a resync storm.
+func TestUpdatePodOrdinaryPendingDoesNotEnqueue(t *testing.T) {
+	ms := newModelServingForDeleteTest("default", "ms")
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	require.Eventually(t, func() bool {
+		_, err := controller.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	drainWorkqueue(t, controller.workqueue)
+	assertQueueEmpty(t, controller.workqueue)
+
+	pod := newPendingPodForBlockingFailureTest(ms, "pod-ordinary", "ms-0")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: "main",
+			State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
+			},
+		},
+	}
+
+	controller.updatePod(nil, pod)
+
+	assertQueueStaysEmpty(t, controller.workqueue, 200*time.Millisecond)
+}
+
 func TestIsServingGroupOutdated(t *testing.T) {
 	ns := "test-ns"
 	groupName := "test-group"
