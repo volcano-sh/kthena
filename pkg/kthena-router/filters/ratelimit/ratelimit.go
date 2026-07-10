@@ -147,7 +147,7 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
 
 	if useGlobal {
-		// Initialize Redis client if not already done or if the address changed
+		// Initialize Redis client if not already done
 		if r.redisClient == nil {
 			if r.redisClient != nil {
 				_ = r.redisClient.Close()
@@ -218,13 +218,18 @@ func (r *TokenRateLimiter) DeleteLimiter(model string) {
 
 	delete(r.inputLimiter, model)
 	delete(r.outputLimiter, model)
-	delete(r.appliedLimits, model)
+	if r.appliedLimits != nil {
+		delete(r.appliedLimits, model)
+	}
 }
 
 // GetAppliedLimiter returns the applied rate limit configuration for a model
 func (r *TokenRateLimiter) GetAppliedLimiter(model string) *networkingv1alpha1.RateLimit {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+	if r.appliedLimits == nil {
+		return nil
+	}
 	return r.appliedLimits[model]
 }
 
