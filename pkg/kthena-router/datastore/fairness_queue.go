@@ -148,11 +148,11 @@ type Request struct {
 	SessionID    string  // Session identifier for multi-turn conversations
 	Priority     float64 // Priority (lower value means higher priority)
 	SessionBoost bool    // Whether this request has session priority boost (recently completed session)
-	// SessionCompletedAt is the time the session's previous turn completed, captured
+	// LastTurnCompletedAt is the time the session's previous turn completed, captured
 	// when the request is boosted. Boosted requests are ordered by this timestamp
 	// (most recent first) so the session with the warmest prefix cache runs first.
-	SessionCompletedAt time.Time
-	RequestTime        time.Time
+	LastTurnCompletedAt time.Time
+	RequestTime         time.Time
 	NotifyChan         chan struct{}
 	CancelCh           <-chan struct{} // Request-scoped cancellation signal
 	Release            func()          // Set by the queue when a permit is acquired
@@ -286,8 +286,8 @@ func (pq *RequestPriorityQueue) Less(i, j int) bool {
 			return pq.heap[i].SessionBoost
 		}
 		if pq.heap[i].SessionBoost {
-			if !pq.heap[i].SessionCompletedAt.Equal(pq.heap[j].SessionCompletedAt) {
-				return pq.heap[i].SessionCompletedAt.After(pq.heap[j].SessionCompletedAt)
+			if !pq.heap[i].LastTurnCompletedAt.Equal(pq.heap[j].LastTurnCompletedAt) {
+				return pq.heap[i].LastTurnCompletedAt.After(pq.heap[j].LastTurnCompletedAt)
 			}
 			return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
 		}
@@ -335,7 +335,7 @@ func (pq *RequestPriorityQueue) PushRequest(r *Request) error {
 	if pq.sessionBoost && pq.sessionTracker != nil && r.SessionID != "" {
 		if completedAt, ok := pq.sessionTracker.CompletionTime(r.SessionID); ok {
 			r.SessionBoost = true
-			r.SessionCompletedAt = completedAt
+			r.LastTurnCompletedAt = completedAt
 		}
 	}
 
