@@ -124,7 +124,9 @@ func rebuildJwks(config conf.AuthenticationConfig) *Jwks {
 	var keySet jwk.Set
 	var err error
 	for i := 0; i < maxRetryAttempts; i++ {
-		keySet, err = jwk.Fetch(context.Background(), config.JwksUri)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		keySet, err = jwk.Fetch(ctx, config.JwksUri)
+		cancel()
 		if err != nil {
 			klog.V(4).Infof("failed to fetch JWKS from %s: %v", config.JwksUri, err)
 		} else {
