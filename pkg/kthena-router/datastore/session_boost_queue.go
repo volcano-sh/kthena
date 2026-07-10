@@ -233,30 +233,16 @@ func (pq *RequestPriorityQueue) drainPendingRelease() bool {
 	}
 }
 
-// isHeadSessionBoosted checks if the highest-priority request in the queue has a session boost.
-func (pq *RequestPriorityQueue) isHeadSessionBoosted() bool {
-	pq.mu.RLock()
-	defer pq.mu.RUnlock()
-	if len(pq.heap) == 0 {
-		return false
-	}
-	return pq.heap[0].SessionBoost
-}
-
 // waitGraceAndDequeue holds a just-freed slot for up to SessionBoostGracePeriod
 // before dispatching, giving a same-session follow-up time to arrive. It does not
 // need to watch for the follow-up itself: boosted requests outrank others in the
-// heap, so once the timer fires tryBackpressureDequeue admits the boosted request
-// first if one showed up. The wait stays responsive to shutdown via ctx/stopCh.
+// heap and, among boosted requests, the most-recently-arrived one wins, so once
+// the timer fires tryBackpressureDequeue admits the newest boosted follow-up first
+// if one showed up. The wait always runs for the full window even when the head is
+// already boosted, because a still-newer same-session follow-up may yet arrive and
+// should be the one to ride the warm prefix cache. The wait stays responsive to
+// shutdown via ctx/stopCh.
 func (pq *RequestPriorityQueue) waitGraceAndDequeue(ctx context.Context) {
-	// Fast path: a boosted follow-up is already at the head, so there is nothing
-	// to wait for.
-	if pq.isHeadSessionBoosted() {
-		klog.V(4).Info("[SessionBoost] grace: head already boosted, skipping wait")
-		pq.tryBackpressureDequeue(ctx)
-		return
-	}
-
 	klog.V(4).Infof("[SessionBoost] grace: holding freed slot for %v", pq.config.SessionBoostGracePeriod)
 	timer := time.NewTimer(pq.config.SessionBoostGracePeriod)
 	defer timer.Stop()

@@ -169,7 +169,8 @@ This design is intentional: inference engines such as vLLM evict their prefix (K
 The session boost queue uses a simple two-level priority:
 
 1. **Boosted requests** (session tracked in the LRU cache) are always dequeued before non-boosted requests.
-2. **Within the same boost level**, requests are served in FIFO order (earliest arrival first).
+2. **Within the boosted group**, the most-recently-arrived boosted request wins (LIFO): a freshly boosted follow-up always jumps to the head of the queue rather than joining the back of the boosted group. This keeps the newest same-session request first so it reuses the still-warm prefix cache.
+3. **Among non-boosted requests**, ordering is FIFO (earliest arrival first).
 
 ### Backpressure Control
 
@@ -197,13 +198,13 @@ If a request waits in the queue longer than `SESSION_BOOST_TIMEOUT`, the router 
 
 Session boost and user fairness are two mutually exclusive scheduling strategies for the per-model request queue; they configure that queue for different goals:
 
-| Aspect           | Session Boost                      | User Fairness                     |
-| ---------------- | ---------------------------------- | --------------------------------- |
-| Goal             | Maximize prefix cache hits         | Equitable resource allocation     |
-| Activation       | `ENABLE_SESSION_BOOST=true`        | `ENABLE_FAIRNESS_SCHEDULING=true` |
-| Requires user ID | No                                 | Yes                               |
-| Priority logic   | Boosted > non-boosted, FIFO within | Lower recent usage wins           |
-| Best for         | Multi-turn latency optimization    | Multi-tenant contention           |
+| Aspect           | Session Boost                             | User Fairness                     |
+| ---------------- | ----------------------------------------- | --------------------------------- |
+| Goal             | Maximize prefix cache hits                | Equitable resource allocation     |
+| Activation       | `ENABLE_SESSION_BOOST=true`               | `ENABLE_FAIRNESS_SCHEDULING=true` |
+| Requires user ID | No                                        | Yes                               |
+| Priority logic   | Boosted > non-boosted; newest boost first | Lower recent usage wins           |
+| Best for         | Multi-turn latency optimization           | Multi-tenant contention           |
 
 The two strategies are **mutually exclusive**; enabling both is a configuration error. Enable one or the other based on your primary scheduling concern.
 
@@ -286,9 +287,9 @@ The grace period is an **advanced, scenario-specific** tuning knob. It is **disa
 
 By default, when a request completes the queue immediately dequeues the next request. The grace period (`SESSION_BOOST_GRACE_PERIOD`) instead makes the queue **briefly hold the freed dequeue slot** after a completion, waiting for a follow-up from the *same* session to arrive so it can ride the still-warm prefix cache:
 
-- If a boosted (same-session) request arrives during the grace window, it is admitted first when the window ends, because boosted requests outrank others in the queue.
+- If a boosted (same-session) request arrives during the grace window, it is admitted first when the window ends, because boosted requests outrank others in the queue—and among boosted requests the most-recently-arrived one is at the head.
 - If no boosted request arrives before the window expires, the next non-boosted request proceeds as normal.
-- If the head of the queue is already a boosted request, the grace period is skipped entirely.
+- The queue always waits for the full grace window even when a boosted request is already at the head, because a still-newer same-session follow-up may yet arrive and should be the one to ride the warm prefix cache.
 
 ### When it might help
 

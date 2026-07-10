@@ -217,12 +217,13 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 		t.Errorf("Last two should not be boosted: third=%v fourth=%v", third.SessionBoost, fourth.SessionBoost)
 	}
 
-	// Among boosted: FIFO order (boost-A arrived before boost-B)
-	if first.UserID != "u2" {
-		t.Errorf("Expected boost-A first (earlier arrival), got %s", first.UserID)
+	// Among boosted: newest arrival wins (LIFO), so boost-B (later arrival) is
+	// dequeued before boost-A.
+	if first.UserID != "u3" {
+		t.Errorf("Expected boost-B first (latest arrival), got %s", first.UserID)
 	}
-	if second.UserID != "u3" {
-		t.Errorf("Expected boost-B second, got %s", second.UserID)
+	if second.UserID != "u2" {
+		t.Errorf("Expected boost-A second, got %s", second.UserID)
 	}
 
 	// Among normal: FIFO order
