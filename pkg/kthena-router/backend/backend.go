@@ -75,7 +75,7 @@ func GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error)
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
 		klog.Errorf("Failed to get inference engine: %v", err)
-		return nil, nil
+		return nil, err
 	}
 
 	return provider.GetPodModels(pod, port)
