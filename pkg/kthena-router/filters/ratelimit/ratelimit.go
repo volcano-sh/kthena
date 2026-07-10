@@ -148,7 +148,7 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 
 	if useGlobal {
 		// Initialize Redis client if not already done or if the address changed
-		if r.redisClient == nil || r.redisClient.Options().Addr != ratelimit.Global.Redis.Address {
+		if r.redisClient == nil {
 			if r.redisClient != nil {
 				_ = r.redisClient.Close()
 			}
