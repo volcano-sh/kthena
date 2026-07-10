@@ -1119,7 +1119,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 	if partitionErr != nil {
 		klog.Errorf("manageRoleReplicasPerGroup: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
 	}
-	for index, roleObj := range roleList {
+	for _, roleObj := range roleList {
 		if roleObj.Status == datastore.RoleDeleting {
 			continue
 		}
@@ -1140,9 +1140,9 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 		}
 		if len(pods) < expectedPods {
 			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
-			partitionProtected := partitionConfigured && partition > 0 && index < partition
-			roleToApply, revisionToUse, hashToUse := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, partitionProtected)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
+			partitionProtected := partitionConfigured && partition > 0 && roleIndex < partition
+			roleToApply, revisionToUse, hashToUse := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, partitionProtected)
 			if err := c.CreatePodsByRole(ctx, *roleToApply.DeepCopy(), ms, roleIndex, servingGroupOrdinal, revisionToUse, hashToUse); err != nil {
 				klog.Errorf("manageRoleReplicasPerGroup: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			}
