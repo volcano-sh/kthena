@@ -153,9 +153,9 @@ type Request struct {
 	// (most recent first) so the session with the warmest prefix cache runs first.
 	LastTurnCompletedAt time.Time
 	RequestTime         time.Time
-	NotifyChan         chan struct{}
-	CancelCh           <-chan struct{} // Request-scoped cancellation signal
-	Release            func()          // Set by the queue when a permit is acquired
+	NotifyChan          chan struct{}
+	CancelCh            <-chan struct{} // Request-scoped cancellation signal
+	Release             func()          // Set by the queue when a permit is acquired
 
 	// admitMu serializes admission (by the dequeue loop) against abandonment (by
 	// the waiting caller on timeout/cancel), closing the race where the loop has
