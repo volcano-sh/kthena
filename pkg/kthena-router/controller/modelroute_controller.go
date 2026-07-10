@@ -164,13 +164,18 @@ func (c *ModelRouteController) syncHandler(key string) error {
 }
 
 func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute) error {
-	// Check if status is already up-to-date
-	if mr.Status.ObservedGeneration == mr.Generation {
-		if cond := meta.FindStatusCondition(mr.Status.Conditions, string(aiv1alpha1.ModelRouteConditionReady)); cond != nil &&
-			cond.Status == metav1.ConditionTrue &&
-			cond.Reason == "RouteRegistered" {
-			return nil
-		}
+	// If the Ready condition is already set with the expected values,
+	// no update is needed. We check the condition content rather than
+	// Status.ObservedGeneration to avoid unnecessary status writes on
+	// spec-only changes (e.g. rate limit updates). Unnecessary writes
+	// increment the resourceVersion and cause conflicts with clients
+	// that are simultaneously updating the same ModelRoute.
+	readyCond := meta.FindStatusCondition(mr.Status.Conditions, string(aiv1alpha1.ModelRouteConditionReady))
+	if readyCond != nil &&
+		readyCond.Status == metav1.ConditionTrue &&
+		readyCond.Reason == aiv1alpha1.ReasonRouteRegistered &&
+		readyCond.ObservedGeneration == mr.Generation {
+		return nil
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -187,7 +192,7 @@ func (c *ModelRouteController) updateModelRouteStatus(mr *aiv1alpha1.ModelRoute)
 		meta.SetStatusCondition(&mrCopy.Status.Conditions, metav1.Condition{
 			Type:    string(aiv1alpha1.ModelRouteConditionReady),
 			Status:  metav1.ConditionTrue,
-			Reason:  "RouteRegistered",
+			Reason:  aiv1alpha1.ReasonRouteRegistered,
 			Message: "ModelRoute registered in router store",
 		})
 

@@ -78,7 +78,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 		store,
 	)
 	require.NoError(t, err)
-	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
+	_ = kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -1157,9 +1157,10 @@ func TestModelServerController_PodEnqueuesModelServer(t *testing.T) {
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := newStoreWithMockBackend()
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient, kthenaInformerFactory, kubeInformerFactory, store,
 	)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -1280,9 +1281,10 @@ func TestModelServerController_GetMatchingModelServers(t *testing.T) {
 
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubefake.NewSimpleClientset(), 0)
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
-	controller := NewModelServerController(
+	controller, err := NewModelServerController(
 		kthenaClient, kthenaInformerFactory, kubeInformerFactory, newStoreWithMockBackend(),
 	)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -1350,7 +1352,8 @@ func TestModelServerController_ReadinessConditions(t *testing.T) {
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := newStoreWithMockBackend()
-	controller := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	controller, err := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -1502,7 +1505,8 @@ func TestModelServerController_ReadinessConditionTransitions(t *testing.T) {
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := newStoreWithMockBackend()
-	controller := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	controller, err := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -1521,7 +1525,7 @@ func TestModelServerController_ReadinessConditionTransitions(t *testing.T) {
 			},
 		},
 	}
-	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+	_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
 		context.Background(), ms, metav1.CreateOptions{})
 	require.NoError(t, err)
 	waitForObjectInCache(t, 2*time.Second, func() bool {

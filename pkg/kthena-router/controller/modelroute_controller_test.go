@@ -206,7 +206,8 @@ func TestModelRouteController_StatusUpdate(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
+	controller, err := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -253,7 +254,7 @@ func TestModelRouteController_StatusUpdate(t *testing.T) {
 		cond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelRouteConditionReady))
 		require.NotNil(t, cond)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
-		assert.Equal(t, "RouteRegistered", cond.Reason)
+		assert.Equal(t, aiv1alpha1.ReasonRouteRegistered, cond.Reason)
 	})
 
 	// sync skips status update when already up-to-date

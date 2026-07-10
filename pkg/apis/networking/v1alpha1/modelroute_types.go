@@ -171,6 +171,10 @@ type ModelRouteConditionType string
 const (
 	// ModelRouteConditionReady indicates the route has been registered in the router store.
 	ModelRouteConditionReady ModelRouteConditionType = "Ready"
+
+	// ReasonRouteRegistered is the reason used when a ModelRoute has been successfully
+	// registered in the router store.
+	ReasonRouteRegistered = "RouteRegistered"
 )
 
 // ModelRouteStatus defines the observed state of ModelRoute.
