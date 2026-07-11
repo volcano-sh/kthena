@@ -21,6 +21,17 @@ TAG=${TAG:-latest}
 CLUSTER_NAME=${CLUSTER_NAME:-kthena-e2e}
 TEST_CATEGORY=${TEST_CATEGORY:-all}
 
+# External runtime image referenced by the controller-manager ModelBooster E2E fixtures.
+# It is not built by this repo, so it must be pulled once and preloaded into Kind here
+# rather than left for kubelet to pull live while a test's Eventually is ticking.
+VLLM_CPU_ENV_IMAGE=${VLLM_CPU_ENV_IMAGE:-ghcr.io/huntersman/vllm-cpu-env:main}
+
+preload_vllm_cpu_env_image() {
+  echo "Preloading external vLLM CPU image (${VLLM_CPU_ENV_IMAGE}) used by ModelBooster E2E fixtures"
+  docker pull "${VLLM_CPU_ENV_IMAGE}"
+  kind load docker-image "${VLLM_CPU_ENV_IMAGE}" --name "${CLUSTER_NAME}"
+}
+
 # Create Kind cluster
 echo "Creating Kind cluster: ${CLUSTER_NAME}"
 kind create cluster --name "${CLUSTER_NAME}"
@@ -65,6 +76,7 @@ case "${TEST_CATEGORY}" in
   controller-manager)
     echo "Start to install LeaderWorkerSet CRDs"
     kubectl create -f https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
+    preload_vllm_cpu_env_image
     ;;
   router)
     echo "Router tests: no additional CRDs needed"
@@ -76,6 +88,7 @@ case "${TEST_CATEGORY}" in
     kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.2.0/manifests.yaml
     echo "Start to install LeaderWorkerSet CRDs"
     kubectl create -f https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
+    preload_vllm_cpu_env_image
     ;;
 esac
 

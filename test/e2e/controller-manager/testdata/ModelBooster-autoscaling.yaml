@@ -13,7 +13,9 @@ spec:
     replicas: 1
     workers:
     - type: server
-      image: ghcr.io/huntersman/vllm-cpu-env:latest
+      # Pinned to a non-"latest" tag so Kubernetes defaults imagePullPolicy to
+      # IfNotPresent, matching what test/e2e/setup.sh preloads into Kind.
+      image: ghcr.io/huntersman/vllm-cpu-env:main
       replicas: 1
       pods: 1
       config:
