@@ -1284,8 +1284,10 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 			klog.ErrorS(rollbackErr, "Failed to rollback role status", "role", roleID, "group", groupName)
 		}
 		if servingGroupStatusDowngraded {
-			if rollbackErr := c.store.UpdateServingGroupStatus(nsn, groupName, servingGroupStatus); rollbackErr != nil {
-				klog.ErrorS(rollbackErr, "Failed to rollback ServingGroup status", "group", groupName)
+			if c.store.GetServingGroupStatus(nsn, groupName) == datastore.ServingGroupScaling {
+				if rollbackErr := c.store.UpdateServingGroupStatus(nsn, groupName, servingGroupStatus); rollbackErr != nil {
+					klog.ErrorS(rollbackErr, "Failed to rollback ServingGroup status", "group", groupName)
+				}
 			}
 		}
 		c.enqueueModelServing(ms)
