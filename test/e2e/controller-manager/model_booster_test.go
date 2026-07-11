@@ -36,6 +36,14 @@ import (
 const (
 	testDataDir                   = "test/e2e/controller-manager/testdata"
 	modelBoosterTestSchedulerName = "volcano"
+
+	// modelActiveWaitTimeout bounds the wait for a real vLLM backend to become Active.
+	// It covers the model-downloader init container fetching the model plus the engine's
+	// own cold start, so it is intentionally larger than the other Eventually calls in this
+	// file that only wait on controller reconciliation. Preloading the engine image (see
+	// test/e2e/setup.sh) removes the image-pull portion of that wait; this margin covers
+	// the remaining Hugging Face model download and vLLM engine startup.
+	modelActiveWaitTimeout = 7 * time.Minute
 )
 
 // TestModelCR creates a ModelBooster CR from YAML, waits for it to become active,
@@ -67,7 +75,7 @@ func TestModelCR(t *testing.T) {
 		}
 		return meta.IsStatusConditionPresentAndEqual(m.Status.Conditions,
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
-	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
+	}, modelActiveWaitTimeout, 5*time.Second, "Model did not become Active")
 
 	// Test chat via port-forward
 	messages := []utils.ChatMessage{
@@ -263,7 +271,7 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 		}
 		return meta.IsStatusConditionPresentAndEqual(m.Status.Conditions,
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
-	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
+	}, modelActiveWaitTimeout, 5*time.Second, "Model did not become Active")
 
 	t.Log("Model is active. Testing self-healing of ModelServing...")
 
