@@ -18,7 +18,7 @@ package tokenizer
 
 import "testing"
 
-func TestSimpleEstimateTokenizerCalculateTokenNum(t *testing.T) {
+func TestSimpleEstimateTokenizerCountTokens(t *testing.T) {
 	tests := []struct {
 		name      string
 		tokenizer *SimpleEstimateTokenizer

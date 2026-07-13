@@ -17,7 +17,7 @@ limitations under the License.
 package tokenizer
 
 type Tokenizer interface {
-	Load(modelServerID, modelID string) error
+	Load(modelServerID, modelRepoID string) error
 	Unload(modelServerID string) error
 	CountTokens(modelServerID, prompt string) (int, error)
 }

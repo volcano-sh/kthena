@@ -113,7 +113,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	metricsInstance := metrics.DefaultMetrics
 
 	// Initialize tokenizer
-	tokenizerInstance := tokenizer.NewLocalTokenizerClient("http://localhost:8000")
+	tokenizerInstance := tokenizer.NewlocalTokenizer("http://localhost:8000")
 
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
 		switch data.EventType {
@@ -322,7 +322,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		promptStr := utils.GetPromptString(prompt)
 
 		// Calculate input tokens for metrics using tokenizer
-		inputTokens, err := r.tokenizer.CalculateTokenNum(promptStr)
+		inputTokens, err := r.tokenizer.CountTokens(modelName, promptStr)
 		if err != nil {
 			klog.Errorf("failed to calculate token number: %v", err)
 			inputTokens = len(promptStr) / 4 // fallback estimation

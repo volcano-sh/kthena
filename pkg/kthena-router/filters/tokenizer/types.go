@@ -2,7 +2,7 @@ package tokenizer
 
 type LoadRequest struct {
 	ModelServerID string `json:"model_server_id"`
-	ModelID       string `json:"model_id"`
+	ModelrepoID   string `json:"model_repo_id"`
 }
 
 type UnloadRequest struct {

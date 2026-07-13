@@ -105,7 +105,7 @@ def parse_bucket_from_model_url(url: str, scheme: str) -> Tuple[str, str]:
 
 
 class DownloadHelper:
-    def __init__(self, model_uri: str, access_key: str = None, secret_key: str = None, endpoint: str = None ):
+    def __init__(self, access_key: str = None, secret_key: str = None, endpoint: str = None ):
         self.access_key = access_key
         self.secret_key = secret_key
         self.endpoint = endpoint
@@ -122,7 +122,7 @@ class DownloadHelper:
     
     def downloadS3(self, source : str  , output_dir: str ,  model_uri: str = None) -> str:
         """ Sync only known tokenizer files from S3. """
-        uri = model_uri or self.model_uri or source
+        uri = model_uri or source
         logger.info(f"Downloading tokenizer from: {uri}")
         os.makedirs(output_dir, exist_ok=True)
         
@@ -142,20 +142,24 @@ class DownloadHelper:
             logger.error(f"S3 sync failed: {e.stderr}")
             raise
 
-    def downloadPVC(self, output_dir: str ) -> str:
-        logger.info(f"Downloading tokenizer from PVC: {self.model_uri}")
+    def downloadPVC(self, pvc_path: str, output_dir: str ) -> str:
+        logger.info(f"Downloading tokenizer from PVC: {pvc_path}")
         os.makedirs(output_dir, exist_ok=True)
+        copied_any = False
 
         for file in _TOKENIZER_FILES:
-            src_file = os.path.join(self.model_uri, file)
+            src_file = os.path.join(pvc_path, file)
             dest_file = os.path.join(output_dir, file)
             if os.path.exists(src_file):
                 shutil.copy(src_file, dest_file)
                 logger.info(f"✓ Copied {file} to {output_dir}")
-                return output_dir
-            else:
-                logger.warning(f"File {file} not found in PVC path: {self.model_uri}")
-                return None
+                copied_any = True
+            
+        if copied_any:
+            return output_dir
+        else:
+            logger.warning(f"No tokenizer files found in PVC path: {pvc_path}")
+            return None
             
       
     def modelscope_download(modelroute: str, revision: str | None = None ) -> Tokenizer:

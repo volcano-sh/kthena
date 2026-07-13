@@ -6,16 +6,16 @@ type localTokenizer struct {
 	client *Client
 }
 
-func NewlocalTokenizer() Tokenizer {
+func NewlocalTokenizer(endpoint string) Tokenizer {
 	return &localTokenizer{
-		client: NewClient("http://localhost:8000"),
+		client: NewClient(endpoint),
 	}
 }
 
-func (s *localTokenizer) Load(modelServerID, modelID string) error {
+func (s *localTokenizer) Load(modelServerID, modelRepoID string) error {
 	req := LoadRequest{
 		ModelServerID: modelServerID,
-		ModelrepoID:   modelID,
+		ModelrepoID:   modelRepoID,
 	}
 	_, err := s.client.post(
 		context.Background(),

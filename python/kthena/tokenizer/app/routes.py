@@ -34,7 +34,7 @@ async def load(req: LoadRequest):
     loop = asyncio.get_event_loop()
 
     try:
-        tokenizer = await loop.run_in_executor(None,downloader.download_tokenizer,req.model_uri,req.modelrevision)
+        tokenizer = await loop.run_in_executor(None,downloader.download_tokenizer,req.model_repo_id,req.modelrevision)
         manager.load_tokenizer(req.model_server_id,tokenizer)
 
     except Exception as e:
