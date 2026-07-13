@@ -32,14 +32,14 @@ Pods are named using the following pattern:
 
 | Component | Description | Example |
 |-----------|-------------|---------|
-| `modelServing‑name` | Name of the ModelServing CR | `llama‑multinode` |
-| `servingGroup‑index` | Zero‑based index of the ServingGroup | `0`, `1` |
-| `role‑name` | Name from `spec.template.roles[].name` | `llama-405b` |
-| `role‑replica‑index` | Zero‑based replica index for the named Role | `0`, `1` |
-| `pod‑index` | `0` for the entry pod; workers start at `1` | `0`, `1` |
+| `modelServing-name` | Name of the ModelServing CR | `llama-multinode` |
+| `servingGroup-index` | Zero-based index of the ServingGroup | `0`, `1` |
+| `role-name` | Name from `spec.template.roles[].name` | `llama-405b` |
+| `role-replica-index` | Zero-based replica index for the named Role | `0`, `1` |
+| `pod-index` | `0` for the entry pod; workers start at `1` | `0`, `1` |
 
-For instance, the pod `llama‑multinode‑0‑llama-405b‑1‑0` belongs to:
-- ModelServing `llama‑multinode`
+For instance, the pod `llama-multinode-0-llama-405b-1-0` belongs to:
+- ModelServing `llama-multinode`
 - ServingGroup `0`
 - Role named `llama-405b`
 - Role replica index `1` (the second replica of `llama-405b`)
@@ -397,7 +397,7 @@ Kthena creates PodGroups based on the ModelServing. Among these, the important f
 
 ### MinRoleReplicas and PodGroup Mapping
 
-When the installed Volcano PodGroup CRD supports `spec.subGroupPolicy`, Kthena converts each role into one subgroup policy. `minRoleReplicas[roleName]` becomes `minSubGroups`, while `subGroupSize` is the number of pods in one role replica (`1 + workerReplicas`). `matchLabelKeys` groups pods by the generated `modelserving.volcano.sh/role-id` label. The PodGroup's overall `minMember` is the sum of the required subgroups and their sizes.
+When the installed Volcano PodGroup CRD supports `spec.subGroupPolicy`, Kthena converts each role into one subgroup policy. `minRoleReplicas[roleName]` becomes `minSubGroups`, while `subGroupSize` is the number of pods in one role replica (`1 + workerReplicas`). `matchLabelKeys` groups pods by the generated `modelserving.volcano.sh/role-id` label. The PodGroup's overall `minMember` is the sum of `minSubGroups * subGroupSize` across all subgroup policies.
 
 **Example:** In the `multi-node.yaml` example, the gang policy is defined as:
 
@@ -436,7 +436,7 @@ To reduce network latency between pods, you can enable network‑topology schedu
 
 2. **Create a HyperNode** that describes your cluster's network topology. Refer to the [Volcano documentation](https://volcano.sh/en/docs/network_topology_aware_scheduling/) for details.
 
-3. **Configure the ModelServing** to request topology‑aware scheduling by adding a `networkTopology` field to the `gangPolicy`:
+3. **Configure the ModelServing** to request topology‑aware scheduling by adding `networkTopology` alongside `gangPolicy` under `spec.template`:
 
    ```yaml
    gangPolicy:
