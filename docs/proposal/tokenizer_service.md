@@ -20,6 +20,7 @@ This proposal introduces an containerized tokenizer sidecar (Python + FastAPI us
 - **Latency Reduction & KV Cache Integration** — Local tokenization (HTTP over localhost in 1-2ms) enables the KV cache-aware scheduling plugin to perform rapid token-level prefix matching and pod scoring before routing, without incurring external network round-trip overhead.
 - **Inference Engine Isolation** — By offloading tokenization to the local sidecar, tokenization requests do not consume backend inference engine resources (e.g. vLLM execution queues/slots), preventing any negative influence on the backend's inference performance.
 - **De-duplication of Tokenizing (Separated Prefill/Decode)** — Decoupling tokenization from the backend prefill/decode stages allows the router to tokenize once. The generated token IDs can be passed directly to the inference engine (e.g. via `prompt_token_ids` in vLLM), avoiding duplicate tokenization passes at the backend engine.
+- single time token manuplation - currently we are doing multiple checks for token so the kv cache based plugin will provide the token count to rate limit removing the overhead of the 4x haulutinating part 
 - **Architectural Separation** — Tokenizer lifecycle is decoupled from model serving, enabling independent scaling, upgrades, and caching configurations.
 
 The router coordinates tokenizer lifecycle via **direct HTTP calls**, eliminating external dependencies. This design supports local PVC-mounted tokenizers, HuggingFace Hub, and ModelScope registries.
@@ -28,19 +29,23 @@ The router coordinates tokenizer lifecycle via **direct HTTP calls**, eliminatin
 
 ### Motivation
 
-Current token counting uses the `len(prompt) / 4` heuristic for quota enforcement and autoscaler decisions. While acceptable for development, this approach introduces architectural limitations in production:
+Current rate limiting relies on the len(prompt) / 4 heuristic to estimate the number of input tokens. While sufficient for approximate accounting, it cannot provide the accuracy required for production workloads and introduces redundant work across the request pipeline.
+
+This proposal introduces a local tokenizer service that performs single-pass tokenization during request scheduling. The KV cache-aware scheduling plugin already requires the complete token sequence for cache-aware pod scoring, making it the natural place to perform tokenization. Rather than discarding the result, the plugin propagates the generated token count to the rate limiter, eliminating additional token counting and replacing heuristic-based estimation with accurate token accounting.
+
+The tokenizer lifecycle is managed automatically through ModelServer events. When a ModelServer is created, updated, or deleted, the router loads, reloads, or unloads the corresponding tokenizer in the sidecar, ensuring that the correct tokenizer is always available without manual configuration.
 
 #### Performance Bottlenecks & Interference
 
 - **Network Latency & Scheduler Blocking** — Querying remote tokenization services (OpenAI, Anthropic APIs) or even in-cluster backend inference engine tokenization endpoints adds 50-200ms of latency. When used by scheduling plugins like the KV Cache-Aware plugin, this latency directly blocks routing decisions.
 - **Backend Inference Resource Contention** — Relying on the backend inference engine (e.g. vLLM) for tokenization means tokenization requests compete with prefill/decode tasks for GPU slots and execution queues, negatively influencing backend inference performance.
-- **Duplicate Tokenization** — A prompt is often tokenized multiple times: first by the router for rate-limiting, then by scheduling plugins for KV cache block matching, and finally by the backend inference engine during the prefill phase.
+- **Duplicate Tokenization** —A prompt may be tokenized multiple times: first by the router, then by the KV cache-aware scheduling plugin, and again by the backend inference engine before the prefill stage. For inference engines supporting pre-tokenized inputs (for example, prompt_token_ids in vLLM), this final tokenization step can be eliminated.
 
 #### Architectural Constraints
 
 - **Tight Coupling** — Current design couples quota enforcement and scheduling logic (router) with model inference (backend), making it impossible to optimize or scale tokenization separately.
-- **Cache Awareness Requirements** — The KV cache-aware scheduler plugin requires token-level sequence block matching (e.g., using Redis block hashes) *before* routing. Without a local tokenizer, the router cannot inspect token IDs to make cache-optimal routing decisions.
-- **Autoscaler Integration** — Issue #1100 requires tokenizer access within the autoscaler for intelligent scaling decisions; remote tokenization adds unacceptable latency and resource overhead.
+
+- **Cache Awareness Requirements** — The KV cache-aware scheduler plugin requires token-level sequence block matching (e.g., using Redis block hashes) *before* routing. Without a local tokenizer, the router needs to use the vllm tokenization endpoint increasing latency for long prompts.
 
 #### Goals
 
@@ -50,7 +55,6 @@ Current token counting uses the `len(prompt) / 4` heuristic for quota enforcemen
 - **Isolate tokenization workloads** from backend inference engines to prevent resource contention and latency spikes.
 - **Decouple tokenizer lifecycle** from model inference, enabling independent scaling, upgrades, and resource allocation.
 - **Support diverse tokenizer sources** — local PVC-mounted models, HuggingFace Hub, ModelScope registry.
-- **Provide consistent token accounting** — every ModelServer is expected to have an associated tokenizer managed by the router.
 
 #### Non-Goals
 

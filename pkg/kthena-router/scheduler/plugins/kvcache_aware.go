@@ -38,6 +38,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/tokenization"
@@ -75,6 +76,9 @@ const (
 
 	kvCacheGCInterval = time.Hour
 	kvCacheGCScanSize = int64(100)
+
+	LocalTokenizerEndpoint = "http://127.0.0.1:8000" // default local tokenizer endpoint template
+
 )
 
 type KVCacheAwareArgs struct {
@@ -83,7 +87,8 @@ type KVCacheAwareArgs struct {
 	// VLLMTokenizerPort overrides the default vLLM tokenizer port (8000).
 	VLLMTokenizerPort int `yaml:"vllmTokenizerPort,omitempty"`
 	// SGLangTokenizerPort overrides the default SGLang tokenizer port (30000).
-	SGLangTokenizerPort int `yaml:"sglangTokenizerPort,omitempty"`
+	SGLangTokenizerPort  int  `yaml:"sglangTokenizerPort,omitempty"`
+	PreferLocalTokenizer bool `yaml:"preferLocalTokenizer,omitempty"`
 }
 
 type KVCacheAware struct {
@@ -93,6 +98,7 @@ type KVCacheAware struct {
 	redisClient      *redis.Client
 	processor        *TokenBlockProcessor
 	tokenizerManager *tokenization.TokenizerManager
+	localTokenizer   tokenizer.Tokenizer
 	gcCursor         uint64
 }
 
@@ -176,6 +182,7 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		redisClient:      redisClient,
 		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
 		tokenizerManager: manager,
+		localTokenizer:   tokenizer.NewlocalTokenizer(),
 	}
 	plugin.startGC()
 	return plugin
@@ -186,6 +193,13 @@ func (t *KVCacheAware) Name() string {
 }
 
 func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods []*datastore.PodInfo) ([]uint32, error) {
+	if t.localTokenizer != nil {
+		tokens, err := t.localTokenizer.Encode(ctx.Model, ctx.Prompt.Text)
+		if err == nil {
+			klog.V(4).Infof("KVCacheAware: using local tokenizer for model=%q, tokens=%v", ctx.Model, tokens)
+			return tokens, nil
+		}
+	}
 	if t.tokenizerManager == nil {
 		return nil, fmt.Errorf("tokenizer manager not available")
 	}

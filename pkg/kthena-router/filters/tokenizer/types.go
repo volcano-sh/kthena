@@ -16,5 +16,6 @@ type EncodeRequest struct {
 }
 
 type EncodeResponse struct {
-	TokenCount int `json:"token_count"`
+	TokenCount int   `json:"token_count"`
+	TokenIds   []int `json:"token_ids"`
 }

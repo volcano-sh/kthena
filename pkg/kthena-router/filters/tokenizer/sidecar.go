@@ -6,16 +6,16 @@ type localTokenizer struct {
 	client *Client
 }
 
-func NewlocalTokenizer(endpoint string) Tokenizer {
+func NewlocalTokenizer() Tokenizer {
 	return &localTokenizer{
-		client: NewClient(endpoint),
+		client: NewClient("http://localhost:8000"),
 	}
 }
 
-func (s *localTokenizer) Load(modelServerID, modelRepoID string) error {
+func (s *localTokenizer) Load(modelServerID, modelID string) error {
 	req := LoadRequest{
 		ModelServerID: modelServerID,
-		ModelrepoID:   modelRepoID,
+		ModelrepoID:   modelID,
 	}
 	_, err := s.client.post(
 		context.Background(),
@@ -56,4 +56,29 @@ func (s *localTokenizer) CountTokens(modelServerID, prompt string) (int, error) 
 		return 0, err
 	}
 	return resp.TokenCount, nil
+}
+
+func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, error) {
+	req := EncodeRequest{
+		ModelServerID: modelServerID,
+		Text:          prompt,
+		ReturnTokens:  true,
+	}
+	var resp EncodeResponse
+	_, err := s.client.post(
+		context.Background(),
+		"/v1/encode",
+		req,
+		&resp,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uint32, len(resp.TokenIds))
+	for i, id := range resp.TokenIds {
+		{
+			ids[i] = uint32(id)
+		}
+	}
+	return ids, nil
 }

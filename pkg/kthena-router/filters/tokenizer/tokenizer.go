@@ -20,4 +20,5 @@ type Tokenizer interface {
 	Load(modelServerID, modelRepoID string) error
 	Unload(modelServerID string) error
 	CountTokens(modelServerID, prompt string) (int, error)
+	Encode(modelServerID, prompt string) ([]uint32, error)
 }
