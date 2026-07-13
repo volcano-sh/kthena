@@ -128,7 +128,6 @@ class AIPerfRunnerTest(unittest.TestCase):
                 "max_tokens": [{"tokens": 128}, {"tokens": 1024}],
             },
             backends={},
-            routing={},
         )
 
         cmd = self.runner.build_aiperf_cmd(
@@ -158,6 +157,75 @@ class AIPerfRunnerTest(unittest.TestCase):
         self.assertEqual(self.runner._parse_duration_seconds("5m"), 300)
         self.assertEqual(self.runner._parse_duration_seconds("2H"), 7200)
 
+    def test_build_aiperf_cmd_maps_ramp_family_arguments(self):
+        scenario = ab_test.ScenarioConfig(
+            name="smoke-test-s2-latency-vs-qps",
+            description="scenario",
+            load={
+                "duration": "2m",
+                "schedule": {"mode": "rate", "rate": 12},
+                "traffic": {
+                    "burstiness": 1.0,
+                    "ramp": {
+                        "strategy": "linear",
+                        "duration": "30s",
+                        "request_rate_duration": 25,
+                    },
+                },
+                "concurrency": {
+                    "connections": 42,
+                    "ramp": {
+                        "strategy": "linear",
+                        "duration": "15s",
+                        "prefill_duration": "12s",
+                    },
+                },
+            },
+            backends={},
+        )
+
+        cmd = self.runner.build_aiperf_cmd(
+            config_name="config_a",
+            scenario=scenario,
+            router_endpoint="localhost:8080",
+        )
+
+        self.assertIn("--request-rate-ramp-duration", cmd)
+        self.assertEqual(cmd[cmd.index("--request-rate-ramp-duration") + 1], "25")
+        self.assertIn("--concurrency-ramp-duration", cmd)
+        self.assertEqual(cmd[cmd.index("--concurrency-ramp-duration") + 1], "15")
+        self.assertIn("--prefill-concurrency-ramp-duration", cmd)
+        self.assertEqual(cmd[cmd.index("--prefill-concurrency-ramp-duration") + 1], "12")
+
+    def test_build_aiperf_cmd_ignores_none_ramp_strategy(self):
+        scenario = ab_test.ScenarioConfig(
+            name="smoke-test-s2-latency-vs-qps",
+            description="scenario",
+            load={
+                "duration": "60s",
+                "schedule": {"mode": "rate", "rate": 12},
+                "traffic": {
+                    "burstiness": 1.0,
+                    "ramp": {"strategy": "none", "duration": "20s"},
+                },
+                "concurrency": {
+                    "connections": 42,
+                    "ramp": {"strategy": "none", "duration": "15s"},
+                },
+            },
+            backends={},
+        )
+
+        cmd = self.runner.build_aiperf_cmd(
+            config_name="config_a",
+            scenario=scenario,
+            router_endpoint="localhost:8080",
+        )
+
+        self.assertNotIn("--request-rate-ramp-duration", cmd)
+        self.assertNotIn("--concurrency-ramp-duration", cmd)
+        self.assertNotIn("--prefill-concurrency-ramp-duration", cmd)
+
 
 class MetricsCollectorTest(unittest.TestCase):
     def setUp(self):
@@ -170,7 +238,6 @@ class MetricsCollectorTest(unittest.TestCase):
             description="scenario",
             load={"duration": "60s"},
             backends={},
-            routing={},
             metrics={
                 "prometheus": True,
                 "pprof": True,
@@ -214,7 +281,6 @@ class MetricsCollectorTest(unittest.TestCase):
             description="scenario",
             load={"duration": "60s"},
             backends={},
-            routing={},
         )
 
         with mock.patch.object(self.collector, "_fetch_text") as fetch_text:
