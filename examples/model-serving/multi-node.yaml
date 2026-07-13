@@ -10,9 +10,9 @@ spec:
     restartGracePeriodSeconds: 60
     gangPolicy:
       minRoleReplicas:
-        405b: 1
+        llama-405b: 1
     roles:
-      - name: 405b
+      - name: llama-405b
         replicas: 2
         entryTemplate:
           spec:

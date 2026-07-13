@@ -27,23 +27,23 @@ Kthena's multi‑node inference is built around three core abstractions:
 Pods are named using the following pattern:
 
 ```
-{modelServing-name}-{servingGroup-index}-{role-hash}-{role-index}-{pod-index}
+{modelServing-name}-{servingGroup-index}-{role-name}-{role-replica-index}-{pod-index}
 ```
 
 | Component | Description | Example |
 |-----------|-------------|---------|
 | `modelServing‑name` | Name of the ModelServing CR | `llama‑multinode` |
 | `servingGroup‑index` | Zero‑based index of the ServingGroup | `0`, `1` |
-| `role‑hash` | Short hash derived from the Role configuration | `405b` |
-| `role‑index` | Zero‑based index of the Role within the ServingGroup | `0`, `1` |
-| `pod‑index` | Zero‑based index of the Pod within the Role | `0`, `1` |
+| `role‑name` | Name from `spec.template.roles[].name` | `llama-405b` |
+| `role‑replica‑index` | Zero‑based replica index for the named Role | `0`, `1` |
+| `pod‑index` | `0` for the entry pod; workers start at `1` | `0`, `1` |
 
-For instance, the pod `llama‑multinode‑0‑405b‑1‑0` belongs to:
+For instance, the pod `llama‑multinode‑0‑llama-405b‑1‑0` belongs to:
 - ModelServing `llama‑multinode`
 - ServingGroup `0`
-- Role with hash `405b`
-- Role index `1` (the second Role)
-- Pod index `0` (the first pod of that Role)
+- Role named `llama-405b`
+- Role replica index `1` (the second replica of `llama-405b`)
+- Pod index `0` (the entry pod of that role replica)
 
 This naming convention makes it easy to identify a pod's position in the multi‑node hierarchy.
 
@@ -58,21 +58,21 @@ graph TD
     MS[ModelServing] --> SG1[ServingGroup 0]
     MS --> SG2[ServingGroup 1]
     
-    SG1 --> R1[Role 405b]
-    SG1 --> R2[Role ...]
+    SG1 --> R1[Role replica llama-405b-0]
+    SG1 --> R2[Role replica llama-405b-1]
     
-    R1 --> P1[Pod 0-405b-0-0]
-    R1 --> P2[Pod 0-405b-0-1]
-    R2 --> P3[Pod 0-405b-1-0]
-    R2 --> P4[Pod 0-405b-1-1]
+    R1 --> P1[Pod 0-llama-405b-0-0]
+    R1 --> P2[Pod 0-llama-405b-0-1]
+    R2 --> P3[Pod 0-llama-405b-1-0]
+    R2 --> P4[Pod 0-llama-405b-1-1]
     
-    SG2 --> R3[Role 405b]
-    SG2 --> R4[Role ...]
+    SG2 --> R3[Role replica llama-405b-0]
+    SG2 --> R4[Role replica llama-405b-1]
     
-    R3 --> P5[Pod 1-405b-0-0]
-    R3 --> P6[Pod 1-405b-0-1]
-    R4 --> P7[Pod 1-405b-1-0]
-    R4 --> P8[Pod 1-405b-1-1]
+    R3 --> P5[Pod 1-llama-405b-0-0]
+    R3 --> P6[Pod 1-llama-405b-0-1]
+    R4 --> P7[Pod 1-llama-405b-1-0]
+    R4 --> P8[Pod 1-llama-405b-1-1]
 ```
 
 - **ModelServing** is the top‑level custom resource.
@@ -105,9 +105,9 @@ spec:
     restartGracePeriodSeconds: 60
     gangPolicy:
       minRoleReplicas:
-        405b: 1
+        llama-405b: 1
     roles:
-      - name: 405b
+      - name: llama-405b
         replicas: 2
         entryTemplate:
           spec:
@@ -177,7 +177,7 @@ spec:
 ```
 
 :::tip
-`ENTRY_ADDRESS` is an environment variable that Kthena automatically injects into every worker pod. Its value is set to the headless service address of the corresponding entry pod (e.g., `llama-multinode-0-405b-0-0.default`). You do not need to define it yourself. When multiple Role replicas exist, each worker pod receives the correct entry address for its own replica, so Ray workers always connect to the right head node. See the [Labels and Environment Variables](../architecture/model-serving-controller.mdx#environment-variables) section for the full list of injected variables.
+`ENTRY_ADDRESS` is an environment variable that Kthena automatically injects into every worker pod. Its value is set to the headless service address of the corresponding entry pod (e.g., `llama-multinode-0-llama-405b-0-0.default`). You do not need to define it yourself. When multiple Role replicas exist, each worker pod receives the correct entry address for its own replica, so Ray workers always connect to the right head node. See the [Labels and Environment Variables](../architecture/model-serving-controller.mdx#environment-variables) section for the full list of injected variables.
 :::
 
 ### Combined PD-Disaggregation and Multi-Node Layout
@@ -255,7 +255,7 @@ command:
 - `--tensor-parallel-size 8`: Splits the model across 8 GPUs within each pod.
 - `--pipeline_parallel_size 2`: Splits the model across 2 pipeline stages (requires multiple pods).
 
-The Role `405b` has `replicas: 2`, which creates two pods per ServingGroup. Together with the parallelism settings, this enables distributed inference across multiple nodes.
+The Role `llama-405b` has `replicas: 2`, which creates two role replicas per ServingGroup. Each role replica contains one entry pod and one worker pod, so the example creates four pods per ServingGroup. Together with the parallelism settings, this enables distributed inference across multiple nodes.
 
 You can run the following command to check the ModelServing status and pod status in the cluster.
 
@@ -283,17 +283,17 @@ status:
 kubectl get pod -owide -l modelserving.volcano.sh/name=llama-multinode
 
 NAMESPACE   NAME                          READY   STATUS    RESTARTS   AGE     IP            NODE           NOMINATED NODE   READINESS GATES
-default     llama-multinode-0-405b-0-0    1/1     Running   0          15m     10.244.0.56   192.168.5.12   <none>           <none>
-default     llama-multinode-0-405b-0-1    1/1     Running   0          15m     10.244.0.58   192.168.5.43   <none>           <none>
-default     llama-multinode-0-405b-1-0    1/1     Running   0          15m     10.244.0.57   192.168.5.58   <none>           <none>
-default     llama-multinode-0-405b-1-1    1/1     Running   0          15m     10.244.0.53   192.168.5.36   <none>           <none>
+default     llama-multinode-0-llama-405b-0-0    1/1     Running   0          15m     10.244.0.56   192.168.5.12   <none>           <none>
+default     llama-multinode-0-llama-405b-0-1    1/1     Running   0          15m     10.244.0.58   192.168.5.43   <none>           <none>
+default     llama-multinode-0-llama-405b-1-0    1/1     Running   0          15m     10.244.0.57   192.168.5.58   <none>           <none>
+default     llama-multinode-0-llama-405b-1-1    1/1     Running   0          15m     10.244.0.53   192.168.5.36   <none>           <none>
 ```
 :::note
-The first number in the pod name indicates which `ServingGroup` this pod belongs to. The second number indicates which `Role` it belongs to. The third number indicates the `pod`'s sequence number within Role.
+The generated suffix combines the ServingGroup ordinal, the literal role name, the role replica ordinal, and the pod ordinal. Because names can contain hyphens, use the ModelServing and role definitions rather than splitting a pod name on every hyphen.
 :::
 
 :::info
-To keep the examples clear, the following sections (Scaling, Rolling Update, Gang Scheduling) use a configuration with a single role (role index 0) to demonstrate scaling, rolling update, and scheduling concepts.
+To keep the examples clear, the following sections (Scaling, Rolling Update, Gang Scheduling) use the single `llama-405b` role definition from the manifest. The role initially has two role replicas, indexed `0` and `1`; each role replica has one entry pod and one worker pod.
 :::
 
 ## Scaling
@@ -303,7 +303,7 @@ ModelServing supports scaling at two distinct levels: **ServingGroup** and **Rol
 | Level | Field | Effect |
 |-------|-------|--------|
 | ServingGroup | `spec.replicas` | Changes the number of ServingGroups (horizontal scaling). Each ServingGroup contains a full set of Roles. |
-| Role | `spec.template.roles[*].replicas` | Changes the number of pods within a specific Role, inside every ServingGroup. |
+| Role | `spec.template.roles[*].replicas` | Changes the number of role replicas inside every ServingGroup. Each role replica contains one entry pod and the configured number of worker pods. |
 
 ### ServingGroup‑level scaling
 
@@ -317,17 +317,21 @@ Increase `spec.replicas` from 1 to 2:
 kubectl get pod -l modelserving.volcano.sh/name=llama-multinode
 
 NAMESPACE            NAME                                          READY   STATUS    RESTARTS   AGE
-default              llama-multinode-0-405b-0-0                    1/1     Running   0          35m
-default              llama-multinode-0-405b-0-1                    1/1     Running   0          35m
-default              llama-multinode-1-405b-0-0                    1/1     Running   0          2m
-default              llama-multinode-1-405b-0-1                    1/1     Running   0          2m
+default              llama-multinode-0-llama-405b-0-0                    1/1     Running   0          35m
+default              llama-multinode-0-llama-405b-0-1                    1/1     Running   0          35m
+default              llama-multinode-0-llama-405b-1-0                    1/1     Running   0          35m
+default              llama-multinode-0-llama-405b-1-1                    1/1     Running   0          35m
+default              llama-multinode-1-llama-405b-0-0                    1/1     Running   0          2m
+default              llama-multinode-1-llama-405b-0-1                    1/1     Running   0          2m
+default              llama-multinode-1-llama-405b-1-0                    1/1     Running   0          2m
+default              llama-multinode-1-llama-405b-1-1                    1/1     Running   0          2m
 ```
 
 After scaling, you can see that a new ServingGroup (index `1`) has been created, containing all Roles defined in the template.
 
 ### Role‑level scaling
 
-Role‑level scaling changes the number of pods inside a particular Role, affecting every ServingGroup. This is useful when you need to adjust the parallelism of a specific component (e.g., add more workers).
+Role‑level scaling changes the number of replicas of a particular Role, affecting every ServingGroup. This is useful when you need to adjust the parallelism of a specific component.
 
 **Example: Scale down a Role from 2 to 1 replica**
 
@@ -337,11 +341,11 @@ Reduce `spec.template.roles[0].replicas` from 2 to 1:
 kubectl get pod -l modelserving.volcano.sh/name=llama-multinode
 
 NAMESPACE            NAME                                          READY   STATUS    RESTARTS   AGE
-default              llama-multinode-0-405b-0-0                    1/1     Running   0          28m
-default              llama-multinode-0-405b-0-1                    1/1     Running   0          28m
+default              llama-multinode-0-llama-405b-0-0                    1/1     Running   0          28m
+default              llama-multinode-0-llama-405b-0-1                    1/1     Running   0          28m
 ```
 
-After scaling, the second pod of each Role (index `1`) is removed, while the first pod remains.
+After scaling, role replica `llama-405b-1` is removed from every ServingGroup, while `llama-405b-0` remains with its entry and worker pods.
 
 ### Combined scaling
 
@@ -372,10 +376,10 @@ You can see the result:
 ```sh
 kubectl get pods -l modelserving.volcano.sh/name=llama-multinode -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
 
-llama-multinode-0-405b-0-0        vllm/vllm-openai:latest    
-llama-multinode-0-405b-0-1        vllm/vllm-openai:latest        
-llama-multinode-1-405b-0-0        vllm/vllm-openai:v0.10.1                  
-llama-multinode-1-405b-0-1        vllm/vllm-openai:v0.10.1                 
+llama-multinode-0-llama-405b-0-0        vllm/vllm-openai:latest
+llama-multinode-0-llama-405b-0-1        vllm/vllm-openai:latest
+llama-multinode-1-llama-405b-0-0        vllm/vllm-openai:v0.10.1
+llama-multinode-1-llama-405b-0-1        vllm/vllm-openai:v0.10.1
 ```
 
 From the pod runtime, we can see that only group 1 has been updated because we set `rolloutStrategy.partition = 1`.
@@ -393,25 +397,34 @@ Kthena creates PodGroups based on the ModelServing. Among these, the important f
 
 ### MinRoleReplicas and PodGroup Mapping
 
-The `MinRoleReplicas` map is used to generate the PodGroup's `spec.minTaskMember` field. Each entry becomes a key-value pair where the key is `{roleName}-{index}` and the value is the total number of pods per role replica (`1 + workerReplicas`). Only role replicas with an index less than the corresponding `minRoleReplicas` value for that role are included, allowing the gang to start before all replicas are ready.
+When the installed Volcano PodGroup CRD supports `spec.subGroupPolicy`, Kthena converts each role into one subgroup policy. `minRoleReplicas[roleName]` becomes `minSubGroups`, while `subGroupSize` is the number of pods in one role replica (`1 + workerReplicas`). `matchLabelKeys` groups pods by the generated `modelserving.volcano.sh/role-id` label. The PodGroup's overall `minMember` is the sum of the required subgroups and their sizes.
 
 **Example:** In the `multi-node.yaml` example, the gang policy is defined as:
 
 ```yaml
 gangPolicy:
   minRoleReplicas:
-    405b: 1
+    llama-405b: 1
 ```
 
-This results in the following PodGroup spec (shown earlier):
+This results in the following relevant PodGroup fields:
 
 ```yaml
 spec:
-  minTaskMember:
-    "405b-0": 2   # roleName-index: (1 entry + workerReplicas)
+  minMember: 2
+  subGroupPolicy:
+    - name: llama-405b
+      labelSelector:
+        matchLabels:
+          modelserving.volcano.sh/name: llama-multinode
+          modelserving.volcano.sh/role: llama-405b
+      matchLabelKeys:
+        - modelserving.volcano.sh/role-id
+      minSubGroups: 1
+      subGroupSize: 2
 ```
 
-In this example, `minRoleReplicas.405b: 1` means only the first role replica (`405b-0`) is included in `minTaskMember`. The value `2` represents the total number of pods in this role replica: 1 entry pod + 1 worker pod (the role has `workerReplicas: 1`).
+In this example, `minRoleReplicas["llama-405b"]: 1` requires one complete `llama-405b` subgroup. `subGroupSize: 2` requires both pods in that role replica: one entry pod and one worker pod.
 
 ### Network‑Topology Scheduling
 
@@ -428,10 +441,14 @@ To reduce network latency between pods, you can enable network‑topology schedu
    ```yaml
    gangPolicy:
      minRoleReplicas:
-       405b: 1
-     networkTopology:
-       mode: soft   # or "hard"
-       highestTierAllowed: 2   # only for hard mode
+       llama-405b: 1
+   networkTopology:
+     rolePolicy:
+       mode: hard
+       highestTierAllowed: 2
+     groupPolicy:
+       mode: hard
+       highestTierAllowed: 2
    ```
 
 4. **Apply the updated ModelServing**. The Volcano scheduler will then attempt to place pods within the same HyperNode (or as close as possible) according to the chosen mode.
@@ -447,14 +464,14 @@ If pods remain in `Pending` state, check the following:
   kubectl logs -l app=volcano-scheduler -n volcano-system
   ```
 
-- **Resource quotas:** Ensure your cluster has enough resources (GPU, memory, CPU) to satisfy the `minTaskMember` requirements.
+- **Resource quotas:** Ensure your cluster has enough resources (GPU, memory, CPU) to satisfy `minMember` and every `subGroupPolicy` requirement.
 
 - **Node affinity / taints:** Check if pods have node affinity or taints that prevent scheduling.
 
 You can run the following command to see the `PodGroup` created by Kthena based on the `llama-multinode` ModelServing.
 
 ```sh
-kubectl get podgroup-0 -oyaml
+kubectl get podgroup llama-multinode-0 -o yaml
 
 apiVersion: scheduling.volcano.sh/v1beta1
 kind: PodGroup
@@ -478,10 +495,20 @@ metadata:
   uid: 3abd9759-1fd7-48d7-be6b-ac55e17b36a0
 spec:
   minMember: 2
-  minResources: {}
-  minTaskMember:
-    405b: 2
+  minResources:
+    cpu: "250"
+    ephemeral-storage: 1600Gi
   queue: default
+  subGroupPolicy:
+  - labelSelector:
+      matchLabels:
+        modelserving.volcano.sh/name: llama-multinode
+        modelserving.volcano.sh/role: llama-405b
+    matchLabelKeys:
+    - modelserving.volcano.sh/role-id
+    minSubGroups: 1
+    name: llama-405b
+    subGroupSize: 2
 status:
   conditions:
   - lastTransitionTime: "2025-09-05T09:10:47Z"
