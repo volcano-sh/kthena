@@ -1,6 +1,10 @@
 package tokenizer
 
-import "context"
+import (
+	"context"
+
+	"k8s.io/klog/v2"
+)
 
 type localTokenizer struct {
 	client *Client
@@ -38,13 +42,13 @@ func (s *localTokenizer) Unload(modelServerID string) error {
 	)
 	return err
 }
-
 func (s *localTokenizer) CountTokens(modelServerID, prompt string) (int, error) {
 	req := EncodeRequest{
 		ModelServerID: modelServerID,
 		Text:          prompt,
 		ReturnTokens:  false,
 	}
+
 	var resp EncodeResponse
 	_, err := s.client.post(
 		context.Background(),
@@ -52,10 +56,16 @@ func (s *localTokenizer) CountTokens(modelServerID, prompt string) (int, error) 
 		req,
 		&resp,
 	)
-	if err != nil {
-		return 0, err
+	if err == nil {
+		return resp.TokenCount, nil
 	}
-	return resp.TokenCount, nil
+
+	klog.Warningf("Local tokenizer unavailable, using heuristic token estimation: %v", err)
+
+	estimator := &SimpleEstimateTokenizer{
+		CharactersPerToken: 4,
+	}
+	return estimator.CountTokens(modelServerID, prompt)
 }
 
 func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, error) {

@@ -38,3 +38,7 @@ func (s *SimpleEstimateTokenizer) CountTokens(modelServerID, prompt string) (int
 	characterCount := utf8.RuneCountInString(prompt)
 	return int(math.Ceil(float64(characterCount) / s.CharactersPerToken)), nil
 }
+
+func (s *SimpleEstimateTokenizer) Encode(modelServerID, prompt string) ([]uint32, error) {
+	return []uint32{0}, nil // Encoding is not supported in the SimpleEstimateTokenizer
+}
