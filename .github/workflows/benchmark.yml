@@ -96,19 +96,6 @@ jobs:
           kubectl rollout status deployment/kthena-controller-manager -n kthena-system --timeout=300s
           kubectl rollout status deployment/kthena-router -n kthena-system --timeout=300s
 
-      - name: Deploy Mock Backends
-        working-directory: benchmark/router-benchmark
-        run: |
-          kubectl apply -f k8s/mocker-deployment.yaml
-          kubectl rollout status deployment/mocker-llm --timeout=300s
-
-      - name: Deploy ModelServer and ModelRoute
-        working-directory: benchmark/router-benchmark
-        run: |
-          kubectl apply -f k8s/modelserver.yaml
-          kubectl apply -f k8s/modelroute.yaml
-          # `kubectl wait` unimplemented
-
       - name: Install AIPerf
         run: |
           pip install 'aiperf>=0.9,<0.11'
