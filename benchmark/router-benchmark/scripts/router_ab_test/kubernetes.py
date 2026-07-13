@@ -20,6 +20,7 @@ import tempfile
 import time
 from typing import Any
 
+import requests
 import yaml
 
 from router_ab_test.models import BackendProfile, BackendsConfig
@@ -339,41 +340,24 @@ class K8sManager:
         """Probe the router to confirm the route table has the given model loaded."""
         print(f"  Probing router for model={mocker_model_name} at {endpoint}...")
         deadline = time.monotonic() + timeout
-        request_body = (
-            '{"model":"'
-            + mocker_model_name
-            + '","messages":[{"role":"user","content":"ping"}],"max_tokens":1}'
-        )
+        url = f"http://{endpoint}/v1/chat/completions"
+        payload = {
+            "model": mocker_model_name,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
         while time.monotonic() < deadline:
             try:
-                result = subprocess.run(
-                    [
-                        "curl", "-s", "-w", "\n%{http_code}",
-                        "-X", "POST",
-                        f"http://{endpoint}/v1/chat/completions",
-                        "-H", "Content-Type: application/json",
-                        "-d", request_body,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-            except subprocess.TimeoutExpired:
-                time.sleep(2)
+                resp = requests.post(url, json=payload, timeout=5)
+            except (requests.Timeout, requests.ConnectionError):
+                time.sleep(5)
                 continue
 
-            output = result.stdout
-            if "\n" in output:
-                body, status_code = output.rsplit("\n", 1)
-            else:
-                body, status_code = "", output
-
-            status_code = status_code.strip()
-            if status_code == "200":
+            if resp.status_code == 200:
                 print(f"  Router route for '{mocker_model_name}' is ready")
                 return
-            body_preview = body.strip()[:200]
-            print(f"  Router probe returned {status_code}: {body_preview}")
+            body_preview = resp.text.strip()[:200]
+            print(f"  Router probe returned {resp.status_code}: {body_preview}")
             time.sleep(5)
 
         raise RuntimeError(f"Router route for '{mocker_model_name}' not ready within {timeout}s.")

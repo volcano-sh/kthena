@@ -46,9 +46,10 @@ class ABTestOrchestrator:
         self.reporter = ResultReporter()
 
     def run_single_config(self, config_path: str, config_name: str) -> BenchmarkResult:
-        self.k8s.cleanup_port_forward()  # Clean up any stale port-forwards before starting
+        self.k8s.cleanup_port_forward()
 
-        # Deploy mocker backends from scenario config
+        # Tear down and re-deploy backends for a cold-start baseline
+        self.k8s.cleanup_backends()
         self.k8s.deploy_backends(self.scenario.backends)
 
         self.k8s.apply_router_config(config_path)
