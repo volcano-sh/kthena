@@ -90,6 +90,7 @@ class AIPerfRunner:
 
         self._append_schedule_args(cmd, schedule)
         self._append_traffic_args(cmd, traffic, benchmark_secs)
+        self._append_concurrency_args(cmd, concurrency)
         self._append_token_args(cmd, load.get("prompts", []), load.get("max_tokens", []))
         return cmd
 
@@ -129,8 +130,24 @@ class AIPerfRunner:
             cmd.extend(["--arrival-pattern", "gamma", "--arrival-smoothness", str(burstiness)])
 
         ramp = traffic.get("ramp", {})
-        if ramp.get("strategy", "none") != "none":
-            cmd.extend(["--request-rate-ramp-duration", str(benchmark_secs)])
+        if self._ramp_enabled(ramp):
+            cmd.extend([
+                "--request-rate-ramp-duration",
+                str(self._resolve_ramp_duration(ramp, benchmark_secs, "request_rate_duration", "duration")),
+            ])
+
+    def _append_concurrency_args(self, cmd: list[str], concurrency: dict[str, Any]) -> None:
+        ramp = concurrency.get("ramp", {})
+        if not self._ramp_enabled(ramp):
+            return
+
+        if duration := ramp.get("duration"):
+            cmd.extend(["--concurrency-ramp-duration", str(self._parse_duration_seconds(duration))])
+        if prefill_duration := ramp.get("prefill_duration"):
+            cmd.extend([
+                "--prefill-concurrency-ramp-duration",
+                str(self._parse_duration_seconds(prefill_duration)),
+            ])
 
     def _append_token_args(
         self,
@@ -151,6 +168,17 @@ class AIPerfRunner:
         if not items:
             return ""
         return ",".join(str(item.get("tokens", default)) for item in items)
+
+    @staticmethod
+    def _ramp_enabled(ramp: dict[str, Any]) -> bool:
+        return str(ramp.get("strategy", "none")).lower() != "none"
+
+    def _resolve_ramp_duration(self, ramp: dict[str, Any], default: int, *keys: str) -> int:
+        for key in keys:
+            value = ramp.get(key)
+            if value is not None:
+                return self._parse_duration_seconds(value)
+        return default
 
     def _read_metrics_from_output(self, run_dir: Path) -> dict[str, Any]:
         """Parse aiperf's aggregated JSON output (profile_export_aiperf.json)."""
