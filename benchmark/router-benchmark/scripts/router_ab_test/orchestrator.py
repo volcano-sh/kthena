@@ -47,8 +47,11 @@ class ABTestOrchestrator:
 
     def run_single_config(self, config_path: str, config_name: str) -> BenchmarkResult:
         self.k8s.cleanup_port_forward()  # Clean up any stale port-forwards before starting
+
+        # Deploy mocker backends from scenario config
+        self.k8s.deploy_backends(self.scenario.backends)
+
         self.k8s.apply_router_config(config_path)
-        self.k8s.wait_for_backend_ready()
         router_endpoint = self.k8s.get_router_endpoint()
         router_debug_endpoint = self.k8s.get_router_debug_endpoint()
         self.k8s.wait_for_router_ready("Qwen/Qwen3-0.6B", router_endpoint, timeout=300)
@@ -72,6 +75,7 @@ class ABTestOrchestrator:
             result_b = self.run_single_config(str(self.router_config_b_path), "config_b")
         finally:
             self.k8s.cleanup_port_forward()
+            self.k8s.cleanup_backends()
 
         report = self.reporter.build_report(
             scenario_name=self.scenario.name,

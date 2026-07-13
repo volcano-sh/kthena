@@ -20,28 +20,19 @@ load:
   duration: "60s"
 
 backends:
-  count: 3
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
   profiles:
     - name: "fast"
       count: 1
-      ttftMean: "10ms"
-      ttftStddev: "2ms"
-      tpotMean: "5ms"
-      tpotStddev: "1ms"
+      speedupRatio: 10.0
     - name: "normal"
       count: 1
-      ttftMean: "100ms"
-      ttftStddev: "15ms"
-      tpotMean: "20ms"
-      tpotStddev: "5ms"
+      speedupRatio: 1.0
     - name: "slow"
       count: 1
-      ttftMean: "500ms"
-      ttftStddev: "50ms"
-      tpotMean: "50ms"
-      tpotStddev: "10ms"
-  responseTokens: 128
-  errorRate: 0.0
+      speedupRatio: 0.2
 
 metrics:
   prometheus: true
