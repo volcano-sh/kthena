@@ -66,36 +66,6 @@ func (c *Client) post(ctx context.Context, path string, req any, resp any) (*htt
 	return httpResp, nil
 }
 
-func (c *Client) get(ctx context.Context, path string, resp any) (*http.Response, error) {
-	httpReq, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		c.endpoint+path,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Accept", "application/json")
-
-	httpResp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode >= 300 {
-		return httpResp, newHTTPError(httpResp)
-	}
-
-	if resp != nil {
-		if err := json.NewDecoder(httpResp.Body).Decode(resp); err != nil {
-			return httpResp, err
-		}
-	}
-	return httpResp, nil
-}
-
 func newHTTPError(httpResp *http.Response) error {
 	const maxErrBody = 4 << 10 // 4KB cap, avoid huge bodies in error strings
 	limited := io.LimitReader(httpResp.Body, maxErrBody)

@@ -171,7 +171,6 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 					} else {
 						break
 					}
-
 				}
 			}()
 
@@ -330,6 +329,9 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Calculate tokens and token ids ffor rate limiting and kvcache key generation.
 		inputTokens, tokencount, err := r.tokenizer.Encode(modelName, promptStr)
+		if err != nil {
+			klog.Errorf("failed to calculate token number: %v", err)
+		}
 
 		c.Set("inputTokens", inputTokens)
 

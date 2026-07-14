@@ -190,7 +190,6 @@ func (t *KVCacheAware) Name() string {
 }
 
 func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods []*datastore.PodInfo) ([]uint32, error) {
-
 	if len(ctx.InputTokens) > 0 {
 		klog.V(4).Infof("KVCacheAware: reusing pre-computed tokens from router context for model=%q , %v", ctx.Model, ctx.InputTokens)
 		return ctx.InputTokens, nil

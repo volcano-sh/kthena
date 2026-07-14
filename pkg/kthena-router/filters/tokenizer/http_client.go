@@ -20,9 +20,14 @@ import (
 	"net/http"
 )
 
+const DefaultTokenizerEndpoint = "http://kthena-tokenizer:8080"
+
 // NewHTTPClient creates a tokenizer client communicating over
 // HTTP with the tokenizer sidecar.
 func NewHTTPClient(endpoint string) *Client {
+	if endpoint == "" {
+		endpoint = DefaultTokenizerEndpoint
+	}
 
 	return &Client{
 		endpoint: endpoint,
