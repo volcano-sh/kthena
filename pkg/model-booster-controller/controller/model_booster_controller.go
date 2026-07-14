@@ -272,7 +272,7 @@ func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, 
 		return nil
 	})
 	if err != nil {
-		klog.Errorf("update modelBooster status failed: %v", err)
+		klog.ErrorS(err, "update modelBooster status failed", "namespace", modelBooster.Namespace, "name", modelBooster.Name)
 		return err
 	}
 

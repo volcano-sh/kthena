@@ -42,7 +42,7 @@ var engineRegistry = map[string]MetricsProvider{
 func GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
-		klog.Errorf("Failed to get inference engine: %v", err)
+		klog.Errorf("Failed to get inference engine %s for pod %s/%s: %v", engine, pod.GetNamespace(), pod.GetName(), err)
 		return nil, nil
 	}
 
@@ -74,7 +74,7 @@ func GetMetricsProvider(engine string) (MetricsProvider, error) {
 func GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
-		klog.Errorf("Failed to get inference engine: %v", err)
+		klog.Errorf("Failed to get inference engine %s for pod %s/%s: %v", engine, pod.GetNamespace(), pod.GetName(), err)
 		return nil, err
 	}
 

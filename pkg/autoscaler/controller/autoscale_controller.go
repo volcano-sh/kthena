@@ -227,17 +227,17 @@ func (ac *AutoscaleController) schedule(ctx context.Context, autoscalePolicy *wo
 	klog.V(2).Infof("start to process autoscaling policy %s", klog.KObj(autoscalePolicy))
 	if autoscalePolicy.Spec.HeterogeneousTarget != nil {
 		if err := ac.doOptimize(ctx, autoscalePolicy); err != nil {
-			klog.Errorf("failed to do optimize, err: %v", err)
+			klog.Errorf("failed to do optimize for autoscaling policy %s: %v", klog.KObj(autoscalePolicy), err)
 			return err
 		}
 	} else if autoscalePolicy.Spec.HomogeneousTarget != nil {
 		if err := ac.doScale(ctx, autoscalePolicy); err != nil {
-			klog.Errorf("failed to do scale, err: %v", err)
+			klog.Errorf("failed to do scale for autoscaling policy %s: %v", klog.KObj(autoscalePolicy), err)
 			return err
 		}
 	} else if autoscalePolicy.Spec.DisaggregatedTarget != nil {
 		if err := ac.doDisaggregatedScale(ctx, autoscalePolicy); err != nil {
-			klog.Errorf("failed to do disaggregated scale, err: %v", err)
+			klog.Errorf("failed to do disaggregated scale for autoscaling policy %s: %v", klog.KObj(autoscalePolicy), err)
 			return err
 		}
 	} else {
