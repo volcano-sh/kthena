@@ -402,6 +402,10 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		return
 	}
 
+	// After DeleteRole deletes pods, downgrade ServingGroup here so AvailableReplicas
+	// reflects unavailability during role rolling. Keep DeleteRole focused on deletion.
+	c.markServingGroupScalingIfRoleDeleting(ms, servingGroupName, roleName, roleID)
+
 	if c.handleDeletionInProgress(ms, servingGroupName, roleName, roleID) {
 		return
 	}
@@ -410,6 +414,27 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	if err != nil {
 		klog.Errorf("handle deleted pod failed: %v", err)
 	}
+}
+
+// markServingGroupScalingIfRoleDeleting downgrades ServingGroup from Running to Scaling
+// when a pod delete event is observed for a role already marked Deleting (e.g. role rolling).
+func (c *ModelServingController) markServingGroupScalingIfRoleDeleting(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) {
+	if roleName == "" || roleID == "" {
+		return
+	}
+	nsn := utils.GetNamespaceName(ms)
+	if c.store.GetRoleStatus(nsn, servingGroupName, roleName, roleID) != datastore.RoleDeleting {
+		return
+	}
+	if c.store.GetServingGroupStatus(nsn, servingGroupName) != datastore.ServingGroupRunning {
+		return
+	}
+	if err := c.store.UpdateServingGroupStatus(nsn, servingGroupName, datastore.ServingGroupScaling); err != nil {
+		klog.Errorf("failed to set ServingGroup %s status to Scaling: %v", servingGroupName, err)
+		return
+	}
+	klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling after role %s pod deleted", ms.GetName(), servingGroupName, roleID)
+	c.enqueueModelServing(ms)
 }
 
 func (c *ModelServingController) deleteService(obj interface{}) {
@@ -1249,26 +1274,11 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	if roleStatus == datastore.RoleDeleting {
 		return
 	}
-	nsn := utils.GetNamespaceName(ms)
-	err := c.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, datastore.RoleDeleting)
+	err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleDeleting)
 	klog.V(4).Infof("Setting role %s/%s status to Deleting", ms.GetName(), roleID)
 	if err != nil {
 		klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
 		return
-	}
-
-	servingGroupStatus := c.store.GetServingGroupStatus(nsn, groupName)
-	servingGroupStatusDowngraded := false
-	if servingGroupStatus == datastore.ServingGroupRunning {
-		if err := c.store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupScaling); err != nil {
-			klog.Errorf("failed to set ServingGroup %s status to Scaling: %v", groupName, err)
-			if rollbackErr := c.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, roleStatus); rollbackErr != nil {
-				klog.ErrorS(rollbackErr, "Failed to rollback role status", "role", roleID, "group", groupName)
-			}
-			return
-		}
-		servingGroupStatusDowngraded = true
-		klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling for role %s deletion", ms.Namespace+"/"+ms.Name, groupName, roleID)
 	}
 
 	// Emit event for role entering Deleting state.
@@ -1279,16 +1289,9 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		if deleteErr == nil {
 			return
 		}
-		rollbackErr := c.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, roleStatus)
+		rollbackErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, roleStatus)
 		if rollbackErr != nil {
 			klog.ErrorS(rollbackErr, "Failed to rollback role status", "role", roleID, "group", groupName)
-		}
-		if servingGroupStatusDowngraded {
-			if c.store.GetServingGroupStatus(nsn, groupName) == datastore.ServingGroupScaling {
-				if rollbackErr := c.store.UpdateServingGroupStatus(nsn, groupName, servingGroupStatus); rollbackErr != nil {
-					klog.ErrorS(rollbackErr, "Failed to rollback ServingGroup status", "group", groupName)
-				}
-			}
 		}
 		c.enqueueModelServing(ms)
 	}()
