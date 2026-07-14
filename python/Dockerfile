@@ -45,7 +45,7 @@ RUN set -ex && \
     rm -rf awscliv2.zip aws
 
 WORKDIR /app
-COPY requirements.txt .
+COPY kthena/downloader/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY kthena/downloader/ ./kthena/downloader/
 COPY kthena/runtime/ ./kthena/runtime/

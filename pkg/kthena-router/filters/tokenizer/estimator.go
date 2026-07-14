@@ -54,8 +54,3 @@ func (s *SimpleEstimateTokenizer) Encode(modelServerID, prompt string) ([]uint32
 	characterCount := utf8.RuneCountInString(prompt)
 	return []uint32{0}, int(math.Ceil(float64(characterCount) / s.CharactersPerToken)), nil
 }
-
-func (s *SimpleEstimateTokenizer) CountTokens(modelServerID, prompt string) (int, error) {
-	_, count, err := s.Encode(modelServerID, prompt)
-	return count, err
-}
