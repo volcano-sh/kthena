@@ -16,6 +16,8 @@ metadata:
       kind: ModelBooster
       name: ds-r1-qwen-7b-pd
       uid: randomUID
+  annotations:
+    kthena.volcano.sh/model-repo-id: s3://aios_models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
 spec:
   model: "ds-r1-qwen-7b-pd"
   inferenceEngine: "vLLM"

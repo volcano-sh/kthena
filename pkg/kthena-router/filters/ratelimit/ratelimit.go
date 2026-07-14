@@ -89,15 +89,11 @@ func (l *LocalLimiter) Tokens() float64 {
 }
 
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
-func NewTokenRateLimiter(urls ...string) *TokenRateLimiter {
-	url := "http://localhost:8000"
-	if len(urls) > 0 && urls[0] != "" {
-		url = urls[0]
-	}
+func NewTokenRateLimiter() *TokenRateLimiter {
 	return &TokenRateLimiter{
 		inputLimiter:  make(map[string]Limiter),
 		outputLimiter: make(map[string]Limiter),
-		tokenizer:     tokenizer.NewlocalTokenizer(url),
+		tokenizer:     tokenizer.NewlocalTokenizer(),
 	}
 }
 

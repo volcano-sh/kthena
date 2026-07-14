@@ -84,5 +84,3 @@ func TestSimpleEstimateTokenizer(t *testing.T) {
 		})
 	}
 }
-
-
