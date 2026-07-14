@@ -53,8 +53,7 @@ Tokenizer instances are automatically managed through ModelServer lifecycle even
 
 - **Backend Resource Contention:** Using the inference engine (vLLM) for tokenization causes tokenization requests to compete with prefill and decode tasks for GPU slots and queues, degrading overall inference performance.
 
-- **Redundant Tokenization:** The same prompt is currently tokenized up to three times - by the rate limiter, KV cache scheduler (pod scoring), and backend during prefill. This wastes CPU cycles and adds 7-14ms of unnecessary latency per request. At 10k RPS, this creates 70-140 seconds of aggregate overhead per second.
-
+- **Redundant Tokenization:** The same prompt is currently tokenized up to three times - by the rate limiter, KV cache scheduler (pod scoring), and backend during prefill. This wastes CPU cycles and adds unnecessary latency per request.
 - **Lost Token IDs:** Each component independently tokenizes the prompt and discards the results, forcing repeated work and breaking context between layers.
 
 ---
@@ -68,14 +67,14 @@ Tokenizer instances are automatically managed through ModelServer lifecycle even
 
 ## Goals
 
-- Deliver low-latency local tokenization (<1ms via UDS sidecar, 1-2ms via HTTP service).
+- Deliver low-latency local tokenization.
 - Enable fast, accurate token counting for the KV cache-aware scheduler before routing.
 - Achieve single-pass tokenization with reuse: rate limiter → KV cache plugin → optional prompt_token_ids forwarding to backend.
 - Fully decouple tokenization from inference engines to eliminate resource contention.
 - Support independent tokenizer lifecycle, scaling, and upgrades.
-- Flexibly support multiple tokenizer sources (PVC, Hugging Face Hub, ModelScope, or model_repo_url annotation).
-- Provide two deployment modes (UDS sidecar or independent HTTP) selectable per ModelServer via annotation.
-- Make prompt_token_ids forwarding to vLLM optional and configurable per model.
+- Flexibly support multiple tokenizer sources (PVC, Hugging Face Hub, ModelScope ).
+- Provide two deployment modes (UDS sidecar or independent HTTP) selected globally .
+- Make prompt_token_ids forwarding to vLLM optional and configurable per model .
 
 ### Non-Goals
 
@@ -91,14 +90,14 @@ Tokenizer instances are automatically managed through ModelServer lifecycle even
 
 - Tokenizer runs as a sidecar container in the same pod as the router
 - Communication via Unix Domain Socket (`/tmp/tokenizer.sock`)
-- Ultra-low latency (<1ms), zero network overhead
+- Ultra-low latency, zero network overhead
 - Cannot scale independently from the router
 
 ### 2. HTTP-Based Independent Service (Separate Pods)
 
 - Tokenizer runs as its own Kubernetes Deployment
 - Communication via HTTP through cluster Service DNS
-- Low latency (1-2ms)
+- Low latency
 - Supports independent scaling and fault isolation
 
 ---
@@ -115,7 +114,7 @@ The router pod contains two containers sharing a tmpfs volume for the Unix socke
 #### Data Flow
 
 ```
-Request → Rate Limiter → Manager.Encode() → UDS socket → Tokenizer returns token count (<1ms)
+Request → Rate Limiter → Manager.Encode() → UDS socket → Tokenizer returns token count
 ```
 
 **Benefits:**
@@ -141,7 +140,7 @@ Tokenizer runs as a separate Deployment in the same namespace:
 #### Data Flow
 
 ```
-Request → Rate Limiter → HTTP POST to tokenizer Service → Returns token count (1-2ms)
+Request → Rate Limiter → HTTP POST to tokenizer Service → Returns token count
 ```
 
 **Benefits:**
@@ -189,11 +188,15 @@ Operators configure the mode via Helm values:
 ```yaml
 kthenaRouter:
   tokenizer:
-    mode: "uds"
-    sidecar:
-      enabled: true
-      image: tokenizer-sidecar:v1.0
+    mode: sidecar
 ```
+In this mode, Helm automatically:
+
+- Injects the tokenizer as a sidecar container into the router pod.
+- Creates a shared emptyDir volume.
+- Mounts the shared Unix Domain Socket path (/tmp/tokenizer.sock) into both containers.
+- Configures the router to use the UDS tokenizer client.
+- Sets TOKENIZER_SOCKET=/tmp/tokenizer.sock for the tokenizer service.
 
 #### HTTP Independent Mode
 
@@ -202,13 +205,14 @@ kthenaRouter:
   tokenizer:
     mode: "http"
 
-tokenizer:
-  replicas: 2
-  image: tokenizer-service:v1.0
 ```
+or http, whichever your implementation actually uses.)
 
-**Important:** UDS mode requires the tokenizer to run as a sidecar in the same pod. HTTP mode is mandatory for separate pods. Mismatched configurations will cause failures.
+In this mode, Helm automatically:
 
+- Deploys the tokenizer as an independent Deployment.
+- Exposes it through a Kubernetes Service.
+- Configures the router to use the HTTP tokenizer client.
 ---
 
 ### Implementation Details
@@ -224,9 +228,6 @@ tokenizer:
 if tokenizer.IsAnnotated(modelServerID) {
     count, _ := tokenizer.Encode(modelServerID, prompt)  // UDS or HTTP
     quotaUsed = count
-} else {
-    quotaUsed = len(prompt) / 4  // fallback
-}
 ```
 
 ---
@@ -235,8 +236,8 @@ if tokenizer.IsAnnotated(modelServerID) {
 
 The KV cache-aware scheduler plugin calls the local tokenizer for fast token counting:
 
-- **UDS:** <1ms latency
-- **HTTP:** 1-2ms latency
+- **UDS:** 
+- **HTTP:** 
 
 This enables accurate cache hit estimation without involving the inference backend.
 
@@ -254,9 +255,9 @@ When enabled:
 
 - Router computes token IDs during rate limiting
 - Forwards `prompt_token_ids` to compatible backends (supported by both vLLM and SGLANG)
+- directly send the already created list of tokens to the inference engines instead of sending prompts
 - Backend skips redundant tokenization
 
-This is kept opt-in due to added complexity and limited backend support.
 
 ---
 
@@ -274,7 +275,7 @@ A PaaS operator runs a multi-tenant LLM service handling 10k+ requests per secon
 4. Router automatically loads the tokenizer over UDS socket.
 5. All requests use local tokenization (<1ms vs. previous 150ms remote).
 
-**Result:** Reduces per-request latency by ~140ms at scale, significantly improving end-to-end latency and overall throughput.
+**Result:** Reduces per-request latency  at scale, significantly improving end-to-end latency and overall throughput.
 
 ---
 
@@ -293,54 +294,6 @@ An operator needs to scale tokenization independently as request volume grows an
 4. Traffic is automatically load-balanced across the additional pods.
 
 **Result:** Tokenizer scales independently without restarting the router, maintaining stable performance under varying loads.
-
----
-
-## Performance Analysis
-
-### Latency Comparison
-
-| Scenario | Latency | Impact |
-|----------|---------|--------|
-| **UDS Sidecar** | **<1 ms** | Minimal, direct Unix Domain Socket communication |
-| **HTTP Independent** | **1-2 ms** | Low, limited to Kubernetes cluster networking |
-| **Remote Tokenization** | **50-200 ms** | High, network latency and external service overhead |
-| **Heuristic Estimate** | **<1 ms** | Very low latency, but inaccurate token estimation |
-
----
-
-### Memory Footprint
-
-#### UDS Sidecar
-
-- **Single tokenizer:** 50-200 MB (model dependent)
-- **Five loaded models:** 500 MB-1 GB
-- **Recommended memory limit:** 2 GB (configurable via Helm)
-- **Eviction policy:** LRU automatically unloads least recently used tokenizers
-
-#### HTTP Independent
-
-- Router pod has **zero tokenizer memory overhead**
-- Each tokenizer pod consumes **500 MB-1 GB**
-- Total memory usage scales linearly with the number of tokenizer replicas
-
----
-
-### Scaling Strategy
-
-#### UDS Sidecar
-
-- One tokenizer instance per router pod
-- Scales automatically with router replicas
-- Best suited for consistent, high-throughput deployments
-- Simpler operational model with minimal communication latency
-
-#### HTTP Independent
-
-- Supports multiple tokenizer replicas (2-5+)
-- Each replica delivers **1-2 ms** tokenization latency
-- Can be scaled independently using **Horizontal Pod Autoscaler (HPA)** or manual scaling
-- Provides higher aggregate throughput and improved resource utilization
 
 ---
 
@@ -407,7 +360,6 @@ An operator needs to scale tokenization independently as request volume grows an
 | Tokenizer fails to load model | Return clear error, retain heuristic fallback for models without tokenizer enabled |
 | Invalid or unreachable `model-repo-id` | Validate configuration during model load and surface descriptive errors |
 | `forward-token-ids` enabled for unsupported backend | Feature is disabled by default; document supported backends |
-| Memory growth from multiple loaded tokenizers | LRU cache with configurable memory limits and explicit unload support |
 | Tokenizer request timeout | Configurable request timeout with retry through normal request flow |
 | High tokenizer load | Scale router replicas (UDS) or tokenizer replicas independently (HTTP) |
 
