@@ -31,7 +31,7 @@ downloader = TokenizerDownloader()
 async def encode(req: EncodeRequest):
     encoded, token_count = encoder(req.model_server_id,req.text )
 
-    
+
     return {
         "token_ids": encoded.ids,
         "token_count": token_count

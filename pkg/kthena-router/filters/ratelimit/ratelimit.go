@@ -19,6 +19,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -90,10 +91,17 @@ func (l *LocalLimiter) Tokens() float64 {
 
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
 func NewTokenRateLimiter() *TokenRateLimiter {
+	var t tokenizer.Tokenizer
+	deployment := os.Getenv("TOKENIZER_DEPLOYMENT")
+	if deployment == "" {
+		t = tokenizer.NewSimpleEstimateTokenizer()
+	} else {
+		t = tokenizer.NewLocalTokenizer(tokenizer.TokenizerConfig{Deployment: deployment})
+	}
 	return &TokenRateLimiter{
 		inputLimiter:  make(map[string]Limiter),
 		outputLimiter: make(map[string]Limiter),
-		tokenizer:     tokenizer.NewLocalTokenizer(tokenizer.TokenizerConfig{Deployment: "sidecar"}),
+		tokenizer:     t,
 	}
 }
 
