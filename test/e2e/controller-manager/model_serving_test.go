@@ -2220,7 +2220,6 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 	replicas := int32(1)
 	initialRoleReplicas := int32(4)
 	partition := int32(2)
-	protectedOrdinals := []int32{0, 1}
 
 	modelServing := &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2270,7 +2269,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
 	updatedMS.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt32(partition))
 
-	t.Logf("Updating prefill role image to %s; partition=%d should keep prefill-0/1 on old image", nginxAlpineImage, partition)
+	t.Logf("Updating prefill role image to %s; partition=%d should keep ordinals [0, %d) on old image", nginxAlpineImage, partition, partition)
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
@@ -2299,7 +2298,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			return false
 		}
 
-		for _, ord := range protectedOrdinals {
+		for ord := int32(0); ord < partition; ord++ {
 			if imageByOrdinal[ord] != nginxImage {
 				t.Logf("Protected prefill-%d image=%s, expecting old image=%s", ord, imageByOrdinal[ord], nginxImage)
 				return false
@@ -2307,14 +2306,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 		}
 		updatedCorrect := 0
 		for ord, img := range imageByOrdinal {
-			isProtected := false
-			for _, protected := range protectedOrdinals {
-				if ord == protected {
-					isProtected = true
-					break
-				}
-			}
-			if isProtected {
+			if ord < partition {
 				continue
 			}
 			if img != nginxAlpineImage {
@@ -2415,23 +2407,25 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 		if len(imageByOrdinal) != int(roleReplicas) {
 			return false
 		}
-		if imageByOrdinal[0] != nginxImage {
-			t.Logf("Partition state not ready: protected prefill-0 image=%s", imageByOrdinal[0])
-			return false
+		for ord := int32(0); ord < partition; ord++ {
+			if imageByOrdinal[ord] != nginxImage {
+				t.Logf("Partition state not ready: protected prefill-%d image=%s", ord, imageByOrdinal[ord])
+				return false
+			}
 		}
-		updatedCount := 0
+		updatedCorrect := 0
 		for ord, img := range imageByOrdinal {
-			if ord == 0 {
+			if ord < partition {
 				continue
 			}
 			if img != nginxAlpineImage {
 				t.Logf("Partition state not ready: non-protected prefill-%d image=%s", ord, img)
 				return false
 			}
-			updatedCount++
+			updatedCorrect++
 		}
-		if updatedCount != int(roleReplicas)-int(partition) {
-			t.Logf("Partition state not ready: updated replicas=%d, expecting %d, images=%v", updatedCount, roleReplicas-partition, imageByOrdinal)
+		if updatedCorrect != int(roleReplicas-partition) {
+			t.Logf("Partition state not ready: updated replicas=%d, expecting %d, images=%v", updatedCorrect, roleReplicas-partition, imageByOrdinal)
 			return false
 		}
 		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -2616,10 +2610,20 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 				return false
 			}
 		}
-		for ord := partition; ord < initialRoleReplicas; ord++ {
-			if imageByOrdinal[ord] != nginxAlpineImage {
+		updatedCorrect := 0
+		for ord, img := range imageByOrdinal {
+			if ord < partition {
+				continue
+			}
+			if img != nginxAlpineImage {
 				return false
 			}
+			updatedCorrect++
+		}
+		if updatedCorrect != int(initialRoleReplicas-partition) {
+			t.Logf("Partition state not ready: updated replicas=%d, expecting %d, images=%v",
+				updatedCorrect, initialRoleReplicas-partition, imageByOrdinal)
+			return false
 		}
 		return true
 	}, 3*time.Minute, 2*time.Second, "Role partition state did not converge before scale down")
@@ -2690,8 +2694,14 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 				return false
 			}
 		}
-		if _, ok := imageByOrdinal[partition]; ok {
-			t.Logf("Updated replica prefill-%d should have been removed", partition)
+		updatedCorrect := 0
+		for ord := range imageByOrdinal {
+			if ord >= partition {
+				updatedCorrect++
+			}
+		}
+		if updatedCorrect != 0 {
+			t.Logf("Updated replicas remaining=%d, expecting 0; images=%v", updatedCorrect, imageByOrdinal)
 			return false
 		}
 		return true

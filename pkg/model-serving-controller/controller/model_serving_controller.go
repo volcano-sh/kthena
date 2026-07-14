@@ -978,9 +978,6 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	maxOrdinal := -1
 	existingOrdinals := make(map[int]bool)
 	for _, role := range roleList {
-		if role.Status == datastore.RoleDeleting {
-			continue
-		}
 		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
 		existingOrdinals[ordinal] = true
 		if ordinal > maxOrdinal {
