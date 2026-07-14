@@ -247,6 +247,7 @@ class K8sManager:
     def _deploy_model_crds(self, config: BackendsConfig) -> None:
         """Apply ModelServer and ModelRoute CRDs for the mocker model."""
         model = config.profiles[0].model
+        engine = config.profiles[0].engine_type
 
         modelserver = {
             "apiVersion": "networking.serving.volcano.sh/v1alpha1",
@@ -257,7 +258,7 @@ class K8sManager:
             },
             "spec": {
                 "model": model,
-                "inferenceEngine": "SGLang",
+                "inferenceEngine": engine,
                 "workloadSelector": {"matchLabels": {"app": self.MOCKER_DEPLOYMENT}},
                 "workloadPort": {"port": 30000, "protocol": "http"},
             },

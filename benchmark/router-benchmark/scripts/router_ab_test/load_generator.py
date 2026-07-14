@@ -71,7 +71,7 @@ class AIPerfRunner:
             "aiperf",
             "profile",
             "--model",
-            "Qwen/Qwen3-0.6B",
+            scenario.backends.default_model,
             "--endpoint-type",
             "chat",
             "--url",

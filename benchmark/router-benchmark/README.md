@@ -142,73 +142,13 @@ python scripts/ab_test.py \
 | 模式       | 适用场景      | 说明                                                                        |
 |----------|-----------|---------------------------------------------------------------------------|
 | `pf`（默认） | Kind 测试集群 | 使用 `kubectl port-forward` 将 Router Service 端口转发到 `localhost:<local_port>` |
-| `lb`     | 生产集群      | 从 LoadBalancer 获取 EXTERNAL-IP，组成 `<external_ip>:<node_port>`              |
+| `lb`     | 生产集群      | 从 LoadBalancer 获取 EXTERNAL-IP，组成 `<external_ip>:<service_port>`              |
 
 > 备注：Debug port (15000) 未通过 Service 暴露，两种模式下均使用 port-forward。
 
 ## 场景配置
 
-场景配置遵循三明治模型，分为三部分。以 `smoke-test-s2.yaml` 为例：
-
-```yaml
-name: "smoke-test-s2-latency-vs-qps"
-description: "s2 scenario: routing latency under different QPS"
-
-load:
-  schedule:
-    mode: "rate"
-    rate: 50
-  traffic:
-    burstiness: 1.0
-    ramp:
-      strategy: "none"
-  concurrency:
-    connections: 100
-  prompts:
-    - tokens: 512
-      weight: 10
-  max_tokens:
-    - tokens: 128
-      weight: 10
-  duration: "60s"
-
-backends:
-  count: 4
-  profiles:
-    - name: "homogeneous"
-      count: 4
-      ttftMean: "50ms"
-      ttftStddev: "10ms"
-      tpotMean: "15ms"
-      tpotStddev: "3ms"
-  responseTokens: 128
-  errorRate: 0.0
-
-routing:
-  strategy: "least-latency"
-
-metrics:
-  prometheus: true
-  pprof: true
-  cpuProfileSeconds: 15
-  profiles:
-    - heap
-    - goroutine
-    - allocs
-    - mutex
-
-aiperf:
-  extraArgs:
-    - "--tokenizer"
-    - "Qwen/Qwen3-0.6B"
-```
-
-其中：
-
-- `metrics.prometheus: true`
-  - 采集 `http://<router-endpoint>/metrics`
-- `metrics.pprof: true`
-  - 采集 `http://<router-debug-endpoint>/debug/pprof/*`
+场景配置遵循三明治模型，分为三部分。以 `smoke-test-s2.yaml` 为例，分别为 load、backends、metrics 三端。
 
 ## A/B 测试流程
 
@@ -221,7 +161,7 @@ aiperf:
 6. Probe /v1/chat/completions until the route is really warm
 7. Run AIPerf and collect result A
 8. Scrape router /metrics and fetch pprof artifacts for config A
-9. Apply router config B
+9. Cold-start backend Pods, Apply router config B
 10. Repeat warmup + benchmark + metrics collection for config B
 11. Compare metrics and write report_<scenario>.json
 12. Exit non-zero if report contains regression
