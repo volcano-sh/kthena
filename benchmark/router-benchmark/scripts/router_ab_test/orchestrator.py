@@ -55,7 +55,7 @@ class ABTestOrchestrator:
         self.k8s.apply_router_config(config_path)
         router_endpoint = self.k8s.get_router_endpoint()
         router_debug_endpoint = self.k8s.get_router_debug_endpoint()
-        self.k8s.wait_for_router_ready("Qwen/Qwen3-0.6B", router_endpoint, timeout=300)
+        self.k8s.wait_for_router_ready(self.scenario.backends.default_model, router_endpoint, timeout=300)
         result = self.runner.run(
             config_name=config_name,
             scenario=self.scenario,

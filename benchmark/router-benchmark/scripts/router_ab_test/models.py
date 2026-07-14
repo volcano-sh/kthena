@@ -76,7 +76,7 @@ class BackendsConfig:
                 kv_cache_blocks=p.get("kvCacheBlocks"),
                 max_num_seqs=p.get("maxNumSeqs"),
             )
-            for p in data["profiles"]
+            for p in data.get("profiles", [])
         ]
         return cls(profiles=profiles, **defaults)
 
@@ -89,6 +89,11 @@ class ScenarioConfig:
     backends: BackendsConfig
     aiperf: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Coerce a raw dict backends to BackendsConfig for ergonomic construction."""
+        if isinstance(self.backends, dict):
+            self.backends = BackendsConfig.from_dict(self.backends)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ScenarioConfig":
