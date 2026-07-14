@@ -22,8 +22,8 @@ Compares two router scheduler configurations by:
 Usage:
     python ab_test.py \
         --scenario scenarios/smoke-test-s2.yaml \
-        --router-config-a k8s/router-config-random.yaml \
-        --router-config-b k8s/router-config-least-latency.yaml \
+        --router-config-a plugins/router-config-random.yaml \
+        --router-config-b plugins/router-config-least-latency.yaml \
         --output results/
 """
 
@@ -59,9 +59,10 @@ __all__ = [
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Kthena Router A/B Test Orchestrator")
     parser.add_argument("--scenario", required=True, help="Path to scenario YAML")
-    parser.add_argument("--router-config-a", required=True, help="Path to router scheduler ConfigMap for config A")
-    parser.add_argument("--router-config-b", required=True, help="Path to router scheduler ConfigMap for config B")
+    parser.add_argument("--router-config-a", help="Path to router scheduler ConfigMap for config A")
+    parser.add_argument("--router-config-b", help="Path to router scheduler ConfigMap for config B")
     parser.add_argument("--output", default="./results", help="Output directory")
+    parser.add_argument("--dry-run", action="store_true", help="Write scenario resources YAML to /tmp and exit")
     parser.add_argument(
         "--local-port",
         type=int,
@@ -80,6 +81,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    if args.dry_run:
+        _dry_run(args.scenario)
+        return
+
+    if not args.router_config_a or not args.router_config_b:
+        build_parser().error("--router-config-a and --router-config-b are required (unless --dry-run)")
+
     orchestrator = ABTestOrchestrator(
         scenario_path=args.scenario,
         router_config_a_path=args.router_config_a,
@@ -91,6 +100,19 @@ def main() -> None:
     report = orchestrator.run()
     has_regression = any(metric.get("regression", False) for metric in report["comparison"].values())
     raise SystemExit(1 if has_regression else 0)
+
+
+def _dry_run(scenario_path: str) -> None:
+    """Write scenario resources YAML to /tmp and exit."""
+    from pathlib import Path
+    from router_ab_test.kubernetes import K8sManager
+
+    scenario = ScenarioConfig.from_yaml(scenario_path)
+    k8s = K8sManager()
+    yaml_text = k8s.build_backends_yaml(scenario.backends)
+    out_path = Path(f"/tmp/kthena-scenario-{scenario.name}.yaml")
+    out_path.write_text(yaml_text, encoding="utf-8")
+    print(f"Dry-run: wrote scenario resources to {out_path}")
 
 
 if __name__ == "__main__":

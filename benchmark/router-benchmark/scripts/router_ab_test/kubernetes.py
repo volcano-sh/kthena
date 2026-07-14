@@ -219,7 +219,28 @@ class K8sManager:
         self._debug_pf_proc: subprocess.Popen[str] | None = None
         self._builder = MockerDeploymentBuilder(namespace=self.MOCKER_NAMESPACE)
 
+    # Mapping from scenario engineType (lowercase) to Kthena CRD InferenceEngine.
+    _ENGINE_CRD_MAP: dict[str, str] = {
+        "sglang": "SGLang",
+        "vllm": "vLLM",
+    }
+
     # ---- Mocker backends (built from scenario backends config) -----------------
+
+    def build_backends_yaml(self, config: BackendsConfig) -> str:
+        """Return multi-document YAML of all resources (deployments + service + CRDs),
+        without applying them.  Used by ``--dry-run``."""
+        docs: list[dict[str, Any]] = []
+
+        # Mocker deployments
+        for profile in config.profiles:
+            docs.append(self._builder._build_deployment(profile, config))
+        # Mocker service
+        docs.append(self._builder._build_service())
+        # ModelServer + ModelRoute
+        docs.extend(self._build_model_crds_docs(config))
+
+        return yaml.safe_dump_all(docs, sort_keys=False)
 
     def deploy_backends(self, config: BackendsConfig) -> None:
         """Render and apply mocker Deployment(s) + Service from a BackendsConfig."""
@@ -246,10 +267,22 @@ class K8sManager:
 
     def _deploy_model_crds(self, config: BackendsConfig) -> None:
         """Apply ModelServer and ModelRoute CRDs for the mocker model."""
-        model = config.profiles[0].model
-        engine = config.profiles[0].engine_type
+        docs = self._build_model_crds_docs(config)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", prefix="model-crds-", delete=False,
+        ) as tmp:
+            yaml.safe_dump_all(docs, tmp, sort_keys=False)
+            crd_path = tmp.name
 
-        modelserver = {
+        print(f"  Deploying ModelServer + ModelRoute from {crd_path} ...")
+        self._apply(crd_path)
+
+    def _build_model_crds_docs(self, config: BackendsConfig) -> list[dict[str, Any]]:
+        """Return ModelServer and ModelRoute dicts for the mocker model."""
+        model = config.profiles[0].model
+        engine = self._ENGINE_CRD_MAP.get(config.profiles[0].engine_type, config.profiles[0].engine_type)
+
+        modelserver: dict[str, Any] = {
             "apiVersion": "networking.serving.volcano.sh/v1alpha1",
             "kind": "ModelServer",
             "metadata": {
@@ -275,15 +308,7 @@ class K8sManager:
                 "rules": [{"targetModels": [{"modelServerName": modelserver["metadata"]["name"]}]}],
             },
         }
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", prefix="model-crds-", delete=False,
-        ) as tmp:
-            yaml.safe_dump_all([modelserver, modelroute], tmp, sort_keys=False)
-            crd_path = tmp.name
-
-        print(f"  Deploying ModelServer + ModelRoute from {crd_path} ...")
-        self._apply(crd_path)
+        return [modelserver, modelroute]
 
     def cleanup_backends(self) -> None:
         """Remove all mocker-llm deployments, the shared Service, and Kthena CRDs."""

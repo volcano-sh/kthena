@@ -49,7 +49,6 @@ class BackendsConfig:
     """
     profiles: list[BackendProfile]
 
-    # per-field defaults, matching benchmark/router-benchmark/k8s/mocker-deployment.yaml
     default_engine_type: str = "sglang"
     default_model: str = "Qwen/Qwen3-0.6B"
     default_speedup_ratio: float = 1.0

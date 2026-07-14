@@ -39,18 +39,6 @@
 
 ```
 router-benchmark/
-├── README.md
-├── k8s/
-│   ├── mocker-deployment.yaml
-│   ├── modelroute.yaml
-│   ├── modelserver.yaml
-│   ├── router-config-least-latency.yaml
-│   ├── router-config-least-request.yaml
-│   └── router-config-random.yaml
-├── scenarios/
-│   ├── smoke-test-s2.yaml
-│   ├── smoke-test-s7.yaml
-│   └── smoke-test-s8.yaml
 ├── scripts/
 │   ├── ab_test.py                         # CLI 入口
 │   └── router_ab_test/
@@ -105,33 +93,19 @@ cd /path/to/kthena
 ./hack/local-up-kthena.sh
 ```
 
-### 2. 部署 Mock Backend
-
-```bash
-kubectl apply -f k8s/mocker-deployment.yaml # HF 无法访问，可使用 k8s/mocker-deployment-local-hf.yaml
-kubectl wait --for=condition=ready pod -l app=mocker-llm --timeout=120s
-```
-
-### 3. 部署 Kthena Router 相关模型资源
-
-```bash
-kubectl apply -f k8s/modelserver.yaml
-kubectl apply -f k8s/modelroute.yaml
-```
-
-### 4. 安装 AIPerf
+### 2. 安装 AIPerf
 
 ```bash
 pip install 'aiperf>=0.9,<0.11'
 ```
 
-### 5. 运行 A/B 测试
+### 3. 运行 A/B 测试
 
 ```bash
 python scripts/ab_test.py \
   --scenario scenarios/smoke-test-s2.yaml \
-  --router-config-a k8s/router-config-random.yaml \
-  --router-config-b k8s/router-config-least-latency.yaml \
+  --router-config-a plugins/router-config-random.yaml \
+  --router-config-b plugins/router-config-least-latency.yaml \
   --output /tmp/results/
 ```
 
