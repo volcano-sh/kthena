@@ -16,8 +16,20 @@ limitations under the License.
 
 package tokenizer
 
-type Tokenizer interface {
-	Load(modelServerID, modelRepoID string) error
-	Unload(modelServerID string) error
-	Encode(modelServerID, prompt string) ([]uint32, int, error)
+import (
+	"net/http"
+)
+
+// NewHTTPClient creates a tokenizer client communicating over
+// HTTP with the tokenizer sidecar.
+func NewHTTPClient(endpoint string) *Client {
+
+	return &Client{
+		endpoint: endpoint,
+		client:   &http.Client{},
+	}
+}
+
+func NewClient(endpoint string) *Client {
+	return NewHTTPClient(endpoint)
 }

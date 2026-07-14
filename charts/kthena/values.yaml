@@ -114,6 +114,18 @@ networking:
     # -- Drain timeout for kthena-router graceful shutdown.
     # -- This should be less than terminationGracePeriodSeconds.
     drainTimeout: 5m
+    # -- tokenizer configuration for token counting
+    tokenizer:
+      # -- Deployment mode: "sidecar" or "independent".
+      deployment: sidecar
+      image:
+        # -- Image repository for the tokenizer.
+        repository: ghcr.io/volcano-sh/kthena-tokenizer
+        # -- Image tag for the tokenizer.
+        tag: latest
+        # -- Image pull policy for the tokenizer.
+        pullPolicy: IfNotPresent
+
 
 global:
   # -- Certificate Management Mode.<br/>

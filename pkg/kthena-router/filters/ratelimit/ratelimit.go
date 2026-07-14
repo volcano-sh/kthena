@@ -93,17 +93,24 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 	return &TokenRateLimiter{
 		inputLimiter:  make(map[string]Limiter),
 		outputLimiter: make(map[string]Limiter),
-		tokenizer:     tokenizer.NewlocalTokenizer(),
+		tokenizer:     tokenizer.NewLocalTokenizer(tokenizer.TokenizerConfig{Deployment: "sidecar"}),
 	}
 }
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
-func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
+func (r *TokenRateLimiter) RateLimit(model, prompt string, tokencount int) error {
+	var (
+		tokens int
+		err    error
+	)
 	// Estimate input tokens
-	tokens, err := r.tokenizer.CountTokens(model, prompt)
-	if err != nil {
-		klog.Errorf("failed to calculate token number: %v", err)
-		tokens = len(prompt) / 4 // fallback estimation
+	if tokencount != 0 {
+		tokens = tokencount
+	} else {
+		_, tokens, err = r.tokenizer.Encode(model, prompt)
+		if err != nil {
+			klog.Errorf("failed to calculate token number: %v", err)
+		}
 	}
 
 	r.mutex.RLock()

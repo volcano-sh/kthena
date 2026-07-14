@@ -12,21 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import uvicorn
+from fastapi import FastAPI
+from app.routes import router as routes
 
-from pydantic import BaseModel
+app = FastAPI(title="Kthena Tokenizer Service")
+app.include_router(routes, tags=["Tokenizer Service"])
 
+if __name__ == "__main__":
+    deployment = os.getenv("TOKENIZER_DEPLOYMENT", "sidecar")
 
-class EncodeRequest(BaseModel):
-    model_server_id: str
-    text: str
-    return_tokens: bool = False
-
-
-class LoadRequest(BaseModel):
-    model_server_id: str
-    model_repo_id: str
-    modelrevision: str | None = None
-
-
-class UnLoadRequest(BaseModel):
-    model_server_id: str
+    if deployment == "sidecar":
+        uvicorn.run(
+            app,
+            uds="/tmp/tokenizer.sock",
+        )
+    else:
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=8000,
+        )

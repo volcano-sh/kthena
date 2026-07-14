@@ -118,6 +118,10 @@ spec:
 
             - name: DRAIN_TIMEOUT
               value: {{ .Values.kthenaRouter.drainTimeout | quote }}
+
+            - name: TOKENIZER_DEPLOYMENT
+              value: {{ .Values.kthenaRouter.tokenizer.deployment | quote }}
+
           resources: {{- toYaml .Values.kthenaRouter.resource | nindent 12 }}
           livenessProbe:
             httpGet:
@@ -141,6 +145,11 @@ spec:
           - name: scheduler-config
             mountPath: /etc/config/routerConfiguration.yaml
             subPath: routerConfiguration
+
+          {{- if eq .Values.kthenaRouter.tokenizer.deployment "sidecar" }}
+          - name: tokenizer-socket
+            mountPath: /tmp
+          {{- end }}
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
           - name: router-tls-certs
             mountPath: /etc/tls
@@ -151,10 +160,26 @@ spec:
             mountPath: /etc/tls
             readOnly: true
           {{- end }}
+
+        {{- if eq .Values.kthenaRouter.tokenizer.deployment "sidecar" }}
+        - name: tokenizer
+          image: "{{ .Values.kthenaRouter.tokenizer.image.repository }}:{{ .Values.kthenaRouter.tokenizer.image.tag }}"
+          imagePullPolicy: {{ .Values.kthenaRouter.tokenizer.image.pullPolicy }}
+          env:
+            - name: TOKENIZER_SOCKET
+              value: /tmp/tokenizer.sock
+          volumeMounts:
+          - name: tokenizer-socket
+            mountPath: /tmp
+        {{- end }}
       volumes:
         - name: scheduler-config
           configMap:
             name: kthena-router-config
+        {{- if eq .Values.kthenaRouter.tokenizer.deployment "sidecar" }}
+        - name: tokenizer-socket
+          emptyDir: {}
+        {{- end }}
         {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
         - name: router-tls-certs
           secret:

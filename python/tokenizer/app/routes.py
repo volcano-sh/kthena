@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 import asyncio
 from fastapi import APIRouter, HTTPException
 from .schema import EncodeRequest, LoadRequest, UnLoadRequest
@@ -29,15 +31,9 @@ downloader = TokenizerDownloader()
 async def encode(req: EncodeRequest):
     encoded, token_count = encoder(req.model_server_id,req.text )
 
-    if req.return_tokens:
-        return {
-            "encoded_tokens": encoded.tokens,
-            "encoded_ids": encoded.ids,
-            "token_count": token_count
-        }
-
+    
     return {
-        "encoded_ids": encoded.ids,
+        "token_ids": encoded.ids,
         "token_count": token_count
     }
 
@@ -92,7 +88,5 @@ def encoder(model_server_id: str, text: str):
         logger.exception(f"Encoding failed for tokenizer '{model_server_id}'")
         raise HTTPException(status_code=500,detail=f"Tokenizer encoding failed: {e}")
 
-    token_count = len(encoded.ids)
-
-    return encoded, token_count
+    return encoded, len(encoded.ids)
 

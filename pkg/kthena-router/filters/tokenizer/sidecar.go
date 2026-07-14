@@ -18,17 +18,25 @@ package tokenizer
 
 import (
 	"context"
-
-	"k8s.io/klog/v2"
 )
 
 type localTokenizer struct {
 	client *Client
 }
 
-func NewlocalTokenizer() Tokenizer {
+type TokenizerConfig struct {
+	Deployment string
+}
+
+func NewLocalTokenizer(cfg TokenizerConfig) Tokenizer {
+	if cfg.Deployment == "sidecar" {
+		return &localTokenizer{
+			client: NewUDSClient(),
+		}
+	}
+
 	return &localTokenizer{
-		client: NewClient("http://localhost:8000"),
+		client: NewHTTPClient(""),
 	}
 }
 
@@ -58,37 +66,11 @@ func (s *localTokenizer) Unload(modelServerID string) error {
 	)
 	return err
 }
-func (s *localTokenizer) CountTokens(modelServerID, prompt string) (int, error) {
+
+func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, int, error) {
 	req := EncodeRequest{
 		ModelServerID: modelServerID,
 		Text:          prompt,
-		ReturnTokens:  false,
-	}
-
-	var resp EncodeResponse
-	_, err := s.client.post(
-		context.Background(),
-		"/v1/encode",
-		req,
-		&resp,
-	)
-	if err == nil {
-		return resp.TokenCount, nil
-	}
-
-	klog.Warningf("Local tokenizer unavailable, using heuristic token estimation: %v", err)
-
-	estimator := &SimpleEstimateTokenizer{
-		CharactersPerToken: 4,
-	}
-	return estimator.CountTokens(modelServerID, prompt)
-}
-
-func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, error) {
-	req := EncodeRequest{
-		ModelServerID: modelServerID,
-		Text:          prompt,
-		ReturnTokens:  true,
 	}
 	var resp EncodeResponse
 	_, err := s.client.post(
@@ -98,7 +80,7 @@ func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, error) 
 		&resp,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	ids := make([]uint32, len(resp.TokenIds))
 	for i, id := range resp.TokenIds {
@@ -106,5 +88,6 @@ func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, error) 
 			ids[i] = uint32(id)
 		}
 	}
-	return ids, nil
+
+	return ids, resp.TokenCount, nil
 }

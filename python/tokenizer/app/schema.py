@@ -13,11 +13,19 @@
 # limitations under the License.
 
 
-from fastapi import FastAPI
-from app.routes import router as routes
-
-app = FastAPI(title="Kthena Tokenizer Service")
-
-app.include_router(routes,tags=["Tokenizer Service"])
+from pydantic import BaseModel
 
 
+class EncodeRequest(BaseModel):
+    model_server_id: str
+    text: str
+
+
+class LoadRequest(BaseModel):
+    model_server_id: str
+    model_repo_id: str
+    modelrevision: str | None = None
+
+
+class UnLoadRequest(BaseModel):
+    model_server_id: str

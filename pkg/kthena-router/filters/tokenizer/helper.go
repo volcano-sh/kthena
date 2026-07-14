@@ -25,23 +25,9 @@ import (
 	"net/http"
 )
 
-const (
-	defaultEndpoint = "http://localhost:8000"
-)
-
 type Client struct {
 	endpoint string
 	client   *http.Client
-}
-
-func NewClient(endpoint string) *Client {
-	if endpoint == "" {
-		endpoint = defaultEndpoint
-	}
-	return &Client{
-		endpoint: endpoint,
-		client:   &http.Client{},
-	}
 }
 
 func (c *Client) post(ctx context.Context, path string, req any, resp any) (*http.Response, error) {

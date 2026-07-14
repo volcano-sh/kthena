@@ -63,7 +63,7 @@ func TestSimpleEstimateTokenizerCountTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.tokenizer.CountTokens("", tt.prompt)
+			_, got, err := tt.tokenizer.Encode("", tt.prompt)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("CountTokens() error = nil, want non-nil")

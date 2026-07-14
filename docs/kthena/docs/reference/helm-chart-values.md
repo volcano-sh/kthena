@@ -41,6 +41,11 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |
 | networking.kthenaRouter.tls.secretName | string | `"kthena-router-tls"` | Secret name to store the certificate and key. |
+| networking.kthenaRouter.tokenizer | object | `{"deployment":"sidecar","image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/volcano-sh/kthena-tokenizer","tag":"latest"}}` | tokenizer configuration for token counting |
+| networking.kthenaRouter.tokenizer.deployment | string | `"sidecar"` | Deployment mode: "sidecar" or "independent". |
+| networking.kthenaRouter.tokenizer.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the tokenizer. |
+| networking.kthenaRouter.tokenizer.image.repository | string | `"ghcr.io/volcano-sh/kthena-tokenizer"` | Image repository for the tokenizer. |
+| networking.kthenaRouter.tokenizer.image.tag | string | `"latest"` | Image tag for the tokenizer. |
 | networking.kthenaRouter.webhook.enabled | bool | `true` | Enable webhook for Kthena Router. |
 | networking.kthenaRouter.webhook.port | int | `8443` | Container port for Kthena Router webhook. |
 | networking.kthenaRouter.webhook.servicePort | int | `443` | Service port for Kthena Router webhook. |

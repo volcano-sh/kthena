@@ -32,6 +32,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -76,9 +77,6 @@ const (
 
 	kvCacheGCInterval = time.Hour
 	kvCacheGCScanSize = int64(100)
-
-	LocalTokenizerEndpoint = "http://127.0.0.1:8000" // default local tokenizer endpoint template
-
 )
 
 type KVCacheAwareArgs struct {
@@ -87,8 +85,7 @@ type KVCacheAwareArgs struct {
 	// VLLMTokenizerPort overrides the default vLLM tokenizer port (8000).
 	VLLMTokenizerPort int `yaml:"vllmTokenizerPort,omitempty"`
 	// SGLangTokenizerPort overrides the default SGLang tokenizer port (30000).
-	SGLangTokenizerPort  int  `yaml:"sglangTokenizerPort,omitempty"`
-	PreferLocalTokenizer bool `yaml:"preferLocalTokenizer,omitempty"`
+	SGLangTokenizerPort int `yaml:"sglangTokenizerPort,omitempty"`
 }
 
 type KVCacheAware struct {
@@ -182,7 +179,7 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		redisClient:      redisClient,
 		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
 		tokenizerManager: manager,
-		localTokenizer:   tokenizer.NewlocalTokenizer(),
+		localTokenizer:   tokenizer.NewLocalTokenizer(tokenizer.TokenizerConfig{Deployment: os.Getenv("TOKENIZER_DEPLOYMENT")}),
 	}
 	plugin.startGC()
 	return plugin
@@ -193,8 +190,13 @@ func (t *KVCacheAware) Name() string {
 }
 
 func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods []*datastore.PodInfo) ([]uint32, error) {
+
+	if len(ctx.InputTokens) > 0 {
+		klog.V(4).Infof("KVCacheAware: reusing pre-computed tokens from router context for model=%q , %v", ctx.Model, ctx.InputTokens)
+		return ctx.InputTokens, nil
+	}
 	if t.localTokenizer != nil {
-		tokens, err := t.localTokenizer.Encode(ctx.Model, ctx.Prompt.Text)
+		tokens, _, err := t.localTokenizer.Encode(ctx.Model, ctx.Prompt.Text)
 		if err == nil {
 			klog.V(4).Infof("KVCacheAware: using local tokenizer for model=%q, tokens=%v", ctx.Model, tokens)
 			return tokens, nil
