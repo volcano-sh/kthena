@@ -30,6 +30,7 @@ import (
 const (
 	defaultRefreshInterval = time.Hour * 24 * 7 // 7 days
 	maxRetryAttempts       = 3
+	jwksFetchTimeout       = 10 * time.Second
 )
 
 // Jwks represents the JWKS data structure
@@ -124,7 +125,7 @@ func rebuildJwks(config conf.AuthenticationConfig) *Jwks {
 	var keySet jwk.Set
 	var err error
 	for i := 0; i < maxRetryAttempts; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), jwksFetchTimeout)
 		keySet, err = jwk.Fetch(ctx, config.JwksUri)
 		cancel()
 		if err != nil {
