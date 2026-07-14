@@ -92,15 +92,15 @@ class CompareMetricsTest(unittest.TestCase):
         report = ab_test.ResultReporter().build_report(
             scenario_name="smoke-test-s2-latency-vs-qps",
             description="scenario",
-            config_a_path="k8s/router-config-random.yaml",
-            config_b_path="k8s/router-config-least-latency.yaml",
+            config_a_path="plugins/router-config-random.yaml",
+            config_b_path="plugins/router-config-least-latency.yaml",
             result_a=result_a,
             result_b=result_b,
         )
 
         self.assertEqual(report["scenario"], "smoke-test-s2-latency-vs-qps")
-        self.assertEqual(report["config_a"]["path"], "k8s/router-config-random.yaml")
-        self.assertEqual(report["config_b"]["path"], "k8s/router-config-least-latency.yaml")
+        self.assertEqual(report["config_a"]["path"], "plugins/router-config-random.yaml")
+        self.assertEqual(report["config_b"]["path"], "plugins/router-config-least-latency.yaml")
         self.assertEqual(report["config_a"]["metrics"], result_a.metrics)
         self.assertEqual(report["config_b"]["metrics"], result_b.metrics)
         self.assertEqual(report["config_a"]["artifacts"], result_a.artifacts)
@@ -315,6 +315,7 @@ class MainTest(unittest.TestCase):
             router_config_b="config-b.yaml",
             output="./results",
             local_port=ab_test.K8sManager.DEFAULT_LOCAL_PORT,
+            dry_run=False,
         )
         parser = mock.Mock()
         parser.parse_args.return_value = args
@@ -327,6 +328,38 @@ class MainTest(unittest.TestCase):
 
         self.assertEqual(exit_ctx.exception.code, 1)
 
+    @mock.patch("router_ab_test.kubernetes.K8sManager")
+    @mock.patch("router_ab_test.models.ScenarioConfig")
+    def test_dry_run_writes_yaml_to_tmp(self, mock_scenario_cls, mock_k8s_cls):
+        from pathlib import Path
+
+        mock_scenario = mock.MagicMock()
+        mock_scenario.name = "smoke-test-s2-latency-vs-qps"
+        mock_scenario.backends = mock.MagicMock()
+        mock_scenario_cls.from_yaml.return_value = mock_scenario
+
+        mock_k8s = mock.MagicMock()
+        mock_k8s.build_backends_yaml.return_value = "apiVersion: v1\nkind: Pod\n"
+        mock_k8s_cls.return_value = mock_k8s
+
+        args = mock.Mock(
+            scenario="scenarios/smoke-test-s2.yaml",
+            dry_run=True,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = args
+
+        out_path = Path(f"/tmp/kthena-scenario-{mock_scenario.name}.yaml")
+        out_path.unlink(missing_ok=True)
+
+        try:
+            with mock.patch.object(ab_test, "build_parser", return_value=parser):
+                ab_test.main()
+
+            self.assertTrue(out_path.exists())
+            self.assertEqual(out_path.read_text(), "apiVersion: v1\nkind: Pod\n")
+        finally:
+            out_path.unlink(missing_ok=True)
 
 if __name__ == "__main__":
     unittest.main()
