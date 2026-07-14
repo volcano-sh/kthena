@@ -329,7 +329,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(exit_ctx.exception.code, 1)
 
     @mock.patch("router_ab_test.kubernetes.K8sManager")
-    @mock.patch("router_ab_test.models.ScenarioConfig")
+    @mock.patch.object(ab_test, "ScenarioConfig")
     def test_dry_run_writes_yaml_to_tmp(self, mock_scenario_cls, mock_k8s_cls):
         from pathlib import Path
 

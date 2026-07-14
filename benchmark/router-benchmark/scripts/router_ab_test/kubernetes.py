@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 import select
 import socket
 import subprocess
@@ -544,7 +545,7 @@ class K8sManager:
             return ""
         if not ready:
             return ""
-        return proc.stderr.read().strip()
+        return os.read(proc.stderr.fileno(), 4096).decode(errors="replace").strip()
 
 
 # ---------------------------------------------------------------------------
