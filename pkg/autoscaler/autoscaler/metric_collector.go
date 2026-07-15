@@ -536,3 +536,24 @@ func (collector *MetricCollector) getPrometheusAPI(serverURL string, timeout tim
 	collector.promClients[serverURL] = client
 	return prometheusv1.NewAPI(client), nil
 }
+
+// GetHistoricalSnapshots implements the HistogramDataProvider interface
+func (collector *MetricCollector) GetHistoricalSnapshots(metricName string, windowMinutes int) ([]*histogram.Snapshot, error) {
+	snapshots := []*histogram.Snapshot{}
+
+	snapshotMap, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
+	if !ok {
+		return snapshots, nil
+	}
+
+	for _, histInfo := range snapshotMap {
+		if histInfo.HistogramMap == nil {
+			continue
+		}
+		if histSnapshot, ok := histInfo.HistogramMap[metricName]; ok {
+			snapshots = append(snapshots, histSnapshot)
+		}
+	}
+
+	return snapshots, nil
+}

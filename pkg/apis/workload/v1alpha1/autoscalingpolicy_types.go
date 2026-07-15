@@ -60,7 +60,12 @@ type AutoscalingPolicySpec struct {
 	// single ModelServing that uses disaggregated serving.
 	// +optional
 	DisaggregatedTarget *DisaggregatedTarget `json:"disaggregatedTarget,omitempty"`
+
+	// PredictiveScaling configures predictive scaling behavior
+	// +optional
+	PredictiveScaling *PredictiveScalingConfig `json:"predictiveScaling,omitempty"`
 }
+
 
 // AutoscalingPolicyMetric defines a metric and its target value for scaling decisions.
 type AutoscalingPolicyMetric struct {
@@ -145,6 +150,25 @@ type AutoscalingPolicyPanicPolicy struct {
 	// PanicModeHold defines the duration to remain in panic mode before returning to normal scaling.
 	// +kubebuilder:default="60s"
 	PanicModeHold *metav1.Duration `json:"panicModeHold,omitempty"`
+}
+
+// PredictiveScalingConfig defines the configuration for predictive scaling
+type PredictiveScalingConfig struct {
+	// Enabled enables or disables predictive scaling
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// LookAheadMinutes is the number of minutes to predict ahead
+	// +optional
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	LookAheadMinutes int `json:"lookAheadMinutes,omitempty"`
+
+	// HistoryWindowMinutes is the number of minutes of historical data to consider
+	// +optional
+	// +kubebuilder:default=30
+	// +kubebuilder:validation:Minimum=1
+	HistoryWindowMinutes int `json:"historyWindowMinutes,omitempty"`
 }
 
 // AutoscalingPolicyStatus defines the observed state of AutoscalingPolicy.

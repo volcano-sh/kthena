@@ -18,9 +18,9 @@ package autoscaler
 
 import (
 	"context"
-
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/predictor"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -29,6 +29,7 @@ type Autoscaler struct {
 	Collector *MetricCollector
 	Status    *Status
 	Meta      *ScalingMeta
+	predictor predictor.Predictor
 }
 
 type ScalingMeta struct {
@@ -38,9 +39,12 @@ type ScalingMeta struct {
 }
 
 func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy) *Autoscaler {
+	collector := NewMetricCollector(&autoscalePolicy.Spec.HomogeneousTarget.Target, autoscalePolicy, GetMetricTargets(autoscalePolicy))
+	pred := predictor.NewHistogramBasedPredictor(collector)
+
 	return &Autoscaler{
 		Status:    NewStatus(&autoscalePolicy.Spec.Behavior),
-		Collector: NewMetricCollector(&autoscalePolicy.Spec.HomogeneousTarget.Target, autoscalePolicy, GetMetricTargets(autoscalePolicy)),
+		Collector: collector,
 		Meta: &ScalingMeta{
 			Config:    autoscalePolicy.Spec.HomogeneousTarget,
 			Namespace: autoscalePolicy.Namespace,
@@ -48,6 +52,7 @@ func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy) *Autoscaler {
 				AutoscalePolicyGeneration: autoscalePolicy.Generation,
 			},
 		},
+		predictor: pred,
 	}
 }
 
@@ -68,6 +73,31 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 		klog.Errorf("update metrics error: %v", err)
 		return -1, err
 	}
+
+	// Use prediction if enabled - apply to current metrics, NOT targets
+	if autoscaler.predictor != nil && autoscalePolicy.Spec.PredictiveScaling != nil && autoscalePolicy.Spec.PredictiveScaling.Enabled {
+		lookAhead := autoscalePolicy.Spec.PredictiveScaling.LookAheadMinutes
+		if lookAhead == 0 {
+			lookAhead = 5
+		}
+		// Apply prediction to readyInstancesMetrics (pod-scraped metrics)
+		for metricName := range readyInstancesMetrics {
+			predicted, err := autoscaler.predictor.GetPredictedMetric(metricName, lookAhead)
+			if err == nil && predicted > readyInstancesMetrics[metricName] {
+				readyInstancesMetrics[metricName] = predicted
+				klog.V(4).Infof("Using predicted metric %f for %s", predicted, metricName)
+			}
+		}
+		// Apply prediction to externalMetrics (Prometheus metrics)
+		for metricName := range externalMetrics {
+			predicted, err := autoscaler.predictor.GetPredictedMetric(metricName, lookAhead)
+			if err == nil && predicted > externalMetrics[metricName] {
+				externalMetrics[metricName] = predicted
+				klog.V(4).Infof("Using predicted metric %f for %s", predicted, metricName)
+			}
+		}
+	}
+
 	result := scaleOneTarget(scaleOneTargetInput{
 		Status:                autoscaler.Status,
 		Behavior:              &autoscalePolicy.Spec.Behavior,
@@ -75,10 +105,10 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 		MaxReplicas:           autoscaler.Meta.Config.MaxReplicas,
 		CurrentReplicas:       currentInstancesCount,
 		TolerancePercent:      autoscalePolicy.Spec.TolerancePercent,
-		MetricTargets:         autoscaler.Collector.MetricTargets,
+		MetricTargets:         autoscaler.Collector.MetricTargets, // ORIGINAL targets - UNCHANGED
 		UnreadyInstancesCount: unreadyInstancesCount,
-		ReadyInstancesMetrics: readyInstancesMetrics,
-		ExternalMetrics:       externalMetrics,
+		ReadyInstancesMetrics: readyInstancesMetrics, // MODIFIED with predictions
+		ExternalMetrics:       externalMetrics,       // MODIFIED with predictions
 	})
 	if result.Skip {
 		klog.InfoS("skip recommended instances")

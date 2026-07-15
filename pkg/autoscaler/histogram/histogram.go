@@ -120,3 +120,19 @@ func QuantileInDiff(percentile int32, now *Snapshot, past *Snapshot) (float64, e
 	}
 	return 0, fmt.Errorf("percentile %v not found", percentile)
 }
+
+// Sum returns the sum of all observations
+func (s *Snapshot) Sum() float64 {
+	if s == nil {
+		return 0
+	}
+	return s.sum
+}
+
+// Count returns the count of all observations
+func (s *Snapshot) Count() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.count
+}
