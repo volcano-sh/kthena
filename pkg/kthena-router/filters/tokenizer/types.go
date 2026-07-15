@@ -17,18 +17,18 @@ limitations under the License.
 package tokenizer
 
 type LoadRequest struct {
-	ModelServerID string `json:"model_server_id"`
-	ModelrepoID   string `json:"model_repo_id"`
+	ModelName   string `json:"model_name"`
+	ModelrepoID string `json:"model_repo_id"`
 }
 
 type UnloadRequest struct {
-	ModelServerID string `json:"model_server_id"`
+	ModelName string `json:"model_name"`
 }
 
 type EncodeRequest struct {
-	ModelServerID string `json:"model_server_id"`
-	Text          string `json:"text"`
-	ReturnTokens  bool   `json:"return_tokens"`
+	ModelName    string `json:"model_name"`
+	Text         string `json:"text"`
+	ReturnTokens bool   `json:"return_tokens"`
 }
 
 type EncodeResponse struct {

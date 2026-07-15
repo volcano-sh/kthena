@@ -29,7 +29,7 @@ type TokenizerConfig struct {
 }
 
 func NewLocalTokenizer(cfg TokenizerConfig) Tokenizer {
-	if cfg.Deployment == "uds" {
+	if cfg.Deployment == "sidecar" {
 		return &localTokenizer{
 			client: NewUDSClient(),
 		}

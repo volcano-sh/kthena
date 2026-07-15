@@ -28,7 +28,7 @@ downloader = TokenizerDownloader()
 
 
 @router.post("/v1/encode")
-async def encode(req: EncodeRequest):
+def encode(req: EncodeRequest):
     encoded, token_count = encoder(req.model_server_id,req.text )
 
 

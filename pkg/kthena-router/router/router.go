@@ -140,33 +140,25 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		if data.ModelServer == nil {
 			return
 		}
-
-		// Unique ID derived from the CRD Namespace & Name
-		modelServerID := fmt.Sprintf("%s/%s",
-			data.ModelServer.Namespace,
-			data.ModelServer.Name,
-		)
+		var modelName string
+		if data.ModelServer.Spec.Model != nil {
+			modelName = *data.ModelServer.Spec.Model
+		}
 
 		switch data.EventType {
 		case datastore.EventAdd, datastore.EventUpdate:
-			// model-repo-id is propagated from the corresponding ModelBooster
-			// and identifies which tokenizer should be loaded.
 			modelURI := data.ModelServer.Annotations["kthena.volcano.sh/model-repo-id"]
-			if modelURI == "" && data.ModelServer.Spec.Model != nil {
-				modelURI = *data.ModelServer.Spec.Model
-			}
-
 			if modelURI == "" {
-				klog.Warningf("Skipping tokenizer load for %s: model URI is empty", modelServerID)
+				klog.Errorf("Skipping tokenizer load for ModelServer %s/%s: annotation 'kthena.volcano.sh/model-repo-id' is missing or empty", data.ModelServer.Namespace, data.ModelServer.Name)
 				return
 			}
 
-			klog.Infof("Loading tokenizer for ModelServer %s (URI: %s)", modelServerID, modelURI)
+			klog.Infof("Loading tokenizer for ModelServer %s (URI: %s)", modelName, modelURI)
 
 			go func() {
 				for i := 0; i < 10; i++ {
-					if err := tokenizerInstance.Load(modelServerID, modelURI); err != nil {
-						klog.Errorf("Failed to load tokenizer for ModelServer %s: %v", modelServerID, err)
+					if err := tokenizerInstance.Load(modelName, modelURI); err != nil {
+						klog.Errorf("Failed to load tokenizer for ModelServer %s: %v", modelName, err)
 						time.Sleep(5 * time.Second) // Retry after a delay
 					} else {
 						break
@@ -175,11 +167,11 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 			}()
 
 		case datastore.EventDelete:
-			klog.Infof("Unloading tokenizer for ModelServer %s", modelServerID)
+			klog.Infof("Unloading tokenizer for ModelServer %s", modelName)
 
 			go func() {
-				if err := tokenizerInstance.Unload(modelServerID); err != nil {
-					klog.Errorf("Failed to unload tokenizer for ModelServer %s: %v", modelServerID, err)
+				if err := tokenizerInstance.Unload(modelName); err != nil {
+					klog.Errorf("Failed to unload tokenizer for ModelServer %s: %v", modelName, err)
 				}
 			}()
 		}
