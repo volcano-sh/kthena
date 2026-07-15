@@ -1430,6 +1430,10 @@ spec:
                         regex:
                           type: string
                       type: object
+                      x-kubernetes-validations:
+                      - message: only one of exact, prefix, or regex may be set
+                        rule: '(has(self.exact) ? 1 : 0) + (has(self.prefix) ? 1 :
+                          0) + (has(self.regex) ? 1 : 0) <= 1'
                     description: |-
                       Header to match: prefix, exact, regex
                       If unset, any header will be matched.
@@ -1446,6 +1450,10 @@ spec:
                       regex:
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: only one of exact, prefix, or regex may be set
+                      rule: '(has(self.exact) ? 1 : 0) + (has(self.prefix) ? 1 : 0)
+                        + (has(self.regex) ? 1 : 0) <= 1'
                 type: object
               name:
                 description: |-
