@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -852,11 +853,47 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		// Existing object — concurrent readers may access modelServer and pods,
 		// so we must hold the lock to prevent data races.
 		modelServerObj.mutex.Lock()
+
+		var oldPDGroup *aiv1alpha1.PDGroup
+		if modelServerObj.modelServer.Spec.WorkloadSelector != nil {
+			oldPDGroup = modelServerObj.modelServer.Spec.WorkloadSelector.PDGroup
+		}
+		var newPDGroup *aiv1alpha1.PDGroup
+		if ms.Spec.WorkloadSelector != nil {
+			newPDGroup = ms.Spec.WorkloadSelector.PDGroup
+		}
+
+		hasOldPDGroup := oldPDGroup != nil
+		hasNewPDGroup := newPDGroup != nil
+
+		pdGroupChanged := false
+		if hasOldPDGroup != hasNewPDGroup {
+			pdGroupChanged = true
+		} else if hasOldPDGroup && hasNewPDGroup {
+			pdGroupChanged = !reflect.DeepEqual(oldPDGroup, newPDGroup)
+		}
+
+		if hasOldPDGroup && pdGroupChanged {
+			// PDGroup configuration was removed or modified, clear the existing map
+			modelServerObj.pdGroups = make(map[string]*PDGroupPods)
+		}
+
 		modelServerObj.modelServer = ms
 		if len(pods) != 0 {
 			// do not operate s.pods here, which are done within pod handler
 			modelServerObj.pods = pods
 		}
+
+		if hasNewPDGroup && pdGroupChanged {
+			// Recategorize all existing pods
+			for podName := range modelServerObj.pods {
+				if value, ok := s.pods.Load(podName); ok {
+					podInfo := value.(*PodInfo)
+					modelServerObj.categorizePodForPDGroupNoLock(podName, podInfo.GetPodLabels())
+				}
+			}
+		}
+
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)

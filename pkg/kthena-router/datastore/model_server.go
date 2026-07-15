@@ -78,6 +78,11 @@ func (m *modelServer) categorizePodForPDGroup(podName types.NamespacedName, podL
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	m.categorizePodForPDGroupNoLock(podName, podLabels)
+}
+
+// categorizePodForPDGroupNoLock categorizes a pod without acquiring the mutex lock (caller must hold Lock).
+func (m *modelServer) categorizePodForPDGroupNoLock(podName types.NamespacedName, podLabels map[string]string) {
 	pdGroupValue := m.getPDGroupName(podLabels)
 	if pdGroupValue == "" {
 		return
@@ -117,12 +122,7 @@ func (m *modelServer) removePodFromPDGroups(podName types.NamespacedName, labels
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	pdGroupName := m.getPDGroupName(labels)
-	if pdGroupName == "" {
-		return
-	}
-
-	if pdGroup, ok := m.pdGroups[pdGroupName]; ok {
+	for pdGroupName, pdGroup := range m.pdGroups {
 		pdGroup.RemovePod(podName)
 		// Clean up empty PDGroupPods
 		if pdGroup.IsEmpty() {

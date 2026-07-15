@@ -19,6 +19,7 @@ package datastore
 import (
 	"testing"
 
+	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -282,5 +283,107 @@ func TestPDGroupPodRemoval(t *testing.T) {
 
 	if len(decodePods) != 0 {
 		t.Errorf("Expected 0 decode pods after deletion, got %d", len(decodePods))
+	}
+}
+
+func TestPDGroupSpecChangeRecategorization(t *testing.T) {
+	store := New()
+
+	modelServerName := types.NamespacedName{
+		Namespace: "default",
+		Name:      "test-model",
+	}
+
+	// 1. Create ModelServer with initial PDGroup config
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model",
+			Namespace: "default",
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey: "pd-group",
+					PrefillLabels: map[string]string{
+						"role": "prefill",
+					},
+					DecodeLabels: map[string]string{
+						"role": "decode",
+					},
+				},
+			},
+		},
+	}
+
+	err := store.AddOrUpdateModelServer(modelServer, nil)
+	if err != nil {
+		t.Fatalf("Failed to add model server: %v", err)
+	}
+
+	// 2. Create and add a pod
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"pd-group": "group-a",
+				"role":     "prefill",
+			},
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	err = store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer})
+	if err != nil {
+		t.Fatalf("Failed to add pod: %v", err)
+	}
+
+	// Verify pod is categorized as a prefill pod
+	prefillPods, err := store.GetPrefillPods(modelServerName)
+	if err != nil {
+		t.Fatalf("Failed to get prefill pods: %v", err)
+	}
+	if len(prefillPods) != 1 {
+		t.Errorf("Expected 1 prefill pod, got %d", len(prefillPods))
+	}
+
+	// 3. Update ModelServer PDGroup config, changing prefill label requirements while keeping the same GroupKey
+	updatedModelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model",
+			Namespace: "default",
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey: "pd-group",
+					PrefillLabels: map[string]string{
+						"role": "prefill-new", // changed
+					},
+					DecodeLabels: map[string]string{
+						"role": "decode",
+					},
+				},
+			},
+		},
+	}
+
+	// Associated pods inside modelServer object
+	podsSet := sets.New(types.NamespacedName{Namespace: "default", Name: "test-pod"})
+
+	err = store.AddOrUpdateModelServer(updatedModelServer, podsSet)
+	if err != nil {
+		t.Fatalf("Failed to update model server: %v", err)
+	}
+
+	// Verify that the old prefill categorization has been cleared, and the pod is no longer categorized as prefill
+	prefillPods, err = store.GetPrefillPods(modelServerName)
+	if err != nil {
+		t.Fatalf("Failed to get prefill pods after update: %v", err)
+	}
+	if len(prefillPods) != 0 {
+		t.Errorf("Expected 0 prefill pods after PDGroup prefill label update, got %d", len(prefillPods))
 	}
 }
