@@ -117,7 +117,12 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string, tokencount int) error
 	} else {
 		_, tokens, err = r.tokenizer.Encode(model, prompt)
 		if err != nil {
-			klog.Errorf("failed to calculate token number: %v", err)
+			klog.Warningf("failed to calculate token number via tokenizer: %v. Falling back to heuristic estimation.", err)
+			estimator := tokenizer.NewSimpleEstimateTokenizer()
+			_, tokens, err = estimator.Encode(model, prompt)
+			if err != nil {
+				klog.Errorf("failed to calculate token number via heuristic estimator: %v", err)
+			}
 		}
 	}
 

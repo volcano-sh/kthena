@@ -29,10 +29,13 @@ type TokenizerConfig struct {
 }
 
 func NewLocalTokenizer(cfg TokenizerConfig) Tokenizer {
-	if cfg.Deployment == "sidecar" {
+	if cfg.Deployment == "uds" {
 		return &localTokenizer{
 			client: NewUDSClient(),
 		}
+	}
+	if cfg.Deployment == "" {
+		return NewSimpleEstimateTokenizer()
 	}
 
 	return &localTokenizer{
@@ -84,9 +87,7 @@ func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, int, er
 	}
 	ids := make([]uint32, len(resp.TokenIds))
 	for i, id := range resp.TokenIds {
-		{
-			ids[i] = uint32(id)
-		}
+		ids[i] = uint32(id)
 	}
 
 	return ids, resp.TokenCount, nil
