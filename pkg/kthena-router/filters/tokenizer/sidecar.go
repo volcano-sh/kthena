@@ -43,10 +43,10 @@ func NewLocalTokenizer(cfg TokenizerConfig) Tokenizer {
 	}
 }
 
-func (s *localTokenizer) Load(modelServerID, modelID string) error {
+func (s *localTokenizer) Load(modelName, modelID string) error {
 	req := LoadRequest{
-		ModelServerID: modelServerID,
-		ModelrepoID:   modelID,
+		ModelName:   modelName,
+		ModelrepoID: modelID,
 	}
 	_, err := s.client.post(
 		context.Background(),
@@ -57,9 +57,9 @@ func (s *localTokenizer) Load(modelServerID, modelID string) error {
 	return err
 }
 
-func (s *localTokenizer) Unload(modelServerID string) error {
+func (s *localTokenizer) Unload(modelName string) error {
 	req := UnloadRequest{
-		ModelServerID: modelServerID,
+		ModelName: modelName,
 	}
 	_, err := s.client.post(
 		context.Background(),
@@ -70,10 +70,10 @@ func (s *localTokenizer) Unload(modelServerID string) error {
 	return err
 }
 
-func (s *localTokenizer) Encode(modelServerID, prompt string) ([]uint32, int, error) {
+func (s *localTokenizer) Encode(modelName, prompt string) ([]uint32, int, error) {
 	req := EncodeRequest{
-		ModelServerID: modelServerID,
-		Text:          prompt,
+		ModelName: modelName,
+		Text:      prompt,
 	}
 	var resp EncodeResponse
 	_, err := s.client.post(

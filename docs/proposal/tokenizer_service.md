@@ -222,16 +222,6 @@ In this mode, Helm automatically:
 
 ---
 
-### Rate Limiter Integration
-
-```go
-if tokenizer.IsAnnotated(modelServerID) {
-    count, _ := tokenizer.Encode(modelServerID, prompt)  // UDS or HTTP
-    quotaUsed = count
-```
-
----
-
 ### KV Cache Scheduling Integration
 
 The KV cache-aware scheduler plugin calls the local tokenizer for fast token counting:
@@ -256,7 +246,7 @@ When enabled:
 - Router computes token IDs during rate limiting
 - Forwards `prompt_token_ids` to compatible backends (supported by both vLLM and SGLANG)
 - directly send the already created list of tokens to the inference engines instead of sending prompts
-- Backend skips redundant tokenization
+- Backend skips tokenization
 
 
 ---
