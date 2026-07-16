@@ -83,6 +83,19 @@ func counterVal(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float64
 	return m.GetCounter().GetValue()
 }
 
+func gaugeVal(t *testing.T, vec *prometheus.GaugeVec, lvs ...string) float64 {
+	t.Helper()
+	g, err := vec.GetMetricWithLabelValues(lvs...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := g.Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
+
 func TestPrefixCacheMatchRatio(t *testing.T) {
 	m := DefaultMetrics
 	const model = "metricstest-prefix-matchratio"
@@ -187,5 +200,74 @@ func TestRequestRecorderDelegation(t *testing.T) {
 	}
 	if got := histCount(t, &m.KVCacheMatchRatio, model) - kvBefore; got != 1 {
 		t.Errorf("recorder kvcache match_ratio delta = %d, want 1", got)
+	}
+}
+
+func TestRequestRecorderBindsDestinationLabels(t *testing.T) {
+	m := DefaultMetrics
+	const model = "metricstest-recorder-destination"
+	const path = "/v1/chat/completions"
+	const modelRoute = "default/mr-external"
+	const backendName = "default/openai-provider"
+	const upstreamModel = "gpt-4o-mini"
+	r := NewRequestMetricsRecorder(m, model, path)
+
+	inputBefore := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	outputBefore := counterVal(t, &m.TokensTotal, model, path, TokenTypeOutput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	requestBefore := counterVal(t, &m.RequestsTotal, model, path, "200", "successful_request", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	durationBefore := histCount(t, &m.RequestDuration, model, path, "200", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+
+	r.RecordInputTokens(5)
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - inputBefore; got != 0 {
+		t.Errorf("input token delta before destination bind = %v, want 0", got)
+	}
+
+	r.BindDestination(modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	r.RecordOutputTokens(3)
+	r.Finish("200", "successful_request")
+
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - inputBefore; got != 5 {
+		t.Errorf("input token delta after destination bind = %v, want 5", got)
+	}
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeOutput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - outputBefore; got != 3 {
+		t.Errorf("output token delta = %v, want 3", got)
+	}
+	if got := counterVal(t, &m.RequestsTotal, model, path, "200", "successful_request", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - requestBefore; got != 1 {
+		t.Errorf("request delta = %v, want 1", got)
+	}
+	if got := histCount(t, &m.RequestDuration, model, path, "200", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - durationBefore; got != 1 {
+		t.Errorf("request duration sample count delta = %d, want 1", got)
+	}
+}
+
+func TestRequestRecorderFlushesInputTokensAsUnresolved(t *testing.T) {
+	m := DefaultMetrics
+	const model = "metricstest-recorder-unresolved"
+	const path = "/v1/chat/completions"
+	r := NewRequestMetricsRecorder(m, model, path)
+
+	before := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone)
+	r.RecordInputTokens(7)
+	r.Finish("404", "model_server_matching")
+
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone) - before; got != 7 {
+		t.Errorf("unresolved input token delta = %v, want 7", got)
+	}
+}
+
+func TestActiveUpstreamRequestsKeepModelServerCompatibilityLabel(t *testing.T) {
+	m := DefaultMetrics
+	const modelRoute = "default/mr-external"
+	const backendName = "default/openai-provider"
+	const upstreamModel = "gpt-4o-mini"
+
+	before := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	m.IncActiveUpstreamRequestsForDestination(modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	if got := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - before; got != 1 {
+		t.Errorf("external active upstream delta = %v, want 1", got)
+	}
+	m.DecActiveUpstreamRequestsForDestination(modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	if got := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - before; got != 0 {
+		t.Errorf("external active upstream delta after decrement = %v, want 0", got)
 	}
 }

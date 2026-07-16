@@ -32,30 +32,47 @@ func MatchMetricLabels(metricLabels []*dto.LabelPair, wantLabels map[string]stri
 	return true
 }
 
-// GetCounterValue returns the counter value for the named metric and labels, or 0 if not found.
+// GetCounterValue returns the sum of counter values matching the named metric and labels.
 func GetCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
 	mf, ok := metrics[metricName]
 	if !ok {
 		return 0
 	}
+	var value float64
 	for _, m := range mf.GetMetric() {
 		if MatchMetricLabels(m.GetLabel(), labels) {
-			return m.GetCounter().GetValue()
+			value += m.GetCounter().GetValue()
 		}
 	}
-	return 0
+	return value
 }
 
-// GetHistogramCount returns the histogram sample count for the named metric and labels, or 0 if not found.
+// GetGaugeValue returns the sum of gauge values matching the named metric and labels.
+func GetGaugeValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
+	mf, ok := metrics[metricName]
+	if !ok {
+		return 0
+	}
+	var value float64
+	for _, m := range mf.GetMetric() {
+		if MatchMetricLabels(m.GetLabel(), labels) {
+			value += m.GetGauge().GetValue()
+		}
+	}
+	return value
+}
+
+// GetHistogramCount returns the sum of histogram sample counts matching the named metric and labels.
 func GetHistogramCount(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) uint64 {
 	mf, ok := metrics[metricName]
 	if !ok {
 		return 0
 	}
+	var count uint64
 	for _, m := range mf.GetMetric() {
 		if MatchMetricLabels(m.GetLabel(), labels) {
-			return m.GetHistogram().GetSampleCount()
+			count += m.GetHistogram().GetSampleCount()
 		}
 	}
-	return 0
+	return count
 }
