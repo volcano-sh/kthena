@@ -60,7 +60,8 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 		namespace = policy.Namespace
 	}
 	return &MetricCollector{
-		PastHistograms: datastructure.NewSnapshotSlidingWindow[map[string]HistogramInfo](util.SecondToTimestamp(util.SloQuantileSlidingWindowSeconds), util.SecondToTimestamp(util.SloQuantileDataKeepSeconds)),
+		// FIX: Swapped from 60s (SloQuantileSlidingWindowSeconds) to 24h (86400 seconds) for cold-start historical archive
+		PastHistograms: datastructure.NewSnapshotSlidingWindow[map[string]HistogramInfo](util.SecondToTimestamp(86400), util.SecondToTimestamp(86400)),
 		Target:         target,
 		Scope: Scope{
 			Namespace:     namespace,
