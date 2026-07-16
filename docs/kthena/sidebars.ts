@@ -77,6 +77,7 @@ const sidebars: SidebarsConfig = {
           label: 'Router',
           items: [
             'user-guide/router-routing',
+            'user-guide/external-model-provider',
             'user-guide/config-router',
             'user-guide/kvcache-aware',
             'user-guide/fairness-scheduling',
