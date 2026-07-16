@@ -32,6 +32,12 @@ stringData:
 
 The `secretRef.key` value controls which key in the Secret is used. If the Secret or the key is missing, the provider is not ready and Router requests return `503`.
 
+### Access control
+
+Treat `ExternalModelProvider` as an administrator API. Anyone who can create or update one can use any Secret in the same namespace and choose where the Router sends that credential. For example, a user could set `baseURL` to an HTTPS server they control and reference another Secret in the namespace.
+
+Do not grant tenant roles permission to create or update `ExternalModelProvider`. Limit that permission to cluster administrators. Router egress should also be restricted with NetworkPolicy or an egress proxy. Same-namespace Secret references prevent cross-namespace selection, but they do not remove this credential-forwarding risk.
+
 ## Configure an OpenAI-Compatible Provider
 
 Use `providerType: OpenAI` for OpenAI-compatible APIs. Compatible providers can use their own endpoint in `baseURL`.
@@ -53,6 +59,8 @@ spec:
 ```
 
 The Router sends the Secret value as `Authorization: Bearer <token>`. If `spec.model` is set, the Router rewrites the upstream request model to that value. If `spec.model` is omitted, the original request model is preserved.
+
+For streaming Chat/Completions requests, the Router may add `stream_options.include_usage=true` upstream so it can read the provider's final usage event. Existing fields in `stream_options` are preserved. The Router does not inject `include_usage` or `stream_options` into non-streaming requests.
 
 Create a `ModelRoute` that targets the provider:
 
@@ -125,6 +133,8 @@ spec:
 ```
 
 The Router sends the Secret value as `x-api-key: <token>`. Anthropic also requires an API version header, which can be configured through `spec.headers`.
+
+`baseURL` can be the API host, such as `https://api.anthropic.com`, or a URL ending in `/v1`. The Router avoids adding a second `/v1` when the version is already present.
 
 Create a `ModelRoute`:
 

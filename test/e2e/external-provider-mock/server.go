@@ -175,6 +175,10 @@ func (s *mockServer) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if hasNonStreamingOpenAIOptions(capture.Body) {
+		writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"include_usage and stream_options are streaming-only options"}}`)
+		return
+	}
 	if s.applyControls(w, r) {
 		return
 	}
@@ -270,6 +274,19 @@ func isStreaming(body json.RawMessage) bool {
 		Stream bool `json:"stream"`
 	}
 	return json.Unmarshal(body, &request) == nil && request.Stream
+}
+
+func hasNonStreamingOpenAIOptions(body json.RawMessage) bool {
+	var request map[string]any
+	if json.Unmarshal(body, &request) != nil {
+		return false
+	}
+	if stream, _ := request["stream"].(bool); stream {
+		return false
+	}
+	_, hasIncludeUsage := request["include_usage"]
+	_, hasStreamOptions := request["stream_options"]
+	return hasIncludeUsage || hasStreamOptions
 }
 
 func (s *mockServer) captureJSONRequest(w http.ResponseWriter, r *http.Request, authorized bool) (capturedRequest, bool) {

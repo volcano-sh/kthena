@@ -493,7 +493,7 @@ OpenAI-compatible adapter behavior:
 
 Anthropic-compatible adapter behavior:
 
-- Accept Router requests on `/v1/messages` and forward them to the provider's Anthropic-compatible Messages API path under `baseURL`.
+- Accept Router requests on `/v1/messages` and forward them to the provider's Anthropic-compatible Messages API path under `baseURL`. Append `/v1/messages` when `baseURL` is an unversioned host or custom prefix; append only `/messages` when `baseURL` already ends in `/v1`.
 - If `auth` is configured, inject the selected Secret value as `x-api-key: <secret value>`.
 - Forward or set required non-sensitive Anthropic protocol headers such as `anthropic-version` through the static header and downstream-header allowlist path. Credential-bearing headers still must come from `auth.secretRef`.
 - If `ExternalModelProvider.spec.model` is set, rewrite the Anthropic request `model` to that value; otherwise preserve the request model.
@@ -530,7 +530,7 @@ The external path should:
 
 - Preserve `text/event-stream` behavior and flush chunks as they arrive.
 - Parse usage chunks when the provider returns them.
-- For OpenAI-compatible chat/completions requests, follow the existing ModelServer path and inject usage options by default when needed for token accounting.
+- For streaming OpenAI-compatible chat/completions requests, inject `stream_options.include_usage=true` when needed for token accounting. Do not inject `include_usage` or `stream_options` into non-streaming requests.
 - If Router injects OpenAI-compatible `stream_options.include_usage=true`, parse the usage chunk and suppress the injected usage-only chunk before forwarding. If the downstream request already asked for usage, forward the usage chunk.
 - For Responses API requests, do not inject chat/completions usage options. Parse native non-streaming usage fields and aggregate the latest complete usage from streaming response events, while forwarding every SSE line unchanged.
 - For Anthropic-compatible requests, do not inject OpenAI-specific usage options; parse Anthropic-native usage fields and streaming events instead.
@@ -566,7 +566,7 @@ Streaming usage handling should be shared with the existing Pod path. Today this
 applyUsageOpts(c, modelRequest, backendType)
 ```
 
-For OpenAI-compatible chat/completions requests, follow the existing ModelServer behavior. If the downstream streaming request already asks for `stream_options.include_usage=true`, forward the provider's usage chunk to the client and also use it for internal accounting. If the downstream streaming request does not ask for usage, Router may inject `stream_options.include_usage=true` upstream for token accounting, parse the usage chunk, and suppress the injected usage-only chunk before forwarding so the downstream response shape stays unchanged. For non-streaming chat/completions requests, keep the current internal-path behavior and add `include_usage=true` when building the upstream request.
+For OpenAI-compatible chat/completions requests, usage-option injection applies only to streaming requests. If the downstream request already asks for `stream_options.include_usage=true`, forward the provider's usage chunk to the client and also use it for internal accounting. Otherwise, Router may merge `include_usage=true` into the existing `stream_options` object, parse the usage chunk, and suppress the injected usage-only chunk before forwarding so the downstream response shape stays unchanged. Non-streaming requests are forwarded without Router-injected `include_usage` or `stream_options`; their normal response envelope already contains usage when the provider reports it. The internal ModelServer path keeps its existing behavior.
 
 For OpenAI Responses API requests, preserve the native request shape and do not inject chat/completions usage fields. Parse `input_tokens`, `output_tokens`, and `total_tokens` from the non-streaming response envelope or the latest complete response carried by a streaming event.
 
@@ -695,8 +695,9 @@ This proposal intentionally does not implement cost-aware routing in the first v
 
 ### Security and Validation
 
-- Treat ExternalModelProvider as trusted network configuration. Users allowed to create or update it can make the Router connect to arbitrary destinations reachable from the Router Pod, including cluster-internal addresses; same-namespace references and URL syntax validation do not prevent this SSRF capability.
-- Restrict ExternalModelProvider create/update permissions to trusted administrators or tenants that are explicitly allowed to select Router egress destinations. In multi-tenant installations, enforce the allowed destinations with Router egress NetworkPolicy, a proxy, or an environment-specific admission policy.
+- Treat ExternalModelProvider as an administrator API in the initial implementation. Do not grant tenant roles permission to create or update it.
+- Create or update permission carries two capabilities: selecting any destination reachable from the Router Pod and using any Secret in the provider's namespace. A user can point `baseURL` at a server they control and cause the Router to send the selected Secret as provider credentials. Same-namespace references and URL validation do not prevent this confused-deputy path.
+- Cluster administrators should constrain Router egress with NetworkPolicy or an egress proxy. Installations that later delegate ExternalModelProvider must add an environment-specific admission policy for allowed Secrets and destinations first.
 - Never log Secret contents or upstream auth headers.
 - Require HTTPS by default.
 - `insecureSkipVerify` applies only to HTTPS and disables both certificate-chain and hostname verification. Restrict its use to trusted provider configuration where the endpoint cannot present a certificate trusted by the Router; prefer adding the organization CA to the Router trust store because skip-verification permits man-in-the-middle attacks.
@@ -717,9 +718,9 @@ Unit tests should not call real third-party APIs. Use `httptest.Server` and fake
 | Request scope | OpenAI and Anthropic native tool and multimodal fields pass through unchanged; local prompt accounting remains text-only; unsupported provider paths remain rejected |
 | Secret resolution | missing Secret, missing key, valid key, rotation behavior, Secret add/update/delete event mapping, `ObservedGeneration`, `CredentialsResolved`, and `Ready` transitions |
 | Route resolution | external target, internal target, weighted internal/external split, LoRA route remains ModelServer-only, request protocol matches selected provider type |
-| Request building | OpenAI chat/completions, Responses, and Anthropic path joining; raw body preservation; `UseNumber`; configured model override and unset-model passthrough; no chat-specific usage injection for Responses; adapter-specific auth headers; reserved credential static-header rejection; downstream header allowlist; credential precedence |
+| Request building | OpenAI chat/completions, Responses, and Anthropic path joining; raw body preservation; `UseNumber`; configured model override and unset-model passthrough; streaming-only OpenAI usage-option injection with existing `stream_options` fields preserved; no usage-option injection for non-streaming OpenAI requests or Responses; adapter-specific auth headers; reserved credential static-header rejection; downstream header allowlist; credential precedence |
 | TLS | trusted certificate succeeds by default; self-signed certificate fails by default; the same self-signed endpoint succeeds only with `insecureSkipVerify=true`; plain HTTP `baseURL` is rejected; secure and skip-verification connection pools remain isolated |
-| Streaming | SSE passthrough, line-by-line flush, usage callback, OpenAI chat/completions default usage-option injection aligned with the existing ModelServer path, downstream-requested usage chunks forwarded, Router-injected usage-only chunks suppressed, Responses terminal-event usage parsing with unchanged event forwarding, Anthropic-native streaming events and usage parsing, terminal event handling, EOF completion, cancellation before and after a terminal event, response header filtering, no mid-stream retry |
+| Streaming | SSE passthrough, line-by-line flush, usage callback, streaming-only OpenAI chat/completions usage-option injection with existing options preserved, downstream-requested usage chunks forwarded, Router-injected usage-only chunks suppressed, Responses terminal-event usage parsing with unchanged event forwarding, Anthropic-native streaming events and usage parsing, terminal event handling, EOF completion, cancellation before and after a terminal event, response header filtering, no mid-stream retry |
 | Non-streaming | body passthrough, OpenAI chat/completions, Responses, and Anthropic usage parsing when present, response header filtering |
 | Errors | pass through every upstream non-2xx response with `upstream_response`/`upstream` attribution; create 502/504 with `upstream_transport`/`router` attribution; bounded access-log messages; no automatic provider retry |
 | Compatibility | existing ModelServer-only routes unchanged |
