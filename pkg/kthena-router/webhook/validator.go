@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -63,6 +64,7 @@ func (v *KthenaRouterValidator) Run(ctx context.Context, tlsCertFile, tlsPrivate
 	mux := http.NewServeMux()
 	mux.HandleFunc("/validate/modelroute", v.HandleModelRoute)
 	mux.HandleFunc("/validate/modelserver", v.HandleModelServer)
+	mux.HandleFunc("/validate/externalmodelprovider", v.HandleExternalModelProvider)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
@@ -156,6 +158,42 @@ func (v *KthenaRouterValidator) HandleModelServer(w http.ResponseWriter, r *http
 	}
 }
 
+// HandleExternalModelProvider handles admission requests for ExternalModelProvider resources
+func (v *KthenaRouterValidator) HandleExternalModelProvider(w http.ResponseWriter, r *http.Request) {
+	// Parse the admission request
+	admissionReview, provider, err := ParseExternalModelProviderFromRequest(r)
+	if err != nil {
+		klog.Errorf("Failed to parse admission request: %v", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Validate the ExternalModelProvider
+	allowed, reason := v.validateExternalModelProvider(provider)
+
+	// Create the admission response
+	admissionResponse := admissionv1.AdmissionResponse{
+		Allowed: allowed,
+		UID:     admissionReview.Request.UID,
+	}
+
+	if !allowed {
+		admissionResponse.Result = &metav1.Status{
+			Message: reason,
+		}
+	}
+
+	// Create the admission review response
+	admissionReview.Response = &admissionResponse
+
+	// Send the response
+	if err := SendAdmissionResponse(w, admissionReview); err != nil {
+		klog.Errorf("Failed to send admission response: %v", err)
+		http.Error(w, fmt.Sprintf("could not send response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
 // validateModelRoute validates the ModelRoute resource
 func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha1.ModelRoute) (bool, string) {
 	var allErrs field.ErrorList
@@ -185,8 +223,17 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		totalWeight := uint32(0)
 		for j, targetModel := range rule.TargetModels {
 			targetModelField := ruleField.Child("targetModels").Index(j)
-			if targetModel.ModelServerName == "" {
-				allErrs = append(allErrs, field.Invalid(targetModelField.Child("modelServerName"), targetModel.ModelServerName, "modelServerName cannot be an empty string"))
+			hasModelServer := targetModel.ModelServerName != ""
+			hasExternalProvider := targetModel.ExternalModelProviderName != ""
+			if hasModelServer == hasExternalProvider {
+				allErrs = append(allErrs, field.Invalid(
+					targetModelField,
+					fmt.Sprintf("%s/%s", targetModel.ModelServerName, targetModel.ExternalModelProviderName),
+					"exactly one of modelServerName or externalModelProviderName must be set",
+				))
+			}
+			if hasExternalProvider && len(modelRoute.Spec.LoraAdapters) > 0 {
+				allErrs = append(allErrs, field.Invalid(targetModelField.Child("externalModelProviderName"), targetModel.ExternalModelProviderName, "lora routes must target modelServerName"))
 			}
 			if targetModel.Weight != nil {
 				totalWeight += *targetModel.Weight
@@ -270,6 +317,80 @@ func (v *KthenaRouterValidator) validateModelServer(modelServer *networkingv1alp
 		return false, fmt.Sprintf("validation failed: %s", strings.Join(messages, ""))
 	}
 	return true, ""
+}
+
+func (v *KthenaRouterValidator) validateExternalModelProvider(provider *networkingv1alpha1.ExternalModelProvider) (bool, string) {
+	var allErrs field.ErrorList
+	specField := field.NewPath("spec")
+
+	switch provider.Spec.ProviderType {
+	case "", networkingv1alpha1.OpenAI, networkingv1alpha1.Anthropic:
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			specField.Child("providerType"),
+			provider.Spec.ProviderType,
+			[]string{string(networkingv1alpha1.OpenAI), string(networkingv1alpha1.Anthropic)},
+		))
+	}
+
+	parsedURL, err := url.Parse(provider.Spec.BaseURL)
+	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
+		allErrs = append(allErrs, field.Invalid(specField.Child("baseURL"), provider.Spec.BaseURL, "baseURL must use https"))
+	} else if parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		allErrs = append(allErrs, field.Invalid(specField.Child("baseURL"), provider.Spec.BaseURL, "baseURL must not contain userinfo, query, or fragment"))
+	}
+
+	for header := range provider.Spec.Headers {
+		if isReservedProviderHeader(header) {
+			allErrs = append(allErrs, field.Invalid(specField.Child("headers").Key(header), header, "header is reserved and cannot be configured as a static header"))
+		}
+	}
+
+	if provider.Spec.Auth != nil {
+		secretRefField := specField.Child("auth").Child("secretRef")
+		if provider.Spec.Auth.SecretRef.Name == "" {
+			allErrs = append(allErrs, field.Required(secretRefField.Child("name"), "secret name is required"))
+		}
+		if provider.Spec.Auth.SecretRef.Key == "" {
+			allErrs = append(allErrs, field.Required(secretRefField.Child("key"), "secret key is required"))
+		}
+		if provider.Spec.Auth.SecretRef.Optional != nil && *provider.Spec.Auth.SecretRef.Optional {
+			allErrs = append(allErrs, field.Invalid(secretRefField.Child("optional"), true, "optional must be false or unset"))
+		}
+	}
+
+	if len(allErrs) > 0 {
+		var messages []string
+		for _, err := range allErrs {
+			messages = append(messages, fmt.Sprintf("  - %s", err.Error()))
+		}
+		return false, fmt.Sprintf("validation failed: %s", strings.Join(messages, ""))
+	}
+	return true, ""
+}
+
+func isReservedProviderHeader(header string) bool {
+	reservedHeaders := []string{
+		"Authorization",
+		"Proxy-Authorization",
+		"Cookie",
+		"X-API-Key",
+		"Host",
+		"Content-Length",
+		"Connection",
+		"Keep-Alive",
+		"Proxy-Connection",
+		"Transfer-Encoding",
+		"Upgrade",
+		"Trailer",
+		"TE",
+	}
+	for _, reserved := range reservedHeaders {
+		if strings.EqualFold(header, reserved) {
+			return true
+		}
+	}
+	return false
 }
 
 func (v *KthenaRouterValidator) shutdown() {

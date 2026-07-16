@@ -193,11 +193,19 @@ type Store interface {
 
 	// New methods for routing functionality
 	MatchModelServer(modelName string, request *http.Request, gatewayKey string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error)
+	MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error)
 
 	// Model routing methods
 	AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error
 	DeleteModelRoute(namespacedName string) error
 	GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute
+	AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error
+	DeleteExternalModelProvider(name types.NamespacedName) error
+	GetExternalModelProvider(name types.NamespacedName) *aiv1alpha1.ExternalModelProvider
+	GetAllExternalModelProviders() map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
+	AddOrUpdateSecret(secret *corev1.Secret) error
+	DeleteSecret(name types.NamespacedName) error
+	GetSecret(name types.NamespacedName) *corev1.Secret
 
 	// PDGroup methods for efficient PD scheduling
 	GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo, error)
@@ -334,9 +342,23 @@ type modelRouteInfo struct {
 	loras []string
 }
 
+type ModelTargetKind string
+
+const (
+	ModelTargetKindModelServer           ModelTargetKind = "ModelServer"
+	ModelTargetKindExternalModelProvider ModelTargetKind = "ExternalModelProvider"
+)
+
+type ModelTarget struct {
+	Kind ModelTargetKind
+	Name types.NamespacedName
+}
+
 type store struct {
-	modelServer sync.Map // map[types.NamespacedName]*modelServer
-	pods        sync.Map // map[types.NamespacedName]*PodInfo
+	modelServer            sync.Map // map[types.NamespacedName]*modelServer
+	externalModelProviders sync.Map // map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
+	pods                   sync.Map // map[types.NamespacedName]*PodInfo
+	secrets                sync.Map // map[types.NamespacedName]*corev1.Secret
 
 	// onFlightCounter is optional. When non-nil (Redis-backed), in-flight request
 	// counts are shared across all router replicas via Redis. When nil, only the
@@ -912,6 +934,51 @@ func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, err
 	return pods, nil
 }
 
+func (s *store) AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error {
+	s.externalModelProviders.Store(utils.GetNamespaceName(provider), provider)
+	return nil
+}
+
+func (s *store) DeleteExternalModelProvider(name types.NamespacedName) error {
+	s.externalModelProviders.Delete(name)
+	return nil
+}
+
+func (s *store) GetExternalModelProvider(name types.NamespacedName) *aiv1alpha1.ExternalModelProvider {
+	if value, ok := s.externalModelProviders.Load(name); ok {
+		return value.(*aiv1alpha1.ExternalModelProvider)
+	}
+	return nil
+}
+
+func (s *store) GetAllExternalModelProviders() map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider {
+	result := make(map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider)
+	s.externalModelProviders.Range(func(key, value any) bool {
+		if namespacedName, ok := key.(types.NamespacedName); ok {
+			result[namespacedName] = value.(*aiv1alpha1.ExternalModelProvider)
+		}
+		return true
+	})
+	return result
+}
+
+func (s *store) AddOrUpdateSecret(secret *corev1.Secret) error {
+	s.secrets.Store(utils.GetNamespaceName(secret), secret)
+	return nil
+}
+
+func (s *store) DeleteSecret(name types.NamespacedName) error {
+	s.secrets.Delete(name)
+	return nil
+}
+
+func (s *store) GetSecret(name types.NamespacedName) *corev1.Secret {
+	if value, ok := s.secrets.Load(name); ok {
+		return value.(*corev1.Secret)
+	}
+	return nil
+}
+
 // GetDecodePods returns all decode pods for a given model server
 func (s *store) GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo, error) {
 	value, ok := s.modelServer.Load(modelServerName)
@@ -1283,6 +1350,17 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 }
 
 func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error) {
+	target, isLora, mr, err := s.MatchModelTarget(model, req, gatewayKey)
+	if err != nil {
+		return types.NamespacedName{}, false, nil, err
+	}
+	if target.Kind != ModelTargetKindModelServer {
+		return types.NamespacedName{}, false, nil, fmt.Errorf("matched target is not a ModelServer: %s", target.Kind)
+	}
+	return target.Name, isLora, mr, nil
+}
+
+func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
 
@@ -1298,7 +1376,7 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		// Try to find routes by lora name
 		loraRoutes, ok := s.loraRoutes[model]
 		if !ok {
-			return types.NamespacedName{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
+			return ModelTarget{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
 		}
 		candidateRoutes = loraRoutes
 		isLora = true
@@ -1339,11 +1417,33 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		}
 
 		// Found a matching ModelRoute
-		return types.NamespacedName{Namespace: mr.Namespace, Name: dst.ModelServerName}, isLora, mr, nil
+		target, err := modelTargetFromDestination(mr.Namespace, dst)
+		if err != nil {
+			continue // Try next ModelRoute
+		}
+		return target, isLora, mr, nil
 	}
 
 	// No matching ModelRoute found
-	return types.NamespacedName{}, false, nil, fmt.Errorf("no matching ModelRoute found for model %s", model)
+	return ModelTarget{}, false, nil, fmt.Errorf("no matching ModelRoute found for model %s", model)
+}
+
+func modelTargetFromDestination(namespace string, target *aiv1alpha1.TargetModel) (ModelTarget, error) {
+	hasModelServer := target.ModelServerName != ""
+	hasExternalProvider := target.ExternalModelProviderName != ""
+	if hasModelServer == hasExternalProvider {
+		return ModelTarget{}, fmt.Errorf("exactly one target backend must be set")
+	}
+	if hasExternalProvider {
+		return ModelTarget{
+			Kind: ModelTargetKindExternalModelProvider,
+			Name: types.NamespacedName{Namespace: namespace, Name: target.ExternalModelProviderName},
+		}, nil
+	}
+	return ModelTarget{
+		Kind: ModelTargetKindModelServer,
+		Name: types.NamespacedName{Namespace: namespace, Name: target.ModelServerName},
+	}, nil
 }
 
 // matchesSpecificGateway checks if the ModelRoute matches a specific gateway

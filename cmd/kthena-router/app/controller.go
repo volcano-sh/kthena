@@ -81,6 +81,10 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	if err != nil {
 		klog.Fatalf("Error creating model route controller: %s", err.Error())
 	}
+	externalModelProviderController, err := controller.NewExternalModelProviderController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	if err != nil {
+		klog.Fatalf("Error creating external model provider controller: %s", err.Error())
+	}
 	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
 	if err != nil {
 		klog.Fatalf("Error creating model server controller: %s", err.Error())
@@ -88,6 +92,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 
 	cacheSyncs := []cache.InformerSynced{
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
+		kthenaInformerFactory.Networking().V1alpha1().ExternalModelProviders().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().HasSynced,
 		kubeInformerFactory.Core().V1().Pods().Informer().HasSynced,
 	}
@@ -153,11 +158,16 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		klog.Fatalf("Failed to sync informer caches")
 	}
 
-	controllers := []Controller{modelRouteController, modelServerController}
+	controllers := []Controller{modelRouteController, externalModelProviderController, modelServerController}
 
 	go func() {
 		if err := modelRouteController.Run(stop); err != nil {
 			klog.Fatalf("Error running model route controller: %s", err.Error())
+		}
+	}()
+	go func() {
+		if err := externalModelProviderController.Run(stop); err != nil {
+			klog.Fatalf("Error running external model provider controller: %s", err.Error())
 		}
 	}()
 	go func() {

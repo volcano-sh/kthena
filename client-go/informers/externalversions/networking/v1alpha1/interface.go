@@ -24,6 +24,8 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
+	// ExternalModelProviders returns a ExternalModelProviderInformer.
+	ExternalModelProviders() ExternalModelProviderInformer
 	// ModelRoutes returns a ModelRouteInformer.
 	ModelRoutes() ModelRouteInformer
 	// ModelServers returns a ModelServerInformer.
@@ -39,6 +41,11 @@ type version struct {
 // New returns a new Interface.
 func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+}
+
+// ExternalModelProviders returns a ExternalModelProviderInformer.
+func (v *version) ExternalModelProviders() ExternalModelProviderInformer {
+	return &externalModelProviderInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // ModelRoutes returns a ModelRouteInformer.

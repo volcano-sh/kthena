@@ -103,12 +103,19 @@ type StringMatch struct {
 	Regex  *string `json:"regex,omitempty"`
 }
 
-// LLM inference traffic target model
+// LLM inference traffic target model.
+// +kubebuilder:validation:XValidation:rule="(has(self.modelServerName) && self.modelServerName != \"\") != (has(self.externalModelProviderName) && self.externalModelProviderName != \"\")",message="exactly one of modelServerName or externalModelProviderName must be set"
 type TargetModel struct {
 	// ModelServerName is used to specify the correlated modelServer within the same namespace.
+	// It is mutually exclusive with ExternalModelProviderName.
 	//
-	// +kubebuilder:validation:required
-	ModelServerName string `json:"modelServerName"`
+	// +optional
+	ModelServerName string `json:"modelServerName,omitempty"`
+	// ExternalModelProviderName is used to specify the correlated ExternalModelProvider within the same namespace.
+	// It is mutually exclusive with ModelServerName.
+	//
+	// +optional
+	ExternalModelProviderName string `json:"externalModelProviderName,omitempty"`
 	// Weight is used to specify the percentage of traffic should be sent to the target model.
 	// The value should be in the range of [0, 100].
 	//

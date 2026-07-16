@@ -101,6 +101,10 @@ func (m *MockStore) MatchModelServer(modelName string, request *http.Request, ga
 	return args.Get(0).(types.NamespacedName), args.Bool(1), modelRoute, args.Error(3)
 }
 
+func (m *MockStore) MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (datastore.ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
+	return datastore.ModelTarget{}, false, nil, nil
+}
+
 func (m *MockStore) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	args := m.Called(mr)
 	return args.Error(0)
@@ -331,6 +335,34 @@ func (m *MockStore) GetModelNames() []string {
 		return nil
 	}
 	return args.Get(0).([]string)
+}
+
+func (m *MockStore) AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error {
+	return nil
+}
+
+func (m *MockStore) DeleteExternalModelProvider(name types.NamespacedName) error {
+	return nil
+}
+
+func (m *MockStore) GetExternalModelProvider(name types.NamespacedName) *aiv1alpha1.ExternalModelProvider {
+	return nil
+}
+
+func (m *MockStore) GetAllExternalModelProviders() map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider {
+	return nil
+}
+
+func (m *MockStore) AddOrUpdateSecret(secret *corev1.Secret) error {
+	return nil
+}
+
+func (m *MockStore) DeleteSecret(name types.NamespacedName) error {
+	return nil
+}
+
+func (m *MockStore) GetSecret(name types.NamespacedName) *corev1.Secret {
+	return nil
 }
 
 func (m *MockStore) SyncOnFlightCounts() {}

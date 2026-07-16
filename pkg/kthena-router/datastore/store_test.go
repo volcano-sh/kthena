@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"sync"
@@ -1559,6 +1560,90 @@ func TestStoreMatchModelServer(t *testing.T) {
 			assert.Equal(t, tt.expectedServer, server)
 		})
 	}
+}
+
+func TestStoreExternalModelProvider(t *testing.T) {
+	s := New()
+
+	provider := &aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "openai-provider",
+		},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType: aiv1alpha1.OpenAI,
+			BaseURL:      "https://api.openai.com",
+		},
+	}
+
+	err := s.AddOrUpdateExternalModelProvider(provider)
+	assert.NoError(t, err)
+
+	got := s.GetExternalModelProvider(types.NamespacedName{Namespace: "default", Name: "openai-provider"})
+	assert.Equal(t, provider, got)
+
+	all := s.GetAllExternalModelProviders()
+	assert.Equal(t, provider, all[types.NamespacedName{Namespace: "default", Name: "openai-provider"}])
+
+	err = s.DeleteExternalModelProvider(types.NamespacedName{Namespace: "default", Name: "openai-provider"})
+	assert.NoError(t, err)
+	assert.Nil(t, s.GetExternalModelProvider(types.NamespacedName{Namespace: "default", Name: "openai-provider"}))
+}
+
+func TestStoreSecret(t *testing.T) {
+	s := New()
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "provider-secret",
+		},
+		Data: map[string][]byte{
+			"api-key": []byte("test-key"),
+		},
+	}
+
+	err := s.AddOrUpdateSecret(secret)
+	assert.NoError(t, err)
+
+	got := s.GetSecret(types.NamespacedName{Namespace: "default", Name: "provider-secret"})
+	assert.Equal(t, secret, got)
+
+	err = s.DeleteSecret(types.NamespacedName{Namespace: "default", Name: "provider-secret"})
+	assert.NoError(t, err)
+	assert.Nil(t, s.GetSecret(types.NamespacedName{Namespace: "default", Name: "provider-secret"}))
+}
+
+func TestStoreMatchModelTargetExternalProvider(t *testing.T) {
+	s := New()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "external-route",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "gpt-router",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "openai-provider"},
+					},
+				},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	target, isLora, route, err := s.MatchModelTarget("gpt-router", req, "")
+	assert.NoError(t, err)
+	assert.False(t, isLora)
+	assert.Equal(t, mr, route)
+	assert.Equal(t, ModelTargetKindExternalModelProvider, target.Kind)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "openai-provider"}, target.Name)
+
+	_, _, _, err = s.MatchModelServer("gpt-router", req, "")
+	assert.Error(t, err)
 }
 
 type fakePodRuntimeInspector struct {

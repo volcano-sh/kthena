@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -28,6 +29,8 @@ import (
 
 func TestValidateModelRoute(t *testing.T) {
 	weight0 := uint32(0)
+	weight20 := uint32(20)
+	weight80 := uint32(80)
 	invalidHeaderRegex := "["
 	invalidURIRegex := "["
 
@@ -138,6 +141,57 @@ func TestValidateModelRoute(t *testing.T) {
 							TargetModels: []*networkingv1alpha1.TargetModel{
 								{ModelServerName: "test-server-1"},
 								{ModelServerName: "test-server-2", Weight: &weight0},
+							},
+						},
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "valid model route with external provider target",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ExternalModelProviderName: "openai-provider"},
+							},
+						},
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "valid model route with weighted internal and external targets",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "test-server", Weight: &weight80},
+								{ExternalModelProviderName: "openai-provider", Weight: &weight20},
 							},
 						},
 					},
@@ -340,7 +394,7 @@ func TestValidateModelRoute(t *testing.T) {
 			expectedReason: "validation failed:\n  - spec.rules[1].targetModels: Required value: each rule must have at least one target model",
 		},
 		{
-			name: "invalid model route - empty modelServerName",
+			name: "invalid model route - empty target reference",
 			modelRoute: &networkingv1alpha1.ModelRoute{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: "networking.serving.volcano.sh/v1alpha1",
@@ -363,7 +417,88 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:\n  - spec.rules[0].targetModels[0].modelServerName: Invalid value: \"\": modelServerName cannot be an empty string",
+			expectedReason: "validation failed:\n  - spec.rules[0].targetModels[0]: Invalid value: \"/\": exactly one of modelServerName or externalModelProviderName must be set",
+		},
+		{
+			name: "invalid model route - target has both model server and external provider",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{
+									ModelServerName:           "test-server",
+									ExternalModelProviderName: "openai-provider",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:\n  - spec.rules[0].targetModels[0]: Invalid value: \"test-server/openai-provider\": exactly one of modelServerName or externalModelProviderName must be set",
+		},
+		{
+			name: "invalid model route - target has neither model server nor external provider",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:\n  - spec.rules[0].targetModels[0]: Invalid value: \"/\": exactly one of modelServerName or externalModelProviderName must be set",
+		},
+		{
+			name: "invalid model route - lora route uses external provider",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					LoraAdapters: []string{"adapter1"},
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ExternalModelProviderName: "openai-provider"},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:\n  - spec.rules[0].targetModels[0].externalModelProviderName: Invalid value: \"openai-provider\": lora routes must target modelServerName",
 		},
 		{
 			name: "invalid model route - all target weights are zero",
@@ -682,4 +817,154 @@ func TestValidateModelServer(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateExternalModelProvider(t *testing.T) {
+	optionalTrue := true
+
+	tests := []struct {
+		name           string
+		provider       *networkingv1alpha1.ExternalModelProvider
+		expectValid    bool
+		expectedReason string
+	}{
+		{
+			name: "valid openai provider",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "openai-provider",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					Model:        ptrString("gpt-4o-mini"),
+					BaseURL:      "https://api.openai.com/v1",
+					Auth: &networkingv1alpha1.ProviderAuth{
+						SecretRef: corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "openai-api-key"},
+							Key:                  "apiKey",
+						},
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "valid anthropic provider with version header",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "anthropic-provider",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.Anthropic,
+					Model:        ptrString("claude-sonnet"),
+					BaseURL:      "https://api.anthropic.com",
+					Auth: &networkingv1alpha1.ProviderAuth{
+						SecretRef: corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "anthropic-api-key"},
+							Key:                  "apiKey",
+						},
+					},
+					Headers: map[string]string{
+						"anthropic-version": "2023-06-01",
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "invalid provider - http baseURL",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					BaseURL:      "http://api.example.com",
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.baseURL: Invalid value: \"http://api.example.com\": baseURL must use https",
+		},
+		{
+			name: "invalid provider - url contains userinfo query and fragment",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					BaseURL:      "https://user@example.com/v1?debug=true#frag",
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.baseURL: Invalid value: \"https://user@example.com/v1?debug=true#frag\": baseURL must not contain userinfo, query, or fragment",
+		},
+		{
+			name: "invalid provider - reserved static authorization header",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					BaseURL:      "https://api.example.com/v1",
+					Headers: map[string]string{
+						"authorization": "Bearer unsafe",
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.headers[authorization]: Invalid value: \"authorization\": header is reserved and cannot be configured as a static header",
+		},
+		{
+			name: "invalid provider - reserved static x-api-key header",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.Anthropic,
+					BaseURL:      "https://api.anthropic.com",
+					Headers: map[string]string{
+						"X-API-Key": "unsafe",
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.headers[X-API-Key]: Invalid value: \"X-API-Key\": header is reserved and cannot be configured as a static header",
+		},
+		{
+			name: "invalid provider - optional secret ref",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					BaseURL:      "https://api.example.com/v1",
+					Auth: &networkingv1alpha1.ProviderAuth{
+						SecretRef: corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "openai-api-key"},
+							Key:                  "apiKey",
+							Optional:             &optionalTrue,
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.auth.secretRef.optional: Invalid value: true: optional must be false or unset",
+		},
+	}
+
+	kubeClient := fake.NewSimpleClientset()
+	validator := NewKthenaRouterValidator(kubeClient, 8080)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, reason := validator.validateExternalModelProvider(tt.provider)
+
+			assert.Equal(t, tt.expectValid, allowed, "Expected validation result should match")
+			if !tt.expectValid {
+				assert.Equal(t, tt.expectedReason, reason, "Error message should match expected reason")
+			} else {
+				assert.Empty(t, reason, "Reason should be empty for valid providers")
+			}
+		})
+	}
+}
+
+func ptrString(value string) *string {
+	return &value
 }
