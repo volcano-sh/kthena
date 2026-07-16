@@ -388,6 +388,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var modelTarget datastore.ModelTarget
 	var modelRoute *v1alpha1.ModelRoute
 	var modelServer *v1alpha1.ModelServer
+	var inferencePoolFullName string
 
 	// Get gateway key from context if available (set by Gateway listener)
 	var gatewayKey string
@@ -414,6 +415,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			if provider == nil {
 				klog.Errorf("failed to get external model provider: %v", modelTarget.Name)
 				accesslog.SetError(c, "provider_discovery", fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
+				accesslog.SetErrorOrigin(c, "router")
 				c.Set("finishReason", "provider_discovery")
 				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
 				return nil
@@ -430,6 +432,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 				var proxyErr *externalProxyError
 				if errors.As(err, &proxyErr) {
 					accesslog.SetError(c, proxyErr.reason, proxyErr.message)
+					accesslog.SetErrorOrigin(c, "router")
 					c.Set("finishReason", proxyErr.reason)
 					if !c.Writer.Written() {
 						c.AbortWithStatusJSON(proxyErr.statusCode, proxyErr.message)
@@ -438,6 +441,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 				}
 
 				accesslog.SetError(c, "proxy", "external provider request processing failed")
+				accesslog.SetErrorOrigin(c, "router")
 				c.Set("finishReason", "proxy")
 				if !c.Writer.Written() {
 					c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
@@ -470,6 +474,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 
 		// Get InferencePool from store
 		inferencePoolKey := fmt.Sprintf("%s/%s", inferencePoolName.Namespace, inferencePoolName.Name)
+		inferencePoolFullName = inferencePoolKey
 		inferencePool := r.store.GetInferencePool(inferencePoolKey)
 		if inferencePool == nil {
 			klog.Errorf("failed to get inference pool: %v", inferencePoolName)
@@ -539,11 +544,19 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		sessionID = c.Request.Header.Get(sessionHeader)
 	}
 
+	upstreamModelForMetrics := modelName
+	if modelServer == nil {
+		upstreamModelForMetrics = metrics.DestinationLabelValueNone
+	} else if modelServer.Spec.Model != nil && !isLora {
+		upstreamModelForMetrics = *modelServer.Spec.Model
+	}
+
 	ctx := &framework.Context{
 		Model:           modelName,
 		Prompt:          prompt,
 		SessionID:       sessionID,
 		ModelServerName: modelServerName,
+		UpstreamModel:   upstreamModelForMetrics,
 		PDGroup:         pdGroup,
 		MetricsRecorder: metricsRecorder,
 	}
@@ -556,7 +569,10 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	}
 
 	// Set complete request routing information in access log
-	modelServerFullName := fmt.Sprintf("%s/%s", modelServerName.Namespace, modelServerName.Name)
+	modelServerFullName := ""
+	if modelServer != nil {
+		modelServerFullName = fmt.Sprintf("%s/%s", modelServerName.Namespace, modelServerName.Name)
+	}
 	modelRouteName := ""
 	if modelRoute != nil {
 		modelRouteName = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
@@ -571,6 +587,20 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		// Set routing info even if no pod is selected (for error cases)
 		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 	}
+	backendType := metrics.BackendTypeModelServer
+	backendName := modelServerFullName
+	upstreamModel := ctx.UpstreamModel
+	if modelServer == nil {
+		backendType = metrics.BackendTypeInferencePool
+		backendName = inferencePoolFullName
+	}
+	accesslog.SetBackendInfo(c, backendType, backendName, upstreamModel)
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			rec.BindDestination(modelRouteName, backendType, backendName, upstreamModel)
+		}
+	}
+
 	req := c.Request
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
@@ -745,6 +775,7 @@ func (r *Router) proxy(
 
 	for i := 0; i < len(ctx.BestPods); i++ {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		accesslog.SetUpstreamInfo(c, 0, i+1)
 		pod := ctx.BestPods[i]
 		podObj := pod.GetPod()
 		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
@@ -752,14 +783,14 @@ func (r *Router) proxy(
 		// Track this request as in-flight to the chosen pod.
 		r.store.IncrPodOnFlightRequests(podName)
 
-		// Increment upstream request count with both modelServer and modelRoute.
-		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
+		// Increment upstream request count with backend destination labels.
+		r.metrics.IncActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
 
 		// Request dispatched to the pod.
 		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, onUsage)
 
 		// Decrement upstream request count when request completes
-		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
+		r.metrics.DecActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
 
 		// Request is complete (success or failure) — decrement on-flight counter.
 		r.store.DecrPodOnFlightRequests(podName)
@@ -855,10 +886,23 @@ func (r *Router) proxyExternalProvider(
 	defer accesslog.MarkUpstreamEnd(c)
 
 	providerName := fmt.Sprintf("%s/%s", provider.Namespace, provider.Name)
+	upstreamModel := modelName
+	if provider.Spec.Model != nil && *provider.Spec.Model != "" {
+		upstreamModel = *provider.Spec.Model
+	}
+	accesslog.SetBackendInfo(c, "external_provider", providerName, upstreamModel)
+
+	modelRouteName := ""
+	if routeName, exists := c.Get("modelRouteName"); exists {
+		if name, ok := routeName.(string); ok {
+			modelRouteName = name
+		}
+	}
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
 		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
 			metricsRecorder = rec
+			rec.BindDestination(modelRouteName, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
 		}
 	}
 
@@ -881,6 +925,10 @@ func (r *Router) proxyExternalProvider(
 	}
 
 	userID := c.GetString(common.UserIdKey)
+
+	accesslog.SetUpstreamInfo(c, 0, 1)
+	r.metrics.IncActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
+	defer r.metrics.DecActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
 
 	return proxyExternalRequest(c, upstreamRequest, provider.Spec.ProviderType, provider.Spec.InsecureSkipVerify, isStreaming(modelRequest), providerName, func(usage TokenUsage) {
 		if usage.TotalTokens <= 0 {
@@ -1001,6 +1049,7 @@ func proxyRequest(
 	resp, err := doRequest(req, podIP, port)
 	if resp != nil {
 		defer resp.Body.Close()
+		accesslog.SetUpstreamInfo(c, resp.StatusCode, 0)
 	}
 	if err != nil {
 		return fmt.Errorf("decode request error: %w", err)
@@ -1027,8 +1076,10 @@ func proxyExternalRequest(
 	}
 	defer resp.Body.Close()
 
+	accesslog.SetUpstreamInfo(c, resp.StatusCode, 1)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		accesslog.SetError(c, "upstream_response", fmt.Sprintf("provider %s returned HTTP %d", providerName, resp.StatusCode))
+		accesslog.SetErrorOrigin(c, "upstream")
 		c.Set("finishReason", "upstream_response")
 	}
 
@@ -1408,6 +1459,7 @@ func (r *Router) proxyToPDDisaggregated(
 	}
 
 	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
+	accesslog.SetBackendInfo(c, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
 
 	// Get model route name from context
 	var modelRouteName string
@@ -1419,7 +1471,7 @@ func (r *Router) proxyToPDDisaggregated(
 
 	// Set upstream connection info in metrics recorder
 	if metricsRecorder != nil {
-		metricsRecorder.SetUpstreamConnectionInfo(modelServerName, modelRouteName)
+		metricsRecorder.BindDestination(modelRouteName, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
 	}
 
 	// Try multiple prefill/decode pairs
@@ -1434,6 +1486,7 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 		prefillPod := ctx.PrefillPods[i].GetPod()
 		decodePod := ctx.DecodePods[i].GetPod()
+		accesslog.SetUpstreamInfo(c, 0, i+1)
 
 		// Build addresses for prefill and decode pods
 		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
@@ -1454,6 +1507,9 @@ func (r *Router) proxyToPDDisaggregated(
 
 		// Execute the PD disaggregated proxy operation
 		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, hooks)
+		if c.Writer.Written() {
+			accesslog.SetUpstreamInfo(c, c.Writer.Status(), 0)
+		}
 
 		if err != nil {
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",

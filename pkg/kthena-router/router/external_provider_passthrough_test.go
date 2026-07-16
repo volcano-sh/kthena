@@ -17,22 +17,16 @@ limitations under the License.
 package router
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
 func TestExternalProviderForwardsOpaqueRequestContent(t *testing.T) {
@@ -82,12 +76,12 @@ func TestExternalProviderForwardsOpaqueRequestContent(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			fixture := newExternalPassthroughFixture(t, fmt.Sprintf("passthrough-%d", i), tt.providerType, upstream.URL)
-			body := addPassthroughModel(tt.requestBody, fixture.clientModel)
+			fixture := newExternalObservabilityFixture(t, fmt.Sprintf("passthrough-%d", i), tt.providerType, upstream.URL)
+			body := addModelToRequestBody(tt.requestBody, fixture.clientModel)
 			var original map[string]interface{}
 			require.NoError(t, json.Unmarshal([]byte(body), &original))
 
-			w, accessCtx := executeExternalPassthroughRequest(t, fixture, tt.path, body)
+			w, accessCtx := executeExternalObservabilityRequest(t, fixture, tt.path, body)
 
 			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			assert.Equal(t, 1, upstreamCalls)
@@ -98,71 +92,4 @@ func TestExternalProviderForwardsOpaqueRequestContent(t *testing.T) {
 			assert.Nil(t, accessCtx.Error)
 		})
 	}
-}
-
-type externalPassthroughFixture struct {
-	router        *Router
-	clientModel   string
-	providerModel string
-}
-
-func newExternalPassthroughFixture(t *testing.T, suffix string, providerType aiv1alpha1.ExternalProviderType, baseURL string) externalPassthroughFixture {
-	t.Helper()
-	store := datastore.New()
-	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
-	clientModel := "passthrough-client-" + suffix
-	providerModel := "passthrough-upstream-" + suffix
-	providerName := "passthrough-provider-" + suffix
-	secretName := "passthrough-secret-" + suffix
-	routeName := "passthrough-route-" + suffix
-	headers := map[string]string{}
-	if providerType == aiv1alpha1.Anthropic {
-		headers["anthropic-version"] = "2023-06-01"
-	}
-
-	require.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
-		ObjectMeta: metav1.ObjectMeta{Name: providerName, Namespace: "default"},
-		Spec: aiv1alpha1.ExternalModelProviderSpec{
-			ProviderType:       providerType,
-			BaseURL:            baseURL,
-			Model:              &providerModel,
-			InsecureSkipVerify: true,
-			Auth: &aiv1alpha1.ProviderAuth{SecretRef: corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-				Key:                  "api-key",
-			}},
-			Headers: headers,
-		},
-	}))
-	require.NoError(t, store.AddOrUpdateSecret(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
-		Data:       map[string][]byte{"api-key": []byte("provider-key")},
-	}))
-	require.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: "default"},
-		Spec: aiv1alpha1.ModelRouteSpec{
-			ModelName: clientModel,
-			Rules: []*aiv1alpha1.Rule{{TargetModels: []*aiv1alpha1.TargetModel{{
-				ExternalModelProviderName: providerName,
-			}}}},
-		},
-	}))
-
-	return externalPassthroughFixture{router: router, clientModel: clientModel, providerModel: providerModel}
-}
-
-func addPassthroughModel(body, model string) string {
-	return fmt.Sprintf(`{"model":%q,%s`, model, body[1:])
-}
-
-func executeExternalPassthroughRequest(t *testing.T, fixture externalPassthroughFixture, path, body string) (*httptest.ResponseRecorder, *accesslog.AccessLogContext) {
-	t.Helper()
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-	accessCtx := accesslog.NewAccessLogContext("external-passthrough", http.MethodPost, path, c.Request.Proto, fixture.clientModel)
-	c.Set(accesslog.AccessLogContextKey, accessCtx)
-	fixture.router.HandlerFunc()(c)
-	return w, accessCtx
 }

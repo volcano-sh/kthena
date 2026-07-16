@@ -37,6 +37,11 @@ func TestAccessLogEntry_ToJSON(t *testing.T) {
 		ModelServer:                "default/llama2-server",
 		SelectedPod:                "llama2-deployment-5f7b8c9d-xk2p4",
 		RequestID:                  "test-request-id",
+		BackendType:                "model_server",
+		BackendName:                "default/llama2-server",
+		UpstreamModel:              "llama2-7b",
+		UpstreamStatusCode:         200,
+		UpstreamAttempts:           1,
 		InputTokens:                150,
 		OutputTokens:               75,
 		DurationTotal:              2350,
@@ -68,6 +73,11 @@ func TestAccessLogEntry_ToJSON(t *testing.T) {
 	assert.Equal(t, "default/llama2-route-v1", parsed["model_route"])
 	assert.Equal(t, "default/llama2-server", parsed["model_server"])
 	assert.Equal(t, "llama2-deployment-5f7b8c9d-xk2p4", parsed["selected_pod"])
+	assert.Equal(t, "model_server", parsed["backend_type"])
+	assert.Equal(t, "default/llama2-server", parsed["backend_name"])
+	assert.Equal(t, "llama2-7b", parsed["upstream_model"])
+	assert.Equal(t, float64(200), parsed["upstream_status_code"])
+	assert.Equal(t, float64(1), parsed["upstream_attempts"])
 	assert.Equal(t, float64(150), parsed["input_tokens"])
 	assert.Equal(t, float64(75), parsed["output_tokens"])
 
@@ -90,6 +100,11 @@ func TestAccessLogEntry_ToText(t *testing.T) {
 		ModelServer:                "default/llama2-server",
 		SelectedPod:                "llama2-deployment-5f7b8c9d-xk2p4",
 		RequestID:                  "test-request-id",
+		BackendType:                "model_server",
+		BackendName:                "default/llama2-server",
+		UpstreamModel:              "llama2-7b",
+		UpstreamStatusCode:         200,
+		UpstreamAttempts:           1,
 		InputTokens:                150,
 		OutputTokens:               75,
 		DurationTotal:              2350,
@@ -118,6 +133,11 @@ func TestAccessLogEntry_ToText(t *testing.T) {
 		`model_server=default/llama2-server`,
 		`selected_pod=llama2-deployment-5f7b8c9d-xk2p4`,
 		`request_id=test-request-id`,
+		`backend_type=model_server`,
+		`backend_name=default/llama2-server`,
+		`upstream_model=llama2-7b`,
+		`upstream_status_code=200`,
+		`upstream_attempts=1`,
 		`tokens=150/75`,
 		`timings=2350ms(45+2180+5)`,
 	}
@@ -191,6 +211,15 @@ func TestAccessLogContext_Lifecycle(t *testing.T) {
 	assert.Equal(t, "default/test-route", ctx.ModelRoute)
 	assert.Equal(t, "default/test-server", ctx.ModelServer)
 	assert.Equal(t, "test-pod-123", ctx.SelectedPod)
+	ctx.SetBackendInfo("model_server", "default/test-server", "test-model-base")
+	ctx.SetUpstreamInfo(429, 2)
+	ctx.SetErrorOrigin("upstream")
+	assert.Equal(t, "model_server", ctx.BackendType)
+	assert.Equal(t, "default/test-server", ctx.BackendName)
+	assert.Equal(t, "test-model-base", ctx.UpstreamModel)
+	assert.Equal(t, 429, ctx.UpstreamStatusCode)
+	assert.Equal(t, 2, ctx.UpstreamAttempts)
+	assert.Equal(t, "upstream", ctx.ErrorOrigin)
 
 	// Set token counts
 	ctx.SetTokenCounts(100, 50)
@@ -225,6 +254,12 @@ func TestAccessLogContext_Lifecycle(t *testing.T) {
 	assert.Equal(t, "default/test-route", entry.ModelRoute)
 	assert.Equal(t, "default/test-server", entry.ModelServer)
 	assert.Equal(t, "test-pod-123", entry.SelectedPod)
+	assert.Equal(t, "model_server", entry.BackendType)
+	assert.Equal(t, "default/test-server", entry.BackendName)
+	assert.Equal(t, "test-model-base", entry.UpstreamModel)
+	assert.Equal(t, 429, entry.UpstreamStatusCode)
+	assert.Equal(t, 2, entry.UpstreamAttempts)
+	assert.Equal(t, "upstream", entry.ErrorOrigin)
 	assert.Equal(t, 100, entry.InputTokens)
 	assert.Equal(t, 50, entry.OutputTokens)
 	assert.Greater(t, entry.DurationTotal, int64(0))

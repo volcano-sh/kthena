@@ -26,19 +26,22 @@ import (
 
 const (
 	// Label names
-	LabelModel       = "model"
-	LabelPath        = "path"
-	LabelStatusCode  = "status_code"
-	LabelErrorType   = "error_type"
-	LabelTokenType   = "token_type"
-	LabelPlugin      = "plugin"
-	LabelType        = "type"
-	LabelLimitType   = "limit_type"
-	LabelModelRoute  = "model_route"
-	LabelModelServer = "model_server"
-	LabelEngine      = "engine"
-	LabelUserID      = "user_id"
-	LabelStage       = "stage"
+	LabelModel         = "model"
+	LabelPath          = "path"
+	LabelStatusCode    = "status_code"
+	LabelErrorType     = "error_type"
+	LabelTokenType     = "token_type"
+	LabelPlugin        = "plugin"
+	LabelType          = "type"
+	LabelLimitType     = "limit_type"
+	LabelModelRoute    = "model_route"
+	LabelModelServer   = "model_server"
+	LabelBackendType   = "backend_type"
+	LabelBackendName   = "backend_name"
+	LabelUpstreamModel = "upstream_model"
+	LabelEngine        = "engine"
+	LabelUserID        = "user_id"
+	LabelStage         = "stage"
 
 	// kvcache-aware error stage values
 	StageTokenize = "tokenize"
@@ -56,6 +59,14 @@ const (
 	LimitTypeInputTokens  = "input_tokens"
 	LimitTypeOutputTokens = "output_tokens"
 	LimitTypeRequests     = "requests"
+
+	// Backend type values
+	BackendTypeNone             = "none"
+	BackendTypeModelServer      = "model_server"
+	BackendTypeExternalProvider = "external_provider"
+	BackendTypeInferencePool    = "inference_pool"
+	BackendTypeUnresolved       = "unresolved"
+	DestinationLabelValueNone   = "none"
 )
 
 // Metrics holds all Prometheus metrics for the kthena-router
@@ -125,7 +136,7 @@ func NewMetrics() *Metrics {
 				Name: "kthena_router_requests_total",
 				Help: "Total number of HTTP requests processed by the router",
 			},
-			[]string{LabelModel, LabelPath, LabelStatusCode, LabelErrorType},
+			[]string{LabelModel, LabelPath, LabelStatusCode, LabelErrorType, LabelModelRoute, LabelBackendType, LabelBackendName, LabelUpstreamModel},
 		),
 
 		RequestDuration: *promauto.NewHistogramVec(
@@ -134,7 +145,7 @@ func NewMetrics() *Metrics {
 				Help:    "End-to-end request processing latency distribution for all requests",
 				Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60},
 			},
-			[]string{LabelModel, LabelPath, LabelStatusCode},
+			[]string{LabelModel, LabelPath, LabelStatusCode, LabelModelRoute, LabelBackendType, LabelBackendName, LabelUpstreamModel},
 		),
 
 		RequestPrefillDuration: *promauto.NewHistogramVec(
@@ -160,7 +171,7 @@ func NewMetrics() *Metrics {
 				Name: "kthena_router_tokens_total",
 				Help: "Total tokens processed/generated",
 			},
-			[]string{LabelModel, LabelPath, LabelTokenType},
+			[]string{LabelModel, LabelPath, LabelTokenType, LabelModelRoute, LabelBackendType, LabelBackendName, LabelUpstreamModel},
 		),
 
 		SchedulerPluginDuration: *promauto.NewHistogramVec(
@@ -193,7 +204,7 @@ func NewMetrics() *Metrics {
 				Name: "kthena_router_active_upstream_requests",
 				Help: "Current number of active upstream requests (from router to backend pods)",
 			},
-			[]string{LabelModelServer, LabelModelRoute},
+			[]string{LabelModelServer, LabelModelRoute, LabelBackendType, LabelBackendName, LabelUpstreamModel},
 		),
 
 		FairnessQueueSize: *promauto.NewGaugeVec(
@@ -412,8 +423,14 @@ func (m *Metrics) RecordKVCacheError(model, stage string) {
 
 // RecordRequest records a completed request with all relevant metrics
 func (m *Metrics) RecordRequest(model, path, statusCode, errorType string, duration time.Duration) {
-	m.RequestsTotal.WithLabelValues(model, path, statusCode, errorType).Inc()
-	m.RequestDuration.WithLabelValues(model, path, statusCode).Observe(duration.Seconds())
+	m.RecordRequestForDestination(model, path, statusCode, errorType, "", "", "", "", duration)
+}
+
+// RecordRequestForDestination records a completed request with backend destination labels.
+func (m *Metrics) RecordRequestForDestination(model, path, statusCode, errorType, modelRoute, backendType, backendName, upstreamModel string, duration time.Duration) {
+	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
+	m.RequestsTotal.WithLabelValues(model, path, statusCode, errorType, modelRoute, backendType, backendName, upstreamModel).Inc()
+	m.RequestDuration.WithLabelValues(model, path, statusCode, modelRoute, backendType, backendName, upstreamModel).Observe(duration.Seconds())
 }
 
 // RecordPrefillDuration records prefill phase duration for PD-disaggregated requests
@@ -428,11 +445,17 @@ func (m *Metrics) RecordDecodeDuration(model, path, statusCode string, duration 
 
 // RecordTokens records input and output token counts
 func (m *Metrics) RecordTokens(model, path string, inputTokens, outputTokens int) {
+	m.RecordTokensForDestination(model, path, "", "", "", "", inputTokens, outputTokens)
+}
+
+// RecordTokensForDestination records input and output token counts with backend destination labels.
+func (m *Metrics) RecordTokensForDestination(model, path, modelRoute, backendType, backendName, upstreamModel string, inputTokens, outputTokens int) {
+	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
 	if inputTokens > 0 {
-		m.TokensTotal.WithLabelValues(model, path, TokenTypeInput).Add(float64(inputTokens))
+		m.TokensTotal.WithLabelValues(model, path, TokenTypeInput, modelRoute, backendType, backendName, upstreamModel).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		m.TokensTotal.WithLabelValues(model, path, TokenTypeOutput).Add(float64(outputTokens))
+		m.TokensTotal.WithLabelValues(model, path, TokenTypeOutput, modelRoute, backendType, backendName, upstreamModel).Add(float64(outputTokens))
 	}
 }
 
@@ -473,7 +496,14 @@ func (m *Metrics) SetActiveDownstreamRequests(model string, count float64) {
 
 // SetActiveUpstreamRequests sets the current number of active upstream requests
 func (m *Metrics) SetActiveUpstreamRequests(modelServer, modelRoute string, count float64) {
-	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute).Set(count)
+	m.SetActiveUpstreamRequestsForDestination(modelRoute, BackendTypeModelServer, modelServer, "", count)
+}
+
+// SetActiveUpstreamRequestsForDestination sets active upstream requests with backend destination labels.
+func (m *Metrics) SetActiveUpstreamRequestsForDestination(modelRoute, backendType, backendName, upstreamModel string, count float64) {
+	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
+	modelServer := activeUpstreamModelServerLabel(backendType, backendName)
+	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute, backendType, backendName, upstreamModel).Set(count)
 }
 
 // IncActiveDownstreamRequests increments the active downstream requests counter
@@ -488,12 +518,26 @@ func (m *Metrics) DecActiveDownstreamRequests(model string) {
 
 // IncActiveUpstreamRequests increments the active upstream requests counter
 func (m *Metrics) IncActiveUpstreamRequests(modelServer, modelRoute string) {
-	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute).Inc()
+	m.IncActiveUpstreamRequestsForDestination(modelRoute, BackendTypeModelServer, modelServer, "")
+}
+
+// IncActiveUpstreamRequestsForDestination increments active upstream requests with backend destination labels.
+func (m *Metrics) IncActiveUpstreamRequestsForDestination(modelRoute, backendType, backendName, upstreamModel string) {
+	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
+	modelServer := activeUpstreamModelServerLabel(backendType, backendName)
+	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute, backendType, backendName, upstreamModel).Inc()
 }
 
 // DecActiveUpstreamRequests decrements the active upstream requests counter
 func (m *Metrics) DecActiveUpstreamRequests(modelServer, modelRoute string) {
-	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute).Dec()
+	m.DecActiveUpstreamRequestsForDestination(modelRoute, BackendTypeModelServer, modelServer, "")
+}
+
+// DecActiveUpstreamRequestsForDestination decrements active upstream requests with backend destination labels.
+func (m *Metrics) DecActiveUpstreamRequestsForDestination(modelRoute, backendType, backendName, upstreamModel string) {
+	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
+	modelServer := activeUpstreamModelServerLabel(backendType, backendName)
+	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute, backendType, backendName, upstreamModel).Dec()
 }
 
 // IncFairnessQueueSize increments the fairness queue size
@@ -588,14 +632,19 @@ func (m *Metrics) DecSessionBoostQueueInflight(model string) {
 
 // RequestMetricsRecorder is a helper struct to record detailed metrics for individual requests
 type RequestMetricsRecorder struct {
-	metrics          *Metrics
-	model            string
-	path             string
-	modelServer      string
-	modelRoute       string
-	startTime        time.Time
-	prefillStartTime *time.Time
-	decodeStartTime  *time.Time
+	metrics            *Metrics
+	model              string
+	path               string
+	modelServer        string
+	modelRoute         string
+	backendType        string
+	backendName        string
+	upstreamModel      string
+	destinationBound   bool
+	pendingInputTokens int
+	startTime          time.Time
+	prefillStartTime   *time.Time
+	decodeStartTime    *time.Time
 }
 
 // NewRequestMetricsRecorder creates a new recorder for a specific request
@@ -612,20 +661,39 @@ func NewRequestMetricsRecorder(metrics *Metrics, model, path string) *RequestMet
 func (r *RequestMetricsRecorder) SetUpstreamConnectionInfo(modelServer, modelRoute string) {
 	r.modelServer = modelServer
 	r.modelRoute = modelRoute
+	r.BindDestination(modelRoute, BackendTypeModelServer, modelServer, "")
+}
+
+// BindDestination sets backend labels for request-scoped metrics and flushes
+// input tokens that were measured before routing selected a backend.
+func (r *RequestMetricsRecorder) BindDestination(modelRoute, backendType, backendName, upstreamModel string) {
+	r.modelRoute, r.backendType, r.backendName, r.upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
+	r.modelServer = r.backendName
+	r.destinationBound = true
+	if r.pendingInputTokens > 0 {
+		r.metrics.RecordTokensForDestination(r.model, r.path, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, r.pendingInputTokens, 0)
+		r.pendingInputTokens = 0
+	}
 }
 
 // RecordInputTokens records input token usage for this request
 func (r *RequestMetricsRecorder) RecordInputTokens(tokens int) {
-	if tokens > 0 {
-		r.metrics.TokensTotal.WithLabelValues(r.model, r.path, TokenTypeInput).Add(float64(tokens))
+	if tokens <= 0 {
+		return
 	}
+	if !r.destinationBound {
+		r.pendingInputTokens += tokens
+		return
+	}
+	r.metrics.RecordTokensForDestination(r.model, r.path, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, tokens, 0)
 }
 
 // RecordOutputTokens records output token usage for this request
 func (r *RequestMetricsRecorder) RecordOutputTokens(tokens int) {
-	if tokens > 0 {
-		r.metrics.TokensTotal.WithLabelValues(r.model, r.path, TokenTypeOutput).Add(float64(tokens))
+	if tokens <= 0 {
+		return
 	}
+	r.metrics.RecordTokensForDestination(r.model, r.path, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, 0, tokens)
 }
 
 // RecordRateLimitExceeded records when rate limiting is applied
@@ -663,8 +731,12 @@ func (r *RequestMetricsRecorder) FinishDecodePhase(statusCode string) {
 
 // Finish completes the request recording with final status
 func (r *RequestMetricsRecorder) Finish(statusCode, errorType string) {
+	if !r.destinationBound && r.pendingInputTokens > 0 {
+		r.metrics.RecordTokensForDestination(r.model, r.path, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone, r.pendingInputTokens, 0)
+		r.pendingInputTokens = 0
+	}
 	duration := time.Since(r.startTime)
-	r.metrics.RecordRequest(r.model, r.path, statusCode, errorType, duration)
+	r.metrics.RecordRequestForDestination(r.model, r.path, statusCode, errorType, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, duration)
 }
 
 // RecordSchedulerPluginDuration records the execution time for a scheduler plugin
@@ -699,17 +771,40 @@ func (r *RequestMetricsRecorder) RecordKVCacheError(stage string) {
 
 // IncActiveUpstreamRequests increments the active upstream requests counter for this request
 func (r *RequestMetricsRecorder) IncActiveUpstreamRequests() {
-	if r.modelServer != "" && r.modelRoute != "" {
-		r.metrics.IncActiveUpstreamRequests(r.modelServer, r.modelRoute)
+	if r.destinationBound {
+		r.metrics.IncActiveUpstreamRequestsForDestination(r.modelRoute, r.backendType, r.backendName, r.upstreamModel)
 	}
 }
 
 // DecActiveUpstreamRequests decrements the active upstream requests counter for this request
 func (r *RequestMetricsRecorder) DecActiveUpstreamRequests() {
-	if r.modelServer != "" && r.modelRoute != "" {
-		r.metrics.DecActiveUpstreamRequests(r.modelServer, r.modelRoute)
+	if r.destinationBound {
+		r.metrics.DecActiveUpstreamRequestsForDestination(r.modelRoute, r.backendType, r.backendName, r.upstreamModel)
 	}
 }
 
 // Global metrics instance
 var DefaultMetrics = NewMetrics()
+
+func normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel string) (string, string, string, string) {
+	if modelRoute == "" {
+		modelRoute = DestinationLabelValueNone
+	}
+	if backendType == "" {
+		backendType = BackendTypeUnresolved
+	}
+	if backendName == "" {
+		backendName = DestinationLabelValueNone
+	}
+	if upstreamModel == "" {
+		upstreamModel = DestinationLabelValueNone
+	}
+	return modelRoute, backendType, backendName, upstreamModel
+}
+
+func activeUpstreamModelServerLabel(backendType, backendName string) string {
+	if backendType == BackendTypeModelServer {
+		return backendName
+	}
+	return DestinationLabelValueNone
+}
