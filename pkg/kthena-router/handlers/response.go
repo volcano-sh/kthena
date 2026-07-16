@@ -39,6 +39,34 @@ type OpenAIResponse struct {
 	Usage   Usage  `json:"usage"`
 }
 
+type anthropicUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+type openAIResponsesUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+type openAIResponsesResponse struct {
+	ID     string               `json:"id"`
+	Object string               `json:"object"`
+	Model  string               `json:"model"`
+	Usage  openAIResponsesUsage `json:"usage"`
+}
+
+type anthropicResponse struct {
+	Model string         `json:"model"`
+	Usage anthropicUsage `json:"usage"`
+}
+
+type anthropicStreamResponse struct {
+	Message *anthropicResponse `json:"message"`
+	Usage   anthropicUsage     `json:"usage"`
+}
+
 // Function to parse the OpenAI response body
 func ParseOpenAIResponseBody(resp []byte) (*OpenAIResponse, error) {
 	// Unmarshal the JSON body into the struct
@@ -49,6 +77,31 @@ func ParseOpenAIResponseBody(resp []byte) (*OpenAIResponse, error) {
 	}
 
 	return &responseBody, nil
+}
+
+func ParseOpenAIResponsesResponseBody(resp []byte) (*OpenAIResponse, error) {
+	var responseBody openAIResponsesResponse
+	if err := json.Unmarshal(resp, &responseBody); err != nil {
+		return nil, err
+	}
+
+	return normalizeOpenAIResponsesResponse(responseBody), nil
+}
+
+func ParseAnthropicResponseBody(resp []byte) (*OpenAIResponse, error) {
+	var responseBody anthropicResponse
+	if err := json.Unmarshal(resp, &responseBody); err != nil {
+		return nil, err
+	}
+
+	return &OpenAIResponse{
+		Model: responseBody.Model,
+		Usage: Usage{
+			PromptTokens:     responseBody.Usage.InputTokens,
+			CompletionTokens: responseBody.Usage.OutputTokens,
+			TotalTokens:      responseBody.Usage.InputTokens + responseBody.Usage.OutputTokens,
+		},
+	}, nil
 }
 
 const (
@@ -82,5 +135,73 @@ func ParseStreamRespForUsage(
 		return response
 	}
 
+	return response
+}
+
+func ParseOpenAIResponsesStreamRespForUsage(responseText string) OpenAIResponse {
+	if !strings.HasPrefix(responseText, streamingRespPrefix) || strings.HasPrefix(responseText, streamingEndMsg) {
+		return OpenAIResponse{}
+	}
+	content := strings.TrimPrefix(responseText, streamingRespPrefix)
+
+	var event struct {
+		Response *openAIResponsesResponse `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(content), &event); err != nil {
+		klog.Error(err, "unmarshaling OpenAI Responses stream body ", content)
+		return OpenAIResponse{}
+	}
+	if event.Response != nil {
+		return *normalizeOpenAIResponsesResponse(*event.Response)
+	}
+
+	var response openAIResponsesResponse
+	if err := json.Unmarshal([]byte(content), &response); err != nil {
+		return OpenAIResponse{}
+	}
+	return *normalizeOpenAIResponsesResponse(response)
+}
+
+func normalizeOpenAIResponsesResponse(response openAIResponsesResponse) *OpenAIResponse {
+	totalTokens := response.Usage.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = response.Usage.InputTokens + response.Usage.OutputTokens
+	}
+	return &OpenAIResponse{
+		ID:     response.ID,
+		Object: response.Object,
+		Model:  response.Model,
+		Usage: Usage{
+			PromptTokens:     response.Usage.InputTokens,
+			CompletionTokens: response.Usage.OutputTokens,
+			TotalTokens:      totalTokens,
+		},
+	}
+}
+
+func ParseAnthropicStreamRespForUsage(responseText string) OpenAIResponse {
+	var response OpenAIResponse
+	if !strings.HasPrefix(responseText, streamingRespPrefix) {
+		return response
+	}
+	content := strings.TrimPrefix(responseText, streamingRespPrefix)
+
+	var streamResponse anthropicStreamResponse
+	if err := json.Unmarshal([]byte(content), &streamResponse); err != nil {
+		klog.Error(err, "unmarshaling anthropic stream response body ", content)
+		return response
+	}
+
+	usage := streamResponse.Usage
+	if streamResponse.Message != nil {
+		response.Model = streamResponse.Message.Model
+		usage.InputTokens += streamResponse.Message.Usage.InputTokens
+		usage.OutputTokens += streamResponse.Message.Usage.OutputTokens
+	}
+	response.Usage = Usage{
+		PromptTokens:     usage.InputTokens,
+		CompletionTokens: usage.OutputTokens,
+		TotalTokens:      usage.InputTokens + usage.OutputTokens,
+	}
 	return response
 }

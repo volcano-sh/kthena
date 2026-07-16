@@ -117,7 +117,7 @@ func buildPrefillRequest(req *http.Request, modelRequest map[string]interface{})
 }
 
 func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) *http.Request {
-	modelRequest = addTokenUsage(c, modelRequest)
+	modelRequest = AddTokenUsage(c, modelRequest)
 	body, err := json.Marshal(modelRequest)
 	if err != nil {
 		return nil
@@ -131,9 +131,9 @@ func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[stri
 	return reqCopy
 }
 
-// addTokenUsage adds token usage to the request body if it is not already present
+// AddTokenUsage adds token usage to the request body if it is not already present
 // should be used for decode requests or non PD disaggregated mode
-func addTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]interface{} {
+func AddTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]interface{} {
 	// Check if streaming is enabled
 	if isStreamingRequest(reqBody) {
 		if !isTokenUsageEnabled(reqBody) {
@@ -151,6 +151,10 @@ func addTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]in
 		reqBody["include_usage"] = true
 	}
 	return reqBody
+}
+
+func addTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]interface{} {
+	return AddTokenUsage(c, reqBody)
 }
 
 // isStreaming checks if the given model request has streaming enabled
