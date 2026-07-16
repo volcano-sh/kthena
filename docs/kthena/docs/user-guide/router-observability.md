@@ -37,19 +37,28 @@ The debug endpoints (`/debug/config_dump/*`) are served on port **15000**.
 
 | Metric Name                                          | Type      | Description                                                  | Labels                                      | Buckets                                                                 |
 |------------------------------------------------------|-----------|--------------------------------------------------------------|---------------------------------------------|-------------------------------------------------------------------------|
-| `kthena_router_requests_total`                       | Counter   | Total requests processed                                     | `model`, `path`, `status_code`, `error_type` | —                                                                       |
-| `kthena_router_request_duration_seconds`             | Histogram | End-to-end latency (client → response)                       | `model`, `path`, `status_code`              | 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60        |
+| `kthena_router_requests_total`                       | Counter   | Total requests processed                                     | `model`, `path`, `status_code`, `error_type`, `model_route`, `backend_type`, `backend_name`, `upstream_model` | —                                                                       |
+| `kthena_router_request_duration_seconds`             | Histogram | End-to-end latency (client → response)                       | `model`, `path`, `status_code`, `model_route`, `backend_type`, `backend_name`, `upstream_model` | 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60        |
 | `kthena_router_request_prefill_duration_seconds`     | Histogram | Prefill (prompt processing) phase duration                   | `model`, `path`, `status_code`              | same as above                                                           |
 | `kthena_router_request_decode_duration_seconds`      | Histogram | Decode (token generation) phase duration                     | `model`, `path`, `status_code`              | same as above                                                           |
 | `kthena_router_active_requests`                      | Gauge     | Currently active requests handled by the router              | —                                           | —                                                                       |
 | `kthena_router_active_downstream_requests`           | Gauge     | Currently active client requests                             | `model`                                     | —                                                                       |
-| `kthena_router_active_upstream_requests`             | Gauge     | Currently active requests to inference pods                  | `model_route`, `model_server`               | —                                                                       |
+| `kthena_router_active_upstream_requests`             | Gauge     | Currently active requests to upstream backends               | `model_server`, `model_route`, `backend_type`, `backend_name`, `upstream_model` | —                                                                       |
 
 ### Token & Usage Metrics
 
 | Metric Name                            | Type    | Description                                      | Labels                              |
 |----------------------------------------|---------|--------------------------------------------------|-------------------------------------|
-| `kthena_router_tokens_total`           | Counter | Total tokens processed (input + output)          | `model`, `path`, `token_type` (input/output) |
+| `kthena_router_tokens_total`           | Counter | Total tokens processed (input + output)          | `model`, `path`, `token_type` (input/output), `model_route`, `backend_type`, `backend_name`, `upstream_model` |
+
+Input token values come from the Router's pre-dispatch tokenizer and are also used for input rate limiting. Output token values use upstream-reported usage when it is available. For external providers, input values can differ from billing usage because provider tokenizers, system prompts, prompt caching, and cached-token reporting vary.
+
+The destination labels use bounded values so dashboards can group all router backends consistently:
+
+- `backend_type` is one of `model_server`, `external_provider`, `inference_pool`, `unresolved`, or `none`.
+- `model_route` and `backend_name` use `namespace/name` when resolved and `none` when not applicable.
+- `upstream_model` is the model name sent to the backend, or `none` when the backend does not expose one.
+- `model_server` remains on `kthena_router_active_upstream_requests` for compatibility. It is `none` for non-ModelServer destinations.
 
 ### Scheduler & Fairness Metrics
 
@@ -80,6 +89,11 @@ The debug endpoints (`/debug/config_dump/*`) are served on port **15000**.
   "model_route": "prod/llama3-70b-route",
   "model_server": "prod/llama3-70b-server",
   "selected_pod": "llama3-70b-deployment-7b9f4c2d-kjx9p",
+  "backend_type": "model_server",
+  "backend_name": "prod/llama3-70b-server",
+  "upstream_model": "llama3-70b-instruct",
+  "upstream_status_code": 200,
+  "upstream_attempts": 1,
   "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "input_tokens": 412,
   "output_tokens": 189,
