@@ -187,8 +187,16 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
-	q.MarkSessionRequestCompleted("conv-A")
-	q.MarkSessionRequestCompleted("conv-B")
+	// Use a controllable clock so conv-B's completion is strictly after conv-A's,
+	// keeping the completion-time ordering below deterministic.
+	st := q.GetSessionTracker()
+	base := time.Now()
+	markCompletedAt := func(sessionID string, completedAt time.Time) {
+		st.now = func() time.Time { return completedAt }
+		q.MarkSessionRequestCompleted(sessionID)
+	}
+	markCompletedAt("conv-A", base)
+	markCompletedAt("conv-B", base.Add(time.Second))
 
 	now := time.Now()
 	requests := []*Request{
@@ -217,12 +225,13 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 		t.Errorf("Last two should not be boosted: third=%v fourth=%v", third.SessionBoost, fourth.SessionBoost)
 	}
 
-	// Among boosted: FIFO order (boost-A arrived before boost-B)
-	if first.UserID != "u2" {
-		t.Errorf("Expected boost-A first (earlier arrival), got %s", first.UserID)
+	// Among boosted: the session that completed most recently wins. conv-B was
+	// marked completed after conv-A, so boost-B (u3) is dequeued before boost-A (u2).
+	if first.UserID != "u3" {
+		t.Errorf("Expected boost-B first (most recently completed session), got %s", first.UserID)
 	}
-	if second.UserID != "u3" {
-		t.Errorf("Expected boost-B second, got %s", second.UserID)
+	if second.UserID != "u2" {
+		t.Errorf("Expected boost-A second, got %s", second.UserID)
 	}
 
 	// Among normal: FIFO order
@@ -231,6 +240,60 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 	}
 	if fourth.UserID != "u4" {
 		t.Errorf("Expected normal-2 fourth, got %s", fourth.UserID)
+	}
+}
+
+// TestSessionBoostQueue_OrderedByCompletionTime verifies that boosted requests are
+// dequeued by their session's completion time (most recently completed first),
+// independent of the order in which the requests arrived in the queue.
+func TestSessionBoostQueue_OrderedByCompletionTime(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	// Drive the tracker with a controllable clock so each completion gets a
+	// strictly increasing, distinct timestamp regardless of the wall clock's
+	// resolution or how fast the test executes. This keeps the completion-time
+	// ordering deterministic instead of falling back to the RequestTime tiebreak.
+	st := q.GetSessionTracker()
+	base := time.Now()
+	markCompletedAt := func(sessionID string, completedAt time.Time) {
+		st.now = func() time.Time { return completedAt }
+		q.MarkSessionRequestCompleted(sessionID)
+	}
+
+	// Completion order: conv-A, then conv-B, then conv-C (conv-C most recent).
+	markCompletedAt("conv-A", base)
+	markCompletedAt("conv-B", base.Add(time.Second))
+	markCompletedAt("conv-C", base.Add(2*time.Second))
+
+	now := time.Now()
+	// Arrival order deliberately differs from completion order: B arrives first,
+	// then C, then A. This distinguishes completion-time ordering from both FIFO
+	// (which would yield B, C, A) and LIFO (which would yield A, C, B).
+	requests := []*Request{
+		{UserID: "u-B", ModelName: "m", SessionID: "conv-B", RequestTime: now},
+		{UserID: "u-C", ModelName: "m", SessionID: "conv-C", RequestTime: now.Add(time.Millisecond)},
+		{UserID: "u-A", ModelName: "m", SessionID: "conv-A", RequestTime: now.Add(2 * time.Millisecond)},
+	}
+	for _, r := range requests {
+		if err := q.PushRequest(r); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	// Expect dequeue order by most-recent completion: C, then B, then A.
+	for i, expected := range []string{"u-C", "u-B", "u-A"} {
+		got, err := q.popWhenAvailable(context.Background())
+		if err != nil {
+			t.Fatalf("Pop %d failed: %v", i, err)
+		}
+		if !got.SessionBoost {
+			t.Errorf("Position %d: expected boosted request, got non-boosted %s", i, got.UserID)
+		}
+		if got.UserID != expected {
+			t.Errorf("Position %d: expected %s (by completion time), got %s", i, expected, got.UserID)
+		}
 	}
 }
 

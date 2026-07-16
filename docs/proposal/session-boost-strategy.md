@@ -79,11 +79,12 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │  ┌──────────────────┐     ┌─────────────────────────┐    │
 │  │ SessionTracker   │<────│ MarkSessionRequest      │    │
 │  │ (bounded LRU)    │     │ Completed()             │    │
-│  │ keys: sessionID  │     │ (after response sent)   │    │
-│  │ cap: 4096 default│     └─────────────────────────┘    │
+│  │ key:   sessionID │     │ (after response sent)   │    │
+│  │ value: completeAt│     └─────────────────────────┘    │
+│  │ cap: 4096 default│                                    │
 │  └────────┬─────────┘                                    │
 │            │                                             │
-│            │ HasRecentCompletion(sessionID)?             │
+│            │ CompletionTime(sessionID)?                  │
 │            ▼                                             │
 │  ┌──────────────────┐                                    │
 │  │  PushRequest()   │                                    │
@@ -98,9 +99,10 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │  │                                      │                │
 │  │  Ordering:                           │                │
 │  │  1. SessionBoost=true > false        │                │
-│  │  2. Within same boost: FIFO          │                │
+│  │  2. Within boosted: most recently     │                │
+│  │     completed session first          │                │
 │  │                                      │                │
-│  │  [Boosted-1] [Boosted-2] [Normal-1]  │                │
+│  │  [Boosted-warm][Boosted-cooler][Norm]│                │
 │  └──────────────────────────────────────┘                │
 │            │                                             │
 │            ▼                                             │
@@ -159,14 +161,14 @@ Timeline:
          ▼  ▼                                  ▼
     ─────┼──┼──────────────────────────────────┼─────
          │  │                                  │
-         │  │  Case A: Head already boosted →  │
-         │  │  skip grace, dequeue immediately │
-         │  │                                  │
-         │  │  Case B: Otherwise hold the slot │
-         │  │  for the full grace period, then │
-         │  │  dequeue the head (boosted ranks │
-         │  │  first, so a follow-up that      │
-         │  │  arrived wins automatically)     │
+         │  │  Hold the slot for the full      │
+         │  │  grace period, then dequeue the  │
+         │  │  head. Boosted requests rank     │
+         │  │  first and, among boosted, the   │
+         │  │  newest-arrived wins, so a       │
+         │  │  same-session follow-up that     │
+         │  │  arrived during the window is    │
+         │  │  dequeued first automatically.   │
          │  └────────────────────────────────┐
 ```
 
@@ -178,16 +180,17 @@ It is important that grace is **triggered only by release events**, because a re
 
 1. A request finishes → `Release()` runs → `inflightCount` is decremented → a signal is sent on `releaseCh`.
 2. The freed slot would normally be claimed immediately by the current heap head (which may be an unrelated, non-boosted request). The grace wait instead **holds that just-freed slot for up to `SessionBoostGracePeriod`**, betting that a same-session follow-up is about to arrive and reuse the warm prefix cache.
-3. When the wait resolves, `tryBackpressureDequeue` runs and re-checks **both** capacity gates before admitting anyone. A boosted follow-up that arrived during grace is admitted first because boosted requests outrank others in the heap, and only when `inflight < MaxConcurrent` **and** at least one backend pod reports capacity.
+3. When the wait resolves, `tryBackpressureDequeue` runs and re-checks **both** capacity gates before admitting anyone. A boosted follow-up that arrived during grace is admitted first because boosted requests outrank others in the heap and, among boosted requests, the one whose session completed most recently is at the head — and only when `inflight < MaxConcurrent` **and** at least one backend pod reports capacity.
 
-The grace wait can resolve in three ways, and in every case the two capacity gates are the final arbiter:
+The grace wait always runs for the full window (subject to shutdown), and in every case the two capacity gates are the final arbiter:
 
-| Outcome                    | Trigger                                                                                       | What happens next                                                                                                                                                                                                                                       |
-| -------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Skip grace (fast path)** | The heap head is *already* session-boosted when the release fires (`isHeadSessionBoosted()`). | No wait at all — go straight to the capacity gates and admit if they pass. There is nothing to wait for.                                                                                                                                                |
-| **Grace expires**          | The timer fires (`timer.C`).                                                                  | Stop holding the slot and fall through to the capacity gates, which admit the heap head. If a same-session follow-up arrived during the wait it is now boosted and sits at the head, so it wins automatically (subject to inflight + backend capacity). |
+| Outcome           | Trigger                      | What happens next                                                                                                                                                                                                                                                                                       |
+| ----------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Grace expires** | The timer fires (`timer.C`). | Stop holding the slot and fall through to the capacity gates, which admit the heap head. If a same-session follow-up arrived during the wait it is now boosted and sits at the head (session with the most recent completion first), so it wins automatically (subject to inflight + backend capacity). |
 
-This ordering matters because the three checks answer different questions and run in sequence:
+> There is no "head already boosted" fast path. The queue holds the freed slot for the full grace window even when a boosted request is already at the head, because a still-newer same-session follow-up may yet arrive during the window and should be the one to ride the warm prefix cache.
+
+This ordering matters because the timing layer and the two gates answer different questions and run in sequence:
 
 ```
 Release frees a slot
@@ -215,7 +218,7 @@ Two interactions are worth calling out explicitly:
 - **Grace never overrides backpressure.** If the grace window ends but the inflight limit is already reached or every backend pod is busy, the request is **not** admitted — `tryBackpressureDequeue` simply holds (and drains any cancelled requests from the heap) until the next release or new arrival reopens the gates. Grace only chooses *who* tries next; the capacity gates decide *whether* anyone runs.
 - **Fresh arrivals on an idle queue bypass grace.** Grace is tied to `releaseCh` (a freed slot), not to `notifyCh` (a new arrival). When a request lands on an otherwise idle queue with no pending release, it goes straight to the capacity gates with no grace delay, so enabling grace adds no admission latency to first turns. The only place a new arrival waits is *inside* an already-running grace window, where it is precisely the boosted follow-up the window exists to catch. When both a release and a new arrival are pending at once, the release is preferred so the freed slot is the one held for the grace window.
 
-The net effect is a strict precedence: **grace timing → inflight gate → backend gate**. The grace layer is purely additive and optional (`SessionBoostGracePeriod = 0` removes it entirely, taking the no-grace fast path), and it can only ever *delay* an admission to favor a session-boosted follow-up — it can never admit a request that the inflight or backend gates would otherwise reject.
+The net effect is a strict precedence: **grace timing → inflight gate → backend gate**. The grace layer is purely additive and optional (`SessionBoostGracePeriod = 0` removes it entirely, dequeuing immediately on each release), and it can only ever *delay* an admission to favor a session-boosted follow-up — it can never admit a request that the inflight or backend gates would otherwise reject.
 
 #### Configuration
 
@@ -266,7 +269,9 @@ type RequestPriorityQueue struct {
 
 // Session-boost ordering (RequestPriorityQueue.Less when sessionBoost == true):
 // 1. SessionBoost=true comes before SessionBoost=false
-// 2. Within same boost status: earlier RequestTime comes first (FIFO)
+// 2. Within boosted requests: the session whose previous turn completed most
+//    recently comes first (warmest prefix cache); ties broken FIFO by RequestTime
+// 3. Within non-boosted requests: earlier RequestTime comes first (FIFO)
 ```
 
 #### Session Identification
