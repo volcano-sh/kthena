@@ -163,8 +163,8 @@ func (c *ExternalModelProviderController) processNextWorkItem() bool {
 				return true
 			}
 			klog.V(2).Infof("giving up on syncing externalModelProvider %q after %d retries: %s", key, maxRetries, err)
-			c.workqueue.Forget(obj)
 		}
+		c.workqueue.Forget(obj)
 		return true
 	}
 
@@ -340,9 +340,9 @@ func (c *ExternalModelProviderController) reconcileProviderStatus(provider *netw
 		return nil
 	}
 
-	copy := provider.DeepCopy()
-	copy.Status = status
-	_, err := c.kthenaClient.NetworkingV1alpha1().ExternalModelProviders(provider.Namespace).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+	updated := provider.DeepCopy()
+	updated.Status = status
+	_, err := c.kthenaClient.NetworkingV1alpha1().ExternalModelProviders(provider.Namespace).UpdateStatus(context.TODO(), updated, metav1.UpdateOptions{})
 	if errors.IsNotFound(err) {
 		return nil
 	}

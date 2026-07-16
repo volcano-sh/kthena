@@ -115,6 +115,67 @@ func TestOpenAIAdapterBuildRequest(t *testing.T) {
 	assert.Equal(t, true, tokenUsageInjected)
 }
 
+func TestOpenAIAdapterBuildRequestDoesNotInjectUsageForNonStreamingRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	provider := &networkingv1alpha1.ExternalModelProvider{
+		Spec: networkingv1alpha1.ExternalModelProviderSpec{
+			ProviderType: networkingv1alpha1.OpenAI,
+			BaseURL:      "https://api.example.com",
+		},
+	}
+
+	adapter, err := NewAdapter(provider.Spec.ProviderType)
+	assert.NoError(t, err)
+	upstream, err := adapter.BuildRequest(c, req, provider, nil, map[string]interface{}{
+		"model":  "m",
+		"stream": false,
+	})
+	assert.NoError(t, err)
+
+	var got map[string]interface{}
+	assert.NoError(t, json.NewDecoder(upstream.Body).Decode(&got))
+	assert.NotContains(t, got, "include_usage")
+	assert.NotContains(t, got, "stream_options")
+	_, tokenUsageInjected := c.Get(common.TokenUsageKey)
+	assert.False(t, tokenUsageInjected)
+}
+
+func TestOpenAIAdapterBuildRequestMergesStreamingUsageOption(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	provider := &networkingv1alpha1.ExternalModelProvider{
+		Spec: networkingv1alpha1.ExternalModelProviderSpec{
+			ProviderType: networkingv1alpha1.OpenAI,
+			BaseURL:      "https://api.example.com",
+		},
+	}
+
+	adapter, err := NewAdapter(provider.Spec.ProviderType)
+	assert.NoError(t, err)
+	upstream, err := adapter.BuildRequest(c, req, provider, nil, map[string]interface{}{
+		"model":  "m",
+		"stream": true,
+		"stream_options": map[string]interface{}{
+			"include_usage": false,
+			"vendor_option": "preserve-me",
+		},
+	})
+	assert.NoError(t, err)
+
+	var got map[string]interface{}
+	assert.NoError(t, json.NewDecoder(upstream.Body).Decode(&got))
+	assert.Equal(t, map[string]interface{}{
+		"include_usage": true,
+		"vendor_option": "preserve-me",
+	}, got["stream_options"])
+	tokenUsageInjected, exists := c.Get(common.TokenUsageKey)
+	assert.True(t, exists)
+	assert.Equal(t, true, tokenUsageInjected)
+}
+
 func TestOpenAIAdapterBuildRequestDoesNotDuplicateV1WhenBaseURLHasPath(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -306,6 +367,25 @@ func TestAnthropicAdapterBuildRequestPreservesV1WhenBaseURLHasPath(t *testing.T)
 	assert.NoError(t, err)
 
 	assert.Equal(t, "https://api.example.com/anthropic/v1/messages?trace=true", upstream.URL.String())
+}
+
+func TestAnthropicAdapterBuildRequestDoesNotDuplicateV1(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages?trace=true", nil)
+	provider := &networkingv1alpha1.ExternalModelProvider{
+		Spec: networkingv1alpha1.ExternalModelProviderSpec{
+			ProviderType: networkingv1alpha1.Anthropic,
+			BaseURL:      "https://api.example.com/v1",
+		},
+	}
+
+	adapter, err := NewAdapter(provider.Spec.ProviderType)
+	assert.NoError(t, err)
+	upstream, err := adapter.BuildRequest(c, req, provider, nil, map[string]interface{}{"model": "m"})
+	assert.NoError(t, err)
+
+	assert.Equal(t, "https://api.example.com/v1/messages?trace=true", upstream.URL.String())
 }
 
 func TestBuildRequestRequiresConfiguredSecretKey(t *testing.T) {

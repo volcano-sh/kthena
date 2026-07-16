@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
@@ -364,6 +365,36 @@ func TestExternalModelProviderController_WorkQueueProcessing(t *testing.T) {
 		result := controller.processNextWorkItem()
 		assert.True(t, result)
 	})
+}
+
+func TestExternalModelProviderController_SuccessForgetsRetryHistory(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	controller, err := NewExternalModelProviderController(
+		kthenaClient,
+		kthenaInformerFactory,
+		kubeInformerFactory,
+		datastore.New(),
+	)
+	assert.NoError(t, err)
+
+	controller.workqueue.ShutDown()
+	controller.workqueue = workqueue.NewTypedRateLimitingQueue(
+		workqueue.NewTypedItemExponentialFailureRateLimiter[any](0, 0),
+	)
+	defer controller.workqueue.ShutDown()
+
+	provider := providerWithSecretRef("default", "openai-provider", "")
+	provider.Spec.Auth = nil
+	assert.NoError(t, controller.externalModelProviderIndexer.Add(provider))
+
+	key := "default/openai-provider"
+	controller.workqueue.AddRateLimited(key)
+	assert.Equal(t, 1, controller.workqueue.NumRequeues(key))
+	assert.True(t, controller.processNextWorkItem())
+	assert.Zero(t, controller.workqueue.NumRequeues(key))
 }
 
 func TestExternalModelProviderController_EnqueueDeletedFinalStateUnknown(t *testing.T) {

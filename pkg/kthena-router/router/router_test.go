@@ -747,7 +747,8 @@ func TestRouter_HandlerFunc_ExternalOpenAIProvider(t *testing.T) {
 		var reqBody ModelRequest
 		assert.NoError(t, json.Unmarshal(body, &reqBody))
 		assert.Equal(t, providerModel, reqBody["model"])
-		assert.Equal(t, true, reqBody["include_usage"])
+		assert.NotContains(t, reqBody, "include_usage")
+		assert.NotContains(t, reqBody, "stream_options")
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1493,6 +1494,58 @@ func TestParseModelRequestValidatesModelName(t *testing.T) {
 			}
 			assert.NoError(t, err)
 			assert.Equal(t, "test-model", got["model"])
+		})
+	}
+}
+
+func TestParseModelRequestReturnsReadableJSONError(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":`))
+
+	modelRequest, err := ParseModelRequest(c)
+
+	assert.Error(t, err)
+	assert.Nil(t, modelRequest)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "unexpected EOF")
+}
+
+func TestParseModelRequestAllowsOnlyOneJSONValue(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantErr    bool
+		wantStatus int
+	}{
+		{
+			name: "trailing whitespace",
+			body: "{\"model\":\"test-model\"} \n\t",
+		},
+		{
+			name:       "second JSON value",
+			body:       `{"model":"test-model"}{"extra":true}`,
+			wantErr:    true,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(tt.body))
+
+			modelRequest, err := ParseModelRequest(c)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, modelRequest)
+				assert.Equal(t, tt.wantStatus, w.Code)
+				assert.Contains(t, w.Body.String(), "invalid request body")
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, "test-model", modelRequest["model"])
 		})
 	}
 }

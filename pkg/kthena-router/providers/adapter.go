@@ -31,7 +31,6 @@ import (
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 )
 
 type Adapter interface {
@@ -67,8 +66,9 @@ func (openAIAdapter) BuildRequest(c *gin.Context, req *http.Request, provider *n
 	}
 	rewriteBody := provider.Spec.Model != nil && *provider.Spec.Model != ""
 	if req.URL.Path != "/v1/responses" {
-		modelRequest = connectors.AddTokenUsage(c, modelRequest)
-		rewriteBody = true
+		if addOpenAIStreamingTokenUsage(c, modelRequest) {
+			rewriteBody = true
+		}
 	}
 	upstream, err := buildProviderRequest(c, req, provider, secret, modelRequest, rewriteBody)
 	if err != nil {
@@ -153,7 +153,8 @@ func buildProviderURL(baseURL, requestPath, rawQuery string, providerType networ
 	}
 	basePath := strings.TrimRight(parsed.Path, "/")
 	pathSuffix := strings.TrimLeft(requestPath, "/")
-	if basePath != "" && (providerType == "" || providerType == networkingv1alpha1.OpenAI) {
+	baseIncludesAPIVersion := providerType == networkingv1alpha1.Anthropic && strings.HasSuffix(basePath, "/v1")
+	if basePath != "" && (providerType == "" || providerType == networkingv1alpha1.OpenAI || baseIncludesAPIVersion) {
 		pathSuffix = strings.TrimPrefix(pathSuffix, "v1/")
 		if pathSuffix == "v1" {
 			pathSuffix = ""
@@ -168,6 +169,26 @@ func buildProviderURL(baseURL, requestPath, rawQuery string, providerType networ
 	}
 	parsed.RawQuery = rawQuery
 	return parsed, nil
+}
+
+func addOpenAIStreamingTokenUsage(c *gin.Context, modelRequest map[string]interface{}) bool {
+	streaming, _ := modelRequest["stream"].(bool)
+	if !streaming {
+		return false
+	}
+
+	streamOptions, ok := modelRequest["stream_options"].(map[string]interface{})
+	if !ok {
+		streamOptions = map[string]interface{}{}
+		modelRequest["stream_options"] = streamOptions
+	}
+	if includeUsage, _ := streamOptions["include_usage"].(bool); includeUsage {
+		return false
+	}
+
+	streamOptions["include_usage"] = true
+	c.Set(common.TokenUsageKey, true)
+	return true
 }
 
 func isOpenAIPath(path string) bool {

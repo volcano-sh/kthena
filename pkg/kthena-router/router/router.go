@@ -591,7 +591,7 @@ func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 	decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
 	decoder.UseNumber()
 	if err := decoder.Decode(&modelRequest); err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, err)
+		c.AbortWithStatusJSON(http.StatusBadRequest, err.Error())
 		return nil, err
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {

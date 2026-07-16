@@ -153,10 +153,6 @@ func AddTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]in
 	return reqBody
 }
 
-func addTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]interface{} {
-	return AddTokenUsage(c, reqBody)
-}
-
 // isStreaming checks if the given model request has streaming enabled
 func isStreamingRequest(modelRequest map[string]interface{}) bool {
 	if v, ok := modelRequest["stream"]; ok {
