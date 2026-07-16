@@ -53,6 +53,14 @@ Each category installs only the external CRDs it needs:
 | `gateway-inference-extension` | Gateway API and Gateway API Inference Extension |
 | `all` | Gateway API, Gateway API Inference Extension, and LeaderWorkerSet |
 
+### Router External Provider Mock
+
+The Router category builds `kthena-external-provider-mock` from the repository and loads the image directly into Kind. The image is not pushed to a registry. It serves self-signed HTTPS endpoints for OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, plus a cluster-local HTTP administration endpoint used only to inspect captured requests.
+
+These tests use fixed fake credentials and do not call real model-provider APIs. They verify protocol and opaque payload passthrough, model rewriting, streaming usage extraction, destination-specific metrics, structured access logs, upstream 429 handling, active-request gauges, and text-only local input-token accounting. In particular, non-text image and file content is forwarded but does not contribute to Router input-token estimates, rate limiting, or related scheduling observations.
+
+`make test-e2e-router` supplies `E2E_EXTERNAL_PROVIDER_MOCK_IMAGE` to the Go E2E package after building and loading that exact image. This is an internal image-reference variable, not a provider credential; users normally do not need to set it.
+
 ## Running the Tests
 
 ### Run All Tests (Legacy)
@@ -98,6 +106,7 @@ Replace `gateway-api` with the category that failed in CI.
 - `TEST_CATEGORY`: Specify which CRDs to install (used by setup.sh)
 - `HUB`: Docker image registry (default: `ghcr.io/volcano-sh`)
 - `TAG`: Docker image tag (default: `latest`)
+- `E2E_EXTERNAL_PROVIDER_MOCK_IMAGE`: Internal image reference supplied by `make test-e2e-router`; it is not an API key or other credential
 
 ## Local Testing Considerations
 

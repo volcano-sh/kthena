@@ -98,7 +98,7 @@ test-e2e: ## Run all e2e tests sequentially (legacy).
 	@echo "Setting up Kind cluster for E2E tests..."
 	@./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-controller-manager
@@ -111,7 +111,8 @@ test-e2e-controller-manager: ## Run controller-manager e2e tests.
 test-e2e-router: ## Run router e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=router ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
+	@go test -v ./test/e2e/external-provider-mock
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
 
 .PHONY: test-e2e-gateway-api
 test-e2e-gateway-api: ## Run gateway-api e2e tests.
@@ -162,6 +163,7 @@ IMG_CONTROLLER ?= ${HUB}/kthena-controller-manager:${TAG}
 IMG_ROUTER ?= ${HUB}/kthena-router:${TAG}
 IMG_DOWNLOADER ?= ${HUB}/downloader:${TAG}
 IMG_RUNTIME ?= ${HUB}/runtime:${TAG}
+IMG_E2E_EXTERNAL_PROVIDER_MOCK ?= ${HUB}/kthena-external-provider-mock:${TAG}
 
 .PHONY: docker-build-router
 docker-build-router: generate
@@ -178,6 +180,10 @@ docker-build-downloader: generate
 .PHONY: docker-build-runtime
 docker-build-runtime: generate
 	$(CONTAINER_TOOL) build -t ${IMG_RUNTIME} --target runtime -f python/Dockerfile python
+
+.PHONY: docker-build-e2e-external-provider-mock
+docker-build-e2e-external-provider-mock:
+	$(CONTAINER_TOOL) build -t ${IMG_E2E_EXTERNAL_PROVIDER_MOCK} -f test/e2e/external-provider-mock/Dockerfile .
 
 .PHONY: docker-build-all
 docker-build-all: docker-build-router docker-build-controller docker-build-downloader docker-build-runtime## Build all images.
