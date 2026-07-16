@@ -74,7 +74,7 @@ func (f externalProviderFixture) testOpenAIChatNonStreaming(t *testing.T) {
 
 	capture := fetchMockCapture(t, f.adminURL, requestID)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, true)
+	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, false)
 
 	after := waitForExternalMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
 	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
@@ -90,6 +90,7 @@ func (f externalProviderFixture) testOpenAIChatStreaming(t *testing.T) {
 		"model":"` + externalOpenAIChatModel + `",
 		"messages":[{"role":"user","content":"Stream a short answer."}],
 		"stream":true,
+		"stream_options":{"vendor_option":"preserve-me"},
 		"max_tokens":16
 	}`)
 
@@ -263,7 +264,7 @@ func (f externalProviderFixture) testNonTextInputAccounting(t *testing.T) {
 
 	capture := fetchMockCapture(t, f.adminURL, requestID)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, true)
+	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, false)
 	assert.Contains(t, string(capture.Body), `"type":"image_url"`)
 
 	after := waitForExternalMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
@@ -288,7 +289,7 @@ func (f externalProviderFixture) testUpstream429(t *testing.T) {
 	capture := fetchMockCapture(t, f.adminURL, requestID)
 	assertExternalCapture(t, capture, path, false)
 	assert.Equal(t, "mock_status=429", capture.RawQuery)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, true)
+	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, false)
 
 	after := waitForExternalMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusTooManyRequests, "upstream_response", externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 0)
 	assert.Equal(t, float64(0), after.outputTokens-before.outputTokens)
@@ -380,7 +381,7 @@ func assertPositiveExternalInputAccounting(t *testing.T, before, after externalM
 	assert.Equal(t, delta, float64(entry.InputTokens), "metric and access log must use the same local input-token estimate")
 }
 
-func assertRewrittenExternalPayload(t *testing.T, original, captured []byte, upstreamModel string, expectUsageInjection bool) {
+func assertRewrittenExternalPayload(t *testing.T, original, captured []byte, upstreamModel string, expectStreamUsageInjection bool) {
 	t.Helper()
 	var want, got map[string]any
 	require.NoError(t, json.Unmarshal(original, &want))
@@ -388,14 +389,18 @@ func assertRewrittenExternalPayload(t *testing.T, original, captured []byte, ups
 	assert.Equal(t, upstreamModel, got["model"])
 	delete(want, "model")
 	delete(got, "model")
-	if expectUsageInjection {
-		if stream, _ := want["stream"].(bool); stream {
-			assert.Equal(t, map[string]any{"include_usage": true}, got["stream_options"])
-			delete(got, "stream_options")
-		} else {
-			assert.Equal(t, true, got["include_usage"])
-			delete(got, "include_usage")
-		}
+	if expectStreamUsageInjection {
+		wantOptions, _ := want["stream_options"].(map[string]any)
+		gotOptions, ok := got["stream_options"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, true, gotOptions["include_usage"])
+		delete(gotOptions, "include_usage")
+		assert.Equal(t, wantOptions, gotOptions)
+		delete(want, "stream_options")
+		delete(got, "stream_options")
+	} else {
+		assert.NotContains(t, got, "include_usage")
+		assert.NotContains(t, got, "stream_options")
 	}
 	assert.Equal(t, want, got, "opaque non-model payload fields must be preserved")
 }

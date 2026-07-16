@@ -57,6 +57,37 @@ func TestOpenAIChatCapturesAuthorizedRequest(t *testing.T) {
 	assert.JSONEq(t, body, string(capture.Body))
 }
 
+func TestOpenAIChatRejectsStreamingOptionsForNonStreamingRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "top-level include_usage",
+			body: `{"model":"mock-openai-chat","stream":false,"include_usage":true}`,
+		},
+		{
+			name: "stream_options",
+			body: `{"model":"mock-openai-chat","stream":false,"stream_options":{"include_usage":true}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestMockServer()
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer e2e-openai-key")
+			req.Header.Set("X-Request-Id", "non-streaming-options")
+			recorder := httptest.NewRecorder()
+
+			server.providerHandler().ServeHTTP(recorder, req)
+
+			assert.Equal(t, http.StatusBadRequest, recorder.Code)
+			assert.Contains(t, recorder.Body.String(), "streaming-only option")
+		})
+	}
+}
+
 func TestProviderRejectsWrongAuthentication(t *testing.T) {
 	server := newTestMockServer()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
