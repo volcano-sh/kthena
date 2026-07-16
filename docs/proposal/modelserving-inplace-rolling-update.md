@@ -31,7 +31,7 @@ Deleting a Pod can cause:
 - changes to Pod UID and Pod IP;
 - recreation of Services or other Role-scoped resources;
 - repeated gang or topology-aware scheduling;
-- model initialization, model loading, and cache warm-up costs; and reduced availability while a replacement Pod is being scheduled and initialized.
+- model initialization, model loading, and cache warm-up costs, plus reduced availability while a replacement Pod is being scheduled and initialized.
 
 Kubernetes permits updates to regular container image fields on an existing Pod. Kubelet applies the new image by restarting the affected container while retaining the Pod object and node assignment. `ModelServing` should expose this behavior as an explicit update strategy with well-defined safety, availability, recovery, and status semantics.
 
@@ -103,8 +103,8 @@ const (
 `InPlaceRollingUpdate` uses the `RollingUpdateConfiguration` embedded in each Role:
 
 - `partition` protects the first `Partition` Role instances.
-- `maxUnavailable` limits the number of unavailable servingGroup
-- `template.maxUnavailable` limits the number of unavailable role
+- `maxUnavailable` limits the number of unavailable servingGroup.
+- `template.maxUnavailable` limits the number of unavailable role.
 
 The top-level `spec.rolloutStrategy.rollingUpdateConfiguration`, which configures ServingGroup-level rollout, is not valid with `InPlaceRollingUpdate`.
 
@@ -252,7 +252,7 @@ A changed container has completed the runtime update only when all of the follow
 - its current state is Running; and
 - kubelet has observably processed the change.
 
-The preferred evidence that kubelet processed the change is that the current image ID differs from the recorded pre-update image ID, matching the fallback completion check used by RBG. If the target image string resolves to the same image ID, the controller may accept matching normalized spec and status image values; it must not accept an unchanged image ID while status still reports the old image. Container ID change is additional evidence but is not the primary criterion because an unrelated restart can also change it.
+The preferred evidence that kubelet processed the change is that the current image ID differs from the recorded pre-update image ID, matching the fallback completion check described above. If the target image string resolves to the same image ID, the controller may accept matching normalized spec and status image values; it must not accept an unchanged image ID while status still reports the old image. Container ID change is additional evidence but is not the primary criterion because an unrelated restart can also change it.
 
 After all changed containers pass the runtime check, the controller sets `InPlaceUpdateReady=True`. Kubelet then recomputes the aggregate Pod Ready condition using `ContainersReady` and all readiness gates. A Pod update is complete only when both the custom condition and aggregate Pod Ready condition are `True`.
 
@@ -362,34 +362,6 @@ An end-to-end test records Pod UID, Pod IP, node name, restart count, container 
 - an invalid image stalls without rescheduling, after which a valid image update recovers the rollout.
 
 ### Alternatives
-
-#### Continue Using Delete-and-Recreate Rolling Updates
-
-The existing strategies support arbitrary Pod template changes and remain the correct fallback for such updates. They do not meet this proposal's objective because deleting Pods discards placement and network identity and may incur substantial scheduling and initialization costs.
-
-#### Add a Separate In-Place Update Controller
-
-A separate controller could watch the same `ModelServing` and Pods. It would compete with the existing controller over rollout decisions, failure recovery, datastore state, and status updates. Coordinating ownership would require a new durable handoff protocol. Keeping one reconciliation owner and extracting an internal rollout manager provides code separation without conflicting writers.
-
-#### Patch Images Without Persistent State
-
-A controller could patch images and ignore restart events for a short period using an in-memory map. This is not safe across controller restarts, leadership changes, or delayed kubelet processing. Persistent Pod annotations provide resumable and inspectable intent.
-
-#### Use Only an Annotation to Identify Active Updates
-
-An annotation is necessary to persist target and baseline data, but using its presence as the active-update signal is ambiguous when historical restart baselines must remain after completion. Following the readiness-gate pattern used by RBG, this proposal uses `InPlaceUpdateReady=False` for the active window and the annotation for durable update details and post-update restart accounting. This also makes Kubernetes readiness and Service endpoint behavior reflect the update directly.
-
-#### Automatically Fall Back to Recreation
-
-Automatically deleting a Pod when an in-place update fails would violate the user's choice to preserve placement and could unexpectedly trigger expensive rescheduling. The initial design reports and blocks instead. Users can explicitly select a recreation-based strategy when that behavior is acceptable.
-
-#### Use a Sidecar or External Lifecycle Manager
-
-A sidecar or external agent could download artifacts or replace application processes, but it would require application-specific integration and would not provide a consistent Kubernetes container image update model. Patching the supported Pod image field uses native kubelet behavior and keeps orchestration in `ModelServing`.
-
-#### Use Ephemeral Containers
-
-Ephemeral containers are intended primarily for debugging and cannot replace the regular workload containers or provide the desired lifecycle and readiness semantics.
 
 <!--
 Note: This is a simplified version of kubernetes enhancement proposal template.
