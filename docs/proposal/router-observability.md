@@ -51,6 +51,9 @@ The router exposes the following metrics to monitor request processing:
 - Standard HTTP status codes
 - Controlled model catalog
 - Predefined error types
+- Destination labels come from ModelRoute, ModelServer, ExternalModelProvider, and InferencePool objects or fixed sentinel values. They must not contain request IDs, URLs, Secret names, or raw errors.
+
+Adding `model_route`, `backend_type`, `backend_name`, and `upstream_model` to existing metrics is an intentional schema migration. It increases the possible series count by the configured route-backend-model combinations, but makes mixed internal and external destinations distinguishable without introducing a second set of metric names. Operators must update exact-label queries, alerts, recording rules, dashboards, and tests when adopting this schema.
 
 #### Request Processing Metrics
 

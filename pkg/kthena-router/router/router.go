@@ -890,7 +890,7 @@ func (r *Router) proxyExternalProvider(
 	if provider.Spec.Model != nil && *provider.Spec.Model != "" {
 		upstreamModel = *provider.Spec.Model
 	}
-	accesslog.SetBackendInfo(c, "external_provider", providerName, upstreamModel)
+	accesslog.SetBackendInfo(c, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
 
 	modelRouteName := ""
 	if routeName, exists := c.Get("modelRouteName"); exists {

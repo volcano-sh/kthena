@@ -60,6 +60,20 @@ The destination labels use bounded values so dashboards can group all router bac
 - `upstream_model` is the model name sent to the backend, or `none` when the backend does not expose one.
 - `model_server` remains on `kthena_router_active_upstream_requests` for compatibility. It is `none` for non-ModelServer destinations.
 
+### Metric schema migration
+
+This release adds `model_route`, `backend_type`, `backend_name`, and `upstream_model` to the existing request, request-duration, and token metrics. It also adds destination labels to `kthena_router_active_upstream_requests`. Metric names stay the same, but the label sets do not. Prometheus creates new time series after the Router is upgraded, so counters based on the old label sets do not continue into the new series.
+
+Update dashboards, alerts, recording rules, and tests that match an exact label set. Queries that need the previous aggregate view should sum over the new destination labels. For example:
+
+```promql
+sum by (model, path, status_code, error_type) (
+  rate(kthena_router_requests_total[5m])
+)
+```
+
+The new labels create more time series. Their values come from configured Kubernetes objects and fixed enums, not request IDs, URLs, Secret names, or error text. The series count can still grow with the product of ModelRoutes, backends, upstream models, paths, status codes, and error types. Check the expected combinations in your cluster before upgrading, especially when Prometheus retention is long or many routes point to several backends.
+
 ### Scheduler & Fairness Metrics
 
 | Metric Name                                           | Type      | Description                                            | Labels                        | Buckets                                                                |
