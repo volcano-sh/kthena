@@ -42,10 +42,19 @@ kind load docker-image ${HUB}/kthena-controller-manager:${TAG} --name "${CLUSTER
 kind load docker-image ${HUB}/downloader:${TAG} --name "${CLUSTER_NAME}"
 kind load docker-image ${HUB}/runtime:${TAG} --name "${CLUSTER_NAME}"
 
+case "${TEST_CATEGORY}" in
+  router|all)
+    echo "Building external provider mock image"
+    make docker-build-e2e-external-provider-mock HUB="${HUB}" TAG="${TAG}"
+    echo "Loading external provider mock image into Kind cluster"
+    kind load docker-image "${HUB}/kthena-external-provider-mock:${TAG}" --name "${CLUSTER_NAME}"
+    ;;
+esac
+
 echo "Start to install cert-manager"
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml
 echo "Waiting for cert-manager to be ready..."
-go install github.com/cert-manager/cmctl/v2@latest && $(go env GOPATH)/bin/cmctl check api --wait=5m
+go install github.com/cert-manager/cmctl/v2@latest && "$(go env GOPATH)/bin/cmctl" check api --wait=5m
 
 echo "Start to install Volcano"
 kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/master/installer/volcano-development.yaml
