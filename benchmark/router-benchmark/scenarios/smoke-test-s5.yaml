@@ -1,0 +1,39 @@
+name: "smoke-test-s5-prompt-length-impact"
+description: "s5 scenario: request parsing cost with short and long prompts"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 30
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  concurrency:
+    connections: 60
+  prompts:
+    - tokens: 128
+      weight: 7
+    - tokens: 2048
+      weight: 3
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 4
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
