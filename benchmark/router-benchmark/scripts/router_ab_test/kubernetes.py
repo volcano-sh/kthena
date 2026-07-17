@@ -80,6 +80,7 @@ class MockerDeploymentBuilder:
         name = f"{self.APP_LABEL}-{profile.name}"
         kv_blocks = profile.kv_cache_blocks if profile.kv_cache_blocks is not None else config.default_kv_cache_blocks
         max_seqs = profile.max_num_seqs if profile.max_num_seqs is not None else config.default_max_num_seqs
+        resources = self._resolve_resources(profile)
 
         return {
             "apiVersion": "apps/v1",
@@ -127,16 +128,7 @@ class MockerDeploymentBuilder:
                                         "protocol": "TCP",
                                     },
                                 ],
-                                "resources": {
-                                    "requests": {
-                                        "cpu": self.cpu_request,
-                                        "memory": self.memory_request,
-                                    },
-                                    "limits": {
-                                        "cpu": self.cpu_limit,
-                                        "memory": self.memory_limit,
-                                    },
-                                },
+                                "resources": resources,
                                 "readinessProbe": {
                                     "httpGet": {
                                         "path": "/v1/models",
@@ -161,6 +153,27 @@ class MockerDeploymentBuilder:
         }
 
     # ---- Shared Service -------------------------------------------------------
+
+    def _resolve_resources(self, profile: BackendProfile) -> dict[str, Any]:
+        """Return the container resources for a profile.
+
+        Falls back to the builder defaults for any missing request/limit so
+        that a profile only needs to specify the fields it wants to tighten
+        (e.g. CPU for CI-sized clusters).
+        """
+        override = profile.resources or {}
+        requests = override.get("requests", {})
+        limits = override.get("limits", {})
+        return {
+            "requests": {
+                "cpu": requests.get("cpu", self.cpu_request),
+                "memory": requests.get("memory", self.memory_request),
+            },
+            "limits": {
+                "cpu": limits.get("cpu", self.cpu_limit),
+                "memory": limits.get("memory", self.memory_limit),
+            },
+        }
 
     def _build_service(self) -> dict[str, Any]:
         return {
