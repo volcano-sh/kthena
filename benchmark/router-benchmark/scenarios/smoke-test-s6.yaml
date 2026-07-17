@@ -1,0 +1,39 @@
+name: "smoke-test-s6-long-response"
+description: "s6 scenario: SSE relay overhead under long output streams"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 20
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  concurrency:
+    connections: 40
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 256
+      weight: 6
+    - tokens: 1024
+      weight: 4
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 4
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"

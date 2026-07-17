@@ -1,0 +1,37 @@
+name: "smoke-test-s1-throughput-baseline"
+description: "s1 scenario: baseline throughput ceiling under homogeneous backends"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 75
+  traffic:
+    burstiness: 0.5
+    ramp:
+      strategy: "none"
+  concurrency:
+    connections: 150
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 4
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
