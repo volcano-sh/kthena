@@ -227,6 +227,83 @@ class AIPerfRunnerTest(unittest.TestCase):
         self.assertNotIn("--prefill-concurrency-ramp-duration", cmd)
 
 
+class BackendsConfigTest(unittest.TestCase):
+    def test_profile_resources_are_parsed_from_yaml_dict(self):
+        config = ab_test.ScenarioConfig(
+            name="s4",
+            description="d",
+            load={},
+            backends={
+                "common": {"engineType": "sglang", "model": "Qwen/Qwen3-0.6B"},
+                "profiles": [
+                    {
+                        "name": "homogeneous",
+                        "count": 6,
+                        "resources": {
+                            "requests": {"cpu": "250m", "memory": "256Mi"},
+                            "limits": {"cpu": "1", "memory": "1Gi"},
+                        },
+                    },
+                ],
+            },
+        )
+
+        profile = config.backends.profiles[0]
+        self.assertEqual(profile.resources["requests"]["cpu"], "250m")
+        self.assertEqual(profile.resources["limits"]["memory"], "1Gi")
+
+    def test_builder_uses_profile_resources_when_present(self):
+        from router_ab_test.kubernetes import MockerDeploymentBuilder
+
+        config = ab_test.ScenarioConfig(
+            name="s4",
+            description="d",
+            load={},
+            backends={
+                "common": {"engineType": "sglang", "model": "Qwen/Qwen3-0.6B"},
+                "profiles": [
+                    {
+                        "name": "homogeneous",
+                        "count": 6,
+                        "resources": {
+                            "requests": {"cpu": "250m", "memory": "256Mi"},
+                            "limits": {"cpu": "1", "memory": "1Gi"},
+                        },
+                    },
+                ],
+            },
+        )
+
+        builder = MockerDeploymentBuilder()
+        deployment = builder._build_deployment(config.backends.profiles[0], config.backends)
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(container["resources"]["requests"]["cpu"], "250m")
+        self.assertEqual(container["resources"]["requests"]["memory"], "256Mi")
+        self.assertEqual(container["resources"]["limits"]["cpu"], "1")
+        self.assertEqual(container["resources"]["limits"]["memory"], "1Gi")
+
+    def test_builder_falls_back_to_defaults_when_profile_has_no_resources(self):
+        from router_ab_test.kubernetes import MockerDeploymentBuilder
+
+        config = ab_test.ScenarioConfig(
+            name="s2",
+            description="d",
+            load={},
+            backends={
+                "common": {"engineType": "sglang", "model": "Qwen/Qwen3-0.6B"},
+                "profiles": [{"name": "homogeneous", "count": 4}],
+            },
+        )
+
+        builder = MockerDeploymentBuilder()
+        deployment = builder._build_deployment(config.backends.profiles[0], config.backends)
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(container["resources"]["requests"]["cpu"], "500m")
+        self.assertEqual(container["resources"]["requests"]["memory"], "512Mi")
+        self.assertEqual(container["resources"]["limits"]["cpu"], "2")
+        self.assertEqual(container["resources"]["limits"]["memory"], "2Gi")
+
+
 class MetricsCollectorTest(unittest.TestCase):
     def setUp(self):
         self.output_dir = Path(tempfile.mkdtemp())

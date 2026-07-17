@@ -30,6 +30,15 @@ class BackendProfile:
       speedupRatio   → --speedup-ratio
       kvCacheBlocks  → --num-gpu-blocks-override
       maxNumSeqs     → --max-num-seqs
+
+    Optional ``resources`` overrides the mocker container's k8s
+    requests/limits for this profile — useful for CI-constrained
+    scenarios (e.g. many small pods) where the defaults would not
+    fit on the node. Shape::
+
+        resources:
+          requests: {cpu: "250m", memory: "256Mi"}
+          limits:   {cpu: "1",    memory: "1Gi"}
     """
     name: str
     count: int
@@ -38,6 +47,7 @@ class BackendProfile:
     speedup_ratio: float
     kv_cache_blocks: int | None = None
     max_num_seqs: int | None = None
+    resources: dict[str, dict[str, str]] | None = None
 
 
 @dataclass
@@ -74,6 +84,7 @@ class BackendsConfig:
                 speedup_ratio=float(p.get("speedupRatio", defaults["default_speedup_ratio"])),
                 kv_cache_blocks=p.get("kvCacheBlocks"),
                 max_num_seqs=p.get("maxNumSeqs"),
+                resources=p.get("resources"),
             )
             for p in data.get("profiles", [])
         ]
