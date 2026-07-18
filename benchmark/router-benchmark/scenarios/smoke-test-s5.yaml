@@ -1,5 +1,5 @@
 name: "smoke-test-s5-prompt-length-impact"
-description: "s5 scenario: request parsing cost with short and long prompts"
+description: "s5 scenario: request parsing cost with long prompts (2048 tokens)"
 
 load:
   schedule:
@@ -12,10 +12,8 @@ load:
   concurrency:
     connections: 60
   prompts:
-    - tokens: 128
-      weight: 7
     - tokens: 2048
-      weight: 3
+      weight: 10
   max_tokens:
     - tokens: 128
       weight: 10

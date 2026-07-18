@@ -122,3 +122,58 @@ class BenchmarkResult:
     metrics: dict[str, Any]
     raw_output: str
     artifacts: dict[str, Any] = field(default_factory=dict)
+    verdict: dict[str, Any] = field(default_factory=dict)
+
+
+# Run verdict values (see https://github.com/volcano-sh/kthena/issues/1271).
+# Only ``VERDICT_VALID`` runs are eligible for A/B comparison.
+VERDICT_VALID = "valid"
+VERDICT_INVALID = "invalid"
+VERDICT_FRAMEWORK_ERROR = "framework_error"
+
+# Pod state reasons that, when observed on a steady-state backend, invalidate
+# the run regardless of restart count (e.g. OOMKill followed by a successful
+# restart still produced a gap in capacity mid-measurement).
+INVALIDATING_TERMINATED_REASONS = frozenset({"OOMKilled", "Error"})
+INVALIDATING_WAITING_REASONS = frozenset({"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull"})
+
+
+def compute_run_verdict(restart_stats: dict[str, Any]) -> dict[str, Any]:
+    """Compute the run verdict from post-traffic mocker pod restart stats.
+
+    A run is ``valid`` only if no mocker pod restarted and no pod shows an
+    invalidating terminated/waiting reason. Otherwise the run is ``invalid``
+    and the offending pods are listed under ``offenders`` for diagnosis.
+
+    ``framework_error`` is reserved for benchmark tooling failures (e.g.
+    AIPerf exit failure) and is set by the caller, not by this function.
+    """
+    offenders: list[dict[str, Any]] = []
+    reasons: list[str] = []
+    for pod in restart_stats.get("pods", []):
+        pod_reasons: list[str] = []
+        if pod.get("restarts", 0) > 0:
+            pod_reasons.append(f"restartCount={pod['restarts']}")
+        last_reason = pod.get("last_reason")
+        if last_reason in INVALIDATING_TERMINATED_REASONS:
+            pod_reasons.append(f"lastState.terminated.reason={last_reason}")
+        waiting_reason = pod.get("waiting_reason")
+        if waiting_reason in INVALIDATING_WAITING_REASONS:
+            pod_reasons.append(f"state.waiting.reason={waiting_reason}")
+        if pod_reasons:
+            offenders.append({"name": pod.get("name"), "reasons": pod_reasons})
+            reasons.extend(f"{pod.get('name')}: {r}" for r in pod_reasons)
+
+    if offenders:
+        return {
+            "status": VERDICT_INVALID,
+            "reasons": reasons,
+            "offenders": offenders,
+            "restart_stats": restart_stats,
+        }
+    return {
+        "status": VERDICT_VALID,
+        "reasons": [],
+        "offenders": [],
+        "restart_stats": restart_stats,
+    }

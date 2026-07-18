@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import json
 import os
 import select
 import socket
@@ -531,6 +532,72 @@ class K8sManager:
                 proc.kill()
                 proc.wait()
         setattr(self, process_attr, None)
+
+    # ---- Backend stability inspection -----------------------------------------
+
+    def get_mocker_pod_restart_stats(self) -> dict[str, Any]:
+        """Return restart counts and last-termination reasons for all mocker pods.
+
+        Used by the run verdict: a pod that restarted, was OOMKilled, or
+        entered CrashLoopBackOff during the measurement window invalidates
+        the steady-state assumption for that run.
+
+        Returns:
+            {
+              "total_restarts": int,
+              "pods": [
+                {
+                  "name": str,
+                  "restarts": int,
+                  "last_reason": str | None,  # OOMKilled / Error / Completed / ...
+                  "waiting_reason": str | None,  # CrashLoopBackOff / ImagePullBackOff / ...
+                },
+                ...
+              ],
+            }
+        """
+        result = subprocess.run(
+            [
+                "kubectl", "get", "pods",
+                "-l", self._MOCKER_LABEL_SELECTOR,
+                "-n", self.MOCKER_NAMESPACE,
+                "-o", "json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        try:
+            pod_list = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            pod_list = {}
+
+        pods: list[dict[str, Any]] = []
+        total = 0
+        for pod in pod_list.get("items", []):
+            name = pod.get("metadata", {}).get("name", "<unknown>")
+            container_statuses = pod.get("status", {}).get("containerStatuses", []) or []
+            restarts = sum(cs.get("restartCount", 0) for cs in container_statuses)
+            last_reason: str | None = None
+            waiting_reason: str | None = None
+            for cs in container_statuses:
+                terminated = (cs.get("lastState") or {}).get("terminated") or {}
+                if terminated.get("reason"):
+                    last_reason = terminated["reason"]
+                waiting = (cs.get("state") or {}).get("waiting") or {}
+                if waiting.get("reason"):
+                    waiting_reason = waiting["reason"]
+            pods.append(
+                {
+                    "name": name,
+                    "restarts": restarts,
+                    "last_reason": last_reason,
+                    "waiting_reason": waiting_reason,
+                }
+            )
+            total += restarts
+
+        return {"total_restarts": total, "pods": pods}
 
     # ---- Internal helpers -----------------------------------------------------
 

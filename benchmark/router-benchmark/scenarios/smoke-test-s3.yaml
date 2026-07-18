@@ -1,5 +1,5 @@
 name: "smoke-test-s3-concurrency-scaling"
-description: "s3 scenario: connection pool behavior as concurrent connections scale"
+description: "s3 scenario: connection pool stress at 200 concurrent connections"
 
 load:
   schedule:
@@ -10,14 +10,17 @@ load:
     ramp:
       strategy: "none"
   concurrency:
-    connections: 100
+    connections: 200
+    ramp:
+      strategy: "linear"
+      duration: "15s"
   prompts:
     - tokens: 512
       weight: 10
   max_tokens:
     - tokens: 128
       weight: 10
-  duration: "45s"
+  duration: "60s"
 
 backends:
   common:
@@ -35,5 +38,3 @@ aiperf:
   extraArgs:
     - "--tokenizer"
     - "Qwen/Qwen3-0.6B"
-    - "--concurrency"
-    - "10,100,200"

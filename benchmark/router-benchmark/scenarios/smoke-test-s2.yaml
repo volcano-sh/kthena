@@ -1,5 +1,5 @@
 name: "smoke-test-s2-latency-vs-qps"
-description: "s2 scenario: routing latency under different QPS"
+description: "s2 scenario: mid-QPS steady-state comparison point"
 
 load:
   schedule:
@@ -17,7 +17,7 @@ load:
   max_tokens:
     - tokens: 128
       weight: 10
-  duration: "60s"
+  duration: "45s"
 
 backends:
   common:
@@ -30,12 +30,6 @@ backends:
 metrics:
   prometheus: true
   pprof: false
-#  cpuProfileSeconds: 15
-#  profiles:
-#    - heap
-#    - goroutine
-#    - allocs
-#    - mutex
 
 aiperf:
   extraArgs:
