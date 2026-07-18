@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.models import BenchmarkResult
+from router_ab_test.models import BenchmarkResult, VERDICT_VALID
 
 _METRIC_SPECS: dict[str, dict[str, Any]] = {
     "ttft_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
@@ -31,6 +31,16 @@ class ResultReporter:
     """Build, persist, and print A/B benchmark reports."""
 
     def compare(self, result_a: BenchmarkResult, result_b: BenchmarkResult) -> dict[str, Any]:
+        # Only valid runs participate in A/B comparison. An invalid or
+        # framework_error run produces no comparable numbers (issue #1271).
+        for result in (result_a, result_b):
+            status = result.verdict.get("status") if result.verdict else None
+            if status and status != VERDICT_VALID:
+                return {
+                    "_skipped": True,
+                    "reason": f"{result.config_name} verdict is {status!r}; comparison requires both runs to be valid",
+                }
+
         comparison: dict[str, Any] = {}
         for metric, spec in _METRIC_SPECS.items():
             val_a = result_a.metrics.get(metric)
@@ -64,11 +74,13 @@ class ResultReporter:
                 "path": config_a_path,
                 "metrics": result_a.metrics,
                 "artifacts": result_a.artifacts,
+                "verdict": result_a.verdict,
             },
             "config_b": {
                 "path": config_b_path,
                 "metrics": result_b.metrics,
                 "artifacts": result_b.artifacts,
+                "verdict": result_b.verdict,
             },
             "comparison": self.compare(result_a, result_b),
         }
@@ -84,30 +96,35 @@ class ResultReporter:
         print(f"Description: {report['description']}")
         print("=" * 70)
 
-        print(f"\nRouter Config A: {report['config_a']['path']}")
-        for key, value in report["config_a"]["metrics"].items():
-            print(f"  {key}: {value}")
+        self._print_config_section("A", report["config_a"])
+        self._print_config_section("B", report["config_b"])
 
-        if report["config_a"]["artifacts"]:
-            print("  artifacts:")
-            for key in report["config_a"]["artifacts"]:
-                print(f"    - {key}")
-
-        print(f"\nRouter Config B: {report['config_b']['path']}")
-        for key, value in report["config_b"]["metrics"].items():
-            print(f"  {key}: {value}")
-
-        if report["config_b"]["artifacts"]:
-            print("  artifacts:")
-            for key in report["config_b"]["artifacts"]:
-                print(f"    - {key}")
-
-        print("\nComparison (B vs A, positive delta means improvement):")
-        for metric, data in report["comparison"].items():
-            status = "REGRESSION" if data["regression"] else "OK"
-            print(f"  {metric}: {data['delta_pct']:+.2f}% [{status}]")
+        comparison = report.get("comparison", {})
+        if comparison.get("_skipped"):
+            print(f"\nComparison skipped: {comparison.get('reason', '<no reason>')}")
+        else:
+            print("\nComparison (B vs A, positive delta means improvement):")
+            for metric, data in comparison.items():
+                status = "REGRESSION" if data["regression"] else "OK"
+                print(f"  {metric}: {data['delta_pct']:+.2f}% [{status}]")
 
         print("=" * 70)
+
+    @staticmethod
+    def _print_config_section(label: str, config_report: dict[str, Any]) -> None:
+        print(f"\nRouter Config {label}: {config_report['path']}")
+        verdict = config_report.get("verdict") or {}
+        if verdict:
+            print(f"  verdict: {verdict.get('status', '<unset>')}")
+            for reason in verdict.get("reasons", []):
+                print(f"    - {reason}")
+        for key, value in config_report["metrics"].items():
+            print(f"  {key}: {value}")
+
+        if config_report["artifacts"]:
+            print("  artifacts:")
+            for key in config_report["artifacts"]:
+                print(f"    - {key}")
 
     @staticmethod
     def _calculate_delta_pct(config_a_value: float, config_b_value: float, higher_is_better: bool) -> float:

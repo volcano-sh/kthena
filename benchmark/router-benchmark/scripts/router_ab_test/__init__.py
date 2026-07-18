@@ -14,7 +14,16 @@
 from router_ab_test.kubernetes import EndpointMode, K8sManager, MockerDeploymentBuilder
 from router_ab_test.load_generator import AIPerfRunner
 from router_ab_test.metrics_collector import MetricsCollector
-from router_ab_test.models import BackendProfile, BackendsConfig, BenchmarkResult, ScenarioConfig
+from router_ab_test.models import (
+    VERDICT_FRAMEWORK_ERROR,
+    VERDICT_INVALID,
+    VERDICT_VALID,
+    BackendProfile,
+    BackendsConfig,
+    BenchmarkResult,
+    ScenarioConfig,
+    compute_run_verdict,
+)
 from router_ab_test.orchestrator import ABTestOrchestrator
 from router_ab_test.reporter import ResultReporter
 
@@ -30,4 +39,8 @@ __all__ = [
     "MockerDeploymentBuilder",
     "ResultReporter",
     "ScenarioConfig",
+    "VERDICT_FRAMEWORK_ERROR",
+    "VERDICT_INVALID",
+    "VERDICT_VALID",
+    "compute_run_verdict",
 ]

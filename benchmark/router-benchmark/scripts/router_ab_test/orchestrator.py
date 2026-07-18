@@ -13,13 +13,19 @@
 # limitations under the License.
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from router_ab_test.kubernetes import EndpointMode, K8sManager
 from router_ab_test.load_generator import AIPerfRunner
 from router_ab_test.metrics_collector import MetricsCollector
-from router_ab_test.models import BenchmarkResult, ScenarioConfig
+from router_ab_test.models import (
+    VERDICT_FRAMEWORK_ERROR,
+    BenchmarkResult,
+    ScenarioConfig,
+    compute_run_verdict,
+)
 from router_ab_test.reporter import ResultReporter
 
 
@@ -56,12 +62,41 @@ class ABTestOrchestrator:
         router_endpoint = self.k8s.get_router_endpoint()
         router_debug_endpoint = self.k8s.get_router_debug_endpoint()
         self.k8s.wait_for_router_ready(self.scenario.backends.default_model, router_endpoint, timeout=300)
-        result = self.runner.run(
-            config_name=config_name,
-            scenario=self.scenario,
-            router_endpoint=router_endpoint,
-            extra_args=self.scenario.aiperf.get("extraArgs"),
-        )
+        try:
+            result = self.runner.run(
+                config_name=config_name,
+                scenario=self.scenario,
+                router_endpoint=router_endpoint,
+                extra_args=self.scenario.aiperf.get("extraArgs"),
+            )
+        except subprocess.CalledProcessError as exc:
+            # Benchmark tooling itself failed — the run is not a measurement
+            # and must not be judged against backend stability signals.
+            result = BenchmarkResult(
+                config_name=config_name,
+                scenario=self.scenario.name,
+                timestamp="",
+                metrics={},
+                raw_output=f"aiperf exited with code {exc.returncode}",
+                artifacts={},
+                verdict={
+                    "status": VERDICT_FRAMEWORK_ERROR,
+                    "reasons": [f"aiperf exited with code {exc.returncode}"],
+                    "offenders": [],
+                    "restart_stats": {},
+                },
+            )
+            return result
+
+        # Steady-state validity check (post-traffic only): query mocker pods
+        # for restarts / OOMKilled / CrashLoopBackOff that happened during
+        # the measurement window. See issue #1271.
+        restart_stats = self.k8s.get_mocker_pod_restart_stats()
+        result.verdict = compute_run_verdict(restart_stats)
+        print(f"  Run verdict for {config_name}: {result.verdict['status']}")
+        for reason in result.verdict.get("reasons", []):
+            print(f"    - {reason}")
+
         result.artifacts = self.collector.collect_artifacts(
             config_name=config_name,
             scenario=self.scenario,

@@ -32,6 +32,9 @@ from __future__ import annotations
 import argparse
 
 from router_ab_test import (
+    VERDICT_FRAMEWORK_ERROR,
+    VERDICT_INVALID,
+    VERDICT_VALID,
     ABTestOrchestrator,
     AIPerfRunner,
     BenchmarkResult,
@@ -40,6 +43,7 @@ from router_ab_test import (
     MetricsCollector,
     ResultReporter,
     ScenarioConfig,
+    compute_run_verdict,
 )
 
 __all__ = [
@@ -51,7 +55,11 @@ __all__ = [
     "MetricsCollector",
     "ResultReporter",
     "ScenarioConfig",
+    "VERDICT_FRAMEWORK_ERROR",
+    "VERDICT_INVALID",
+    "VERDICT_VALID",
     "build_parser",
+    "compute_run_verdict",
     "main",
 ]
 
@@ -98,7 +106,12 @@ def main() -> None:
         endpoint_mode=args.endpoint_mode,
     )
     report = orchestrator.run()
-    has_regression = any(metric.get("regression", False) for metric in report["comparison"].values())
+    comparison = report.get("comparison", {})
+    if comparison.get("_skipped"):
+        # At least one run was invalid/framework_error — not a regression
+        # signal, but the run itself failed the validity gate (issue #1271).
+        raise SystemExit(2)
+    has_regression = any(metric.get("regression", False) for metric in comparison.values())
     raise SystemExit(1 if has_regression else 0)
 
 

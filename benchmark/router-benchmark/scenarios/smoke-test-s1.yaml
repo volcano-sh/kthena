@@ -1,5 +1,5 @@
 name: "smoke-test-s1-throughput-baseline"
-description: "s1 scenario: baseline throughput ceiling under homogeneous backends"
+description: "s1 scenario: high-load burst baseline under homogeneous backends"
 
 load:
   schedule:

@@ -438,5 +438,169 @@ class MainTest(unittest.TestCase):
         finally:
             out_path.unlink(missing_ok=True)
 
+class ComputeRunVerdictTest(unittest.TestCase):
+    def test_valid_when_no_restarts_and_no_bad_states(self):
+        stats = {
+            "total_restarts": 0,
+            "pods": [
+                {"name": "mocker-llm-a", "restarts": 0, "last_reason": None, "waiting_reason": None},
+                {"name": "mocker-llm-b", "restarts": 0, "last_reason": "Completed", "waiting_reason": None},
+            ],
+        }
+        verdict = ab_test.compute_run_verdict(stats)
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(verdict["reasons"], [])
+        self.assertEqual(verdict["offenders"], [])
+        self.assertEqual(verdict["restart_stats"], stats)
+
+    def test_invalid_when_pod_restarted(self):
+        stats = {
+            "total_restarts": 2,
+            "pods": [
+                {"name": "mocker-llm-a", "restarts": 2, "last_reason": "Error", "waiting_reason": None},
+            ],
+        }
+        verdict = ab_test.compute_run_verdict(stats)
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertEqual(len(verdict["offenders"]), 1)
+        offender = verdict["offenders"][0]
+        self.assertEqual(offender["name"], "mocker-llm-a")
+        self.assertIn("restartCount=2", offender["reasons"])
+        self.assertIn("lastState.terminated.reason=Error", offender["reasons"])
+
+    def test_invalid_when_oomkilled(self):
+        stats = {
+            "total_restarts": 1,
+            "pods": [
+                {"name": "mocker-llm-a", "restarts": 1, "last_reason": "OOMKilled", "waiting_reason": None},
+            ],
+        }
+        verdict = ab_test.compute_run_verdict(stats)
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(any("OOMKilled" in r for r in verdict["reasons"]))
+
+    def test_invalid_when_crash_loop_backoff(self):
+        stats = {
+            "total_restarts": 5,
+            "pods": [
+                {"name": "mocker-llm-a", "restarts": 5, "last_reason": "Error", "waiting_reason": "CrashLoopBackOff"},
+            ],
+        }
+        verdict = ab_test.compute_run_verdict(stats)
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(any("CrashLoopBackOff" in r for r in verdict["reasons"]))
+
+    def test_empty_pod_list_is_valid(self):
+        verdict = ab_test.compute_run_verdict({"total_restarts": 0, "pods": []})
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+
+
+class ReporterVerdictTest(unittest.TestCase):
+    def make_result(self, verdict_status=None, **metrics):
+        result = ab_test.BenchmarkResult(
+            config_name="config",
+            scenario="scenario",
+            timestamp="2026-07-18T00:00:00",
+            metrics=metrics,
+            raw_output="",
+        )
+        if verdict_status is not None:
+            result.verdict = {"status": verdict_status, "reasons": [], "offenders": [], "restart_stats": {}}
+        return result
+
+    def test_compare_skipped_when_config_a_invalid(self):
+        result_a = self.make_result(verdict_status=ab_test.VERDICT_INVALID, ttft_avg_ms=100.0)
+        result_b = self.make_result(verdict_status=ab_test.VERDICT_VALID, ttft_avg_ms=80.0)
+        comparison = ab_test.ResultReporter().compare(result_a, result_b)
+        self.assertTrue(comparison["_skipped"])
+        self.assertIn("invalid", comparison["reason"])
+
+    def test_compare_skipped_when_framework_error(self):
+        result_a = self.make_result(verdict_status=ab_test.VERDICT_FRAMEWORK_ERROR)
+        result_b = self.make_result(verdict_status=ab_test.VERDICT_VALID, ttft_avg_ms=80.0)
+        comparison = ab_test.ResultReporter().compare(result_a, result_b)
+        self.assertTrue(comparison["_skipped"])
+        self.assertIn("framework_error", comparison["reason"])
+
+    def test_compare_runs_when_both_valid(self):
+        result_a = self.make_result(verdict_status=ab_test.VERDICT_VALID, ttft_avg_ms=100.0, throughput_rps=50.0)
+        result_b = self.make_result(verdict_status=ab_test.VERDICT_VALID, ttft_avg_ms=80.0, throughput_rps=60.0)
+        comparison = ab_test.ResultReporter().compare(result_a, result_b)
+        self.assertNotIn("_skipped", comparison)
+        self.assertEqual(comparison["ttft_avg_ms"]["delta_pct"], 20.0)
+
+    def test_compare_runs_when_verdict_unset(self):
+        # Legacy BenchmarkResult without verdict should still compare
+        result_a = self.make_result(ttft_avg_ms=100.0)
+        result_b = self.make_result(ttft_avg_ms=80.0)
+        comparison = ab_test.ResultReporter().compare(result_a, result_b)
+        self.assertNotIn("_skipped", comparison)
+
+    def test_build_report_includes_verdicts(self):
+        result_a = self.make_result(verdict_status=ab_test.VERDICT_VALID, ttft_avg_ms=100.0)
+        result_b = self.make_result(verdict_status=ab_test.VERDICT_INVALID, ttft_avg_ms=80.0)
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s",
+            description="d",
+            config_a_path="a.yaml",
+            config_b_path="b.yaml",
+            result_a=result_a,
+            result_b=result_b,
+        )
+        self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(report["comparison"]["_skipped"])
+
+
+class K8sManagerRestartStatsTest(unittest.TestCase):
+    def _pod(self, name, restart_count, last_reason=None, waiting_reason=None):
+        container_status: dict = {
+            "restartCount": restart_count,
+            "lastState": {},
+            "state": {},
+        }
+        if last_reason:
+            container_status["lastState"] = {"terminated": {"reason": last_reason}}
+        if waiting_reason:
+            container_status["state"] = {"waiting": {"reason": waiting_reason}}
+        return {
+            "metadata": {"name": name},
+            "status": {"containerStatuses": [container_status]},
+        }
+
+    def test_parses_restart_counts_and_reasons(self):
+        import json as _json
+        from router_ab_test.kubernetes import K8sManager
+
+        payload = {
+            "items": [
+                self._pod("mocker-llm-a", 0),
+                self._pod("mocker-llm-b", 2, last_reason="OOMKilled"),
+                self._pod("mocker-llm-c", 5, last_reason="Error", waiting_reason="CrashLoopBackOff"),
+            ]
+        }
+        fake_result = mock.Mock(stdout=_json.dumps(payload), returncode=0)
+        k8s = K8sManager()
+        with mock.patch("subprocess.run", return_value=fake_result):
+            stats = k8s.get_mocker_pod_restart_stats()
+
+        self.assertEqual(stats["total_restarts"], 7)
+        pods_by_name = {p["name"]: p for p in stats["pods"]}
+        self.assertEqual(pods_by_name["mocker-llm-a"]["restarts"], 0)
+        self.assertEqual(pods_by_name["mocker-llm-b"]["last_reason"], "OOMKilled")
+        self.assertEqual(pods_by_name["mocker-llm-c"]["waiting_reason"], "CrashLoopBackOff")
+
+    def test_empty_cluster_returns_zero(self):
+        import json as _json
+        from router_ab_test.kubernetes import K8sManager
+
+        fake_result = mock.Mock(stdout=_json.dumps({"items": []}), returncode=0)
+        k8s = K8sManager()
+        with mock.patch("subprocess.run", return_value=fake_result):
+            stats = k8s.get_mocker_pod_restart_stats()
+        self.assertEqual(stats["total_restarts"], 0)
+        self.assertEqual(stats["pods"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
