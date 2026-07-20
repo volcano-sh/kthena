@@ -22,6 +22,19 @@ controllerManager:
     requests:
       cpu: 100m
       memory: 128Mi
+  # probes tunes the health checks for the controller manager container. The startup
+  # probe guards the bootstrap window so that the liveness probe cannot restart the
+  # container before the webhook server has begun listening on 8443.
+  probes:
+    startup:
+      periodSeconds: 5
+      failureThreshold: 30
+    liveness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
   # controllers specifies which controllers to enable
   # Available options: modelserving, modelbooster, autoscaler
   # If empty or not specified, all controllers are enabled
