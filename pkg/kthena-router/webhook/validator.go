@@ -59,7 +59,10 @@ func NewKthenaRouterValidator(kubeClient kubernetes.Interface, port int) *Kthena
 	}
 }
 
-func (v *KthenaRouterValidator) Run(ctx context.Context, tlsCertFile, tlsPrivateKey string) {
+// Run serves the validating webhook with the supplied key pair. The caller passes an
+// already-parsed certificate rather than file paths so that the server can start as
+// soon as the certificate is known, without waiting for it to appear on disk.
+func (v *KthenaRouterValidator) Run(ctx context.Context, servingCert tls.Certificate) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/validate/modelroute", v.HandleModelRoute)
 	mux.HandleFunc("/validate/modelserver", v.HandleModelServer)
@@ -70,11 +73,15 @@ func (v *KthenaRouterValidator) Run(ctx context.Context, tlsCertFile, tlsPrivate
 		}
 	})
 	v.httpServer.Handler = mux
+	if v.httpServer.TLSConfig == nil {
+		v.httpServer.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	v.httpServer.TLSConfig.Certificates = []tls.Certificate{servingCert}
 
 	// Start server
 	klog.Infof("Starting webhook server on %s", v.httpServer.Addr)
 	go func() {
-		if err := v.httpServer.ListenAndServeTLS(tlsCertFile, tlsPrivateKey); err != nil && err != http.ErrServerClosed {
+		if err := v.httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			klog.Fatalf("failed to listen and serve validating webhook: %v", err)
 		}
 	}()
