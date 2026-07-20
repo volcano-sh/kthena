@@ -106,7 +106,7 @@ spec:
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest
-        replicase: 1
+        replicas: 1
         pods: 1
         resources:
           limits:
@@ -167,7 +167,7 @@ spec:
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest
-        replicase: 1
+        replicas: 1
         pods: 1
 ```
 
