@@ -102,7 +102,7 @@ jobs:
           # Tag-triggered checkouts use a detached HEAD, so set the PR base explicitly.
           base: main
           # Use a deterministic branch name per tag; safe to re-run.
-          branch: docs/archive-${{ github.ref_name }}
+          branch: docs-archive-${{ github.ref_name }}
           commit-message: "docs: archive Docusaurus version ${{ github.ref_name }}"
           title: "docs: archive documentation for release ${{ github.ref_name }}"
           body: |
