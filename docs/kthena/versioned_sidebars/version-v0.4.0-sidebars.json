@@ -45,7 +45,6 @@
           ]
         },
         "user-guide/multi-node-inference",
-        "user-guide/network-topology",
         {
           "type": "doc",
           "label": "Autoscaler",
@@ -80,7 +79,6 @@
           ]
         },
         "user-guide/runtime",
-        "user-guide/binpack-scale-down",
         {
           "type": "category",
           "label": "Prefill Decode Disaggregation",
