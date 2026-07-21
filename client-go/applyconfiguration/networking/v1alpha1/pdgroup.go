@@ -24,6 +24,7 @@ type PDGroupApplyConfiguration struct {
 	GroupKey      *string           `json:"groupKey,omitempty"`
 	PrefillLabels map[string]string `json:"prefillLabels,omitempty"`
 	DecodeLabels  map[string]string `json:"decodeLabels,omitempty"`
+	EncodeLabels  map[string]string `json:"encodeLabels,omitempty"`
 }
 
 // PDGroupApplyConfiguration constructs a declarative configuration of the PDGroup type for use with
@@ -64,6 +65,20 @@ func (b *PDGroupApplyConfiguration) WithDecodeLabels(entries map[string]string) 
 	}
 	for k, v := range entries {
 		b.DecodeLabels[k] = v
+	}
+	return b
+}
+
+// WithEncodeLabels puts the entries into the EncodeLabels field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, the entries provided by each call will be put on the EncodeLabels field,
+// overwriting an existing map entries in EncodeLabels field with the same key.
+func (b *PDGroupApplyConfiguration) WithEncodeLabels(entries map[string]string) *PDGroupApplyConfiguration {
+	if b.EncodeLabels == nil && len(entries) > 0 {
+		b.EncodeLabels = make(map[string]string, len(entries))
+	}
+	for k, v := range entries {
+		b.EncodeLabels[k] = v
 	}
 	return b
 }

@@ -1519,3 +1519,115 @@ type failingEnqueueStore struct {
 func (s *failingEnqueueStore) Enqueue(req *datastore.Request) error {
 	return fmt.Errorf("injected enqueue failure")
 }
+
+func TestRouter_HandlerFunc_EPDMode(t *testing.T) {
+	// 1. Setup backend mock server
+	epdStageReqs := 0
+	decodeReqs := 0
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var reqBody map[string]any
+		_ = json.Unmarshal(body, &reqBody)
+
+		// Encode/prefill requests are built via preparePrefillBody(), which forces max_tokens=1.
+		if v, ok := reqBody["max_tokens"]; ok && v == float64(1) {
+			epdStageReqs++
+		} else {
+			decodeReqs++
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"epd-resp"}`)
+	})
+	router, store, backend := setupTestRouter(t, backendHandler)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendIP := backendURL.Hostname()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	// 2. Populate store
+	pipelineModeEPD := aiv1alpha1.PipelineModeEPD
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-epd", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("test-model-epd"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+			PipelineMode:    &pipelineModeEPD,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "group",
+					EncodeLabels:  map[string]string{"app": "encode"},
+					PrefillLabels: map[string]string{"app": "prefill"},
+					DecodeLabels:  map[string]string{"app": "decode"},
+				},
+			},
+		},
+	}
+	encodePod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "encode-pod-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "encode", "group": "test-group"},
+		},
+		Status: corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	prefillPod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "prefill-pod-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "prefill", "group": "test-group"},
+		},
+		Status: corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	decodePod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "decode-pod-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "decode", "group": "test-group"},
+		},
+		Status: corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-epd", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model-epd",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ModelServerName: "ms-epd"},
+					},
+				},
+			},
+		},
+	}
+
+	store.AddOrUpdateModelServer(modelServer, sets.New(types.NamespacedName{Name: "encode-pod-1", Namespace: "default"}, types.NamespacedName{Name: "prefill-pod-1", Namespace: "default"}, types.NamespacedName{Name: "decode-pod-1", Namespace: "default"}))
+	store.AddOrUpdatePod(encodePod, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdatePod(prefillPod, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdatePod(decodePod, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+
+	// Wait a moment for cache to process events
+
+	// 3. Create request
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	reqBody := `{"model": "test-model-epd", "prompt": "hello epd", "max_tokens": 16}`
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	// 4. Execute handler
+	router.HandlerFunc()(c)
+
+	// 5. Assertions
+	// Note: HTTPConnector natively implements ProxyEPD, so the proxy loop
+	// successfully sends the requests sequentially and returns the final decode response.
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "epd-resp")
+	assert.Equal(t, 2, epdStageReqs)
+	assert.Equal(t, 1, decodeReqs)
+}

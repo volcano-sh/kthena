@@ -89,16 +89,14 @@ func (m *modelServer) categorizePodForPDGroup(podName types.NamespacedName, podL
 	pdGroupPods := m.pdGroups[pdGroupValue]
 	pdGroup := m.modelServer.Spec.WorkloadSelector.PDGroup
 	// Check if pod matches decode labels
-	isDecodePod := matchesLabels(podLabels, pdGroup.DecodeLabels)
-	if isDecodePod {
+	if matchesLabels(podLabels, pdGroup.DecodeLabels) {
 		pdGroupPods.AddDecodePod(podName)
-		return
-	}
-
-	// Check if pod matches prefill labels
-	isPrefillPod := matchesLabels(podLabels, pdGroup.PrefillLabels)
-	if isPrefillPod {
+	} else if matchesLabels(podLabels, pdGroup.PrefillLabels) {
+		// Check if pod matches prefill labels
 		pdGroupPods.AddPrefillPod(podName)
+	} else if matchesLabels(podLabels, pdGroup.EncodeLabels) {
+		// Check if pod matches encode labels (for EPD)
+		pdGroupPods.AddEncodePod(podName)
 	}
 }
 
@@ -155,6 +153,18 @@ func (m *modelServer) getAllPrefillPods() []types.NamespacedName {
 	return result
 }
 
+// getAllEncodePods returns all encode pods across all PD groups
+func (m *modelServer) getAllEncodePods() []types.NamespacedName {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	var result []types.NamespacedName
+	for _, pdGroupPods := range m.pdGroups {
+		result = append(result, pdGroupPods.GetEncodePods()...)
+	}
+	return result
+}
+
 // getPrefillPodsForDecodeGroup returns prefill pods that match the same PD group as a decode pod
 func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.NamespacedName {
 	m.mutex.RLock()
@@ -174,6 +184,30 @@ func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.Namespa
 	// Return prefill pods for the same PD group value
 	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
 		return pdGroupPods.GetPrefillPods()
+	}
+
+	return nil
+}
+
+// getEncodePodsForDecodeGroup returns encode pods that match the same PD group as a decode pod
+func (m *modelServer) getEncodePodsForDecodeGroup(pod *PodInfo) []types.NamespacedName {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	// Check if this modelServer has PDGroup configuration
+	if m.modelServer.Spec.WorkloadSelector == nil || m.modelServer.Spec.WorkloadSelector.PDGroup == nil {
+		return nil
+	}
+
+	pdGroup := m.modelServer.Spec.WorkloadSelector.PDGroup
+	pdGroupValue, hasPDGroupKey := pod.GetPodLabels()[pdGroup.GroupKey]
+	if !hasPDGroupKey {
+		return nil
+	}
+
+	// Return encode pods for the same PD group value
+	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
+		return pdGroupPods.GetEncodePods()
 	}
 
 	return nil

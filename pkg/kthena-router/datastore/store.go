@@ -202,7 +202,9 @@ type Store interface {
 	// PDGroup methods for efficient PD scheduling
 	GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo, error)
 	GetPrefillPods(modelServerName types.NamespacedName) ([]*PodInfo, error)
+	GetEncodePods(modelServerName types.NamespacedName) ([]*PodInfo, error)
 	GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error)
+	GetEncodePodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error)
 
 	// New methods for callback management
 	RegisterCallback(kind string, callback CallbackFunc)
@@ -857,6 +859,41 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 			// do not operate s.pods here, which are done within pod handler
 			modelServerObj.pods = pods
 		}
+
+		// Take snapshot of pods for rebuilding indexes
+		podNames := modelServerObj.pods.UnsortedList()
+
+		// Rebuild pdGroups role indexes atomically
+		newPDGroups := make(map[string]*PDGroupPods)
+		for _, podName := range podNames {
+			if podVal, ok := s.pods.Load(podName); ok {
+				podInfo := podVal.(*PodInfo)
+				podLabels := podInfo.GetPodLabels()
+
+				pdGroupValue := ""
+				if ms.Spec.WorkloadSelector != nil && ms.Spec.WorkloadSelector.PDGroup != nil {
+					pdGroupValue = podLabels[ms.Spec.WorkloadSelector.PDGroup.GroupKey]
+				}
+				if pdGroupValue == "" {
+					continue
+				}
+				if _, exists := newPDGroups[pdGroupValue]; !exists {
+					newPDGroups[pdGroupValue] = NewPDGroupPods()
+				}
+				pdGroupPods := newPDGroups[pdGroupValue]
+				pdGroup := ms.Spec.WorkloadSelector.PDGroup
+
+				if matchesLabels(podLabels, pdGroup.DecodeLabels) {
+					pdGroupPods.AddDecodePod(podName)
+				} else if matchesLabels(podLabels, pdGroup.PrefillLabels) {
+					pdGroupPods.AddPrefillPod(podName)
+				} else if matchesLabels(podLabels, pdGroup.EncodeLabels) {
+					pdGroupPods.AddEncodePod(podName)
+				}
+			}
+		}
+
+		modelServerObj.pdGroups = newPDGroups
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
@@ -952,6 +989,26 @@ func (s *store) GetPrefillPods(modelServerName types.NamespacedName) ([]*PodInfo
 	return prefillPods, nil
 }
 
+// GetEncodePods returns all encode pods for a given model server
+func (s *store) GetEncodePods(modelServerName types.NamespacedName) ([]*PodInfo, error) {
+	value, ok := s.modelServer.Load(modelServerName)
+	if !ok {
+		return nil, fmt.Errorf("model server not found: %v", modelServerName)
+	}
+	ms := value.(*modelServer)
+
+	encodePodNames := ms.getAllEncodePods()
+	encodePods := make([]*PodInfo, 0, len(encodePodNames))
+
+	for _, podName := range encodePodNames {
+		if value, ok := s.pods.Load(podName); ok {
+			encodePods = append(encodePods, value.(*PodInfo))
+		}
+	}
+
+	return encodePods, nil
+}
+
 // GetPrefillPodsForDecodeGroup returns prefill pods that match the same PD group as the decode pod
 func (s *store) GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error) {
 	value, ok := s.modelServer.Load(modelServerName)
@@ -975,6 +1032,31 @@ func (s *store) GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedNam
 	}
 
 	return prefillPods, nil
+}
+
+// GetEncodePodsForDecodeGroup returns encode pods that match the same PD group as the decode pod
+func (s *store) GetEncodePodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error) {
+	value, ok := s.modelServer.Load(modelServerName)
+	if !ok {
+		return nil, fmt.Errorf("model server not found: %v", modelServerName)
+	}
+	ms := value.(*modelServer)
+
+	pod, ok := s.pods.Load(decodePodName)
+	if !ok {
+		return nil, fmt.Errorf("pod not found: %v", decodePodName)
+	}
+	podInfo := pod.(*PodInfo)
+
+	encodePodNames := ms.getEncodePodsForDecodeGroup(podInfo)
+	encodePods := make([]*PodInfo, 0, len(encodePodNames))
+	for _, podName := range encodePodNames {
+		if value, ok := s.pods.Load(podName); ok {
+			encodePods = append(encodePods, value.(*PodInfo))
+		}
+	}
+
+	return encodePods, nil
 }
 
 func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.ModelServer) error {

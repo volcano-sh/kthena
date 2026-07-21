@@ -47,7 +47,20 @@ type ModelServerSpec struct {
 	// KVConnector specifies the KV connector configuration for PD disaggregated routing
 	// +optional
 	KVConnector *KVConnectorSpec `json:"kvConnector,omitempty"`
+
+	// PipelineMode specifies the native inference pipeline execution strategy
+	// +kubebuilder:validation:Enum=epd
+	// +optional
+	PipelineMode *PipelineMode `json:"pipelineMode,omitempty"`
 }
+
+// PipelineMode defines the pipeline execution strategy
+type PipelineMode string
+
+const (
+	// PipelineModeEPD indicates an Encode-Prefill-Decode execution mode
+	PipelineModeEPD PipelineMode = "epd"
+)
 
 // InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
 //
@@ -83,6 +96,9 @@ type PDGroup struct {
 	PrefillLabels map[string]string `json:"prefillLabels"`
 	// The labels to match the model serving instances for decode.
 	DecodeLabels map[string]string `json:"decodeLabels"`
+	// The labels to match the model serving instances for encode (EPD mode).
+	// +optional
+	EncodeLabels map[string]string `json:"encodeLabels,omitempty"`
 }
 
 // WorkloadPort defines the port and protocol configuration for the model server.

@@ -119,6 +119,14 @@ func (m *MockStore) GetDecodePods(modelServerName types.NamespacedName) ([]*data
 	return args.Get(0).([]*datastore.PodInfo), args.Error(1)
 }
 
+func (m *MockStore) GetEncodePods(modelServerName types.NamespacedName) ([]*datastore.PodInfo, error) {
+	args := m.Called(modelServerName)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*datastore.PodInfo), args.Error(1)
+}
+
 func (m *MockStore) GetPrefillPods(modelServerName types.NamespacedName) ([]*datastore.PodInfo, error) {
 	args := m.Called(modelServerName)
 	if args.Get(0) == nil {
@@ -128,6 +136,14 @@ func (m *MockStore) GetPrefillPods(modelServerName types.NamespacedName) ([]*dat
 }
 
 func (m *MockStore) GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*datastore.PodInfo, error) {
+	args := m.Called(modelServerName, decodePodName)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*datastore.PodInfo), args.Error(1)
+}
+
+func (m *MockStore) GetEncodePodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*datastore.PodInfo, error) {
 	args := m.Called(modelServerName, decodePodName)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)

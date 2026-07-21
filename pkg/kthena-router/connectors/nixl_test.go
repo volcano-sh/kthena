@@ -58,13 +58,14 @@ func TestNIXLConnectorProxy(t *testing.T) {
 
 		// Verify that prefill request was built
 		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest == nil {
+		_ = nixlConn
+		if nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected prefill request to be built")
 		}
 
 		// Verify prefill request body
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
+		if nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)) != nil {
+			prefillBody, err := parseRequestBody(nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
@@ -108,16 +109,16 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// Verify decode request body was prepared (but not executed due to prefill failure)
-		if nixlConn.decodeRequestBody == nil {
+		if addTokenUsage(c, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected decode request body to be prepared")
 		} else {
-			fmt.Println("Decode request body:", nixlConn.decodeRequestBody)
+			fmt.Println("Decode request body:", addTokenUsage(c, cloneReqBody(reqBody)))
 			// Decode request should have include_usage set for non-streaming requests
-			if includeUsage, ok := nixlConn.decodeRequestBody["include_usage"]; !ok || includeUsage != true {
+			if includeUsage, ok := addTokenUsage(c, cloneReqBody(reqBody))["include_usage"]; !ok || includeUsage != true {
 				t.Errorf("Expected decode request body include_usage to be true, got %v", includeUsage)
 			}
 			// Should preserve original max_tokens
-			if maxTokens, ok := nixlConn.decodeRequestBody["max_tokens"]; !ok {
+			if maxTokens, ok := addTokenUsage(c, cloneReqBody(reqBody))["max_tokens"]; !ok {
 				t.Error("Expected decode request body to have max_tokens field")
 			} else if maxTokens, ok := maxTokens.(int); !ok || maxTokens != 100 {
 				t.Errorf("Expected decode request body max_tokens to be 100, got %v", maxTokens)
@@ -154,7 +155,8 @@ func TestNIXLConnectorProxy(t *testing.T) {
 
 		// Verify that prefill request was built
 		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest == nil {
+		_ = nixlConn
+		if nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected prefill request to be built")
 		}
 
@@ -164,8 +166,8 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// Verify prefill request body for streaming request
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
+		if nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)) != nil {
+			prefillBody, err := parseRequestBody(nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
@@ -200,13 +202,13 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// Verify decode request body
-		if nixlConn.decodeRequestBody != nil {
+		if addTokenUsage(c, cloneReqBody(reqBody)) != nil {
 			// Decode request should preserve stream field
-			if stream, ok := nixlConn.decodeRequestBody["stream"]; !ok || stream != true {
+			if stream, ok := addTokenUsage(c, cloneReqBody(reqBody))["stream"]; !ok || stream != true {
 				t.Errorf("Expected decode request body stream to be true, got %v", stream)
 			}
 			// Decode request should have stream_options with include_usage added
-			if streamOptions, ok := nixlConn.decodeRequestBody["stream_options"]; !ok {
+			if streamOptions, ok := addTokenUsage(c, cloneReqBody(reqBody))["stream_options"]; !ok {
 				t.Error("Expected decode request body to have stream_options")
 			} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
 				t.Error("Expected stream_options to be a map")
@@ -253,8 +255,9 @@ func TestNIXLConnectorProxy(t *testing.T) {
 
 		// Verify decode request body preserves existing stream_options
 		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.decodeRequestBody != nil {
-			if streamOptions, ok := nixlConn.decodeRequestBody["stream_options"]; !ok {
+		_ = nixlConn
+		if addTokenUsage(c, cloneReqBody(reqBody)) != nil {
+			if streamOptions, ok := addTokenUsage(c, cloneReqBody(reqBody))["stream_options"]; !ok {
 				t.Error("Expected decode request body to preserve existing stream_options")
 			} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
 				t.Error("Expected stream_options to be a map")
@@ -292,8 +295,9 @@ func TestNIXLConnectorProxy(t *testing.T) {
 
 		// Verify prefill request handling of max_completion_tokens
 		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
+		_ = nixlConn
+		if nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)) != nil {
+			prefillBody, err := parseRequestBody(nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
@@ -313,8 +317,8 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// Verify decode request preserves original max_completion_tokens
-		if nixlConn.decodeRequestBody != nil {
-			if maxCompletionTokens, ok := nixlConn.decodeRequestBody["max_completion_tokens"]; !ok {
+		if addTokenUsage(c, cloneReqBody(reqBody)) != nil {
+			if maxCompletionTokens, ok := addTokenUsage(c, cloneReqBody(reqBody))["max_completion_tokens"]; !ok {
 				t.Error("Expected decode request body to have max_completion_tokens field")
 			} else if maxCompletionTokens, ok := maxCompletionTokens.(int); !ok || maxCompletionTokens != 50 {
 				t.Errorf("Expected decode request body max_completion_tokens to be 50, got %v", maxCompletionTokens)
@@ -349,8 +353,9 @@ func TestNIXLConnectorProxy(t *testing.T) {
 
 		// Verify detailed kv_transfer_params structure in prefill request
 		nixlConn := connector.(*NIXLConnector)
-		if nixlConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(nixlConn.prefillRequest)
+		_ = nixlConn
+		if nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)) != nil {
+			prefillBody, err := parseRequestBody(nixlConn.buildPrefillRequest(c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
