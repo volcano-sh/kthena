@@ -112,15 +112,58 @@ func TestLeastLatencyScore(t *testing.T) {
 
 func TestNewLeastLatencyNilRawUsesDefaultWeight(t *testing.T) {
 	plugin := NewLeastLatency(runtime.RawExtension{})
-	if plugin.TTFTTPOTWeightFactor != 0.5 {
-		t.Fatalf("expected default weight factor 0.5, got %v", plugin.TTFTTPOTWeightFactor)
+	if plugin.TTFTTPOTWeightFactor != defaultTTFTTPOTWeightFactor {
+		t.Fatalf("expected default weight factor %v, got %v", defaultTTFTTPOTWeightFactor, plugin.TTFTTPOTWeightFactor)
 	}
 }
 
 func TestNewLeastLatencyInvalidArgsUsesDefaultWeight(t *testing.T) {
 	plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte(`TTFTTPOTWeightFactor: [`)})
-	if plugin.TTFTTPOTWeightFactor != 0.5 {
-		t.Fatalf("expected default weight factor 0.5, got %v", plugin.TTFTTPOTWeightFactor)
+	if plugin.TTFTTPOTWeightFactor != defaultTTFTTPOTWeightFactor {
+		t.Fatalf("expected default weight factor %v, got %v", defaultTTFTTPOTWeightFactor, plugin.TTFTTPOTWeightFactor)
+	}
+}
+
+func TestNewLeastLatencyInvalidWeightUsesDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "below minimum", raw: "TTFTTPOTWeightFactor: -0.1"},
+		{name: "above maximum", raw: "TTFTTPOTWeightFactor: 1.1"},
+		{name: "positive infinity", raw: "TTFTTPOTWeightFactor: .inf"},
+		{name: "negative infinity", raw: "TTFTTPOTWeightFactor: -.inf"},
+		{name: "not a number", raw: "TTFTTPOTWeightFactor: .nan"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte(tt.raw)})
+			if plugin.TTFTTPOTWeightFactor != defaultTTFTTPOTWeightFactor {
+				t.Fatalf("expected default weight factor %v, got %v", defaultTTFTTPOTWeightFactor, plugin.TTFTTPOTWeightFactor)
+			}
+		})
+	}
+}
+
+func TestNewLeastLatencyAcceptsWeightBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		raw    string
+		expect float64
+	}{
+		{name: "minimum", raw: "0.0", expect: 0.0},
+		{name: "default", raw: "0.5", expect: 0.5},
+		{name: "maximum", raw: "1.0", expect: 1.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte("TTFTTPOTWeightFactor: " + tt.raw)})
+			if plugin.TTFTTPOTWeightFactor != tt.expect {
+				t.Fatalf("expected weight %v, got %v", tt.expect, plugin.TTFTTPOTWeightFactor)
+			}
+		})
 	}
 }
 
