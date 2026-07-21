@@ -1,0 +1,123 @@
+name: Archive Documentation Version
+
+# Trigger on tags. GitHub's on.push.tags uses glob syntax (not full regex), so
+# we use the narrowest practical glob "v[0-9]*.[0-9]*.0" to pre-filter, then
+# perform an exact regex check ("^v[0-9]+\.[0-9]+\.0$") in the guard step to
+# reject anything that slips through (e.g. "v1.2.01", "v1.2.0-rc.1"). This
+# two-layer approach is required because globs cannot express anchored patterns
+# or digit-only groups precisely enough on their own.
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.0'
+
+# Prevent duplicate archive runs for the same tag.
+concurrency:
+  group: docs-archive-${{ github.ref_name }}
+  cancel-in-progress: false
+
+# Minimum required permissions; everything else is read-only by default.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  archive:
+    name: Archive Docusaurus docs for ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so the PR branch can be pushed cleanly.
+          fetch-depth: 0
+
+      # --- Exact tag guard --------------------------------------------------
+      # The glob above cannot distinguish "v1.2.0" from "v1.2.0-rc.1" or
+      # "v1.2.01", so we validate here before touching anything.
+      - name: Validate tag matches v<major>.<minor>.0 exactly
+        id: guard
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.0$ ]]; then
+            echo "Tag '$TAG' does not match the required pattern v<major>.<minor>.0 – skipping archive."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag '$TAG' is a valid minor-release tag."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- Idempotency check ------------------------------------------------
+      # If the tag already appears in versions.json, there is nothing to do.
+      - name: Check if version already archived
+        id: idempotency
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          TAG="${{ github.ref_name }}"
+          if jq -e --arg v "$TAG" 'index($v) != null' docs/kthena/versions.json > /dev/null 2>&1; then
+            echo "Version '$TAG' already exists in versions.json – skipping archive."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version '$TAG' not yet archived."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- Node setup -------------------------------------------------------
+      - name: Setup Node.js
+        if: steps.guard.outputs.skip == 'false' && steps.idempotency.outputs.skip == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.5.0'
+          cache: 'npm'
+          cache-dependency-path: './docs/kthena/package-lock.json'
+
+      # Reproducible install from the lock file, consistent with docs-tests.yml.
+      - name: Install dependencies
+        if: steps.guard.outputs.skip == 'false' && steps.idempotency.outputs.skip == 'false'
+        working-directory: ./docs/kthena
+        run: npm ci
+
+      # --- Archive ----------------------------------------------------------
+      - name: Create Docusaurus version snapshot
+        if: steps.guard.outputs.skip == 'false' && steps.idempotency.outputs.skip == 'false'
+        working-directory: ./docs/kthena
+        run: npm run docusaurus docs:version "${{ github.ref_name }}"
+
+      # --- Validate ---------------------------------------------------------
+      # Run the same typecheck + build that CI uses for docs changes.
+      - name: Validate generated documentation
+        if: steps.guard.outputs.skip == 'false' && steps.idempotency.outputs.skip == 'false'
+        run: make test-docs
+
+      # --- Open PR ----------------------------------------------------------
+      # Push the generated version files in a PR rather than directly to main,
+      # so that branch protection rules are respected.
+      - name: Open pull request with archived docs
+        if: steps.guard.outputs.skip == 'false' && steps.idempotency.outputs.skip == 'false'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Use a deterministic branch name per tag; safe to re-run.
+          branch: docs/archive-${{ github.ref_name }}
+          commit-message: "docs: archive Docusaurus version ${{ github.ref_name }}"
+          title: "docs: archive documentation for release ${{ github.ref_name }}"
+          body: |
+            ## Documentation Archive – ${{ github.ref_name }}
+
+            This PR was automatically created by the **Archive Documentation Version** workflow
+            in response to the `${{ github.ref_name }}` release tag.
+
+            It snapshots the current `docs/kthena/docs/` tree as a versioned Docusaurus
+            archive so that the published site retains documentation for every minor release.
+
+            Closes #1383 (tracking issue for automated doc versioning).
+
+            ### What changed
+            - Added versioned snapshot under `docs/kthena/versioned_docs/version-${{ github.ref_name }}/`
+            - Added sidebar config at `docs/kthena/versioned_sidebars/version-${{ github.ref_name }}-sidebars.json`
+            - Updated `docs/kthena/versions.json`
+
+            ### Validation
+            `make test-docs` (typecheck + build) passed in the workflow run before this PR was opened.
+          labels: documentation
+          delete-branch: true
