@@ -167,28 +167,32 @@ func TestVTCTokenTracker_OnRequestFinishWithoutStartIsSafe(t *testing.T) {
 
 func TestVTCTokenWeightsConfiguration(t *testing.T) {
 	tests := []struct {
-		name            string
-		inputWeight     float64
-		outputWeight    float64
-		wantInputWeight float64
+		name             string
+		inputWeight      float64
+		outputWeight     float64
+		wantInputWeight  float64
+		wantOutputWeight float64
 	}{
 		{
-			name:            "valid weights applied",
-			inputWeight:     2.0,
-			outputWeight:    3.0,
-			wantInputWeight: 2.0,
+			name:             "valid weights applied",
+			inputWeight:      2.0,
+			outputWeight:     3.0,
+			wantInputWeight:  2.0,
+			wantOutputWeight: 3.0,
 		},
 		{
-			name:            "NaN input weight ignored",
-			inputWeight:     math.NaN(),
-			outputWeight:    3.0,
-			wantInputWeight: defaultInputTokenWeight,
+			name:             "NaN input weight ignored",
+			inputWeight:      math.NaN(),
+			outputWeight:     3.0,
+			wantInputWeight:  defaultInputTokenWeight,
+			wantOutputWeight: defaultOutputTokenWeight,
 		},
 		{
-			name:            "negative output weight ignored",
-			inputWeight:     2.0,
-			outputWeight:    -1.0,
-			wantInputWeight: defaultInputTokenWeight,
+			name:             "negative output weight ignored",
+			inputWeight:      2.0,
+			outputWeight:     -1.0,
+			wantInputWeight:  defaultInputTokenWeight,
+			wantOutputWeight: defaultOutputTokenWeight,
 		},
 	}
 
@@ -200,6 +204,9 @@ func TestVTCTokenWeightsConfiguration(t *testing.T) {
 
 			if tracker.inputTokenWeight != tt.wantInputWeight {
 				t.Errorf("inputTokenWeight = %v, want %v", tracker.inputTokenWeight, tt.wantInputWeight)
+			}
+			if tracker.outputTokenWeight != tt.wantOutputWeight {
+				t.Errorf("outputTokenWeight = %v, want %v", tracker.outputTokenWeight, tt.wantOutputWeight)
 			}
 		})
 	}

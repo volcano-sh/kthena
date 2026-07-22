@@ -17,7 +17,6 @@ limitations under the License.
 package datastore
 
 import (
-	"math"
 	"sync"
 )
 
@@ -28,22 +27,35 @@ type vtcUserState struct {
 	activeRequests int     // Requests currently in the fairness queue for this user/model
 }
 
+// vtcActiveMin caches the minimum counter among currently active users for a
+// model, along with which user holds it, so OnRequestStart doesn't need to
+// scan every user on the common path. It goes stale (valid=false) only when
+// the holder itself might no longer be the minimum: it left the active set
+// (OnRequestFinish) or its counter increased (UpdateTokenCount). A stale cache
+// is recomputed by a single O(active users) scan the next time it's needed.
+type vtcActiveMin struct {
+	user  string
+	value float64
+	valid bool
+}
+
 // InMemoryVTCTokenTracker implements the Virtual Token Counter fairness
 // algorithm described in the S-LoRA paper (https://arxiv.org/pdf/2401.00588,
 // section 4). Instead of a sliding time window, each user accrues a monotonic
 // counter of weighted token usage; the fairness queue prioritizes the user
 // with the lowest counter.
 //
-// To keep a user who was idle for a while from being penalized by everyone
-// else's usage catching up forever (or, symmetrically, from a bursty new user
-// starving everyone else with a counter stuck at zero), the counter is lifted
-// to the minimum counter among currently active users whenever a user goes
-// from idle to active (OnRequestStart).
+// When a user transitions from idle to active (OnRequestStart), if their
+// counter sits below the current minimum among active users, it is raised to
+// that minimum. Without this, a user who was idle for a while would rejoin
+// with a stale, low counter and queue-jump ahead of users who kept sending
+// requests the whole time.
 type InMemoryVTCTokenTracker struct {
 	mu                sync.RWMutex
 	inputTokenWeight  float64
 	outputTokenWeight float64
 	userState         map[string]map[string]*vtcUserState // [user][model]
+	activeMin         map[string]*vtcActiveMin            // [model] -> cached active minimum
 }
 
 // VTCTokenTrackerOption configures an InMemoryVTCTokenTracker.
@@ -67,6 +79,7 @@ func NewInMemoryVTCTokenTracker(opts ...VTCTokenTrackerOption) TokenTracker {
 		inputTokenWeight:  defaultInputTokenWeight,
 		outputTokenWeight: defaultOutputTokenWeight,
 		userState:         make(map[string]map[string]*vtcUserState),
+		activeMin:         make(map[string]*vtcActiveMin),
 	}
 	for _, opt := range opts {
 		opt(tracker)
@@ -98,21 +111,52 @@ func (t *InMemoryVTCTokenTracker) getOrCreateState(user, model string) *vtcUserS
 	return state
 }
 
-// Caller must hold t.mu (read or write).
-func (t *InMemoryVTCTokenTracker) activeMinLocked(model string) (float64, bool) {
-	min := math.Inf(1)
-	found := false
-	for _, models := range t.userState {
+// scanActiveMinLocked recomputes the minimum counter among active users for a
+// model by scanning every user. Caller must hold t.mu (write) and only call
+// this when the cache is stale. Time: O(number of users).
+func (t *InMemoryVTCTokenTracker) scanActiveMinLocked(model string) (user string, value float64, found bool) {
+	for u, models := range t.userState {
 		state, ok := models[model]
 		if !ok || state.activeRequests == 0 {
 			continue
 		}
-		if state.virtualTokens < min {
-			min = state.virtualTokens
+		if !found || state.virtualTokens < value {
+			value = state.virtualTokens
+			user = u
 			found = true
 		}
 	}
-	return min, found
+	return user, value, found
+}
+
+// ensureActiveMinLocked returns the current minimum counter among active
+// users for a model, using the cache when valid and falling back to a full
+// scan (and repopulating the cache) otherwise. Caller must hold t.mu (write).
+func (t *InMemoryVTCTokenTracker) ensureActiveMinLocked(model string) (float64, bool) {
+	cache, ok := t.activeMin[model]
+	if ok && cache.valid {
+		return cache.value, true
+	}
+	user, value, found := t.scanActiveMinLocked(model)
+	if !ok {
+		cache = &vtcActiveMin{}
+		t.activeMin[model] = cache
+	}
+	cache.valid = found
+	if found {
+		cache.user = user
+		cache.value = value
+	}
+	return value, found
+}
+
+// invalidateActiveMinLocked marks the cached minimum for a model stale if the
+// given user was (or might have been) the cached holder. Caller must hold
+// t.mu (write).
+func (t *InMemoryVTCTokenTracker) invalidateActiveMinLocked(model, user string) {
+	if cache, ok := t.activeMin[model]; ok && cache.valid && cache.user == user {
+		cache.valid = false
+	}
 }
 
 // GetTokenCount returns the user's current VTC counter for the given model.
@@ -145,6 +189,12 @@ func (t *InMemoryVTCTokenTracker) UpdateTokenCount(user, model string, inputToke
 	state := t.getOrCreateState(user, model)
 	state.virtualTokens += inputTokens*t.inputTokenWeight + outputTokens*t.outputTokenWeight
 	state.requestCount++
+	// The counter only grows here, so if this user held the cached minimum,
+	// another active user may now be lower; the cache can't confirm that
+	// cheaply, so invalidate it and let the next lookup rescan.
+	if state.activeRequests > 0 {
+		t.invalidateActiveMinLocked(model, user)
+	}
 	return nil
 }
 
@@ -174,9 +224,23 @@ func (t *InMemoryVTCTokenTracker) OnRequestStart(user, model string) {
 	defer t.mu.Unlock()
 	state := t.getOrCreateState(user, model)
 	if state.activeRequests == 0 {
-		if min, ok := t.activeMinLocked(model); ok && state.virtualTokens < min {
+		min, hasActive := t.ensureActiveMinLocked(model)
+		if hasActive && state.virtualTokens < min {
 			state.virtualTokens = min
 		}
+		// This user is about to join the active set: keep the cache valid by
+		// recording them as the new holder if they're at or below the current
+		// minimum (or if there was no active user before them).
+		cache, ok := t.activeMin[model]
+		if !ok {
+			cache = &vtcActiveMin{}
+			t.activeMin[model] = cache
+		}
+		if !hasActive || state.virtualTokens <= cache.value {
+			cache.user = user
+			cache.value = state.virtualTokens
+		}
+		cache.valid = true
 	}
 	state.activeRequests++
 }
@@ -193,4 +257,9 @@ func (t *InMemoryVTCTokenTracker) OnRequestFinish(user, model string) {
 		return
 	}
 	state.activeRequests--
+	if state.activeRequests == 0 {
+		// The user leaving might have been the cached minimum holder; the next
+		// active user, if any, is unknown without a rescan.
+		t.invalidateActiveMinLocked(model, user)
+	}
 }
