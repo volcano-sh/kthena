@@ -22,6 +22,14 @@ controllerManager:
     requests:
       cpu: 100m
       memory: 128Mi
+  # nodeSelector specifies node labels that the Controller Manager Pod must match.
+  nodeSelector: {}
+  # affinity specifies affinity and anti-affinity rules for the Controller Manager Pod.
+  affinity: {}
+  # tolerations specifies tolerations applied to the Controller Manager Pod.
+  tolerations: []
+  # topologySpreadConstraints specifies topology spread constraints for the Controller Manager Pod.
+  topologySpreadConstraints: []
   # controllers specifies which controllers to enable
   # Available options: modelserving, modelbooster, autoscaler
   # If empty or not specified, all controllers are enabled
@@ -54,4 +62,3 @@ controllerManager:
     accessKey: ""
     # secretKey is the secret key for the downloader.
     secretKey: ""
-
