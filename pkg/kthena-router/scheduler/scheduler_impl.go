@@ -273,7 +273,16 @@ func TopNPodInfos(m map[*datastore.PodInfo]int, n int) []*datastore.PodInfo {
 	}
 
 	sort.Slice(list, func(i, j int) bool {
-		return list[i].score > list[j].score
+		if list[i].score != list[j].score {
+			return list[i].score > list[j].score
+		}
+
+		left := list[i].pod.GetPodNamespacedName()
+		right := list[j].pod.GetPodNamespacedName()
+		if left.Namespace != right.Namespace {
+			return left.Namespace < right.Namespace
+		}
+		return left.Name < right.Name
 	})
 
 	res := []*datastore.PodInfo{}

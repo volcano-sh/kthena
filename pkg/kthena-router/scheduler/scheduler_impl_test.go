@@ -117,6 +117,33 @@ func TestTopNPodInfosOrdering(t *testing.T) {
 	assert.Equal(t, "pod1", result[2].Pod.Name)
 }
 
+// TestTopNPodInfosTieBreak verifies that equal-score pods are ordered by their
+// namespace and pod name instead of depending on Go map iteration order.
+func TestTopNPodInfosTieBreak(t *testing.T) {
+	podA := createTestPodInfo("pod-z")
+	podA.Pod.Namespace = "namespace-a"
+	podB := createTestPodInfo("pod-a")
+	podB.Pod.Namespace = "namespace-a"
+	podC := createTestPodInfo("pod-a")
+	podC.Pod.Namespace = "namespace-b"
+
+	scores := map[*datastore.PodInfo]int{
+		podA: 100,
+		podB: 100,
+		podC: 100,
+	}
+
+	result := TopNPodInfos(scores, 3)
+
+	require.Len(t, result, 3)
+	assert.Equal(t, "namespace-a", result[0].Pod.Namespace)
+	assert.Equal(t, "pod-a", result[0].Pod.Name)
+	assert.Equal(t, "namespace-a", result[1].Pod.Namespace)
+	assert.Equal(t, "pod-z", result[1].Pod.Name)
+	assert.Equal(t, "namespace-b", result[2].Pod.Namespace)
+	assert.Equal(t, "pod-a", result[2].Pod.Name)
+}
+
 // TestSchedulePDGroup uses table-driven tests to validate PD scheduling behavior.
 // It covers both graceful degradation (no prefill pods) and the happy path (valid prefill pod).
 func TestSchedulePDGroup(t *testing.T) {
