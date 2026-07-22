@@ -129,6 +129,21 @@ type mockServer struct {
 	captures *captureStore
 }
 
+type providerProtocol int
+
+const (
+	protocolOpenAI providerProtocol = iota
+	protocolAnthropic
+)
+
+func writeProviderError(w http.ResponseWriter, protocol providerProtocol, status int, errorType, message string) {
+	if protocol == protocolAnthropic {
+		writeJSON(w, status, fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%q}}`, errorType, message))
+		return
+	}
+	writeJSON(w, status, fmt.Sprintf(`{"error":{"type":%q,"message":%q}}`, errorType, message))
+}
+
 func newMockServer(config mockConfig) *mockServer {
 	if config.MaxDelay <= 0 {
 		config.MaxDelay = 5 * time.Second
@@ -163,23 +178,24 @@ func (s *mockServer) adminHandler() http.Handler {
 
 func (s *mockServer) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", http.MethodPost)
+		writeProviderError(w, protocolOpenAI, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
 		return
 	}
 	authorized := constantTimeEqual(r.Header.Get("Authorization"), "Bearer "+s.config.OpenAIKey)
 	if !authorized {
-		writeJSON(w, http.StatusUnauthorized, `{"error":{"type":"authentication_error","message":"invalid mock credential"}}`)
+		writeProviderError(w, protocolOpenAI, http.StatusUnauthorized, "authentication_error", "invalid mock credential")
 		return
 	}
-	capture, ok := s.captureJSONRequest(w, r, true)
+	capture, ok := s.captureJSONRequest(w, r, true, protocolOpenAI)
 	if !ok {
 		return
 	}
 	if hasNonStreamingOpenAIOptions(capture.Body) {
-		writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"include_usage and stream_options are streaming-only options"}}`)
+		writeProviderError(w, protocolOpenAI, http.StatusBadRequest, "invalid_request", "include_usage and stream_options are streaming-only options")
 		return
 	}
-	if s.applyControls(w, r) {
+	if s.applyControls(w, r, protocolOpenAI) {
 		return
 	}
 	if isStreaming(capture.Body) {
@@ -196,16 +212,17 @@ func (s *mockServer) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *mockServer) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", http.MethodPost)
+		writeProviderError(w, protocolOpenAI, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
 		return
 	}
 	authorized := constantTimeEqual(r.Header.Get("Authorization"), "Bearer "+s.config.OpenAIKey)
 	if !authorized {
-		writeJSON(w, http.StatusUnauthorized, `{"error":{"type":"authentication_error","message":"invalid mock credential"}}`)
+		writeProviderError(w, protocolOpenAI, http.StatusUnauthorized, "authentication_error", "invalid mock credential")
 		return
 	}
-	capture, ok := s.captureJSONRequest(w, r, true)
-	if !ok || s.applyControls(w, r) {
+	capture, ok := s.captureJSONRequest(w, r, true, protocolOpenAI)
+	if !ok || s.applyControls(w, r, protocolOpenAI) {
 		return
 	}
 	if !isStreaming(capture.Body) {
@@ -220,19 +237,20 @@ func (s *mockServer) handleOpenAIResponses(w http.ResponseWriter, r *http.Reques
 
 func (s *mockServer) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", http.MethodPost)
+		writeProviderError(w, protocolAnthropic, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	if !constantTimeEqual(r.Header.Get("X-Api-Key"), s.config.AnthropicKey) {
-		writeJSON(w, http.StatusUnauthorized, `{"type":"error","error":{"type":"authentication_error","message":"invalid mock credential"}}`)
+		writeProviderError(w, protocolAnthropic, http.StatusUnauthorized, "authentication_error", "invalid mock credential")
 		return
 	}
 	if r.Header.Get("Anthropic-Version") != "2023-06-01" {
-		writeJSON(w, http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"unsupported anthropic-version"}}`)
+		writeProviderError(w, protocolAnthropic, http.StatusBadRequest, "invalid_request_error", "unsupported anthropic-version")
 		return
 	}
-	capture, ok := s.captureJSONRequest(w, r, true)
-	if !ok || s.applyControls(w, r) {
+	capture, ok := s.captureJSONRequest(w, r, true, protocolAnthropic)
+	if !ok || s.applyControls(w, r, protocolAnthropic) {
 		return
 	}
 	if !isStreaming(capture.Body) {
@@ -247,21 +265,21 @@ func (s *mockServer) handleAnthropicMessages(w http.ResponseWriter, r *http.Requ
 	)
 }
 
-func (s *mockServer) applyControls(w http.ResponseWriter, r *http.Request) bool {
+func (s *mockServer) applyControls(w http.ResponseWriter, r *http.Request, protocol providerProtocol) bool {
 	query := r.URL.Query()
 	if status := query.Get("mock_status"); status != "" {
 		if status != strconv.Itoa(http.StatusTooManyRequests) {
-			writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"unsupported mock_status"}}`)
+			writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "unsupported mock_status")
 			return true
 		}
-		writeJSON(w, http.StatusTooManyRequests, `{"error":{"type":"rate_limit_error","message":"mock rate limit"}}`)
+		writeProviderError(w, protocol, http.StatusTooManyRequests, "rate_limit_error", "mock rate limit")
 		return true
 	}
 	if delayValue := query.Get("mock_delay_ms"); delayValue != "" {
 		delayMS, err := strconv.Atoi(delayValue)
 		delay := time.Duration(delayMS) * time.Millisecond
 		if err != nil || delayMS < 0 || delay > s.config.MaxDelay {
-			writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"invalid mock_delay_ms"}}`)
+			writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "invalid mock_delay_ms")
 			return true
 		}
 		time.Sleep(delay)
@@ -289,34 +307,34 @@ func hasNonStreamingOpenAIOptions(body json.RawMessage) bool {
 	return hasIncludeUsage || hasStreamOptions
 }
 
-func (s *mockServer) captureJSONRequest(w http.ResponseWriter, r *http.Request, authorized bool) (capturedRequest, bool) {
+func (s *mockServer) captureJSONRequest(w http.ResponseWriter, r *http.Request, authorized bool, protocol providerProtocol) (capturedRequest, bool) {
 	requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 	if requestID == "" {
-		writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"x-request-id is required"}}`)
+		writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "x-request-id is required")
 		return capturedRequest{}, false
 	}
 
 	limited := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"request body is invalid or too large"}}`)
+		writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "request body is invalid or too large")
 		return capturedRequest{}, false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	var object map[string]any
 	if err := decoder.Decode(&object); err != nil {
-		writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"request body must be a JSON object"}}`)
+		writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "request body must be a JSON object")
 		return capturedRequest{}, false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"request body must contain one JSON object"}}`)
+		writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "request body must contain one JSON object")
 		return capturedRequest{}, false
 	}
 
 	compact := bytes.NewBuffer(make([]byte, 0, len(body)))
 	if err := json.Compact(compact, body); err != nil {
-		writeJSON(w, http.StatusBadRequest, `{"error":{"type":"invalid_request","message":"request body must be valid JSON"}}`)
+		writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
 		return capturedRequest{}, false
 	}
 	capture := capturedRequest{

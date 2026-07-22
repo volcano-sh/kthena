@@ -54,7 +54,7 @@ esac
 echo "Start to install cert-manager"
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml
 echo "Waiting for cert-manager to be ready..."
-go install github.com/cert-manager/cmctl/v2@latest && "$(go env GOPATH)/bin/cmctl" check api --wait=5m
+go install github.com/cert-manager/cmctl/v2@v2.2.0 && "$(go env GOPATH)/bin/cmctl" check api --wait=5m
 
 echo "Start to install Volcano"
 kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/master/installer/volcano-development.yaml
