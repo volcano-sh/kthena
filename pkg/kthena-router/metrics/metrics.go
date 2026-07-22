@@ -202,7 +202,7 @@ func NewMetrics() *Metrics {
 		ActiveUpstreamRequests: *promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "kthena_router_active_upstream_requests",
-				Help: "Current number of active upstream requests (from router to backend pods)",
+				Help: "Current number of active upstream requests (from router to upstream backends)",
 			},
 			[]string{LabelModelServer, LabelModelRoute, LabelBackendType, LabelBackendName, LabelUpstreamModel},
 		),

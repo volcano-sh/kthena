@@ -224,6 +224,10 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		totalWeight := uint32(0)
 		for j, targetModel := range rule.TargetModels {
 			targetModelField := ruleField.Child("targetModels").Index(j)
+			if targetModel == nil {
+				allErrs = append(allErrs, field.Required(targetModelField, "target model cannot be null"))
+				continue
+			}
 			hasModelServer := targetModel.ModelServerName != ""
 			hasExternalProvider := targetModel.ExternalModelProviderName != ""
 			if hasModelServer == hasExternalProvider {
