@@ -432,6 +432,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 				var proxyErr *externalProxyError
 				if errors.As(err, &proxyErr) {
 					accesslog.SetError(c, proxyErr.reason, proxyErr.message)
+					if proxyErr.origin != "" {
+						accesslog.SetErrorOrigin(c, proxyErr.origin)
+					}
 					accesslog.SetErrorOrigin(c, "router")
 					c.Set("finishReason", proxyErr.reason)
 					if !c.Writer.Written() {
@@ -970,10 +973,15 @@ type externalProxyError struct {
 	statusCode int
 	reason     string
 	message    string
+	origin     string
 }
 
 func newExternalProxyError(statusCode int, reason, message string) *externalProxyError {
-	return &externalProxyError{statusCode: statusCode, reason: reason, message: message}
+	origin := "router"
+	if reason == "upstream_response" {
+		origin = "upstream"
+	}
+	return &externalProxyError{statusCode: statusCode, reason: reason, message: message, origin: origin}
 }
 
 func (e *externalProxyError) Error() string {

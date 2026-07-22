@@ -2,6 +2,8 @@
 
 ## Overview & Purpose
 
+Request, token, and latency metrics include destination labels (`model_route`, `backend_type`, `backend_name`, and `upstream_model`) so external providers and in-cluster backends can be distinguished. These labels increase series cardinality with the number of configured routes and destinations; monitor scrape storage and retention accordingly.
+
 The **kthena-router** serves as the central data-plane gateway for all inference traffic in the Kthena LLM inference platform.  
 It is responsible for request routing, load balancing, scheduling, fairness queuing, rate limiting, token accounting, and (when applicable) disaggregated prefill/decode forwarding.
 
