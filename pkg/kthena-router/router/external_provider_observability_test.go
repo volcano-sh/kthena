@@ -472,7 +472,7 @@ func TestExternalProviderObservabilityStreamReadFailure(t *testing.T) {
 	fixture := newExternalObservabilityFixture(t, "stream-read-failure", aiv1alpha1.OpenAI, upstream.URL)
 	path := "/v1/responses"
 	requestBody := addModelToRequestBody(`{"input":"hello","stream":true}`, fixture.clientModel)
-	before := observeExternalMetrics(t, fixture, path, http.StatusOK, "proxy")
+	before := observeExternalMetrics(t, fixture, path, http.StatusOK, "response_forwarding")
 
 	w, accessCtx := executeExternalObservabilityStreamRequest(t, fixture, path, requestBody)
 
@@ -480,9 +480,9 @@ func TestExternalProviderObservabilityStreamReadFailure(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"type":"response.created"`)
 	assertExternalAccessLog(t, accessCtx, fixture, http.StatusOK, 1, http.StatusOK, "router", 0)
 	require.NotNil(t, accessCtx.Error)
-	assert.Equal(t, "proxy", accessCtx.Error.Type)
-	assertExternalMetricDeltas(t, fixture, path, http.StatusOK, "proxy", before, accessCtx.InputTokens, 0)
-	assertExternalMetricsExposed(t, fixture, path, http.StatusOK, "proxy", accessCtx.InputTokens, 0)
+	assert.Equal(t, "response_forwarding", accessCtx.Error.Type)
+	assertExternalMetricDeltas(t, fixture, path, http.StatusOK, "response_forwarding", before, accessCtx.InputTokens, 0)
+	assertExternalMetricsExposed(t, fixture, path, http.StatusOK, "response_forwarding", accessCtx.InputTokens, 0)
 }
 
 func TestExternalProviderObservabilityConfigurationFailure(t *testing.T) {
