@@ -1323,11 +1323,15 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 			utils.NewChatMessage("user", "Hello"),
 		}
 
-		resp := utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, "lora-NonExistent", messages, nil)
+		resp := utils.SendChatRequest(t, "lora-NonExistent", messages)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err, "Failed to read response body")
 
 		// Non-existent LoRA adapter should return 404
-		assert.Equal(t, 404, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
-		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, resp.Body)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
+		require.Contains(t, string(body), "route not found", "Expected route-not-found response body")
+		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, body)
 	})
 
 	// Unload LoRA adapters after test is complete
