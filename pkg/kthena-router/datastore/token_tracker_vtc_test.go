@@ -19,6 +19,7 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestVTCTokenTracker_UpdateAndGetTokenCount(t *testing.T) {
@@ -149,8 +150,11 @@ func TestVTCTokenTracker_OnRequestStartIgnoresEmptyIDs(t *testing.T) {
 	tracker.OnRequestStart("user", "")
 	tracker.OnRequestFinish("user", "")
 
-	if len(tracker.userState) != 0 {
-		t.Fatalf("expected no state created for empty user/model, got %v", tracker.userState)
+	tracker.mu.RLock()
+	stateCount := len(tracker.userState)
+	tracker.mu.RUnlock()
+	if stateCount != 0 {
+		t.Fatalf("expected no state created for empty user/model, got %d entries", stateCount)
 	}
 }
 
@@ -159,7 +163,9 @@ func TestVTCTokenTracker_OnRequestFinishWithoutStartIsSafe(t *testing.T) {
 	// Finishing a request that was never started must not panic or underflow.
 	tracker.OnRequestFinish("alice", "model-a")
 
+	tracker.mu.RLock()
 	state := tracker.getState("alice", "model-a")
+	tracker.mu.RUnlock()
 	if state != nil && state.activeRequests < 0 {
 		t.Fatalf("activeRequests underflowed: %d", state.activeRequests)
 	}
@@ -209,6 +215,68 @@ func TestVTCTokenWeightsConfiguration(t *testing.T) {
 				t.Errorf("outputTokenWeight = %v, want %v", tracker.outputTokenWeight, tt.wantOutputWeight)
 			}
 		})
+	}
+}
+
+// fakeClock lets tests fast-forward time deterministically instead of sleeping.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+func TestVTCTokenTracker_PruneEvictsOnlyExpiredIdleEntries(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	tracker := NewInMemoryVTCTokenTracker(WithVTCIdleTTL(time.Hour)).(*InMemoryVTCTokenTracker)
+	tracker.now = clock.Now
+	tracker.lastPrune = clock.Now()
+
+	// alice goes idle right away; bob stays active the whole time and accrues usage.
+	tracker.OnRequestStart("alice", "model-a")
+	tracker.OnRequestFinish("alice", "model-a")
+	tracker.OnRequestStart("bob", "model-a")
+	if err := tracker.UpdateTokenCount("bob", "model-a", 10, 10); err != nil {
+		t.Fatalf("UpdateTokenCount returned error: %v", err)
+	}
+
+	// Advance well past both the idle TTL and the prune throttle interval, then
+	// trigger a prune via OnRequestStart for an unrelated user.
+	clock.Advance(2 * time.Hour)
+	tracker.OnRequestStart("carol", "model-a")
+	tracker.OnRequestFinish("carol", "model-a")
+
+	tracker.mu.RLock()
+	_, aliceStillTracked := tracker.userState["alice"]
+	_, bobStillTracked := tracker.userState["bob"]
+	tracker.mu.RUnlock()
+
+	if aliceStillTracked {
+		t.Fatal("expected alice's idle entry to be evicted after exceeding idleTTL")
+	}
+	if !bobStillTracked {
+		t.Fatal("expected bob's active entry to survive pruning")
+	}
+
+	// bob's counter and request count must survive pruning unchanged, proving
+	// his entry wasn't evicted and silently recreated from scratch.
+	bobCount, _ := tracker.GetTokenCount("bob", "model-a")
+	if bobCount != 30 {
+		t.Fatalf("bob counter changed by pruning: got %v, want 30", bobCount)
+	}
+	bobRequests, _ := tracker.GetRequestCount("bob", "model-a")
+	if bobRequests != 1 {
+		t.Fatalf("bob request count changed by pruning: got %d, want 1", bobRequests)
 	}
 }
 

@@ -18,13 +18,23 @@ package datastore
 
 import (
 	"sync"
+	"time"
 )
+
+// defaultVTCIdleTTL is how long a user/model pair with no in-flight requests
+// is kept before it's eligible for eviction, when not overridden.
+const defaultVTCIdleTTL = 30 * time.Minute
+
+// vtcPruneInterval throttles how often OnRequestStart scans for expired idle
+// entries, so the scan cost is amortized instead of paid on every call.
+const vtcPruneInterval = time.Minute
 
 // vtcUserState holds the per (user, model) bookkeeping for the VTC tracker.
 type vtcUserState struct {
-	virtualTokens  float64 // Cumulative weighted token usage (the VTC counter)
-	requestCount   int     // Cumulative request count, for GetRequestCount
-	activeRequests int     // Requests currently in the fairness queue for this user/model
+	virtualTokens  float64   // Cumulative weighted token usage (the VTC counter)
+	requestCount   int       // Cumulative request count, for GetRequestCount
+	activeRequests int       // Requests currently in the fairness queue for this user/model
+	lastSeen       time.Time // Last time this entry was touched, for idle eviction
 }
 
 // vtcActiveMin caches the minimum counter among currently active users for a
@@ -50,10 +60,18 @@ type vtcActiveMin struct {
 // that minimum. Without this, a user who was idle for a while would rejoin
 // with a stale, low counter and queue-jump ahead of users who kept sending
 // requests the whole time.
+//
+// Because the counter never resets on its own, per-user state is only dropped
+// once a user has been idle (no in-flight requests) for longer than idleTTL,
+// so a long-running router doesn't accumulate state for users it will never
+// see again. Currently-active entries are never evicted.
 type InMemoryVTCTokenTracker struct {
 	mu                sync.RWMutex
 	inputTokenWeight  float64
 	outputTokenWeight float64
+	idleTTL           time.Duration
+	lastPrune         time.Time
+	now               func() time.Time
 	userState         map[string]map[string]*vtcUserState // [user][model]
 	activeMin         map[string]*vtcActiveMin            // [model] -> cached active minimum
 }
@@ -73,17 +91,32 @@ func WithVTCTokenWeights(inputWeight, outputWeight float64) VTCTokenTrackerOptio
 	}
 }
 
+// WithVTCIdleTTL overrides how long an idle (no in-flight requests) user/model
+// entry is retained before it becomes eligible for eviction. Non-positive
+// values are ignored.
+func WithVTCIdleTTL(ttl time.Duration) VTCTokenTrackerOption {
+	return func(t *InMemoryVTCTokenTracker) {
+		if ttl <= 0 {
+			return
+		}
+		t.idleTTL = ttl
+	}
+}
+
 // NewInMemoryVTCTokenTracker creates a new VTC tracker with optional configuration.
 func NewInMemoryVTCTokenTracker(opts ...VTCTokenTrackerOption) TokenTracker {
 	tracker := &InMemoryVTCTokenTracker{
 		inputTokenWeight:  defaultInputTokenWeight,
 		outputTokenWeight: defaultOutputTokenWeight,
+		idleTTL:           defaultVTCIdleTTL,
+		now:               time.Now,
 		userState:         make(map[string]map[string]*vtcUserState),
 		activeMin:         make(map[string]*vtcActiveMin),
 	}
 	for _, opt := range opts {
 		opt(tracker)
 	}
+	tracker.lastPrune = tracker.now()
 	return tracker
 }
 
@@ -105,10 +138,35 @@ func (t *InMemoryVTCTokenTracker) getOrCreateState(user, model string) *vtcUserS
 	}
 	state, ok := models[model]
 	if !ok {
-		state = &vtcUserState{}
+		state = &vtcUserState{lastSeen: t.now()}
 		models[model] = state
 	}
 	return state
+}
+
+// pruneIdleLocked drops user/model entries that have had no in-flight
+// requests for longer than idleTTL, so long-lived routers with high-cardinality
+// or rotating user IDs don't accumulate state forever. Active entries
+// (activeRequests > 0) are never evicted. Throttled to at most once per
+// vtcPruneInterval so the scan cost is amortized across calls. Caller must
+// hold t.mu (write).
+func (t *InMemoryVTCTokenTracker) pruneIdleLocked() {
+	now := t.now()
+	if now.Sub(t.lastPrune) < vtcPruneInterval {
+		return
+	}
+	t.lastPrune = now
+	cutoff := now.Add(-t.idleTTL)
+	for user, models := range t.userState {
+		for model, state := range models {
+			if state.activeRequests == 0 && state.lastSeen.Before(cutoff) {
+				delete(models, model)
+			}
+		}
+		if len(models) == 0 {
+			delete(t.userState, user)
+		}
+	}
 }
 
 // scanActiveMinLocked recomputes the minimum counter among active users for a
@@ -189,6 +247,7 @@ func (t *InMemoryVTCTokenTracker) UpdateTokenCount(user, model string, inputToke
 	state := t.getOrCreateState(user, model)
 	state.virtualTokens += inputTokens*t.inputTokenWeight + outputTokens*t.outputTokenWeight
 	state.requestCount++
+	state.lastSeen = t.now()
 	// The counter only grows here, so if this user held the cached minimum,
 	// another active user may now be lower; the cache can't confirm that
 	// cheaply, so invalidate it and let the next lookup rescan.
@@ -222,7 +281,9 @@ func (t *InMemoryVTCTokenTracker) OnRequestStart(user, model string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.pruneIdleLocked()
 	state := t.getOrCreateState(user, model)
+	state.lastSeen = t.now()
 	if state.activeRequests == 0 {
 		min, hasActive := t.ensureActiveMinLocked(model)
 		if hasActive && state.virtualTokens < min {
@@ -257,6 +318,7 @@ func (t *InMemoryVTCTokenTracker) OnRequestFinish(user, model string) {
 		return
 	}
 	state.activeRequests--
+	state.lastSeen = t.now()
 	if state.activeRequests == 0 {
 		// The user leaving might have been the cached minimum holder; the next
 		// active user, if any, is unknown without a rescan.
