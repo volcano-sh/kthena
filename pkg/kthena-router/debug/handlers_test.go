@@ -333,6 +333,11 @@ func (m *MockStore) GetModelNames() []string {
 	return args.Get(0).([]string)
 }
 
+func (m *MockStore) HasModel(name string) bool {
+	args := m.Called(name)
+	return args.Bool(0)
+}
+
 func (m *MockStore) SyncOnFlightCounts() {}
 
 func (m *MockStore) IncrPodOnFlightRequests(podName types.NamespacedName) {}

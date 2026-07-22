@@ -279,21 +279,17 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
-		metricsModel := modelName
-		var gatewayKey string
-		if key, exists := c.Get(GatewayKey); exists {
-			if k, ok := key.(string); ok {
-				gatewayKey = k
-			}
-		}
-		if _, _, _, err := r.store.MatchModelServer(modelName, c.Request, gatewayKey); err != nil {
-			if _, matched := r.findHTTPRouteMatch(c, gatewayKey); !matched {
-				metricsModel = metrics.UnknownModel
-			}
+		metricsModel := metrics.UnknownModel
+		if r.store.HasModel(modelName) {
+			metricsModel = modelName
 		}
 		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, metricsModel, path)
 
+		// Increment downstream request count at request start
+		r.metrics.IncActiveDownstreamRequests(metricsModel)
 		defer func() {
+			// Decrement downstream request count when request completes
+			r.metrics.DecActiveDownstreamRequests(metricsModel)
 			if metricsRecorder != nil {
 				statusCode := strconv.Itoa(c.Writer.Status())
 				reason := "successful_request"
@@ -324,10 +320,12 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Calculate and set input tokens for access log
 		accesslog.SetTokenCounts(c, inputTokens, 0)
-		metricsRecorder.RecordInputTokens(inputTokens)
 
 		// Mark end of request processing phase
 		accesslog.MarkRequestProcessingEnd(c)
+
+		// Record input tokens immediately
+		metricsRecorder.RecordInputTokens(inputTokens)
 
 		// Apply rate limiting using the unified rate limiter
 		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
@@ -364,8 +362,6 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Store metrics recorder in context for use in other functions
 		c.Set("metricsRecorder", metricsRecorder)
-		r.metrics.IncActiveDownstreamRequests(metricsModel)
-		defer r.metrics.DecActiveDownstreamRequests(metricsModel)
 
 		// step 3.1: direct load balancing when neither fairness scheduling nor
 		// session boost is enabled.

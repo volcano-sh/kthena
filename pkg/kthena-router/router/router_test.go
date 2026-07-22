@@ -34,6 +34,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
@@ -720,6 +721,7 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	reqBody := `{"model": "test-model", "prompt": "hello"}`
 	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
 	c.Request.Header.Set("Content-Type", "application/json")
+	requestsBefore := requestCounterValue(t, router, "test-model", "/v1/chat/completions", "200", "successful_request")
 
 	// 4. Execute handler
 	router.HandlerFunc()(c)
@@ -727,6 +729,7 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	// 5. Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"id":"response-id"`)
+	assert.Equal(t, float64(1), requestCounterValue(t, router, "test-model", "/v1/chat/completions", "200", "successful_request")-requestsBefore)
 }
 
 func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
@@ -851,17 +854,16 @@ func TestRouter_HandlerFunc_ModelNotFound(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "route not found")
 }
 
-func metricModelCount(t *testing.T, name, prefix string) int {
+func countMetricsWithModelPrefix(t *testing.T, prefix string) int {
 	t.Helper()
 
 	families, err := prometheus.DefaultGatherer.Gather()
-	assert.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
 
 	count := 0
 	for _, family := range families {
-		if family.GetName() != name {
-			continue
-		}
 		for _, metric := range family.GetMetric() {
 			for _, label := range metric.GetLabel() {
 				if label.GetName() == metrics.LabelModel && strings.HasPrefix(label.GetValue(), prefix) {
@@ -873,37 +875,18 @@ func metricModelCount(t *testing.T, name, prefix string) int {
 	return count
 }
 
-func requestCounterValue(t *testing.T, labels map[string]string) float64 {
+func requestCounterValue(t *testing.T, router *Router, model, path, statusCode, errorType string) float64 {
 	t.Helper()
 
-	families, err := prometheus.DefaultGatherer.Gather()
-	assert.NoError(t, err)
-
-	for _, family := range families {
-		if family.GetName() != "kthena_router_requests_total" {
-			continue
-		}
-		for _, metric := range family.GetMetric() {
-			matched := true
-			for name, value := range labels {
-				found := false
-				for _, label := range metric.GetLabel() {
-					if label.GetName() == name && label.GetValue() == value {
-						found = true
-						break
-					}
-				}
-				if !found {
-					matched = false
-					break
-				}
-			}
-			if matched {
-				return metric.GetCounter().GetValue()
-			}
-		}
+	counter, err := router.metrics.RequestsTotal.GetMetricWithLabelValues(model, path, statusCode, errorType)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
 	}
-	return 0
+	metric := &dto.Metric{}
+	if err := counter.Write(metric); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return metric.GetCounter().GetValue()
 }
 
 func TestRouter_HandlerFunc_UnknownModelMetricsUseBoundedLabel(t *testing.T) {
@@ -911,13 +894,7 @@ func TestRouter_HandlerFunc_UnknownModelMetricsUseBoundedLabel(t *testing.T) {
 	defer backend.Close()
 
 	prefix := "cardinality-proof-test-"
-	requestLabels := map[string]string{
-		metrics.LabelModel:      metrics.UnknownModel,
-		metrics.LabelPath:       "/v1/chat/completions",
-		metrics.LabelStatusCode: "404",
-		metrics.LabelErrorType:  "route_not_found",
-	}
-	requestsBefore := requestCounterValue(t, requestLabels)
+	requestsBefore := requestCounterValue(t, router, metrics.UnknownModel, "/v1/chat/completions", "404", "route_not_found")
 
 	for i := 0; i < 3; i++ {
 		w := httptest.NewRecorder()
@@ -932,9 +909,8 @@ func TestRouter_HandlerFunc_UnknownModelMetricsUseBoundedLabel(t *testing.T) {
 		assert.Contains(t, w.Body.String(), "route not found")
 	}
 
-	assert.Equal(t, 0, metricModelCount(t, "kthena_router_requests_total", prefix))
-	assert.Equal(t, 0, metricModelCount(t, "kthena_router_active_downstream_requests", prefix))
-	assert.Equal(t, float64(3), requestCounterValue(t, requestLabels)-requestsBefore)
+	assert.Equal(t, 0, countMetricsWithModelPrefix(t, prefix))
+	assert.Equal(t, float64(3), requestCounterValue(t, router, metrics.UnknownModel, "/v1/chat/completions", "404", "route_not_found")-requestsBefore)
 }
 
 func TestRouter_HandlerFunc_ScheduleFailure(t *testing.T) {
