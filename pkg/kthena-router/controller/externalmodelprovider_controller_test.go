@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -25,9 +26,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
@@ -395,6 +398,58 @@ func TestExternalModelProviderController_SuccessForgetsRetryHistory(t *testing.T
 	assert.Equal(t, 1, controller.workqueue.NumRequeues(key))
 	assert.True(t, controller.processNextWorkItem())
 	assert.Zero(t, controller.workqueue.NumRequeues(key))
+}
+
+func TestExternalModelProviderController_ReconcileSecretContinuesAfterStatusFailure(t *testing.T) {
+	secretName := types.NamespacedName{Namespace: "default", Name: "provider-secret"}
+	providers := []*aiv1alpha1.ExternalModelProvider{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "first-provider", Namespace: secretName.Namespace},
+			Spec: aiv1alpha1.ExternalModelProviderSpec{Auth: &aiv1alpha1.ProviderAuth{
+				SecretRef: corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName.Name},
+					Key:                  "api-key",
+				},
+			}},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "second-provider", Namespace: secretName.Namespace},
+			Spec: aiv1alpha1.ExternalModelProviderSpec{Auth: &aiv1alpha1.ProviderAuth{
+				SecretRef: corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName.Name},
+					Key:                  "api-key",
+				},
+			}},
+		},
+	}
+	kthenaClient := kthenafake.NewSimpleClientset(providers[0], providers[1])
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	secretInformer := kubeInformerFactory.Core().V1().Secrets()
+	controller, err := NewExternalModelProviderController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, datastore.New())
+	assert.NoError(t, err)
+	for _, provider := range providers {
+		assert.NoError(t, controller.externalModelProviderIndexer.Add(provider))
+	}
+	assert.NoError(t, secretInformer.Informer().GetIndexer().Add(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName.Name, Namespace: secretName.Namespace},
+		Data:       map[string][]byte{"api-key": []byte("key")},
+	}))
+
+	var updated []string
+	kthenaClient.PrependReactor("update", "externalmodelproviders", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		provider := action.(clienttesting.UpdateAction).GetObject().(*aiv1alpha1.ExternalModelProvider)
+		updated = append(updated, provider.Name)
+		if provider.Name == "first-provider" {
+			return true, nil, errors.New("status update failed")
+		}
+		return false, nil, nil
+	})
+
+	err = controller.reconcileProvidersForSecret(secretName)
+	assert.EqualError(t, err, "status update failed")
+	assert.ElementsMatch(t, []string{"first-provider", "second-provider"}, updated)
 }
 
 func TestExternalModelProviderController_EnqueueDeletedFinalStateUnknown(t *testing.T) {

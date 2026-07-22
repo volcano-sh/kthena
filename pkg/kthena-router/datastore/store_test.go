@@ -982,7 +982,7 @@ func createComplexModelRoute() *aiv1alpha1.ModelRoute {
 	}
 }
 
-func TestStoreMatchModelServer(t *testing.T) {
+func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 	tests := []struct {
 		name           string
 		setupStore     func() *store
@@ -1548,7 +1548,7 @@ func TestStoreMatchModelServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			server, isLora, _, err := s.MatchModelServer(tt.modelName, tt.request, "")
+			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, "")
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -1557,7 +1557,8 @@ func TestStoreMatchModelServer(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedIsLora, isLora)
-			assert.Equal(t, tt.expectedServer, server)
+			assert.Equal(t, ModelTargetKindModelServer, target.Kind)
+			assert.Equal(t, tt.expectedServer, target.Name)
 		})
 	}
 }
@@ -1642,8 +1643,6 @@ func TestStoreMatchModelTargetExternalProvider(t *testing.T) {
 	assert.Equal(t, ModelTargetKindExternalModelProvider, target.Kind)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "openai-provider"}, target.Name)
 
-	_, _, _, err = s.MatchModelServer("gpt-router", req, "")
-	assert.Error(t, err)
 }
 
 type fakePodRuntimeInspector struct {
@@ -2043,7 +2042,7 @@ func TestSelectFromWeightedSlice_ValidWeights(t *testing.T) {
 	}
 }
 
-func TestMatchModelServer_EmptyTargetModels_NoPanic(t *testing.T) {
+func TestMatchModelTarget_EmptyTargetModels_NoPanic(t *testing.T) {
 	// This is the end-to-end test for the bug: a ModelRoute with a rule
 	// that has empty TargetModels should return an error, not panic.
 	s := &store{
@@ -2074,12 +2073,12 @@ func TestMatchModelServer_EmptyTargetModels_NoPanic(t *testing.T) {
 
 	// Before the fix this would panic. After the fix it returns an error.
 	assert.NotPanics(t, func() {
-		_, _, _, err := s.MatchModelServer("my-model", req, "")
+		_, _, _, err := s.MatchModelTarget("my-model", req, "")
 		assert.Error(t, err)
 	})
 }
 
-func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
+func TestMatchModelTarget_EmptyTargetModels_FallsThrough(t *testing.T) {
 	// When the first rule has empty TargetModels but a second rule is valid,
 	// the request should fall through to the second rule.
 	s := &store{
@@ -2117,12 +2116,13 @@ func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
 	s.AddOrUpdateModelRoute(mr)
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	server, _, _, err := s.MatchModelServer("my-model", req, "")
+	target, _, _, err := s.MatchModelTarget("my-model", req, "")
 	assert.NoError(t, err)
-	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, server)
+	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, target.Name)
 }
 
-func TestMatchModelServer_GatewayScoped(t *testing.T) {
+func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 	kindGateway := gatewayv1.Kind("Gateway")
 	kindService := gatewayv1.Kind("Service")
 	sectionHTTPS := gatewayv1.SectionName("https")
@@ -2410,7 +2410,7 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			server, isLora, _, err := s.MatchModelServer(tt.modelName, tt.request, tt.gatewayKey)
+			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, tt.gatewayKey)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -2419,7 +2419,8 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedIsLora, isLora)
-			assert.Equal(t, tt.expectedServer, server)
+			assert.Equal(t, ModelTargetKindModelServer, target.Kind)
+			assert.Equal(t, tt.expectedServer, target.Name)
 		})
 	}
 }

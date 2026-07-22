@@ -46,9 +46,6 @@ func (e *UnsupportedPathError) Error() string {
 	return fmt.Sprintf("provider type %q does not support path %q", e.ProviderType, e.Path)
 }
 
-type openAIAdapter struct{}
-type anthropicAdapter struct{}
-
 func NewAdapter(providerType networkingv1alpha1.ExternalProviderType) (Adapter, error) {
 	switch providerType {
 	case "", networkingv1alpha1.OpenAI:
@@ -58,49 +55,6 @@ func NewAdapter(providerType networkingv1alpha1.ExternalProviderType) (Adapter, 
 	default:
 		return nil, fmt.Errorf("unsupported provider type %q", providerType)
 	}
-}
-
-func (openAIAdapter) BuildRequest(c *gin.Context, req *http.Request, provider *networkingv1alpha1.ExternalModelProvider, secret *corev1.Secret, modelRequest map[string]interface{}) (*http.Request, error) {
-	if !isOpenAIPath(req.URL.Path) {
-		return nil, &UnsupportedPathError{ProviderType: provider.Spec.ProviderType, Path: req.URL.Path}
-	}
-	rewriteBody := provider.Spec.Model != nil && *provider.Spec.Model != ""
-	if req.URL.Path != "/v1/responses" {
-		if addOpenAIStreamingTokenUsage(c, modelRequest) {
-			rewriteBody = true
-		}
-	}
-	upstream, err := buildProviderRequest(c, req, provider, secret, modelRequest, rewriteBody)
-	if err != nil {
-		return nil, err
-	}
-	token, err := providerToken(provider, secret)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		upstream.Header.Set("Authorization", "Bearer "+token)
-	}
-	return upstream, nil
-}
-
-func (anthropicAdapter) BuildRequest(c *gin.Context, req *http.Request, provider *networkingv1alpha1.ExternalModelProvider, secret *corev1.Secret, modelRequest map[string]interface{}) (*http.Request, error) {
-	if req.URL.Path != "/v1/messages" {
-		return nil, &UnsupportedPathError{ProviderType: provider.Spec.ProviderType, Path: req.URL.Path}
-	}
-	rewriteBody := provider.Spec.Model != nil && *provider.Spec.Model != ""
-	upstream, err := buildProviderRequest(c, req, provider, secret, modelRequest, rewriteBody)
-	if err != nil {
-		return nil, err
-	}
-	token, err := providerToken(provider, secret)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		upstream.Header.Set("x-api-key", token)
-	}
-	return upstream, nil
 }
 
 func buildProviderRequest(c *gin.Context, req *http.Request, provider *networkingv1alpha1.ExternalModelProvider, secret *corev1.Secret, modelRequest map[string]interface{}, rewriteBody bool) (*http.Request, error) {
@@ -169,30 +123,6 @@ func buildProviderURL(baseURL, requestPath, rawQuery string, providerType networ
 	}
 	parsed.RawQuery = rawQuery
 	return parsed, nil
-}
-
-func addOpenAIStreamingTokenUsage(c *gin.Context, modelRequest map[string]interface{}) bool {
-	streaming, _ := modelRequest["stream"].(bool)
-	if !streaming {
-		return false
-	}
-
-	streamOptions, ok := modelRequest["stream_options"].(map[string]interface{})
-	if !ok {
-		streamOptions = map[string]interface{}{}
-		modelRequest["stream_options"] = streamOptions
-	}
-	if includeUsage, _ := streamOptions["include_usage"].(bool); includeUsage {
-		return false
-	}
-
-	streamOptions["include_usage"] = true
-	c.Set(common.TokenUsageKey, true)
-	return true
-}
-
-func isOpenAIPath(path string) bool {
-	return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/v1/responses"
 }
 
 func providerToken(provider *networkingv1alpha1.ExternalModelProvider, secret *corev1.Secret) (string, error) {

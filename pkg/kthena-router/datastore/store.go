@@ -192,7 +192,6 @@ type Store interface {
 	DeletePod(podName types.NamespacedName) error
 
 	// New methods for routing functionality
-	MatchModelServer(modelName string, request *http.Request, gatewayKey string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error)
 	MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error)
 
 	// Model routing methods
@@ -1349,17 +1348,6 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	return nil
 }
 
-func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error) {
-	target, isLora, mr, err := s.MatchModelTarget(model, req, gatewayKey)
-	if err != nil {
-		return types.NamespacedName{}, false, nil, err
-	}
-	if target.Kind != ModelTargetKindModelServer {
-		return types.NamespacedName{}, false, nil, fmt.Errorf("matched target is not a ModelServer: %s", target.Kind)
-	}
-	return target.Name, isLora, mr, nil
-}
-
 func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
@@ -1419,6 +1407,7 @@ func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey str
 		// Found a matching ModelRoute
 		target, err := modelTargetFromDestination(mr.Namespace, dst)
 		if err != nil {
+			klog.Warningf("failed to resolve target for ModelRoute %s/%s: %v", mr.Namespace, mr.Name, err)
 			continue // Try next ModelRoute
 		}
 		return target, isLora, mr, nil
