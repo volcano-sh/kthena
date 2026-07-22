@@ -406,7 +406,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	// Try to match ModelRoute first
 	modelTarget, isLora, modelRoute, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey)
 	if err != nil {
-		accesslog.SetError(c, "model_server_matching", fmt.Sprintf("can't find corresponding model server: %v", err))
+		accesslog.SetError(c, "model_route_matching", fmt.Sprintf("failed to match model route target: %v", err))
 	}
 
 	if err == nil && strings.HasPrefix(c.Request.URL.Path, "/v1/") {
@@ -440,9 +440,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 					return nil
 				}
 
-				accesslog.SetError(c, "proxy", "external provider request processing failed")
+				accesslog.SetError(c, "external_provider_proxy", "external provider request processing failed")
 				accesslog.SetErrorOrigin(c, "router")
-				c.Set("finishReason", "proxy")
+				c.Set("finishReason", "external_provider_proxy")
 				if !c.Writer.Written() {
 					c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
 				}
@@ -913,7 +913,7 @@ func (r *Router) proxyExternalProvider(
 
 	adapter, err := providers.NewAdapter(provider.Spec.ProviderType)
 	if err != nil {
-		return err
+		return newExternalProxyError(http.StatusInternalServerError, "provider_request_build", "failed to build external provider request")
 	}
 	upstreamRequest, err := adapter.BuildRequest(c, req, provider, secret, modelRequest)
 	if err != nil {
@@ -921,7 +921,7 @@ func (r *Router) proxyExternalProvider(
 		if errors.As(err, &unsupportedPath) {
 			return newExternalProxyError(http.StatusBadRequest, "request_protocol", unsupportedPath.Error())
 		}
-		return err
+		return newExternalProxyError(http.StatusInternalServerError, "provider_request_build", "failed to build external provider request")
 	}
 
 	userID := c.GetString(common.UserIdKey)
@@ -978,22 +978,6 @@ func newExternalProxyError(statusCode int, reason, message string) *externalProx
 
 func (e *externalProxyError) Error() string {
 	return e.message
-}
-
-func (r *Router) GetModelServer(modelName string, req *http.Request) (*v1alpha1.ModelServer, error) {
-	modelServerName, isLora, _, err := r.store.MatchModelServer(modelName, req, "")
-	if err != nil {
-		return nil, fmt.Errorf("can't find corresponding model server: %v", err)
-	}
-	klog.V(4).Infof("modelServer is %v, is_lora: %v", modelServerName, isLora)
-
-	pods, modelServer, err := r.getPodsAndServer(modelServerName)
-	if err != nil || len(pods) == 0 {
-		klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
-		return nil, fmt.Errorf("can't find model server: %v", modelServerName)
-	}
-
-	return modelServer, nil
 }
 
 type modelObject struct {
@@ -1083,14 +1067,19 @@ func proxyExternalRequest(
 		c.Set("finishReason", "upstream_response")
 	}
 
+	var forwardErr error
 	switch {
 	case providerType == v1alpha1.Anthropic:
-		return forwardResponseWithUsageParser(c, resp, stream, &anthropicUsageParser{}, onUsage)
+		forwardErr = forwardResponseWithUsageParser(c, resp, stream, &anthropicUsageParser{}, onUsage)
 	case (providerType == "" || providerType == v1alpha1.OpenAI) && c.Request != nil && c.Request.URL.Path == "/v1/responses":
-		return forwardResponseWithUsageParser(c, resp, stream, &openAIResponsesUsageParser{}, onUsage)
+		forwardErr = forwardResponseWithUsageParser(c, resp, stream, &openAIResponsesUsageParser{}, onUsage)
 	default:
-		return forwardResponse(c, resp, stream, onUsage)
+		forwardErr = forwardResponse(c, resp, stream, onUsage)
 	}
+	if forwardErr != nil {
+		return newExternalProxyError(http.StatusBadGateway, "response_forwarding", fmt.Sprintf("failed to forward response from external provider %s", providerName))
+	}
+	return nil
 }
 
 // TokenUsage is the router-level token accounting view extracted from an

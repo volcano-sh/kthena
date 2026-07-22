@@ -246,12 +246,13 @@ func (c *ExternalModelProviderController) reconcileProvidersForSecret(secretName
 	if err != nil {
 		return err
 	}
+	var firstErr error
 	for _, provider := range providers {
-		if err := c.reconcileProviderStatus(provider); err != nil {
-			return err
+		if err := c.reconcileProviderStatus(provider); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func (c *ExternalModelProviderController) externalModelProvidersForSecret(secretName types.NamespacedName) ([]*networkingv1alpha1.ExternalModelProvider, error) {

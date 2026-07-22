@@ -883,7 +883,7 @@ func TestValidateExternalModelProvider(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.baseURL: Invalid value: \"http://api.example.com\": baseURL must use https",
+			expectedReason: "validation failed:\n  - spec.baseURL: Invalid value: \"http://api.example.com\": baseURL must use https",
 		},
 		{
 			name: "invalid provider - url contains userinfo query and fragment",
@@ -895,7 +895,7 @@ func TestValidateExternalModelProvider(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.baseURL: Invalid value: \"https://user@example.com/v1?debug=true#frag\": baseURL must not contain userinfo, query, or fragment",
+			expectedReason: "validation failed:\n  - spec.baseURL: Invalid value: \"https://user@example.com/v1?debug=true#frag\": baseURL must not contain userinfo, query, or fragment",
 		},
 		{
 			name: "invalid provider - reserved static authorization header",
@@ -910,7 +910,7 @@ func TestValidateExternalModelProvider(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.headers[authorization]: Invalid value: \"authorization\": header is reserved and cannot be configured as a static header",
+			expectedReason: "validation failed:\n  - spec.headers[authorization]: Invalid value: \"authorization\": header is reserved and cannot be configured as a static header",
 		},
 		{
 			name: "invalid provider - reserved static x-api-key header",
@@ -925,7 +925,37 @@ func TestValidateExternalModelProvider(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.headers[X-API-Key]: Invalid value: \"X-API-Key\": header is reserved and cannot be configured as a static header",
+			expectedReason: "validation failed:\n  - spec.headers[X-API-Key]: Invalid value: \"X-API-Key\": header is reserved and cannot be configured as a static header",
+		},
+		{
+			name: "invalid provider - malformed static header name",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					BaseURL:      "https://api.example.com/v1",
+					Headers: map[string]string{
+						"Bad Header": "value",
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:\n  - spec.headers[Bad Header]: Invalid value: \"Bad Header\": header name is invalid",
+		},
+		{
+			name: "invalid provider - static header value contains newline",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					BaseURL:      "https://api.example.com/v1",
+					Headers: map[string]string{
+						"X-Tenant": "tenant-a\r\nX-Injected: true",
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:\n  - spec.headers[X-Tenant]: Invalid value: \"tenant-a\\r\\nX-Injected: true\": header value must not contain CR or LF",
 		},
 		{
 			name: "invalid provider - optional secret ref",
@@ -944,7 +974,24 @@ func TestValidateExternalModelProvider(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.auth.secretRef.optional: Invalid value: true: optional must be false or unset",
+			expectedReason: "validation failed:\n  - spec.auth.secretRef.optional: Invalid value: true: optional must be false or unset",
+		},
+		{
+			name: "invalid provider - multiple validation errors use separate lines",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					BaseURL: "http://api.example.com",
+					Auth: &networkingv1alpha1.ProviderAuth{
+						SecretRef: corev1.SecretKeySelector{},
+					},
+				},
+			},
+			expectValid: false,
+			expectedReason: "validation failed:\n" +
+				"  - spec.baseURL: Invalid value: \"http://api.example.com\": baseURL must use https\n" +
+				"  - spec.auth.secretRef.name: Required value: secret name is required\n" +
+				"  - spec.auth.secretRef.key: Required value: secret key is required",
 		},
 	}
 
