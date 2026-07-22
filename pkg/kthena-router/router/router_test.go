@@ -1259,6 +1259,81 @@ func TestRouter_HandlerFunc_ExternalProviderPassesThroughNon2xx(t *testing.T) {
 	assert.Equal(t, "upstream_response", reason)
 }
 
+func TestRouter_HandlerFunc_ExternalProviderRequestBuildFailure(t *testing.T) {
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "invalid-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType: aiv1alpha1.OpenAI,
+			BaseURL:      "://invalid",
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ExternalModelProviderName: "invalid-provider"}},
+			}},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "provider_request_build", reason)
+	assert.NotContains(t, w.Body.String(), "://invalid")
+}
+
+func TestRouter_HandlerFunc_ExternalProviderResponseForwardingFailure(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"partial":true}`)
+	}))
+	defer upstream.Close()
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "openai-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType:       aiv1alpha1.OpenAI,
+			BaseURL:            upstream.URL,
+			InsecureSkipVerify: true,
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ExternalModelProviderName: "openai-provider"}},
+			}},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "response_forwarding", reason)
+}
+
 func TestProxyExternalRequest_AnthropicStreamAggregatesUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

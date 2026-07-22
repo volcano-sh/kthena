@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -340,9 +341,17 @@ func (v *KthenaRouterValidator) validateExternalModelProvider(provider *networki
 		allErrs = append(allErrs, field.Invalid(specField.Child("baseURL"), provider.Spec.BaseURL, "baseURL must not contain userinfo, query, or fragment"))
 	}
 
-	for header := range provider.Spec.Headers {
+	for header, value := range provider.Spec.Headers {
+		headerField := specField.Child("headers").Key(header)
+		if !httpguts.ValidHeaderFieldName(header) {
+			allErrs = append(allErrs, field.Invalid(headerField, header, "header name is invalid"))
+			continue
+		}
 		if isReservedProviderHeader(header) {
-			allErrs = append(allErrs, field.Invalid(specField.Child("headers").Key(header), header, "header is reserved and cannot be configured as a static header"))
+			allErrs = append(allErrs, field.Invalid(headerField, header, "header is reserved and cannot be configured as a static header"))
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			allErrs = append(allErrs, field.Invalid(headerField, value, "header value must not contain CR or LF"))
 		}
 	}
 
@@ -364,7 +373,7 @@ func (v *KthenaRouterValidator) validateExternalModelProvider(provider *networki
 		for _, err := range allErrs {
 			messages = append(messages, fmt.Sprintf("  - %s", err.Error()))
 		}
-		return false, fmt.Sprintf("validation failed: %s", strings.Join(messages, ""))
+		return false, fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
 	}
 	return true, ""
 }
