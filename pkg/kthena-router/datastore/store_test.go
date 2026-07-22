@@ -234,6 +234,56 @@ func TestCreateVTCTokenTrackerRejectsInvalidWeights(t *testing.T) {
 	}
 }
 
+func TestCreateVTCTokenTrackerIdleTTL(t *testing.T) {
+	t.Setenv("FAIRNESS_MODE", "vtc")
+
+	tests := []struct {
+		name    string
+		ttl     string
+		wantTTL time.Duration
+	}{
+		{
+			name:    "unset uses default",
+			ttl:     "",
+			wantTTL: defaultVTCIdleTTL,
+		},
+		{
+			name:    "valid override applied",
+			ttl:     "10m",
+			wantTTL: 10 * time.Minute,
+		},
+		{
+			name:    "unparsable value falls back to default",
+			ttl:     "not-a-duration",
+			wantTTL: defaultVTCIdleTTL,
+		},
+		{
+			name:    "zero falls back to default",
+			ttl:     "0s",
+			wantTTL: defaultVTCIdleTTL,
+		},
+		{
+			name:    "negative falls back to default",
+			ttl:     "-1m",
+			wantTTL: defaultVTCIdleTTL,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.ttl == "" {
+				t.Setenv("FAIRNESS_VTC_IDLE_TTL", "")
+			} else {
+				t.Setenv("FAIRNESS_VTC_IDLE_TTL", tt.ttl)
+			}
+			tracker := createTokenTracker().(*InMemoryVTCTokenTracker)
+			if tracker.idleTTL != tt.wantTTL {
+				t.Fatalf("idleTTL = %v, want %v", tracker.idleTTL, tt.wantTTL)
+			}
+		})
+	}
+}
+
 func Test_updateHistogramMetrics(t *testing.T) {
 	sum1 := float64(2)
 	count1 := uint64(2)

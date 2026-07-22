@@ -156,10 +156,10 @@ func createVTCTokenTracker() TokenTracker {
 	}
 
 	if idleTTLStr := os.Getenv("FAIRNESS_VTC_IDLE_TTL"); idleTTLStr != "" {
-		if idleTTL, err := time.ParseDuration(idleTTLStr); err == nil {
+		if idleTTL, err := time.ParseDuration(idleTTLStr); err == nil && idleTTL > 0 {
 			opts = append(opts, WithVTCIdleTTL(idleTTL))
 		} else {
-			klog.Warningf("Invalid FAIRNESS_VTC_IDLE_TTL: %v, using default", err)
+			klog.Warningf("Invalid FAIRNESS_VTC_IDLE_TTL: %q, using default", idleTTLStr)
 		}
 	}
 
