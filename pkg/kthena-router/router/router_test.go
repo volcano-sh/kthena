@@ -1290,6 +1290,7 @@ func TestRouter_HandlerFunc_ExternalProviderRequestBuildFailure(t *testing.T) {
 	reason, ok := c.Get("finishReason")
 	assert.True(t, ok)
 	assert.Equal(t, "provider_request_build", reason)
+	assert.JSONEq(t, `"failed to build external provider request"`, w.Body.String())
 	assert.NotContains(t, w.Body.String(), "://invalid")
 }
 
