@@ -1190,6 +1190,8 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		// priority, so skip the token-tracker priority computation entirely.
 		pri = 0
 	} else if userId != "" {
+		r.store.OnRequestStart(userId, modelName)
+		defer r.store.OnRequestFinish(userId, modelName)
 		pri = r.calculateRequestPriority(userId, modelName)
 	} else {
 		// Assign lowest priority to unauthenticated requests so they don't

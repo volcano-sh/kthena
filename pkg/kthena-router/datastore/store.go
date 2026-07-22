@@ -74,8 +74,62 @@ const (
 	onFlightSyncInterval = 50 * time.Millisecond
 )
 
-// createTokenTracker creates a token tracker with configuration from environment variables
+// Fairness mode selection. FAIRNESS_MODE defaults to fairnessModeWindow so
+// existing deployments keep the sliding-window behavior unless they opt in.
+const (
+	fairnessModeEnv    = "FAIRNESS_MODE"
+	fairnessModeWindow = "window"
+	fairnessModeVTC    = "vtc"
+)
+
+// createTokenTracker creates a token tracker with configuration from environment variables.
 func createTokenTracker() TokenTracker {
+	mode := os.Getenv(fairnessModeEnv)
+	switch mode {
+	case "", fairnessModeWindow:
+		return createSlidingWindowTokenTracker()
+	case fairnessModeVTC:
+		return createVTCTokenTracker()
+	default:
+		klog.Warningf("Invalid FAIRNESS_MODE: %q, using default %q", mode, fairnessModeWindow)
+		return createSlidingWindowTokenTracker()
+	}
+}
+
+// parseTokenWeightsFromEnv reads FAIRNESS_INPUT_TOKEN_WEIGHT and
+// FAIRNESS_OUTPUT_TOKEN_WEIGHT, returning the configured weights and whether
+// either one was set. Invalid values fall back to the package defaults.
+func parseTokenWeightsFromEnv() (inputWeight, outputWeight float64, set bool) {
+	inputWeightStr := os.Getenv("FAIRNESS_INPUT_TOKEN_WEIGHT")
+	outputWeightStr := os.Getenv("FAIRNESS_OUTPUT_TOKEN_WEIGHT")
+
+	if inputWeightStr == "" && outputWeightStr == "" {
+		return 0, 0, false
+	}
+
+	inputWeight = defaultInputTokenWeight
+	outputWeight = defaultOutputTokenWeight
+
+	if inputWeightStr != "" {
+		if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil && isValidTokenWeight(w) {
+			inputWeight = w
+		} else {
+			klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %q, using default", inputWeightStr)
+		}
+	}
+
+	if outputWeightStr != "" {
+		if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil && isValidTokenWeight(w) {
+			outputWeight = w
+		} else {
+			klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %q, using default", outputWeightStr)
+		}
+	}
+
+	return inputWeight, outputWeight, true
+}
+
+func createSlidingWindowTokenTracker() TokenTracker {
 	var opts []TokenTrackerOption
 
 	// Parse window size from environment
@@ -87,34 +141,21 @@ func createTokenTracker() TokenTracker {
 		}
 	}
 
-	// Parse token weights from environment
-	inputWeightStr := os.Getenv("FAIRNESS_INPUT_TOKEN_WEIGHT")
-	outputWeightStr := os.Getenv("FAIRNESS_OUTPUT_TOKEN_WEIGHT")
-
-	if inputWeightStr != "" || outputWeightStr != "" {
-		inputWeight := defaultInputTokenWeight
-		outputWeight := defaultOutputTokenWeight
-
-		if inputWeightStr != "" {
-			if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil && isValidTokenWeight(w) {
-				inputWeight = w
-			} else {
-				klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %q, using default", inputWeightStr)
-			}
-		}
-
-		if outputWeightStr != "" {
-			if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil && isValidTokenWeight(w) {
-				outputWeight = w
-			} else {
-				klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %q, using default", outputWeightStr)
-			}
-		}
-
+	if inputWeight, outputWeight, set := parseTokenWeightsFromEnv(); set {
 		opts = append(opts, WithTokenWeights(inputWeight, outputWeight))
 	}
 
 	return NewInMemorySlidingWindowTokenTracker(opts...)
+}
+
+func createVTCTokenTracker() TokenTracker {
+	var opts []VTCTokenTrackerOption
+
+	if inputWeight, outputWeight, set := parseTokenWeightsFromEnv(); set {
+		opts = append(opts, WithVTCTokenWeights(inputWeight, outputWeight))
+	}
+
+	return NewInMemoryVTCTokenTracker(opts...)
 }
 
 // EventType represents different types of events that can trigger callbacks
@@ -236,6 +277,13 @@ type Store interface {
 	UpdateTokenCount(userId, modelName string, inputTokens, outputTokens float64) error
 	// GetRequestCount returns the request count for a user and model in the current window
 	GetRequestCount(userId, modelName string) (int, error)
+	// OnRequestStart notifies the token tracker that a request for the given
+	// user/model has entered the fairness queue. Must be paired with exactly
+	// one OnRequestFinish call once the request leaves the queue.
+	OnRequestStart(userId, modelName string)
+	// OnRequestFinish notifies the token tracker that a request started via
+	// OnRequestStart has left the fairness queue.
+	OnRequestFinish(userId, modelName string)
 
 	// Enqueue adds a request to the fair queue
 	Enqueue(*Request) error
@@ -649,6 +697,14 @@ func (s *store) UpdateTokenCount(userID, model string, inputTokens, outputTokens
 
 func (s *store) GetRequestCount(userID, model string) (int, error) {
 	return s.tokenTracker.GetRequestCount(userID, model)
+}
+
+func (s *store) OnRequestStart(userID, model string) {
+	s.tokenTracker.OnRequestStart(userID, model)
+}
+
+func (s *store) OnRequestFinish(userID, model string) {
+	s.tokenTracker.OnRequestFinish(userID, model)
 }
 
 func (s *store) Enqueue(req *Request) error {

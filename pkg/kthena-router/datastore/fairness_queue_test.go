@@ -695,6 +695,10 @@ func (m *mockTokenTracker) GetRequestCount(user, model string) (int, error) {
 	return m.requestCounts[user+"|"+model], nil
 }
 
+func (m *mockTokenTracker) OnRequestStart(user, model string) {}
+
+func (m *mockTokenTracker) OnRequestFinish(user, model string) {}
+
 func TestPriorityRefresh_ReinsertOnDrift(t *testing.T) {
 	tracker := newMockTokenTracker()
 	tracker.SetTokenCount("user-low", "model-1", 1.0)
