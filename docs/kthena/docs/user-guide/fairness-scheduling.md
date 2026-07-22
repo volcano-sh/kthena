@@ -35,7 +35,7 @@ The router supports two token-tracking strategies, selected with `FAIRNESS_MODE`
 
 ## How Priority Is Calculated
 
-The fairness scheduler tracks recent usage per `(user, model)` pair, either in a sliding window or as a VTC counter depending on `FAIRNESS_MODE`.
+The fairness scheduler tracks usage per `(user, model)` pair, either recent usage in a sliding window (`window` mode) or a cumulative, non-decaying counter (`vtc` mode), depending on `FAIRNESS_MODE`.
 
 First, the token tracker builds weighted historical usage:
 

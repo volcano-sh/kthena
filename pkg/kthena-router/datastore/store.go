@@ -271,11 +271,15 @@ type Store interface {
 	// the given pod. Must be called once the response is received (or the request fails).
 	DecrPodOnFlightRequests(podName types.NamespacedName)
 
-	// GetTokenCount returns the token count for a user and model
+	// GetTokenCount returns the token count for a user and model: usage in the
+	// current sliding window under FAIRNESS_MODE=window, or the cumulative VTC
+	// counter under FAIRNESS_MODE=vtc
 	GetTokenCount(userId, modelName string) (float64, error)
 	// UpdateTokenCount updates token usage for a user and model
 	UpdateTokenCount(userId, modelName string, inputTokens, outputTokens float64) error
-	// GetRequestCount returns the request count for a user and model in the current window
+	// GetRequestCount returns the request count for a user and model: requests
+	// in the current sliding window under FAIRNESS_MODE=window, or the
+	// cumulative (non-decaying) request count under FAIRNESS_MODE=vtc
 	GetRequestCount(userId, modelName string) (int, error)
 	// OnRequestStart notifies the token tracker that a request for the given
 	// user/model has entered the fairness queue. Must be paired with exactly
