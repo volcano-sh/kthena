@@ -1642,7 +1642,6 @@ func TestStoreMatchModelTargetExternalProvider(t *testing.T) {
 	assert.Equal(t, mr, route)
 	assert.Equal(t, ModelTargetKindExternalModelProvider, target.Kind)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "openai-provider"}, target.Name)
-
 }
 
 type fakePodRuntimeInspector struct {
