@@ -18,6 +18,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -352,6 +353,44 @@ func TestAnthropicRequiresKeyAndVersion(t *testing.T) {
 
 			assert.Equal(t, tt.wantStatus, recorder.Code)
 			assert.NotContains(t, recorder.Body.String(), "e2e-anthropic-key")
+		})
+	}
+}
+
+func TestAnthropicSharedFailuresUseAnthropicEnvelope(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		requestID  string
+		wantStatus int
+		wantType   string
+	}{
+		{name: "method", method: http.MethodGet, path: "/v1/messages", requestID: "method-1", wantStatus: http.StatusMethodNotAllowed, wantType: "invalid_request_error"},
+		{name: "missing request id", method: http.MethodPost, path: "/v1/messages", wantStatus: http.StatusBadRequest, wantType: "invalid_request"},
+		{name: "rate limit", method: http.MethodPost, path: "/v1/messages?mock_status=429", requestID: "rate-limit-1", wantStatus: http.StatusTooManyRequests, wantType: "rate_limit_error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestMockServer()
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{"model":"m"}`))
+			req.Header.Set("X-Api-Key", "e2e-anthropic-key")
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+			req.Header.Set("X-Request-Id", tt.requestID)
+			recorder := httptest.NewRecorder()
+
+			server.providerHandler().ServeHTTP(recorder, req)
+
+			assert.Equal(t, tt.wantStatus, recorder.Code)
+			assert.JSONEq(t, fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%q}}`, tt.wantType, map[string]string{
+				"method":             "method not allowed",
+				"missing request id": "x-request-id is required",
+				"rate limit":         "mock rate limit",
+			}[tt.name]), recorder.Body.String())
+			if tt.wantStatus == http.StatusMethodNotAllowed {
+				assert.Equal(t, http.MethodPost, recorder.Header().Get("Allow"))
+			}
 		})
 	}
 }
