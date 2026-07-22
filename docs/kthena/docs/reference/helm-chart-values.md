@@ -18,6 +18,7 @@ A Helm chart for deploying Kthena
 | global.certManagementMode | string | `"auto"` | Certificate Management Mode.<br/>  Three mutually exclusive options for managing TLS certificates:<br/>  - `auto`: Webhook servers generate self-signed certificates automatically.<br/>  - `cert-manager`: Use cert-manager to generate and manage certificates (requires cert-manager installation).<br/>  - `manual`: Provide your own certificates via caBundle. |
 | global.webhook.caBundle | string | `""` | CA bundle for webhook server certificates (base64-encoded).<br/> This is ONLY required when `certManagementMode` is set to "manual".<br/> You can generate it with: `cat /path/to/your/ca.crt | base64 | tr -d '\n'`<br/> |
 | networking.enabled | bool | `true` | Enable the networking subchart. |
+| networking.kthenaRouter.affinity | object | `{}` | Affinity and anti-affinity rules for the Kthena Router Pod. |
 | networking.kthenaRouter.debugPort | int | `15000` | Debug server port for Kthena Router (localhost only). |
 | networking.kthenaRouter.drainTimeout | string | `"5m"` | This should be less than terminationGracePeriodSeconds. |
 | networking.kthenaRouter.enabled | bool | `true` | Enable Kthena Router. |
@@ -31,6 +32,7 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for Kthena Router. |
 | networking.kthenaRouter.image.repository | string | `"ghcr.io/volcano-sh/kthena-router"` | Image repository for Kthena Router. |
 | networking.kthenaRouter.image.tag | string | `"latest"` | Image tag for Kthena Router. |
+| networking.kthenaRouter.nodeSelector | object | `{}` | Node labels that the Kthena Router Pod must match. |
 | networking.kthenaRouter.port | int | `8080` | Container port for Kthena Router. |
 | networking.kthenaRouter.sessionBoost.enabled | bool | `false` | Enable session-boost scheduling. Mutually exclusive with fairness. |
 | networking.kthenaRouter.sessionBoost.gracePeriod | string | `"0s"` | Wait time after a request completes for a same-session follow-up.<br/> Disabled by default (`0s`). |
@@ -42,12 +44,15 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |
 | networking.kthenaRouter.tls.secretName | string | `"kthena-router-tls"` | Secret name to store the certificate and key. |
+| networking.kthenaRouter.tolerations | list | `[]` | Tolerations applied to the Kthena Router Pod. |
+| networking.kthenaRouter.topologySpreadConstraints | list | `[]` | Topology spread constraints for the Kthena Router Pod. |
 | networking.kthenaRouter.webhook.enabled | bool | `true` | Enable webhook for Kthena Router. |
 | networking.kthenaRouter.webhook.port | int | `8443` | Container port for Kthena Router webhook. |
 | networking.kthenaRouter.webhook.servicePort | int | `443` | Service port for Kthena Router webhook. |
 | networking.kthenaRouter.webhook.tls.certFile | string | `"/etc/tls/tls.crt"` | Certificate file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.keyFile | string | `"/etc/tls/tls.key"` | Key file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.secretName | string | `"kthena-router-webhook-certs"` | Secret name for storing webhook certificates. |
+| workload.controllerManager.affinity | object | `{}` | Affinity and anti-affinity rules for the Controller Manager Pod. |
 | workload.controllerManager.autoscalingSyncPeriodSeconds | int | `0` | Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 uses the binary default (15). |
 | workload.controllerManager.debugPort | int | `0` | Debug server port for Controller Manager (set 0 to disable). |
 | workload.controllerManager.downloaderImage.repository | string | `"ghcr.io/volcano-sh/downloader"` | Image repository for the Downloader. |
@@ -55,8 +60,11 @@ A Helm chart for deploying Kthena
 | workload.controllerManager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the Controller Manager. |
 | workload.controllerManager.image.repository | string | `"ghcr.io/volcano-sh/kthena-controller-manager"` | Image repository for the Controller Manager. |
 | workload.controllerManager.image.tag | string | `"latest"` | Image tag for the Controller Manager. |
+| workload.controllerManager.nodeSelector | object | `{}` | Node labels that the Controller Manager Pod must match. |
 | workload.controllerManager.runtimeImage.repository | string | `"ghcr.io/volcano-sh/runtime"` | Image repository for the Runtime. |
 | workload.controllerManager.runtimeImage.tag | string | `"latest"` | Image tag for the Runtime. |
+| workload.controllerManager.tolerations | list | `[]` | Tolerations applied to the Controller Manager Pod. |
+| workload.controllerManager.topologySpreadConstraints | list | `[]` | Topology spread constraints for the Controller Manager Pod. |
 | workload.controllerManager.webhook.enabled | bool | `true` | Enable webhook for the Controller Manager. |
 | workload.controllerManager.webhook.tls.certSecretName | string | `"kthena-controller-manager-webhook-certs"` | Secret name for storing webhook certificates. |
 | workload.controllerManager.webhook.tls.serviceName | string | `"kthena-controller-manager-webhook"` | Service name for the webhook. |
