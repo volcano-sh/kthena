@@ -619,6 +619,8 @@ For external providers, every non-2xx response is passed through unchanged; only
 
 Access logs should record the provider status code and a bounded message such as `provider returned HTTP 429`; they must not copy an arbitrary provider error body into logs. Successful provider responses keep `error_type="successful_request"` and omit `error_origin`.
 
+Errors produced before an upstream response exists use the existing Router response contract: the client receives a JSON string containing a safe message, matching the internal ModelServer path. The fixed categories are `provider_discovery`, `request_protocol`, `provider_request_build`, `response_forwarding`, and `external_provider_proxy`. Once an upstream response exists, Kthena does not translate its error envelope: OpenAI-compatible responses retain the top-level `error` object and Anthropic responses retain their `type`/`error` structure.
+
 #### Secret Resolution
 
 Add a Kubernetes Secret informer/lister to the router process. Secret rotation takes effect on the next request because credentials are resolved from the lister cache at request time.
@@ -722,7 +724,7 @@ Unit tests should not call real third-party APIs. Use `httptest.Server` and fake
 | TLS | trusted certificate succeeds by default; self-signed certificate fails by default; the same self-signed endpoint succeeds only with `insecureSkipVerify=true`; plain HTTP `baseURL` is rejected; secure and skip-verification connection pools remain isolated |
 | Streaming | SSE passthrough, line-by-line flush, usage callback, streaming-only OpenAI chat/completions usage-option injection with existing options preserved, downstream-requested usage chunks forwarded, Router-injected usage-only chunks suppressed, Responses terminal-event usage parsing with unchanged event forwarding, Anthropic-native streaming events and usage parsing, terminal event handling, EOF completion, cancellation before and after a terminal event, response header filtering, no mid-stream retry |
 | Non-streaming | body passthrough, OpenAI chat/completions, Responses, and Anthropic usage parsing when present, response header filtering |
-| Errors | pass through every upstream non-2xx response with `upstream_response`/`upstream` attribution; create 502/504 with `upstream_transport`/`router` attribution; bounded access-log messages; no automatic provider retry |
+| Errors | Router-generated errors keep the internal ModelServer response shape (a JSON string with a safe message); classify request/protocol/build/forwarding failures with bounded types; pass through every upstream non-2xx response with `upstream_response`/`upstream` attribution and the provider-native error envelope; create 502/504 with `upstream_transport`/`router` attribution; bounded access-log messages; no automatic provider retry |
 | Compatibility | existing ModelServer-only routes unchanged |
 | Observability | exact label schemas; ModelServer, matched LoRA adapter, provider, explicitly bound InferencePool, and unresolved values; buffered input tokens; consistent input/output attribution; balanced upstream gauges across retries and cancellation; no external-only metrics; controlled label values; e2e aggregation across matching series |
 
