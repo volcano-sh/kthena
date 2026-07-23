@@ -8,6 +8,8 @@
 
 
 ### Resource Types
+- [ExternalModelProvider](#externalmodelprovider)
+- [ExternalModelProviderList](#externalmodelproviderlist)
 - [ModelRoute](#modelroute)
 - [ModelRouteList](#modelroutelist)
 - [ModelServer](#modelserver)
@@ -29,6 +31,97 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | Model is the name of the model or lora adapter to match.<br />If this field is not specified, any model or lora adapter will be matched. |  |  |
+
+
+#### ExternalModelProvider
+
+
+
+ExternalModelProvider is the Schema for the externalmodelproviders API.
+
+
+
+_Appears in:_
+- [ExternalModelProviderList](#externalmodelproviderlist)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ExternalModelProvider` | | |
+| `spec` _[ExternalModelProviderSpec](#externalmodelproviderspec)_ |  |  |  |
+| `status` _[ExternalModelProviderStatus](#externalmodelproviderstatus)_ |  |  |  |
+
+
+#### ExternalModelProviderList
+
+
+
+ExternalModelProviderList contains a list of ExternalModelProvider.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ExternalModelProviderList` | | |
+| `items` _[ExternalModelProvider](#externalmodelprovider) array_ |  |  |  |
+
+
+#### ExternalModelProviderSpec
+
+
+
+ExternalModelProviderSpec defines the desired state of ExternalModelProvider.
+
+
+
+_Appears in:_
+- [ExternalModelProvider](#externalmodelprovider)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerType` _[ExternalProviderType](#externalprovidertype)_ | ProviderType selects the protocol adapter used for this provider. | OpenAI | Enum: [OpenAI Anthropic] <br /> |
+| `model` _string_ | Model is the actual upstream model name. When set, it overwrites the<br />model in the request, matching ModelServer.Spec.Model behavior. |  | MaxLength: 256 <br /> |
+| `baseURL` _string_ | BaseURL is the provider endpoint root. External providers must use HTTPS.<br />Example: https://api.deepseek.com |  | MinLength: 1 <br />Pattern: `^https://.+` <br />Required: \{\} <br /> |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify disables server certificate-chain and hostname<br />verification for HTTPS. It does not enable plain HTTP. | false |  |
+| `auth` _[ProviderAuth](#providerauth)_ | Auth references a credential Secret in the same namespace. |  |  |
+| `headers` _object (keys:string, values:string)_ | Non-sensitive static headers added to upstream requests. |  |  |
+
+
+#### ExternalModelProviderStatus
+
+
+
+ExternalModelProviderStatus defines the observed state of ExternalModelProvider.
+
+
+
+_Appears in:_
+- [ExternalModelProvider](#externalmodelprovider)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ |  |  |  |
+
+
+#### ExternalProviderType
+
+_Underlying type:_ _string_
+
+ExternalProviderType defines the protocol adapter used for an external provider.
+
+_Validation:_
+- Enum: [OpenAI Anthropic]
+
+_Appears in:_
+- [ExternalModelProviderSpec](#externalmodelproviderspec)
+
+| Field | Description |
+| --- | --- |
+| `OpenAI` | OpenAI selects the OpenAI-compatible API adapter.<br /> |
+| `Anthropic` | Anthropic selects the Anthropic-compatible Messages API adapter.<br /> |
 
 
 #### GlobalRateLimit
@@ -279,6 +372,22 @@ _Appears in:_
 | `decodeLabels` _object (keys:string, values:string)_ | The labels to match the model serving instances for decode. |  |  |
 
 
+#### ProviderAuth
+
+
+
+ProviderAuth defines how a provider credential is loaded.
+
+
+
+_Appears in:_
+- [ExternalModelProviderSpec](#externalmodelproviderspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `secretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | SecretRef references a credential Secret in the same namespace. |  | Required: \{\} <br /> |
+
+
 #### RateLimit
 
 
@@ -392,7 +501,7 @@ _Appears in:_
 
 
 
-LLM inference traffic target model
+LLM inference traffic target model.
 
 
 
@@ -401,7 +510,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `modelServerName` _string_ | ModelServerName is used to specify the correlated modelServer within the same namespace. |  |  |
+| `modelServerName` _string_ | ModelServerName is used to specify the correlated modelServer within the same namespace.<br />It is mutually exclusive with ExternalModelProviderName. |  |  |
+| `externalModelProviderName` _string_ | ExternalModelProviderName is used to specify the correlated ExternalModelProvider within the same namespace.<br />It is mutually exclusive with ModelServerName. |  |  |
 | `weight` _integer_ | Weight is used to specify the percentage of traffic should be sent to the target model.<br />The value should be in the range of [0, 100]. | 100 | Maximum: 100 <br />Minimum: 0 <br /> |
 
 

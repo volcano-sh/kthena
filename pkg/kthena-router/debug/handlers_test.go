@@ -92,13 +92,8 @@ func (m *MockStore) DeletePod(podName types.NamespacedName) error {
 	return args.Error(0)
 }
 
-func (m *MockStore) MatchModelServer(modelName string, request *http.Request, gatewayKey string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error) {
-	args := m.Called(modelName, request, gatewayKey)
-	var modelRoute *aiv1alpha1.ModelRoute
-	if args.Get(2) != nil {
-		modelRoute = args.Get(2).(*aiv1alpha1.ModelRoute)
-	}
-	return args.Get(0).(types.NamespacedName), args.Bool(1), modelRoute, args.Error(3)
+func (m *MockStore) MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (datastore.ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
+	return datastore.ModelTarget{}, false, nil, nil
 }
 
 func (m *MockStore) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
@@ -331,6 +326,34 @@ func (m *MockStore) GetModelNames() []string {
 		return nil
 	}
 	return args.Get(0).([]string)
+}
+
+func (m *MockStore) AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error {
+	return nil
+}
+
+func (m *MockStore) DeleteExternalModelProvider(name types.NamespacedName) error {
+	return nil
+}
+
+func (m *MockStore) GetExternalModelProvider(name types.NamespacedName) *aiv1alpha1.ExternalModelProvider {
+	return nil
+}
+
+func (m *MockStore) GetAllExternalModelProviders() map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider {
+	return nil
+}
+
+func (m *MockStore) AddOrUpdateSecret(secret *corev1.Secret) error {
+	return nil
+}
+
+func (m *MockStore) DeleteSecret(name types.NamespacedName) error {
+	return nil
+}
+
+func (m *MockStore) GetSecret(name types.NamespacedName) *corev1.Secret {
+	return nil
 }
 
 func (m *MockStore) SyncOnFlightCounts() {}

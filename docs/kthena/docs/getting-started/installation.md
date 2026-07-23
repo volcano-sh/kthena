@@ -98,6 +98,22 @@ helm install kthena oci://ghcr.io/volcano-sh/charts/kthena \
 
 For a complete list of all configurable Helm values, see the [Helm Chart Values Reference](../reference/helm-chart-values.md).
 
+## Upgrade CRDs before Helm
+
+Helm installs CRDs from a chart during the first installation, but `helm upgrade` does not update them. Apply the CRDs from the target Kthena version before upgrading the release:
+
+```bash
+helm show crds oci://ghcr.io/volcano-sh/charts/kthena \
+  --version vX.Y.Z \
+  | kubectl apply --server-side -f -
+
+helm upgrade kthena oci://ghcr.io/volcano-sh/charts/kthena \
+  --version vX.Y.Z \
+  --namespace kthena-system
+```
+
+This order is required for releases that add a CRD, including the release that introduces `ExternalModelProvider`. If the Router starts before that CRD exists, its informer cannot finish its initial sync and the Router does not begin serving requests.
+
 ## Verification
 
 After installation, verify that all components are running:

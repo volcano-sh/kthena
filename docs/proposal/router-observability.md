@@ -41,30 +41,39 @@ The router exposes the following metrics to monitor request processing:
 - `status_code`: HTTP response status code (200, 400, 500) - monitor success/failure patterns
 - `model`: AI model name - essential for AI workload monitoring
 - `error_type`: Specific error categories for detailed troubleshooting
+- `model_route`: Namespaced ModelRoute name, or `none`
+- `backend_type`: Bounded destination kind (`model_server`, `external_provider`, `inference_pool`, `unresolved`, or `none`)
+- `backend_name`: Namespaced backend resource name, or `none`
+- `upstream_model`: Configured upstream model, or `none`
 
 **Label Cardinality Management**: Keep label values bounded to avoid high cardinality issues:
 - Limited set of endpoints and methods
 - Standard HTTP status codes
 - Controlled model catalog
 - Predefined error types
+- Destination labels come from ModelRoute, ModelServer, ExternalModelProvider, and InferencePool objects or fixed sentinel values. They must not contain request IDs, URLs, Secret names, or raw errors.
+
+Adding `model_route`, `backend_type`, `backend_name`, and `upstream_model` to existing metrics is an intentional schema migration. It increases the possible series count by the configured route-backend-model combinations, but makes mixed internal and external destinations distinguishable without introducing a second set of metric names. Operators must update exact-label queries, alerts, recording rules, dashboards, and tests when adopting this schema.
 
 #### Request Processing Metrics
 
 **HTTP Request Metrics**
-- `kthena_router_requests_total{model="<model_name>",path="<path>",status_code="<code>",error_type="<error_type>"}` (Counter)
+- `kthena_router_requests_total{model="<model_name>",path="<path>",status_code="<code>",error_type="<error_type>",model_route="<route_name>",backend_type="<type>",backend_name="<backend_name>",upstream_model="<upstream_model>"}` (Counter)
   - Total number of HTTP requests processed by the router
   - Labels: 
     - `model`: AI model name
     - `path`: Request path (/v1/chat/completions, /v1/completions, etc.)
     - `status_code`: HTTP response status code (200, 400, 500, etc.)
     - `error_type`: Type of error (validation, timeout, internal, rate_limit, etc.)
+    - `model_route`, `backend_type`, `backend_name`, `upstream_model`: Bounded destination identity
 
-- `kthena_router_request_duration_seconds{model="<model_name>",path="<path>",status_code="<code>"}` (Histogram)
+- `kthena_router_request_duration_seconds{model="<model_name>",path="<path>",status_code="<code>",model_route="<route_name>",backend_type="<type>",backend_name="<backend_name>",upstream_model="<upstream_model>"}` (Histogram)
   - End-to-end request processing latency distribution for all requests
   - Labels:
     - `model`: AI model name
     - `path`: Request path (/v1/chat/completions, /v1/completions, etc.)
     - `status_code`: HTTP response status code (200, 400, 500, etc.)
+    - `model_route`, `backend_type`, `backend_name`, `upstream_model`: Bounded destination identity
   - Buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60]
 
 - `kthena_router_request_prefill_duration_seconds{model="<model_name>",path="<path>",status_code="<code>"}` (Histogram)
@@ -88,19 +97,21 @@ The router exposes the following metrics to monitor request processing:
   - Labels:
     - `model`: AI model name
 
-- `kthena_router_active_upstream_requests{model_route="<route_name>",model_server="<server_name>"}` (Gauge)
+- `kthena_router_active_upstream_requests{model_server="<server_name>",model_route="<route_name>",backend_type="<type>",backend_name="<backend_name>",upstream_model="<upstream_model>"}` (Gauge)
   - Current number of active upstream requests (from router to backend pods)
   - Labels:
     - `model_route`: ModelRoute name handling the requests
     - `model_server`: ModelServer name processing the requests
+    - `backend_type`, `backend_name`, `upstream_model`: Destination-neutral backend identity; `model_server` is retained for query compatibility
 
 **AI-Specific Token Metrics**
-- `kthena_router_tokens_total{model="<model_name>",path="<path>",token_type="input|output"}` (Counter)
+- `kthena_router_tokens_total{model="<model_name>",path="<path>",token_type="input|output",model_route="<route_name>",backend_type="<type>",backend_name="<backend_name>",upstream_model="<upstream_model>"}` (Counter)
   - Total tokens processed/generated
   - Labels:
     - `model`: AI model name
     - `path`: Request path (/v1/chat/completions, /v1/completions, etc.)
     - `token_type`: Token type ("input" for processed tokens, "output" for generated tokens)
+    - `model_route`, `backend_type`, `backend_name`, `upstream_model`: Bounded destination identity
 
 **Scheduler Plugin Metrics**
 - `kthena_router_scheduler_plugin_duration_seconds{model="<model_name>",plugin="<plugin_name>",type="filter|score"}` (Histogram)
@@ -162,6 +173,11 @@ The router generates structured access logs for each request, following Envoy's 
   "model_route": "default/llama2-route-v1",
   "model_server": "default/llama2-server",
   "selected_pod": "llama2-deployment-5f7b8c9d-xk2p4",
+  "backend_type": "model_server",
+  "backend_name": "default/llama2-server",
+  "upstream_model": "llama2-7b",
+  "upstream_status_code": 200,
+  "upstream_attempts": 1,
   "request_id": "550e8400-e29b-41d4-a716-446655440000",
   
   // Token information
@@ -185,7 +201,7 @@ The router generates structured access logs for each request, following Envoy's 
 #### Text Format (Alternative)
 For environments preferring text logs, a structured text format is also supported:
 ```
-[2024-01-15T10:30:45.123Z] "POST /v1/chat/completions HTTP/1.1" 200 model_name=llama2-7b model_route=default/llama2-route-v1 model_server=default/llama2-server selected_pod=llama2-deployment-5f7b8c9d-xk2p4 request_id=550e8400-e29b-41d4-a716-446655440000 tokens=150/75 timings=2350ms(45+2180+5)
+[2024-01-15T10:30:45.123Z] "POST /v1/chat/completions HTTP/1.1" 200 model_name=llama2-7b model_route=default/llama2-route-v1 model_server=default/llama2-server selected_pod=llama2-deployment-5f7b8c9d-xk2p4 backend_type=model_server backend_name=default/llama2-server upstream_model=llama2-7b upstream_status_code=200 upstream_attempts=1 request_id=550e8400-e29b-41d4-a716-446655440000 tokens=150/75 timings=2350ms(45+2180+5)
 ```
 
 **Text Format Features:**
@@ -206,6 +222,12 @@ For environments preferring text logs, a structured text format is also supporte
 - `model_route`: Which ModelRoute CR was matched for this request (namespace/name format)
 - `model_server`: Which ModelServer CR was selected for routing (namespace/name format)
 - `selected_pod`: The specific pod that processed the inference request
+- `backend_type`: Destination kind shared by ModelServer, ExternalModelProvider, and InferencePool paths
+- `backend_name`: Namespaced backend resource name
+- `upstream_model`: Model identifier sent to the selected backend
+- `upstream_status_code`: HTTP status returned by the accepted upstream attempt
+- `upstream_attempts`: Number of upstream attempts made for the request
+- `error_origin`: Bounded failure origin (`router` or `upstream`), omitted for successful requests
 - `request_id`: Unique request identifier (generated if not provided in x-request-id header)
 
 **Token Tracking**:
