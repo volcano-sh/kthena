@@ -279,13 +279,17 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
-		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, modelName, path)
+		metricsModel := metrics.UnknownModel
+		if r.store.HasModel(modelName) {
+			metricsModel = modelName
+		}
+		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, metricsModel, path)
 
 		// Increment downstream request count at request start
-		r.metrics.IncActiveDownstreamRequests(modelName)
+		r.metrics.IncActiveDownstreamRequests(metricsModel)
 		defer func() {
 			// Decrement downstream request count when request completes
-			r.metrics.DecActiveDownstreamRequests(modelName)
+			r.metrics.DecActiveDownstreamRequests(metricsModel)
 			if metricsRecorder != nil {
 				statusCode := strconv.Itoa(c.Writer.Status())
 				reason := "successful_request"
@@ -460,6 +464,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	} else {
 		accesslog.SetError(c, "route_not_found", "route not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
+		c.Set("finishReason", "route_not_found")
 		return fmt.Errorf("route not found")
 	}
 

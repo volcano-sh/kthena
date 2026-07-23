@@ -34,6 +34,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	routermetrics "github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
@@ -1517,7 +1518,8 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 	t.Run("VerifyErrorMetrics", func(t *testing.T) {
 		nonExistentModel := "non-existent-model-xyz"
 		labels := map[string]string{
-			"model":       nonExistentModel,
+			"error_type":  "route_not_found",
+			"model":       routermetrics.UnknownModel,
 			"status_code": "404",
 		}
 
