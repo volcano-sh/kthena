@@ -28,6 +28,10 @@ type FakeNetworkingV1alpha1 struct {
 	*testing.Fake
 }
 
+func (c *FakeNetworkingV1alpha1) ExternalModelProviders(namespace string) v1alpha1.ExternalModelProviderInterface {
+	return newFakeExternalModelProviders(c, namespace)
+}
+
 func (c *FakeNetworkingV1alpha1) ModelRoutes(namespace string) v1alpha1.ModelRouteInterface {
 	return newFakeModelRoutes(c, namespace)
 }

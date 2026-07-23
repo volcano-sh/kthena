@@ -113,3 +113,139 @@ func TestParseStreamRespForUsage(t *testing.T) {
 		})
 	}
 }
+
+func TestParseOpenAIResponsesResponseBody(t *testing.T) {
+	resp := []byte(`{"id":"resp_1","object":"response","model":"gpt-5.6-sol","usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}`)
+
+	got, err := ParseOpenAIResponsesResponseBody(resp)
+	if err != nil {
+		t.Fatalf("ParseOpenAIResponsesResponseBody() unexpected error: %v", err)
+	}
+
+	want := &OpenAIResponse{
+		ID:     "resp_1",
+		Object: "response",
+		Model:  "gpt-5.6-sol",
+		Usage: Usage{
+			PromptTokens:     12,
+			CompletionTokens: 3,
+			TotalTokens:      15,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseOpenAIResponsesResponseBody() got = %v, want %v", got, want)
+	}
+}
+
+func TestParseOpenAIResponsesStreamRespForUsage(t *testing.T) {
+	tests := []struct {
+		name         string
+		responseText string
+		want         OpenAIResponse
+	}{
+		{
+			name:         "completed response usage",
+			responseText: `data: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-5.6-sol","usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}`,
+			want: OpenAIResponse{
+				ID:     "resp_1",
+				Object: "response",
+				Model:  "gpt-5.6-sol",
+				Usage: Usage{
+					PromptTokens:     12,
+					CompletionTokens: 3,
+					TotalTokens:      15,
+				},
+			},
+		},
+		{
+			name:         "event line has no usage",
+			responseText: `event: response.completed`,
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "done marker has no usage",
+			responseText: `data: [DONE]`,
+			want:         OpenAIResponse{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseOpenAIResponsesStreamRespForUsage(tt.responseText)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ParseOpenAIResponsesStreamRespForUsage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseAnthropicResponseBody(t *testing.T) {
+	resp := []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude","usage":{"input_tokens":11,"output_tokens":22}}`)
+
+	got, err := ParseAnthropicResponseBody(resp)
+	if err != nil {
+		t.Fatalf("ParseAnthropicResponseBody() unexpected error: %v", err)
+	}
+
+	want := &OpenAIResponse{
+		Model: "claude",
+		Usage: Usage{
+			PromptTokens:     11,
+			CompletionTokens: 22,
+			TotalTokens:      33,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseAnthropicResponseBody() got = %v, want %v", got, want)
+	}
+}
+
+func TestParseAnthropicStreamRespForUsage(t *testing.T) {
+	tests := []struct {
+		name         string
+		responseText string
+		want         OpenAIResponse
+	}{
+		{
+			name:         "message start usage",
+			responseText: `data: {"type":"message_start","message":{"model":"claude","usage":{"input_tokens":11,"output_tokens":1}}}`,
+			want: OpenAIResponse{
+				Model: "claude",
+				Usage: Usage{
+					PromptTokens:     11,
+					CompletionTokens: 1,
+					TotalTokens:      12,
+				},
+			},
+		},
+		{
+			name:         "message delta usage",
+			responseText: `data: {"type":"message_delta","usage":{"output_tokens":22}}`,
+			want: OpenAIResponse{
+				Usage: Usage{
+					CompletionTokens: 22,
+					TotalTokens:      22,
+				},
+			},
+		},
+		{
+			name:         "ping has no usage",
+			responseText: `event: ping`,
+			want:         OpenAIResponse{},
+		},
+		{
+			name:         "invalid json",
+			responseText: `data: {"type":"message_delta",`,
+			want:         OpenAIResponse{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseAnthropicStreamRespForUsage(tt.responseText)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ParseAnthropicStreamRespForUsage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
