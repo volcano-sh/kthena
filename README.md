@@ -101,6 +101,16 @@ Contributions are welcome! Here's how to get started:
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines.
 
+## Meeting
+
+Regular Community Meeting:
+
+- Community biweekly meeting for Asia: 16:00 - 17:00 (UTC+8) .Wednesday [Convert to your timezone](https://dateful.com/time-zone-converter?t=15&tz2=UTC%2B8).
+
+Resources:
+- [Meeting notes and agenda](https://docs.google.com/document/d/1bph_MA1UU3tKCV9T8XmJ0cIH3o85uAxExep412fDToE/edit?tab=t.0)
+- [Meeting link](https://zoom-lfx.platform.linuxfoundation.org/meeting/99772189625?password=c4530aed-d08f-4871-9477-091980f37d50)
+
 ## License
 
 Kthena is licensed under the [Apache 2.0 License](LICENSE).
