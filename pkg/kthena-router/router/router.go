@@ -1159,6 +1159,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		RequestTime: time.Now(),
 		NotifyChan:  make(chan struct{}),
 		CancelCh:    reqCtx.Done(),
+		Cancel:      cancel,
 	}
 
 	if err := r.store.Enqueue(queueReq); err != nil {

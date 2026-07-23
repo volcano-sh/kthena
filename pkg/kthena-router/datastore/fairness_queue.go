@@ -155,6 +155,7 @@ type Request struct {
 	RequestTime         time.Time
 	NotifyChan          chan struct{}
 	CancelCh            <-chan struct{} // Request-scoped cancellation signal
+	Cancel              func()          // Cancels the request when the queue is shut down
 	Release             func()          // Set by the queue when a permit is acquired
 
 	// admitMu serializes admission (by the dequeue loop) against abandonment (by
@@ -165,6 +166,8 @@ type Request struct {
 	admitted  bool // admission committed: Release is set and about to be signalled
 	abandoned bool // caller gave up before admission; the loop must not admit
 }
+
+var errRequestQueueClosed = errors.New("request queue is closed")
 
 // commitAdmission runs fn under the request lock, but only if the caller has not
 // already abandoned the request. fn performs the admission side effects that must
@@ -329,6 +332,12 @@ func (pq *RequestPriorityQueue) PushRequest(r *Request) error {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
+	select {
+	case <-pq.stopCh:
+		return errRequestQueueClosed
+	default:
+	}
+
 	// In session-boost mode, promote requests whose session recently completed.
 	// Capture the session's completion time so boosted requests can be ordered by
 	// prefix-cache warmth (most recently completed first).
@@ -476,7 +485,17 @@ func (pq *RequestPriorityQueue) requeueRequest(req *Request) {
 		return
 	}
 	pq.mu.Lock()
+	select {
+	case <-pq.stopCh:
+		pq.mu.Unlock()
+		if req.Cancel != nil {
+			req.Cancel()
+		}
+		return
+	default:
+	}
 	heap.Push(pq, req)
+	pq.metricIncSize(req.ModelName, req.UserID)
 	pq.mu.Unlock()
 	select {
 	case pq.notifyCh <- struct{}{}:
@@ -576,23 +595,33 @@ func (pq *RequestPriorityQueue) runSemaphoreMode(ctx context.Context) {
 	}
 }
 
-// Close stops the dequeue loop and drains pending items from the heap.
-// Callers waiting on NotifyChan will detect cancellation via their request-scoped signal.
+// Close stops the dequeue loop, cancels pending requests, and drains the heap.
 func (pq *RequestPriorityQueue) Close() {
 	pq.mu.Lock()
-	defer pq.mu.Unlock()
 	select {
 	case <-pq.stopCh:
 		// already closed
+		pq.mu.Unlock()
 		return
 	default:
 		close(pq.stopCh)
 	}
 
-	// Drain pending items: clear metrics for each remaining request
-	for len(pq.heap) > 0 {
-		req := heap.Pop(pq).(*Request)
+	// Drain pending items and clear their metrics while holding the queue lock so
+	// concurrent PushRequest calls cannot add work after shutdown begins.
+	pending := pq.heap
+	pq.heap = nil
+	for _, req := range pending {
 		pq.metricDecSize(req.ModelName, req.UserID)
+	}
+	pq.mu.Unlock()
+
+	// Cancel outside the queue lock. Context cancellation can synchronously run
+	// callbacks, and those callbacks must not be able to deadlock queue shutdown.
+	for _, req := range pending {
+		if req.Cancel != nil {
+			req.Cancel()
+		}
 	}
 	klog.V(4).Info("fairness queue closed and drained")
 }

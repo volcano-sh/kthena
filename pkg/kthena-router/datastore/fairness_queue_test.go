@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestNewRequestPriorityQueue(t *testing.T) {
@@ -471,6 +473,78 @@ func TestClose_DrainsPendingWaiters(t *testing.T) {
 
 	if pq.Len() != 0 {
 		t.Errorf("Expected 0 items after close, got %d", pq.Len())
+	}
+}
+
+func TestClose_CancelsPendingWaiters(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := &Request{
+		ModelName:   "model-1",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+		CancelCh:    ctx.Done(),
+		Cancel:      cancel,
+	}
+	if err := pq.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	pq.Close()
+
+	select {
+	case <-ctx.Done():
+		// Expected: queue shutdown cancels requests still waiting in the heap.
+	default:
+		t.Fatal("pending request was not cancelled when queue closed")
+	}
+}
+
+func TestPushRequestAfterClose(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+	pq.Close()
+
+	err := pq.PushRequest(&Request{ModelName: "model-1", RequestTime: time.Now()})
+	if err != errRequestQueueClosed {
+		t.Fatalf("expected %q, got %v", errRequestQueueClosed, err)
+	}
+	if pq.Len() != 0 {
+		t.Fatalf("closed queue accepted a request; length=%d", pq.Len())
+	}
+}
+
+func TestRequeueRequestRestoresQueueSizeMetric(t *testing.T) {
+	const (
+		model = "requeue-metric-test-model"
+		user  = "requeue-metric-test-user"
+	)
+
+	pq := NewRequestPriorityQueue(nil)
+	defer pq.Close()
+
+	req := &Request{
+		UserID:      user,
+		ModelName:   model,
+		RequestTime: time.Now(),
+	}
+	if err := pq.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	if _, err := pq.popWhenAvailable(context.Background()); err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+
+	pq.requeueRequest(req)
+
+	var metric dto.Metric
+	if err := pq.metrics.FairnessQueueSize.WithLabelValues(model, user).Write(&metric); err != nil {
+		t.Fatalf("failed to read queue size metric: %v", err)
+	}
+	got := metric.GetGauge().GetValue()
+	if got != 1 {
+		t.Fatalf("expected queue size metric to be restored to 1 after requeue, got %v", got)
 	}
 }
 
