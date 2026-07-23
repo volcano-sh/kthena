@@ -21,6 +21,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +30,13 @@ import (
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corelister "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
+
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 )
 
@@ -334,4 +340,55 @@ not a valid prometheus metric line
 	})
 
 	require.Error(t, err)
+}
+
+func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n# TYPE queue_depth_alt gauge\nqueue_depth_alt 40\n")
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(serverURL.Port())
+	require.NoError(t, err)
+
+	labels := map[string]string{
+		workload.ModelServingNameLabelKey: "model",
+		workload.EntryLabelKey:            "true",
+	}
+	readyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: "default", Labels: labels},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "127.0.0.1",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	unreadyPod := readyPod.DeepCopy()
+	unreadyPod.Name = "unready"
+	unreadyPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(readyPod))
+	require.NoError(t, indexer.Add(unreadyPod))
+	podLister := corelister.NewPodLister(indexer)
+
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
+	collector := NewMetricCollector(
+		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
+		policy,
+		algorithm.Metrics{"queue_depth": 10, "queue_depth_alt": 10},
+	)
+
+	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
+		// This creates a second metric group selecting the same pods.
+		"queue_depth_alt": {Pod: &workload.PodMetricSource{Name: "queue_depth_alt", Uri: "/metrics-alt", Port: int32(port)}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), unreadyCount)
+	// Expected behavior: scrape the ready pod even though another matching pod is unready.
+	require.Equal(t, float64(40), readyMetrics["queue_depth"])
+	require.Equal(t, float64(40), readyMetrics["queue_depth_alt"])
 }
