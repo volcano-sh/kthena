@@ -2465,7 +2465,7 @@ func (c *ModelServingController) syncHeadlessServices(ctx context.Context, ms *w
 				if role.WorkerTemplate != nil {
 					_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 					if err := utils.CreateHeadlessService(ctx, c.kubeClientSet, ms, serviceSelector, sg.Name, role.Name, roleIndex); err != nil {
-						klog.Errorf("failed to create service for role %s in serving group %s: %v", roleObj.Name, sg.Name, err)
+						return fmt.Errorf("failed to create service for role %s in serving group %s: %v", roleObj.Name, sg.Name, err)
 					}
 				}
 			}
