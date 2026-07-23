@@ -84,6 +84,21 @@ func ParseModelServerFromRequest(r *http.Request) (*admissionv1.AdmissionReview,
 	return admissionReview, &ms, nil
 }
 
+// ParseExternalModelProviderFromRequest parses the HTTP request and extracts the AdmissionReview and ExternalModelProvider.
+func ParseExternalModelProviderFromRequest(r *http.Request) (*admissionv1.AdmissionReview, *networkingv1alpha1.ExternalModelProvider, error) {
+	admissionReview, err := parseAdmissionReviewFromRequest(r)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var provider networkingv1alpha1.ExternalModelProvider
+	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &provider); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode externalModelProvider: %v", err)
+	}
+
+	return admissionReview, &provider, nil
+}
+
 // SendAdmissionResponse sends the AdmissionReview response back to the client
 func SendAdmissionResponse(w http.ResponseWriter, admissionReview *admissionv1.AdmissionReview) error {
 	// Send the response

@@ -34,6 +34,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -48,6 +49,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/handlers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
@@ -383,6 +385,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var pods []*datastore.PodInfo
 	var port int32
 	var modelServerName types.NamespacedName
+	var modelTarget datastore.ModelTarget
 	var modelRoute *v1alpha1.ModelRoute
 	var modelServer *v1alpha1.ModelServer
 
@@ -400,12 +403,50 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var isLora bool
 	var err error
 	// Try to match ModelRoute first
-	modelServerName, isLora, modelRoute, err = r.store.MatchModelServer(modelName, c.Request, gatewayKey)
+	modelTarget, isLora, modelRoute, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey)
 	if err != nil {
-		accesslog.SetError(c, "model_server_matching", fmt.Sprintf("can't find corresponding model server: %v", err))
+		accesslog.SetError(c, "model_route_matching", fmt.Sprintf("failed to match model route target: %v", err))
 	}
 
 	if err == nil && strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+		if modelTarget.Kind == datastore.ModelTargetKindExternalModelProvider {
+			provider := r.store.GetExternalModelProvider(modelTarget.Name)
+			if provider == nil {
+				klog.Errorf("failed to get external model provider: %v", modelTarget.Name)
+				accesslog.SetError(c, "provider_discovery", fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
+				c.Set("finishReason", "provider_discovery")
+				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
+				return nil
+			}
+
+			modelRouteName := ""
+			if modelRoute != nil {
+				modelRouteName = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
+				c.Set("modelRouteName", modelRouteName)
+			}
+			accesslog.SetRequestRouting(c, modelRouteName, "", "")
+			if err := r.proxyExternalProvider(c, c.Request, provider, modelRequest, modelName); err != nil {
+				klog.Errorf("external provider request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
+				var proxyErr *externalProxyError
+				if errors.As(err, &proxyErr) {
+					accesslog.SetError(c, proxyErr.reason, proxyErr.message)
+					c.Set("finishReason", proxyErr.reason)
+					if !c.Writer.Written() {
+						c.AbortWithStatusJSON(proxyErr.statusCode, proxyErr.message)
+					}
+					return nil
+				}
+
+				accesslog.SetError(c, "external_provider_proxy", "external provider request processing failed")
+				c.Set("finishReason", "external_provider_proxy")
+				if !c.Writer.Written() {
+					c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+				}
+			}
+			return nil
+		}
+
+		modelServerName = modelTarget.Name
 		// Regular ModelServer request
 		// step 3: Find pods and model server details
 		klog.V(4).Infof("modelServer is %v, is_lora: %v", modelServerName, isLora)
@@ -530,7 +571,6 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		// Set routing info even if no pod is selected (for error cases)
 		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 	}
-
 	req := c.Request
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
@@ -548,10 +588,18 @@ func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 		return nil, err
 	}
 	var modelRequest ModelRequest
-	if err := json.Unmarshal(bodyBytes, &modelRequest); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
+	decoder.UseNumber()
+	if err := decoder.Decode(&modelRequest); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, err.Error())
 		return nil, err
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		c.AbortWithStatusJSON(http.StatusBadRequest, "invalid request body")
+		return nil, fmt.Errorf("invalid request body")
+	}
+	c.Set(common.RawRequestBodyKey, bodyBytes)
+	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	modelName, ok := modelRequest["model"].(string)
 	if !ok || strings.TrimSpace(modelName) == "" {
@@ -670,7 +718,7 @@ func (r *Router) proxy(
 	ctx *framework.Context,
 	stream bool,
 	port int32,
-	onUsage func(u handlers.OpenAIResponse),
+	onUsage func(u TokenUsage),
 ) error {
 	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
 
@@ -704,7 +752,7 @@ func (r *Router) proxy(
 		// Track this request as in-flight to the chosen pod.
 		r.store.IncrPodOnFlightRequests(podName)
 
-		// Increment upstream request count with both modelServer and modelRoute
+		// Increment upstream request count with both modelServer and modelRoute.
 		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
 
 		// Request dispatched to the pod.
@@ -756,28 +804,28 @@ func (r *Router) proxyModelEndpoint(
 		stream := isStreaming(modelRequest)
 		modelName := ctx.Model
 		userID := c.GetString(common.UserIdKey)
-		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
-			if resp.Usage.TotalTokens <= 0 {
+		err := r.proxy(c, decodeRequest, ctx, stream, port, func(usage TokenUsage) {
+			if usage.TotalTokens <= 0 {
 				return
 			}
 			// Record output tokens for rate limiting
 			if r.loadRateLimiter != nil {
-				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
+				r.loadRateLimiter.RecordOutputTokens(modelName, usage.CompletionTokens)
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
-				accessCtx.SetTokenCounts(accessCtx.InputTokens, resp.Usage.CompletionTokens)
+				accessCtx.SetTokenCounts(accessCtx.InputTokens, usage.CompletionTokens)
 			}
 
 			// Record output token metrics
 			if metricsRecorder != nil {
 				// Record output tokens
-				metricsRecorder.RecordOutputTokens(resp.Usage.CompletionTokens)
+				metricsRecorder.RecordOutputTokens(usage.CompletionTokens)
 			}
 			if userID == "" || modelName == "" {
 				return
 			}
-			_ = r.store.UpdateTokenCount(userID, modelName, float64(resp.Usage.PromptTokens), float64(resp.Usage.CompletionTokens))
+			_ = r.store.UpdateTokenCount(userID, modelName, float64(usage.PromptTokens), float64(usage.CompletionTokens))
 		})
 
 		// Mark end of upstream processing
@@ -796,20 +844,92 @@ func (r *Router) proxyModelEndpoint(
 	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port)
 }
 
-func (r *Router) GetModelServer(modelName string, req *http.Request) (*v1alpha1.ModelServer, error) {
-	modelServerName, isLora, _, err := r.store.MatchModelServer(modelName, req, "")
+func (r *Router) proxyExternalProvider(
+	c *gin.Context,
+	req *http.Request,
+	provider *v1alpha1.ExternalModelProvider,
+	modelRequest ModelRequest,
+	modelName string,
+) error {
+	accesslog.MarkUpstreamStart(c)
+	defer accesslog.MarkUpstreamEnd(c)
+
+	providerName := fmt.Sprintf("%s/%s", provider.Namespace, provider.Name)
+	var metricsRecorder *metrics.RequestMetricsRecorder
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			metricsRecorder = rec
+		}
+	}
+
+	secret, err := r.getProviderSecret(provider)
 	if err != nil {
-		return nil, fmt.Errorf("can't find corresponding model server: %v", err)
-	}
-	klog.V(4).Infof("modelServer is %v, is_lora: %v", modelServerName, isLora)
-
-	pods, modelServer, err := r.getPodsAndServer(modelServerName)
-	if err != nil || len(pods) == 0 {
-		klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
-		return nil, fmt.Errorf("can't find model server: %v", modelServerName)
+		return newExternalProxyError(http.StatusServiceUnavailable, "provider_config", fmt.Sprintf("external provider %s is not ready", providerName))
 	}
 
-	return modelServer, nil
+	adapter, err := providers.NewAdapter(provider.Spec.ProviderType)
+	if err != nil {
+		return newExternalProxyError(http.StatusInternalServerError, "provider_request_build", "failed to build external provider request")
+	}
+	upstreamRequest, err := adapter.BuildRequest(c, req, provider, secret, modelRequest)
+	if err != nil {
+		var unsupportedPath *providers.UnsupportedPathError
+		if errors.As(err, &unsupportedPath) {
+			return newExternalProxyError(http.StatusBadRequest, "request_protocol", unsupportedPath.Error())
+		}
+		return newExternalProxyError(http.StatusInternalServerError, "provider_request_build", "failed to build external provider request")
+	}
+
+	userID := c.GetString(common.UserIdKey)
+
+	return proxyExternalRequest(c, upstreamRequest, provider.Spec.ProviderType, provider.Spec.InsecureSkipVerify, isStreaming(modelRequest), providerName, func(usage TokenUsage) {
+		if usage.TotalTokens <= 0 {
+			return
+		}
+		if r.loadRateLimiter != nil {
+			r.loadRateLimiter.RecordOutputTokens(modelName, usage.CompletionTokens)
+		}
+		if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
+			accessCtx.SetTokenCounts(accessCtx.InputTokens, usage.CompletionTokens)
+		}
+		if metricsRecorder != nil {
+			metricsRecorder.RecordOutputTokens(usage.CompletionTokens)
+		}
+		if userID == "" || modelName == "" {
+			return
+		}
+		_ = r.store.UpdateTokenCount(userID, modelName, float64(usage.PromptTokens), float64(usage.CompletionTokens))
+	})
+}
+
+func (r *Router) getProviderSecret(provider *v1alpha1.ExternalModelProvider) (*corev1.Secret, error) {
+	if provider.Spec.Auth == nil {
+		return nil, nil
+	}
+	secretName := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Spec.Auth.SecretRef.Name}
+	secret := r.store.GetSecret(secretName)
+	if secret == nil {
+		return nil, fmt.Errorf("secret %s not found", secretName)
+	}
+	key := provider.Spec.Auth.SecretRef.Key
+	if value, ok := secret.Data[key]; !ok || len(value) == 0 {
+		return nil, fmt.Errorf("secret %s key %s not found", secretName, key)
+	}
+	return secret, nil
+}
+
+type externalProxyError struct {
+	statusCode int
+	reason     string
+	message    string
+}
+
+func newExternalProxyError(statusCode int, reason, message string) *externalProxyError {
+	return &externalProxyError{statusCode: statusCode, reason: reason, message: message}
+}
+
+func (e *externalProxyError) Error() string {
+	return e.message
 }
 
 type modelObject struct {
@@ -860,80 +980,349 @@ func proxyRequest(
 	podIP string,
 	port int32,
 	stream bool,
-	onUsage func(u handlers.OpenAIResponse),
+	onUsage func(u TokenUsage),
 ) error {
 	resp, err := doRequest(req, podIP, port)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("decode request error: %w", err)
 	}
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			c.Header(k, v)
+	return forwardResponse(c, resp, stream, onUsage)
+}
+
+func proxyExternalRequest(
+	c *gin.Context,
+	req *http.Request,
+	providerType v1alpha1.ExternalProviderType,
+	insecureSkipVerify bool,
+	stream bool,
+	providerName string,
+	onUsage func(u TokenUsage),
+) error {
+	resp, err := providers.Do(req, insecureSkipVerify)
+	if err != nil {
+		statusCode := http.StatusBadGateway
+		if isTimeoutError(err) {
+			statusCode = http.StatusGatewayTimeout
 		}
+		return newExternalProxyError(statusCode, "upstream_transport", fmt.Sprintf("external provider %s request failed", providerName))
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		accesslog.SetError(c, "upstream_response", fmt.Sprintf("provider %s returned HTTP %d", providerName, resp.StatusCode))
+		c.Set("finishReason", "upstream_response")
+	}
+
+	var forwardErr error
+	switch {
+	case providerType == v1alpha1.Anthropic:
+		forwardErr = forwardResponseWithUsageParser(c, resp, stream, &anthropicUsageParser{}, onUsage)
+	case (providerType == "" || providerType == v1alpha1.OpenAI) && c.Request != nil && c.Request.URL.Path == "/v1/responses":
+		forwardErr = forwardResponseWithUsageParser(c, resp, stream, &openAIResponsesUsageParser{}, onUsage)
+	default:
+		forwardErr = forwardResponse(c, resp, stream, onUsage)
+	}
+	if forwardErr != nil {
+		return newExternalProxyError(http.StatusBadGateway, "response_forwarding", fmt.Sprintf("failed to forward response from external provider %s", providerName))
+	}
+	return nil
+}
+
+// TokenUsage is the router-level token accounting view extracted from an
+// upstream response, independent from any provider response shape.
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
+}
+
+type responseUsageParser interface {
+	ParseStreamLine(line string) (TokenUsage, bool)
+	ParseBody(body []byte) (TokenUsage, bool)
+	FinalStreamUsage() (TokenUsage, bool)
+}
+
+type streamCompletionParser interface {
+	RecordStreamLineWritten(line string)
+	StreamCompleted() bool
+}
+
+type openAIUsageParser struct {
+	completed bool
+}
+
+func (openAIUsageParser) ParseStreamLine(line string) (TokenUsage, bool) {
+	parsed := handlers.ParseStreamRespForUsage(line)
+	return tokenUsageFromOpenAIResponse(parsed), parsed.Usage.CompletionTokens > 0
+}
+
+func (openAIUsageParser) ParseBody(body []byte) (TokenUsage, bool) {
+	parsed, _ := handlers.ParseOpenAIResponseBody(body)
+	if parsed == nil || parsed.Usage.CompletionTokens <= 0 {
+		return TokenUsage{}, false
+	}
+	return tokenUsageFromOpenAIResponse(*parsed), true
+}
+
+func (openAIUsageParser) FinalStreamUsage() (TokenUsage, bool) {
+	return TokenUsage{}, false
+}
+
+func (p *openAIUsageParser) RecordStreamLineWritten(line string) {
+	p.completed = p.completed || strings.TrimSpace(line) == "data: [DONE]"
+}
+
+func (p *openAIUsageParser) StreamCompleted() bool {
+	return p.completed
+}
+
+type openAIResponsesUsageParser struct {
+	latest    TokenUsage
+	completed bool
+}
+
+func (p *openAIResponsesUsageParser) ParseStreamLine(line string) (TokenUsage, bool) {
+	parsed := handlers.ParseOpenAIResponsesStreamRespForUsage(line)
+	usage := tokenUsageFromOpenAIResponse(parsed)
+	if usage.TotalTokens > 0 {
+		p.latest = usage
+	}
+	return TokenUsage{}, false
+}
+
+func (p *openAIResponsesUsageParser) ParseBody(body []byte) (TokenUsage, bool) {
+	parsed, _ := handlers.ParseOpenAIResponsesResponseBody(body)
+	if parsed == nil {
+		return TokenUsage{}, false
+	}
+	usage := tokenUsageFromOpenAIResponse(*parsed)
+	return usage, usage.TotalTokens > 0
+}
+
+func (p *openAIResponsesUsageParser) FinalStreamUsage() (TokenUsage, bool) {
+	return p.latest, p.latest.TotalTokens > 0
+}
+
+func (p *openAIResponsesUsageParser) StreamCompleted() bool {
+	return p.completed
+}
+
+func (p *openAIResponsesUsageParser) RecordStreamLineWritten(line string) {
+	p.completed = p.completed || isJSONStreamEvent(line, "response.completed")
+}
+
+func isJSONStreamEvent(line, eventType string) bool {
+	const dataPrefix = "data:"
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, dataPrefix) {
+		return false
+	}
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, dataPrefix))), &event); err != nil {
+		return false
+	}
+	return event.Type == eventType
+}
+
+type anthropicUsageParser struct {
+	latest    TokenUsage
+	completed bool
+}
+
+func (p *anthropicUsageParser) ParseStreamLine(line string) (TokenUsage, bool) {
+	parsed := handlers.ParseAnthropicStreamRespForUsage(line)
+	if parsed.Usage.TotalTokens <= 0 {
+		return TokenUsage{}, false
+	}
+	if parsed.Usage.PromptTokens > 0 {
+		p.latest.PromptTokens = parsed.Usage.PromptTokens
+	}
+	if parsed.Usage.CompletionTokens > 0 {
+		p.latest.CompletionTokens = parsed.Usage.CompletionTokens
+	}
+	p.latest.TotalTokens = p.latest.PromptTokens + p.latest.CompletionTokens
+	return TokenUsage{}, false
+}
+
+func (p *anthropicUsageParser) ParseBody(body []byte) (TokenUsage, bool) {
+	parsed, _ := handlers.ParseAnthropicResponseBody(body)
+	if parsed == nil || parsed.Usage.CompletionTokens <= 0 {
+		return TokenUsage{}, false
+	}
+	return tokenUsageFromOpenAIResponse(*parsed), true
+}
+
+func (p *anthropicUsageParser) FinalStreamUsage() (TokenUsage, bool) {
+	return p.latest, p.latest.TotalTokens > 0
+}
+
+func (p *anthropicUsageParser) RecordStreamLineWritten(line string) {
+	p.completed = p.completed || isJSONStreamEvent(line, "message_stop")
+}
+
+func (p *anthropicUsageParser) StreamCompleted() bool {
+	return p.completed
+}
+
+func tokenUsageFromOpenAIResponse(resp handlers.OpenAIResponse) TokenUsage {
+	usage := TokenUsage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		TotalTokens:      resp.Usage.TotalTokens,
+	}
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	return usage
+}
+
+func forwardResponse(
+	c *gin.Context,
+	resp *http.Response,
+	stream bool,
+	onUsage func(TokenUsage),
+) error {
+	return forwardResponseWithUsageParser(c, resp, stream, &openAIUsageParser{}, onUsage)
+}
+
+func forwardResponseWithUsageParser(
+	c *gin.Context,
+	resp *http.Response,
+	stream bool,
+	parser responseUsageParser,
+	onUsage func(TokenUsage),
+) error {
+	copyResponseHeaders(c, resp.Header, stream)
 	c.Status(resp.StatusCode)
 
 	if stream {
-		// If the request is a streaming request, we need to stream the response body.
-		// Stream response: read and forward each event (line) one by one, and parse usage if present
-		c.Status(resp.StatusCode)
 		reader := bufio.NewReader(resp.Body)
 		var streamErr error
-		c.Stream(func(w io.Writer) bool {
+		completed, _ := parser.(streamCompletionParser)
+		clientDisconnected := c.Stream(func(w io.Writer) bool {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
-				// Try to parse usage from this line, assuming it's a data line
-				parsed := handlers.ParseStreamRespForUsage(string(line))
-				if parsed.Usage.CompletionTokens > 0 {
-					klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
-
-					// Always call onUsage callback to record output tokens
+				if usage, ok := parser.ParseStreamLine(string(line)); ok {
+					klog.V(4).Infof("Parsed usage: %+v", usage)
 					if onUsage != nil {
-						onUsage(parsed)
+						onUsage(usage)
 					}
-
-					// The token usage is set by router, so remove it before sending to downstream
 					if v, ok := c.Get(common.TokenUsageKey); ok && v.(bool) {
 						return true
 					}
 				}
-				// Forward to downstream
-				_, _ = w.Write(line)
+				n, writeErr := w.Write(line)
+				if writeErr != nil {
+					klog.Errorf("error writing stream body: %v", writeErr)
+					streamErr = writeErr
+					return false
+				}
+				if n != len(line) {
+					klog.Errorf("error writing stream body: %v", io.ErrShortWrite)
+					streamErr = io.ErrShortWrite
+					return false
+				}
+				if completed != nil {
+					completed.RecordStreamLineWritten(string(line))
+				}
 			}
 			if err != nil {
 				if err != io.EOF {
-					klog.Errorf("error reading stream body: %v", err)
-					streamErr = err
+					if !errors.Is(err, context.Canceled) || completed == nil || !completed.StreamCompleted() {
+						klog.Errorf("error reading stream body: %v", err)
+						streamErr = err
+					}
 				}
 				return false
 			}
 			return true
 		})
+		if clientDisconnected && streamErr == nil && (completed == nil || !completed.StreamCompleted()) {
+			streamErr = context.Canceled
+		}
+		if usage, ok := parser.FinalStreamUsage(); ok && onUsage != nil {
+			onUsage(usage)
+		}
 		return streamErr
-	} else {
-		// Non-stream: efficiently stream response while capturing for parsing
-		var buf bytes.Buffer
-		ttee := io.TeeReader(resp.Body, &buf)
-
-		_, err := io.Copy(c.Writer, ttee)
-		if err != nil {
-			klog.Errorf("copy response to downstream failed: %v", err)
-			return err
-		}
-
-		// Parse usage if present
-		parsed, _ := handlers.ParseOpenAIResponseBody(buf.Bytes())
-		if parsed != nil && parsed.Usage.CompletionTokens > 0 {
-			klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
-			if onUsage != nil {
-				onUsage(*parsed)
-			}
-		}
 	}
 
+	var buf bytes.Buffer
+	teeReader := io.TeeReader(resp.Body, &buf)
+	if _, err := io.Copy(c.Writer, teeReader); err != nil {
+		klog.Errorf("copy response to downstream failed: %v", err)
+		return err
+	}
+
+	if usage, ok := parser.ParseBody(buf.Bytes()); ok && onUsage != nil {
+		klog.V(4).Infof("Parsed usage: %+v", usage)
+		onUsage(usage)
+	}
 	return nil
+}
+
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func copyResponseHeaders(c *gin.Context, headers http.Header, stream bool) {
+	dynamicHopByHopHeaders := connectionHeaderTokens(headers)
+	for key, values := range headers {
+		if shouldSkipResponseHeader(key, stream, dynamicHopByHopHeaders) {
+			continue
+		}
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+}
+
+func shouldSkipResponseHeader(header string, stream bool, dynamicHopByHopHeaders map[string]struct{}) bool {
+	if stream && strings.EqualFold(header, "Content-Length") {
+		return true
+	}
+	if _, ok := dynamicHopByHopHeaders[http.CanonicalHeaderKey(header)]; ok {
+		return true
+	}
+	for _, reserved := range hopByHopResponseHeaders {
+		if strings.EqualFold(header, reserved) {
+			return true
+		}
+	}
+	return false
+}
+
+func connectionHeaderTokens(headers http.Header) map[string]struct{} {
+	tokens := map[string]struct{}{}
+	for _, value := range headers.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				continue
+			}
+			tokens[http.CanonicalHeaderKey(token)] = struct{}{}
+		}
+	}
+	return tokens
+}
+
+var hopByHopResponseHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"TE",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
 }
 
 func doRequest(
@@ -951,8 +1340,7 @@ func doRequest(
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		resp.Body.Close()
-		return nil, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
+		return resp, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
 	}
 	return resp, nil
 }

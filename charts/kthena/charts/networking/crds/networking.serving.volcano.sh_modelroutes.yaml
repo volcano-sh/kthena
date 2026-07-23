@@ -321,11 +321,17 @@ spec:
                       type: string
                     targetModels:
                       items:
-                        description: LLM inference traffic target model
+                        description: LLM inference traffic target model.
                         properties:
+                          externalModelProviderName:
+                            description: |-
+                              ExternalModelProviderName is used to specify the correlated ExternalModelProvider within the same namespace.
+                              It is mutually exclusive with ModelServerName.
+                            type: string
                           modelServerName:
-                            description: ModelServerName is used to specify the correlated
-                              modelServer within the same namespace.
+                            description: |-
+                              ModelServerName is used to specify the correlated modelServer within the same namespace.
+                              It is mutually exclusive with ExternalModelProviderName.
                             type: string
                           weight:
                             default: 100
@@ -336,9 +342,13 @@ spec:
                             maximum: 100
                             minimum: 0
                             type: integer
-                        required:
-                        - modelServerName
                         type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of modelServerName or externalModelProviderName
+                            must be set
+                          rule: (has(self.modelServerName) && self.modelServerName
+                            != "") != (has(self.externalModelProviderName) && self.externalModelProviderName
+                            != "")
                       maxItems: 16
                       minItems: 1
                       type: array

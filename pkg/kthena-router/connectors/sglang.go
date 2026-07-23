@@ -110,7 +110,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	// one-shot bytes.Buffer wrapped in io.NopCloser, so it cannot be retried
 	// against a different upstream pod by the router's PD retry loop.
 	decodeBody := cloneReqBody(reqBody)
-	decodeBody = addTokenUsage(c, decodeBody)
+	decodeBody = AddTokenUsage(c, decodeBody)
 	decodeBody["bootstrap_room"] = s.bootstrapRoom
 	decodeBody["bootstrap_host"] = prefillHost
 	decodeRequest, err := buildRequest(c.Request, decodeBody)

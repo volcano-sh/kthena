@@ -64,7 +64,7 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	prefillBody := cloneReqBody(reqBody)
 	n.prefillRequest = n.buildPrefillRequest(req, prefillBody)
 	decodeBody := cloneReqBody(reqBody)
-	n.decodeRequestBody = addTokenUsage(c, decodeBody)
+	n.decodeRequestBody = AddTokenUsage(c, decodeBody)
 
 	// --- Prefill phase ---
 	if metricsRecorder != nil {

@@ -48,6 +48,7 @@ type ResourceType string
 const (
 	ResourceTypeModelServer ResourceType = "ModelServer"
 	ResourceTypePod         ResourceType = "Pod"
+	ResourceTypeSecret      ResourceType = "Secret"
 )
 
 // QueueItem represents an item in the work queue

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"sync"
@@ -981,7 +982,7 @@ func createComplexModelRoute() *aiv1alpha1.ModelRoute {
 	}
 }
 
-func TestStoreMatchModelServer(t *testing.T) {
+func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 	tests := []struct {
 		name           string
 		setupStore     func() *store
@@ -1547,7 +1548,7 @@ func TestStoreMatchModelServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			server, isLora, _, err := s.MatchModelServer(tt.modelName, tt.request, "")
+			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, "")
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -1556,9 +1557,91 @@ func TestStoreMatchModelServer(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedIsLora, isLora)
-			assert.Equal(t, tt.expectedServer, server)
+			assert.Equal(t, ModelTargetKindModelServer, target.Kind)
+			assert.Equal(t, tt.expectedServer, target.Name)
 		})
 	}
+}
+
+func TestStoreExternalModelProvider(t *testing.T) {
+	s := New()
+
+	provider := &aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "openai-provider",
+		},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType: aiv1alpha1.OpenAI,
+			BaseURL:      "https://api.openai.com",
+		},
+	}
+
+	err := s.AddOrUpdateExternalModelProvider(provider)
+	assert.NoError(t, err)
+
+	got := s.GetExternalModelProvider(types.NamespacedName{Namespace: "default", Name: "openai-provider"})
+	assert.Equal(t, provider, got)
+
+	all := s.GetAllExternalModelProviders()
+	assert.Equal(t, provider, all[types.NamespacedName{Namespace: "default", Name: "openai-provider"}])
+
+	err = s.DeleteExternalModelProvider(types.NamespacedName{Namespace: "default", Name: "openai-provider"})
+	assert.NoError(t, err)
+	assert.Nil(t, s.GetExternalModelProvider(types.NamespacedName{Namespace: "default", Name: "openai-provider"}))
+}
+
+func TestStoreSecret(t *testing.T) {
+	s := New()
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "provider-secret",
+		},
+		Data: map[string][]byte{
+			"api-key": []byte("test-key"),
+		},
+	}
+
+	err := s.AddOrUpdateSecret(secret)
+	assert.NoError(t, err)
+
+	got := s.GetSecret(types.NamespacedName{Namespace: "default", Name: "provider-secret"})
+	assert.Equal(t, secret, got)
+
+	err = s.DeleteSecret(types.NamespacedName{Namespace: "default", Name: "provider-secret"})
+	assert.NoError(t, err)
+	assert.Nil(t, s.GetSecret(types.NamespacedName{Namespace: "default", Name: "provider-secret"}))
+}
+
+func TestStoreMatchModelTargetExternalProvider(t *testing.T) {
+	s := New()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "external-route",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "gpt-router",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "openai-provider"},
+					},
+				},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	target, isLora, route, err := s.MatchModelTarget("gpt-router", req, "")
+	assert.NoError(t, err)
+	assert.False(t, isLora)
+	assert.Equal(t, mr, route)
+	assert.Equal(t, ModelTargetKindExternalModelProvider, target.Kind)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "openai-provider"}, target.Name)
 }
 
 type fakePodRuntimeInspector struct {
@@ -1958,7 +2041,7 @@ func TestSelectFromWeightedSlice_ValidWeights(t *testing.T) {
 	}
 }
 
-func TestMatchModelServer_EmptyTargetModels_NoPanic(t *testing.T) {
+func TestMatchModelTarget_EmptyTargetModels_NoPanic(t *testing.T) {
 	// This is the end-to-end test for the bug: a ModelRoute with a rule
 	// that has empty TargetModels should return an error, not panic.
 	s := &store{
@@ -1989,12 +2072,12 @@ func TestMatchModelServer_EmptyTargetModels_NoPanic(t *testing.T) {
 
 	// Before the fix this would panic. After the fix it returns an error.
 	assert.NotPanics(t, func() {
-		_, _, _, err := s.MatchModelServer("my-model", req, "")
+		_, _, _, err := s.MatchModelTarget("my-model", req, "")
 		assert.Error(t, err)
 	})
 }
 
-func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
+func TestMatchModelTarget_EmptyTargetModels_FallsThrough(t *testing.T) {
 	// When the first rule has empty TargetModels but a second rule is valid,
 	// the request should fall through to the second rule.
 	s := &store{
@@ -2032,12 +2115,13 @@ func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
 	s.AddOrUpdateModelRoute(mr)
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	server, _, _, err := s.MatchModelServer("my-model", req, "")
+	target, _, _, err := s.MatchModelTarget("my-model", req, "")
 	assert.NoError(t, err)
-	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, server)
+	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, target.Name)
 }
 
-func TestMatchModelServer_GatewayScoped(t *testing.T) {
+func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 	kindGateway := gatewayv1.Kind("Gateway")
 	kindService := gatewayv1.Kind("Service")
 	sectionHTTPS := gatewayv1.SectionName("https")
@@ -2325,7 +2409,7 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			server, isLora, _, err := s.MatchModelServer(tt.modelName, tt.request, tt.gatewayKey)
+			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, tt.gatewayKey)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -2334,7 +2418,8 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedIsLora, isLora)
-			assert.Equal(t, tt.expectedServer, server)
+			assert.Equal(t, ModelTargetKindModelServer, target.Kind)
+			assert.Equal(t, tt.expectedServer, target.Name)
 		})
 	}
 }

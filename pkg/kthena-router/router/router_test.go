@@ -79,6 +79,15 @@ func withMetricsEndpoint(handler http.Handler) http.Handler {
 	})
 }
 
+type closeNotifyRecorder struct {
+	*httptest.ResponseRecorder
+	closeCh chan bool
+}
+
+func (r *closeNotifyRecorder) CloseNotify() <-chan bool {
+	return r.closeCh
+}
+
 // setupTestRouter initializes a router and its dependencies for testing.
 // It uses a mock HTTP server as the backend, following the community's recommendation
 // to avoid hacky dependency injection.
@@ -727,6 +736,606 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"id":"response-id"`)
 }
 
+func TestRouter_HandlerFunc_ExternalOpenAIProvider(t *testing.T) {
+	providerModel := "gpt-4o-mini"
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		assert.Equal(t, "Bearer provider-key", r.Header.Get("Authorization"))
+		assert.Equal(t, "", r.Header.Get("Cookie"))
+
+		body, _ := io.ReadAll(r.Body)
+		var reqBody ModelRequest
+		assert.NoError(t, json.Unmarshal(body, &reqBody))
+		assert.Equal(t, providerModel, reqBody["model"])
+		assert.NotContains(t, reqBody, "include_usage")
+		assert.NotContains(t, reqBody, "stream_options")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"external-response","usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}`)
+	}))
+	defer upstream.Close()
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "openai-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType:       aiv1alpha1.OpenAI,
+			BaseURL:            upstream.URL,
+			Model:              &providerModel,
+			InsecureSkipVerify: true,
+			Auth: &aiv1alpha1.ProviderAuth{
+				SecretRef: corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "provider-secret"},
+					Key:                  "api-key",
+				},
+			},
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateSecret(&corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{Name: "provider-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			"api-key": []byte("provider-key"),
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "openai-provider"},
+					},
+				},
+			},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("Authorization", "Bearer downstream")
+	c.Request.Header.Set("Cookie", "session=downstream")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"id":"external-response"`)
+}
+
+func TestRouter_HandlerFunc_ExternalOpenAIResponsesProvider(t *testing.T) {
+	providerModel := "gpt-5.6-sol"
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/responses", r.URL.Path)
+		assert.Equal(t, "Bearer provider-key", r.Header.Get("Authorization"))
+
+		body, _ := io.ReadAll(r.Body)
+		var reqBody ModelRequest
+		assert.NoError(t, json.Unmarshal(body, &reqBody))
+		assert.Equal(t, providerModel, reqBody["model"])
+		assert.Equal(t, "Reply OK", reqBody["input"])
+		assert.Equal(t, false, reqBody["stream"])
+		assert.NotContains(t, reqBody, "include_usage")
+		assert.NotContains(t, reqBody, "stream_options")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"resp_1","object":"response","model":"gpt-5.6-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}`)
+	}))
+	defer upstream.Close()
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "responses-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType:       aiv1alpha1.OpenAI,
+			BaseURL:            upstream.URL + "/v1",
+			Model:              &providerModel,
+			InsecureSkipVerify: true,
+			Auth: &aiv1alpha1.ProviderAuth{SecretRef: corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "responses-secret"},
+				Key:                  "api-key",
+			}},
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateSecret(&corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{Name: "responses-secret", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte("provider-key")},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "responses-route", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "responses-model",
+			Rules: []*aiv1alpha1.Rule{{TargetModels: []*aiv1alpha1.TargetModel{{
+				ExternalModelProviderName: "responses-provider",
+			}}}},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model":"responses-model","input":"Reply OK","max_output_tokens":16,"stream":false}`
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+	accessCtx := accesslog.NewAccessLogContext("responses-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "responses-model")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"id":"resp_1"`)
+	assert.Equal(t, 3, accessCtx.OutputTokens)
+}
+
+func TestRouter_HandlerFunc_ExternalAnthropicProvider(t *testing.T) {
+	providerModel := "claude-3-5-sonnet-latest"
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/messages", r.URL.Path)
+		assert.Equal(t, "provider-key", r.Header.Get("x-api-key"))
+		assert.Equal(t, "", r.Header.Get("Authorization"))
+		assert.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
+
+		body, _ := io.ReadAll(r.Body)
+		var reqBody ModelRequest
+		assert.NoError(t, json.Unmarshal(body, &reqBody))
+		assert.Equal(t, providerModel, reqBody["model"])
+		assert.NotContains(t, reqBody, "include_usage")
+		assert.NotContains(t, reqBody, "stream_options")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","model":"claude","usage":{"input_tokens":7,"output_tokens":9}}`)
+	}))
+	defer upstream.Close()
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "anthropic-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType:       aiv1alpha1.Anthropic,
+			BaseURL:            upstream.URL,
+			Model:              &providerModel,
+			InsecureSkipVerify: true,
+			Auth: &aiv1alpha1.ProviderAuth{
+				SecretRef: corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "provider-secret"},
+					Key:                  "api-key",
+				},
+			},
+			Headers: map[string]string{
+				"anthropic-version": "2023-06-01",
+			},
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateSecret(&corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{Name: "provider-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			"api-key": []byte("provider-key"),
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-anthropic", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "anthropic-router",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "anthropic-provider"},
+					},
+				},
+			},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model":"anthropic-router","messages":[{"role":"user","content":"hello"}],"max_tokens":64}`
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("Authorization", "Bearer downstream")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"id":"msg_1"`)
+}
+
+func TestRouter_HandlerFunc_ExternalProviderProtocolMismatch(t *testing.T) {
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "openai-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType: aiv1alpha1.OpenAI,
+			BaseURL:      "https://api.openai.example",
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "openai-provider"},
+					},
+				},
+			},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "request_protocol", reason)
+}
+
+func TestRouter_HandlerFunc_ExternalProviderMissingSecret(t *testing.T) {
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "openai-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType: aiv1alpha1.OpenAI,
+			BaseURL:      "https://api.openai.example",
+			Auth: &aiv1alpha1.ProviderAuth{
+				SecretRef: corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "provider-secret"},
+					Key:                  "api-key",
+				},
+			},
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "openai-provider"},
+					},
+				},
+			},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "provider_config", reason)
+}
+
+func TestRouter_HandlerFunc_ExternalProviderMissingSecretKey(t *testing.T) {
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "openai-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType: aiv1alpha1.OpenAI,
+			BaseURL:      "https://api.openai.example",
+			Auth: &aiv1alpha1.ProviderAuth{
+				SecretRef: corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "provider-secret"},
+					Key:                  "api-key",
+				},
+			},
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateSecret(&corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{Name: "provider-secret", Namespace: "default"},
+		Data: map[string][]byte{
+			"other": []byte("provider-key"),
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "openai-provider"},
+					},
+				},
+			},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "provider_config", reason)
+}
+
+func TestRouter_HandlerFunc_ExternalProviderPreservesRawBodyWhenUnchanged(t *testing.T) {
+	reqBody := `{"model":"anthropic-router","messages":[{"role":"user","content":"hello"}],"metadata":{"trace_id":9007199254740993123}}`
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		assert.Equal(t, reqBody, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","model":"claude","usage":{"input_tokens":7,"output_tokens":9}}`)
+	}))
+	defer upstream.Close()
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "anthropic-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType:       aiv1alpha1.Anthropic,
+			BaseURL:            upstream.URL,
+			InsecureSkipVerify: true,
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-anthropic", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "anthropic-router",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "anthropic-provider"},
+					},
+				},
+			},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRouter_HandlerFunc_ExternalProviderPassesThroughNon2xx(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":"rate limited"}`)
+	}))
+	defer upstream.Close()
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "openai-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType:       aiv1alpha1.OpenAI,
+			BaseURL:            upstream.URL,
+			InsecureSkipVerify: true,
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ExternalModelProviderName: "openai-provider"},
+					},
+				},
+			},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	reqBody := `{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Contains(t, w.Body.String(), `"error":"rate limited"`)
+	assert.Empty(t, w.Header().Get("Connection"))
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "upstream_response", reason)
+}
+
+func TestRouter_HandlerFunc_ExternalProviderRequestBuildFailure(t *testing.T) {
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "invalid-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType: aiv1alpha1.OpenAI,
+			BaseURL:      "://invalid",
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ExternalModelProviderName: "invalid-provider"}},
+			}},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "provider_request_build", reason)
+	assert.NotContains(t, w.Body.String(), "://invalid")
+}
+
+func TestRouter_HandlerFunc_ExternalProviderResponseForwardingFailure(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"partial":true}`)
+	}))
+	defer upstream.Close()
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+	assert.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+		ObjectMeta: v1.ObjectMeta{Name: "openai-provider", Namespace: "default"},
+		Spec: aiv1alpha1.ExternalModelProviderSpec{
+			ProviderType:       aiv1alpha1.OpenAI,
+			BaseURL:            upstream.URL,
+			InsecureSkipVerify: true,
+		},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-external", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "external-model",
+			Rules: []*aiv1alpha1.Rule{{
+				TargetModels: []*aiv1alpha1.TargetModel{{ExternalModelProviderName: "openai-provider"}},
+			}},
+		},
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"external-model","messages":[{"role":"user","content":"hello"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	reason, ok := c.Get("finishReason")
+	assert.True(t, ok)
+	assert.Equal(t, "response_forwarding", reason)
+}
+
+func TestProxyExternalRequest_AnthropicStreamAggregatesUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude\",\"usage\":{\"input_tokens\":11,\"output_tokens\":1}}}\n")
+		fmt.Fprint(w, "\n")
+		fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":22}}\n")
+		fmt.Fprint(w, "\n")
+	}))
+	defer upstream.Close()
+
+	w := &closeNotifyRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		closeCh:          make(chan bool),
+	}
+	c, _ := gin.CreateTestContext(w)
+	req, err := http.NewRequest(http.MethodPost, upstream.URL, nil)
+	assert.NoError(t, err)
+
+	var got TokenUsage
+	err = proxyExternalRequest(c, req, aiv1alpha1.Anthropic, false, true, "default/anthropic-provider", func(usage TokenUsage) {
+		got = usage
+	})
+	assert.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"message_start"`)
+	assert.Equal(t, 11, got.PromptTokens)
+	assert.Equal(t, 22, got.CompletionTokens)
+	assert.Equal(t, 33, got.TotalTokens)
+}
+
+func TestProxyExternalRequest_OpenAIResponsesStreamAggregatesUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "event: response.created\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n")
+		fmt.Fprint(w, "\n")
+		fmt.Fprint(w, "event: response.completed\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":12,\"output_tokens\":3,\"total_tokens\":15}}}\n")
+		fmt.Fprint(w, "\n")
+	}))
+	defer upstream.Close()
+
+	for _, providerType := range []aiv1alpha1.ExternalProviderType{aiv1alpha1.OpenAI, ""} {
+		providerType := providerType
+		t.Run(fmt.Sprintf("provider type %q", providerType), func(t *testing.T) {
+			w := &closeNotifyRecorder{
+				ResponseRecorder: httptest.NewRecorder(),
+				closeCh:          make(chan bool),
+			}
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			upstreamRequest, err := http.NewRequest(http.MethodPost, upstream.URL, nil)
+			assert.NoError(t, err)
+
+			var got TokenUsage
+			callbackCount := 0
+			err = proxyExternalRequest(c, upstreamRequest, providerType, false, true, "default/openai-provider", func(usage TokenUsage) {
+				got = usage
+				callbackCount++
+			})
+			assert.NoError(t, err)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), "event: response.created")
+			assert.Contains(t, w.Body.String(), "event: response.completed")
+			assert.Contains(t, w.Body.String(), `"type":"response.completed"`)
+			assert.Equal(t, 1, callbackCount)
+			assert.Equal(t, 12, got.PromptTokens)
+			assert.Equal(t, 3, got.CompletionTokens)
+			assert.Equal(t, 15, got.TotalTokens)
+		})
+	}
+}
+
+func TestCopyResponseHeadersPreservesMultipleValues(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	headers := http.Header{}
+	headers.Add("Set-Cookie", "session=first")
+	headers.Add("Set-Cookie", "preference=second")
+
+	copyResponseHeaders(c, headers, false)
+
+	assert.Equal(t, []string{"session=first", "preference=second"}, w.Header().Values("Set-Cookie"))
+}
+
 func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
 	// 1. Setup backend mock server
 	prefillReqs := 0
@@ -964,6 +1573,58 @@ func TestParseModelRequestValidatesModelName(t *testing.T) {
 	}
 }
 
+func TestParseModelRequestReturnsReadableJSONError(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":`))
+
+	modelRequest, err := ParseModelRequest(c)
+
+	assert.Error(t, err)
+	assert.Nil(t, modelRequest)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "unexpected EOF")
+}
+
+func TestParseModelRequestAllowsOnlyOneJSONValue(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantErr    bool
+		wantStatus int
+	}{
+		{
+			name: "trailing whitespace",
+			body: "{\"model\":\"test-model\"} \n\t",
+		},
+		{
+			name:       "second JSON value",
+			body:       `{"model":"test-model"}{"extra":true}`,
+			wantErr:    true,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(tt.body))
+
+			modelRequest, err := ParseModelRequest(c)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, modelRequest)
+				assert.Equal(t, tt.wantStatus, w.Code)
+				assert.Contains(t, w.Body.String(), "invalid request body")
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, "test-model", modelRequest["model"])
+		})
+	}
+}
+
 func TestAccessLogConfigurationFromEnv(t *testing.T) {
 	// Save original environment variables
 	originalEnabled := os.Getenv("ACCESS_LOG_ENABLED")
@@ -1185,6 +1846,8 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	reqBody := `{"model": "retry-model", "prompt": "test prompt for retry path"}`
 	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
 	c.Request.Header.Set("Content-Type", "application/json")
+	accessCtx := accesslog.NewAccessLogContext("retry-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "retry-model")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
 
 	router.HandlerFunc()(c)
 

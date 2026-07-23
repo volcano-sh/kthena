@@ -22,4 +22,4 @@ jobs:
         uses: codespell-project/actions-codespell@v2
         with:
           skip: "*.yaml,*.svg,*.css,*.ai,package-lock.json"
-          ignore_words_list: "Aray,ded,specField"
+          ignore_words_list: "Aray,ded,specField,TE"
