@@ -35,4 +35,6 @@ type OnFlightHooks struct {
 	DecrPrefill func()
 	IncrDecode  func()
 	DecrDecode  func()
+	IncrEncode  func()
+	DecrEncode  func()
 }

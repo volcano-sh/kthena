@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 
+	"github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -145,12 +146,27 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			return err
 		}
 
+		modelServer := s.store.GetModelServer(ctx.ModelServerName)
+		if modelServer == nil {
+			return fmt.Errorf("model server not found: %v", ctx.ModelServerName)
+		}
+		isEPDMode := modelServer.Spec.PipelineMode != nil && *modelServer.Spec.PipelineMode == v1alpha1.PipelineModeEPD
+
+		if isEPDMode && len(ctx.PDGroup.EncodeLabels) == 0 {
+			return fmt.Errorf("EPD mode requires pdGroup.encodeLabels to be configured")
+		}
+
 		klog.V(4).Info("Running score plugins for decode pod")
 		scores := s.RunScorePlugins(decodePods, ctx)
 
 		topNDecodePods := TopNPodInfos(scores, topN)
 		ctx.DecodePods = topNDecodePods
 		prefillPods := make([]*datastore.PodInfo, len(topNDecodePods))
+		var encodePods []*datastore.PodInfo
+		if isEPDMode {
+			encodePods = make([]*datastore.PodInfo, len(topNDecodePods))
+			ctx.EncodePods = encodePods
+		}
 		validPairs := 0
 
 		for i, decodePod := range ctx.DecodePods {
@@ -180,6 +196,26 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				continue
 			}
 			prefillPods[i] = bestPrefillPod[0]
+
+			// Get encode pods for the same PD group as the decode pod (O(1) lookup).
+			// Only for EPD mode. If encode pods are not found or none available for this decode instance,
+			// we skip this tuple and rely on the final validPairs check to fail the scheduling request.
+			if isEPDMode {
+				selectedEncodePods, err := s.store.GetEncodePodsForDecodeGroup(ctx.ModelServerName, decodePodName)
+				if err != nil || len(selectedEncodePods) == 0 {
+					klog.Warningf("encode pods for decode group not found for EPD mode for decode instance %v", decodePodName)
+					continue
+				}
+				klog.V(4).Info("Running score plugins for encode pod")
+				encodeScores := s.RunScorePlugins(selectedEncodePods, ctx)
+				bestEncodePod := TopNPodInfos(encodeScores, 1)
+				if len(bestEncodePod) == 0 {
+					klog.Warningf("no valid encode pods after scoring for EPD mode for decode instance %v", decodePodName)
+					continue
+				}
+				encodePods[i] = bestEncodePod[0]
+			}
+
 			validPairs++
 		}
 		ctx.PrefillPods = prefillPods
