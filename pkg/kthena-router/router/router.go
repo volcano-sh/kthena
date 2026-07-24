@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -140,8 +141,15 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		switch data.EventType {
 		case datastore.EventAdd, datastore.EventUpdate:
 			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
+				loadRateLimiter.DeleteLimiter(data.ModelName)
 				return
 			}
+
+			appliedLimit := loadRateLimiter.GetAppliedLimiter(data.ModelName)
+			if reflect.DeepEqual(appliedLimit, data.ModelRoute.Spec.RateLimit) {
+				return // RateLimit already successfully applied, nothing to do
+			}
+
 			klog.Infof("add or update rate limit for model %s", data.ModelName)
 
 			// Configure the unified rate limiter for this model
