@@ -85,6 +85,72 @@ helm install kthena oci://ghcr.io/volcano-sh/charts/kthena \
   --set networking.kthenaRouter.tls.enabled=true
 ```
 
+### Control-plane Pod Scheduling
+
+The router and controller manager can be scheduled independently by configuring
+standard Kubernetes Pod scheduling fields. For example, the following values
+place both components on dedicated control-plane nodes while spreading replicas
+across zones and hosts:
+
+```yaml
+workload:
+  controllerManager:
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: ""
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: kthena-controller-manager
+                  app.kubernetes.io/instance: kthena
+              topologyKey: kubernetes.io/hostname
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/component: kthena-controller-manager
+            app.kubernetes.io/instance: kthena
+
+networking:
+  kthenaRouter:
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: ""
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: kthena-router
+                  app.kubernetes.io/instance: kthena
+              topologyKey: kubernetes.io/hostname
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/component: kthena-router
+            app.kubernetes.io/instance: kthena
+```
+
+Node taints are managed by the cluster administrator. The Helm chart configures
+the matching Pod-side `tolerations`; it does not add or remove taints on nodes.
+
 ### Common Configuration Parameters
 
 | Parameter                             | Description                                                    | Default |
