@@ -1106,6 +1106,8 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	s.routeMutex.Lock()
 	key := mr.Namespace + "/" + mr.Name
+	_, _, namesToCleanQueue := s.removeModelRouteFromIndexesLocked(key)
+
 	s.routeInfo[key] = &modelRouteInfo{
 		model: mr.Spec.ModelName,
 		loras: mr.Spec.LoraAdapters,
@@ -1168,7 +1170,15 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		}
 	}
 
+	var queuesToClean []string
+	for _, name := range namesToCleanQueue {
+		if len(s.routes[name]) == 0 && len(s.loraRoutes[name]) == 0 {
+			queuesToClean = append(queuesToClean, name)
+		}
+	}
 	s.routeMutex.Unlock()
+
+	s.cleanRequestWaitingQueues(queuesToClean)
 
 	s.triggerCallbacks("ModelRoute", EventData{
 		EventType:  EventUpdate,
@@ -1178,22 +1188,7 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	return nil
 }
 
-func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
-	sort.Slice(routes, func(i, j int) bool {
-		ti, tj := routes[i].CreationTimestamp.Time, routes[j].CreationTimestamp.Time
-		if !ti.Equal(tj) {
-			return ti.Before(tj)
-		}
-		ri, rj := routes[i].ResourceVersion, routes[j].ResourceVersion
-		if ri != rj {
-			return ri < rj
-		}
-		return routes[i].Namespace+"/"+routes[i].Name < routes[j].Namespace+"/"+routes[j].Name
-	})
-}
-
-func (s *store) DeleteModelRoute(namespacedName string) error {
-	s.routeMutex.Lock()
+func (s *store) removeModelRouteFromIndexesLocked(namespacedName string) (string, *aiv1alpha1.ModelRoute, []string) {
 	info := s.routeInfo[namespacedName]
 	var modelName string
 	var deletedRoute *aiv1alpha1.ModelRoute
@@ -1262,11 +1257,11 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 		}
 	}
 
-	delete(s.routeInfo, namespacedName)
-	s.routeMutex.Unlock()
+	return modelName, deletedRoute, namesToCleanQueue
+}
 
-	// Clean up associated waiting queues for both base model and all lora adapters
-	for _, name := range namesToCleanQueue {
+func (s *store) cleanRequestWaitingQueues(names []string) {
+	for _, name := range names {
 		val, _ := s.requestWaitingQueue.LoadAndDelete(name)
 		if val != nil {
 			queue, _ := val.(*RequestPriorityQueue)
@@ -1274,6 +1269,30 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			klog.Infof("deleted waiting queue for model %s", name)
 		}
 	}
+}
+
+func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
+	sort.Slice(routes, func(i, j int) bool {
+		ti, tj := routes[i].CreationTimestamp.Time, routes[j].CreationTimestamp.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		ri, rj := routes[i].ResourceVersion, routes[j].ResourceVersion
+		if ri != rj {
+			return ri < rj
+		}
+		return routes[i].Namespace+"/"+routes[i].Name < routes[j].Namespace+"/"+routes[j].Name
+	})
+}
+
+func (s *store) DeleteModelRoute(namespacedName string) error {
+	s.routeMutex.Lock()
+	modelName, deletedRoute, namesToCleanQueue := s.removeModelRouteFromIndexesLocked(namespacedName)
+	delete(s.routeInfo, namespacedName)
+	s.routeMutex.Unlock()
+
+	// Clean up associated waiting queues for both base model and all lora adapters
+	s.cleanRequestWaitingQueues(namesToCleanQueue)
 
 	// Trigger callbacks outside the lock to avoid potential deadlocks
 	s.triggerCallbacks("ModelRoute", EventData{
