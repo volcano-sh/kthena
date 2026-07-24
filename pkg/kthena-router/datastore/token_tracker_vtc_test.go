@@ -304,3 +304,58 @@ func TestVTCTokenTracker_ConcurrentAccess(t *testing.T) {
 		t.Fatalf("GetRequestCount after concurrent updates = %d, want 20", count)
 	}
 }
+
+func TestVTCTokenTracker_ActiveMinCacheInvalidation(t *testing.T) {
+	tracker := NewInMemoryVTCTokenTracker().(*InMemoryVTCTokenTracker)
+
+	// Step 1: Start bob (counter=0 initially). Active min cache holds bob with valid=true.
+	tracker.OnRequestStart("bob", "model-a")
+	tracker.mu.RLock()
+	minCache, exists := tracker.activeMin["model-a"]
+	if !exists || !minCache.valid || minCache.user != "bob" || minCache.value != 0 {
+		t.Fatalf("expected valid activeMin user=bob, val=0, got exists=%v, valid=%v, user=%s, val=%v", exists, minCache.valid, minCache.user, minCache.value)
+	}
+	tracker.mu.RUnlock()
+
+	// Step 2: Update bob's token count while active. Since bob is the active minimum holder,
+	// increasing his counter invalidates the cache (valid=false) so the next lookup rescans.
+	if err := tracker.UpdateTokenCount("bob", "model-a", 100, 0); err != nil {
+		t.Fatalf("UpdateTokenCount bob error: %v", err)
+	}
+	tracker.mu.RLock()
+	minCache = tracker.activeMin["model-a"]
+	if minCache.valid {
+		t.Fatal("expected activeMin cache to be invalidated when active minimum holder's counter increases")
+	}
+	tracker.mu.RUnlock()
+
+	// Step 3: OnRequestStart for alice. ensureActiveMinLocked rescans active users (bob=100),
+	// lifts alice to 100, and caches alice (100) with valid=true.
+	tracker.OnRequestStart("alice", "model-a")
+	tracker.mu.RLock()
+	minCache = tracker.activeMin["model-a"]
+	if !minCache.valid || minCache.user != "alice" || minCache.value != 100 {
+		t.Fatalf("expected valid activeMin user=alice, val=100, got valid=%v, user=%s, val=%v", minCache.valid, minCache.user, minCache.value)
+	}
+	tracker.mu.RUnlock()
+
+	// Step 4: Non-minimum holder (bob) finishes. Since bob is not the current minimum holder (alice is),
+	// the cache remains valid.
+	tracker.OnRequestFinish("bob", "model-a")
+	tracker.mu.RLock()
+	minCache = tracker.activeMin["model-a"]
+	if !minCache.valid || minCache.user != "alice" {
+		t.Fatalf("expected activeMin cache to remain valid for alice, got valid=%v, user=%s", minCache.valid, minCache.user)
+	}
+	tracker.mu.RUnlock()
+
+	// Step 5: Minimum holder (alice) finishes. Since alice was the cached minimum holder,
+	// OnRequestFinish invalidates the cache (valid=false).
+	tracker.OnRequestFinish("alice", "model-a")
+	tracker.mu.RLock()
+	minCache = tracker.activeMin["model-a"]
+	if minCache.valid {
+		t.Fatal("expected activeMin cache to be invalidated when active minimum holder finishes")
+	}
+	tracker.mu.RUnlock()
+}
