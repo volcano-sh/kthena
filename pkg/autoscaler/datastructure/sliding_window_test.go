@@ -332,3 +332,30 @@ func Test_snapshotSlidingWindowWithZeroTTL(t *testing.T) {
 	_, ok = window.GetLastUnfreshSnapshot()
 	assert.False(ok)
 }
+
+func Test_snapshotSlidingWindowGetLastSnapshot(t *testing.T) {
+	assert := assert.New(t)
+
+	window := NewSnapshotSlidingWindow[string](10000, 15000)
+
+	_, ok := window.GetLastSnapshot()
+	assert.False(ok)
+
+	window.getCurrentTimestamp = dateFunc(1)
+	window.Append("foo")
+
+	last, ok := window.GetLastSnapshot()
+	assert.True(ok)
+	assert.Equal("foo", last)
+
+	window.getCurrentTimestamp = dateFunc(3)
+	window.Append("bar")
+
+	last, ok = window.GetLastSnapshot()
+	assert.True(ok)
+	assert.Equal("bar", last)
+
+	window.getCurrentTimestamp = dateFunc(19)
+	_, ok = window.GetLastSnapshot()
+	assert.False(ok)
+}
