@@ -7,7 +7,7 @@ Unlike traditional microservices that use request count or connection-based rate
 Kthena Router provides powerful rate-limiting capabilities to control the traffic flow to your backend models. This is essential for preventing service overload, managing costs, and ensuring fair usage. Rate limiting is configured directly within the **ModelRoute** Custom Resource (CR).
 
 The router supports two main types of rate limiting:
-- **Local Rate Limiting**: Enforces limits on a per-router-instance basis. It\'s simple to configure and effective for basic load protection.
+- **Local Rate Limiting**: Enforces limits on a per-router-instance basis. It's simple to configure and effective for basic load protection.
 - **Global Rate Limiting**: Enforces a shared limit across all router instances, using a central store like Redis. This is ideal for providing consistent limits in a scaled-out environment.
 
 Limits are based on the number of input/output tokens over a specific time window (second, minute, hour, day, or month).
@@ -89,7 +89,7 @@ curl http://$ROUTER_IP/v1/completions \
 "input token rate limit exceeded"
 
 # 5. Clean up
-kubectl delete -f https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRouteWithRateLimit.yaml
+kubectl delete -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelRouteWithRateLimit.yaml
 ```
 
 ### 2. Global Rate Limiting
@@ -135,10 +135,10 @@ The test process is similar to local rate limiting. Even if your requests are ha
 
 ```bash
 # 1. Deploy Redis service
-kubectl apply -f https://github.com/volcano-sh/kthena/blob/main/examples/redis/redis-standalone.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/redis/redis-standalone.yaml
 
 # 2. Apply the ModelRoute yaml above
-kubectl apply -f https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRouteWithGlobalRateLimit.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelRouteWithGlobalRateLimit.yaml
 
 # 3. Scale up the replicas of the router to 3 to demonstrate global rate limiting
 kubectl scale deployment kthena-router -n kthena-system --replicas=3
@@ -160,7 +160,7 @@ curl http://$ROUTER_IP/v1/completions \
 "input token rate limit exceeded"
 
 # 6. Clean up
-kubectl delete -f https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRouteWithGlobalRateLimit.yaml
+kubectl delete -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelRouteWithGlobalRateLimit.yaml
 ```
 
 By leveraging local and global rate limiting, Kthena gives you fine-grained control over your AI service traffic, enabling robust, scalable, and cost-effective model deployments.
