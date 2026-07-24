@@ -974,18 +974,15 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 
 	// Find the maximum ordinal in existing roles.
 	// Since roleList is already sorted in ascending order by ordinal,
-	// we can track maxOrdinal while building existingOrdinals.
+	// we can directly get the maxOrdinal from the last element.
 	maxOrdinal := -1
 	existingOrdinals := make(map[int]bool)
 	for _, role := range roleList {
-		if role.Status == datastore.RoleDeleting {
-			continue
-		}
 		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
 		existingOrdinals[ordinal] = true
-		if ordinal > maxOrdinal {
-			maxOrdinal = ordinal
-		}
+	}
+	if len(roleList) > 0 {
+		_, maxOrdinal = utils.GetParentNameAndOrdinal(roleList[len(roleList)-1].Name)
 	}
 
 	// Role needs to scale up, and the ServingGroup status needs to be set to Scaling

@@ -2295,6 +2295,7 @@ func TestScaleUpRoles(t *testing.T) {
 		name string
 
 		existingIndices    []int // Indices of existing Roles
+		deletingIndices    []int // Subset of existingIndices that are RoleDeleting
 		expectedCount      int   // Target count for scale up
 		expectedNewIndices []int // Expected indices for newly created roles
 
@@ -2349,6 +2350,15 @@ func TestScaleUpRoles(t *testing.T) {
 			expectedNewIndices: []int{1, 2, 3, 4},
 			expectNoCreation:   false,
 		},
+		{
+			// RoleDeleting ordinals must reserve their index so scale-up does not recreate them.
+			name:               "scale up reserves RoleDeleting ordinals",
+			existingIndices:    []int{0, 1},
+			deletingIndices:    []int{1},
+			expectedCount:      3,
+			expectedNewIndices: []int{2},
+			expectNoCreation:   false,
+		},
 	}
 
 	for idx, tt := range tests {
@@ -2397,17 +2407,32 @@ func TestScaleUpRoles(t *testing.T) {
 				},
 			}
 
+			deletingSet := make(map[int]bool, len(tt.deletingIndices))
+			for _, ordinal := range tt.deletingIndices {
+				deletingSet[ordinal] = true
+			}
+
 			// Pre-populate the store with ServingGroup and Roles
-			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
+			nsn := utils.GetNamespaceName(ms)
+			controller.store.AddServingGroup(nsn, 0, "test-revision")
 			for _, ordinal := range tt.existingIndices {
-				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal), "test-revision", "test-roleTemplateHash")
+				roleID := utils.GenerateRoleID("prefill", ordinal)
+				controller.store.AddRole(nsn, groupName, "prefill", roleID, "test-revision", "test-roleTemplateHash")
+				if deletingSet[ordinal] {
+					assert.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "prefill", roleID, datastore.RoleDeleting))
+				}
 			}
 
 			// Build the roleList to pass to scaleUpRoles
 			existingRoles := make([]datastore.Role, len(tt.existingIndices))
 			for i, ordinal := range tt.existingIndices {
+				status := datastore.RoleCreating
+				if deletingSet[ordinal] {
+					status = datastore.RoleDeleting
+				}
 				existingRoles[i] = datastore.Role{
-					Name: utils.GenerateRoleID("prefill", ordinal),
+					Name:   utils.GenerateRoleID("prefill", ordinal),
+					Status: status,
 				}
 			}
 
@@ -2417,7 +2442,7 @@ func TestScaleUpRoles(t *testing.T) {
 			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision")
 
 			// Verify the results
-			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, "prefill")
+			roles, err := controller.store.GetRoleList(nsn, groupName, "prefill")
 			assert.NoError(t, err)
 
 			if tt.expectNoCreation {
@@ -2435,6 +2460,13 @@ func TestScaleUpRoles(t *testing.T) {
 						}
 					}
 					assert.True(t, found, "Expected role %s to be created", expectedName)
+				}
+
+				// RoleDeleting ordinals must stay reserved and not be recreated.
+				for _, ordinal := range tt.deletingIndices {
+					roleID := utils.GenerateRoleID("prefill", ordinal)
+					assert.Equal(t, datastore.RoleDeleting, controller.store.GetRoleStatus(nsn, groupName, "prefill", roleID),
+						"RoleDeleting ordinal %d should remain reserved", ordinal)
 				}
 
 				// Verify total roles count
