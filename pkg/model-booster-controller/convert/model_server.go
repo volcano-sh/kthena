@@ -63,6 +63,9 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 			OwnerReferences: []metav1.OwnerReference{
 				utils.NewModelOwnerRef(model),
 			},
+			Annotations: map[string]string{
+				"kthena.volcano.sh/model-repo-id": backend.ModelURI,
+			},
 		},
 		Spec: networking.ModelServerSpec{
 			Model:           &servedModelName,

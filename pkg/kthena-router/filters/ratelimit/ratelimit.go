@@ -19,6 +19,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -90,20 +91,39 @@ func (l *LocalLimiter) Tokens() float64 {
 
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
 func NewTokenRateLimiter() *TokenRateLimiter {
+	var t tokenizer.Tokenizer
+	deployment := os.Getenv("TOKENIZER_DEPLOYMENT")
+	if deployment == "" {
+		t = tokenizer.NewSimpleEstimateTokenizer()
+	} else {
+		t = tokenizer.NewLocalTokenizer(tokenizer.TokenizerConfig{Deployment: deployment})
+	}
 	return &TokenRateLimiter{
 		inputLimiter:  make(map[string]Limiter),
 		outputLimiter: make(map[string]Limiter),
-		tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
+		tokenizer:     t,
 	}
 }
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
-func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
+func (r *TokenRateLimiter) RateLimit(model, prompt string, tokencount int) error {
+	var (
+		tokens int
+		err    error
+	)
 	// Estimate input tokens
-	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
-	if err != nil {
-		klog.Errorf("failed to calculate token number: %v", err)
-		tokens = len(prompt) / 4 // fallback estimation
+	if tokencount != 0 {
+		tokens = tokencount
+	} else {
+		_, tokens, err = r.tokenizer.Encode(model, prompt)
+		if err != nil {
+			klog.Warningf("failed to calculate token number via tokenizer: %v. Falling back to heuristic estimation.", err)
+			estimator := tokenizer.NewSimpleEstimateTokenizer()
+			_, tokens, err = estimator.Encode(model, prompt)
+			if err != nil {
+				klog.Errorf("failed to calculate token number via heuristic estimator: %v", err)
+			}
+		}
 	}
 
 	r.mutex.RLock()

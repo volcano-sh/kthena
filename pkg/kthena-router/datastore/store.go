@@ -132,8 +132,9 @@ type EventData struct {
 	Pod       types.NamespacedName
 	Gateway   types.NamespacedName
 
-	ModelName  string
-	ModelRoute *aiv1alpha1.ModelRoute
+	ModelName   string
+	ModelRoute  *aiv1alpha1.ModelRoute
+	ModelServer *aiv1alpha1.ModelServer
 }
 
 // CallbackFunc is the type of function that can be registered as a callback
@@ -862,6 +863,10 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
+	s.triggerCallbacks("ModelServer", EventData{
+		EventType:   EventUpdate,
+		ModelServer: ms,
+	})
 	return nil
 }
 
@@ -879,6 +884,7 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 			podInfo.RemoveModelServer(ms)
 			if podInfo.GetModelServerCount() == 0 {
 				s.pods.Delete(podName)
+				s.triggerCallbacks("ModelServer", EventData{EventType: EventDelete, ModelServer: modelServerObj.modelServer})
 			}
 		} else {
 			klog.Warningf("pod %s not found", podName)

@@ -133,8 +133,10 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	// Use global metrics instance
 	metricsInstance := metrics.DefaultMetrics
 
+	deploymenttype := os.Getenv("TOKENIZER_DEPLOYMENT")
+
 	// Initialize tokenizer
-	tokenizerInstance := tokenizer.NewSimpleEstimateTokenizer()
+	tokenizerInstance := tokenizer.NewLocalTokenizer(tokenizer.TokenizerConfig{Deployment: deploymenttype})
 
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
 		switch data.EventType {
@@ -152,6 +154,47 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		case datastore.EventDelete:
 			klog.Infof("delete rate limit for model %s", data.ModelName)
 			loadRateLimiter.DeleteLimiter(data.ModelName)
+		}
+	})
+
+	store.RegisterCallback("ModelServer", func(data datastore.EventData) {
+		if data.ModelServer == nil {
+			return
+		}
+		var modelName string
+		if data.ModelServer.Spec.Model != nil {
+			modelName = *data.ModelServer.Spec.Model
+		}
+
+		switch data.EventType {
+		case datastore.EventAdd, datastore.EventUpdate:
+			modelURI := data.ModelServer.Annotations["kthena.volcano.sh/model-repo-id"]
+			if modelURI == "" {
+				klog.Errorf("Skipping tokenizer load for ModelServer %s/%s: annotation 'kthena.volcano.sh/model-repo-id' is missing or empty", data.ModelServer.Namespace, data.ModelServer.Name)
+				return
+			}
+
+			klog.Infof("Loading tokenizer for ModelServer %s (URI: %s)", modelName, modelURI)
+
+			go func() {
+				for i := 0; i < 10; i++ {
+					if err := tokenizerInstance.Load(modelName, modelURI); err != nil {
+						klog.Errorf("Failed to load tokenizer for ModelServer %s: %v", modelName, err)
+						time.Sleep(5 * time.Second) // Retry after a delay
+					} else {
+						break
+					}
+				}
+			}()
+
+		case datastore.EventDelete:
+			klog.Infof("Unloading tokenizer for ModelServer %s", modelName)
+
+			go func() {
+				if err := tokenizerInstance.Unload(modelName); err != nil {
+					klog.Errorf("Failed to unload tokenizer for ModelServer %s: %v", modelName, err)
+				}
+			}()
 		}
 	})
 
@@ -322,24 +365,25 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		c.Set(PromptKey, prompt)
 		promptStr := utils.GetPromptString(prompt)
 
-		// Calculate input tokens for metrics using tokenizer
-		inputTokens, err := r.tokenizer.CalculateTokenNum(promptStr)
+		// Calculate tokens and token ids ffor rate limiting and kvcache key generation.
+		inputTokens, tokencount, err := r.tokenizer.Encode(modelName, promptStr)
 		if err != nil {
 			klog.Errorf("failed to calculate token number: %v", err)
-			inputTokens = len(promptStr) / 4 // fallback estimation
 		}
 
+		c.Set("inputTokens", inputTokens)
+
 		// Calculate and set input tokens for access log
-		accesslog.SetTokenCounts(c, inputTokens, 0)
+		accesslog.SetTokenCounts(c, tokencount, 0)
 
 		// Mark end of request processing phase
 		accesslog.MarkRequestProcessingEnd(c)
 
 		// Record input tokens immediately
-		metricsRecorder.RecordInputTokens(inputTokens)
+		metricsRecorder.RecordInputTokens(tokencount)
 
 		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
+		if err := r.loadRateLimiter.RateLimit(modelName, promptStr, tokencount); err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string
@@ -538,6 +582,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	if sessionHeader != "" {
 		sessionID = c.Request.Header.Get(sessionHeader)
 	}
+	var inputTokens []uint32
+	if cached, exists := c.Get("inputTokens"); exists {
+		if tokens, ok := cached.([]uint32); ok {
+			inputTokens = tokens
+		}
+	}
 
 	ctx := &framework.Context{
 		Model:           modelName,
@@ -546,6 +596,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		ModelServerName: modelServerName,
 		PDGroup:         pdGroup,
 		MetricsRecorder: metricsRecorder,
+		InputTokens:     inputTokens,
 	}
 
 	err = r.scheduler.Schedule(ctx, pods)

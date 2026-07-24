@@ -48,6 +48,8 @@ type Context struct {
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
+
+	InputTokens []uint32
 }
 
 type ScorePlugin interface {

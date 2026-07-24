@@ -1,0 +1,92 @@
+# Copyright The Volcano Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+import asyncio
+from fastapi import APIRouter, HTTPException
+from .schema import EncodeRequest, LoadRequest, UnLoadRequest
+from .downloader import TokenizerManager, TokenizerDownloader
+import logging
+
+router = APIRouter()
+
+logger = logging.getLogger(__name__)
+
+manager = TokenizerManager()
+downloader = TokenizerDownloader()
+
+
+@router.post("/v1/encode")
+def encode(req: EncodeRequest):
+    encoded, token_count = encoder(req.model_server_id,req.text )
+
+
+    return {
+        "token_ids": encoded.ids,
+        "token_count": token_count
+    }
+
+
+@router.post("/v1/load")
+async def load(req: LoadRequest):
+    loop = asyncio.get_event_loop()
+
+    try:
+        tokenizer = await loop.run_in_executor(None,downloader.download_tokenizer,req.model_repo_id,req.modelrevision)
+        manager.load_tokenizer(req.model_server_id,tokenizer)
+
+    except Exception as e:
+        logger.exception(f"Failed to load tokenizer for {req.model_server_id}")
+
+        raise HTTPException(status_code=500,detail=f"Failed to load tokenizer: {e}")
+
+    return {
+        "message": "Tokenizer loaded successfully",
+        "model_server_id": req.model_server_id,
+        "loaded": True
+    }
+
+
+@router.post("/v1/unload")
+async def unload(req: UnLoadRequest):
+    manager.unload_tokenizer(req.model_server_id)
+
+    return {
+        "message": "Tokenizer unloaded successfully",
+        "model_server_id": req.model_server_id
+    }
+
+
+@router.get("/v1/list")
+async def list_tokenizers():
+    return {
+        "message": "List of loaded tokenizers",
+        "tokenizers": manager.list_tokenizers()
+    }
+
+def encoder(model_server_id: str, text: str):
+    tokenizer = manager.get_tokenizer(model_server_id)
+
+    if tokenizer is None:
+        raise HTTPException(status_code=404,detail=f"Tokenizer '{model_server_id}' not found")
+
+    try:
+        encoded = tokenizer.encode(text)
+
+    except Exception as e:
+        logger.exception(f"Encoding failed for tokenizer '{model_server_id}'")
+        raise HTTPException(status_code=500,detail=f"Tokenizer encoding failed: {e}")
+
+    return encoded, len(encoded.ids)
+

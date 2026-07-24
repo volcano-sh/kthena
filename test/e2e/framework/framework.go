@@ -82,6 +82,7 @@ func InstallKthena(cfg *KthenaConfig) error {
 		"--set", fmt.Sprintf("workload.controllerManager.image.tag=%s", cfg.ImageTag),
 		"--set", fmt.Sprintf("workload.controllerManager.downloaderImage.tag=%s", cfg.ImageTag),
 		"--set", fmt.Sprintf("workload.controllerManager.runtimeImage.tag=%s", cfg.ImageTag),
+		"--set", "networking.kthenaRouter.tokenizer.deployment=",
 	}
 
 	cmd := exec.Command("helm", args...)

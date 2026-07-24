@@ -17,19 +17,24 @@ limitations under the License.
 package tokenizer
 
 import (
-	"github.com/pkoukk/tiktoken-go"
-	tiktokenloader "github.com/pkoukk/tiktoken-go-loader"
+	"net/http"
 )
 
-const encodingName = "cl100k_base"
+const DefaultTokenizerEndpoint = "http://kthena-tokenizer:8080"
 
-type TickToken struct{}
-
-func (t *TickToken) CalculateTokenNum(prompt string) (int, error) {
-	tiktoken.SetBpeLoader(tiktokenloader.NewOfflineLoader())
-	encoding, err := tiktoken.GetEncoding(encodingName)
-	if err != nil {
-		return 0, err
+// NewHTTPClient creates a tokenizer client communicating over
+// HTTP with the tokenizer sidecar.
+func NewHTTPClient(endpoint string) *Client {
+	if endpoint == "" {
+		endpoint = DefaultTokenizerEndpoint
 	}
-	return len(encoding.Encode(prompt, nil, nil)), nil
+
+	return &Client{
+		endpoint: endpoint,
+		client:   &http.Client{},
+	}
+}
+
+func NewClient(endpoint string) *Client {
+	return NewHTTPClient(endpoint)
 }

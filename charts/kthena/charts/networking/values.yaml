@@ -96,6 +96,18 @@ kthenaRouter:
   # kubeAPIBurst is the burst to use while talking with kubernetes apiserver
   # If 0 or not specified, uses default value (10)
   kubeAPIBurst: 0
+  # tokenizer configuration for token counting
+  tokenizer:
+    # -- Deployment mode: "sidecar" or "independent".
+    deployment: sidecar
+    image:
+      # -- Image repository for the tokenizer.
+      repository: ghcr.io/volcano-sh/kthena-tokenizer
+      # -- Image tag for the tokenizer.
+      tag: latest
+      # -- Image pull policy for the tokenizer.
+      pullPolicy: IfNotPresent
+
 
 webhook:
   enabled: true

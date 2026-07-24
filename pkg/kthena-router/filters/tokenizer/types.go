@@ -16,8 +16,22 @@ limitations under the License.
 
 package tokenizer
 
-type Tokenizer interface {
-	Load(modelServerID, modelRepoID string) error
-	Unload(modelServerID string) error
-	Encode(modelServerID, prompt string) ([]uint32, int, error)
+type LoadRequest struct {
+	ModelName   string `json:"model_name"`
+	ModelrepoID string `json:"model_repo_id"`
+}
+
+type UnloadRequest struct {
+	ModelName string `json:"model_name"`
+}
+
+type EncodeRequest struct {
+	ModelName    string `json:"model_name"`
+	Text         string `json:"text"`
+	ReturnTokens bool   `json:"return_tokens"`
+}
+
+type EncodeResponse struct {
+	TokenCount int   `json:"token_count"`
+	TokenIds   []int `json:"token_ids"`
 }

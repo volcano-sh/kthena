@@ -32,12 +32,14 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/tokenization"
@@ -93,6 +95,7 @@ type KVCacheAware struct {
 	redisClient      *redis.Client
 	processor        *TokenBlockProcessor
 	tokenizerManager *tokenization.TokenizerManager
+	localTokenizer   tokenizer.Tokenizer
 	gcCursor         uint64
 }
 
@@ -176,6 +179,7 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		redisClient:      redisClient,
 		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
 		tokenizerManager: manager,
+		localTokenizer:   tokenizer.NewLocalTokenizer(tokenizer.TokenizerConfig{Deployment: os.Getenv("TOKENIZER_DEPLOYMENT")}),
 	}
 	plugin.startGC()
 	return plugin
@@ -186,6 +190,17 @@ func (t *KVCacheAware) Name() string {
 }
 
 func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods []*datastore.PodInfo) ([]uint32, error) {
+	if len(ctx.InputTokens) > 0 {
+		klog.V(4).Infof("KVCacheAware: reusing pre-computed tokens from router context for model=%q , %v", ctx.Model, ctx.InputTokens)
+		return ctx.InputTokens, nil
+	}
+	if t.localTokenizer != nil {
+		tokens, _, err := t.localTokenizer.Encode(ctx.Model, ctx.Prompt.Text)
+		if err == nil {
+			klog.V(4).Infof("KVCacheAware: using local tokenizer for model=%q, tokens=%v", ctx.Model, tokens)
+			return tokens, nil
+		}
+	}
 	if t.tokenizerManager == nil {
 		return nil, fmt.Errorf("tokenizer manager not available")
 	}
