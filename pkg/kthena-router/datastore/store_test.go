@@ -412,6 +412,17 @@ func TestStoreAddOrUpdatePod(t *testing.T) {
 		ms2Info := value.(*modelServer)
 		assert.Equal(t, ms2Info.pods.Len(), 0, "model server 2 should not reference the pod")
 	}
+
+	err = s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{})
+	assert.NoError(t, err)
+	if value, ok := s.pods.Load(podName); ok {
+		podInfo := value.(*PodInfo)
+		assert.Equal(t, 0, podInfo.modelServer.Len(), "pod should not reference any model servers")
+	}
+	if value, ok := s.modelServer.Load(utils.GetNamespaceName(ms1)); ok {
+		ms1Info := value.(*modelServer)
+		assert.Equal(t, 0, ms1Info.pods.Len(), "model server 1 should not reference the pod")
+	}
 }
 
 func TestStoreDeletePod(t *testing.T) {
@@ -485,6 +496,7 @@ func TestStoreDeletePod_MultiModelServers(t *testing.T) {
 func TestStoreAddOrUpdateModelServer(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
+		pods:        sync.Map{},
 	}
 	ms := &aiv1alpha1.ModelServer{
 		ObjectMeta: metav1.ObjectMeta{
@@ -514,6 +526,22 @@ func TestStoreAddOrUpdateModelServer(t *testing.T) {
 		msInfo := value.(*modelServer)
 		assert.True(t, msInfo.pods.Contains(types.NamespacedName{Namespace: "default", Name: "pod2"}))
 		assert.False(t, msInfo.pods.Contains(types.NamespacedName{Namespace: "default", Name: "pod1"}))
+	}
+
+	pod2Name := types.NamespacedName{Namespace: "default", Name: "pod2"}
+	podInfo := &PodInfo{
+		Pod:         &corev1.Pod{},
+		modelServer: sets.New[types.NamespacedName](msName),
+		models:      sets.New[string](),
+	}
+	s.pods.Store(pod2Name, podInfo)
+
+	err = s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]())
+	assert.NoError(t, err)
+	if value, ok := s.modelServer.Load(msName); ok {
+		msInfo := value.(*modelServer)
+		assert.True(t, msInfo.pods.IsEmpty())
+		assert.False(t, podInfo.HasModelServer(msName))
 	}
 }
 

@@ -286,10 +286,11 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 		servers = append(servers, item)
 	}
 
-	if len(servers) > 0 {
-		if err := c.store.AddOrUpdatePod(pod, servers); err != nil {
-			return fmt.Errorf("failed to add or update pod %s/%s in data store: %v", pod.Namespace, pod.Name, err)
-		}
+	if len(servers) == 0 && c.store.GetPodInfo(utils.GetNamespaceName(pod)) == nil {
+		return nil
+	}
+	if err := c.store.AddOrUpdatePod(pod, servers); err != nil {
+		return fmt.Errorf("failed to add or update pod %s/%s in data store: %v", pod.Namespace, pod.Name, err)
 	}
 
 	return nil
