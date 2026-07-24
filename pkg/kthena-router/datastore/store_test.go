@@ -158,6 +158,132 @@ func TestCreateTokenTrackerRejectsInvalidWeights(t *testing.T) {
 	}
 }
 
+func TestCreateTokenTrackerFairnessMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		wantType TokenTracker
+	}{
+		{
+			name:     "unset defaults to sliding window",
+			mode:     "",
+			wantType: &InMemorySlidingWindowTokenTracker{},
+		},
+		{
+			name:     "explicit window",
+			mode:     "window",
+			wantType: &InMemorySlidingWindowTokenTracker{},
+		},
+		{
+			name:     "vtc",
+			mode:     "vtc",
+			wantType: &InMemoryVTCTokenTracker{},
+		},
+		{
+			name:     "invalid value falls back to sliding window",
+			mode:     "bogus",
+			wantType: &InMemorySlidingWindowTokenTracker{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.mode == "" {
+				t.Setenv("FAIRNESS_MODE", "")
+			} else {
+				t.Setenv("FAIRNESS_MODE", tt.mode)
+			}
+			tracker := createTokenTracker()
+
+			switch tt.wantType.(type) {
+			case *InMemoryVTCTokenTracker:
+				if _, ok := tracker.(*InMemoryVTCTokenTracker); !ok {
+					t.Fatalf("expected *InMemoryVTCTokenTracker, got %T", tracker)
+				}
+			default:
+				if _, ok := tracker.(*InMemorySlidingWindowTokenTracker); !ok {
+					t.Fatalf("expected *InMemorySlidingWindowTokenTracker, got %T", tracker)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateVTCTokenTrackerRejectsInvalidWeights(t *testing.T) {
+	t.Setenv("FAIRNESS_MODE", "vtc")
+	t.Setenv("FAIRNESS_INPUT_TOKEN_WEIGHT", "NaN")
+	t.Setenv("FAIRNESS_OUTPUT_TOKEN_WEIGHT", strconv.FormatFloat(math.Inf(1), 'f', -1, 64))
+
+	tracker := createTokenTracker().(*InMemoryVTCTokenTracker)
+	if tracker.inputTokenWeight != defaultInputTokenWeight {
+		t.Fatalf("Expected default input token weight %v, got %v", defaultInputTokenWeight, tracker.inputTokenWeight)
+	}
+	if tracker.outputTokenWeight != defaultOutputTokenWeight {
+		t.Fatalf("Expected default output token weight %v, got %v", defaultOutputTokenWeight, tracker.outputTokenWeight)
+	}
+
+	t.Setenv("FAIRNESS_INPUT_TOKEN_WEIGHT", "1.5")
+	t.Setenv("FAIRNESS_OUTPUT_TOKEN_WEIGHT", "-2")
+
+	tracker = createTokenTracker().(*InMemoryVTCTokenTracker)
+	if tracker.inputTokenWeight != 1.5 {
+		t.Fatalf("Expected configured input token weight 1.5, got %v", tracker.inputTokenWeight)
+	}
+	if tracker.outputTokenWeight != defaultOutputTokenWeight {
+		t.Fatalf("Expected default output token weight for negative value, got %v", tracker.outputTokenWeight)
+	}
+}
+
+func TestCreateVTCTokenTrackerIdleTTL(t *testing.T) {
+	t.Setenv("FAIRNESS_MODE", "vtc")
+
+	tests := []struct {
+		name    string
+		ttl     string
+		wantTTL time.Duration
+	}{
+		{
+			name:    "unset uses default",
+			ttl:     "",
+			wantTTL: defaultVTCIdleTTL,
+		},
+		{
+			name:    "valid override applied",
+			ttl:     "10m",
+			wantTTL: 10 * time.Minute,
+		},
+		{
+			name:    "unparsable value falls back to default",
+			ttl:     "not-a-duration",
+			wantTTL: defaultVTCIdleTTL,
+		},
+		{
+			name:    "zero falls back to default",
+			ttl:     "0s",
+			wantTTL: defaultVTCIdleTTL,
+		},
+		{
+			name:    "negative falls back to default",
+			ttl:     "-1m",
+			wantTTL: defaultVTCIdleTTL,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.ttl == "" {
+				t.Setenv("FAIRNESS_VTC_IDLE_TTL", "")
+			} else {
+				t.Setenv("FAIRNESS_VTC_IDLE_TTL", tt.ttl)
+			}
+			tracker := createTokenTracker().(*InMemoryVTCTokenTracker)
+			if tracker.idleTTL != tt.wantTTL {
+				t.Fatalf("idleTTL = %v, want %v", tracker.idleTTL, tt.wantTTL)
+			}
+		})
+	}
+}
+
 func Test_updateHistogramMetrics(t *testing.T) {
 	sum1 := float64(2)
 	count1 := uint64(2)

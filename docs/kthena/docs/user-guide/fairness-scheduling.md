@@ -24,9 +24,18 @@ The queue uses these rules:
 
 Fairness is enforced **per model**. Heavy usage on one model does not currently reduce a user's priority on a different model.
 
+## Fairness Modes
+
+The router supports two token-tracking strategies, selected with `FAIRNESS_MODE`:
+
+- **`window`** (default): tracks usage in a sliding time window per `(user, model)` pair. Usage naturally decays as it falls outside the window. This is the original tracker described below.
+- **`vtc`**: tracks a cumulative Virtual Token Counter per `(user, model)` pair, based on the VTC algorithm from the [S-LoRA fairness paper](https://arxiv.org/abs/2401.00588). Instead of a time window, each user's counter only grows with usage, and the queue prioritizes the lowest counter. Without correction, a user who goes idle for a while would rejoin the queue with a stale, low counter and unfairly jump ahead of users who kept sending requests the whole time. To prevent that, a user's counter is raised (never lowered) to the current minimum among active users the moment they re-enter the queue after being idle. To prevent unbounded memory growth in long-running routers with high user cardinality, idle entries (no in-flight requests) are evicted after `FAIRNESS_VTC_IDLE_TTL` (default 30m), which reclaims memory and resets accumulated usage history for users who remain idle past the TTL.
+
+`vtc` is useful when recent-usage decay isn't the fairness property you want, for example when you want a long-lived, session-independent measure of how much of a model's capacity a user has consumed. Both modes are configured with the same `FAIRNESS_INPUT_TOKEN_WEIGHT` / `FAIRNESS_OUTPUT_TOKEN_WEIGHT` variables and plug into the same priority queue and metrics.
+
 ## How Priority Is Calculated
 
-The fairness scheduler tracks recent usage in a sliding window per `(user, model)` pair.
+The fairness scheduler tracks usage per `(user, model)` pair, either recent usage in a sliding window (`window` mode) or a cumulative, non-decaying counter (`vtc` mode), depending on `FAIRNESS_MODE`.
 
 First, the token tracker builds weighted historical usage:
 
@@ -124,7 +133,9 @@ env:
 | Environment Variable           | Purpose                                               | Default              | Notes                                                                                                            |
 | ------------------------------ | ----------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `ENABLE_FAIRNESS_SCHEDULING`   | Enables fairness scheduling in the router             | `false`              | Global feature switch. Mutually exclusive with `ENABLE_SESSION_BOOST`                                            |
-| `FAIRNESS_WINDOW_SIZE`         | Sliding window used to track recent usage             | runtime default `5m` | The Helm chart default sets this to `1h` when fairness is enabled                                                |
+| `FAIRNESS_MODE`                | Token-tracking strategy: `window` or `vtc`            | `window`             | See [Fairness Modes](#fairness-modes). Invalid values fall back to `window`                                       |
+| `FAIRNESS_WINDOW_SIZE`         | Sliding window used to track recent usage             | runtime default `5m` | Only applies when `FAIRNESS_MODE=window`. The Helm chart default sets this to `1h` when fairness is enabled       |
+| `FAIRNESS_VTC_IDLE_TTL`        | How long an idle user/model entry is retained before eviction | `30m`         | Only applies when `FAIRNESS_MODE=vtc`. Active entries are never evicted. Reclaims memory and resets usage history for users idle past TTL. Non-positive or unparsable values fall back to the default |
 | `FAIRNESS_INPUT_TOKEN_WEIGHT`  | Weight applied to input tokens when recording usage   | `1.0`                | Used by the token tracker                                                                                        |
 | `FAIRNESS_OUTPUT_TOKEN_WEIGHT` | Weight applied to output tokens when recording usage  | `2.0`                | Used by the token tracker                                                                                        |
 | `FAIRNESS_QUEUE_TIMEOUT`       | Maximum time a request may wait in the fairness queue | `60s`                | Waiting longer returns a timeout (504) to the client. Applies only to the user-fairness queue, not session boost |
