@@ -70,7 +70,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	if err := plugincontext.SetupPluginComponents(testCtx.KubeClient, testCtx.KthenaClient, testNamespace); err != nil {
+	if err := plugincontext.SetupPluginComponents(testCtx.KubeClient, testCtx.KthenaClient, testNamespace, kthenaNamespace); err != nil {
 		fmt.Printf("Failed to setup plugin components: %v\n", err)
 		_ = testCtx.CleanupCommonComponents()
 		_ = testCtx.DeleteTestNamespace()
