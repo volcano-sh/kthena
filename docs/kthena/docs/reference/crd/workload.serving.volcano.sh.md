@@ -677,7 +677,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `roles` _string array_ | Roles limits the plugin to the specified role names. |  |  |
-| `target` _[PluginTarget](#plugintarget)_ | Target limits the plugin to specific pod target (Entry/Worker/All).<br />kubebuilder:default=All<br />kubebuilder:validation:Enum=\{All,Entry,Worker\} |  |  |
+| `target` _[PluginTarget](#plugintarget)_ | Target limits the plugin to specific pod target (Entry/Worker/All). | All | Enum: [All Entry Worker] <br /> |
 
 
 #### PluginSpec

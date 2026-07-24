@@ -67,10 +67,13 @@ spec:
                             type: string
                           type: array
                         target:
-                          description: |-
-                            Target limits the plugin to specific pod target (Entry/Worker/All).
-                            kubebuilder:default=All
-                            kubebuilder:validation:Enum={All,Entry,Worker}
+                          default: All
+                          description: Target limits the plugin to specific pod target
+                            (Entry/Worker/All).
+                          enum:
+                          - All
+                          - Entry
+                          - Worker
                           type: string
                       type: object
                     type:
