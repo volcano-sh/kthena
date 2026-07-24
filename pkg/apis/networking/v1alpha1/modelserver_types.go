@@ -110,6 +110,17 @@ const (
 	ConnectorTypeMoonCake KVConnectorType = "mooncake" // Indicates `MoonCakeConnector` in vllm-ascend
 )
 
+// ModelServerConditionType is the type of a status condition on a ModelServer.
+type ModelServerConditionType string
+
+const (
+	// ModelServerConditionReady indicates at least one ready pod is registered in the router store.
+	ModelServerConditionReady ModelServerConditionType = "Ready"
+
+	// ModelServerConditionAllPodsReady indicates every matched pod is ready and registered in the router store.
+	ModelServerConditionAllPodsReady ModelServerConditionType = "AllPodsReady"
+)
+
 // KVConnectorSpec defines KV connector configuration for PD disaggregated routing
 type KVConnectorSpec struct {
 	// Type specifies the connector type.
@@ -143,8 +154,30 @@ type Retry struct {
 
 // ModelServerStatus defines the observed state of ModelServer.
 type ModelServerStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// observedGeneration is the most recent generation observed for this ModelServer.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// readyReplicas is the number of ready pods that are currently matched by the
+	// workloadSelector and have been successfully registered in the router's store.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+
+	// matchedReplicas is the total number of pods (ready or not) that match the
+	// workloadSelector.
+	// +optional
+	MatchedReplicas int32 `json:"matchedReplicas,omitempty"`
+
+	// Conditions track the lifecycle of this ModelServer.
+	// Types:
+	//   - "Ready": true when at least one ready pod is matched and the ModelServer has been
+	//     registered with the router store. Signals that the ModelServer can serve traffic.
+	//   - "AllPodsReady": true when at least one pod is matched and every matched pod is ready
+	//     and registered with the router store.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true

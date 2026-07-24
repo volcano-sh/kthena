@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -71,12 +72,13 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 
 	// Create controller
 	controller, err := NewModelServerController(
+		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
 	)
 	require.NoError(t, err)
-	modelServerIndexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
+	_ = kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -106,13 +108,15 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			t.Fatal("Failed to sync caches within timeout")
 		}
 
-		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
-		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver")
+		// write through fake API so status update can Get
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		// Simulate controller receiving the event
-		controller.enqueueModelServer(ms)
-		assert.Equal(t, 1, controller.workqueue.Len())
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver")
+			return err == nil
+		})
 
 		// Process the queue item
 		err = controller.syncModelServerHandler("default/test-modelserver")
@@ -147,35 +151,31 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
-		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+		// update via fake API, verify store reflects changes
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
 
-		// Process initial creation
-		controller.enqueueModelServer(ms)
-		err = controller.syncModelServerHandler("default/test-modelserver-update")
-		assert.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+			return err == nil
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/test-modelserver-update"))
 
 		// Update ModelServer
 		updatedMS := ms.DeepCopy()
 		updatedMS.Labels["version"] = "v2"
 		updatedMS.Spec.WorkloadSelector.MatchLabels["environment"] = "production"
 
-		require.NoError(t, modelServerIndexer.Update(updatedMS.DeepCopy()))
-		cachedMS, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+		_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Update(
+			context.Background(), updatedMS, metav1.UpdateOptions{})
 		require.NoError(t, err)
-		assert.Equal(t, "v2", cachedMS.Labels["version"])
 
-		// Simulate controller receiving update event
-		controller.enqueueModelServer(updatedMS)
-		// Clear any previous items from queue
-		for controller.workqueue.Len() > 0 {
-			item, _ := controller.workqueue.Get()
-			controller.workqueue.Done(item)
-			controller.workqueue.Forget(item)
-		}
-		controller.enqueueModelServer(updatedMS)
-		assert.Equal(t, 1, controller.workqueue.Len())
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			cached, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-update")
+			return err == nil && cached.Labels["version"] == "v2"
+		})
 
 		// Process the update
 		err = controller.syncModelServerHandler("default/test-modelserver-update")
@@ -208,9 +208,15 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, modelServerIndexer.Add(ms.DeepCopy()))
-		_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+		// delete via fake API, verify removed from store
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+			return err == nil
+		})
 
 		// Process creation
 		err = controller.syncModelServerHandler("default/test-modelserver-delete")
@@ -223,9 +229,14 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 		})
 		require.NotNil(t, storedMS, "ModelServer should be found in store before deletion")
 
-		require.NoError(t, modelServerIndexer.Delete(ms.DeepCopy()))
-		_, err = controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
-		assert.Error(t, err)
+		err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Delete(
+			context.Background(), "test-modelserver-delete", metav1.DeleteOptions{})
+		assert.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelServerLister.ModelServers("default").Get("test-modelserver-delete")
+			return err != nil
+		})
 
 		// Process the deletion - this should handle the NotFound error gracefully
 		err = controller.syncModelServerHandler("default/test-modelserver-delete")
@@ -273,6 +284,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 
 	// Create controller
 	controller, err := NewModelServerController(
+		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
@@ -490,6 +502,7 @@ func TestModelServerController_ErrorHandling(t *testing.T) {
 
 	// Create controller
 	controller, err := NewModelServerController(
+		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
@@ -535,6 +548,7 @@ func TestModelServerController_WorkQueueProcessing(t *testing.T) {
 
 	// Create controller
 	controller, err := NewModelServerController(
+		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
@@ -611,6 +625,7 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 
 	// Create controller
 	controller, err := NewModelServerController(
+		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
@@ -800,6 +815,7 @@ func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 	// Create controller and store
 	store := newStoreWithMockBackend()
 	controller, err := NewModelServerController(
+		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
@@ -977,6 +993,7 @@ func TestModelServerController_SharedPods(t *testing.T) {
 
 	// Create controller
 	controller, err := NewModelServerController(
+		kthenaClient,
 		kthenaInformerFactory,
 		kubeInformerFactory,
 		store,
@@ -1102,4 +1119,529 @@ func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() 
 			}
 		}
 	}
+}
+
+// drainModelServerKeys drains the workqueue and returns keys of enqueued ModelServer items.
+func drainModelServerKeys(controller *ModelServerController) []string {
+	var keys []string
+	for controller.workqueue.Len() > 0 {
+		item, _ := controller.workqueue.Get()
+		controller.workqueue.Done(item)
+		controller.workqueue.Forget(item)
+		if item.ResourceType == ResourceTypeModelServer {
+			keys = append(keys, item.Key)
+		}
+	}
+	return keys
+}
+
+// TestModelServerController_PodEnqueuesModelServer verifies that syncPodHandler
+// enqueues matching ModelServers after pod state changes.
+func TestModelServerController_PodEnqueuesModelServer(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms-enq"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "enq-test"},
+			},
+		},
+	}
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller, err := NewModelServerController(
+		kthenaClient, kthenaInformerFactory, kubeInformerFactory, store,
+	)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced)
+	waitForObjectInCache(t, 2*time.Second, func() bool {
+		_, err := controller.modelServerLister.ModelServers("default").Get("test-ms-enq")
+		return err == nil
+	})
+
+	// ready pod sync enqueues its matching ModelServer
+	t.Run("ReadyPodEnqueuesMatchingModelServer", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "ready-pod-enq",
+				Labels:    map[string]string{"app": "enq-test"},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		_, err := kubeClient.CoreV1().Pods("default").Create(
+			context.Background(), pod, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("ready-pod-enq")
+			return e == nil && p.Name == "ready-pod-enq"
+		})
+		// drain any pending items before sync
+		drainModelServerKeys(controller)
+
+		err = controller.syncPodHandler("default/ready-pod-enq")
+		assert.NoError(t, err)
+
+		keys := drainModelServerKeys(controller)
+		assert.Contains(t, keys, "default/test-ms-enq")
+	})
+
+	// not-ready pod sync deletes from store and enqueues matching ModelServer
+	t.Run("NotReadyPodEnqueuesMatchingModelServer", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "notready-pod-enq",
+				Labels:    map[string]string{"app": "enq-test"},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+				},
+			},
+		}
+		_, err := kubeClient.CoreV1().Pods("default").Create(
+			context.Background(), pod, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("notready-pod-enq")
+			return e == nil && p.Name == "notready-pod-enq"
+		})
+		drainModelServerKeys(controller)
+
+		err = controller.syncPodHandler("default/notready-pod-enq")
+		assert.NoError(t, err)
+
+		keys := drainModelServerKeys(controller)
+		assert.Contains(t, keys, "default/test-ms-enq")
+	})
+
+	// deleted pod (not found in lister) enqueues all namespace ModelServers
+	t.Run("DeletedPodEnqueuesAllNamespaceModelServers", func(t *testing.T) {
+		drainModelServerKeys(controller)
+
+		err := controller.syncPodHandler("default/non-existent-pod-enq")
+		assert.NoError(t, err)
+
+		keys := drainModelServerKeys(controller)
+		assert.Contains(t, keys, "default/test-ms-enq")
+	})
+}
+
+// TestModelServerController_GetMatchingModelServers verifies the helper
+// returns correct ModelServers based on pod label matching.
+func TestModelServerController_GetMatchingModelServers(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	ms1 := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-match"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "myapp"},
+			},
+		},
+	}
+	ms2 := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-nomatch"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "other"},
+			},
+		},
+	}
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms1, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms2, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubefake.NewSimpleClientset(), 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	controller, err := NewModelServerController(
+		kthenaClient, kthenaInformerFactory, kubeInformerFactory, newStoreWithMockBackend(),
+	)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced)
+
+	// pod labels match one ModelServer's workloadSelector
+	t.Run("MatchingLabelsReturnsModelServer", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "matching-pod",
+				Labels:    map[string]string{"app": "myapp"},
+			},
+		}
+		result, err := controller.getMatchingModelServers(pod)
+		assert.NoError(t, err)
+		assert.Len(t, result, 1)
+		assert.Equal(t, "ms-match", result[0].Name)
+	})
+
+	// pod labels match no ModelServer
+	t.Run("NonMatchingLabelsReturnsEmpty", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "other-pod",
+				Labels:    map[string]string{"app": "nonexistent"},
+			},
+		}
+		result, err := controller.getMatchingModelServers(pod)
+		assert.NoError(t, err)
+		assert.Empty(t, result)
+	})
+}
+
+func helperPod(name string, labels map[string]string, ready bool) *corev1.Pod {
+	phase := corev1.PodPending
+	condStatus := corev1.ConditionFalse
+	if ready {
+		phase = corev1.PodRunning
+		condStatus = corev1.ConditionTrue
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      name,
+			Labels:    labels,
+		},
+		Status: corev1.PodStatus{
+			Phase: phase,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: condStatus},
+			},
+		},
+	}
+}
+
+// TestModelServerController_ReadinessConditions verifies that the new AllPodsReady
+// condition is set alongside Ready for empty / partial / full pod readiness.
+func TestModelServerController_ReadinessConditions(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller, err := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced)
+
+	// zero matched pods: Ready=False, AllPodsReady=False
+	t.Run(ReasonNoMatchedPods, func(t *testing.T) {
+		noMatchLabels := map[string]string{"app": "readiness-no-match"}
+		ms := &aiv1alpha1.ModelServer{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-no-pods"},
+			Spec: aiv1alpha1.ModelServerSpec{
+				InferenceEngine: aiv1alpha1.VLLM,
+				WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+					MatchLabels: noMatchLabels,
+				},
+			},
+		}
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, e := controller.modelServerLister.ModelServers("default").Get("ms-no-pods")
+			return e == nil
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-no-pods"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-no-pods", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, int32(0), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(0), updated.Status.ReadyReplicas)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+		assert.Equal(t, ReasonNoReadyPods, readyCond.Reason)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonNoMatchedPods, allReadyCond.Reason)
+	})
+
+	// 1/2 pods ready: Ready=True, AllPodsReady=False
+	t.Run("PartialReadiness", func(t *testing.T) {
+		partialLabels := map[string]string{"app": "readiness-partial"}
+		ms := &aiv1alpha1.ModelServer{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-partial"},
+			Spec: aiv1alpha1.ModelServerSpec{
+				InferenceEngine: aiv1alpha1.VLLM,
+				WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+					MatchLabels: partialLabels,
+				},
+			},
+		}
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, e := controller.modelServerLister.ModelServers("default").Get("ms-partial")
+			return e == nil
+		})
+
+		// Create 1 ready + 1 not-ready pod
+		readyPod := helperPod("ready-a", partialLabels, true)
+		notReadyPod := helperPod("notready-a", partialLabels, false)
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), readyPod, metav1.CreateOptions{})
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), notReadyPod, metav1.CreateOptions{})
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("notready-a")
+			return e == nil && p.Name == "notready-a"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-partial"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-partial", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(1), updated.Status.ReadyReplicas)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+		assert.Equal(t, ReasonPodsReady, readyCond.Reason)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonPodsNotFullyReady, allReadyCond.Reason)
+	})
+
+	// 2/2 pods ready: Ready=True, AllPodsReady=True
+	t.Run("FullReadiness", func(t *testing.T) {
+		fullLabels := map[string]string{"app": "readiness-full"}
+		ms := &aiv1alpha1.ModelServer{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-full"},
+			Spec: aiv1alpha1.ModelServerSpec{
+				InferenceEngine: aiv1alpha1.VLLM,
+				WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+					MatchLabels: fullLabels,
+				},
+			},
+		}
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, e := controller.modelServerLister.ModelServers("default").Get("ms-full")
+			return e == nil
+		})
+
+		pod1 := helperPod("ready-full-1", fullLabels, true)
+		pod2 := helperPod("ready-full-2", fullLabels, true)
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), pod1, metav1.CreateOptions{})
+		_, _ = kubeClient.CoreV1().Pods("default").Create(context.Background(), pod2, metav1.CreateOptions{})
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("ready-full-2")
+			return e == nil && p.Name == "ready-full-2"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-full"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-full", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(2), updated.Status.ReadyReplicas)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionTrue, allReadyCond.Status)
+		assert.Equal(t, ReasonAllPodsReady, allReadyCond.Reason)
+	})
+}
+
+// TestModelServerController_ReadinessConditionTransitions verifies condition
+// values across a lifecycle: 0 pods → 1/1 ready → 1/2 ready → 2/2 ready.
+func TestModelServerController_ReadinessConditionTransitions(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller, err := NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced)
+
+	tLabels := map[string]string{"app": "readiness-trans"}
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-trans"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: tLabels,
+			},
+		},
+	}
+	_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	waitForObjectInCache(t, 2*time.Second, func() bool {
+		_, e := controller.modelServerLister.ModelServers("default").Get("ms-trans")
+		return e == nil
+	})
+
+	// Step 1: no matching pods
+	t.Run("Step1_NoMatchingPods", func(t *testing.T) {
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+		assert.Equal(t, ReasonNoReadyPods, readyCond.Reason)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonNoMatchedPods, allReadyCond.Reason)
+		assert.Equal(t, int32(0), updated.Status.MatchedReplicas)
+	})
+
+	// Step 2: add one ready pod → Ready=True, AllPodsReady=True (only 1 matched)
+	t.Run("Step2_AllPodsReadyWithOnePod", func(t *testing.T) {
+		readyPod := helperPod("trans-pod-1", tLabels, true)
+		_, err := kubeClient.CoreV1().Pods("default").Create(context.Background(), readyPod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("trans-pod-1")
+			return e == nil && p.Name == "trans-pod-1"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionTrue, allReadyCond.Status)
+		assert.Equal(t, ReasonAllPodsReady, allReadyCond.Reason)
+
+		assert.Equal(t, int32(1), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(1), updated.Status.ReadyReplicas)
+	})
+
+	// Step 3: add one not-ready pod → Ready=True, AllPodsReady=False (1/2)
+	t.Run("Step3_PartialAfterNotReady", func(t *testing.T) {
+		notReadyPod := helperPod("trans-pod-2", tLabels, false)
+		_, err := kubeClient.CoreV1().Pods("default").Create(context.Background(), notReadyPod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("trans-pod-2")
+			return e == nil && p.Name == "trans-pod-2"
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionFalse, allReadyCond.Status)
+		assert.Equal(t, ReasonPodsNotFullyReady, allReadyCond.Reason)
+
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(1), updated.Status.ReadyReplicas)
+	})
+
+	// Step 4: make the second pod ready → Ready=True, AllPodsReady=True (2/2)
+	t.Run("Step4_FullReadyAfterTransition", func(t *testing.T) {
+		// Update not-ready pod to ready
+		notReadyPod, err := kubeClient.CoreV1().Pods("default").Get(context.Background(), "trans-pod-2", metav1.GetOptions{})
+		require.NoError(t, err)
+		updatedPod := notReadyPod.DeepCopy()
+		updatedPod.Status.Phase = corev1.PodRunning
+		updatedPod.Status.Conditions[0].Status = corev1.ConditionTrue
+		_, err = kubeClient.CoreV1().Pods("default").Update(context.Background(), updatedPod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			p, e := controller.podLister.Pods("default").Get("trans-pod-2")
+			return e == nil && isPodReady(p)
+		})
+
+		assert.NoError(t, controller.syncModelServerHandler("default/ms-trans"))
+
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Get(
+			context.Background(), "ms-trans", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		require.NotNil(t, readyCond)
+		assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+
+		allReadyCond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		require.NotNil(t, allReadyCond)
+		assert.Equal(t, metav1.ConditionTrue, allReadyCond.Status)
+		assert.Equal(t, ReasonAllPodsReady, allReadyCond.Reason)
+
+		assert.Equal(t, int32(2), updated.Status.MatchedReplicas)
+		assert.Equal(t, int32(2), updated.Status.ReadyReplicas)
+	})
 }

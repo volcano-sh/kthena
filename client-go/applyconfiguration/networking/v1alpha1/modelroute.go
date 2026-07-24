@@ -19,7 +19,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
@@ -30,8 +29,8 @@ import (
 type ModelRouteApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
-	Spec                             *ModelRouteSpecApplyConfiguration    `json:"spec,omitempty"`
-	Status                           *networkingv1alpha1.ModelRouteStatus `json:"status,omitempty"`
+	Spec                             *ModelRouteSpecApplyConfiguration   `json:"spec,omitempty"`
+	Status                           *ModelRouteStatusApplyConfiguration `json:"status,omitempty"`
 }
 
 // ModelRoute constructs a declarative configuration of the ModelRoute type for use with
@@ -215,8 +214,8 @@ func (b *ModelRouteApplyConfiguration) WithSpec(value *ModelRouteSpecApplyConfig
 // WithStatus sets the Status field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Status field is set to the value of the last call.
-func (b *ModelRouteApplyConfiguration) WithStatus(value networkingv1alpha1.ModelRouteStatus) *ModelRouteApplyConfiguration {
-	b.Status = &value
+func (b *ModelRouteApplyConfiguration) WithStatus(value *ModelRouteStatusApplyConfiguration) *ModelRouteApplyConfiguration {
+	b.Status = value
 	return b
 }
 
