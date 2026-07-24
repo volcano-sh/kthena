@@ -5138,6 +5138,8 @@ func TestManageHeadlessService(t *testing.T) {
 		servingGroupStatus   datastore.ServingGroupStatus
 		expectedServiceCount int
 		expectServiceCreated bool
+		createServiceError   error
+		expectError          bool
 	}{
 		{
 			name: "create headless service when none exists",
@@ -5177,6 +5179,34 @@ func TestManageHeadlessService(t *testing.T) {
 			servingGroupStatus:   datastore.ServingGroupRunning,
 			expectedServiceCount: 2, // One for each role
 			expectServiceCreated: true,
+		},
+		{
+			name: "return service creation error",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](1),
+								WorkerReplicas: 1,
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
+			},
+			servingGroupStatus: datastore.ServingGroupRunning,
+			createServiceError: apierrors.NewInternalError(fmt.Errorf("temporary API failure")),
+			expectError:        true,
 		},
 		{
 			name: "do not create headless service when one already exists",
@@ -5364,9 +5394,19 @@ func TestManageHeadlessService(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
+			if tt.createServiceError != nil {
+				kubeClient.PrependReactor("create", "services", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, tt.createServiceError
+				})
+			}
+
 			// Call the function being tested
 			err = controller.syncHeadlessServices(context.TODO(), tt.modelServing)
-			assert.NoError(t, err)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 
 			// Verify the expected number of services exist
 			svcList, err := kubeClient.CoreV1().Services("default").List(context.TODO(), metav1.ListOptions{})
