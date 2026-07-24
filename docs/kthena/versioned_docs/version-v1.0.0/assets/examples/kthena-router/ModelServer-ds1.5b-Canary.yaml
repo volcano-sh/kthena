@@ -1,0 +1,35 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseek-r1-1-5b-v1
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: deepseek-r1-1-5b
+      version: v1
+  workloadPort:
+    port: 8000
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-v1"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s
+
+---
+
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseek-r1-1-5b-v2
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: deepseek-r1-1-5b
+      version: v2
+  workloadPort:
+    port: 8000
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B-v2"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s
