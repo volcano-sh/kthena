@@ -7716,3 +7716,55 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
 }
+
+func TestCalMaxScaleDown(t *testing.T) {
+	tests := []struct {
+		name             string
+		expectedReplicas int
+		allReplicas      int
+		maxUnavailable   int
+		newUnavailable   int
+		want             int
+	}{
+		{
+			name:             "normal budget",
+			expectedReplicas: 3,
+			allReplicas:      3,
+			maxUnavailable:   1,
+			newUnavailable:   0,
+			want:             1, // 3 - (3-1) - 0 = 1
+		},
+		{
+			name:             "budget exhausted clamps to zero",
+			expectedReplicas: 3,
+			allReplicas:      3,
+			maxUnavailable:   1,
+			newUnavailable:   1,
+			want:             0, // 3 - 2 - 1 = 0
+		},
+		{
+			name:             "minAvailable clamps when maxUnavailable exceeds expected",
+			expectedReplicas: 2,
+			allReplicas:      2,
+			maxUnavailable:   5,
+			newUnavailable:   0,
+			want:             2, // minAvailable=0 => 2 - 0 - 0 = 2
+		},
+		{
+			name:             "newUnavailable reduces budget",
+			expectedReplicas: 5,
+			allReplicas:      5,
+			maxUnavailable:   2,
+			newUnavailable:   1,
+			want:             1, // 5 - (5-2) - 1 = 1
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calMaxScaleDown(tt.expectedReplicas, tt.allReplicas, tt.maxUnavailable, tt.newUnavailable)
+			if got != tt.want {
+				t.Fatalf("calMaxScaleDown() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

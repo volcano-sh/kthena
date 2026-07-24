@@ -1361,8 +1361,6 @@ func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *wo
 			return fmt.Errorf("failed to calculate maxUnavailable: %v", err)
 		}
 
-		// TODO(hzxuzhonghu): reuse calMaxScaleDown
-
 		// Calculate the minimum number of available ServingGroups required
 		// Refer to https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/rolling.go
 		// Check if we can scale down. We can scale down in the following 2 cases:
@@ -1370,8 +1368,7 @@ func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *wo
 		//   since that won't further increase unavailability.
 		// * New servingGroup has scaled up and its replicas become ready, then we can scale down old servingGroups
 		//   in a further step.
-		minAvailable := int(*ms.Spec.Replicas) - maxUnavailable
-		maxScaleDown = len(servingGroupList) - minAvailable - newServingGroupUnavailableCount
+		maxScaleDown = calMaxScaleDown(int(*ms.Spec.Replicas), len(servingGroupList), maxUnavailable, newServingGroupUnavailableCount)
 		if maxScaleDown <= 0 {
 			klog.V(4).Infof("No ServingGroups can be updated for ModelServing %s/%s: maxScaleDown=%d",
 				ms.Namespace, ms.Name, maxScaleDown)
@@ -1544,7 +1541,7 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 			continue
 		}
 		hasOutdatedRoles = true
-		maxScaleDown, err := calMaxScaleDown(roleSpec, outdatedRoles, len(roleList), newUnavailable)
+		maxScaleDown, err := calMaxScaleDownForRole(roleSpec, outdatedRoles, len(roleList), newUnavailable)
 		if err != nil {
 			klog.Errorf("failed to calculate maxScaleDown for role %s in ServingGroup %s: %v", roleSpec.Name, sg.Name, err)
 		}
@@ -2866,7 +2863,22 @@ func (c *ModelServingController) RegisterModelServingDebugEndpoints(mux *http.Se
 	mux.HandleFunc("/debug/modelserving/cache", c.handleModelServingDatastoreCacheDump)
 }
 
-func calMaxScaleDown(role workloadv1alpha1.Role, outdatedRoles []datastore.Role, allReplicas, newUnavailable int) (int, error) {
+// calMaxScaleDown returns how many outdated replicas can be terminated without
+// dropping below expectedReplicas - maxUnavailable, after accounting for
+// already-unavailable new replicas. The result is clamped to >= 0.
+func calMaxScaleDown(expectedReplicas, allReplicas, maxUnavailable, newUnavailable int) int {
+	minAvailable := expectedReplicas - maxUnavailable
+	if minAvailable < 0 {
+		minAvailable = 0
+	}
+	maxScaleDown := allReplicas - minAvailable - newUnavailable
+	if maxScaleDown < 0 {
+		maxScaleDown = 0
+	}
+	return maxScaleDown
+}
+
+func calMaxScaleDownForRole(role workloadv1alpha1.Role, outdatedRoles []datastore.Role, allReplicas, newUnavailable int) (int, error) {
 	maxUnavailable, configured, err := utils.GetMaxUnavailableForRole(role)
 	if err != nil {
 		return 0, fmt.Errorf("failed to calculate maxUnavailable for role %s: %v", role.Name, err)
@@ -2878,13 +2890,5 @@ func calMaxScaleDown(role workloadv1alpha1.Role, outdatedRoles []datastore.Role,
 	if role.Replicas != nil {
 		expectedReplicas = int(*role.Replicas)
 	}
-	minAvailable := expectedReplicas - maxUnavailable
-	if minAvailable < 0 {
-		minAvailable = 0
-	}
-	maxScaleDown := allReplicas - minAvailable - newUnavailable
-	if maxScaleDown < 0 {
-		maxScaleDown = 0
-	}
-	return maxScaleDown, nil
+	return calMaxScaleDown(expectedReplicas, allReplicas, maxUnavailable, newUnavailable), nil
 }
