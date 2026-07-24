@@ -18,56 +18,46 @@ set -eo pipefail
 
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 
-ensure_sponge() {
-  if command -v sponge >/dev/null 2>&1; then
-    return
-  fi
-
-  echo "sponge not found; attempting to install moreutils..."
-
-  # Use sudo if available and not already running as root.
-  SUDO=""
-  if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-    SUDO="sudo"
-  fi
-
-  if command -v apt-get >/dev/null 2>&1; then
-    $SUDO apt-get update -y
-    $SUDO apt-get install -y moreutils
-  elif command -v yum >/dev/null 2>&1; then
-    $SUDO yum install -y moreutils
-  elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y moreutils
-  else
-    echo "Error: sponge (moreutils) is required but could not be installed automatically." >&2
-    echo "Please install the 'moreutils' package manually." >&2
-    exit 1
-  fi
-
-  if ! command -v sponge >/dev/null 2>&1; then
-    echo "Error: sponge (moreutils) installation appears to have failed." >&2
-    exit 1
-  fi
-}
-
-ensure_sponge
-
-GO_FILES=$(find "$ROOT_DIR" -not -path "/vendor/*" -type f -name '*.go')
-PY_FILES=$(find "$ROOT_DIR" -not -path "/venv/*" -type f -name '*.py')
-
 GO_TPL="$ROOT_DIR/hack/boilerplate.go.txt"
 PY_TPL="$ROOT_DIR/hack/boilerplate.py.txt"
 
-for file in $GO_FILES; do
-  if ! grep -q "Copyright The Volcano Authors" "$file"; then
-    (cat "$GO_TPL" && echo && cat "$file") | sponge "$file"
-  fi
-done
+add_header() {
+  local file=$1
+  local template=$2
+  local temporary
 
-for file in $PY_FILES; do
-  if ! grep -q "Copyright The Volcano Authors" "$file"; then
-    (cat "$PY_TPL" && echo && cat "$file") | sponge "$file"
+  temporary=$(mktemp "${file}.tmp.XXXXXX")
+  if ! cp -p "$file" "$temporary"; then
+    rm -f "$temporary"
+    return 1
   fi
-done
+
+  if ! { cat "$template" && echo && cat "$file"; } > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+
+  if ! mv "$temporary" "$file"; then
+    rm -f "$temporary"
+    return 1
+  fi
+}
+
+add_headers() {
+  local extension=$1
+  local template=$2
+  local file
+
+  while IFS= read -r -d '' file; do
+    if ! grep -q "Copyright The Volcano Authors" "$file"; then
+      add_header "$file" "$template"
+    fi
+  done < <(find "$ROOT_DIR" \
+    -type d \( -name vendor -o -name venv \) -prune -o \
+    -type f -name "*.${extension}" -print0)
+}
+
+add_headers go "$GO_TPL"
+add_headers py "$PY_TPL"
 
 echo "Update Copyright Done"
