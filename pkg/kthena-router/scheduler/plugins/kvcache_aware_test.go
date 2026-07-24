@@ -43,6 +43,18 @@ import (
 
 // Test core functions that don't require external dependencies
 
+func testWeightedBlockOwners(blockToPods map[uint64][]string) map[uint64]map[string]float64 {
+	weightedOwners := make(map[uint64]map[string]float64, len(blockToPods))
+	for hash, pods := range blockToPods {
+		podWeights := make(map[string]float64, len(pods))
+		for _, pod := range pods {
+			podWeights[pod] = 1.0
+		}
+		weightedOwners[hash] = podWeights
+	}
+	return weightedOwners
+}
+
 func TestKVCacheAwareBlock_String_Core(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -396,12 +408,95 @@ func TestKVCacheAware_CalculatePodScores_Core(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, _ := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
+			result, _ := plugin.calculatePodScores(tt.blockHashes, testWeightedBlockOwners(tt.blockToPods))
 
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestKVCacheAware_CalculatePodScoresWithWeights(t *testing.T) {
+	plugin := &KVCacheAware{}
+	blockHashes := []uint64{1, 2}
+	blockToPods := map[uint64]map[string]float64{
+		1: {
+			"gpu-pod":      1.0,
+			"cpu-pod":      0.8,
+			"disabled-pod": 0,
+		},
+		2: {
+			"gpu-pod":      1.0,
+			"cpu-pod":      0.8,
+			"disabled-pod": 0,
+		},
+	}
+
+	result, longest := plugin.calculatePodScores(blockHashes, blockToPods)
+
+	if result["gpu-pod"] != 100 {
+		t.Errorf("gpu-pod score = %d, want 100", result["gpu-pod"])
+	}
+	if result["cpu-pod"] != 80 {
+		t.Errorf("cpu-pod score = %d, want 80", result["cpu-pod"])
+	}
+	if result["disabled-pod"] != 0 {
+		t.Errorf("disabled-pod score = %d, want 0", result["disabled-pod"])
+	}
+	if longest != 2 {
+		t.Errorf("longest match = %d, want 2", longest)
+	}
+}
+
+func TestParseKVCacheFieldValue(t *testing.T) {
+	timestamp, medium := parseKVCacheFieldValue("1703123456|GPU")
+	if timestamp != "1703123456" || medium != "GPU" {
+		t.Errorf("parseKVCacheFieldValue returned %q, %q", timestamp, medium)
+	}
+
+	timestamp, medium = parseKVCacheFieldValue("1703123456")
+	if timestamp != "1703123456" || medium != "" {
+		t.Errorf("parseKVCacheFieldValue returned %q, %q", timestamp, medium)
+	}
+}
+
+func TestKVCacheAware_WeightForMedium(t *testing.T) {
+	plugin := &KVCacheAware{
+		tierWeights: map[string]float64{
+			"gpu":        1.0,
+			"cpu":        0.8,
+			"cpu_pinned": 0,
+		},
+	}
+
+	if weight := plugin.weightForMedium("CPU"); weight != 0.8 {
+		t.Errorf("CPU weight = %v, want 0.8", weight)
+	}
+	if weight := plugin.weightForMedium("CPU_PINNED"); weight != 0 {
+		t.Errorf("CPU_PINNED weight = %v, want 0", weight)
+	}
+	if weight := plugin.weightForMedium("DISK"); weight != 1.0 {
+		t.Errorf("DISK weight = %v, want 1.0", weight)
+	}
+}
+
+func TestNewKVCacheAware_TierWeights(t *testing.T) {
+	plugin := NewKVCacheAware(runtime.RawExtension{
+		Raw: []byte(`{"tierWeights":{"gpu":0.9,"cpu_pinned":0,"disk":-1,"fs":1.5}}`),
+	})
+
+	if plugin.tierWeights["gpu"] != 0.9 {
+		t.Errorf("gpu weight = %v, want 0.9", plugin.tierWeights["gpu"])
+	}
+	if plugin.tierWeights["cpu_pinned"] != 0 {
+		t.Errorf("cpu_pinned weight = %v, want 0", plugin.tierWeights["cpu_pinned"])
+	}
+	if _, ok := plugin.tierWeights["disk"]; ok {
+		t.Errorf("disk weight should be ignored")
+	}
+	if _, ok := plugin.tierWeights["fs"]; ok {
+		t.Errorf("fs weight should be ignored")
 	}
 }
 
@@ -437,13 +532,58 @@ func TestKVCacheAware_QueryRedisForBlocks_ReturnsRedisOwners(t *testing.T) {
 		t.Fatalf("queryRedisForBlocks returned error: %v", err)
 	}
 	gotPods := make(map[string]bool, len(result[hash]))
-	for _, pod := range result[hash] {
+	for pod := range result[hash] {
 		gotPods[pod] = true
 	}
 	for _, pod := range []string{"pod-1", "pod-1.default", "pod-2.default"} {
 		if !gotPods[pod] {
 			t.Errorf("expected %s in result, got %v", pod, result[hash])
 		}
+	}
+}
+
+func TestKVCacheAware_QueryRedisForBlocks_ReturnsTierWeights(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+		tierWeights: map[string]float64{
+			"gpu":        1.0,
+			"cpu":        0.8,
+			"cpu_pinned": 0.8,
+		},
+	}
+
+	ctx := context.Background()
+	hash := uint64(222)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	if err := client.HSet(ctx, key,
+		"gpu-pod", now+"|GPU",
+		"cpu-pod", now+"|CPU_PINNED",
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	blockToPods, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen")
+	if err != nil {
+		t.Fatalf("queryRedisForBlocks returned error: %v", err)
+	}
+	result, _ := plugin.calculatePodScores([]uint64{hash}, blockToPods)
+
+	if result["gpu-pod"] != 100 {
+		t.Errorf("gpu-pod score = %d, want 100", result["gpu-pod"])
+	}
+	if result["cpu-pod"] != 80 {
+		t.Errorf("cpu-pod score = %d, want 80", result["cpu-pod"])
 	}
 }
 
@@ -479,7 +619,7 @@ func TestKVCacheAware_QueryRedisForBlocks_KeepsNamespacedOwners(t *testing.T) {
 	}
 
 	gotPods := make(map[string]bool, len(result[hash]))
-	for _, pod := range result[hash] {
+	for pod := range result[hash] {
 		gotPods[pod] = true
 	}
 	for _, pod := range []string{"pod-1.default", "pod-1.other"} {
@@ -518,7 +658,7 @@ func TestKVCacheAware_GCStaleFields(t *testing.T) {
 		"pod-1", now,
 		"pod-1.default", now,
 		"pod-2.default", now,
-		"pod-3.default", stale,
+		"pod-3.default", stale+"|CPU_PINNED",
 	).Err(); err != nil {
 		t.Fatalf("failed to seed redis: %v", err)
 	}
@@ -999,7 +1139,7 @@ func TestKVCacheAware_CalculatePodScores_AdvancedCases_Core(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, _ := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
+			result, _ := plugin.calculatePodScores(tt.blockHashes, testWeightedBlockOwners(tt.blockToPods))
 
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
@@ -1233,7 +1373,7 @@ func TestKVCacheAware_Integration_Core(t *testing.T) {
 					blockHashes[1]: {"pod1"},
 				}
 
-				scores, _ := plugin.calculatePodScores(blockHashes, blockToPods)
+				scores, _ := plugin.calculatePodScores(blockHashes, testWeightedBlockOwners(blockToPods))
 
 				expectedScores := map[string]int{
 					"pod1": 100, // 2/2 * 100
@@ -1289,7 +1429,7 @@ func TestKVCacheAware_Integration_Core(t *testing.T) {
 					// pod1 missing block 3
 				}
 
-				scores, _ := plugin.calculatePodScores(blockHashes, blockToPods)
+				scores, _ := plugin.calculatePodScores(blockHashes, testWeightedBlockOwners(blockToPods))
 				expected := map[string]int{
 					"pod1": 66, // 2/3 * 100 = 66.666... -> 66
 				}
@@ -1817,7 +1957,7 @@ func TestKVCacheAware_CalculatePodScores_Complex_Core(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, _ := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
+			result, _ := plugin.calculatePodScores(tt.blockHashes, testWeightedBlockOwners(tt.blockToPods))
 
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
@@ -2209,7 +2349,7 @@ func TestKVCacheAware_Integration_Comprehensive_Core(t *testing.T) {
 					blockHashes[1]: {"pod1"},
 				}
 
-				scores, _ := plugin.calculatePodScores(blockHashes, blockToPods)
+				scores, _ := plugin.calculatePodScores(blockHashes, testWeightedBlockOwners(blockToPods))
 				expectedScores := map[string]int{
 					"pod1": 100, // 2/2 * 100
 					"pod2": 50,  // 1/2 * 100
@@ -2300,7 +2440,7 @@ func TestKVCacheAware_CalculatePodScoresAndMatch_LongestMatch(t *testing.T) {
 		3: {"pod1"},
 		4: {"pod1"},
 	}
-	scores, longest := plugin.calculatePodScores(blockHashes, blockToPods)
+	scores, longest := plugin.calculatePodScores(blockHashes, testWeightedBlockOwners(blockToPods))
 	if scores["pod1"] != 100 {
 		t.Errorf("pod1 score = %d, want 100", scores["pod1"])
 	}
@@ -2308,6 +2448,7 @@ func TestKVCacheAware_CalculatePodScoresAndMatch_LongestMatch(t *testing.T) {
 		t.Errorf("longest match = %d, want 4", longest)
 	}
 }
+
 func TestKVCacheAware_CandidateFilteringRestrictsLongestMatch(t *testing.T) {
 	plugin := &KVCacheAware{}
 	blockHashes := []uint64{10, 20, 30, 40}
@@ -2319,7 +2460,7 @@ func TestKVCacheAware_CandidateFilteringRestrictsLongestMatch(t *testing.T) {
 		40: {"pod3"},
 	}
 
-	if _, clusterLongest := plugin.calculatePodScores(blockHashes, blockToPods); clusterLongest != 4 {
+	if _, clusterLongest := plugin.calculatePodScores(blockHashes, testWeightedBlockOwners(blockToPods)); clusterLongest != 4 {
 		t.Fatalf("unfiltered longestMatch = %d, want 4 (inflated by non-candidate pod3)", clusterLongest)
 	}
 
@@ -2328,7 +2469,7 @@ func TestKVCacheAware_CandidateFilteringRestrictsLongestMatch(t *testing.T) {
 		10: {"pod1"},
 		20: {"pod1"},
 	}
-	if _, candidateLongest := plugin.calculatePodScores(blockHashes, candidateScoped); candidateLongest != 2 {
+	if _, candidateLongest := plugin.calculatePodScores(blockHashes, testWeightedBlockOwners(candidateScoped)); candidateLongest != 2 {
 		t.Errorf("candidate-restricted longestMatch = %d, want 2 (pod1 holds only the first 2 blocks)", candidateLongest)
 	}
 }

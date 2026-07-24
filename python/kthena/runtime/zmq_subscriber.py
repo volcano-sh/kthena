@@ -49,10 +49,12 @@ class BlockStored(KVCacheEvent):
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
+    medium: Optional[str] = None
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[int]
+    medium: Optional[str] = None
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -237,13 +239,15 @@ class VLLMZMQSubscriber:
                     parent_block_hash=event.parent_block_hash,
                     token_ids=event.token_ids,
                     block_size=event.block_size,
-                    lora_id=event.lora_id
+                    lora_id=event.lora_id,
+                    medium=event.medium,
                 )
                 event_type = EventType.VLLM_BLOCK_STORED
 
             elif isinstance(event, BlockRemoved):
                 vllm_event = VLLMBlockRemovedEvent(
-                    block_hashes=event.block_hashes
+                    block_hashes=event.block_hashes,
+                    medium=event.medium,
                 )
                 event_type = EventType.VLLM_BLOCK_REMOVED
 
