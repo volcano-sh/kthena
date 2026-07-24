@@ -1015,6 +1015,45 @@ func createInvalidModelServing() *workload.ModelServing {
 	}
 }
 
+// createModelServingWithConflictingNetworkTopology returns a ModelServing that configures both the
+// legacy spec.template.networkTopology.rolePolicy and a role-level networkTopology policy, which the
+// webhook must reject since the two are mutually exclusive.
+func createModelServingWithConflictingNetworkTopology() *workload.ModelServing {
+	replicas := int32(1)
+	return &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "conflicting-network-topology",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas: &replicas,
+			Template: workload.ServingGroup{
+				NetworkTopology: &workload.NetworkTopology{
+					RolePolicy: &workload.NetworkTopologySpec{Mode: "hard"},
+				},
+				Roles: []workload.Role{
+					{
+						Name:            "prefill",
+						Replicas:        &replicas,
+						NetworkTopology: &workload.NetworkTopologySpec{Mode: "hard"},
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test",
+										Image: nginxImage,
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
+}
+
 // TestModelServingRollingUpdateMaxUnavailableWithBadImage tests maxUnavailable constraint when transitioning to bad image
 func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
