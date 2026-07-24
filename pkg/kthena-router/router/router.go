@@ -34,6 +34,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/openai/openai-go/v3"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -714,7 +715,7 @@ func (r *Router) proxy(
 	ctx *framework.Context,
 	stream bool,
 	port int32,
-	onUsage func(u handlers.OpenAIResponse),
+	onUsage func(u openai.CompletionUsage),
 ) error {
 	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
 
@@ -801,28 +802,28 @@ func (r *Router) proxyModelEndpoint(
 		stream := isStreaming(modelRequest)
 		modelName := ctx.Model
 		userID := c.GetString(common.UserIdKey)
-		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
-			if resp.Usage.TotalTokens <= 0 {
+		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp openai.CompletionUsage) {
+			if resp.TotalTokens <= 0 {
 				return
 			}
 			// Record output tokens for rate limiting
 			if r.loadRateLimiter != nil {
-				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
+				r.loadRateLimiter.RecordOutputTokens(modelName, int(resp.CompletionTokens))
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
-				accessCtx.SetTokenCounts(accessCtx.InputTokens, resp.Usage.CompletionTokens)
+				accessCtx.SetTokenCounts(accessCtx.InputTokens, int(resp.CompletionTokens))
 			}
 
 			// Record output token metrics
 			if metricsRecorder != nil {
 				// Record output tokens
-				metricsRecorder.RecordOutputTokens(resp.Usage.CompletionTokens)
+				metricsRecorder.RecordOutputTokens(int(resp.CompletionTokens))
 			}
 			if userID == "" || modelName == "" {
 				return
 			}
-			_ = r.store.UpdateTokenCount(userID, modelName, float64(resp.Usage.PromptTokens), float64(resp.Usage.CompletionTokens))
+			_ = r.store.UpdateTokenCount(userID, modelName, float64(resp.PromptTokens), float64(resp.CompletionTokens))
 		})
 
 		// Mark end of upstream processing
@@ -905,7 +906,7 @@ func proxyRequest(
 	podIP string,
 	port int32,
 	stream bool,
-	onUsage func(u handlers.OpenAIResponse),
+	onUsage func(u openai.CompletionUsage),
 ) error {
 	resp, err := doRequest(req, podIP, port)
 	if err != nil {
@@ -936,7 +937,7 @@ func proxyRequest(
 
 					// Always call onUsage callback to record output tokens
 					if onUsage != nil {
-						onUsage(parsed)
+						onUsage(parsed.Usage)
 					}
 
 					// The token usage is set by router, so remove it before sending to downstream
@@ -973,7 +974,7 @@ func proxyRequest(
 		if parsed != nil && parsed.Usage.CompletionTokens > 0 {
 			klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 			if onUsage != nil {
-				onUsage(*parsed)
+				onUsage(parsed.Usage)
 			}
 		}
 	}

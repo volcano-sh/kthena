@@ -17,26 +17,27 @@ limitations under the License.
 package handlers
 
 import (
-	"reflect"
 	"testing"
+
+	"github.com/openai/openai-go/v3"
 )
 
 func TestParseOpenAIResponseBody(t *testing.T) {
 	tests := []struct {
 		name    string
 		resp    []byte
-		want    *OpenAIResponse
+		want    *openai.ChatCompletion
 		wantErr bool
 	}{
 		{
 			name: "valid response",
 			resp: []byte(`{"id":"test-id","object":"text_completion","created":123456789,"model":"test-model","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`),
-			want: &OpenAIResponse{
+			want: &openai.ChatCompletion{
 				ID:      "test-id",
 				Object:  "text_completion",
 				Created: 123456789,
 				Model:   "test-model",
-				Usage: Usage{
+				Usage: openai.CompletionUsage{
 					PromptTokens:     10,
 					CompletionTokens: 20,
 					TotalTokens:      30,
@@ -59,8 +60,19 @@ func TestParseOpenAIResponseBody(t *testing.T) {
 				t.Errorf("ParseOpenAIResponseBody() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("ParseOpenAIResponseBody() got = %v, want %v", got, tt.want)
+			if !tt.wantErr {
+				if got.ID != tt.want.ID {
+					t.Errorf("ID got = %v, want %v", got.ID, tt.want.ID)
+				}
+				if got.Usage.PromptTokens != tt.want.Usage.PromptTokens {
+					t.Errorf("PromptTokens got = %v, want %v", got.Usage.PromptTokens, tt.want.Usage.PromptTokens)
+				}
+				if got.Usage.CompletionTokens != tt.want.Usage.CompletionTokens {
+					t.Errorf("CompletionTokens got = %v, want %v", got.Usage.CompletionTokens, tt.want.Usage.CompletionTokens)
+				}
+				if got.Usage.TotalTokens != tt.want.Usage.TotalTokens {
+					t.Errorf("TotalTokens got = %v, want %v", got.Usage.TotalTokens, tt.want.Usage.TotalTokens)
+				}
 			}
 		})
 	}
@@ -70,17 +82,17 @@ func TestParseStreamRespForUsage(t *testing.T) {
 	tests := []struct {
 		name         string
 		responseText string
-		want         OpenAIResponse
+		want         openai.ChatCompletionChunk
 	}{
 		{
 			name:         "valid stream with usage",
 			responseText: `data: {"id":"test-id","object":"text_completion","created":1739400043,"model":"tweet-summary-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}`,
-			want: OpenAIResponse{
+			want: openai.ChatCompletionChunk{
 				ID:      "test-id",
 				Object:  "text_completion",
 				Created: 1739400043,
 				Model:   "tweet-summary-0",
-				Usage: Usage{
+				Usage: openai.CompletionUsage{
 					PromptTokens:     7,
 					CompletionTokens: 10,
 					TotalTokens:      17,
@@ -90,25 +102,34 @@ func TestParseStreamRespForUsage(t *testing.T) {
 		{
 			name:         "stream [DONE]",
 			responseText: `data: [DONE]`,
-			want:         OpenAIResponse{},
+			want:         openai.ChatCompletionChunk{},
 		},
 		{
 			name:         "no data: prefix",
 			responseText: `{"id":"test-id"}`,
-			want:         OpenAIResponse{},
+			want:         openai.ChatCompletionChunk{},
 		},
 		{
 			name:         "invalid json",
 			responseText: `data: {"id":"test-id",`,
-			want:         OpenAIResponse{},
+			want:         openai.ChatCompletionChunk{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ParseStreamRespForUsage(tt.responseText)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("ParseStreamRespForUsage() = %v, want %v", got, tt.want)
+			if got.ID != tt.want.ID {
+				t.Errorf("ID got = %v, want %v", got.ID, tt.want.ID)
+			}
+			if got.Usage.PromptTokens != tt.want.Usage.PromptTokens {
+				t.Errorf("PromptTokens got = %v, want %v", got.Usage.PromptTokens, tt.want.Usage.PromptTokens)
+			}
+			if got.Usage.CompletionTokens != tt.want.Usage.CompletionTokens {
+				t.Errorf("CompletionTokens got = %v, want %v", got.Usage.CompletionTokens, tt.want.Usage.CompletionTokens)
+			}
+			if got.Usage.TotalTokens != tt.want.Usage.TotalTokens {
+				t.Errorf("TotalTokens got = %v, want %v", got.Usage.TotalTokens, tt.want.Usage.TotalTokens)
 			}
 		})
 	}

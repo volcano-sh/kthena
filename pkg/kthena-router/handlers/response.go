@@ -21,28 +21,13 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/openai/openai-go/v3"
 	"k8s.io/klog/v2"
 )
 
-type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
-
-// Define a struct to represent the OpenAI response body
-type OpenAIResponse struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Usage   Usage  `json:"usage"`
-}
-
-// Function to parse the OpenAI response body
-func ParseOpenAIResponseBody(resp []byte) (*OpenAIResponse, error) {
-	// Unmarshal the JSON body into the struct
-	var responseBody OpenAIResponse
+// ParseOpenAIResponseBody parses an OpenAI-compatible non-streaming response using the official openai-go SDK.
+func ParseOpenAIResponseBody(resp []byte) (*openai.ChatCompletion, error) {
+	var responseBody openai.ChatCompletion
 	err := json.Unmarshal(resp, &responseBody)
 	if err != nil {
 		return nil, err
@@ -69,8 +54,8 @@ const (
 // indicates end of streaming.
 func ParseStreamRespForUsage(
 	responseText string,
-) OpenAIResponse {
-	var response OpenAIResponse
+) openai.ChatCompletionChunk {
+	var response openai.ChatCompletionChunk
 	if !strings.HasPrefix(responseText, streamingRespPrefix) || strings.HasPrefix(responseText, streamingEndMsg) {
 		return response
 	}
