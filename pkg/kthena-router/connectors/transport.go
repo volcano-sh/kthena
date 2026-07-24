@@ -31,6 +31,22 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// httpStatusError wraps an upstream non-2xx HTTP response with its status code
+type httpStatusError struct {
+	code  int
+	phase string // "prefill" or "decode"
+}
+
+// Error returns the diagnostic message, identical to the previous fmt.Errorf text
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s request failed with status %d", e.phase, e.code)
+}
+
+// Code returns the upstream HTTP status code
+func (e *httpStatusError) Code() int {
+	return e.code
+}
+
 func prefillerProxy(_ *gin.Context, req *http.Request) error {
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
@@ -39,7 +55,7 @@ func prefillerProxy(_ *gin.Context, req *http.Request) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("prefill request failed with status %d", resp.StatusCode)
+		return &httpStatusError{code: resp.StatusCode, phase: "prefill"}
 	}
 
 	klog.V(4).Infof("Prefill request completed successfully")
@@ -54,7 +70,7 @@ func decoderProxy(c *gin.Context, req *http.Request) (int, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, fmt.Errorf("decode request failed with status %d", resp.StatusCode)
+		return 0, &httpStatusError{code: resp.StatusCode, phase: "decode"}
 	}
 
 	// Copy response headers

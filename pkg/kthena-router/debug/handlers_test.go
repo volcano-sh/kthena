@@ -344,6 +344,8 @@ func (m *MockStore) IncrPodOnFlightRequests(podName types.NamespacedName) {}
 
 func (m *MockStore) DecrPodOnFlightRequests(podName types.NamespacedName) {}
 
+func (m *MockStore) RecordPodProxyResult(podName types.NamespacedName, is5xxFailure bool) {}
+
 func newTestContext(params gin.Params) (*gin.Context, *httptest.ResponseRecorder) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

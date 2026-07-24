@@ -371,3 +371,46 @@ func TestPDSchedulerFiltersOverloadedDecodePod(t *testing.T) {
 	err = NewScheduler(store, nil).Schedule(ctx, pods)
 	require.Error(t, err)
 }
+
+// TestRunScorePluginsCircuitBreakerPenalty verifies a suspect pod's score is halved.
+func TestRunScorePluginsCircuitBreakerPenalty(t *testing.T) {
+	healthyPod := createTestPodInfo("healthy")
+	suspectPod := createTestPodInfo("suspect")
+	// Trip the circuit breaker on the suspect pod.
+	for i := 0; i < circuit5xxThreshold; i++ {
+		suspectPod.IncrConsecutive5xxFailures()
+	}
+	require.Equal(t, int64(circuit5xxThreshold), suspectPod.GetConsecutive5xxFailures())
+	require.Zero(t, healthyPod.GetConsecutive5xxFailures())
+
+	store := datastore.New()
+	// Add pods to the store so least-request can read their on-flight counts.
+	require.NoError(t, store.AddOrUpdatePod(healthyPod.GetPod(), nil))
+	require.NoError(t, store.AddOrUpdatePod(suspectPod.GetPod(), nil))
+
+	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
+		ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
+	}
+
+	result := scheduler.RunScorePlugins([]*datastore.PodInfo{healthyPod, suspectPod}, ctx)
+
+	// The suspect pod must have been penalised (halved); the healthy pod must not.
+	healthyScore, okH := result[healthyPod]
+	suspectScore, okS := result[suspectPod]
+	require.True(t, okH)
+	require.True(t, okS)
+
+	// With identical plugin inputs the pre-penalty scores are equal, so the only
+	// divergence is the 50% circuit-breaker cut on the suspect pod.
+	if healthyScore == suspectScore {
+		t.Fatalf("expected suspect pod score to be halved, but both are %d", healthyScore)
+	}
+	assert.Equal(t, healthyScore/2, suspectScore, "suspect pod total score should be half of healthy pod")
+
+	// Self-healing: reset the suspect pod's counter and its score must recover.
+	suspectPod.ResetConsecutive5xxFailures()
+	result = scheduler.RunScorePlugins([]*datastore.PodInfo{healthyPod, suspectPod}, ctx)
+	assert.Equal(t, result[healthyPod], result[suspectPod], "suspect pod score should recover after reset")
+}

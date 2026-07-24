@@ -34,6 +34,10 @@ import (
 const (
 	// Get the top five scoring podinfo
 	topN = 5
+
+	// circuit5xxThreshold is the consecutive-5xx count at which a pod's total
+	// score is halved (circuit breaker). A success resets the counter.
+	circuit5xxThreshold = 5
 )
 
 type SchedulerImpl struct {
@@ -245,6 +249,13 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 			} else {
 				res[k] += v * scorePlugin.weight
 			}
+		}
+	}
+
+	// Circuit breaker: halve the score of a pod with circuit5xxThreshold consecutive 5xx
+	for pod, score := range res {
+		if pod.GetConsecutive5xxFailures() >= circuit5xxThreshold {
+			res[pod] = score / 2
 		}
 	}
 
