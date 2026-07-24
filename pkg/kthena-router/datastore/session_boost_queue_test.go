@@ -19,6 +19,7 @@ package datastore
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -728,5 +729,198 @@ func TestSessionBoost_ConcurrentAdmitAbandonNoLeak(t *testing.T) {
 		if got := q.GetInflightCount(); got != 0 {
 			t.Fatalf("iteration %d: inflight leaked, count=%d", i, got)
 		}
+	}
+}
+
+func TestSessionBoostQueue_GracePeriod_WaitsFullDuration(t *testing.T) {
+	checker := func() bool { return true }
+
+	cfg := sessionBoostConfig()
+	// Use a short grace period for the test so it doesn't artificially inflate CI time.
+	cfg.SessionBoostGracePeriod = 100 * time.Millisecond
+	cfg.InflightPerPod = 1
+	q := newSessionBoostQueue(cfg, checker)
+	defer q.Close()
+
+	now := time.Now()
+	req1 := &Request{
+		UserID:      "user-A",
+		ModelName:   "model-1",
+		SessionID:   "session-1",
+		RequestTime: now,
+		NotifyChan:  make(chan struct{}),
+	}
+	if err := q.PushRequest(req1); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go q.Run(ctx, 0)
+
+	// Wait for req1 to be admitted
+	<-req1.NotifyChan
+
+	// Mark session completed and trigger the grace period
+	q.MarkSessionRequestCompleted("session-1")
+	req1.Release()
+
+	// Wait deterministically for the grace period reservation
+	timeout := time.Now().Add(1 * time.Second)
+	for q.GetInflightCount() != 1 {
+		if time.Now().After(timeout) {
+			t.Fatal("Timeout waiting for grace period inflight reservation")
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	gracePeriodStart := time.Now()
+
+	// Push a boosted follow-up during the grace period
+	boostedFollowUp := &Request{
+		UserID:      "user-A",
+		ModelName:   "model-1",
+		SessionID:   "session-1",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+	}
+
+	if err := q.PushRequest(boostedFollowUp); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	// The boosted request MUST NOT be dequeued instantly; it must wait the full timer.
+	select {
+	case <-boostedFollowUp.NotifyChan:
+		elapsed := time.Since(gracePeriodStart)
+		if elapsed < 80*time.Millisecond {
+			t.Fatalf("Boosted request was dispatched too early (%v). Expected to wait the full 100ms grace period.", elapsed)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Timeout: boosted request was not admitted at all")
+	}
+}
+
+func TestSessionBoostQueue_GracePeriod_SecondaryCapacityDrained(t *testing.T) {
+	var backendCapacity atomic.Int32
+	backendCapacity.Store(2)
+	checker := func() bool { return backendCapacity.Load() > 0 }
+
+	cfg := sessionBoostConfig()
+	cfg.SessionBoostGracePeriod = 100 * time.Millisecond
+	cfg.InflightPerPod = 2
+	q := newSessionBoostQueue(cfg, checker)
+	defer q.Close()
+
+	now := time.Now()
+
+	// Fill both slots
+	req1 := &Request{UserID: "user-A", ModelName: "m", SessionID: "session-1", RequestTime: now, NotifyChan: make(chan struct{})}
+	req2 := &Request{UserID: "user-B", ModelName: "m", SessionID: "session-2", RequestTime: now, NotifyChan: make(chan struct{})}
+	if err := q.PushRequest(req1); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.PushRequest(req2); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go q.Run(ctx, 0)
+
+	<-req1.NotifyChan
+	<-req2.NotifyChan
+	backendCapacity.Store(0)
+
+	q.MarkSessionRequestCompleted("session-1")
+
+	// Release slot 1 to trigger the grace period
+	backendCapacity.Store(1)
+	req1.Release()
+
+	// Wait deterministically for the grace period reservation (req2 is still inflight)
+	timeout := time.Now().Add(1 * time.Second)
+	for q.GetInflightCount() != 2 {
+		if time.Now().After(timeout) {
+			t.Fatal("Timeout waiting for grace period inflight reservation")
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// Push a normal request, which should be blocked by the reserved slot
+	normalReq := &Request{UserID: "normal", ModelName: "m", SessionID: "normal-sess", RequestTime: time.Now(), NotifyChan: make(chan struct{})}
+	if err := q.PushRequest(normalReq); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-normalReq.NotifyChan:
+		t.Fatal("Normal request incorrectly stole the reserved grace period slot")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release slot 2. The normal request should be admitted here safely.
+	backendCapacity.Store(2)
+	req2.Release()
+
+	select {
+	case <-normalReq.NotifyChan:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Normal request was starved; secondary capacity was not drained")
+	}
+
+	// Finally, push the boosted follow-up. It should get the reserved slot 1 once the 100ms timer fires.
+	boostedReq := &Request{UserID: "user-A", ModelName: "m", SessionID: "session-1", RequestTime: time.Now(), NotifyChan: make(chan struct{})}
+	if err := q.PushRequest(boostedReq); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-boostedReq.NotifyChan:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Boosted request was not admitted into its reserved slot")
+	}
+}
+
+func TestSessionBoostQueue_GracePeriod_ContextCancelledNoLeak(t *testing.T) {
+	checker := func() bool { return true }
+
+	cfg := sessionBoostConfig()
+	cfg.SessionBoostGracePeriod = 2 * time.Second
+	cfg.InflightPerPod = 1
+	q := newSessionBoostQueue(cfg, checker)
+	defer q.Close()
+
+	req1 := &Request{UserID: "user-A", ModelName: "m", SessionID: "session-1", RequestTime: time.Now(), NotifyChan: make(chan struct{})}
+	if err := q.PushRequest(req1); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go q.Run(ctx, 0)
+
+	// Trigger grace period
+	<-req1.NotifyChan
+	q.MarkSessionRequestCompleted("session-1")
+	req1.Release()
+
+	// Wait deterministically for the grace period reservation
+	timeout := time.Now().Add(1 * time.Second)
+	for q.GetInflightCount() != 1 {
+		if time.Now().After(timeout) {
+			t.Fatal("Timeout waiting for grace period inflight reservation")
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// Cancel the context while the dispatcher is waiting in the grace period
+	cancel()
+
+	// Verify the inflight reservation was released cleanly
+	timeout = time.Now().Add(1 * time.Second)
+	for q.GetInflightCount() != 0 {
+		if time.Now().After(timeout) {
+			t.Fatal("Inflight permit leaked on context cancellation!")
+		}
+		time.Sleep(1 * time.Millisecond)
 	}
 }
