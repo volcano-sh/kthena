@@ -1996,6 +1996,20 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
 	require.NoError(t, err, "Failed to update ModelServing for role-based rolling update")
 
+	t.Log("Waiting for ServingGroups to become unavailable during role rolling update")
+	require.Eventually(t, func() bool {
+		ms, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if getErr != nil || ms.Spec.Replicas == nil {
+			return false
+		}
+		expectedReplicas := *ms.Spec.Replicas
+		if ms.Status.AvailableReplicas < expectedReplicas {
+			t.Logf("Role rolling in progress: availableReplicas=%d expected=%d", ms.Status.AvailableReplicas, expectedReplicas)
+			return true
+		}
+		return false
+	}, 2*time.Minute, 1*time.Second, "ServingGroups should be unavailable while roles are rolling")
+
 	// Monitor the role-based rolling update to ensure only prefill role pods are replaced
 	t.Log("Monitoring role-based rolling update to ensure only prefill role pods are replaced while decode role pods remain")
 
