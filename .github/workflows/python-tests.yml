@@ -29,6 +29,7 @@ jobs:
           pip install -r python/kthena/downloader/requirements.txt
           pip install -r python/kthena/runtime/requirements.txt
           pip install -r python/kthena/runtime/requirements-dev.txt
+          pip install -r benchmark/router-benchmark/scripts/requirements.txt
       - name: Run tests
         run: |
           pip install coverage

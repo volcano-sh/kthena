@@ -1,0 +1,44 @@
+name: "smoke-test-s7-backend-variance"
+description: "s7 scenario: latency variance on heterogeneous backends"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 50
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  concurrency:
+    connections: 100
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "fast"
+      count: 1
+      speedupRatio: 10.0
+    - name: "normal"
+      count: 1
+      speedupRatio: 1.0
+    - name: "slow"
+      count: 1
+      speedupRatio: 0.2
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"

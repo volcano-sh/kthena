@@ -1,0 +1,193 @@
+name: Router Benchmark
+
+on:
+  workflow_dispatch:
+
+#  pull_request:
+#    branches:
+#      - main
+#    paths:
+#      - "benchmark/router-benchmark/**"
+#      - "pkg/kthena-router/**"
+#      - "charts/kthena/**"
+#      - ".github/workflows/benchmark.yml"
+
+  push:
+    branches:
+      - feat/router-benchmark
+    paths:
+      - "benchmark/router-benchmark/**"
+      - "pkg/kthena-router/**"
+      - "charts/kthena/**"
+      - ".github/workflows/benchmark.yml"
+
+jobs:
+  benchmark:
+    name: ${{ matrix.scenario }} (${{ matrix.router-config-a }} vs ${{ matrix.router-config-b }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: smoke-test-s2
+            router-config-a: router-config-random
+            router-config-b: router-config-least-latency
+#          - scenario: smoke-test-s7
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-latency
+#          - scenario: smoke-test-s8
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-latency
+#          - scenario: smoke-test-s8
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
+#          - scenario: smoke-test-s8
+#            router-config-a: router-config-least-latency
+#            router-config-b: router-config-least-request
+
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: false
+          haskell: false
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Helm
+        shell: bash
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.21.1-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+
+      - name: Install Kind
+        shell: bash
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Deploy Kthena
+        run: |
+          export CLUSTER_NAME=kthena-benchmark
+          export TAG=benchmark-${{ github.run_id }}
+          ./hack/local-up-kthena.sh
+
+      - name: Check Kthena Deployment
+        run: |
+          kubectl get pods -n kthena-system
+          kubectl rollout status deployment/kthena-controller-manager -n kthena-system --timeout=300s
+          kubectl rollout status deployment/kthena-router -n kthena-system --timeout=300s
+
+      - name: Install AIPerf
+        run: |
+          pip install 'aiperf>=0.9,<0.11'
+
+      - name: Run A/B Test
+        id: benchmark
+        working-directory: benchmark/router-benchmark
+        run: |
+          python scripts/ab_test.py \
+            --scenario "scenarios/${{ matrix.scenario }}.yaml" \
+            --router-config-a "plugins/${{ matrix.router-config-a }}.yaml" \
+            --router-config-b "plugins/${{ matrix.router-config-b }}.yaml" \
+            --output results/
+
+      - name: Collect Results
+        if: always()
+        working-directory: benchmark/router-benchmark
+        run: |
+          echo "=== Benchmark Results ==="
+          ls -la results/ || echo "No results directory"
+          cat results/report_*.json 2>/dev/null || echo "No report files"
+          echo "=== AIPerf Output ==="
+          ls -la results/runs/ || echo "No runs directory"
+          find results/runs -name "*.json" -exec cat {} \; 2>/dev/null || echo "No AIPerf output"
+
+      - name: Upload Benchmark Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: benchmark/router-benchmark/results/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Collect Cluster Snapshot on Failure
+        if: failure()
+        run: |
+          SNAPDIR=/tmp/kind-logs
+          mkdir -p "$SNAPDIR"
+
+          # Pod status (all namespaces)
+          kubectl get pods -A -o wide > "$SNAPDIR/pods.txt" 2>&1 || true
+
+          # Deployment status
+          kubectl get deployments -A -o wide > "$SNAPDIR/deployments.txt" 2>&1 || true
+
+          # Service status
+          kubectl get services -A -o wide > "$SNAPDIR/services.txt" 2>&1 || true
+
+          # Cluster events (last 10 min, sorted by time)
+          kubectl get events -A --sort-by='.lastTimestamp' > "$SNAPDIR/events.txt" 2>&1 || true
+
+          # Describe problematic pods (non-Running/Non-Completed)
+          kubectl get pods -A --no-headers | grep -v -E '(Running|Completed)' | \
+            awk '{print "-n " $1, $2}' | while read -r args; do
+              kubectl describe pod $args >> "$SNAPDIR/describe-failed-pods.txt" 2>&1 || true
+            done
+
+          # Describe all mocker pods (may be CrashLoopBackOff between restarts)
+          for pod in $(kubectl get pods -l app=mocker-llm -o name 2>/dev/null); do
+            kubectl describe "$pod" >> "$SNAPDIR/describe-mocker-pods.txt" 2>&1 || true
+          done
+
+          # Node resource usage
+          kubectl describe nodes > "$SNAPDIR/nodes-describe.txt" 2>&1 || true
+
+          # Mocker pod logs (current + previous instance)
+          for pod in $(kubectl get pods -l app=mocker-llm -o name 2>/dev/null); do
+            kubectl logs "$pod" --tail=500 > "$SNAPDIR/${pod//\//-}-current.log" 2>&1 || true
+            kubectl logs "$pod" --previous --tail=500 > "$SNAPDIR/${pod//\//-}-previous.log" 2>&1 || true
+          done
+
+          # Kthena controller & router logs
+          kubectl logs deployment/kthena-controller-manager -n kthena-system --tail=500 \
+            > "$SNAPDIR/kthena-controller.log" 2>&1 || true
+          kubectl logs deployment/kthena-router -n kthena-system --tail=500 \
+            > "$SNAPDIR/kthena-router.log" 2>&1 || true
+
+          echo "=== Snapshot saved to $SNAPDIR ==="
+          ls -la "$SNAPDIR"
+
+      - name: Upload Cluster Snapshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-snapshot-${{ github.run_id }}
+          path: /tmp/kind-logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always()
+        run: |
+          export CLUSTER_NAME=kthena-benchmark
+          ./hack/local-up-kthena.sh -q || true
