@@ -24,10 +24,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
+	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
+	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/yaml"
 )
 
@@ -210,6 +214,146 @@ func TestTriggerModel(t *testing.T) {
 	// invalid old
 	controller.triggerModel("invalid", modelServing)
 	assert.Equal(t, 0, controller.workQueue.Len())
+}
+
+func TestModelBoosterOwnerNameFindsOwnerByGVK(t *testing.T) {
+	controllerOwner := true
+	modelOwner := metav1.OwnerReference{
+		APIVersion: workload.GroupVersion.String(),
+		Kind:       workload.ModelKind.Kind,
+		Name:       "owner-model",
+		Controller: &controllerOwner,
+	}
+	nonControllerModelOwner := metav1.OwnerReference{
+		APIVersion: workload.GroupVersion.String(),
+		Kind:       workload.ModelKind.Kind,
+		Name:       "observer-model",
+	}
+	unrelatedOwner := metav1.OwnerReference{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Name:       "config",
+	}
+
+	obj := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			OwnerReferences: []metav1.OwnerReference{unrelatedOwner, nonControllerModelOwner, modelOwner},
+		},
+	}
+
+	ownerName, ok := modelBoosterOwnerName(obj)
+	assert.True(t, ok)
+	assert.Equal(t, "owner-model", ownerName)
+}
+
+func TestChildResourceHandlersEnqueueModelBoosterOwner(t *testing.T) {
+	model := &workload.ModelBooster{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "owner-model",
+		},
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	assert.NoError(t, indexer.Add(model))
+	controller := newOwnerQueueController(indexer)
+	defer controller.workQueue.ShutDown()
+
+	controllerOwner := true
+	modelOwner := metav1.OwnerReference{
+		APIVersion: workload.GroupVersion.String(),
+		Kind:       workload.ModelKind.Kind,
+		Name:       model.Name,
+		Controller: &controllerOwner,
+	}
+	unrelatedOwner := metav1.OwnerReference{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Name:       "config",
+	}
+	ownerRefs := []metav1.OwnerReference{unrelatedOwner, modelOwner}
+
+	cases := []struct {
+		name   string
+		invoke func()
+	}{
+		{
+			name: "model serving update",
+			invoke: func() {
+				controller.triggerModel(
+					&workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: model.Namespace, Name: "serving"}},
+					&workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: model.Namespace, Name: "serving", OwnerReferences: ownerRefs}},
+				)
+			},
+		},
+		{
+			name: "model serving delete",
+			invoke: func() {
+				controller.deleteModelServing(&workload.ModelServing{
+					ObjectMeta: metav1.ObjectMeta{Namespace: model.Namespace, Name: "serving", OwnerReferences: ownerRefs},
+				})
+			},
+		},
+		{
+			name: "model route delete",
+			invoke: func() {
+				controller.deleteModelRoute(&networkingv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: model.Namespace, Name: "route", OwnerReferences: ownerRefs},
+				})
+			},
+		},
+		{
+			name: "model server delete",
+			invoke: func() {
+				controller.deleteModelServer(&networkingv1alpha1.ModelServer{
+					ObjectMeta: metav1.ObjectMeta{Namespace: model.Namespace, Name: "server", OwnerReferences: ownerRefs},
+				})
+			},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			drainWorkQueue(controller)
+			tt.invoke()
+			assert.Equal(t, 1, controller.workQueue.Len())
+		})
+	}
+}
+
+func TestChildResourceHandlersIgnoreNonModelBoosterOwners(t *testing.T) {
+	controller := newOwnerQueueController(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}))
+	defer controller.workQueue.ShutDown()
+
+	controller.deleteModelRoute(&networkingv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "route",
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: "v1", Kind: "ConfigMap", Name: "config"},
+			},
+		},
+	})
+
+	assert.Equal(t, 0, controller.workQueue.Len())
+}
+
+func newOwnerQueueController(indexer cache.Indexer) *ModelBoosterController {
+	return &ModelBoosterController{
+		modelBoosterLister: workloadLister.NewModelBoosterLister(indexer),
+		workQueue: workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.DefaultTypedControllerRateLimiter[any](),
+			workqueue.TypedRateLimitingQueueConfig[any]{}),
+	}
+}
+
+func drainWorkQueue(controller *ModelBoosterController) {
+	for controller.workQueue.Len() > 0 {
+		item, shutdown := controller.workQueue.Get()
+		if shutdown {
+			return
+		}
+		controller.workQueue.Done(item)
+		controller.workQueue.Forget(item)
+	}
 }
 
 // Removed tests for LoRA adapter changes as the current API defines a single backend without loraAdapters
