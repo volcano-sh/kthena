@@ -42,7 +42,7 @@ var engineRegistry = map[string]MetricsProvider{
 func GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
-		klog.Errorf("Failed to get inference engine: %v", err)
+		klog.Errorf("Failed to get inference engine %s for pod %s: %v", engine, podRef(pod), err)
 		return nil, nil
 	}
 
@@ -74,9 +74,17 @@ func GetMetricsProvider(engine string) (MetricsProvider, error) {
 func GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
-		klog.Errorf("Failed to get inference engine: %v", err)
+		klog.Errorf("Failed to get inference engine %s for pod %s: %v", engine, podRef(pod), err)
 		return nil, err
 	}
 
 	return provider.GetPodModels(pod, port)
+}
+
+// podRef returns a "namespace/name" identifier for logging, tolerating a nil pod.
+func podRef(pod *corev1.Pod) string {
+	if pod == nil {
+		return "<nil>"
+	}
+	return pod.GetNamespace() + "/" + pod.GetName()
 }
