@@ -42,13 +42,13 @@ func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 	}
 }
 
-func ParsePrompt(body map[string]interface{}) (common.ChatMessage, error) {
+func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 	if prompt, ok := body["prompt"]; ok {
 		promptStr, ok := prompt.(string)
 		if !ok {
-			return common.ChatMessage{}, fmt.Errorf("prompt is not a string")
+			return nil, fmt.Errorf("prompt is not a string")
 		}
-		return common.ChatMessage{
+		return &common.ChatMessage{
 			Text: promptStr,
 		}, nil
 	}
@@ -56,7 +56,7 @@ func ParsePrompt(body map[string]interface{}) (common.ChatMessage, error) {
 	if messages, ok := body["messages"]; ok {
 		messageList, ok := messages.([]interface{})
 		if !ok {
-			return common.ChatMessage{}, fmt.Errorf("messages is not a list")
+			return nil, fmt.Errorf("messages is not a list")
 		}
 
 		msgs := make([]common.Message, 0, len(messageList))
@@ -82,15 +82,15 @@ func ParsePrompt(body map[string]interface{}) (common.ChatMessage, error) {
 			})
 		}
 
-		return common.ChatMessage{
+		return &common.ChatMessage{
 			Messages: msgs,
 		}, nil
 	}
 
-	return common.ChatMessage{}, fmt.Errorf("prompt or messages not found in request body")
+	return nil, fmt.Errorf("prompt or messages not found in request body")
 }
 
-func GetPromptString(chatMessage common.ChatMessage) string {
+func GetPromptString(chatMessage *common.ChatMessage) string {
 	// If Text field is present, return text directly (for prompt format)
 	if chatMessage.Text != "" {
 		return chatMessage.Text

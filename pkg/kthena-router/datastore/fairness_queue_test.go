@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestNewRequestPriorityQueue(t *testing.T) {
@@ -44,7 +46,6 @@ func TestPushAndPopRequest(t *testing.T) {
 	defer pq.Close()
 
 	req := &Request{
-		ReqID:       "test-1",
 		UserID:      "user-1",
 		ModelName:   "model-1",
 		Priority:    1.0,
@@ -65,8 +66,8 @@ func TestPushAndPopRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PopRequest failed: %v", err)
 	}
-	if popped.ReqID != req.ReqID {
-		t.Errorf("Expected ReqID %s, got %s", req.ReqID, popped.ReqID)
+	if popped.UserID != req.UserID {
+		t.Errorf("Expected UserID %s, got %s", req.UserID, popped.UserID)
 	}
 	if pq.Len() != 0 {
 		t.Errorf("Expected queue length 0, got %d", pq.Len())
@@ -79,9 +80,9 @@ func TestPriorityOrdering(t *testing.T) {
 
 	now := time.Now()
 	requests := []*Request{
-		{ReqID: "high", UserID: "user1", Priority: 1.0, RequestTime: now},
-		{ReqID: "medium", UserID: "user2", Priority: 2.0, RequestTime: now.Add(time.Second)},
-		{ReqID: "low", UserID: "user3", Priority: 3.0, RequestTime: now.Add(2 * time.Second)},
+		{UserID: "high", Priority: 1.0, RequestTime: now},
+		{UserID: "medium", Priority: 2.0, RequestTime: now.Add(time.Second)},
+		{UserID: "low", Priority: 3.0, RequestTime: now.Add(2 * time.Second)},
 	}
 
 	// Push in reverse priority order
@@ -99,8 +100,8 @@ func TestPriorityOrdering(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PopRequest failed at index %d: %v", i, err)
 		}
-		if req.ReqID != expected {
-			t.Errorf("Expected ReqID %s at index %d, got %s", expected, i, req.ReqID)
+		if req.UserID != expected {
+			t.Errorf("Expected UserID %s at index %d, got %s", expected, i, req.UserID)
 		}
 	}
 }
@@ -111,9 +112,9 @@ func TestFairnessSameUser(t *testing.T) {
 
 	now := time.Now()
 	requests := []*Request{
-		{ReqID: "req1", UserID: "user1", Priority: 1.0, RequestTime: now},
-		{ReqID: "req2", UserID: "user1", Priority: 1.0, RequestTime: now.Add(time.Second)},
-		{ReqID: "req3", UserID: "user1", Priority: 1.0, RequestTime: now.Add(2 * time.Second)},
+		{SessionID: "req1", UserID: "user1", Priority: 1.0, RequestTime: now},
+		{SessionID: "req2", UserID: "user1", Priority: 1.0, RequestTime: now.Add(time.Second)},
+		{SessionID: "req3", UserID: "user1", Priority: 1.0, RequestTime: now.Add(2 * time.Second)},
 	}
 
 	// Push in reverse time order
@@ -131,8 +132,8 @@ func TestFairnessSameUser(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PopRequest failed at index %d: %v", i, err)
 		}
-		if req.ReqID != expected {
-			t.Errorf("Expected ReqID %s at index %d, got %s", expected, i, req.ReqID)
+		if req.SessionID != expected {
+			t.Errorf("Expected SessionID %s at index %d, got %s", expected, i, req.SessionID)
 		}
 	}
 }
@@ -143,7 +144,7 @@ func TestPopWhenAvailable(t *testing.T) {
 
 	ctx := context.Background()
 	req := &Request{
-		ReqID:       "test-async",
+		SessionID:   "test-async",
 		UserID:      "user1",
 		Priority:    1.0,
 		RequestTime: time.Now(),
@@ -173,8 +174,8 @@ func TestPopWhenAvailable(t *testing.T) {
 	// Should receive the request
 	select {
 	case result := <-resultCh:
-		if result.ReqID != req.ReqID {
-			t.Errorf("Expected ReqID %s, got %s", req.ReqID, result.ReqID)
+		if result.SessionID != req.SessionID {
+			t.Errorf("Expected SessionID %s, got %s", req.SessionID, result.SessionID)
 		}
 	case err := <-errorCh:
 		t.Fatalf("popWhenAvailable failed: %v", err)
@@ -253,7 +254,7 @@ func TestRunMethod(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		notifyCh := make(chan struct{})
 		req := &Request{
-			ReqID:       "req-" + string(rune('1'+i)),
+			SessionID:   "req-" + string(rune('1'+i)),
 			UserID:      "user1",
 			Priority:    float64(i + 1),
 			RequestTime: time.Now(),
@@ -271,7 +272,7 @@ func TestRunMethod(t *testing.T) {
 			case <-r.NotifyChan:
 				processedCh <- r
 			case <-time.After(time.Second):
-				t.Errorf("Request %s was not processed", r.ReqID)
+				t.Errorf("Request %s was not processed", r.SessionID)
 			}
 		}(req)
 	}
@@ -298,8 +299,8 @@ func TestRunMethod(t *testing.T) {
 	// Validate all expected requests were processed (order can vary due to concurrency)
 	expectedSet := map[string]struct{}{"req-1": {}, "req-2": {}, "req-3": {}}
 	for _, r := range processed {
-		if _, ok := expectedSet[r.ReqID]; !ok {
-			t.Errorf("Unexpected ReqID processed: %s", r.ReqID)
+		if _, ok := expectedSet[r.SessionID]; !ok {
+			t.Errorf("Unexpected SessionID processed: %s", r.SessionID)
 		}
 	}
 }
@@ -319,7 +320,6 @@ func TestConcurrentPushPop(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < numRequests; j++ {
 				req := &Request{
-					ReqID:       fmt.Sprintf("req-%d-%d", id, j),
 					UserID:      fmt.Sprintf("user-%d", id),
 					Priority:    float64(j),
 					RequestTime: time.Now(),
@@ -397,8 +397,8 @@ func TestPopWhenAvailable_SkipsCancelledRequests(t *testing.T) {
 	cancel() // cancel immediately
 
 	requests := []*Request{
-		{ReqID: "cancelled-req", UserID: "user1", Priority: 0.5, RequestTime: now, CancelCh: cancelledCtx.Done()},
-		{ReqID: "valid-req", UserID: "user2", Priority: 1.0, RequestTime: now.Add(time.Second)},
+		{UserID: "user1", Priority: 0.5, RequestTime: now, CancelCh: cancelledCtx.Done()},
+		{UserID: "user2", Priority: 1.0, RequestTime: now.Add(time.Second)},
 	}
 
 	for _, req := range requests {
@@ -412,8 +412,8 @@ func TestPopWhenAvailable_SkipsCancelledRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("popWhenAvailable failed: %v", err)
 	}
-	if result.ReqID != "valid-req" {
-		t.Errorf("Expected valid-req, got %s", result.ReqID)
+	if result.UserID != "user2" {
+		t.Errorf("Expected valid request (user2), got %s", result.UserID)
 	}
 }
 
@@ -428,8 +428,8 @@ func TestPopWhenAvailable_SkipsTimedOutRequests(t *testing.T) {
 	defer cancel()
 
 	requests := []*Request{
-		{ReqID: "expired-req", UserID: "user1", Priority: 0.5, RequestTime: now, CancelCh: expiredCtx.Done()},
-		{ReqID: "fresh-req", UserID: "user2", Priority: 1.0, RequestTime: now.Add(time.Second)},
+		{UserID: "user1", Priority: 0.5, RequestTime: now, CancelCh: expiredCtx.Done()},
+		{UserID: "user2", Priority: 1.0, RequestTime: now.Add(time.Second)},
 	}
 
 	for _, req := range requests {
@@ -442,8 +442,8 @@ func TestPopWhenAvailable_SkipsTimedOutRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("popWhenAvailable failed: %v", err)
 	}
-	if result.ReqID != "fresh-req" {
-		t.Errorf("Expected fresh-req, got %s", result.ReqID)
+	if result.UserID != "user2" {
+		t.Errorf("Expected fresh request (user2), got %s", result.UserID)
 	}
 }
 
@@ -453,7 +453,6 @@ func TestClose_DrainsPendingWaiters(t *testing.T) {
 	// Push requests that will remain in the queue
 	for i := 0; i < 5; i++ {
 		req := &Request{
-			ReqID:       fmt.Sprintf("req-%d", i),
 			UserID:      "user1",
 			ModelName:   "model-1",
 			Priority:    float64(i),
@@ -477,6 +476,78 @@ func TestClose_DrainsPendingWaiters(t *testing.T) {
 	}
 }
 
+func TestClose_CancelsPendingWaiters(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := &Request{
+		ModelName:   "model-1",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+		CancelCh:    ctx.Done(),
+		Cancel:      cancel,
+	}
+	if err := pq.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	pq.Close()
+
+	select {
+	case <-ctx.Done():
+		// Expected: queue shutdown cancels requests still waiting in the heap.
+	default:
+		t.Fatal("pending request was not cancelled when queue closed")
+	}
+}
+
+func TestPushRequestAfterClose(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+	pq.Close()
+
+	err := pq.PushRequest(&Request{ModelName: "model-1", RequestTime: time.Now()})
+	if err != errRequestQueueClosed {
+		t.Fatalf("expected %q, got %v", errRequestQueueClosed, err)
+	}
+	if pq.Len() != 0 {
+		t.Fatalf("closed queue accepted a request; length=%d", pq.Len())
+	}
+}
+
+func TestRequeueRequestRestoresQueueSizeMetric(t *testing.T) {
+	const (
+		model = "requeue-metric-test-model"
+		user  = "requeue-metric-test-user"
+	)
+
+	pq := NewRequestPriorityQueue(nil)
+	defer pq.Close()
+
+	req := &Request{
+		UserID:      user,
+		ModelName:   model,
+		RequestTime: time.Now(),
+	}
+	if err := pq.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	if _, err := pq.popWhenAvailable(context.Background()); err != nil {
+		t.Fatalf("popWhenAvailable failed: %v", err)
+	}
+
+	pq.requeueRequest(req)
+
+	var metric dto.Metric
+	if err := pq.metrics.FairnessQueueSize.WithLabelValues(model, user).Write(&metric); err != nil {
+		t.Fatalf("failed to read queue size metric: %v", err)
+	}
+	got := metric.GetGauge().GetValue()
+	if got != 1 {
+		t.Fatalf("expected queue size metric to be restored to 1 after requeue, got %v", got)
+	}
+}
+
 func TestNewRequestPriorityQueueWithConfig(t *testing.T) {
 	cfg := FairnessQueueConfig{
 		MaxConcurrent:             5,
@@ -484,7 +555,7 @@ func TestNewRequestPriorityQueueWithConfig(t *testing.T) {
 		MaxPriorityRefreshRetries: 3,
 		RebuildThreshold:          32,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	if pq == nil {
 		t.Fatal("NewRequestPriorityQueueWithConfig returned nil")
 	}
@@ -504,7 +575,7 @@ func TestNewRequestPriorityQueueWithConfig_NoSemaphore(t *testing.T) {
 		MaxConcurrent: 0,
 		MaxQPS:        100,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	if pq.sem != nil {
 		t.Error("Expected nil semaphore with MaxConcurrent = 0")
 	}
@@ -515,7 +586,7 @@ func TestRun_SemaphoreMode(t *testing.T) {
 		MaxConcurrent: 2,
 		MaxQPS:        0, // no QPS cap
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	defer pq.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -527,7 +598,6 @@ func TestRun_SemaphoreMode(t *testing.T) {
 		notifyCh := make(chan struct{})
 		notifyChs[i] = notifyCh
 		req := &Request{
-			ReqID:       fmt.Sprintf("req-%d", i),
 			UserID:      fmt.Sprintf("user-%d", i),
 			ModelName:   "test-model",
 			Priority:    float64(i),
@@ -636,14 +706,14 @@ func TestPriorityRefresh_ReinsertOnDrift(t *testing.T) {
 		MaxPriorityRefreshRetries: 3,
 		RebuildThreshold:          64,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
 	// user-low has low initial priority (should be dequeued first)
-	req1 := &Request{ReqID: "low", UserID: "user-low", ModelName: "model-1", Priority: 1.0, RequestTime: now}
+	req1 := &Request{UserID: "user-low", ModelName: "model-1", Priority: 1.0, RequestTime: now}
 	// user-high has high initial priority
-	req2 := &Request{ReqID: "high", UserID: "user-high", ModelName: "model-1", Priority: 10.0, RequestTime: now.Add(time.Second)}
+	req2 := &Request{UserID: "user-high", ModelName: "model-1", Priority: 10.0, RequestTime: now.Add(time.Second)}
 
 	pq.PushRequest(req1)
 	pq.PushRequest(req2)
@@ -658,8 +728,8 @@ func TestPriorityRefresh_ReinsertOnDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("popWhenAvailable failed: %v", err)
 	}
-	if result.ReqID != "high" {
-		t.Errorf("Expected 'high' (user-high now has lower token count), got %s", result.ReqID)
+	if result.UserID != "user-high" {
+		t.Errorf("Expected 'user-high' (now has lower token count), got %s", result.UserID)
 	}
 
 	// Pop again should get the reinserted request
@@ -667,8 +737,8 @@ func TestPriorityRefresh_ReinsertOnDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("popWhenAvailable failed: %v", err)
 	}
-	if result2.ReqID != "low" {
-		t.Errorf("Expected 'low' on second pop, got %s", result2.ReqID)
+	if result2.UserID != "user-low" {
+		t.Errorf("Expected 'user-low' on second pop, got %s", result2.UserID)
 	}
 }
 
@@ -680,7 +750,7 @@ func TestPriorityRefresh_HeapRebuild(t *testing.T) {
 		MaxPriorityRefreshRetries: 1, // Will rebuild after 1 reinsert
 		RebuildThreshold:          64,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
@@ -689,9 +759,9 @@ func TestPriorityRefresh_HeapRebuild(t *testing.T) {
 	tracker.SetTokenCount("user-b", "model-1", 5.0)
 	tracker.SetTokenCount("user-c", "model-1", 10.0)
 
-	pq.PushRequest(&Request{ReqID: "a", UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
-	pq.PushRequest(&Request{ReqID: "b", UserID: "user-b", ModelName: "model-1", Priority: 5.0, RequestTime: now.Add(time.Second)})
-	pq.PushRequest(&Request{ReqID: "c", UserID: "user-c", ModelName: "model-1", Priority: 10.0, RequestTime: now.Add(2 * time.Second)})
+	pq.PushRequest(&Request{UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
+	pq.PushRequest(&Request{UserID: "user-b", ModelName: "model-1", Priority: 5.0, RequestTime: now.Add(time.Second)})
+	pq.PushRequest(&Request{UserID: "user-c", ModelName: "model-1", Priority: 10.0, RequestTime: now.Add(2 * time.Second)})
 
 	// Drift user-a to highest usage
 	tracker.SetTokenCount("user-a", "model-1", 100.0)
@@ -704,8 +774,8 @@ func TestPriorityRefresh_HeapRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("popWhenAvailable failed: %v", err)
 	}
-	if result.ReqID != "c" {
-		t.Errorf("Expected 'c' (lowest after rebuild), got %s", result.ReqID)
+	if result.UserID != "user-c" {
+		t.Errorf("Expected 'user-c' (lowest after rebuild), got %s", result.UserID)
 	}
 }
 
@@ -714,7 +784,7 @@ func TestRelease_ReleasesPermit(t *testing.T) {
 		MaxConcurrent: 1,
 		MaxQPS:        0,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	defer pq.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -723,7 +793,7 @@ func TestRelease_ReleasesPermit(t *testing.T) {
 	// Push 2 requests
 	notifyCh1 := make(chan struct{})
 	req1 := &Request{
-		ReqID: "req-1", UserID: "user1", ModelName: "m1",
+		UserID: "user1", ModelName: "m1",
 		Priority: 1.0, RequestTime: time.Now(),
 		NotifyChan: notifyCh1,
 	}
@@ -731,7 +801,7 @@ func TestRelease_ReleasesPermit(t *testing.T) {
 
 	notifyCh2 := make(chan struct{})
 	req2 := &Request{
-		ReqID: "req-2", UserID: "user2", ModelName: "m1",
+		UserID: "user2", ModelName: "m1",
 		Priority: 2.0, RequestTime: time.Now(),
 		NotifyChan: notifyCh2,
 	}
@@ -774,15 +844,15 @@ func TestPriorityRefresh_SkipsHeapRebuildAboveThreshold(t *testing.T) {
 		MaxPriorityRefreshRetries: 1,
 		RebuildThreshold:          1,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
 	tracker.SetTokenCount("user-a", "model-1", 1.0)
 	tracker.SetTokenCount("user-b", "model-1", 2.0)
 
-	pq.PushRequest(&Request{ReqID: "a", UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
-	pq.PushRequest(&Request{ReqID: "b", UserID: "user-b", ModelName: "model-1", Priority: 2.0, RequestTime: now.Add(time.Second)})
+	pq.PushRequest(&Request{UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
+	pq.PushRequest(&Request{UserID: "user-b", ModelName: "model-1", Priority: 2.0, RequestTime: now.Add(time.Second)})
 
 	tracker.SetTokenCount("user-a", "model-1", 10.0)
 	tracker.SetTokenCount("user-b", "model-1", 1.5)
@@ -791,8 +861,8 @@ func TestPriorityRefresh_SkipsHeapRebuildAboveThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("popWhenAvailable failed: %v", err)
 	}
-	if result.ReqID != "b" {
-		t.Fatalf("Expected b to be dequeued after refresh, got %s", result.ReqID)
+	if result.UserID != "user-b" {
+		t.Fatalf("Expected user-b to be dequeued after refresh, got %s", result.UserID)
 	}
 }
 
@@ -806,7 +876,7 @@ func TestPriorityRefresh_UsesCompositePriority(t *testing.T) {
 		TokenWeight:               1.0,
 		RequestNumWeight:          10.0,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
@@ -815,8 +885,8 @@ func TestPriorityRefresh_UsesCompositePriority(t *testing.T) {
 	tracker.SetRequestCount("user-a", "model-1", 0)
 	tracker.SetRequestCount("user-b", "model-1", 0)
 
-	pq.PushRequest(&Request{ReqID: "a", UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
-	pq.PushRequest(&Request{ReqID: "b", UserID: "user-b", ModelName: "model-1", Priority: 2.0, RequestTime: now.Add(time.Second)})
+	pq.PushRequest(&Request{UserID: "user-a", ModelName: "model-1", Priority: 1.0, RequestTime: now})
+	pq.PushRequest(&Request{UserID: "user-b", ModelName: "model-1", Priority: 2.0, RequestTime: now.Add(time.Second)})
 
 	tracker.SetRequestCount("user-a", "model-1", 5)
 	tracker.SetRequestCount("user-b", "model-1", 0)
@@ -825,8 +895,8 @@ func TestPriorityRefresh_UsesCompositePriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("popWhenAvailable failed: %v", err)
 	}
-	if result.ReqID != "b" {
-		t.Fatalf("Expected b to be dequeued after composite refresh, got %s", result.ReqID)
+	if result.UserID != "user-b" {
+		t.Fatalf("Expected user-b to be dequeued after composite refresh, got %s", result.UserID)
 	}
 }
 
@@ -835,7 +905,7 @@ func TestRun_SemaphoreMode_EmptyQueueDoesNotConsumePermit(t *testing.T) {
 		MaxConcurrent: 1,
 		MaxQPS:        0,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	defer pq.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -846,7 +916,6 @@ func TestRun_SemaphoreMode_EmptyQueueDoesNotConsumePermit(t *testing.T) {
 
 	notifyCh := make(chan struct{})
 	req := &Request{
-		ReqID:       "req-1",
 		UserID:      "user1",
 		ModelName:   "m1",
 		Priority:    1.0,

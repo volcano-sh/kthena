@@ -1,0 +1,146 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: podinfo-pd-ms
+  namespace: autoscale-demo
+spec:
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    rollingUpdateConfiguration:
+      maxUnavailable: 1
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          metadata:
+            annotations:
+              prometheus.io/port: "9797"
+              prometheus.io/scrape: "true"
+          spec:
+            containers:
+              - name: podinfo
+                image: ghcr.io/stefanprodan/podinfo:6.12.0
+                imagePullPolicy: IfNotPresent
+                command:
+                  - ./podinfo
+                  - --port=9898
+                  - --cert-path=/data/cert
+                  - --port-metrics=9797
+                  - --grpc-port=9999
+                  - --grpc-service-name=podinfo-prefill
+                  - --level=info
+                  - --random-delay=false
+                  - --random-error=false
+                env:
+                  - name: PODINFO_UI_COLOR
+                    value: '#34577c'
+                livenessProbe:
+                  exec:
+                    command:
+                      - podcli
+                      - check
+                      - http
+                      - localhost:9898/healthz
+                  initialDelaySeconds: 1
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  successThreshold: 1
+                  failureThreshold: 3
+                readinessProbe:
+                  exec:
+                    command:
+                      - podcli
+                      - check
+                      - http
+                      - localhost:9898/readyz
+                  initialDelaySeconds: 1
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  successThreshold: 1
+                  failureThreshold: 3
+                ports:
+                  - name: http
+                    containerPort: 9898
+                  - name: http-metrics
+                    containerPort: 9797
+                  - name: grpc
+                    containerPort: 9999
+                resources:
+                  requests:
+                    cpu: 1m
+                    memory: 16Mi
+                volumeMounts:
+                  - name: data
+                    mountPath: /data
+            volumes:
+              - name: data
+                emptyDir: {}
+        workerReplicas: 0
+      - name: decode
+        replicas: 2
+        entryTemplate:
+          metadata:
+            annotations:
+              prometheus.io/port: "9797"
+              prometheus.io/scrape: "true"
+          spec:
+            containers:
+              - name: podinfo
+                image: ghcr.io/stefanprodan/podinfo:6.12.0
+                imagePullPolicy: IfNotPresent
+                command:
+                  - ./podinfo
+                  - --port=9898
+                  - --cert-path=/data/cert
+                  - --port-metrics=9797
+                  - --grpc-port=9999
+                  - --grpc-service-name=podinfo-decode
+                  - --level=info
+                  - --random-delay=false
+                  - --random-error=false
+                env:
+                  - name: PODINFO_UI_COLOR
+                    value: '#7c4534'
+                livenessProbe:
+                  exec:
+                    command:
+                      - podcli
+                      - check
+                      - http
+                      - localhost:9898/healthz
+                  initialDelaySeconds: 1
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  successThreshold: 1
+                  failureThreshold: 3
+                readinessProbe:
+                  exec:
+                    command:
+                      - podcli
+                      - check
+                      - http
+                      - localhost:9898/readyz
+                  initialDelaySeconds: 1
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  successThreshold: 1
+                  failureThreshold: 3
+                ports:
+                  - name: http
+                    containerPort: 9898
+                  - name: http-metrics
+                    containerPort: 9797
+                  - name: grpc
+                    containerPort: 9999
+                resources:
+                  requests:
+                    cpu: 1m
+                    memory: 16Mi
+                volumeMounts:
+                  - name: data
+                    mountPath: /data
+            volumes:
+              - name: data
+                emptyDir: {}
+        workerReplicas: 0

@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
@@ -44,6 +43,10 @@ type SchedulerImpl struct {
 	scorePlugins  []*scorePlugin
 
 	postScheduleHooks []framework.PostScheduleHook
+
+	// syncOnFlight is true when the least-request plugin is enabled.
+	// In that case Schedule() syncs on-flight counts from Redis before scoring.
+	syncOnFlight bool
 }
 
 type scorePlugin struct {
@@ -87,22 +90,37 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		}
 	}
 
-	prefixCache := plugins.NewPrefixCache(store, pluginsArgMap[plugins.PrefixCachePluginName])
+	leastRequestEnabled := false
+	for _, name := range filterPluginMap {
+		if name == plugins.LeastRequestPluginName {
+			leastRequestEnabled = true
+			break
+		}
+	}
+	if !leastRequestEnabled {
+		for name := range scorePluginMap {
+			if name == plugins.LeastRequestPluginName {
+				leastRequestEnabled = true
+				break
+			}
+		}
+	}
+
+	scorePlugins := getScorePlugins(registry, store, scorePluginMap, pluginsArgMap)
 	return &SchedulerImpl{
-		store:         store,
-		filterPlugins: getFilterPlugins(registry, filterPluginMap, pluginsArgMap),
-		scorePlugins:  getScorePlugins(registry, prefixCache, scorePluginMap, pluginsArgMap),
-		postScheduleHooks: []framework.PostScheduleHook{
-			prefixCache,
-		},
+		store:             store,
+		filterPlugins:     getFilterPlugins(registry, filterPluginMap, pluginsArgMap),
+		scorePlugins:      scorePlugins,
+		postScheduleHooks: getPostScheduleHooks(scorePlugins),
+		syncOnFlight:      leastRequestEnabled,
 	}
 }
 
 func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
-	// first filter out invalid pods that wonot be selected to loadbalance to.
-	pods, err := s.RunFilterPlugins(pods, ctx)
-	if err != nil {
-		return err
+	// Sync on-flight counts from Redis before scoring when least-request is active,
+	// so cross-router traffic is reflected in pod scores. Rate-limited internally.
+	if s.syncOnFlight {
+		s.store.SyncOnFlightCounts()
 	}
 
 	if ctx.PDGroup != nil {
@@ -119,6 +137,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			return fmt.Errorf("no decode pod found")
 		}
 
+		// The initial pod list contains both prefill and decode roles. Filter the
+		// role-specific list after retrieving it from the store so overloaded
+		// decode pods cannot bypass filters in the optimized PD path.
+		decodePods, err = s.RunFilterPlugins(decodePods, ctx)
+		if err != nil {
+			return err
+		}
+
 		klog.V(4).Info("Running score plugins for decode pod")
 		scores := s.RunScorePlugins(decodePods, ctx)
 
@@ -128,14 +154,20 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		validPairs := 0
 
 		for i, decodePod := range ctx.DecodePods {
+			decodePodName := decodePod.GetPodNamespacedName()
+			if decodePodName.Name == "" {
+				continue
+			}
 			// Get prefill pods for the same PD group as the decode pod (O(1) lookup)
-			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName,
-				types.NamespacedName{
-					Namespace: decodePod.Pod.Namespace,
-					Name:      decodePod.Pod.Name,
-				})
+			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName, decodePodName)
 			if err != nil || len(selectedPods) == 0 {
-				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", klog.KObj(decodePod.Pod), "error", err)
+				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", decodePodName, "error", err)
+				continue
+			}
+
+			selectedPods, err = s.RunFilterPlugins(selectedPods, ctx)
+			if err != nil {
+				klog.V(4).InfoS("prefill pods were filtered out", "decode instance", decodePodName, "error", err)
 				continue
 			}
 
@@ -144,7 +176,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			bestPrefillPod := TopNPodInfos(scores, 1)
 			if len(bestPrefillPod) == 0 {
 				klog.V(4).InfoS("no valid prefill pods after scoring, skipping",
-					"decode instance", klog.KObj(decodePod.Pod))
+					"decode instance", decodePodName)
 				continue
 			}
 			prefillPods[i] = bestPrefillPod[0]
@@ -154,7 +186,13 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		if validPairs == 0 {
 			return fmt.Errorf("no valid prefill-decode pod pairs found")
 		}
+
 		return nil
+	}
+
+	pods, err := s.RunFilterPlugins(pods, ctx)
+	if err != nil {
+		return err
 	}
 
 	klog.V(4).Info("Running score plugins for PD aggregated pod")
@@ -199,8 +237,8 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 
 		klog.V(4).Infof("ScorePlugin: %s", scorePlugin.plugin.Name())
 		for k, v := range scores {
-			if k.Pod != nil {
-				klog.V(4).Infof("Pod: %s/%s, Score: %d", k.Pod.Namespace, k.Pod.Name, v)
+			if podName := k.GetPodNamespacedName(); podName.Name != "" {
+				klog.V(4).Infof("Pod: %s/%s, Score: %d", podName.Namespace, podName.Name, v)
 			}
 			if _, ok := res[k]; !ok {
 				res[k] = v * scorePlugin.weight
@@ -213,8 +251,8 @@ func (s *SchedulerImpl) RunScorePlugins(pods []*datastore.PodInfo, ctx *framewor
 	if klog.V(4).Enabled() {
 		klog.Info("Final Pod Scores:")
 		for k, v := range res {
-			if k.Pod != nil {
-				klog.Infof("  Pod: %s/%s, Final Score: %d", k.Pod.Namespace, k.Pod.Name, v)
+			if podName := k.GetPodNamespacedName(); podName.Name != "" {
+				klog.Infof("  Pod: %s/%s, Final Score: %d", podName.Namespace, podName.Name, v)
 			}
 		}
 	}

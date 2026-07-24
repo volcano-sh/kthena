@@ -34,6 +34,11 @@ kthenaRouter:
     requests:
       cpu: 100m
       memory: 128Mi
+  # -- The router will drain all in-flight requests before forcefully closing connections
+  terminationGracePeriodSeconds: 330
+  # -- Drain timeout for kthena-router graceful shutdown.
+  # -- This should be less than terminationGracePeriodSeconds.
+  drainTimeout: 5m
   # fairness configuration for request scheduling
   fairness:
     # enabled controls whether fairness scheduling is active
@@ -45,6 +50,31 @@ kthenaRouter:
     inputTokenWeight: 1.0
     # outputTokenWeight is the weight multiplier for output tokens in priority calculation (default: 2.0)
     outputTokenWeight: 2.0
+  # sessionBoost configures session-aware boosting to maximize prefix cache hits
+  # for multi-turn conversations. It is mutually exclusive with fairness.
+  sessionBoost:
+    # enabled controls whether session-boost scheduling is active
+    enabled: false
+    # header is the HTTP header used to identify conversation sessions
+    header: "X-Session-ID"
+    # maxSessions is the maximum number of recently-completed sessions kept "warm"
+    # for boosting. It bounds an LRU cache: when exceeded, the least-recently-used
+    # session is evicted automatically. Size it by the number of concurrent
+    # conversations you want to keep boosted (default: 4096).
+    maxSessions: 4096
+    # inflightPerPod is the maximum number of inflight requests admitted per backend
+    # pod. The total inflight limit is inflightPerPod multiplied by the number of
+    # backend pods. 0 or unset uses the router default (16).
+    inflightPerPod: 16
+    # gracePeriod is the wait time after a request completes for a same-session
+    # follow-up to arrive. Disabled by default (0s); enable only if you understand
+    # the latency trade-off for non-boosted requests.
+    gracePeriod: "0s"
+    # timeout is the maximum time a request may wait in the session-boost queue
+    # before it is rejected with HTTP 504. Defaults to 30s; set it to a non-positive
+    # duration (e.g. "0s") to disable the timeout, in which case a request is bounded
+    # only by client disconnect.
+    timeout: "30s"
   # accessLog configuration for request logging
   accessLog:
     # enabled controls whether access logging is active

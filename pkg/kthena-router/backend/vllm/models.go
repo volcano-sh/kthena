@@ -36,7 +36,7 @@ type ModelList struct {
 }
 
 func FetchPodModels(podIP string, port uint32) ([]string, error) {
-	url := fmt.Sprintf("http://%s:%d/v1/models", podIP, port)
+	url := metrics.PodEndpointURL(podIP, port, "/v1/models")
 	resp, err := metrics.HTTPClient().Get(url)
 	if err != nil {
 		return nil, err
@@ -65,6 +65,9 @@ func FetchPodModels(podIP string, port uint32) ([]string, error) {
 	return models, nil
 }
 
-func (engine *vllmEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
-	return FetchPodModels(pod.Status.PodIP, engine.MetricPort)
+func (engine *vllmEngine) GetPodModels(pod *corev1.Pod, port uint32) ([]string, error) {
+	if port == 0 {
+		port = 8000
+	}
+	return FetchPodModels(pod.Status.PodIP, port)
 }

@@ -167,12 +167,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"VOLUME_MOUNTS": []corev1.VolumeMount{{
@@ -183,7 +178,7 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 			cacheVolume,
 		},
 		"MODEL_NAME":             model.Name,
-		"BACKEND_REPLICAS":       backend.MinReplicas, // todo: backend replicas
+		"BACKEND_REPLICAS":       backend.Replicas,
 		"INIT_CONTAINERS":        initContainers,
 		"MODEL_DOWNLOAD_ENVFROM": backend.EnvFrom,
 		"ENGINE_PREFILL_COMMAND": preFillCommand,
@@ -207,6 +202,10 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		"ENGINE_PREFILL_IMAGE":               workersMap[workload.ModelWorkerTypePrefill].Image,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
 		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+		"PREFILL_AFFINITY":                   workersMap[workload.ModelWorkerTypePrefill].Affinity,
+		"DECODE_AFFINITY":                    workersMap[workload.ModelWorkerTypeDecode].Affinity,
+		"PREFILL_TOLERATIONS":                workersMap[workload.ModelWorkerTypePrefill].Tolerations,
+		"DECODE_TOLERATIONS":                 workersMap[workload.ModelWorkerTypeDecode].Tolerations,
 	}
 	return loadModelServingTemplate(VllmDisaggregatedTemplatePath, &data)
 }
@@ -279,17 +278,12 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 			Namespace: model.Namespace,
 			Labels:    utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
 			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: workload.GroupVersion.String(),
-					Kind:       workload.ModelKind.Kind,
-					Name:       model.Name,
-					UID:        model.UID,
-				},
+				utils.NewModelOwnerRef(model),
 			},
 		},
 		"MODEL_NAME":       model.Name,
 		"BACKEND_NAME":     strings.ToLower(backend.Name),
-		"BACKEND_REPLICAS": backend.MinReplicas, // todo: backend replicas
+		"BACKEND_REPLICAS": backend.Replicas,
 		"BACKEND_TYPE":     strings.ToLower(string(backend.Type)),
 		"ENGINE_ENV":       engineEnv,
 		"WORKER_ENV":       backend.Env,
@@ -332,6 +326,8 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"WORKER_REPLICAS":                    workersMap[workload.ModelWorkerTypeServer].Pods - 1,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
 		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
+		"SERVER_AFFINITY":                    workersMap[workload.ModelWorkerTypeServer].Affinity,
+		"SERVER_TOLERATIONS":                 workersMap[workload.ModelWorkerTypeServer].Tolerations,
 	}
 	return loadModelServingTemplate(VllmTemplatePath, &data)
 }
@@ -410,7 +406,12 @@ func getKvConnectorFromConfig(config *apiextensionsv1.JSON) string {
 	return ""
 }
 
-// GetMountPath returns the mount path for the given ModelBackend in the format "/<backend.Name>".
+// GetMountPath returns the hashed sub-directory appended to the cache mount point where
+// the downloader writes—and the inference engine reads—the model files.
+//
+// The sub-directory is the MD5 hex digest of modelURI, which keeps downloads from
+// different sources isolated and avoids filename collisions inside the cache volume.
+// The full model path inside every container is: GetCachePath(cacheURI) + GetMountPath(modelURI).
 func GetMountPath(modelURI string) string {
 	h := md5.New()
 	h.Write([]byte(modelURI))
@@ -452,11 +453,19 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 	return nil, fmt.Errorf("not support prefix in CacheURI: %s", backend.CacheURI)
 }
 
-// GetCachePath returns the in-container mount path derived from a cache URI.
-// It takes the substring after "://", trims surrounding slashes, and prepends a
-// single "/" so the result is a valid absolute path suitable for a container's
-// VolumeMount.MountPath or HostPath.Path. For example, for "pvc://my-pvc" it
-// returns "/my-pvc". It is NOT a PVC ClaimName; use GetPVCClaimName for that.
+// GetCachePath returns the absolute in-container path at which the cache volume
+// is mounted. It is derived from the cache URI by taking the part after "://",
+// trimming surrounding slashes, and prepending "/".
+//
+// Examples:
+//
+//	"pvc://model-cache"          → "/model-cache"
+//	"pvc:///model-cache"         → "/model-cache"
+//	"hostpath:///tmp/cache"      → "/tmp/cache"
+//
+// This path is used as VolumeMount.MountPath for both the downloader init
+// container and the inference engine containers.  It is NOT the PVC claim name;
+// use GetPVCClaimName for that.
 func GetCachePath(path string) string {
 	if path == "" || !strings.Contains(path, URIPrefixSeparator) {
 		return ""

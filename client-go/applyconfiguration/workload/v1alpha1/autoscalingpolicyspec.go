@@ -21,9 +21,12 @@ package v1alpha1
 // AutoscalingPolicySpecApplyConfiguration represents a declarative configuration of the AutoscalingPolicySpec type for use
 // with apply.
 type AutoscalingPolicySpecApplyConfiguration struct {
-	TolerancePercent *int32                                       `json:"tolerancePercent,omitempty"`
-	Metrics          []AutoscalingPolicyMetricApplyConfiguration  `json:"metrics,omitempty"`
-	Behavior         *AutoscalingPolicyBehaviorApplyConfiguration `json:"behavior,omitempty"`
+	TolerancePercent    *int32                                       `json:"tolerancePercent,omitempty"`
+	Metrics             []AutoscalingPolicyMetricApplyConfiguration  `json:"metrics,omitempty"`
+	Behavior            *AutoscalingPolicyBehaviorApplyConfiguration `json:"behavior,omitempty"`
+	HomogeneousTarget   *HomogeneousTargetApplyConfiguration         `json:"homogeneousTarget,omitempty"`
+	HeterogeneousTarget *HeterogeneousTargetApplyConfiguration       `json:"heterogeneousTarget,omitempty"`
+	DisaggregatedTarget *DisaggregatedTargetApplyConfiguration       `json:"disaggregatedTarget,omitempty"`
 }
 
 // AutoscalingPolicySpecApplyConfiguration constructs a declarative configuration of the AutoscalingPolicySpec type for use with
@@ -58,5 +61,29 @@ func (b *AutoscalingPolicySpecApplyConfiguration) WithMetrics(values ...*Autosca
 // If called multiple times, the Behavior field is set to the value of the last call.
 func (b *AutoscalingPolicySpecApplyConfiguration) WithBehavior(value *AutoscalingPolicyBehaviorApplyConfiguration) *AutoscalingPolicySpecApplyConfiguration {
 	b.Behavior = value
+	return b
+}
+
+// WithHomogeneousTarget sets the HomogeneousTarget field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the HomogeneousTarget field is set to the value of the last call.
+func (b *AutoscalingPolicySpecApplyConfiguration) WithHomogeneousTarget(value *HomogeneousTargetApplyConfiguration) *AutoscalingPolicySpecApplyConfiguration {
+	b.HomogeneousTarget = value
+	return b
+}
+
+// WithHeterogeneousTarget sets the HeterogeneousTarget field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the HeterogeneousTarget field is set to the value of the last call.
+func (b *AutoscalingPolicySpecApplyConfiguration) WithHeterogeneousTarget(value *HeterogeneousTargetApplyConfiguration) *AutoscalingPolicySpecApplyConfiguration {
+	b.HeterogeneousTarget = value
+	return b
+}
+
+// WithDisaggregatedTarget sets the DisaggregatedTarget field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DisaggregatedTarget field is set to the value of the last call.
+func (b *AutoscalingPolicySpecApplyConfiguration) WithDisaggregatedTarget(value *DisaggregatedTargetApplyConfiguration) *AutoscalingPolicySpecApplyConfiguration {
+	b.DisaggregatedTarget = value
 	return b
 }

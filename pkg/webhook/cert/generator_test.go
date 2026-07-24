@@ -110,6 +110,45 @@ func TestGenerateSelfSignedCertificate_MultipleDNSNames(t *testing.T) {
 	assert.Equal(t, dnsNames[0], serverCert.Subject.CommonName)
 }
 
+func TestGenerateSelfSignedCertificate_RandomSerialNumbers(t *testing.T) {
+	dnsNames := []string{"webhook.default.svc"}
+
+	bundle1, err := GenerateSelfSignedCertificate(dnsNames)
+	require.NoError(t, err)
+
+	bundle2, err := GenerateSelfSignedCertificate(dnsNames)
+	require.NoError(t, err)
+
+	// Parse CA certs
+	ca1Block, _ := pem.Decode(bundle1.CAPEM)
+	ca1, err := x509.ParseCertificate(ca1Block.Bytes)
+	require.NoError(t, err)
+
+	ca2Block, _ := pem.Decode(bundle2.CAPEM)
+	ca2, err := x509.ParseCertificate(ca2Block.Bytes)
+	require.NoError(t, err)
+
+	// Parse server certs
+	srv1Block, _ := pem.Decode(bundle1.CertPEM)
+	srv1, err := x509.ParseCertificate(srv1Block.Bytes)
+	require.NoError(t, err)
+
+	srv2Block, _ := pem.Decode(bundle2.CertPEM)
+	srv2, err := x509.ParseCertificate(srv2Block.Bytes)
+	require.NoError(t, err)
+
+	// Serial numbers must be positive
+	assert.True(t, ca1.SerialNumber.Sign() > 0, "CA serial must be positive")
+	assert.True(t, srv1.SerialNumber.Sign() > 0, "server serial must be positive")
+
+	// Serial numbers from different calls must differ
+	assert.NotEqual(t, ca1.SerialNumber, ca2.SerialNumber, "CA serials should differ across calls")
+	assert.NotEqual(t, srv1.SerialNumber, srv2.SerialNumber, "server serials should differ across calls")
+
+	// CA and server serials within the same bundle must differ
+	assert.NotEqual(t, ca1.SerialNumber, srv1.SerialNumber, "CA and server serials should differ")
+}
+
 func TestGenerateSelfSignedCertificate_EmptyDNSNames(t *testing.T) {
 	dnsNames := []string{}
 

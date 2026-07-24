@@ -23,12 +23,14 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 )
 
 func TestModelPrefixStore(t *testing.T) {
@@ -323,6 +325,62 @@ func TestModelPrefixStore(t *testing.T) {
 		// Even though pod is cached, an empty candidates list must return nothing.
 		matches := store.FindTopMatches("filter-model", []uint64{1, 2, 3}, []*datastore.PodInfo{})
 		assert.Equal(t, 0, len(matches), "empty candidate list must yield no results")
+	})
+}
+
+func prefixEvictionCount(t *testing.T, model string) float64 {
+	t.Helper()
+	c, err := metrics.DefaultMetrics.PrefixCacheEvictionsTotal.GetMetricWithLabelValues(model)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+func TestModelPrefixStoreEvictionMetric(t *testing.T) {
+	t.Run("Capacity eviction increments evictions_total", func(t *testing.T) {
+		mockStore := datastore.New()
+		store := NewModelPrefixStore(mockStore, 2, 5) // per-pod LRU capacity of 2
+
+		pod := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "evict-pod", Namespace: "test"}},
+		}
+
+		const model = "evictmetric-capacity-model"
+		before := prefixEvictionCount(t, model)
+
+		// Fill to capacity, then add 3 more distinct hashes -> 3 capacity evictions.
+		store.Add(model, []uint64{1, 2}, pod)
+		store.Add(model, []uint64{3, 4, 5}, pod)
+
+		if got := prefixEvictionCount(t, model) - before; got != 3 {
+			t.Errorf("evictions delta = %v, want 3", got)
+		}
+	})
+
+	t.Run("Pod deletion does not count as eviction", func(t *testing.T) {
+		mockStore := datastore.New()
+		store := NewModelPrefixStore(mockStore, 10, 5) // capacity large enough to avoid eviction
+
+		podName := types.NamespacedName{Name: "del-pod", Namespace: "test"}
+		pod := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace}},
+		}
+
+		const model = "evictmetric-deletion-model"
+		before := prefixEvictionCount(t, model)
+
+		store.Add(model, []uint64{1, 2, 3}, pod)
+		store.onPodDeleted(datastore.EventData{EventType: datastore.EventDelete, Pod: podName})
+		time.Sleep(50 * time.Millisecond)
+
+		if got := prefixEvictionCount(t, model) - before; got != 0 {
+			t.Errorf("evictions delta on pod deletion = %v, want 0", got)
+		}
 	})
 }
 

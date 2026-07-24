@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"reflect"
@@ -24,8 +25,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/tokenization"
 	v1 "k8s.io/api/core/v1"
@@ -376,16 +380,166 @@ func TestKVCacheAware_CalculatePodScores_Core(t *testing.T) {
 				"pod2": 25, // 1/4 * 100 (only block 1, then stops at missing block 2)
 			},
 		},
+		{
+			name:        "Namespaced pods stay distinct",
+			blockHashes: []uint64{1, 2},
+			blockToPods: map[uint64][]string{
+				1: {"pod1.default", "pod1.other"},
+				2: {"pod1.default"},
+			},
+			expected: map[string]int{
+				"pod1.default": 100,
+				"pod1.other":   50,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
+			result, _ := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
 
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestKVCacheAware_QueryRedisForBlocks_ReturnsRedisOwners(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+	}
+
+	ctx := context.Background()
+	hash := uint64(111)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	if err := client.HSet(ctx, key,
+		"pod-1", now,
+		"pod-1.default", now,
+		"pod-2.default", now,
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen")
+	if err != nil {
+		t.Fatalf("queryRedisForBlocks returned error: %v", err)
+	}
+	gotPods := make(map[string]bool, len(result[hash]))
+	for _, pod := range result[hash] {
+		gotPods[pod] = true
+	}
+	for _, pod := range []string{"pod-1", "pod-1.default", "pod-2.default"} {
+		if !gotPods[pod] {
+			t.Errorf("expected %s in result, got %v", pod, result[hash])
+		}
+	}
+}
+
+func TestKVCacheAware_QueryRedisForBlocks_KeepsNamespacedOwners(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+	}
+
+	ctx := context.Background()
+	hash := uint64(333)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	if err := client.HSet(ctx, key,
+		"pod-1.default", now,
+		"pod-1.other", now,
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen")
+	if err != nil {
+		t.Fatalf("queryRedisForBlocks returned error: %v", err)
+	}
+
+	gotPods := make(map[string]bool, len(result[hash]))
+	for _, pod := range result[hash] {
+		gotPods[pod] = true
+	}
+	for _, pod := range []string{"pod-1.default", "pod-1.other"} {
+		if !gotPods[pod] {
+			t.Errorf("expected %s in result, got %v", pod, result[hash])
+		}
+	}
+
+	scores, _ := plugin.calculatePodScores([]uint64{hash}, result)
+	if scores["pod-1.default"] != 100 || scores["pod-1.other"] != 100 {
+		t.Errorf("expected namespaced scores to stay separate, got %v", scores)
+	}
+}
+
+func TestKVCacheAware_GCStaleFields(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+	}
+
+	ctx := context.Background()
+	hash := uint64(444)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	stale := fmt.Sprintf("%d", time.Now().Add(-25*time.Hour).Unix())
+	if err := client.HSet(ctx, key,
+		"pod-1", now,
+		"pod-1.default", now,
+		"pod-2.default", now,
+		"pod-3.default", stale,
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	plugin.gcStaleFields()
+
+	exists, err := client.HExists(ctx, key, "pod-3.default").Result()
+	if err != nil {
+		t.Fatalf("failed to check pod-3.default: %v", err)
+	}
+	if exists {
+		t.Errorf("expected pod-3.default to be removed")
+	}
+	for _, pod := range []string{"pod-1", "pod-1.default", "pod-2.default"} {
+		exists, err := client.HExists(ctx, key, pod).Result()
+		if err != nil {
+			t.Fatalf("failed to check %s: %v", pod, err)
+		}
+		if !exists {
+			t.Errorf("expected %s to remain", pod)
+		}
 	}
 }
 
@@ -524,44 +678,32 @@ func TestKVCacheAware_Score_Core(t *testing.T) {
 			name: "Empty prompt returns zero scores",
 			context: &framework.Context{
 				Model:  "test-model",
-				Prompt: common.ChatMessage{},
+				Prompt: nil,
 			},
-			pods: pods,
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
+			pods:           pods,
+			expectedScores: map[string]int{},
 		},
 		{
 			name: "Empty model returns zero scores",
 			context: &framework.Context{
 				Model: "",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
-			pods: pods,
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
+			pods:           pods,
+			expectedScores: map[string]int{},
 		},
 		{
 			name: "No tokenizer available returns zero scores",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
-			pods: pods,
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
+			pods:           pods,
+			expectedScores: map[string]int{},
 		},
 	}
 
@@ -857,7 +999,7 @@ func TestKVCacheAware_CalculatePodScores_AdvancedCases_Core(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
+			result, _ := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
 
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
@@ -882,7 +1024,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Core(t *testing.T) {
 				plugin := &KVCacheAware{}
 				ctx := &framework.Context{
 					Model: "test-model",
-					Prompt: common.ChatMessage{
+					Prompt: &common.ChatMessage{
 						Text:     "",
 						Messages: []common.Message{},
 					},
@@ -1091,7 +1233,7 @@ func TestKVCacheAware_Integration_Core(t *testing.T) {
 					blockHashes[1]: {"pod1"},
 				}
 
-				scores := plugin.calculatePodScores(blockHashes, blockToPods)
+				scores, _ := plugin.calculatePodScores(blockHashes, blockToPods)
 
 				expectedScores := map[string]int{
 					"pod1": 100, // 2/2 * 100
@@ -1147,7 +1289,7 @@ func TestKVCacheAware_Integration_Core(t *testing.T) {
 					// pod1 missing block 3
 				}
 
-				scores := plugin.calculatePodScores(blockHashes, blockToPods)
+				scores, _ := plugin.calculatePodScores(blockHashes, blockToPods)
 				expected := map[string]int{
 					"pod1": 66, // 2/3 * 100 = 66.666... -> 66
 				}
@@ -1387,7 +1529,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 			name: "Text prompt with nil tokenizer",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
@@ -1403,7 +1545,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 			name: "Chat messages with nil tokenizer",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Messages: []common.Message{
 						{Role: "user", Content: "Hello"},
 					},
@@ -1421,7 +1563,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 			name: "Empty text and empty messages",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text:     "",
 					Messages: []common.Message{},
 				},
@@ -1472,7 +1614,7 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 			name: "Score with processor nil",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
@@ -1484,18 +1626,14 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 					// processor is nil
 				}
 			},
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
-			description: "Should handle nil processor gracefully",
+			expectedScores: map[string]int{},
+			description:    "Should handle nil processor gracefully",
 		},
 		{
 			name: "Score with maxBlocksToMatch limit",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
 			},
@@ -1507,12 +1645,8 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 					processor:        &TokenBlockProcessor{blockSize: 1},
 				}
 			},
-			expectedScores: map[string]int{
-				"pod1": 0,
-				"pod2": 0,
-				"pod3": 0,
-			},
-			description: "Should handle maxBlocksToMatch limit",
+			expectedScores: map[string]int{},
+			description:    "Should handle maxBlocksToMatch limit",
 		},
 	}
 
@@ -1683,7 +1817,7 @@ func TestKVCacheAware_CalculatePodScores_Complex_Core(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
+			result, _ := plugin.calculatePodScores(tt.blockHashes, tt.blockToPods)
 
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
@@ -1783,7 +1917,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 			name: "Nil context",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello",
 				},
 			},
@@ -1801,7 +1935,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 			name: "Very small maxBlocksToMatch",
 			context: &framework.Context{
 				Model: "test-model",
-				Prompt: common.ChatMessage{
+				Prompt: &common.ChatMessage{
 					Text: "Hello world this is a longer text",
 				},
 			},
@@ -1824,16 +1958,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 			// This should not panic
 			result := plugin.Score(tt.context, pods)
 
-			// Verify result structure
-			if result == nil {
-				t.Error("Expected non-nil result")
-			}
-
-			if len(result) != len(pods) {
-				t.Errorf("Expected %d results, got %d", len(pods), len(result))
-			}
-
-			// Verify all scores are non-negative
+			// Verify no panic and any returned scores are within bounds.
 			for pod, score := range result {
 				if score < 0 {
 					t.Errorf("Score should be non-negative, got %d for pod %s", score, pod.Pod.Name)
@@ -2001,7 +2126,7 @@ func TestKVCacheAware_Concurrency_Core(t *testing.T) {
 	pods := createTestPods("pod1", "pod2")
 	ctx := &framework.Context{
 		Model: "",
-		Prompt: common.ChatMessage{
+		Prompt: &common.ChatMessage{
 			Text: "",
 		},
 	}
@@ -2011,10 +2136,7 @@ func TestKVCacheAware_Concurrency_Core(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func() {
 			defer func() { done <- true }()
-			result := plugin.Score(ctx, pods)
-			if result == nil {
-				t.Error("Expected non-nil result")
-			}
+			_ = plugin.Score(ctx, pods)
 		}()
 	}
 
@@ -2087,7 +2209,7 @@ func TestKVCacheAware_Integration_Comprehensive_Core(t *testing.T) {
 					blockHashes[1]: {"pod1"},
 				}
 
-				scores := plugin.calculatePodScores(blockHashes, blockToPods)
+				scores, _ := plugin.calculatePodScores(blockHashes, blockToPods)
 				expectedScores := map[string]int{
 					"pod1": 100, // 2/2 * 100
 					"pod2": 50,  // 1/2 * 100
@@ -2142,5 +2264,71 @@ func TestKVCacheAware_Integration_Comprehensive_Core(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.testFunc(t)
 		})
+	}
+}
+
+func TestKVCacheAware_ScoreMetrics_TokenizeError(t *testing.T) {
+	plugin := &KVCacheAware{
+		name:             KVCacheAwarePluginName,
+		maxBlocksToMatch: 128,
+		keyPrefix:        kvCacheKeyPrefix,
+		processor:        &TokenBlockProcessor{blockSize: 128},
+		// tokenizerManager nil -> normalizeAndTokenizePrompt returns an error
+	}
+
+	const model = "kvmetrics-tokenize-error"
+	recorder := metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
+	ctx := &framework.Context{
+		Model:           model,
+		Prompt:          &common.ChatMessage{Text: "hello world"},
+		MetricsRecorder: recorder,
+	}
+
+	before := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)
+	plugin.Score(ctx, createTestPods("pod1"))
+	if got := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize) - before; got != 1 {
+		t.Errorf("kvcache tokenize errors delta = %v, want 1", got)
+	}
+}
+
+func TestKVCacheAware_CalculatePodScoresAndMatch_LongestMatch(t *testing.T) {
+	plugin := &KVCacheAware{}
+	blockHashes := []uint64{1, 2, 3, 4}
+	blockToPods := map[uint64][]string{
+		1: {"pod1", "pod2"},
+		2: {"pod1", "pod2"},
+		3: {"pod1"},
+		4: {"pod1"},
+	}
+	scores, longest := plugin.calculatePodScores(blockHashes, blockToPods)
+	if scores["pod1"] != 100 {
+		t.Errorf("pod1 score = %d, want 100", scores["pod1"])
+	}
+	if longest != 4 {
+		t.Errorf("longest match = %d, want 4", longest)
+	}
+}
+func TestKVCacheAware_CandidateFilteringRestrictsLongestMatch(t *testing.T) {
+	plugin := &KVCacheAware{}
+	blockHashes := []uint64{10, 20, 30, 40}
+	// pod3 (not a candidate) holds all 4 blocks; candidate pod1 holds only the first 2.
+	blockToPods := map[uint64][]string{
+		10: {"pod1", "pod3"},
+		20: {"pod1", "pod3"},
+		30: {"pod3"},
+		40: {"pod3"},
+	}
+
+	if _, clusterLongest := plugin.calculatePodScores(blockHashes, blockToPods); clusterLongest != 4 {
+		t.Fatalf("unfiltered longestMatch = %d, want 4 (inflated by non-candidate pod3)", clusterLongest)
+	}
+
+	// After Score() filters to candidates {pod1, pod2}, pod3 is gone and blocks 30/40 drop out.
+	candidateScoped := map[uint64][]string{
+		10: {"pod1"},
+		20: {"pod1"},
+	}
+	if _, candidateLongest := plugin.calculatePodScores(blockHashes, candidateScoped); candidateLongest != 2 {
+		t.Errorf("candidate-restricted longestMatch = %d, want 2 (pod1 holds only the first 2 blocks)", candidateLongest)
 	}
 }

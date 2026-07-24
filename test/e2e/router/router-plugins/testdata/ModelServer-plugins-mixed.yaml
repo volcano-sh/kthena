@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: router-plugin-mock-mixed
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      router-plugin-pool: latency
+  workloadPort:
+    port: 8000
+  model: "router-plugin-model"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s

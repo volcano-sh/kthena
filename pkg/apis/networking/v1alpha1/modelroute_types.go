@@ -26,7 +26,7 @@ import (
 type ModelRouteSpec struct {
 	// `model` in the LLM request, it could be a base model name, lora adapter name or even
 	// a virtual model name. This field is used to match scenarios other than model adapter name and
-	// this field could be empty, but it and  `ModelAdapters` can't both be empty.
+	// this field could be empty, but it and `ModelAdapters` can't both be empty.
 	//
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="modelName is immutable"
 	ModelName string `json:"modelName,omitempty"`

@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -179,6 +180,85 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		ruleField := rulesField.Index(i)
 		if len(rule.TargetModels) == 0 {
 			allErrs = append(allErrs, field.Required(ruleField.Child("targetModels"), "each rule must have at least one target model"))
+			continue
+		}
+		totalWeight := uint32(0)
+		for j, targetModel := range rule.TargetModels {
+			targetModelField := ruleField.Child("targetModels").Index(j)
+			if targetModel.ModelServerName == "" {
+				allErrs = append(allErrs, field.Invalid(targetModelField.Child("modelServerName"), targetModel.ModelServerName, "modelServerName cannot be an empty string"))
+			}
+			if targetModel.Weight != nil {
+				totalWeight += *targetModel.Weight
+			} else {
+				totalWeight += 100
+			}
+		}
+		if totalWeight == 0 {
+			allErrs = append(allErrs, field.Invalid(ruleField.Child("targetModels"), totalWeight, "total weight must be greater than zero"))
+		}
+		if rule.ModelMatch != nil {
+			for key, sm := range rule.ModelMatch.Headers {
+				if sm != nil && sm.Regex != nil {
+					if _, err := regexp.Compile(*sm.Regex); err != nil {
+						allErrs = append(allErrs, field.Invalid(ruleField.Child("modelMatch").Child("headers").Key(key).Child("regex"), *sm.Regex, err.Error()))
+					}
+				}
+			}
+			if rule.ModelMatch.Uri != nil && rule.ModelMatch.Uri.Regex != nil {
+				if _, err := regexp.Compile(*rule.ModelMatch.Uri.Regex); err != nil {
+					allErrs = append(allErrs, field.Invalid(ruleField.Child("modelMatch").Child("uri").Child("regex"), *rule.ModelMatch.Uri.Regex, err.Error()))
+				}
+			}
+		}
+	}
+
+	if len(allErrs) > 0 {
+		var messages []string
+		for _, err := range allErrs {
+			messages = append(messages, fmt.Sprintf("  - %s", err.Error()))
+		}
+		return false, fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
+	}
+	return true, ""
+}
+
+// validateModelServer validates the ModelServer resource
+func (v *KthenaRouterValidator) validateModelServer(modelServer *networkingv1alpha1.ModelServer) (bool, string) {
+	var allErrs field.ErrorList
+	specField := field.NewPath("spec")
+	workloadSelectorField := specField.Child("workloadSelector")
+
+	if modelServer.Spec.WorkloadSelector == nil {
+		allErrs = append(allErrs, field.Required(workloadSelectorField, "workloadSelector must be specified"))
+	} else {
+		matchLabelsField := workloadSelectorField.Child("matchLabels")
+		if len(modelServer.Spec.WorkloadSelector.MatchLabels) == 0 {
+			allErrs = append(allErrs, field.Required(matchLabelsField, "labels must contain at least one label"))
+		} else if _, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: modelServer.Spec.WorkloadSelector.MatchLabels}); err != nil {
+			allErrs = append(allErrs, field.Invalid(matchLabelsField, modelServer.Spec.WorkloadSelector.MatchLabels, fmt.Sprintf("invalid selector: %v", err)))
+		}
+
+		if modelServer.Spec.WorkloadSelector.PDGroup != nil {
+			pdGroup := modelServer.Spec.WorkloadSelector.PDGroup
+			pdGroupField := workloadSelectorField.Child("pdGroup")
+
+			if pdGroup.GroupKey == "" {
+				allErrs = append(allErrs, field.Required(pdGroupField.Child("groupKey"), "groupKey must be specified"))
+			}
+			prefillLabelsField := pdGroupField.Child("prefillLabels")
+			if len(pdGroup.PrefillLabels) == 0 {
+				allErrs = append(allErrs, field.Required(prefillLabelsField, "labels must contain at least one label"))
+			} else if _, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: pdGroup.PrefillLabels}); err != nil {
+				allErrs = append(allErrs, field.Invalid(prefillLabelsField, pdGroup.PrefillLabels, fmt.Sprintf("invalid selector: %v", err)))
+			}
+
+			decodeLabelsField := pdGroupField.Child("decodeLabels")
+			if len(pdGroup.DecodeLabels) == 0 {
+				allErrs = append(allErrs, field.Required(decodeLabelsField, "labels must contain at least one label"))
+			} else if _, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: pdGroup.DecodeLabels}); err != nil {
+				allErrs = append(allErrs, field.Invalid(decodeLabelsField, pdGroup.DecodeLabels, fmt.Sprintf("invalid selector: %v", err)))
+			}
 		}
 	}
 
@@ -189,11 +269,6 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		}
 		return false, fmt.Sprintf("validation failed: %s", strings.Join(messages, ""))
 	}
-	return true, ""
-}
-
-// validateModelServer validates the ModelServer resource
-func (v *KthenaRouterValidator) validateModelServer(*networkingv1alpha1.ModelServer) (bool, string) {
 	return true, ""
 }
 

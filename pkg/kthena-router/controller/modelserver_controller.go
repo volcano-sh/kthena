@@ -76,7 +76,7 @@ func NewModelServerController(
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
-) *ModelServerController {
+) (*ModelServerController, error) {
 	modelServerInformer := kthenaInformerFactory.Networking().V1alpha1().ModelServers()
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 
@@ -90,25 +90,31 @@ func NewModelServerController(
 		store:             store,
 	}
 
+	var err error
 	// Register ModelServer event handlers
-	controller.modelServerRegistration, _ = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	controller.modelServerRegistration, err = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueModelServer,
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueueModelServer(new)
 		},
 		DeleteFunc: controller.enqueueModelServer,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add event handler for modelserver controller: %w", err)
+	}
 
 	// Register Pod event handlers
-	controller.podRegistration, _ = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	controller.podRegistration, err = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueuePod,
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueuePod(new)
 		},
 		DeleteFunc: controller.enqueuePod,
 	})
-
-	return controller
+	if err != nil {
+		return nil, fmt.Errorf("failed to add pod event handler for modelserver controller: %w", err)
+	}
+	return controller, nil
 }
 
 func (c *ModelServerController) Run(stopCh <-chan struct{}) error {
@@ -210,39 +216,29 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 
 	_ = c.store.AddOrUpdateModelServer(ms, pods)
 
-	// Get already bound pods to avoid unnecessary updates
-	existingPods, err := c.store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-	if err != nil {
-		klog.V(4).Infof("failed to get existing pods for ModelServer %s/%s: %v", ms.Namespace, ms.Name, err)
-	}
-
-	// Build a set of existing pod names that are already bound to the model server
-	existingPodNames := sets.New[types.NamespacedName]()
-	for _, podInfo := range existingPods {
-		if !podInfo.HasModelServer(utils.GetNamespaceName(ms)) {
-			// If the pod is not bound to the model server, establish the binding
-			if err := c.store.AppendModelServerToPod(podInfo.Pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
-				klog.Warningf("failed to append modelserver %s/%s to pod %s/%s: %v", ms.Namespace, ms.Name, podInfo.Pod.Namespace, podInfo.Pod.Name, err)
-				continue
-			}
-		}
-		existingPodNames.Insert(utils.GetNamespaceName(podInfo.Pod))
-	}
-
-	// Add new pods that are not yet bound to the store
+	// Bind every ready pod selected by this ModelServer. Pods that already have
+	// an entry in the store get the binding appended so their runtime metrics and
+	// bindings to other ModelServers are preserved; brand-new pods are created
+	// with the binding. We check each pod against the store directly instead of
+	// re-reading GetPodsByModelServer, which would only echo back the pod set that
+	// AddOrUpdateModelServer just wrote and cannot distinguish existing pods from
+	// new ones.
+	msName := utils.GetNamespaceName(ms)
 	for _, pod := range podList {
 		if !isPodReady(pod) {
 			continue
 		}
 
 		podName := utils.GetNamespaceName(pod)
-		// Skip pods that are already properly bound
-		if existingPodNames.Contains(podName) {
+		if c.store.GetPodInfo(podName) != nil {
+			if err := c.store.AppendModelServerToPod(pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
+				klog.Warningf("failed to append modelserver %s to pod %s: %v", msName, podName, err)
+			}
 			continue
 		}
 
 		if err := c.store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}); err != nil {
-			klog.Warningf("failed to add new pod %s/%s to data store: %v", pod.Namespace, pod.Name, err)
+			klog.Warningf("failed to add new pod %s to data store: %v", podName, err)
 		}
 	}
 

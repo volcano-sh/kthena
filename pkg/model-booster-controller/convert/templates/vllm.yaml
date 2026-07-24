@@ -23,6 +23,8 @@ spec:
           metadata: ${SERVER_ENTRY_TEMPLATE_METADATA}
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${SERVER_AFFINITY}
+            tolerations: ${SERVER_TOLERATIONS}
             initContainers: ${INIT_CONTAINERS}
             terminationGracePeriodSeconds: 300
             volumes: ${VOLUMES}
@@ -76,8 +78,13 @@ spec:
                         - -c
                         - |
                           while true; do
-                            RUNNING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_running' | grep -v '#' | awk '{print $2}')
-                            WAITING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_waiting' | grep -v '#' | awk '{print $2}')
+                            METRICS=$(curl -s --max-time 2 http://localhost:8000/metrics)
+                            RUNNING=$(echo "$METRICS" | grep 'vllm:num_requests_running' | grep -v '#' | awk '{print $2}' || true)
+                            WAITING=$(echo "$METRICS" | grep 'vllm:num_requests_waiting' | grep -v '#' | awk '{print $2}' || true)
+                            if [ -z "$RUNNING" ]; then
+                              echo "Terminating: Metrics endpoint unavailable, exiting preStop" >> /proc/1/fd/1
+                              exit 0
+                            fi
                             if [ "$RUNNING" = "0.0" ] && [ "$WAITING" = "0.0" ]; then
                               echo "Terminating: No active or waiting requests, safe to terminate" >> /proc/1/fd/1
                               exit 0
@@ -91,6 +98,8 @@ spec:
           metadata: ${SERVER_WORKER_TEMPLATE_METADATA}
           spec:
             runtimeClassName: ${RUNTIME_CLASS_NAME}
+            affinity: ${SERVER_AFFINITY}
+            tolerations: ${SERVER_TOLERATIONS}
             volumes: ${VOLUMES}
             initContainers: ${INIT_CONTAINERS}
             containers:

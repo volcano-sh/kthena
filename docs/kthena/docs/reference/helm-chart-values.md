@@ -19,17 +19,26 @@ A Helm chart for deploying Kthena
 | global.webhook.caBundle | string | `""` | CA bundle for webhook server certificates (base64-encoded).<br/> This is ONLY required when `certManagementMode` is set to "manual".<br/> You can generate it with: `cat /path/to/your/ca.crt | base64 | tr -d '\n'`<br/> |
 | networking.enabled | bool | `true` | Enable the networking subchart. |
 | networking.kthenaRouter.debugPort | int | `15000` | Debug server port for Kthena Router (localhost only). |
+| networking.kthenaRouter.drainTimeout | string | `"5m"` | This should be less than terminationGracePeriodSeconds. |
 | networking.kthenaRouter.enabled | bool | `true` | Enable Kthena Router. |
-| networking.kthenaRouter.fairness.enabled | bool | `false` | Enable fairness scheduling. |
-| networking.kthenaRouter.fairness.inputTokenWeight | float | `1` | Weight multiplier for input tokens. |
-| networking.kthenaRouter.fairness.outputTokenWeight | float | `2` | Weight multiplier for output tokens. |
-| networking.kthenaRouter.fairness.windowSize | string | `"1h"` | Sliding window duration for token usage tracking. |
+| networking.kthenaRouter.fairness.enabled | bool | `false` | Enable user-fairness scheduling. Mutually exclusive with sessionBoost. |
+| networking.kthenaRouter.fairness.inputTokenWeight | float | `1` | User-fairness strategy: weight multiplier for input tokens. |
+| networking.kthenaRouter.fairness.maxConcurrent | int | `0` | Global total inflight request limit admitted through the fairness gate.<br/> `0` or unset falls back to QPS-based rate limiting. |
+| networking.kthenaRouter.fairness.outputTokenWeight | float | `2` | User-fairness strategy: weight multiplier for output tokens. |
+| networking.kthenaRouter.fairness.windowSize | string | `"1h"` | User-fairness strategy: sliding window duration for token usage tracking. |
 | networking.kthenaRouter.gatewayAPI.enabled | bool | `false` | Enable Gateway API related features. |
 | networking.kthenaRouter.gatewayAPI.inferenceExtension | bool | `false` | Enable Gateway API Inference Extension features.<br/> Requires `gatewayAPI.enabled` to be true. |
 | networking.kthenaRouter.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for Kthena Router. |
 | networking.kthenaRouter.image.repository | string | `"ghcr.io/volcano-sh/kthena-router"` | Image repository for Kthena Router. |
 | networking.kthenaRouter.image.tag | string | `"latest"` | Image tag for Kthena Router. |
 | networking.kthenaRouter.port | int | `8080` | Container port for Kthena Router. |
+| networking.kthenaRouter.sessionBoost.enabled | bool | `false` | Enable session-boost scheduling. Mutually exclusive with fairness. |
+| networking.kthenaRouter.sessionBoost.gracePeriod | string | `"0s"` | Wait time after a request completes for a same-session follow-up.<br/> Disabled by default (`0s`). |
+| networking.kthenaRouter.sessionBoost.header | string | `"X-Session-ID"` | HTTP header used to identify conversation sessions. |
+| networking.kthenaRouter.sessionBoost.inflightPerPod | int | `16` | Maximum inflight requests admitted per backend pod.<br/> Total inflight limit is this value times the number of backend pods.<br/> `0` or unset uses the router default (16). |
+| networking.kthenaRouter.sessionBoost.maxSessions | int | `4096` | Maximum number of recently-completed sessions kept warm for boosting.<br/> Bounds an LRU cache; the least-recently-used session is evicted automatically.<br/> Size it by the number of concurrent conversations to keep boosted. |
+| networking.kthenaRouter.sessionBoost.timeout | string | `"30s"` | Maximum time a request may wait in the session-boost queue before it is<br/> rejected with HTTP 504. Defaults to `30s`; set a non-positive duration<br/> (e.g. `0s`) to disable it (bounded only by client disconnect). |
+| networking.kthenaRouter.terminationGracePeriodSeconds | int | `330` | The router will drain all in-flight requests before forcefully closing connections. |
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |
 | networking.kthenaRouter.tls.secretName | string | `"kthena-router-tls"` | Secret name to store the certificate and key. |
@@ -39,6 +48,7 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.webhook.tls.certFile | string | `"/etc/tls/tls.crt"` | Certificate file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.keyFile | string | `"/etc/tls/tls.key"` | Key file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.secretName | string | `"kthena-router-webhook-certs"` | Secret name for storing webhook certificates. |
+| workload.controllerManager.autoscalingSyncPeriodSeconds | int | `0` | Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 uses the binary default (15). |
 | workload.controllerManager.debugPort | int | `0` | Debug server port for Controller Manager (set 0 to disable). |
 | workload.controllerManager.downloaderImage.repository | string | `"ghcr.io/volcano-sh/downloader"` | Image repository for the Downloader. |
 | workload.controllerManager.downloaderImage.tag | string | `"latest"` | Image tag for the Downloader. |

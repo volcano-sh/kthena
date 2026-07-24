@@ -33,11 +33,10 @@ func TestCreatePatchNoChanges(t *testing.T) {
 		},
 		Spec: v1alpha1.ModelBoosterSpec{
 			Backend: v1alpha1.ModelBackend{
-				Name:        "backend1",
-				Type:        "vLLM",
-				ModelURI:    "hf://test/model",
-				MinReplicas: 1,
-				MaxReplicas: 10,
+				Name:     "backend1",
+				Type:     "vLLM",
+				ModelURI: "hf://test/model",
+				Replicas: 1,
 				Workers: []v1alpha1.ModelWorker{
 					{
 						Type:     "server",

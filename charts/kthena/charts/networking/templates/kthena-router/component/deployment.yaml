@@ -50,10 +50,15 @@ spec:
           ports:
             - containerPort: {{ .Values.kthenaRouter.port }}
               name: http
-          {{- if .Values.kthenaRouter.webhook.enabled }}
+            {{- if .Values.kthenaRouter.webhook.enabled }}
             - containerPort: {{ .Values.kthenaRouter.webhook.port }}
               name: webhook
-          {{- end }}
+            {{- end }}
+            {{- if .Values.kthenaRouter.debugPort }}
+            - containerPort: {{ int .Values.kthenaRouter.debugPort }}
+              name: debug
+              protocol: TCP
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -77,16 +82,40 @@ spec:
                   name: redis-secret
                   key: password
                   optional: true
-            # Fairness scheduling configuration
-            - name: ENABLE_FAIRNESS_SCHEDULING
-              value: {{ .Values.kthenaRouter.fairness.enabled | quote }}
+            # Scheduling strategy: user fairness and session boost are mutually exclusive
             {{- if .Values.kthenaRouter.fairness.enabled }}
+            - name: ENABLE_FAIRNESS_SCHEDULING
+              value: "true"
             - name: FAIRNESS_WINDOW_SIZE
               value: {{ .Values.kthenaRouter.fairness.windowSize | quote }}
             - name: FAIRNESS_INPUT_TOKEN_WEIGHT
               value: {{ .Values.kthenaRouter.fairness.inputTokenWeight | quote }}
             - name: FAIRNESS_OUTPUT_TOKEN_WEIGHT
               value: {{ .Values.kthenaRouter.fairness.outputTokenWeight | quote }}
+            {{- if .Values.kthenaRouter.fairness.maxConcurrent }}
+            - name: FAIRNESS_MAX_CONCURRENT
+              value: {{ .Values.kthenaRouter.fairness.maxConcurrent | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.kthenaRouter.sessionBoost }}
+            {{- if .enabled }}
+            - name: ENABLE_SESSION_BOOST
+              value: "true"
+            - name: SESSION_BOOST_HEADER
+              value: {{ .header | quote }}
+            - name: SESSION_BOOST_MAX_SESSIONS
+              value: {{ .maxSessions | quote }}
+            {{- if .inflightPerPod }}
+            - name: SESSION_BOOST_INFLIGHT_PER_POD
+              value: {{ .inflightPerPod | quote }}
+            {{- end }}
+            - name: SESSION_BOOST_GRACE_PERIOD
+              value: {{ .gracePeriod | quote }}
+            {{- if .timeout }}
+            - name: SESSION_BOOST_TIMEOUT
+              value: {{ .timeout | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             # Access log configuration
             - name: ACCESS_LOG_ENABLED
@@ -95,6 +124,9 @@ spec:
               value: {{ .Values.kthenaRouter.accessLog.format | quote }}
             - name: ACCESS_LOG_OUTPUT
               value: {{ .Values.kthenaRouter.accessLog.output | quote }}
+
+            - name: DRAIN_TIMEOUT
+              value: {{ .Values.kthenaRouter.drainTimeout | quote }}
           resources: {{- toYaml .Values.kthenaRouter.resource | nindent 12 }}
           livenessProbe:
             httpGet:
@@ -120,7 +152,7 @@ spec:
             subPath: routerConfiguration
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
           - name: router-tls-certs
-            mountPath: /etc/tls
+            mountPath: /etc/router-tls
             readOnly: true
           {{- end }}
           {{- if .Values.kthenaRouter.webhook.enabled }}
@@ -144,3 +176,4 @@ spec:
             optional: true
         {{- end }}
       serviceAccountName: kthena-router
+      terminationGracePeriodSeconds: {{ .Values.kthenaRouter.terminationGracePeriodSeconds }}

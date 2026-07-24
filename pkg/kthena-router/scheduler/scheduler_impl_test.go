@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 )
@@ -211,6 +212,7 @@ func TestSchedulePDGroup(t *testing.T) {
 
 			// Create scheduling context with PDGroup enabled
 			ctx := &framework.Context{
+				Prompt:          &common.ChatMessage{},
 				ModelServerName: modelServerName,
 				PDGroup: &aiv1alpha1.PDGroup{
 					GroupKey:      "pd-group",
@@ -253,6 +255,7 @@ func TestScheduleNonPDGroupWithEmptyScores(t *testing.T) {
 	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
 
 	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
 		ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
 		PDGroup:         nil, // Non-PD scheduling
 	}
@@ -290,6 +293,7 @@ func TestRunScorePluginsEdgeCases(t *testing.T) {
 			scheduler := NewScheduler(store, nil).(*SchedulerImpl)
 
 			ctx := &framework.Context{
+				Prompt:          &common.ChatMessage{},
 				ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
 			}
 
@@ -314,4 +318,56 @@ func createTestPodInfo(name string) *datastore.PodInfo {
 			},
 		},
 	}
+}
+
+func TestPDSchedulerFiltersOverloadedDecodePod(t *testing.T) {
+	store := datastore.New()
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model-server", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "pd-group",
+					DecodeLabels:  map[string]string{"role": "decode"},
+					PrefillLabels: map[string]string{"role": "prefill"},
+				},
+			},
+		},
+	}
+	modelServerName := types.NamespacedName{Namespace: "default", Name: "test-model-server"}
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, nil))
+
+	decodePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "decode-pod-0", Namespace: "default", Labels: map[string]string{
+			"pd-group": "group-1", "role": "decode",
+		}},
+		Status: corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	prefillPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "prefill-pod-0", Namespace: "default", Labels: map[string]string{
+			"pd-group": "group-1", "role": "prefill",
+		}},
+		Status: corev1.PodStatus{PodIP: "10.0.0.2"},
+	}
+	require.NoError(t, store.AddOrUpdatePod(decodePod, []*aiv1alpha1.ModelServer{modelServer}))
+	require.NoError(t, store.AddOrUpdatePod(prefillPod, []*aiv1alpha1.ModelServer{modelServer}))
+
+	pods, err := store.GetPodsByModelServer(modelServerName)
+	require.NoError(t, err)
+	for _, pod := range pods {
+		if pod.Pod.Name == "decode-pod-0" {
+			pod.RequestWaitingNum = 20
+		}
+	}
+
+	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
+		ModelServerName: modelServerName,
+		PDGroup:         modelServer.Spec.WorkloadSelector.PDGroup,
+	}
+
+	// Expected behavior: the only decode pod exceeds the default threshold of
+	// 10 and must be filtered out before PD pairing.
+	err = NewScheduler(store, nil).Schedule(ctx, pods)
+	require.Error(t, err)
 }

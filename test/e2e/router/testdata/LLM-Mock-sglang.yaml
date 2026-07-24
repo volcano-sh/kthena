@@ -17,10 +17,20 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+          image: ghcr.io/faust-benchou/sglang-inference-sim:0.1.1
           imagePullPolicy: IfNotPresent
+          args:
+            - --model=kthena-mock-sglang
+            - --served-model-name=Qwen/Qwen3-8B
+            - --port=30000
+            - --mode=echo
+            - --time-to-first-token=0ms
+            - --inter-token-latency=0ms
           ports:
             - containerPort: 30000
-          env:
-            - name: MODEL_NAME
-              value: "Qwen/Qwen3-8B"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 30000
+            initialDelaySeconds: 2
+            periodSeconds: 2

@@ -1,6 +1,6 @@
 # ModelBooster Webhook
 
-The ModelBooster webhook is a Kubernetes admission controller that provides validation and mutation for ModelBooster autoscaling resources in Kthena. It runs as part of the controller-manager webhook server and includes validating and mutating handlers.
+The ModelBooster webhook is a Kubernetes admission controller that provides validation and mutation for ModelBooster resources in Kthena. It runs as part of the controller-manager webhook server and includes validating and mutating handlers.
 
 ## Validation Rules
 
@@ -15,8 +15,7 @@ The validation webhook enforces the following rules for ModelBooster resources:
 
 #### Backend Replica Bounds Validation
 
-- `minReplicas` cannot be greater than `maxReplicas` for any backend
-- The sum of `maxReplicas` across all backends cannot exceed 1,000,000
+- `replicas` cannot exceed 1,000,000
 
 #### Scale-to-Zero Grace Period Validation
 
@@ -29,37 +28,9 @@ The validation webhook enforces the following rules for ModelBooster resources:
 - Container image references cannot contain spaces
 - Basic format validation is performed on image strings
 
-#### Autoscaling Policy Validation
-
-- Validates that referenced AutoscalingPolicy resources exist (currently skipped in implementation)
-- Ensures proper scoping of autoscaling policies between model-level and backend-level configurations
-
-#### Autoscaling Policy Scope Validation
-
-- Enforces mutual exclusivity between model-level and backend-level autoscaling policy references
-- Ensures consistent autoscaling configuration across the model specification
-
-### Autoscaling Policy Binding Resource Validation
-
-#### ScalingConfig and OptimizerConfig Validation
-- Among ScalingConfig and OptimizerConfig, exactly one of them must be configured, and it is not allowed to configure neither or both.
-
-### Autoscaling Policy Resource Validation
-
-- Ensures metric target values are positive
-- Rejects duplicate metric names
-- Validates scale up and scale down policy periods
-
 ## Default Values (Mutator Webhook)
 
-The mutating webhook applies the following default values when certain conditions are met:
-
-### When `AutoscalingPolicy` is set at the model level:
-
-1. **ScaleToZeroGracePeriod**: Defaults to `30 seconds` for all backends that don't have this value explicitly set
-2. **CostExpansionRatePercent**: Defaults to `200` if not explicitly set
-
-These defaults are only applied when the model has an autoscaling policy reference configured, ensuring that autoscaling-related settings have sensible default values.
+The mutating webhook applies ModelBooster defaults when certain fields are omitted.
 
 ## Webhook Configuration
 
@@ -67,11 +38,8 @@ These defaults are only applied when the model has an autoscaling policy referen
 
 - **Validation**:
     - `/validate/modelbooster`
-    - `/validate/autoscalingpolicy`
-    - `/validate/autoscalingpolicybinding`
 - **Mutation**:
     - `/mutate/modelbooster`
-    - `/mutate/autoscalingpolicy`
 - **Health Check**: `/healthz`
 
 ### Default Settings
@@ -129,7 +97,7 @@ To add new default values to the mutating webhook:
 
 ### Adding Support for New Resources
 
-To extend the webhooks to support additional resource types:
+To extend the webhooks to support additional ModelBooster-related resource types:
 
 1. **Create new handler functions** following the pattern in `validator.go` and `mutator.go`
 2. **Register new endpoints** in `cmd/kthena-controller-manager/main.go`:

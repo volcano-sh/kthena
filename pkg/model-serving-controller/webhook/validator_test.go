@@ -104,6 +104,114 @@ func TestValidPodNameLength(t *testing.T) {
 	}
 }
 
+func TestValidateModelServingMissingReplicasDoesNotPanic(t *testing.T) {
+	validator := NewModelServingValidator()
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: v1.ObjectMeta{
+			Name: "valid-name",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name: "role1",
+					},
+				},
+			},
+		},
+	}
+
+	var allowed bool
+	var reason string
+	assert.NotPanics(t, func() {
+		allowed, reason = validator.validateModelServing(ms)
+	})
+	assert.False(t, allowed)
+	assert.Contains(t, reason, "spec.replicas")
+	assert.Contains(t, reason, "spec.template.roles[0].replicas")
+}
+
+func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.T) {
+	replicas := int32(1)
+	longName := "this-is-a-very-long-name-that-exceeds-the-allowed-length-for-generated-name"
+	tests := []struct {
+		name    string
+		ms      *workloadv1alpha1.ModelServing
+		wantErr bool
+	}{
+		{
+			name: "missing top-level replicas",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: "valid-name"},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1", Replicas: &replicas},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "missing role replicas",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: "valid-name"},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: &replicas,
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "missing top-level replicas still validates generated name length",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: longName},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1", Replicas: &replicas},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing role replicas still validates generated name length",
+			ms: &workloadv1alpha1.ModelServing{
+				ObjectMeta: v1.ObjectMeta{Name: longName},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: &replicas,
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "role1"},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got field.ErrorList
+			assert.NotPanics(t, func() {
+				got = validGeneratedNameLength(tt.ms)
+			})
+			if tt.wantErr {
+				assert.NotEmpty(t, got)
+				return
+			}
+			assert.Empty(t, got)
+		})
+	}
+}
+
 func TestValidateRollingUpdateConfiguration(t *testing.T) {
 	replicas := int32(3)
 	type args struct {
@@ -121,6 +229,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.ServingGroupRollingUpdate,
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
 								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
@@ -132,6 +241,31 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 				},
 			},
 			want: field.ErrorList(nil),
+		},
+		{
+			name: "rejects configuration for role rolling update",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							Type: workloadv1alpha1.RoleRollingUpdate,
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 1,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
+					"rollingUpdateConfiguration is only valid when rolloutStrategy.type is ServingGroupRollingUpdate",
+				),
+			},
 		},
 		{
 			name: "invalid maxUnavailable format",
@@ -193,6 +327,25 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					"maxUnavailable cannot be 0",
 				),
 			},
+		},
+		{
+			name: "maxUnavailable greater than replicas is allowed for scale down",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: &intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: 4,
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
 		},
 		{
 			name: "valid partition - within range",
@@ -383,6 +536,107 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 	}
 }
 
+func TestValidateMaxUnavailableForRoles(t *testing.T) {
+	tests := []struct {
+		name    string
+		ms      *workloadv1alpha1.ModelServing
+		wantErr bool
+	}{
+		{
+			name: "valid with role rolling update",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:     "decode",
+					Replicas: ptr.To[int32](4),
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+						MaxUnavailable: ptr.To(intstr.FromInt(2)),
+					},
+				}}},
+			}},
+		},
+		{
+			name: "rejects zero",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:     "decode",
+					Replicas: ptr.To[int32](4),
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+						MaxUnavailable: ptr.To(intstr.FromString("0%")),
+					},
+				}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "allows CRD default maxUnavailable with serving group rolling update",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:     "decode",
+					Replicas: ptr.To[int32](4),
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+						MaxUnavailable: ptr.To(intstr.FromInt(1)),
+					},
+				}}},
+			}},
+		},
+		{
+			name: "requires role rolling update for partition",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:     "decode",
+					Replicas: ptr.To[int32](4),
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+						Partition: ptr.To(intstr.FromInt(1)),
+					},
+				}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "rejects maxUnavailable greater than role replicas",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:     "decode",
+					Replicas: ptr.To[int32](3),
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+						MaxUnavailable: ptr.To(intstr.FromInt(4)),
+					},
+				}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "allows maxUnavailable equal to role replicas",
+			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name:     "decode",
+					Replicas: ptr.To[int32](3),
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+						MaxUnavailable: ptr.To(intstr.FromInt(3)),
+					},
+				}}},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateMaxUnavailableForRoles(tt.ms)
+			if tt.wantErr {
+				assert.NotEmpty(t, got)
+			} else {
+				assert.Empty(t, got)
+			}
+		})
+	}
+}
+
 func TestValidatorReplicas(t *testing.T) {
 	type args struct {
 		ms *workloadv1alpha1.ModelServing
@@ -448,7 +702,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("replicas"),
 					int32PtrNil(),
-					"replicas must be a positive integer",
+					"replicas must be a non-negative integer",
 				),
 			},
 		},
@@ -481,7 +735,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("replicas"),
 					int32Ptr(-1),
-					"replicas must be a positive integer",
+					"replicas must be a non-negative integer",
 				),
 			},
 		},
@@ -514,7 +768,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("replicas"),
 					int32Ptr(-1),
-					"role replicas must be a positive integer",
+					"role replicas must be a non-negative integer",
 				),
 			},
 		},
@@ -547,7 +801,7 @@ func TestValidatorReplicas(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("replicas"),
 					int32PtrNil(),
-					"role replicas must be a positive integer",
+					"role replicas must be a non-negative integer",
 				),
 			},
 		},

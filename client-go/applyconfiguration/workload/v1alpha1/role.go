@@ -18,14 +18,19 @@ limitations under the License.
 
 package v1alpha1
 
+import (
+	intstr "k8s.io/apimachinery/pkg/util/intstr"
+)
+
 // RoleApplyConfiguration represents a declarative configuration of the Role type for use
 // with apply.
 type RoleApplyConfiguration struct {
-	Name           *string                            `json:"name,omitempty"`
-	Replicas       *int32                             `json:"replicas,omitempty"`
-	EntryTemplate  *PodTemplateSpecApplyConfiguration `json:"entryTemplate,omitempty"`
-	WorkerReplicas *int32                             `json:"workerReplicas,omitempty"`
-	WorkerTemplate *PodTemplateSpecApplyConfiguration `json:"workerTemplate,omitempty"`
+	Name                                         *string                            `json:"name,omitempty"`
+	Replicas                                     *int32                             `json:"replicas,omitempty"`
+	EntryTemplate                                *PodTemplateSpecApplyConfiguration `json:"entryTemplate,omitempty"`
+	WorkerReplicas                               *int32                             `json:"workerReplicas,omitempty"`
+	WorkerTemplate                               *PodTemplateSpecApplyConfiguration `json:"workerTemplate,omitempty"`
+	RollingUpdateConfigurationApplyConfiguration `json:",omitempty,inline"`
 }
 
 // RoleApplyConfiguration constructs a declarative configuration of the Role type for use with
@@ -71,5 +76,21 @@ func (b *RoleApplyConfiguration) WithWorkerReplicas(value int32) *RoleApplyConfi
 // If called multiple times, the WorkerTemplate field is set to the value of the last call.
 func (b *RoleApplyConfiguration) WithWorkerTemplate(value *PodTemplateSpecApplyConfiguration) *RoleApplyConfiguration {
 	b.WorkerTemplate = value
+	return b
+}
+
+// WithMaxUnavailable sets the MaxUnavailable field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the MaxUnavailable field is set to the value of the last call.
+func (b *RoleApplyConfiguration) WithMaxUnavailable(value intstr.IntOrString) *RoleApplyConfiguration {
+	b.RollingUpdateConfigurationApplyConfiguration.MaxUnavailable = &value
+	return b
+}
+
+// WithPartition sets the Partition field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Partition field is set to the value of the last call.
+func (b *RoleApplyConfiguration) WithPartition(value intstr.IntOrString) *RoleApplyConfiguration {
+	b.RollingUpdateConfigurationApplyConfiguration.Partition = &value
 	return b
 }

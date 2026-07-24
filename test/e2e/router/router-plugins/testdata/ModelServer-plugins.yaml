@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: router-plugin-mock
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: router-plugin-mock
+  workloadPort:
+    port: 8000
+  model: "router-plugin-model"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s

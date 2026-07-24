@@ -77,6 +77,12 @@ type Role struct {
 	// WorkerTemplate defines the template for the worker pod of a role.
 	// +optional
 	WorkerTemplate *PodTemplateSpec `json:"workerTemplate,omitempty"`
+
+	// RollingUpdateConfiguration defines the parameters to be used for RoleRollingUpdate.
+	// It is inlined so `maxUnavailable` and `partition` can be set directly under a Role.
+	// For `partition`, the first N role replicas sorted by ordinal are protected from updates.
+	// +optional
+	RollingUpdateConfiguration `json:",inline,omitempty"`
 }
 
 // PodTemplateSpec describes the data a pod should have when created from a template

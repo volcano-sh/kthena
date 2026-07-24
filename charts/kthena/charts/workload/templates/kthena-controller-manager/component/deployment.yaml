@@ -41,6 +41,9 @@ spec:
             {{- if .Values.controllerManager.debugPort }}
             - --debug-port={{ .Values.controllerManager.debugPort }}
             {{- end }}
+            {{- if .Values.controllerManager.autoscalingSyncPeriodSeconds }}
+            - --autoscaling-sync-period-seconds={{ .Values.controllerManager.autoscalingSyncPeriodSeconds }}
+            {{- end }}
           imagePullPolicy: {{ .Values.controllerManager.image.pullPolicy }}
           resources:
             {{- toYaml .Values.controllerManager.resource | nindent 12 }}

@@ -90,7 +90,6 @@
       "items": [
         "general/cert-manager",
         "general/faq",
-        "general/prometheus",
         "general/data-parallel-deployment"
       ]
     },

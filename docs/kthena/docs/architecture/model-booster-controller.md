@@ -13,17 +13,16 @@ The Model Booster Controller provides one-stop deployment capabilities, enabling
 
 <LightboxImage src={modelBoosterControllerArchitecture} alt="Architecture Overview"></LightboxImage>
 
-The Model Booster Controller subscribes to the creation/modification/deletion events of the `ModelBooster` CR and synchronizes them to the CRs of `ModelServer`, `ModelRoute`, `ModelServing`, `AutoscalingPolicy`, and `AutoscalingPolicyBinding` that have the same semantic content as the corresponding events. All these CRs will carry the label `registry.volcano.sh/managed-by=registry.volcano.sh`.
+The Model Booster Controller subscribes to the creation/modification/deletion events of the `ModelBooster` CR and synchronizes them to the CRs of `ModelServer`, `ModelRoute`, and `ModelServing` that have the same semantic content as the corresponding events. All these CRs will carry the label `registry.volcano.sh/managed-by=registry.volcano.sh`.
 
 ### How Model Booster Controller works
 
 Model Booster Controller watches for changes to `ModelBooster` CR in the Kubernetes cluster. When a `ModelBooster` CR is created or updated,
 the controller performs the following steps:
 
-1. Convert the `ModelBooster` CR to `ModelServing` CR, `ModelServer` CR, `ModelRoute` CR. `AutoscalingPolicy` CR and
-   `AutoscalingPolicyBinding` CR are optional, only created when the `ModelBooster` CR has `autoscalingPolicy` defined.
-2. Use the result of step 1 to create or update the `ModelServing`, `ModelServer`, `ModelRoute` , `AutoscalingPolicy`,
-   `AutoscalingPolicyBinding`in the Kubernetes.
+1. Convert the `ModelBooster` CR to `ModelServing` CR, `ModelServer` CR, and `ModelRoute` CR.
+2. Use the result of step 1 to create or update the `ModelServing`, `ModelServer`, and `ModelRoute`,
+   in the Kubernetes.
 3. Set the conditions of `ModelBooster` CR.
     - After creating the related resources, the `Initialized` condition is set to `true`.
     - The controller then monitors the status of the `ModelServing` resources. Once all `ModelServing` resources are
@@ -45,7 +44,5 @@ Please note the following limitations when using the Model Booster:
 - Each `Model` can create only one `Model Route`.
 - Rate limiting for `Model Route` is not supported.
 - Topology configuration for `Model Infer` is not supported.
-- The `panicPolicy` configuration for `AutoscalingPolicy` is not supported.
-- Behavior configuration for `AutoscalingPolicy` is not supported.
 
-In these cases, you can manually create `Model Infer`, `Model Server`, `Model Route`, `AutoscalingPolicy`, `AutoscalingPolicyBinding` resources as needed.
+In these cases, you can manually create `Model Infer`, `Model Server`, and `Model Route` resources as needed.

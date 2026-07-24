@@ -25,9 +25,8 @@ import (
 // TargetApplyConfiguration represents a declarative configuration of the Target type for use
 // with apply.
 type TargetApplyConfiguration struct {
-	TargetRef      *v1.ObjectReference               `json:"targetRef,omitempty"`
-	SubTarget      *SubTargetApplyConfiguration      `json:"subTargets,omitempty"`
-	MetricEndpoint *MetricEndpointApplyConfiguration `json:"metricEndpoint,omitempty"`
+	TargetRef     *v1.ObjectReference                       `json:"targetRef,omitempty"`
+	MetricSources map[string]MetricSourceApplyConfiguration `json:"metricSources,omitempty"`
 }
 
 // TargetApplyConfiguration constructs a declarative configuration of the Target type for use with
@@ -44,18 +43,16 @@ func (b *TargetApplyConfiguration) WithTargetRef(value v1.ObjectReference) *Targ
 	return b
 }
 
-// WithSubTarget sets the SubTarget field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the SubTarget field is set to the value of the last call.
-func (b *TargetApplyConfiguration) WithSubTarget(value *SubTargetApplyConfiguration) *TargetApplyConfiguration {
-	b.SubTarget = value
-	return b
-}
-
-// WithMetricEndpoint sets the MetricEndpoint field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the MetricEndpoint field is set to the value of the last call.
-func (b *TargetApplyConfiguration) WithMetricEndpoint(value *MetricEndpointApplyConfiguration) *TargetApplyConfiguration {
-	b.MetricEndpoint = value
+// WithMetricSources puts the entries into the MetricSources field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, the entries provided by each call will be put on the MetricSources field,
+// overwriting an existing map entries in MetricSources field with the same key.
+func (b *TargetApplyConfiguration) WithMetricSources(entries map[string]MetricSourceApplyConfiguration) *TargetApplyConfiguration {
+	if b.MetricSources == nil && len(entries) > 0 {
+		b.MetricSources = make(map[string]MetricSourceApplyConfiguration, len(entries))
+	}
+	for k, v := range entries {
+		b.MetricSources[k] = v
+	}
 	return b
 }

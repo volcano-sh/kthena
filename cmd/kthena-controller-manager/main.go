@@ -30,7 +30,8 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
-	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
+	autoscalerwebhook "github.com/volcano-sh/kthena/pkg/autoscaler/webhook"
 	"github.com/volcano-sh/kthena/pkg/controller"
 	modelboosterwebhook "github.com/volcano-sh/kthena/pkg/model-booster-controller/webhook"
 	modelservingwebhook "github.com/volcano-sh/kthena/pkg/model-serving-controller/webhook"
@@ -83,6 +84,8 @@ func main() {
 	pflag.Float32Var(&cc.KubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&cc.KubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&cc.DebugPort, "debug-port", 0, "Port for debug server to dump internal cache. If 0, debug server is disabled.")
+	pflag.IntVar(&cc.AutoscalingSyncPeriodSeconds, "autoscaling-sync-period-seconds", util.AutoscalingSyncPeriodSeconds,
+		"Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 falls back to the default (15).")
 	pflag.Parse()
 
 	cc.Controllers = parseControllers(controllers)
@@ -145,12 +148,6 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 		return err
 	}
 
-	kthenaClient, err := clientset.NewForConfig(cfg)
-	if err != nil {
-		klog.Fatalf("failed to create kthenaClient: %v", err)
-		return err
-	}
-
 	// Secret -> File -> Generate precedence for CA bundle selection
 	namespace := getNamespace()
 	var caBundle []byte
@@ -191,14 +188,12 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 
 	modelValidator := modelboosterwebhook.NewModelValidator()
 	modelMutator := modelboosterwebhook.NewModelMutator()
-	autoscalingPolicyValidator := modelboosterwebhook.NewAutoscalingPolicyValidator()
-	autoscalingPolicyMutator := modelboosterwebhook.NewAutoscalingPolicyMutator()
-	autoscalingBindingValidator := modelboosterwebhook.NewAutoscalingBindingValidator(kthenaClient)
+	autoscalingPolicyValidator := autoscalerwebhook.NewAutoscalingPolicyValidator()
+	autoscalingPolicyMutator := autoscalerwebhook.NewAutoscalingPolicyMutator()
 	mux.HandleFunc("/validate/modelbooster", modelValidator.Handle)
 	mux.HandleFunc("/mutate/modelbooster", modelMutator.Handle)
 	mux.HandleFunc("/validate/autoscalingpolicy", autoscalingPolicyValidator.Handle)
 	mux.HandleFunc("/mutate/autoscalingpolicy", autoscalingPolicyMutator.Handle)
-	mux.HandleFunc("/validate/autoscalingpolicybinding", autoscalingBindingValidator.Handle)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -238,7 +233,11 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 
 // getNamespace returns the current pod namespace or "default".
 func getNamespace() string {
-	return os.Getenv("POD_NAMESPACE")
+	ns := os.Getenv("POD_NAMESPACE")
+	if ns == "" {
+		return "default"
+	}
+	return ns
 }
 
 // fileExists returns true if the file exists.

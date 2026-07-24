@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -30,8 +31,10 @@ import (
 
 // FairnessQueueConfig holds configurable parameters for the fairness queue.
 type FairnessQueueConfig struct {
-	// MaxConcurrent is the maximum number of in-flight requests allowed through
-	// the fairness gate for this model. When 0, falls back to MaxQPS-based rate limiting.
+	// MaxConcurrent is the maximum number of in-flight requests allowed for this
+	// model in user-fairness mode. It is a global (total) limit, not per-pod:
+	// total concurrent admissions through the fairness gate. When 0, falls back to
+	// MaxQPS-based rate limiting. It is not used in session-boost mode.
 	MaxConcurrent int
 
 	// MaxQPS is the upper-bound dequeue rate used only in ticker/QPS mode.
@@ -49,7 +52,53 @@ type FairnessQueueConfig struct {
 
 	// RequestNumWeight is the request-count weight in the composite priority score.
 	RequestNumWeight float64
+
+	// SessionBoostEnabled switches the queue from user-based fairness ordering to
+	// session-boost ordering. When true, per-user fairness scheduling is disabled
+	// and request priority is derived from recent session completions: requests
+	// belonging to a recently completed session are promoted ahead of others to
+	// maximize prefix-cache reuse on the inference backends.
+	SessionBoostEnabled bool
+
+	// SessionIDHeader is the HTTP header name used to identify conversation
+	// sessions. Only meaningful when SessionBoostEnabled is true. Defaults to
+	// defaultSessionBoostHeader ("X-Session-ID") when not set.
+	SessionIDHeader string
+
+	// SessionBoostMaxSessions is the maximum number of recently-completed sessions
+	// the queue remembers for boosting. It bounds an LRU cache: when the limit is
+	// exceeded, the least-recently-used session is evicted. Sizing this by the
+	// number of conversations to keep "warm" is more intuitive than a time-based
+	// TTL and mirrors how inference engines evict their prefix cache. When <= 0, a
+	// default of defaultSessionBoostMaxSessions is used.
+	SessionBoostMaxSessions int
+
+	// SessionBoostGracePeriod is the duration to wait after a release before
+	// dequeuing the next request in backpressure mode. This gives the same session
+	// time to submit a follow-up request that benefits from prefix cache.
+	// 0 disables the grace period.
+	SessionBoostGracePeriod time.Duration
+
+	// InflightPerPod is the maximum number of inflight requests allowed per backend
+	// pod in session-boost mode. The total inflight limit is InflightPerPod times
+	// the number of backend pods serving the model. When <= 0, a default of
+	// defaultSessionBoostInflightPerPod is used. Only meaningful when
+	// SessionBoostEnabled is true.
+	InflightPerPod int
 }
+
+// defaultSessionBoostInflightPerPod is the per-pod inflight limit used in
+// session-boost mode when InflightPerPod is not set (<= 0).
+const defaultSessionBoostInflightPerPod = 16
+
+// defaultSessionBoostMaxSessions is the LRU capacity (number of recently-completed
+// sessions remembered for boosting) used when SessionBoostMaxSessions is not set
+// (<= 0). Each entry is tiny (a session ID), so the default is generous.
+const defaultSessionBoostMaxSessions = 4096
+
+// defaultSessionBoostHeader is the HTTP header used to identify conversation
+// sessions when SESSION_BOOST_HEADER is not set.
+const defaultSessionBoostHeader = "X-Session-ID"
 
 // DefaultFairnessQueueConfig returns backward-compatible defaults.
 func DefaultFairnessQueueConfig() FairnessQueueConfig {
@@ -60,6 +109,11 @@ func DefaultFairnessQueueConfig() FairnessQueueConfig {
 		RebuildThreshold:          64,
 		TokenWeight:               1.0,
 		RequestNumWeight:          0.0,
+		SessionBoostEnabled:       false,
+		SessionIDHeader:           defaultSessionBoostHeader,
+		SessionBoostMaxSessions:   defaultSessionBoostMaxSessions,
+		SessionBoostGracePeriod:   0,
+		InflightPerPod:            defaultSessionBoostInflightPerPod,
 	}
 }
 
@@ -89,14 +143,71 @@ func CalculateFairnessPriority(source FairnessPrioritySource, userID, modelName 
 
 // Request represents a request item in the priority queue
 type Request struct {
-	ReqID       string
-	UserID      string  // User ID for fairness scheduling
-	ModelName   string  // Target model for per-model fair queuing
-	Priority    float64 // Priority (lower value means higher priority)
-	RequestTime time.Time
-	NotifyChan  chan struct{}
-	CancelCh    <-chan struct{} // Request-scoped cancellation signal
-	Release     func()          // Set by the queue when a permit is acquired
+	UserID       string  // User ID for fairness scheduling
+	ModelName    string  // Target model for per-model fair queuing
+	SessionID    string  // Session identifier for multi-turn conversations
+	Priority     float64 // Priority (lower value means higher priority)
+	SessionBoost bool    // Whether this request has session priority boost (recently completed session)
+	// LastTurnCompletedAt is the time the session's previous turn completed, captured
+	// when the request is boosted. Boosted requests are ordered by this timestamp
+	// (most recent first) so the session with the warmest prefix cache runs first.
+	LastTurnCompletedAt time.Time
+	RequestTime         time.Time
+	NotifyChan          chan struct{}
+	CancelCh            <-chan struct{} // Request-scoped cancellation signal
+	Cancel              func()          // Cancels the request when the queue is shut down
+	Release             func()          // Set by the queue when a permit is acquired
+
+	// admitMu serializes admission (by the dequeue loop) against abandonment (by
+	// the waiting caller on timeout/cancel), closing the race where the loop has
+	// popped the request and passed its cancellation check but has not yet
+	// installed Release / closed NotifyChan. Guards admitted and abandoned.
+	admitMu   sync.Mutex
+	admitted  bool // admission committed: Release is set and about to be signalled
+	abandoned bool // caller gave up before admission; the loop must not admit
+}
+
+var errRequestQueueClosed = errors.New("request queue is closed")
+
+// commitAdmission runs fn under the request lock, but only if the caller has not
+// already abandoned the request. fn performs the admission side effects that must
+// be fully visible before the request is considered admitted: acquiring the
+// inflight permit, installing Release, and incrementing the inflight metric.
+// It returns true if admission was committed. When it returns false the request
+// was abandoned first, so the dequeue loop must not mark it inflight or signal it.
+//
+// Because fn (including installing Release) completes before admitted is set, any
+// caller that observes admitted via abandon() is guaranteed to see a non-nil
+// Release, so the permit can always be returned.
+func (r *Request) commitAdmission(fn func()) bool {
+	r.admitMu.Lock()
+	defer r.admitMu.Unlock()
+	if r.abandoned {
+		return false
+	}
+	fn()
+	r.admitted = true
+	return true
+}
+
+// Abandon marks the request as given up by the waiting caller (queue timeout,
+// wait-reject, or client cancellation). If the request had already been admitted,
+// the caller owned the inflight permit, so Abandon releases it to avoid leaking
+// capacity. Otherwise it marks the request abandoned so admission is guaranteed
+// not to proceed (commitAdmission observes abandoned and skips) and no permit can
+// leak.
+func (r *Request) Abandon() {
+	r.admitMu.Lock()
+	if !r.admitted {
+		r.abandoned = true
+		r.admitMu.Unlock()
+		return
+	}
+	r.admitMu.Unlock()
+	// Admission raced in first, so we own the inflight permit; release it here.
+	// Release is guaranteed non-nil once admitted is set (installed by fn before
+	// commitAdmission sets admitted).
+	r.Release()
 }
 
 // RequestPriorityQueue implements the heap.Interface
@@ -113,17 +224,29 @@ type RequestPriorityQueue struct {
 
 	// Priority refresh (Phase 2)
 	tokenTracker TokenTracker // Optional; when set, enables dequeue-time priority refresh
+
+	// Session-boost mode (enabled via FairnessQueueConfig.SessionBoostEnabled).
+	// When sessionBoost is true the queue orders requests by session boost instead
+	// of per-user fairness, and dequeues using backend backpressure.
+	sessionBoost   bool
+	sessionTracker *SessionTracker       // Tracks recently completed sessions for boosting
+	backendChecker BackendWaitingChecker // Gates dequeue on backend capacity in session-boost mode
+	podCounter     PodCounter            // Optional; counts backend pods for inflight scaling
+	inflightCount  atomic.Int64          // In-flight requests in session-boost mode
+	releaseCh      chan struct{}         // Signals a permit release in session-boost mode
 }
 
 var _ heap.Interface = &RequestPriorityQueue{}
 
 // NewRequestPriorityQueue creates a new priority queue. Pass nil metrics to use defaults.
 func NewRequestPriorityQueue(metricsInstance *metrics.Metrics) *RequestPriorityQueue {
-	return NewRequestPriorityQueueWithConfig(metricsInstance, DefaultFairnessQueueConfig(), nil)
+	return NewRequestPriorityQueueWithConfig(metricsInstance, DefaultFairnessQueueConfig(), nil, nil)
 }
 
 // NewRequestPriorityQueueWithConfig creates a priority queue with explicit configuration.
-func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg FairnessQueueConfig, tracker TokenTracker) *RequestPriorityQueue {
+// When cfg.SessionBoostEnabled is true the queue operates in session-boost mode, where
+// the BackendWaitingChecker gates dequeue on backend capacity.
+func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg FairnessQueueConfig, tracker TokenTracker, checker BackendWaitingChecker) *RequestPriorityQueue {
 	if metricsInstance == nil {
 		metricsInstance = metrics.DefaultMetrics
 	}
@@ -138,7 +261,16 @@ func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg Fai
 		config:       cfg,
 		tokenTracker: tracker,
 	}
-	if cfg.MaxConcurrent > 0 {
+	if cfg.SessionBoostEnabled {
+		pq.sessionBoost = true
+		maxSessions := cfg.SessionBoostMaxSessions
+		if maxSessions <= 0 {
+			maxSessions = defaultSessionBoostMaxSessions
+		}
+		pq.sessionTracker = NewSessionTracker(maxSessions)
+		pq.releaseCh = make(chan struct{}, 1)
+		pq.backendChecker = checker
+	} else if cfg.MaxConcurrent > 0 {
 		pq.sem = make(chan struct{}, cfg.MaxConcurrent)
 	}
 	return pq
@@ -148,6 +280,22 @@ func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg Fai
 func (pq *RequestPriorityQueue) Len() int { return len(pq.heap) }
 
 func (pq *RequestPriorityQueue) Less(i, j int) bool {
+	// Session-boost mode: boosted requests outrank others. Among boosted requests,
+	// the session whose previous turn completed most recently wins, because its
+	// prefix cache is the most likely to still be warm on the backend; ties are
+	// broken FIFO by arrival time. Non-boosted requests keep FIFO ordering.
+	if pq.sessionBoost {
+		if pq.heap[i].SessionBoost != pq.heap[j].SessionBoost {
+			return pq.heap[i].SessionBoost
+		}
+		if pq.heap[i].SessionBoost {
+			if !pq.heap[i].LastTurnCompletedAt.Equal(pq.heap[j].LastTurnCompletedAt) {
+				return pq.heap[i].LastTurnCompletedAt.After(pq.heap[j].LastTurnCompletedAt)
+			}
+			return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
+		}
+		return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
+	}
 	// same user, FIFO
 	if pq.heap[i].UserID == pq.heap[j].UserID {
 		return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
@@ -183,11 +331,31 @@ func (pq *RequestPriorityQueue) Pop() interface{} {
 func (pq *RequestPriorityQueue) PushRequest(r *Request) error {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
+
+	select {
+	case <-pq.stopCh:
+		return errRequestQueueClosed
+	default:
+	}
+
+	// In session-boost mode, promote requests whose session recently completed.
+	// Capture the session's completion time so boosted requests can be ordered by
+	// prefix-cache warmth (most recently completed first).
+	if pq.sessionBoost && pq.sessionTracker != nil && r.SessionID != "" {
+		if completedAt, ok := pq.sessionTracker.CompletionTime(r.SessionID); ok {
+			r.SessionBoost = true
+			r.LastTurnCompletedAt = completedAt
+		}
+	}
+
 	heap.Push(pq, r)
 
-	// Update fairness queue size metrics
-	if pq.metrics != nil {
-		pq.metrics.IncFairnessQueueSize(r.ModelName, r.UserID)
+	// Update queue size metrics
+	pq.metricIncSize(r.ModelName, r.UserID)
+
+	if r.SessionBoost {
+		klog.V(4).Infof("[SessionBoost] session boost: sessionID=%s promoted, queueLen=%d",
+			r.SessionID, len(pq.heap))
 	}
 
 	// Signal that a new item is available
@@ -209,12 +377,9 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 
 			// Skip cancelled/timed-out requests
 			if req.isCancelled() {
-				if pq.metrics != nil {
-					pq.metrics.DecFairnessQueueSize(req.ModelName, req.UserID)
-					queueDuration := time.Since(req.RequestTime)
-					pq.metrics.RecordFairnessQueueDuration(req.ModelName, req.UserID, queueDuration)
-					pq.metrics.IncFairnessQueueCancelled(req.ModelName, req.UserID)
-				}
+				pq.metricDecSize(req.ModelName, req.UserID)
+				pq.metricRecordDuration(req.ModelName, req.UserID, time.Since(req.RequestTime))
+				pq.metricIncCancelled(req.ModelName, req.UserID)
 				pq.mu.Unlock()
 				continue
 			}
@@ -257,12 +422,9 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 			}
 
 			// Update fairness queue size metrics and record queue duration
-			if pq.metrics != nil {
-				pq.metrics.DecFairnessQueueSize(req.ModelName, req.UserID)
-				queueDuration := time.Since(req.RequestTime)
-				pq.metrics.RecordFairnessQueueDuration(req.ModelName, req.UserID, queueDuration)
-				pq.metrics.IncFairnessQueueDequeue(req.ModelName, req.UserID)
-			}
+			pq.metricDecSize(req.ModelName, req.UserID)
+			pq.metricRecordDuration(req.ModelName, req.UserID, time.Since(req.RequestTime))
+			pq.metricIncDequeue(req.ModelName, req.UserID)
 
 			pq.mu.Unlock()
 			return req, nil
@@ -323,7 +485,17 @@ func (pq *RequestPriorityQueue) requeueRequest(req *Request) {
 		return
 	}
 	pq.mu.Lock()
+	select {
+	case <-pq.stopCh:
+		pq.mu.Unlock()
+		if req.Cancel != nil {
+			req.Cancel()
+		}
+		return
+	default:
+	}
 	heap.Push(pq, req)
+	pq.metricIncSize(req.ModelName, req.UserID)
 	pq.mu.Unlock()
 	select {
 	case pq.notifyCh <- struct{}{}:
@@ -331,9 +503,15 @@ func (pq *RequestPriorityQueue) requeueRequest(req *Request) {
 	}
 }
 
-// Run starts the dequeue loop. In semaphore mode (MaxConcurrent > 0), dequeue is
-// gated by available capacity. Otherwise, it falls back to QPS-based ticker dequeue.
+// Run starts the dequeue loop. In session-boost mode, dequeue is gated by backend
+// backpressure and a per-pod inflight limit. Otherwise, in semaphore mode
+// (MaxConcurrent > 0), dequeue is gated by available capacity, and as a final
+// fallback it uses QPS-based ticker dequeue.
 func (pq *RequestPriorityQueue) Run(ctx context.Context, qps int) {
+	if pq.sessionBoost {
+		pq.runSessionBoostMode(ctx)
+		return
+	}
 	if pq.sem != nil {
 		pq.runSemaphoreMode(ctx)
 		return
@@ -392,44 +570,140 @@ func (pq *RequestPriorityQueue) runSemaphoreMode(ctx context.Context) {
 			// Permit acquired
 		}
 
-		releaseOnce := sync.Once{}
-		trackedInflight := false
-		req.Release = func() {
-			releaseOnce.Do(func() {
-				<-pq.sem
-				if trackedInflight && pq.metrics != nil {
-					pq.metrics.DecFairnessQueueInflight(req.ModelName)
-				}
-			})
+		// Commit admission atomically with respect to a concurrent Abandon(): install
+		// Release and increment the inflight metric under the request lock so the
+		// waiting caller either observes the admission (and releases the permit on
+		// timeout) or blocks admission entirely. Increment the metric inside the
+		// committed section so a racing Release always has a matching increment.
+		admitted := req.commitAdmission(func() {
+			releaseOnce := sync.Once{}
+			req.Release = func() {
+				releaseOnce.Do(func() {
+					<-pq.sem
+					pq.metricDecInflight(req.ModelName)
+				})
+			}
+			pq.metricIncInflight(req.ModelName)
+		})
+		if !admitted {
+			// Caller abandoned before admission; return the just-acquired permit and
+			// drop the request without signalling it.
+			<-pq.sem
+			continue
 		}
-
-		if pq.metrics != nil {
-			pq.metrics.IncFairnessQueueInflight(req.ModelName)
-		}
-		trackedInflight = true
 		close(req.NotifyChan)
 	}
 }
 
-// Close stops the dequeue loop and drains pending items from the heap.
-// Callers waiting on NotifyChan will detect cancellation via their request-scoped signal.
+// Close stops the dequeue loop, cancels pending requests, and drains the heap.
 func (pq *RequestPriorityQueue) Close() {
 	pq.mu.Lock()
-	defer pq.mu.Unlock()
 	select {
 	case <-pq.stopCh:
 		// already closed
+		pq.mu.Unlock()
 		return
 	default:
 		close(pq.stopCh)
 	}
 
-	// Drain pending items: clear metrics for each remaining request
-	for len(pq.heap) > 0 {
-		req := heap.Pop(pq).(*Request)
-		if pq.metrics != nil {
-			pq.metrics.DecFairnessQueueSize(req.ModelName, req.UserID)
+	// Drain pending items and clear their metrics while holding the queue lock so
+	// concurrent PushRequest calls cannot add work after shutdown begins.
+	pending := pq.heap
+	pq.heap = nil
+	for _, req := range pending {
+		pq.metricDecSize(req.ModelName, req.UserID)
+	}
+	pq.mu.Unlock()
+
+	// Cancel outside the queue lock. Context cancellation can synchronously run
+	// callbacks, and those callbacks must not be able to deadlock queue shutdown.
+	for _, req := range pending {
+		if req.Cancel != nil {
+			req.Cancel()
 		}
 	}
 	klog.V(4).Info("fairness queue closed and drained")
+}
+
+// --- Metric helpers ---
+//
+// These select between fairness-mode and session-boost-mode metric vectors based
+// on the queue's configured mode, so the shared dequeue paths stay mode-agnostic.
+
+func (pq *RequestPriorityQueue) metricIncSize(model, user string) {
+	if pq.metrics == nil {
+		return
+	}
+	if pq.sessionBoost {
+		pq.metrics.IncSessionBoostQueueSize(model)
+	} else {
+		pq.metrics.IncFairnessQueueSize(model, user)
+	}
+}
+
+func (pq *RequestPriorityQueue) metricDecSize(model, user string) {
+	if pq.metrics == nil {
+		return
+	}
+	if pq.sessionBoost {
+		pq.metrics.DecSessionBoostQueueSize(model)
+	} else {
+		pq.metrics.DecFairnessQueueSize(model, user)
+	}
+}
+
+func (pq *RequestPriorityQueue) metricRecordDuration(model, user string, d time.Duration) {
+	if pq.metrics == nil {
+		return
+	}
+	if pq.sessionBoost {
+		pq.metrics.RecordSessionBoostQueueDuration(model, d)
+	} else {
+		pq.metrics.RecordFairnessQueueDuration(model, user, d)
+	}
+}
+
+func (pq *RequestPriorityQueue) metricIncCancelled(model, user string) {
+	if pq.metrics == nil {
+		return
+	}
+	if pq.sessionBoost {
+		pq.metrics.IncSessionBoostQueueCancelled(model)
+	} else {
+		pq.metrics.IncFairnessQueueCancelled(model, user)
+	}
+}
+
+func (pq *RequestPriorityQueue) metricIncDequeue(model, user string) {
+	if pq.metrics == nil {
+		return
+	}
+	if pq.sessionBoost {
+		pq.metrics.IncSessionBoostQueueDequeue(model)
+	} else {
+		pq.metrics.IncFairnessQueueDequeue(model, user)
+	}
+}
+
+func (pq *RequestPriorityQueue) metricIncInflight(model string) {
+	if pq.metrics == nil {
+		return
+	}
+	if pq.sessionBoost {
+		pq.metrics.IncSessionBoostQueueInflight(model)
+	} else {
+		pq.metrics.IncFairnessQueueInflight(model)
+	}
+}
+
+func (pq *RequestPriorityQueue) metricDecInflight(model string) {
+	if pq.metrics == nil {
+		return
+	}
+	if pq.sessionBoost {
+		pq.metrics.DecSessionBoostQueueInflight(model)
+	} else {
+		pq.metrics.DecFairnessQueueInflight(model)
+	}
 }

@@ -1,0 +1,46 @@
+# Mock vLLM backends for router scheduler plugin e2e tests.
+# KV-cache simulation is enabled for gpu-usage; other plugin tests only use their own scheduler plugins.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router-plugin-mock
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: router-plugin-mock
+  template:
+    metadata:
+      labels:
+        app: router-plugin-mock
+        router-plugin-pool: latency
+    spec:
+      containers:
+        - name: llm-engine
+          image: ghcr.io/llm-d/llm-d-inference-sim:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          args:
+            - --model=kthena-plugin-mock
+            - --served-model-name=router-plugin-model
+            - --port=8000
+            - --mode=echo
+            - --enable-kvcache=true
+            - --force-dummy-tokenizer=true
+            - --kv-cache-size=8
+            - --block-size=8
+            - --max-num-seqs=2
+            - --time-to-first-token=20ms
+            - --inter-token-latency=5ms
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 2

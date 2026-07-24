@@ -30,6 +30,7 @@ import (
 
 // Store is an interface for storing and retrieving data
 type Store interface {
+	// GetServingGroupByModelServing returns the sorted serving groups
 	GetServingGroupByModelServing(modelServingName types.NamespacedName) ([]ServingGroup, error)
 	GetServingGroupRevision(modelServingName types.NamespacedName, groupName string) (string, bool)
 	GetRunningPodNumByServingGroup(modelServingName types.NamespacedName, groupName string) (int, error)
@@ -181,7 +182,8 @@ func (s *store) GetRolesByGroup(modelServingName types.NamespacedName, groupName
 		}
 		copiedInner := make(map[string]*Role, len(roleMap))
 		for roleID, role := range roleMap {
-			copiedInner[roleID] = role
+			roleCopy := *role
+			copiedInner[roleID] = &roleCopy
 		}
 		copiedRoles[roleName] = copiedInner
 	}

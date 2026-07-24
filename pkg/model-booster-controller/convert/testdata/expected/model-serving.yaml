@@ -6,17 +6,18 @@ metadata:
     workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
     workload.serving.volcano.sh/model-name: test-model
     workload.serving.volcano.sh/model-uid: randomUID
-    workload.serving.volcano.sh/revision: 59b8b55cc4
+    workload.serving.volcano.sh/revision: 58bd96d5d5
   name: test-model-backend1
   namespace: default
   ownerReferences:
     - apiVersion: workload.serving.volcano.sh/v1alpha1
+      blockOwnerDeletion: true
+      controller: true
       kind: ModelBooster
       name: test-model
       uid: randomUID
 spec:
   replicas: 0
-  schedulerName: ""
   template:
     restartGracePeriodSeconds: 60
     gangPolicy:
@@ -30,8 +31,9 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: test-model
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 59b8b55cc4
+              workload.serving.volcano.sh/revision: 58bd96d5d5
           spec:
+            affinity: {}
             containers:
               - args:
                   - --port
@@ -112,8 +114,13 @@ spec:
                         - -c
                         - |
                           while true; do
-                            RUNNING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_running' | grep -v '#' | awk '{print $2}')
-                            WAITING=$(curl -s http://localhost:8000/metrics | grep 'vllm:num_requests_waiting' | grep -v '#' | awk '{print $2}')
+                            METRICS=$(curl -s --max-time 2 http://localhost:8000/metrics)
+                            RUNNING=$(echo "$METRICS" | grep 'vllm:num_requests_running' | grep -v '#' | awk '{print $2}' || true)
+                            WAITING=$(echo "$METRICS" | grep 'vllm:num_requests_waiting' | grep -v '#' | awk '{print $2}' || true)
+                            if [ -z "$RUNNING" ]; then
+                              echo "Terminating: Metrics endpoint unavailable, exiting preStop" >> /proc/1/fd/1
+                              exit 0
+                            fi
                             if [ "$RUNNING" = "0.0" ] && [ "$WAITING" = "0.0" ]; then
                               echo "Terminating: No active or waiting requests, safe to terminate" >> /proc/1/fd/1
                               exit 0
@@ -213,8 +220,9 @@ spec:
               workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
               workload.serving.volcano.sh/model-name: test-model
               workload.serving.volcano.sh/model-uid: randomUID
-              workload.serving.volcano.sh/revision: 59b8b55cc4
+              workload.serving.volcano.sh/revision: 58bd96d5d5
           spec:
+            affinity: {}
             containers:
               - command:
                   - bash

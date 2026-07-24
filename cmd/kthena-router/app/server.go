@@ -18,12 +18,17 @@ package app
 
 import (
 	"context"
+	"os"
+	"time"
 
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
+
+const defaultDrainTimeout = 5 * time.Minute
 
 type Server struct {
 	store                              datastore.Store
@@ -38,6 +43,8 @@ type Server struct {
 	DebugPort                          int
 	KubeAPIQPS                         float32
 	KubeAPIBurst                       int
+	// drainTimeout is HTTP server shutdown grace; not datastore state.
+	drainTimeout time.Duration
 }
 
 func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int) *Server {
@@ -52,12 +59,36 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		DebugPort:                          debugPort,
 		KubeAPIQPS:                         kubeAPIQPS,
 		KubeAPIBurst:                       kubeAPIBurst,
+		drainTimeout:                       parseDrainTimeout(),
 	}
 }
 
+func parseDrainTimeout() time.Duration {
+	if v := os.Getenv("DRAIN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		klog.Warningf("Invalid DRAIN_TIMEOUT %q, using default %v", v, defaultDrainTimeout)
+	}
+	return defaultDrainTimeout
+}
+
 func (s *Server) Run(ctx context.Context) {
+	// Build store options. When REDIS_HOST is set, use a Redis-backed on-flight
+	// counter so that multiple router replicas share a globally consistent view
+	// of in-flight request counts, enabling better cross-router scheduling.
+	var storeOpts []datastore.Option
+	if os.Getenv("REDIS_HOST") != "" {
+		if redisClient := utils.TryGetRedisClient(); redisClient != nil {
+			klog.Infof("Redis on-flight counter enabled: cross-router in-flight tracking active")
+			storeOpts = append(storeOpts, datastore.WithRedisOnFlightCounter(datastore.NewRedisOnFlightCounter(redisClient)))
+		} else {
+			klog.Warningf("REDIS_HOST is set but Redis connection failed; falling back to local on-flight counter")
+		}
+	}
+
 	// create store
-	store := datastore.New()
+	store := datastore.New(storeOpts...)
 	s.store = store
 
 	// must be run before the controller, because it will register callbacks

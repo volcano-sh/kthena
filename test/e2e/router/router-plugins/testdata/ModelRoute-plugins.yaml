@@ -1,0 +1,11 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: router-plugin-route
+  namespace: default
+spec:
+  modelName: "router-plugin-model"
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: "router-plugin-mock"

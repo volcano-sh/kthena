@@ -325,19 +325,6 @@ func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *
 			return fmt.Errorf("failed to create AutoscalingPolicy: %v", err)
 		}
 
-	case "AutoscalingPolicyBinding":
-		fmt.Printf("  Creating AutoscalingPolicyBinding: %s in namespace %s\n", resourceName, resourceNamespace)
-		binding := &workloadv1alpha1.AutoscalingPolicyBinding{}
-		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, binding)
-		if err != nil {
-			return fmt.Errorf("failed to convert unstructured object to AutoscalingPolicyBinding: %v", err)
-		}
-
-		_, err = client.WorkloadV1alpha1().AutoscalingPolicyBindings(resourceNamespace).Create(ctx, binding, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to create AutoscalingPolicyBinding: %v", err)
-		}
-
 	default:
 		return fmt.Errorf("unsupported resource type: %s", gvk.Kind)
 	}

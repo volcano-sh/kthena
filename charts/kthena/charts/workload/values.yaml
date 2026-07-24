@@ -35,6 +35,10 @@ controllerManager:
   # debugPort is the debug HTTP server port.
   # If 0 or not specified, debug server is disabled.
   debugPort: 0
+  # autoscalingSyncPeriodSeconds is the reconcile interval in seconds for the autoscaler.
+  # Smaller values react faster to traffic spikes but increase API server load.
+  # If 0 or not specified, uses the binary default (15).
+  autoscalingSyncPeriodSeconds: 0
   # downloaderImage is the container image used for downloading models.
   downloaderImage:
     repository: ghcr.io/volcano-sh/downloader

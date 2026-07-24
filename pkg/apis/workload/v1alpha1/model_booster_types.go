@@ -37,9 +37,6 @@ type ModelBoosterSpec struct {
 	// Backend is the model backend associated with this model.
 	// ModelBackend is the minimum unit of inference instance. It can be vLLM or vLLMDisaggregated.
 	Backend ModelBackend `json:"backend"`
-	// AutoscalingPolicy references the autoscaling policy to be used for this model.
-	// +optional
-	AutoscalingPolicy *AutoscalingPolicySpec `json:"autoscalingPolicy,omitempty"`
 	// ModelMatch defines the predicate used to match LLM inference requests to a given
 	// TargetModels. Multiple match conditions are ANDed together, i.e. the match will
 	// evaluate to true only if all conditions are satisfied.
@@ -55,10 +52,31 @@ type ModelBackend struct {
 	Name string `json:"name"`
 	// Type is the type of the backend.
 	Type ModelBackendType `json:"type"`
-	// ModelURI is the URI where you download the model. Support hf://, s3://, pvc://, ms://.
-	// +kubebuilder:validation:Pattern=`^(hf://|s3://|pvc://|ms://).+`
+	// ModelURI is the source from which the model is fetched by the downloader init container.
+	// Supported schemes:
+	//   hf://NAMESPACE/REPO         — Hugging Face Hub repository
+	//   ms://NAMESPACE/REPO         — ModelScope repository
+	//   s3://BUCKET/PATH            — S3-compatible object storage
+	//   obs://BUCKET/PATH           — Huawei Object Storage Service (OBS)
+	//   pvc:///CLAIM_NAME/PATH      — path inside a PVC already mounted via CacheURI
+	//
+	// When using pvc://, the downloader reads the given path from the container filesystem.
+	// The downloader init container only mounts the volume specified by CacheURI, so the
+	// modelURI path must be reachable through that mount.  Both CacheURI and modelURI must
+	// reference the same PVC, and the modelURI path must start with the CacheURI mount point.
+	// Example: CacheURI: pvc://model-storage, ModelURI: pvc:///model-storage/models/Qwen
+	// +kubebuilder:validation:Pattern=`^(hf://|s3://|obs://|pvc://|ms://).+`
 	ModelURI string `json:"modelURI"`
-	// CacheURI is the URI where the downloaded model stored. Support hostpath://, pvc://.
+	// CacheURI specifies where the downloaded model is stored and how the storage volume is
+	// mounted inside every pod (both the downloader init container and the inference engine).
+	// Supported schemes:
+	//   pvc://CLAIM_NAME    — PersistentVolumeClaim; the PVC is mounted at /CLAIM_NAME
+	//   hostpath://PATH     — host-local directory; mounted at /PATH
+	//   (empty)             — an ephemeral EmptyDir volume is used (no persistence)
+	//
+	// The downloader writes model files under a hashed sub-directory of this mount path.
+	// The inference engine reads from the same path.  When ModelURI uses pvc://, CacheURI
+	// must also use pvc:// and reference the same PVC so the source path is visible.
 	// +kubebuilder:validation:Pattern=`^(hostpath://|pvc://).+`
 	CacheURI string `json:"cacheURI,omitempty"`
 	// List of sources to populate environment variables in the container.
@@ -85,14 +103,10 @@ type ModelBackend struct {
 	// +listType=map
 	// +listMapKey=name
 	Env []corev1.EnvVar `json:"env,omitempty" patchStrategy:"merge" patchMergeKey:"name" protobuf:"bytes,7,rep,name=env"`
-	// MinReplicas is the minimum number of replicas for the backend.
+	// Replicas is the fixed number of replicas for the backend.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000000
-	MinReplicas int32 `json:"minReplicas"`
-	// MaxReplicas is the maximum number of replicas for the backend.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1000000
-	MaxReplicas int32 `json:"maxReplicas"`
+	Replicas int32 `json:"replicas"`
 	// Workers is the list of workers associated with this backend.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=1000
@@ -145,6 +159,10 @@ type ModelWorker struct {
 	// Affinity specifies the affinity rules for scheduling the worker pods.
 	// +optional
 	Affinity corev1.Affinity `json:"affinity,omitempty"`
+	// Tolerations specifies the tolerations for scheduling the worker pods.
+	// +optional
+	// +listType=atomic
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 	// Config contains worker-specific configuration in JSON format.
 	// You can find vLLM config here https://docs.vllm.ai/en/stable/configuration/engine_args.html
 	// +optional
