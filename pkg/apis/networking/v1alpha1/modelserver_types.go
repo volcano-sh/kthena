@@ -17,10 +17,14 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ModelServerSpec defines the desired state of ModelServer.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.workloadSelector) != has(self.externalProvider)",message="exactly one of workloadSelector or externalProvider must be specified"
+// +kubebuilder:validation:XValidation:rule="has(self.workloadSelector) ? has(self.inferenceEngine) : true",message="inferenceEngine must be specified when workloadSelector is set"
 type ModelServerSpec struct {
 	// The real model that the modelServers are running.
 	// If the `model` in LLM inference request is different from this field, it should be overwritten by this field.
@@ -29,13 +33,13 @@ type ModelServerSpec struct {
 	// +kubebuilder:validation:MaxLength=256
 	Model *string `json:"model,omitempty"`
 	// The inference engine used to serve the model.
-	// +kubebuilder:validation:Required
-	InferenceEngine InferenceEngine `json:"inferenceEngine"`
+	// +optional
+	InferenceEngine InferenceEngine `json:"inferenceEngine,omitempty"`
 	// WorkloadSelector is used to match the model serving instances.
 	// Currently, they must be pods within the same namespace as modelServer object.
 	//
-	// +kubebuilder:validation:Required
-	WorkloadSelector *WorkloadSelector `json:"workloadSelector"`
+	// +optional
+	WorkloadSelector *WorkloadSelector `json:"workloadSelector,omitempty"`
 
 	// WorkloadPort defines the port and protocol configuration for the model server.
 	WorkloadPort WorkloadPort `json:"workloadPort,omitempty"`
@@ -47,6 +51,11 @@ type ModelServerSpec struct {
 	// KVConnector specifies the KV connector configuration for PD disaggregated routing
 	// +optional
 	KVConnector *KVConnectorSpec `json:"kvConnector,omitempty"`
+
+	// ExternalProvider specifies an external cloud LLM provider to route requests to.
+	// When this is set, WorkloadSelector is ignored and requests are proxied to the external endpoint.
+	// +optional
+	ExternalProvider *ExternalProvider `json:"externalProvider,omitempty"`
 }
 
 // InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
@@ -60,6 +69,37 @@ const (
 	// https://github.com/sgl-project/sglang
 	SGLang InferenceEngine = "SGLang"
 )
+
+// ExternalProviderType defines the type of external cloud LLM provider.
+//
+// +kubebuilder:validation:Enum=OpenAI;Anthropic;AzureOpenAI;AWSBedrock;Custom
+type ExternalProviderType string
+
+const (
+	ExternalProviderOpenAI      ExternalProviderType = "OpenAI"
+	ExternalProviderAnthropic   ExternalProviderType = "Anthropic"
+	ExternalProviderAzureOpenAI ExternalProviderType = "AzureOpenAI"
+	ExternalProviderAWSBedrock  ExternalProviderType = "AWSBedrock"
+	ExternalProviderCustom      ExternalProviderType = "Custom"
+)
+
+// ExternalProvider specifies an external cloud LLM provider to route requests to.
+// +kubebuilder:validation:XValidation:rule="self.providerType == 'Custom' || self.endpoint.startsWith('https://')",message="endpoint must be an https URL for known provider types"
+type ExternalProvider struct {
+	// The type of the external provider (e.g., OpenAI, Anthropic, Custom).
+	// +kubebuilder:validation:Required
+	ProviderType ExternalProviderType `json:"providerType"`
+
+	// The full base URL for the external provider endpoint (e.g., https://api.openai.com/v1).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Format=uri
+	Endpoint string `json:"endpoint"`
+
+	// Reference to a Kubernetes Secret containing the API credentials/keys for the external provider.
+	// The Secret should contain the token/key under the expected key name (e.g., 'api-key' or 'token').
+	// +optional
+	CredentialsRef *corev1.LocalObjectReference `json:"credentialsRef,omitempty"`
+}
 
 // WorkloadSelector is used to match the model serving instances.
 // Currently, they must be pods within the same namespace as modelServer object.
