@@ -494,6 +494,134 @@ func exclusiveConditionTypes(condition1 metav1.Condition, condition2 metav1.Cond
 	return false
 }
 
+// HasBlockingPodFailure reports whether a single pod is showing a blocking
+// failure signal (scheduling, image pull, or container crash), per the same
+// detection rules as ExtractPodBlockingFailure.
+func HasBlockingPodFailure(pod *corev1.Pod) bool {
+	reason, _ := ExtractPodBlockingFailure([]*corev1.Pod{pod})
+	return reason != ""
+}
+
+// ExtractPodBlockingFailure inspects pods and returns the single most-relevant
+// blocking failure as a (reason, message) pair.
+// Priority order: scheduling failure > image pull > init container crash > runtime container crash.
+// Each priority class is scanned across ALL pods before falling through to the next
+// class, so a lower-priority failure in one pod can never mask a higher-priority
+// failure in another pod.
+// Returns empty strings when no actionable failure is detected.
+func ExtractPodBlockingFailure(pods []*corev1.Pod) (reason, message string) {
+	if r, m, ok := findSchedulingFailure(pods); ok {
+		return r, m
+	}
+	if r, m, ok := findImagePullFailure(pods); ok {
+		return r, m
+	}
+	if r, m, ok := findInitContainerFailure(pods); ok {
+		return r, m
+	}
+	if r, m, ok := findRuntimeContainerFailure(pods); ok {
+		return r, m
+	}
+	return "", ""
+}
+
+// findSchedulingFailure scans all pods for a scheduling failure condition.
+func findSchedulingFailure(pods []*corev1.Pod) (reason, message string, found bool) {
+	for _, pod := range pods {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Message != "" {
+				return "PodSchedulingFailed", cond.Message, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// findImagePullFailure scans all pods' init and runtime containers for an image pull failure.
+func findImagePullFailure(pods []*corev1.Pod) (reason, message string, found bool) {
+	for _, pod := range pods {
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if r, m := extractImagePullFailure(cs); r != "" {
+				return r, m, true
+			}
+		}
+		for _, cs := range pod.Status.ContainerStatuses {
+			if r, m := extractImagePullFailure(cs); r != "" {
+				return r, m, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// findInitContainerFailure scans all pods' init containers for a non-image-pull crash.
+func findInitContainerFailure(pods []*corev1.Pod) (reason, message string, found bool) {
+	for _, pod := range pods {
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if r, m := extractContainerCrashFailure(cs, "InitContainerFailed"); r != "" {
+				return r, m, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// findRuntimeContainerFailure scans all pods' runtime containers for a non-image-pull crash.
+func findRuntimeContainerFailure(pods []*corev1.Pod) (reason, message string, found bool) {
+	for _, pod := range pods {
+		for _, cs := range pod.Status.ContainerStatuses {
+			if r, m := extractContainerCrashFailure(cs, "RuntimeContainerFailed"); r != "" {
+				return r, m, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// extractImagePullFailure returns an ImagePullFailed reason if cs is waiting on
+// an image pull error. Returns empty strings otherwise.
+func extractImagePullFailure(cs corev1.ContainerStatus) (reason, message string) {
+	if cs.State.Waiting == nil {
+		return "", ""
+	}
+	switch cs.State.Waiting.Reason {
+	case "ImagePullBackOff", "ErrImagePull":
+		msg := cs.State.Waiting.Message
+		if msg == "" {
+			msg = cs.State.Waiting.Reason
+		}
+		return "ImagePullFailed", msg
+	}
+	return "", ""
+}
+
+// extractContainerCrashFailure maps a container status to a high-level failure reason,
+// excluding image pull failures which are handled as their own priority class.
+// defaultReason is used for non-image-pull waiting states and for terminated containers
+// with a non-zero exit code.
+func extractContainerCrashFailure(cs corev1.ContainerStatus, defaultReason string) (reason, message string) {
+	if cs.State.Waiting != nil {
+		switch cs.State.Waiting.Reason {
+		case "ImagePullBackOff", "ErrImagePull":
+			return "", ""
+		}
+		if cs.State.Waiting.Message != "" {
+			return defaultReason, cs.State.Waiting.Message
+		}
+	}
+	if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+		msg := cs.State.Terminated.Message
+		if msg == "" {
+			msg = cs.State.Terminated.Reason
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("exit code %d", cs.State.Terminated.ExitCode)
+		}
+		return defaultReason, msg
+	}
+	return "", ""
+}
+
 // ParseAdmissionRequest parses the HTTP request and extracts the AdmissionReview and ModelServing.
 func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview, *workloadv1alpha1.ModelServing, error) {
 	// Verify the content type is accurate

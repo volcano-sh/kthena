@@ -367,6 +367,14 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 				Name:      ms.Name,
 			}, servingGroupName, utils.ObjectRevision(newPod), roleTemplateHash, roleName, utils.GetRoleID(newPod))
 		}
+		// Pending pods with a blocking failure (scheduling, image pull, init container
+		// crash) never reach the Failed or ContainerRestarted branches above, since the
+		// phase stays Pending and RestartCount stays 0. Without this, the owning
+		// ModelServing is never reconciled and the failure is never surfaced as an Event.
+		if utils.HasBlockingPodFailure(newPod) {
+			klog.V(4).Infof("blocking pod failure detected on %s/%s, enqueuing ModelServing %s/%s", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name)
+			c.enqueueModelServing(ms)
+		}
 	}
 }
 
@@ -2013,6 +2021,33 @@ func (c *ModelServingController) isRoleDeleted(ms *workloadv1alpha1.ModelServing
 	return len(pods) == 0 && len(services) == 0
 }
 
+// getBlockingPodFailure inspects pods belonging to non-deleting progressing
+// ServingGroups and returns the single most-relevant pod failure reason and
+// message. Pods from all progressing groups are collected before the failure
+// class priority is evaluated, so a lower-priority failure in one group can
+// never mask a higher-priority failure in another group. It returns empty
+// strings when no blocking failure is found.
+func (c *ModelServingController) getBlockingPodFailure(ms *workloadv1alpha1.ModelServing, groups []datastore.ServingGroup, progressingGroupIndices []int) (reason, message string) {
+	var pods []*corev1.Pod
+	for _, idx := range progressingGroupIndices {
+		if idx >= len(groups) {
+			continue
+		}
+		group := groups[idx]
+		if group.Status == datastore.ServingGroupDeleting {
+			continue
+		}
+		groupKey := fmt.Sprintf("%s/%s", ms.Namespace, group.Name)
+		groupPods, err := c.getPodsByIndex(GroupNameKey, groupKey)
+		if err != nil {
+			klog.Warningf("getBlockingPodFailure: failed to list pods for group %s: %v", groupKey, err)
+			continue
+		}
+		pods = append(pods, groupPods...)
+	}
+	return utils.ExtractPodBlockingFailure(pods)
+}
+
 // getPodsByIndex filter pods using the informer indexer.
 func (c *ModelServingController) getPodsByIndex(indexName, indexValue string) ([]*corev1.Pod, error) {
 	indexer := c.podsInformer.GetIndexer()
@@ -2172,6 +2207,11 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 
 		copy := latestMS.DeepCopy()
 		shouldUpdate := utils.SetCondition(copy, progressingGroups, updatedGroups, currentGroups)
+		if len(progressingGroups) > 0 {
+			if failureReason, failureMsg := c.getBlockingPodFailure(latestMS, groups, progressingGroups); failureReason != "" {
+				c.emitRoleStatusEvent(latestMS, corev1.EventTypeWarning, failureReason, failureMsg)
+			}
+		}
 		if copy.Status.Replicas != int32(len(groups)) || copy.Status.AvailableReplicas != int32(available) || copy.Status.UpdatedReplicas != int32(updated) || copy.Status.CurrentReplicas != int32(current) {
 			shouldUpdate = true
 			copy.Status.Replicas = int32(len(groups))
