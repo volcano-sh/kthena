@@ -183,8 +183,14 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 			continue
 		}
 		totalWeight := uint32(0)
+		hasValidTarget := false
 		for j, targetModel := range rule.TargetModels {
 			targetModelField := ruleField.Child("targetModels").Index(j)
+			if targetModel == nil {
+				allErrs = append(allErrs, field.Invalid(targetModelField, targetModel, "target model must not be nil"))
+				continue
+			}
+			hasValidTarget = true
 			if targetModel.ModelServerName == "" {
 				allErrs = append(allErrs, field.Invalid(targetModelField.Child("modelServerName"), targetModel.ModelServerName, "modelServerName cannot be an empty string"))
 			}
@@ -194,7 +200,7 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 				totalWeight += 100
 			}
 		}
-		if totalWeight == 0 {
+		if hasValidTarget && totalWeight == 0 {
 			allErrs = append(allErrs, field.Invalid(ruleField.Child("targetModels"), totalWeight, "total weight must be greater than zero"))
 		}
 		if rule.ModelMatch != nil {
