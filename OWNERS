@@ -1,7 +1,9 @@
 # List of usernames who may use /lgtm
 reviewers:
   - hzxuzhonghu
+  - YaoZengzeng
 
 # List of usernames who may use /approve
 approvers:
   - hzxuzhonghu
+  - YaoZengzeng
