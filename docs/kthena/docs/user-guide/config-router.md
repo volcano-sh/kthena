@@ -17,9 +17,17 @@ Plugin Configuration (PluginConfig):
 | Plugin Name   | Parameters                                                  | Description                                                                                               |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | least-request | maxWaitingRequests                                          | Sets the maximum number of waiting requests                                                               |
-| least-latency | TTFTTPOTWeightFactor                                        | Sets the weight factor for TTFT and TPOT                                                                  |
+| least-latency | TTFTTPOTWeightFactor                                        | Sets the TTFT weight factor. Must be between `0.0` and `1.0`.                                             |
 | prefix-cache  | blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize | Configures prefix cache parameters                                                                        |
 | kvcache-aware | blockSizeToHash<br />maxBlocksToMatch                       | Configures KV cache aware token-block matching parameters. Requires Redis and the Kthena Runtime sidecar. |
+
+`TTFTTPOTWeightFactor` controls how the least-latency plugin balances Time To First Token (TTFT) and Time Per Output Token (TPOT):
+
+- `0.0` prioritizes TPOT.
+- `0.5` gives equal weight to TTFT and TPOT.
+- `1.0` prioritizes TTFT.
+
+Values outside the `0.0` to `1.0` range, including non-finite values, use the default value `0.5`.
 
 Filter Plugins (Filter):
 

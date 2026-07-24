@@ -29,7 +29,12 @@ import (
 
 var _ framework.ScorePlugin = &LeastLatency{}
 
-const LeastLatencyPluginName = "least-latency"
+const (
+	LeastLatencyPluginName      = "least-latency"
+	defaultTTFTTPOTWeightFactor = 0.5
+	minTTFTTPOTWeightFactor     = 0.0
+	maxTTFTTPOTWeightFactor     = 1.0
+)
 
 // MaxScore is the highest possible score a pod can receive
 const MaxScore = 100.0
@@ -40,16 +45,29 @@ type LeastLatency struct {
 }
 
 type LeastLatencyArgs struct {
+	// TTFTTPOTWeightFactor must be between 0 and 1. A value of 0 prioritizes
+	// TPOT, 1 prioritizes TTFT, and values in between blend both metrics.
 	TTFTTPOTWeightFactor float64 `yaml:"TTFTTPOTWeightFactor,omitempty"`
 }
 
 func NewLeastLatency(pluginArg runtime.RawExtension) *LeastLatency {
-	var leastLatencyArgs LeastLatencyArgs
-	if pluginArg.Raw == nil || yaml.Unmarshal(pluginArg.Raw, &leastLatencyArgs) != nil {
-		klog.Errorf("Unmarshal LeastLatencyArgs error, setting default value")
-		leastLatencyArgs = LeastLatencyArgs{
-			0.5,
+	leastLatencyArgs := LeastLatencyArgs{
+		TTFTTPOTWeightFactor: defaultTTFTTPOTWeightFactor,
+	}
+	if len(pluginArg.Raw) > 0 {
+		if err := yaml.Unmarshal(pluginArg.Raw, &leastLatencyArgs); err != nil {
+			klog.Errorf("Unmarshal LeastLatencyArgs error, setting default value: %v", err)
+			leastLatencyArgs.TTFTTPOTWeightFactor = defaultTTFTTPOTWeightFactor
 		}
+	}
+
+	if math.IsNaN(leastLatencyArgs.TTFTTPOTWeightFactor) ||
+		math.IsInf(leastLatencyArgs.TTFTTPOTWeightFactor, 0) ||
+		leastLatencyArgs.TTFTTPOTWeightFactor < minTTFTTPOTWeightFactor ||
+		leastLatencyArgs.TTFTTPOTWeightFactor > maxTTFTTPOTWeightFactor {
+		klog.Warningf("Invalid TTFTTPOTWeightFactor %v, using default value %v",
+			leastLatencyArgs.TTFTTPOTWeightFactor, defaultTTFTTPOTWeightFactor)
+		leastLatencyArgs.TTFTTPOTWeightFactor = defaultTTFTTPOTWeightFactor
 	}
 
 	return &LeastLatency{
