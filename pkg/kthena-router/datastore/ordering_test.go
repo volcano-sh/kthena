@@ -479,8 +479,7 @@ func TestStore_EdgeCases(t *testing.T) {
 
 	podName := utils.GetNamespaceName(pod)
 	podInfo := s.GetPodInfo(podName)
-	assert.NotNil(t, podInfo)
-	assert.Equal(t, 0, podInfo.GetModelServerCount())
+	assert.Nil(t, podInfo)
 }
 
 // Test Case 11: random operations (simulated)
