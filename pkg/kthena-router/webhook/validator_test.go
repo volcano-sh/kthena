@@ -30,6 +30,9 @@ func TestValidateModelRoute(t *testing.T) {
 	weight0 := uint32(0)
 	invalidHeaderRegex := "["
 	invalidURIRegex := "["
+	exactMatch := "production"
+	prefixMatch := "/v1/"
+	regexMatch := "^/v1/.*"
 
 	tests := []struct {
 		name           string
@@ -453,6 +456,66 @@ func TestValidateModelRoute(t *testing.T) {
 			},
 			expectValid:    false,
 			expectedReason: "validation failed:\n  - spec.rules[0].modelMatch.uri.regex: Invalid value: \"[\": error parsing regexp: missing closing ]: `[`",
+		},
+		{
+			name: "invalid model route - header match has multiple types",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							ModelMatch: &networkingv1alpha1.ModelMatch{
+								Headers: map[string]*networkingv1alpha1.StringMatch{
+									"x-env": {Exact: &exactMatch, Prefix: &prefixMatch},
+								},
+							},
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "test-server"},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.rules[0].modelMatch.headers[x-env]: Invalid value: \"exact,prefix\": only one of exact, prefix, or regex may be set",
+		},
+		{
+			name: "invalid model route - uri match has multiple types",
+			modelRoute: &networkingv1alpha1.ModelRoute{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelRoute",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+				Spec: networkingv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*networkingv1alpha1.Rule{
+						{
+							Name: "test-rule",
+							ModelMatch: &networkingv1alpha1.ModelMatch{
+								Uri: &networkingv1alpha1.StringMatch{Prefix: &prefixMatch, Regex: &regexMatch},
+							},
+							TargetModels: []*networkingv1alpha1.TargetModel{
+								{ModelServerName: "test-server"},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.rules[0].modelMatch.uri: Invalid value: \"prefix,regex\": only one of exact, prefix, or regex may be set",
 		},
 		{
 			name: "invalid model route - nil rule",
