@@ -254,8 +254,21 @@ func (mc *ModelBoosterController) isModelServingActive(model *workload.ModelBoos
 
 // updateModelBoosterStatus updates model status.
 func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, modelBooster *workload.ModelBooster) error {
+	// Status updates within a single reconcile can happen back to back, and the
+	// informer cache does not always catch up between them. Read from the cache
+	// on the first attempt (cheap, and correct in the common case); if that
+	// attempt conflicts, the cache is known to be stale for this object, so
+	// subsequent attempts read directly from the API server instead of retrying
+	// against the same stale resourceVersion.
+	readFromAPI := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest, err := mc.modelBoosterLister.ModelBoosters(modelBooster.Namespace).Get(modelBooster.Name)
+		var latest *workload.ModelBooster
+		var err error
+		if readFromAPI {
+			latest, err = mc.client.WorkloadV1alpha1().ModelBoosters(modelBooster.Namespace).Get(ctx, modelBooster.Name, metav1.GetOptions{})
+		} else {
+			latest, err = mc.modelBoosterLister.ModelBoosters(modelBooster.Namespace).Get(modelBooster.Name)
+		}
 		if err != nil {
 			return err
 		}
@@ -266,6 +279,7 @@ func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, 
 		updated.Status.ObservedGeneration = updated.Generation
 		res, err := mc.client.WorkloadV1alpha1().ModelBoosters(updated.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
 		if err != nil {
+			readFromAPI = true
 			return err
 		}
 		modelBooster.Status = res.Status
