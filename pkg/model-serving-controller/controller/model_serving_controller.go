@@ -75,6 +75,7 @@ type PodGroupManager interface {
 	CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) error
 	HasPodGroupCRD() bool
 	GetPodGroupInformer() cache.SharedIndexInformer
+	GetPodGroupsByIndex(indexName, indexValue string) ([]*schedulingv1beta1.PodGroup, error)
 	Run(parentCtx context.Context) error
 	GenerateTaskName(roleName string, roleIndex int) string
 	AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing, groupName, taskName string)
@@ -1995,13 +1996,10 @@ func (c *ModelServingController) isServingGroupDeleted(ms *workloadv1alpha1.Mode
 		klog.Errorf("failed to get service, err:%v", err)
 		return false
 	}
-	pgs := []*schedulingv1beta1.PodGroup{}
-	if c.podGroupManager.HasPodGroupCRD() {
-		pgs, err = c.getPodGroupsByIndex(GroupNameKey, groupNameValue)
-		if err != nil {
-			klog.Errorf("failed to get podGroup, err: %v", err)
-			return false
-		}
+	pgs, err := c.podGroupManager.GetPodGroupsByIndex(GroupNameKey, groupNameValue)
+	if err != nil {
+		klog.Errorf("failed to get podGroup, err: %v", err)
+		return false
 	}
 	return len(pgs) == 0 && len(pods) == 0 && len(services) == 0
 }
@@ -2070,40 +2068,6 @@ func (c *ModelServingController) getServicesByIndex(indexName, indexValue string
 		services = append(services, svc)
 	}
 	return services, nil
-}
-
-// TODO: move to podgroup manager
-func (c *ModelServingController) getPodGroupsByIndex(indexName, indexValue string) ([]*schedulingv1beta1.PodGroup, error) {
-	if c.podGroupManager == nil || !c.podGroupManager.HasPodGroupCRD() {
-		return nil, nil
-	}
-
-	podGroupInformer := c.podGroupManager.GetPodGroupInformer()
-	if podGroupInformer == nil {
-		return nil, fmt.Errorf("podGroup informer is not initialized")
-	}
-	indexer := podGroupInformer.GetIndexer()
-	if indexer == nil {
-		return nil, fmt.Errorf("podGroup informer indexer is not initialized")
-	}
-	if _, exists := indexer.GetIndexers()[indexName]; !exists {
-		return nil, fmt.Errorf("podGroup indexer %s not found", indexName)
-	}
-	objs, err := indexer.ByIndex(indexName, indexValue)
-	if err != nil {
-		return nil, err
-	}
-
-	var podGroups []*schedulingv1beta1.PodGroup
-	for _, obj := range objs {
-		podGroup, ok := obj.(*schedulingv1beta1.PodGroup)
-		if !ok {
-			klog.Errorf("unexpected object type in podGroup indexer: %T", obj)
-			continue
-		}
-		podGroups = append(podGroups, podGroup)
-	}
-	return podGroups, nil
 }
 
 // UpdateModelServingStatus update replicas in modelServing status.
