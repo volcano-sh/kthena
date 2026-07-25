@@ -151,6 +151,41 @@ func (m *Manager) GetPodGroupInformer() cache.SharedIndexInformer {
 	return m.PodGroupInformer
 }
 
+// GetPodGroupsByIndex returns PodGroups matching the given informer index.
+// Returns nil, nil when the PodGroup CRD is unavailable.
+func (m *Manager) GetPodGroupsByIndex(indexName, indexValue string) ([]*schedulingv1beta1.PodGroup, error) {
+	if !m.HasPodGroupCRD() {
+		return nil, nil
+	}
+
+	podGroupInformer := m.GetPodGroupInformer()
+	if podGroupInformer == nil {
+		return nil, fmt.Errorf("podGroup informer is not initialized")
+	}
+	indexer := podGroupInformer.GetIndexer()
+	if indexer == nil {
+		return nil, fmt.Errorf("podGroup informer indexer is not initialized")
+	}
+	if _, exists := indexer.GetIndexers()[indexName]; !exists {
+		return nil, fmt.Errorf("podGroup indexer %s not found", indexName)
+	}
+	objs, err := indexer.ByIndex(indexName, indexValue)
+	if err != nil {
+		return nil, err
+	}
+
+	var podGroups []*schedulingv1beta1.PodGroup
+	for _, obj := range objs {
+		podGroup, ok := obj.(*schedulingv1beta1.PodGroup)
+		if !ok {
+			klog.Errorf("unexpected object type in podGroup indexer: %T", obj)
+			continue
+		}
+		podGroups = append(podGroups, podGroup)
+	}
+	return podGroups, nil
+}
+
 func (m *Manager) GetPodGroupLister() volcanoschedulerlister.PodGroupLister {
 	m.lock.Lock()
 	defer m.lock.Unlock()

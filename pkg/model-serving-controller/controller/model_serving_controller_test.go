@@ -171,6 +171,10 @@ func (f *fakePodGroupManager) GetPodGroupInformer() cache.SharedIndexInformer {
 	return nil
 }
 
+func (f *fakePodGroupManager) GetPodGroupsByIndex(indexName, indexValue string) ([]*schedulingv1beta1.PodGroup, error) {
+	return nil, nil
+}
+
 func (f *fakePodGroupManager) Run(parentCtx context.Context) error {
 	return nil
 }
