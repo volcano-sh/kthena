@@ -23,6 +23,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestMatchMetricLabelsRequiresLabelPresence(t *testing.T) {
+	labels := metricLabels("present", "")
+
+	assert.True(t, MatchMetricLabels(labels, map[string]string{"present": ""}))
+	assert.False(t, MatchMetricLabels(labels, map[string]string{"missing": ""}))
+}
+
 func TestGetMetricValueAggregatesMatchingDestinationSeries(t *testing.T) {
 	tests := []struct {
 		name       string

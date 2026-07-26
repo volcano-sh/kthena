@@ -780,11 +780,15 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 }
 
 func TestRouter_HandlerFunc_InferencePoolAccessLogDestination(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
 	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var reqBody ModelRequest
 		json.Unmarshal(body, &reqBody)
 		assert.Equal(t, "pool-model", reqBody["model"])
+		close(started)
+		<-release
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `{"id":"pool-response"}`)
 	})
@@ -850,7 +854,34 @@ func TestRouter_HandlerFunc_InferencePoolAccessLogDestination(t *testing.T) {
 	accessCtx := accesslog.NewAccessLogContext("pool-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "pool-model")
 	c.Set(accesslog.AccessLogContextKey, accessCtx)
 
-	router.HandlerFunc()(c)
+	activeLabels := []string{
+		metrics.DestinationLabelValueNone,
+		metrics.DestinationLabelValueNone,
+		metrics.BackendTypeInferencePool,
+		"default/pool",
+		metrics.DestinationLabelValueNone,
+	}
+	activeBefore := externalGaugeValue(t, &router.metrics.ActiveUpstreamRequests, activeLabels...)
+	done := make(chan struct{})
+	go func() {
+		router.HandlerFunc()(c)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("timed out waiting for inference pool upstream request")
+	}
+	assert.Equal(t, activeBefore+1, externalGaugeValue(t, &router.metrics.ActiveUpstreamRequests, activeLabels...))
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for inference pool request completion")
+	}
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, metrics.BackendTypeInferencePool, accessCtx.BackendType)
@@ -858,6 +889,7 @@ func TestRouter_HandlerFunc_InferencePoolAccessLogDestination(t *testing.T) {
 	assert.Equal(t, metrics.DestinationLabelValueNone, accessCtx.UpstreamModel)
 	assert.Equal(t, 1, accessCtx.UpstreamAttempts)
 	assert.Equal(t, http.StatusOK, accessCtx.UpstreamStatusCode)
+	assert.Equal(t, activeBefore, externalGaugeValue(t, &router.metrics.ActiveUpstreamRequests, activeLabels...))
 }
 
 func TestRouter_HandlerFunc_ExternalOpenAIProvider(t *testing.T) {
@@ -1700,15 +1732,30 @@ func countMetricsWithModelPrefix(t *testing.T, prefix string) int {
 func requestCounterValue(t *testing.T, router *Router, model, path, statusCode, errorType string) float64 {
 	t.Helper()
 
-	counter, err := router.metrics.RequestsTotal.GetMetricWithLabelValues(model, path, statusCode, errorType)
-	if err != nil {
-		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	metricsCh := make(chan prometheus.Metric)
+	go func() {
+		router.metrics.RequestsTotal.Collect(metricsCh)
+		close(metricsCh)
+	}()
+
+	var value float64
+	for collected := range metricsCh {
+		metric := &dto.Metric{}
+		if err := collected.Write(metric); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		labels := make(map[string]string, len(metric.Label))
+		for _, label := range metric.Label {
+			labels[label.GetName()] = label.GetValue()
+		}
+		if labels[metrics.LabelModel] == model &&
+			labels[metrics.LabelPath] == path &&
+			labels[metrics.LabelStatusCode] == statusCode &&
+			labels[metrics.LabelErrorType] == errorType {
+			value += metric.GetCounter().GetValue()
+		}
 	}
-	metric := &dto.Metric{}
-	if err := counter.Write(metric); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	return metric.GetCounter().GetValue()
+	return value
 }
 
 func TestRequestFinishReason(t *testing.T) {

@@ -643,9 +643,15 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		backendName = inferencePoolFullName
 	}
 	accesslog.SetBackendInfo(c, backendType, backendName, upstreamModel)
+	destination := metrics.DestinationLabels{
+		ModelRoute:    modelRouteName,
+		BackendType:   backendType,
+		BackendName:   backendName,
+		UpstreamModel: upstreamModel,
+	}
 	if recorder, exists := c.Get("metricsRecorder"); exists {
 		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
-			rec.BindDestination(modelRouteName, backendType, backendName, upstreamModel)
+			rec.BindDestination(destination)
 		}
 	}
 
@@ -801,16 +807,6 @@ func (r *Router) proxy(
 	port int32,
 	onUsage func(u providers.TokenUsage),
 ) error {
-	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
-
-	// Get model route name from context
-	var modelRouteName string
-	if routeName, exists := c.Get("modelRouteName"); exists {
-		if name, ok := routeName.(string); ok {
-			modelRouteName = name
-		}
-	}
-
 	// Capture body bytes once so each retry attempt gets a fresh reader.
 	// transport.RoundTrip drains req.Body on every call, so reusing the same
 	// request across loop iterations sends an empty body to subsequent pods.
@@ -834,14 +830,16 @@ func (r *Router) proxy(
 		// Track this request as in-flight to the chosen pod.
 		r.store.IncrPodOnFlightRequests(podName)
 
-		// Increment upstream request count with backend destination labels.
-		r.metrics.IncActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
+		if ctx.MetricsRecorder != nil {
+			ctx.MetricsRecorder.IncActiveUpstreamRequests()
+		}
 
 		// Request dispatched to the pod.
 		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, onUsage)
 
-		// Decrement upstream request count when request completes
-		r.metrics.DecActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
+		if ctx.MetricsRecorder != nil {
+			ctx.MetricsRecorder.DecActiveUpstreamRequests()
+		}
 
 		// Request is complete (success or failure) — decrement on-flight counter.
 		r.store.DecrPodOnFlightRequests(podName)
@@ -954,7 +952,12 @@ func (r *Router) proxyExternalProvider(
 	if recorder, exists := c.Get("metricsRecorder"); exists {
 		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
 			metricsRecorder = rec
-			rec.BindDestination(modelRouteName, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
+			rec.BindDestination(metrics.DestinationLabels{
+				ModelRoute:    modelRouteName,
+				BackendType:   metrics.BackendTypeExternalProvider,
+				BackendName:   providerName,
+				UpstreamModel: upstreamModel,
+			})
 		}
 	}
 
@@ -991,8 +994,10 @@ func (r *Router) proxyExternalProvider(
 	responseParser := adapter.ResponseParser(c, req.URL.Path)
 
 	accesslog.SetUpstreamInfo(c, 0, 1)
-	r.metrics.IncActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
-	defer r.metrics.DecActiveUpstreamRequestsForDestination(modelRouteName, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
+	if metricsRecorder != nil {
+		metricsRecorder.IncActiveUpstreamRequests()
+		defer metricsRecorder.DecActiveUpstreamRequests()
+	}
 
 	return proxyExternalRequest(c, upstreamRequest, responseParser, provider.Spec.InsecureSkipVerify, isStreaming(modelRequest), providerName, func(usage providers.TokenUsage) {
 		if usage.TotalTokens <= 0 {
@@ -1342,22 +1347,6 @@ func (r *Router) proxyToPDDisaggregated(
 		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
 			metricsRecorder = rec
 		}
-	}
-
-	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
-	accesslog.SetBackendInfo(c, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
-
-	// Get model route name from context
-	var modelRouteName string
-	if routeName, exists := c.Get("modelRouteName"); exists {
-		if name, ok := routeName.(string); ok {
-			modelRouteName = name
-		}
-	}
-
-	// Set upstream connection info in metrics recorder
-	if metricsRecorder != nil {
-		metricsRecorder.BindDestination(modelRouteName, metrics.BackendTypeModelServer, modelServerName, ctx.UpstreamModel)
 	}
 
 	// Try multiple prefill/decode pairs

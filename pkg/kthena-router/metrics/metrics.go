@@ -71,6 +71,16 @@ const (
 	DestinationLabelValueNone   = "none"
 )
 
+// DestinationLabels identifies the backend selected for a routed request.
+// Keeping the four labels together prevents callers from accidentally mixing
+// values when recording different metric families for the same destination.
+type DestinationLabels struct {
+	ModelRoute    string
+	BackendType   string
+	BackendName   string
+	UpstreamModel string
+}
+
 // Metrics holds all Prometheus metrics for the kthena-router
 type Metrics struct {
 	// Request counters
@@ -425,14 +435,35 @@ func (m *Metrics) RecordKVCacheError(model, stage string) {
 
 // RecordRequest records a completed request with all relevant metrics
 func (m *Metrics) RecordRequest(model, path, statusCode, errorType string, duration time.Duration) {
-	m.RecordRequestForDestination(model, path, statusCode, errorType, "", "", "", "", duration)
+	m.RecordRequestForDestination(model, path, statusCode, errorType, DestinationLabels{}, duration)
 }
 
 // RecordRequestForDestination records a completed request with backend destination labels.
-func (m *Metrics) RecordRequestForDestination(model, path, statusCode, errorType, modelRoute, backendType, backendName, upstreamModel string, duration time.Duration) {
-	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
-	m.RequestsTotal.WithLabelValues(model, path, statusCode, errorType, modelRoute, backendType, backendName, upstreamModel).Inc()
-	m.RequestDuration.WithLabelValues(model, path, statusCode, modelRoute, backendType, backendName, upstreamModel).Observe(duration.Seconds())
+func (m *Metrics) RecordRequestForDestination(
+	model, path, statusCode, errorType string,
+	destination DestinationLabels,
+	duration time.Duration,
+) {
+	destination = destination.normalized()
+	m.RequestsTotal.WithLabelValues(
+		model,
+		path,
+		statusCode,
+		errorType,
+		destination.ModelRoute,
+		destination.BackendType,
+		destination.BackendName,
+		destination.UpstreamModel,
+	).Inc()
+	m.RequestDuration.WithLabelValues(
+		model,
+		path,
+		statusCode,
+		destination.ModelRoute,
+		destination.BackendType,
+		destination.BackendName,
+		destination.UpstreamModel,
+	).Observe(duration.Seconds())
 }
 
 // RecordPrefillDuration records prefill phase duration for PD-disaggregated requests
@@ -447,17 +478,37 @@ func (m *Metrics) RecordDecodeDuration(model, path, statusCode string, duration 
 
 // RecordTokens records input and output token counts
 func (m *Metrics) RecordTokens(model, path string, inputTokens, outputTokens int) {
-	m.RecordTokensForDestination(model, path, "", "", "", "", inputTokens, outputTokens)
+	m.RecordTokensForDestination(model, path, DestinationLabels{}, inputTokens, outputTokens)
 }
 
 // RecordTokensForDestination records input and output token counts with backend destination labels.
-func (m *Metrics) RecordTokensForDestination(model, path, modelRoute, backendType, backendName, upstreamModel string, inputTokens, outputTokens int) {
-	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
+func (m *Metrics) RecordTokensForDestination(
+	model, path string,
+	destination DestinationLabels,
+	inputTokens, outputTokens int,
+) {
+	destination = destination.normalized()
 	if inputTokens > 0 {
-		m.TokensTotal.WithLabelValues(model, path, TokenTypeInput, modelRoute, backendType, backendName, upstreamModel).Add(float64(inputTokens))
+		m.TokensTotal.WithLabelValues(
+			model,
+			path,
+			TokenTypeInput,
+			destination.ModelRoute,
+			destination.BackendType,
+			destination.BackendName,
+			destination.UpstreamModel,
+		).Add(float64(inputTokens))
 	}
 	if outputTokens > 0 {
-		m.TokensTotal.WithLabelValues(model, path, TokenTypeOutput, modelRoute, backendType, backendName, upstreamModel).Add(float64(outputTokens))
+		m.TokensTotal.WithLabelValues(
+			model,
+			path,
+			TokenTypeOutput,
+			destination.ModelRoute,
+			destination.BackendType,
+			destination.BackendName,
+			destination.UpstreamModel,
+		).Add(float64(outputTokens))
 	}
 }
 
@@ -498,14 +549,24 @@ func (m *Metrics) SetActiveDownstreamRequests(model string, count float64) {
 
 // SetActiveUpstreamRequests sets the current number of active upstream requests
 func (m *Metrics) SetActiveUpstreamRequests(modelServer, modelRoute string, count float64) {
-	m.SetActiveUpstreamRequestsForDestination(modelRoute, BackendTypeModelServer, modelServer, "", count)
+	m.SetActiveUpstreamRequestsForDestination(DestinationLabels{
+		ModelRoute:  modelRoute,
+		BackendType: BackendTypeModelServer,
+		BackendName: modelServer,
+	}, count)
 }
 
 // SetActiveUpstreamRequestsForDestination sets active upstream requests with backend destination labels.
-func (m *Metrics) SetActiveUpstreamRequestsForDestination(modelRoute, backendType, backendName, upstreamModel string, count float64) {
-	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
-	modelServer := activeUpstreamModelServerLabel(backendType, backendName)
-	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute, backendType, backendName, upstreamModel).Set(count)
+func (m *Metrics) SetActiveUpstreamRequestsForDestination(destination DestinationLabels, count float64) {
+	destination = destination.normalized()
+	modelServer := activeUpstreamModelServerLabel(destination)
+	m.ActiveUpstreamRequests.WithLabelValues(
+		modelServer,
+		destination.ModelRoute,
+		destination.BackendType,
+		destination.BackendName,
+		destination.UpstreamModel,
+	).Set(count)
 }
 
 // IncActiveDownstreamRequests increments the active downstream requests counter
@@ -520,26 +581,46 @@ func (m *Metrics) DecActiveDownstreamRequests(model string) {
 
 // IncActiveUpstreamRequests increments the active upstream requests counter
 func (m *Metrics) IncActiveUpstreamRequests(modelServer, modelRoute string) {
-	m.IncActiveUpstreamRequestsForDestination(modelRoute, BackendTypeModelServer, modelServer, "")
+	m.IncActiveUpstreamRequestsForDestination(DestinationLabels{
+		ModelRoute:  modelRoute,
+		BackendType: BackendTypeModelServer,
+		BackendName: modelServer,
+	})
 }
 
 // IncActiveUpstreamRequestsForDestination increments active upstream requests with backend destination labels.
-func (m *Metrics) IncActiveUpstreamRequestsForDestination(modelRoute, backendType, backendName, upstreamModel string) {
-	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
-	modelServer := activeUpstreamModelServerLabel(backendType, backendName)
-	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute, backendType, backendName, upstreamModel).Inc()
+func (m *Metrics) IncActiveUpstreamRequestsForDestination(destination DestinationLabels) {
+	destination = destination.normalized()
+	modelServer := activeUpstreamModelServerLabel(destination)
+	m.ActiveUpstreamRequests.WithLabelValues(
+		modelServer,
+		destination.ModelRoute,
+		destination.BackendType,
+		destination.BackendName,
+		destination.UpstreamModel,
+	).Inc()
 }
 
 // DecActiveUpstreamRequests decrements the active upstream requests counter
 func (m *Metrics) DecActiveUpstreamRequests(modelServer, modelRoute string) {
-	m.DecActiveUpstreamRequestsForDestination(modelRoute, BackendTypeModelServer, modelServer, "")
+	m.DecActiveUpstreamRequestsForDestination(DestinationLabels{
+		ModelRoute:  modelRoute,
+		BackendType: BackendTypeModelServer,
+		BackendName: modelServer,
+	})
 }
 
 // DecActiveUpstreamRequestsForDestination decrements active upstream requests with backend destination labels.
-func (m *Metrics) DecActiveUpstreamRequestsForDestination(modelRoute, backendType, backendName, upstreamModel string) {
-	modelRoute, backendType, backendName, upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
-	modelServer := activeUpstreamModelServerLabel(backendType, backendName)
-	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute, backendType, backendName, upstreamModel).Dec()
+func (m *Metrics) DecActiveUpstreamRequestsForDestination(destination DestinationLabels) {
+	destination = destination.normalized()
+	modelServer := activeUpstreamModelServerLabel(destination)
+	m.ActiveUpstreamRequests.WithLabelValues(
+		modelServer,
+		destination.ModelRoute,
+		destination.BackendType,
+		destination.BackendName,
+		destination.UpstreamModel,
+	).Dec()
 }
 
 // IncFairnessQueueSize increments the fairness queue size
@@ -637,11 +718,7 @@ type RequestMetricsRecorder struct {
 	metrics            *Metrics
 	model              string
 	path               string
-	modelServer        string
-	modelRoute         string
-	backendType        string
-	backendName        string
-	upstreamModel      string
+	destination        DestinationLabels
 	destinationBound   bool
 	pendingInputTokens int
 	startTime          time.Time
@@ -659,21 +736,13 @@ func NewRequestMetricsRecorder(metrics *Metrics, model, path string) *RequestMet
 	}
 }
 
-// SetUpstreamConnectionInfo sets the upstream connection information for this request
-func (r *RequestMetricsRecorder) SetUpstreamConnectionInfo(modelServer, modelRoute string) {
-	r.modelServer = modelServer
-	r.modelRoute = modelRoute
-	r.BindDestination(modelRoute, BackendTypeModelServer, modelServer, "")
-}
-
 // BindDestination sets backend labels for request-scoped metrics and flushes
 // input tokens that were measured before routing selected a backend.
-func (r *RequestMetricsRecorder) BindDestination(modelRoute, backendType, backendName, upstreamModel string) {
-	r.modelRoute, r.backendType, r.backendName, r.upstreamModel = normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel)
-	r.modelServer = r.backendName
+func (r *RequestMetricsRecorder) BindDestination(destination DestinationLabels) {
+	r.destination = destination.normalized()
 	r.destinationBound = true
 	if r.pendingInputTokens > 0 {
-		r.metrics.RecordTokensForDestination(r.model, r.path, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, r.pendingInputTokens, 0)
+		r.metrics.RecordTokensForDestination(r.model, r.path, r.destination, r.pendingInputTokens, 0)
 		r.pendingInputTokens = 0
 	}
 }
@@ -687,7 +756,7 @@ func (r *RequestMetricsRecorder) RecordInputTokens(tokens int) {
 		r.pendingInputTokens += tokens
 		return
 	}
-	r.metrics.RecordTokensForDestination(r.model, r.path, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, tokens, 0)
+	r.metrics.RecordTokensForDestination(r.model, r.path, r.destination, tokens, 0)
 }
 
 // RecordOutputTokens records output token usage for this request
@@ -695,7 +764,7 @@ func (r *RequestMetricsRecorder) RecordOutputTokens(tokens int) {
 	if tokens <= 0 {
 		return
 	}
-	r.metrics.RecordTokensForDestination(r.model, r.path, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, 0, tokens)
+	r.metrics.RecordTokensForDestination(r.model, r.path, r.destination, 0, tokens)
 }
 
 // RecordRateLimitExceeded records when rate limiting is applied
@@ -734,11 +803,11 @@ func (r *RequestMetricsRecorder) FinishDecodePhase(statusCode string) {
 // Finish completes the request recording with final status
 func (r *RequestMetricsRecorder) Finish(statusCode, errorType string) {
 	if !r.destinationBound && r.pendingInputTokens > 0 {
-		r.metrics.RecordTokensForDestination(r.model, r.path, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone, r.pendingInputTokens, 0)
+		r.metrics.RecordTokensForDestination(r.model, r.path, DestinationLabels{}, r.pendingInputTokens, 0)
 		r.pendingInputTokens = 0
 	}
 	duration := time.Since(r.startTime)
-	r.metrics.RecordRequestForDestination(r.model, r.path, statusCode, errorType, r.modelRoute, r.backendType, r.backendName, r.upstreamModel, duration)
+	r.metrics.RecordRequestForDestination(r.model, r.path, statusCode, errorType, r.destination, duration)
 }
 
 // RecordSchedulerPluginDuration records the execution time for a scheduler plugin
@@ -774,39 +843,39 @@ func (r *RequestMetricsRecorder) RecordKVCacheError(stage string) {
 // IncActiveUpstreamRequests increments the active upstream requests counter for this request
 func (r *RequestMetricsRecorder) IncActiveUpstreamRequests() {
 	if r.destinationBound {
-		r.metrics.IncActiveUpstreamRequestsForDestination(r.modelRoute, r.backendType, r.backendName, r.upstreamModel)
+		r.metrics.IncActiveUpstreamRequestsForDestination(r.destination)
 	}
 }
 
 // DecActiveUpstreamRequests decrements the active upstream requests counter for this request
 func (r *RequestMetricsRecorder) DecActiveUpstreamRequests() {
 	if r.destinationBound {
-		r.metrics.DecActiveUpstreamRequestsForDestination(r.modelRoute, r.backendType, r.backendName, r.upstreamModel)
+		r.metrics.DecActiveUpstreamRequestsForDestination(r.destination)
 	}
 }
 
 // Global metrics instance
 var DefaultMetrics = NewMetrics()
 
-func normalizeDestinationLabels(modelRoute, backendType, backendName, upstreamModel string) (string, string, string, string) {
-	if modelRoute == "" {
-		modelRoute = DestinationLabelValueNone
+func (destination DestinationLabels) normalized() DestinationLabels {
+	if destination.ModelRoute == "" {
+		destination.ModelRoute = DestinationLabelValueNone
 	}
-	if backendType == "" {
-		backendType = BackendTypeUnresolved
+	if destination.BackendType == "" {
+		destination.BackendType = BackendTypeUnresolved
 	}
-	if backendName == "" {
-		backendName = DestinationLabelValueNone
+	if destination.BackendName == "" {
+		destination.BackendName = DestinationLabelValueNone
 	}
-	if upstreamModel == "" {
-		upstreamModel = DestinationLabelValueNone
+	if destination.UpstreamModel == "" {
+		destination.UpstreamModel = DestinationLabelValueNone
 	}
-	return modelRoute, backendType, backendName, upstreamModel
+	return destination
 }
 
-func activeUpstreamModelServerLabel(backendType, backendName string) string {
-	if backendType == BackendTypeModelServer {
-		return backendName
+func activeUpstreamModelServerLabel(destination DestinationLabels) string {
+	if destination.BackendType == BackendTypeModelServer {
+		return destination.BackendName
 	}
 	return DestinationLabelValueNone
 }

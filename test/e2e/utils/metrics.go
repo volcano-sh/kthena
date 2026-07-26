@@ -25,7 +25,8 @@ func MatchMetricLabels(metricLabels []*dto.LabelPair, wantLabels map[string]stri
 		labelMap[lp.GetName()] = lp.GetValue()
 	}
 	for k, v := range wantLabels {
-		if labelMap[k] != v {
+		actual, exists := labelMap[k]
+		if !exists || actual != v {
 			return false
 		}
 	}

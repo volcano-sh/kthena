@@ -210,6 +210,12 @@ func TestRequestRecorderBindsDestinationLabels(t *testing.T) {
 	const modelRoute = "default/mr-external"
 	const backendName = "default/openai-provider"
 	const upstreamModel = "gpt-4o-mini"
+	destination := DestinationLabels{
+		ModelRoute:    modelRoute,
+		BackendType:   BackendTypeExternalProvider,
+		BackendName:   backendName,
+		UpstreamModel: upstreamModel,
+	}
 	r := NewRequestMetricsRecorder(m, model, path)
 
 	inputBefore := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
@@ -222,7 +228,7 @@ func TestRequestRecorderBindsDestinationLabels(t *testing.T) {
 		t.Errorf("input token delta before destination bind = %v, want 0", got)
 	}
 
-	r.BindDestination(modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	r.BindDestination(destination)
 	r.RecordOutputTokens(3)
 	r.Finish("200", "successful_request")
 
@@ -260,13 +266,19 @@ func TestActiveUpstreamRequestsKeepModelServerCompatibilityLabel(t *testing.T) {
 	const modelRoute = "default/mr-external"
 	const backendName = "default/openai-provider"
 	const upstreamModel = "gpt-4o-mini"
+	destination := DestinationLabels{
+		ModelRoute:    modelRoute,
+		BackendType:   BackendTypeExternalProvider,
+		BackendName:   backendName,
+		UpstreamModel: upstreamModel,
+	}
 
 	before := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
-	m.IncActiveUpstreamRequestsForDestination(modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	m.IncActiveUpstreamRequestsForDestination(destination)
 	if got := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - before; got != 1 {
 		t.Errorf("external active upstream delta = %v, want 1", got)
 	}
-	m.DecActiveUpstreamRequestsForDestination(modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	m.DecActiveUpstreamRequestsForDestination(destination)
 	if got := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - before; got != 0 {
 		t.Errorf("external active upstream delta after decrement = %v, want 0", got)
 	}

@@ -40,6 +40,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 )
 
 func TestExternalProviderObservabilitySuccess(t *testing.T) {
@@ -254,14 +255,14 @@ func TestForwardResponsesStreamTreatsCancellationAfterTerminalEventAsComplete(t 
 		},
 	}
 
-	var usage TokenUsage
-	err := forwardResponseWithUsageParser(c, resp, true, &openAIResponsesUsageParser{}, func(got TokenUsage) {
+	var usage providers.TokenUsage
+	err := forwardResponseWithUsageParser(c, resp, true, responseParserFor(t, aiv1alpha1.OpenAI, "/v1/responses"), func(got providers.TokenUsage) {
 		usage = got
 	})
 
 	require.NoError(t, err)
 	assert.Contains(t, w.Body.String(), `"type":"response.completed"`)
-	assert.Equal(t, TokenUsage{PromptTokens: 12, CompletionTokens: 4, TotalTokens: 16}, usage)
+	assert.Equal(t, providers.TokenUsage{PromptTokens: 12, CompletionTokens: 4, TotalTokens: 16}, usage)
 }
 
 func TestForwardResponsesStreamReportsCancellationBeforeTerminalEvent(t *testing.T) {
@@ -278,7 +279,7 @@ func TestForwardResponsesStreamReportsCancellationBeforeTerminalEvent(t *testing
 		},
 	}
 
-	err := forwardResponseWithUsageParser(c, resp, true, &openAIResponsesUsageParser{}, nil)
+	err := forwardResponseWithUsageParser(c, resp, true, responseParserFor(t, aiv1alpha1.OpenAI, "/v1/responses"), nil)
 
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Contains(t, w.Body.String(), `"type":"response.created"`)
@@ -295,7 +296,7 @@ func TestForwardResponsesStreamReportsCloseNotifyBeforeTerminalEvent(t *testing.
 		Body:       http.NoBody,
 	}
 
-	err := forwardResponseWithUsageParser(c, resp, true, &openAIResponsesUsageParser{}, nil)
+	err := forwardResponseWithUsageParser(c, resp, true, responseParserFor(t, aiv1alpha1.OpenAI, "/v1/responses"), nil)
 
 	require.ErrorIs(t, err, context.Canceled)
 }
@@ -316,35 +317,39 @@ func TestForwardResponsesStreamReportsTerminalWriteFailure(t *testing.T) {
 		},
 	}
 
-	err := forwardResponseWithUsageParser(c, resp, true, &openAIResponsesUsageParser{}, nil)
+	err := forwardResponseWithUsageParser(c, resp, true, responseParserFor(t, aiv1alpha1.OpenAI, "/v1/responses"), nil)
 
 	require.ErrorIs(t, err, writeErr)
 }
 
 func TestForwardProviderStreamsTreatCloseNotifyAfterTerminalEventAsComplete(t *testing.T) {
 	tests := []struct {
-		name   string
-		body   string
-		marker string
-		parser responseUsageParser
+		name         string
+		body         string
+		marker       string
+		providerType aiv1alpha1.ExternalProviderType
+		path         string
 	}{
 		{
-			name:   "openai chat done",
-			body:   "data: [DONE]\n\n",
-			marker: "data: [DONE]",
-			parser: &openAIUsageParser{},
+			name:         "openai chat done",
+			body:         "data: [DONE]\n\n",
+			marker:       "data: [DONE]",
+			providerType: aiv1alpha1.OpenAI,
+			path:         "/v1/chat/completions",
 		},
 		{
-			name:   "openai responses completed",
-			body:   "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
-			marker: `"type":"response.completed"`,
-			parser: &openAIResponsesUsageParser{},
+			name:         "openai responses completed",
+			body:         "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+			marker:       `"type":"response.completed"`,
+			providerType: aiv1alpha1.OpenAI,
+			path:         "/v1/responses",
 		},
 		{
-			name:   "anthropic message stop",
-			body:   "data: {\"type\":\"message_stop\"}\n\n",
-			marker: `"type":"message_stop"`,
-			parser: &anthropicUsageParser{},
+			name:         "anthropic message stop",
+			body:         "data: {\"type\":\"message_stop\"}\n\n",
+			marker:       `"type":"message_stop"`,
+			providerType: aiv1alpha1.Anthropic,
+			path:         "/v1/messages",
 		},
 	}
 
@@ -353,18 +358,29 @@ func TestForwardProviderStreamsTreatCloseNotifyAfterTerminalEventAsComplete(t *t
 			base := &closeNotifyRecorder{ResponseRecorder: httptest.NewRecorder(), closeCh: make(chan bool)}
 			w := &closeAfterMarkerRecorder{closeNotifyRecorder: base, marker: []byte(tt.marker)}
 			c, _ := gin.CreateTestContext(w)
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Request = httptest.NewRequest(http.MethodPost, tt.path, nil)
 			resp := &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 				Body:       io.NopCloser(bytes.NewBufferString(tt.body)),
 			}
 
-			err := forwardResponseWithUsageParser(c, resp, true, tt.parser, nil)
+			err := forwardResponseWithUsageParser(c, resp, true, responseParserFor(t, tt.providerType, tt.path), nil)
 
 			require.NoError(t, err)
 		})
 	}
+}
+
+func responseParserFor(
+	t *testing.T,
+	providerType aiv1alpha1.ExternalProviderType,
+	path string,
+) providers.ResponseUsageParser {
+	t.Helper()
+	adapter, err := providers.NewAdapter(providerType)
+	require.NoError(t, err)
+	return adapter.ResponseParser(path)
 }
 
 type terminalWriteErrorRecorder struct {
