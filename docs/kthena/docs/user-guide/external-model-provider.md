@@ -40,7 +40,7 @@ Do not grant tenant roles permission to create or update `ExternalModelProvider`
 
 ## Configure an OpenAI-Compatible Provider
 
-Use `providerType: OpenAI` for OpenAI-compatible APIs. Compatible providers can use their own endpoint in `baseURL`.
+Use `providerType: OpenAI` for OpenAI-compatible APIs. If `providerType` is omitted, the CRD defaults it to `OpenAI`. Compatible providers can use their own endpoint in `baseURL`.
 
 ```yaml
 apiVersion: networking.serving.volcano.sh/v1alpha1

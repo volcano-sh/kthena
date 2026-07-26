@@ -55,7 +55,7 @@ Each category installs only the external CRDs it needs:
 
 ### Router External Provider Mock
 
-The Router category builds `kthena-external-provider-mock` from the repository and loads the image directly into Kind. The image is not pushed to a registry. It serves self-signed HTTPS endpoints for OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, plus a cluster-local HTTP administration endpoint used only to inspect captured requests.
+The Router category builds `kthena-external-provider-mock` from the repository and loads the image directly into Kind. The image is not pushed to a registry. It serves self-signed HTTPS endpoints for OpenAI Chat Completions, OpenAI Completions, OpenAI Responses, and Anthropic Messages, plus a cluster-local HTTP administration endpoint used only to inspect captured requests.
 
 These tests use fixed fake credentials and do not call real model-provider APIs. They verify protocol and opaque payload passthrough, model rewriting, streaming usage extraction, destination-specific metrics, structured access logs, upstream 429 handling, active-request gauges, and text-only local input-token accounting. In particular, non-text image and file content is forwarded but does not contribute to Router input-token estimates, rate limiting, or related scheduling observations.
 

@@ -76,9 +76,6 @@ const (
 )
 
 var (
-	externalRouterBaseURL    = "http://127.0.0.1:8080"
-	externalRouterMetricsURL = externalRouterBaseURL + "/metrics"
-
 	externalProviderNames = []string{
 		externalOpenAIChatProviderName,
 		externalResponsesProviderName,
@@ -92,8 +89,9 @@ var (
 )
 
 type externalProviderFixture struct {
-	adminURL string
-	close    func()
+	adminURL   string
+	routerURL  string
+	metricsURL string
 }
 
 type mockCapture struct {
@@ -148,8 +146,7 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 	routerForwarder, err := utils.SetupPortForward(routerNamespace, utils.RouterDeploymentName, routerPort, "80")
 	require.NoError(t, err, "port-forward restarted Router for external provider tests")
 	cleanup.routerForwarder = routerForwarder
-	externalRouterBaseURL = fmt.Sprintf("http://127.0.0.1:%s", routerPort)
-	externalRouterMetricsURL = externalRouterBaseURL + "/metrics"
+	routerURL := fmt.Sprintf("http://127.0.0.1:%s", routerPort)
 
 	service := utils.LoadYAMLFromFile[corev1.Service](filepath.Join(routercontext.TestDataDir, "ExternalProvider-Mock-Service.yaml"))
 	service.Namespace = namespace
@@ -202,15 +199,16 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 	cleanup.portForwarder, err = utils.SetupPortForward(namespace, externalProviderMockName, localPort, "8080")
 	require.NoError(t, err, "port-forward external provider mock admin API")
 	adminURL := fmt.Sprintf("http://127.0.0.1:%s", localPort)
-	waitForExternalRoutesReady(t, adminURL)
+	waitForExternalRoutesReady(t, routerURL, adminURL)
 
 	return externalProviderFixture{
-		adminURL: adminURL,
-		close:    cleanup.close,
+		adminURL:   adminURL,
+		routerURL:  routerURL,
+		metricsURL: routerURL + "/metrics",
 	}
 }
 
-func waitForExternalRoutesReady(t *testing.T, adminURL string) {
+func waitForExternalRoutesReady(t *testing.T, routerURL, adminURL string) {
 	t.Helper()
 	tests := []struct {
 		name string
@@ -238,7 +236,7 @@ func waitForExternalRoutesReady(t *testing.T, adminURL string) {
 		require.Eventually(t, func() bool {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			response, err := doExternalJSONRequest(ctx, tt.path, requestID, tt.body)
+			response, err := doExternalJSONRequest(ctx, routerURL, tt.path, requestID, tt.body)
 			return err == nil && response.statusCode == http.StatusOK
 		}, 30*time.Second, 250*time.Millisecond, "ModelRoute for %s was not programmed by the Router", tt.name)
 		deleteMockCapture(t, adminURL, requestID)
@@ -291,17 +289,17 @@ func waitForExternalProviderReady(t *testing.T, ctx context.Context, kthenaClien
 	require.NoError(t, err, "wait for ExternalModelProvider %s to become ready", name)
 }
 
-func sendExternalJSONRequest(t *testing.T, path, requestID string, body []byte) externalHTTPResponse {
+func (f externalProviderFixture) sendJSONRequest(t *testing.T, path, requestID string, body []byte) externalHTTPResponse {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	response, err := doExternalJSONRequest(ctx, path, requestID, body)
+	response, err := doExternalJSONRequest(ctx, f.routerURL, path, requestID, body)
 	require.NoError(t, err, "send external provider request")
 	return response
 }
 
-func doExternalJSONRequest(ctx context.Context, path, requestID string, body []byte) (externalHTTPResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, externalRouterBaseURL+path, bytes.NewReader(body))
+func doExternalJSONRequest(ctx context.Context, routerURL, path, requestID string, body []byte) (externalHTTPResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+path, bytes.NewReader(body))
 	if err != nil {
 		return externalHTTPResponse{}, err
 	}
@@ -363,15 +361,15 @@ func mockCaptureURL(adminURL, requestID string) string {
 	return strings.TrimRight(adminURL, "/") + "/__test/requests/" + url.PathEscape(requestID)
 }
 
-func readExternalMetricSnapshot(t *testing.T, model, path string, statusCode int, errorType, namespace, route, provider, upstreamModel string) externalMetricSnapshot {
+func (f externalProviderFixture) readMetricSnapshot(t *testing.T, model, path string, statusCode int, errorType, namespace, route, provider, upstreamModel string) externalMetricSnapshot {
 	t.Helper()
-	snapshot, err := tryReadExternalMetricSnapshot(model, path, statusCode, errorType, namespace, route, provider, upstreamModel)
+	snapshot, err := tryReadExternalMetricSnapshot(f.metricsURL, model, path, statusCode, errorType, namespace, route, provider, upstreamModel)
 	require.NoError(t, err, "fetch Router metrics")
 	return snapshot
 }
 
-func tryReadExternalMetricSnapshot(model, path string, statusCode int, errorType, namespace, route, provider, upstreamModel string) (externalMetricSnapshot, error) {
-	allMetrics, err := backendmetrics.ParseMetricsURL(externalRouterMetricsURL)
+func tryReadExternalMetricSnapshot(metricsURL, model, path string, statusCode int, errorType, namespace, route, provider, upstreamModel string) (externalMetricSnapshot, error) {
+	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
 	if err != nil {
 		return externalMetricSnapshot{}, err
 	}
@@ -404,15 +402,15 @@ func tryReadExternalMetricSnapshot(model, path string, statusCode int, errorType
 	}, nil
 }
 
-func readExternalActiveGauges(t *testing.T, model, namespace, route, provider, upstreamModel string) (downstream, upstream float64) {
+func (f externalProviderFixture) readActiveGauges(t *testing.T, model, namespace, route, provider, upstreamModel string) (downstream, upstream float64) {
 	t.Helper()
-	downstream, upstream, err := tryReadExternalActiveGauges(model, namespace, route, provider, upstreamModel)
+	downstream, upstream, err := tryReadExternalActiveGauges(f.metricsURL, model, namespace, route, provider, upstreamModel)
 	require.NoError(t, err, "fetch Router active-request metrics")
 	return downstream, upstream
 }
 
-func tryReadExternalActiveGauges(model, namespace, route, provider, upstreamModel string) (downstream, upstream float64, err error) {
-	allMetrics, err := backendmetrics.ParseMetricsURL(externalRouterMetricsURL)
+func tryReadExternalActiveGauges(metricsURL, model, namespace, route, provider, upstreamModel string) (downstream, upstream float64, err error) {
+	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
 	if err != nil {
 		return 0, 0, err
 	}

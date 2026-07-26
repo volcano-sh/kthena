@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -58,25 +59,58 @@ func TestOpenAIChatCapturesAuthorizedRequest(t *testing.T) {
 	assert.JSONEq(t, body, string(capture.Body))
 }
 
-func TestOpenAIChatRejectsStreamingOptionsForNonStreamingRequest(t *testing.T) {
+func TestOpenAICompletionsCapturesAuthorizedRequest(t *testing.T) {
+	server := newTestMockServer()
+	body := `{"model":"mock-openai-completions","prompt":"hello","stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer e2e-openai-key")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-Id", "completion-1")
+	recorder := httptest.NewRecorder()
+
+	server.providerHandler().ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.JSONEq(t, `{"id":"completion-mock","object":"text_completion","model":"mock-openai-completions","choices":[{"index":0,"text":"OK","finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`, recorder.Body.String())
+	capture, ok := server.captures.get("completion-1")
+	require.True(t, ok)
+	assert.True(t, capture.Authorized)
+	assert.Equal(t, "/v1/completions", capture.Path)
+	assert.JSONEq(t, body, string(capture.Body))
+}
+
+func TestOpenAIRejectsStreamingOptionsForNonStreamingRequest(t *testing.T) {
 	tests := []struct {
 		name string
+		path string
 		body string
 	}{
 		{
-			name: "top-level include_usage",
+			name: "chat top-level include_usage",
+			path: "/v1/chat/completions",
 			body: `{"model":"mock-openai-chat","stream":false,"include_usage":true}`,
 		},
 		{
-			name: "stream_options",
+			name: "chat stream_options",
+			path: "/v1/chat/completions",
 			body: `{"model":"mock-openai-chat","stream":false,"stream_options":{"include_usage":true}}`,
+		},
+		{
+			name: "completions top-level include_usage",
+			path: "/v1/completions",
+			body: `{"model":"mock-openai-completions","stream":false,"include_usage":true}`,
+		},
+		{
+			name: "completions stream_options",
+			path: "/v1/completions",
+			body: `{"model":"mock-openai-completions","stream":false,"stream_options":{"include_usage":true}}`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := newTestMockServer()
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tt.body))
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
 			req.Header.Set("Authorization", "Bearer e2e-openai-key")
 			req.Header.Set("X-Request-Id", "non-streaming-options")
 			recorder := httptest.NewRecorder()
@@ -215,6 +249,19 @@ func TestStreamingProviderProtocols(t *testing.T) {
 			},
 		},
 		{
+			name:    "completions",
+			path:    "/v1/completions",
+			headers: map[string]string{"Authorization": "Bearer e2e-openai-key"},
+			body:    `{"model":"mock-openai-completions","stream":true,"prompt":"hello"}`,
+			wantMarkers: []string{
+				`"object":"text_completion"`,
+				`"finish_reason":"stop"`,
+				`"prompt_tokens":10`,
+				`"completion_tokens":3`,
+				`data: [DONE]`,
+			},
+		},
+		{
 			name:    "responses",
 			path:    "/v1/responses",
 			headers: map[string]string{"Authorization": "Bearer e2e-openai-key"},
@@ -324,6 +371,29 @@ func TestMockDelayControl(t *testing.T) {
 		server.providerHandler().ServeHTTP(recorder, req)
 
 		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.Less(t, time.Since(started), 500*time.Millisecond)
+	})
+
+	t.Run("client cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?mock_delay_ms=2000", strings.NewReader(`{"model":"m"}`)).WithContext(ctx)
+		req.Header.Set("Authorization", "Bearer e2e-openai-key")
+		req.Header.Set("X-Request-Id", "delay-cancel-1")
+		recorder := httptest.NewRecorder()
+		done := make(chan struct{})
+		started := time.Now()
+
+		go func() {
+			server.providerHandler().ServeHTTP(recorder, req)
+			close(done)
+		}()
+		cancel()
+
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("mock handler did not stop after request cancellation")
+		}
 		assert.Less(t, time.Since(started), 500*time.Millisecond)
 	})
 }
