@@ -70,6 +70,15 @@ func NewModelRouteController(
 	controller.registration, err = modelRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueModelRoute,
 		UpdateFunc: func(old, new interface{}) {
+			oldMR, oldOK := old.(*aiv1alpha1.ModelRoute)
+			newMR, newOK := new.(*aiv1alpha1.ModelRoute)
+			if oldOK && newOK && oldMR.Generation == newMR.Generation {
+				// Status-only update (e.g. written by updateModelRouteStatus).
+				// The spec is unchanged, so skip the re-sync: re-adding the route
+				// to the store would reset per-route runtime state such as the
+				// rate limiter token bucket.
+				return
+			}
 			controller.enqueueModelRoute(new)
 		},
 		DeleteFunc: controller.enqueueModelRoute,
