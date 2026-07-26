@@ -157,6 +157,7 @@ func newMockServer(config mockConfig) *mockServer {
 func (s *mockServer) providerHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChat)
+	mux.HandleFunc("/v1/completions", s.handleOpenAICompletions)
 	mux.HandleFunc("/v1/responses", s.handleOpenAIResponses)
 	mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
 	return mux
@@ -177,25 +178,8 @@ func (s *mockServer) adminHandler() http.Handler {
 }
 
 func (s *mockServer) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeProviderError(w, protocolOpenAI, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
-		return
-	}
-	authorized := constantTimeEqual(r.Header.Get("Authorization"), "Bearer "+s.config.OpenAIKey)
-	if !authorized {
-		writeProviderError(w, protocolOpenAI, http.StatusUnauthorized, "authentication_error", "invalid mock credential")
-		return
-	}
-	capture, ok := s.captureJSONRequest(w, r, true, protocolOpenAI)
+	capture, ok := s.prepareOpenAIRequest(w, r, true)
 	if !ok {
-		return
-	}
-	if hasNonStreamingOpenAIOptions(capture.Body) {
-		writeProviderError(w, protocolOpenAI, http.StatusBadRequest, "invalid_request", "include_usage and stream_options are streaming-only options")
-		return
-	}
-	if s.applyControls(w, r, protocolOpenAI) {
 		return
 	}
 	if isStreaming(capture.Body) {
@@ -210,19 +194,26 @@ func (s *mockServer) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, `{"id":"chat-mock","object":"chat.completion","model":"mock-openai-chat","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}}`)
 }
 
+func (s *mockServer) handleOpenAICompletions(w http.ResponseWriter, r *http.Request) {
+	capture, ok := s.prepareOpenAIRequest(w, r, true)
+	if !ok {
+		return
+	}
+	if isStreaming(capture.Body) {
+		writeSSE(w,
+			`{"id":"completion-mock","object":"text_completion","model":"mock-openai-completions","choices":[{"index":0,"text":"OK","finish_reason":null}]}`,
+			`{"id":"completion-mock","object":"text_completion","model":"mock-openai-completions","choices":[{"index":0,"text":"","finish_reason":"stop"}]}`,
+			`{"id":"completion-mock","object":"text_completion","model":"mock-openai-completions","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`,
+			`[DONE]`,
+		)
+		return
+	}
+	writeJSON(w, http.StatusOK, `{"id":"completion-mock","object":"text_completion","model":"mock-openai-completions","choices":[{"index":0,"text":"OK","finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`)
+}
+
 func (s *mockServer) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeProviderError(w, protocolOpenAI, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
-		return
-	}
-	authorized := constantTimeEqual(r.Header.Get("Authorization"), "Bearer "+s.config.OpenAIKey)
-	if !authorized {
-		writeProviderError(w, protocolOpenAI, http.StatusUnauthorized, "authentication_error", "invalid mock credential")
-		return
-	}
-	capture, ok := s.captureJSONRequest(w, r, true, protocolOpenAI)
-	if !ok || s.applyControls(w, r, protocolOpenAI) {
+	capture, ok := s.prepareOpenAIRequest(w, r, false)
+	if !ok {
 		return
 	}
 	if !isStreaming(capture.Body) {
@@ -233,6 +224,30 @@ func (s *mockServer) handleOpenAIResponses(w http.ResponseWriter, r *http.Reques
 		`{"type":"response.output_text.delta","delta":"OK"}`,
 		`{"type":"response.completed","response":{"id":"resp-mock","object":"response","model":"mock-responses","output":[],"usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16}}}`,
 	)
+}
+
+func (s *mockServer) prepareOpenAIRequest(w http.ResponseWriter, r *http.Request, rejectNonStreamingOptions bool) (capturedRequest, bool) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeProviderError(w, protocolOpenAI, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
+		return capturedRequest{}, false
+	}
+	if !constantTimeEqual(r.Header.Get("Authorization"), "Bearer "+s.config.OpenAIKey) {
+		writeProviderError(w, protocolOpenAI, http.StatusUnauthorized, "authentication_error", "invalid mock credential")
+		return capturedRequest{}, false
+	}
+	capture, ok := s.captureJSONRequest(w, r, true, protocolOpenAI)
+	if !ok {
+		return capturedRequest{}, false
+	}
+	if rejectNonStreamingOptions && hasNonStreamingOpenAIOptions(capture.Body) {
+		writeProviderError(w, protocolOpenAI, http.StatusBadRequest, "invalid_request", "include_usage and stream_options are streaming-only options")
+		return capturedRequest{}, false
+	}
+	if s.applyControls(w, r, protocolOpenAI) {
+		return capturedRequest{}, false
+	}
+	return capture, true
 }
 
 func (s *mockServer) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +297,13 @@ func (s *mockServer) applyControls(w http.ResponseWriter, r *http.Request, proto
 			writeProviderError(w, protocol, http.StatusBadRequest, "invalid_request", "invalid mock_delay_ms")
 			return true
 		}
-		time.Sleep(delay)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-r.Context().Done():
+			return true
+		}
 	}
 	return false
 }

@@ -44,10 +44,11 @@ kind load docker-image ${HUB}/runtime:${TAG} --name "${CLUSTER_NAME}"
 
 case "${TEST_CATEGORY}" in
   router|all)
+    EXTERNAL_PROVIDER_MOCK_IMAGE="${E2E_EXTERNAL_PROVIDER_MOCK_IMAGE:-${HUB}/kthena-external-provider-mock:${TAG}}"
     echo "Building external provider mock image"
-    make docker-build-e2e-external-provider-mock HUB="${HUB}" TAG="${TAG}"
+    make docker-build-e2e-external-provider-mock IMG_E2E_EXTERNAL_PROVIDER_MOCK="${EXTERNAL_PROVIDER_MOCK_IMAGE}"
     echo "Loading external provider mock image into Kind cluster"
-    kind load docker-image "${HUB}/kthena-external-provider-mock:${TAG}" --name "${CLUSTER_NAME}"
+    kind load docker-image "${EXTERNAL_PROVIDER_MOCK_IMAGE}" --name "${CLUSTER_NAME}"
     ;;
 esac
 
