@@ -2565,6 +2565,9 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 		},
 	}
 
+	// waiting for webhook to be ready before running tests
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
 	selector := fmt.Sprintf("%s,%s=prefill,%s=%s", modelServingLabelSelector(modelServing.Name), workload.RoleLabelKey, workload.EntryLabelKey, controllerutils.Entry)
 
 	t.Logf("Creating ModelServing with %d prefill replicas and partition=%d", initialRoleReplicas, partition)
@@ -2585,7 +2588,8 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-		if err != nil || len(pods.Items) != int(initialRoleReplicas) {
+		if err != nil {
+			t.Logf("Failed to list prefill entry pods: %v", err)
 			return false
 		}
 		imageByOrdinal := map[int32]string{}
@@ -2598,17 +2602,29 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 			imageByOrdinal[int32(ordinal)] = pod.Spec.Containers[0].Image
 		}
 		if len(imageByOrdinal) != int(initialRoleReplicas) {
+			t.Logf("Observed running ordinals=%d, expecting %d; images=%v", len(imageByOrdinal), initialRoleReplicas, imageByOrdinal)
 			return false
 		}
 		for ord := int32(0); ord < partition; ord++ {
 			if imageByOrdinal[ord] != nginxImage {
+				t.Logf("Protected prefill-%d image=%s, expecting old image=%s; images=%v", ord, imageByOrdinal[ord], nginxImage, imageByOrdinal)
 				return false
 			}
 		}
-		for ord := partition; ord < initialRoleReplicas; ord++ {
-			if imageByOrdinal[ord] != nginxAlpineImage {
+		updatedCount := 0
+		for ord, image := range imageByOrdinal {
+			if ord < partition {
+				continue
+			}
+			if image != nginxAlpineImage {
+				t.Logf("Non-protected prefill-%d image=%s, expecting new image=%s; images=%v", ord, image, nginxAlpineImage, imageByOrdinal)
 				return false
 			}
+			updatedCount++
+		}
+		if updatedCount != int(initialRoleReplicas-partition) {
+			t.Logf("Updated replicas=%d, expecting %d; images=%v", updatedCount, initialRoleReplicas-partition, imageByOrdinal)
+			return false
 		}
 		return true
 	}, 3*time.Minute, 2*time.Second, "Role partition state did not converge before scale down")
@@ -2648,10 +2664,6 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 			t.Logf("Failed to list prefill entry pods: %v", err)
 			return false
 		}
-		if len(pods.Items) != int(scaledRoleReplicas) {
-			t.Logf("Prefill pod count=%d, expecting %d", len(pods.Items), scaledRoleReplicas)
-			return false
-		}
 
 		imageByOrdinal := map[int32]string{}
 		revisionByOrdinal := map[int32]string{}
@@ -2666,7 +2678,7 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 			revisionByOrdinal[ord] = pod.Labels[workload.RevisionLabelKey]
 		}
 		if len(imageByOrdinal) != int(scaledRoleReplicas) {
-			t.Logf("Observed ordinals=%d, expecting %d", len(imageByOrdinal), scaledRoleReplicas)
+			t.Logf("Observed running ordinals=%d, expecting %d; images=%v", len(imageByOrdinal), scaledRoleReplicas, imageByOrdinal)
 			return false
 		}
 		for ord := int32(0); ord < scaledRoleReplicas; ord++ {
@@ -2679,8 +2691,20 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 				return false
 			}
 		}
-		if _, ok := imageByOrdinal[partition]; ok {
-			t.Logf("Updated replica prefill-%d should have been removed", partition)
+		for ord := range imageByOrdinal {
+			if ord >= partition {
+				t.Logf("Non-protected replica prefill-%d should have been removed; images=%v", ord, imageByOrdinal)
+				return false
+			}
+		}
+		for ord := range revisionByOrdinal {
+			if ord >= partition {
+				t.Logf("Non-protected replica prefill-%d should have been removed; revisions=%v", ord, revisionByOrdinal)
+				return false
+			}
+		}
+		if len(revisionByOrdinal) != int(scaledRoleReplicas) {
+			t.Logf("Observed running revisions=%d, expecting %d; revisions=%v", len(revisionByOrdinal), scaledRoleReplicas, revisionByOrdinal)
 			return false
 		}
 		return true
