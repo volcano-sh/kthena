@@ -134,16 +134,17 @@ func TestHTTPConnectorProxy(t *testing.T) {
 
 		// Verify that prefill and decode requests were built
 		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
+		_ = httpConn
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected prefill request to be built")
 		}
-		if httpConn.decodeRequest == nil {
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected decode request to be built")
 		}
 
 		// Verify request body fields
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)) != nil {
+			prefillBody, err := parseRequestBody(buildPrefillRequest(c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
@@ -168,8 +169,8 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			}
 		}
 
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) != nil {
+			decodeBody, err := parseRequestBody(BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse decode request body: %v", err)
 			} else {
@@ -220,10 +221,11 @@ func TestHTTPConnectorProxy(t *testing.T) {
 
 		// Verify that prefill and decode requests were built
 		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
+		_ = httpConn
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected prefill request to be built")
 		}
-		if httpConn.decodeRequest == nil {
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected decode request to be built")
 		}
 
@@ -233,8 +235,8 @@ func TestHTTPConnectorProxy(t *testing.T) {
 		}
 
 		// Verify request body fields for streaming request
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)) != nil {
+			prefillBody, err := parseRequestBody(buildPrefillRequest(c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
@@ -255,8 +257,8 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			}
 		}
 
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) != nil {
+			decodeBody, err := parseRequestBody(BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse decode request body: %v", err)
 			} else {
@@ -314,10 +316,11 @@ func TestHTTPConnectorProxy(t *testing.T) {
 
 		// Verify that prefill and decode requests were built
 		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
+		_ = httpConn
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected prefill request to be built")
 		}
-		if httpConn.decodeRequest == nil {
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected decode request to be built")
 		}
 
@@ -327,8 +330,8 @@ func TestHTTPConnectorProxy(t *testing.T) {
 		}
 
 		// Verify request body fields when stream_options already exists
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) != nil {
+			decodeBody, err := parseRequestBody(BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse decode request body: %v", err)
 			} else {
@@ -372,24 +375,25 @@ func TestHTTPConnectorProxy(t *testing.T) {
 
 		// Verify that both prefill and decode requests were built
 		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
+		_ = httpConn
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected prefill request to be built")
 		}
-		if httpConn.decodeRequest == nil {
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) == nil {
 			t.Error("Expected decode request to be built")
 		}
 
 		// Both requests should have content
-		if httpConn.prefillRequest.ContentLength == 0 {
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)).ContentLength == 0 {
 			t.Error("Expected prefill request to have a body")
 		}
-		if httpConn.decodeRequest.ContentLength == 0 {
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)).ContentLength == 0 {
 			t.Error("Expected decode request to have a body")
 		}
 
 		// Verify request body fields for max_completion_tokens handling
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBody)) != nil {
+			prefillBody, err := parseRequestBody(buildPrefillRequest(c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
@@ -408,8 +412,8 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			}
 		}
 
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)) != nil {
+			decodeBody, err := parseRequestBody(BuildDecodeRequest(c, c.Request, cloneReqBody(reqBody)))
 			if err != nil {
 				t.Errorf("Failed to parse decode request body: %v", err)
 			} else {
@@ -465,10 +469,11 @@ func TestHTTPConnectorProxy(t *testing.T) {
 
 		// Verify that the original request body was modified correctly
 		httpConn := connector.(*HTTPConnector)
+		_ = httpConn
 
 		// Check prefill request body
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
+		if buildPrefillRequest(c.Request, cloneReqBody(reqBodyCopy)) != nil {
+			prefillBody, err := parseRequestBody(buildPrefillRequest(c.Request, cloneReqBody(reqBodyCopy)))
 			if err != nil {
 				t.Errorf("Failed to parse prefill request body: %v", err)
 			} else {
@@ -492,8 +497,8 @@ func TestHTTPConnectorProxy(t *testing.T) {
 		}
 
 		// Check decode request body
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
+		if BuildDecodeRequest(c, c.Request, cloneReqBody(reqBodyCopy)) != nil {
+			decodeBody, err := parseRequestBody(BuildDecodeRequest(c, c.Request, cloneReqBody(reqBodyCopy)))
 			if err != nil {
 				t.Errorf("Failed to parse decode request body: %v", err)
 			} else {

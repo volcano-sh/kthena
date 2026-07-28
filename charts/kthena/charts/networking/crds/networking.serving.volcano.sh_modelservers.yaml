@@ -68,6 +68,12 @@ spec:
                   Otherwise, the `model` in LLM inference request will not be mutated.
                 maxLength: 256
                 type: string
+              pipelineMode:
+                description: PipelineMode specifies the native inference pipeline
+                  execution strategy
+                enum:
+                - epd
+                type: string
               trafficPolicy:
                 description: Traffic Policy for accessing the model server instance.
                 properties:
@@ -135,6 +141,12 @@ spec:
                           type: string
                         description: The labels to match the model serving instances
                           for decode.
+                        type: object
+                      encodeLabels:
+                        additionalProperties:
+                          type: string
+                        description: The labels to match the model serving instances
+                          for encode (EPD mode).
                         type: object
                       groupKey:
                         description: |-

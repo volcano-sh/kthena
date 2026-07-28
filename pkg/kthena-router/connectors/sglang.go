@@ -115,7 +115,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	decodeBody["bootstrap_host"] = prefillHost
 	decodeRequest, err := buildRequest(c.Request, decodeBody)
 	if err != nil {
-		return http.StatusInternalServerError, err
+		return 0, err
 	}
 
 	// Build the prefill request: strip streaming, cap max_tokens, add bootstrap_room.
@@ -126,7 +126,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	prefillBody["bootstrap_room"] = s.bootstrapRoom
 	prefillRequest, err := buildRequest(req, prefillBody)
 	if err != nil {
-		return http.StatusInternalServerError, err
+		return 0, err
 	}
 
 	// --- Launch prefill and decode concurrently ---
@@ -200,7 +200,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 
 	if prefillResult.err != nil {
 		klog.Errorf("sglang prefill error (bootstrap_room=%d): %v", s.bootstrapRoom, prefillResult.err)
-		return http.StatusInternalServerError, prefillResult.err
+		return 0, prefillResult.err
 	}
 
 	return result, decodeErr
@@ -230,4 +230,9 @@ func buildRequest(req *http.Request, reqBody map[string]interface{}) (*http.Requ
 	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
 	reqCopy.ContentLength = int64(len(body))
 	return reqCopy, nil
+}
+
+// ProxyEPD executes the complete encode-prefill-decode flow natively for SGLang.
+func (s *SGLangConnector) ProxyEPD(c *gin.Context, reqBody map[string]interface{}, encodeAddr, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
+	return 0, fmt.Errorf("EPD is not natively implemented for SGLangConnector yet")
 }

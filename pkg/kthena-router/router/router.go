@@ -794,6 +794,15 @@ func (r *Router) proxyModelEndpoint(
 		}
 	}
 
+	modelServer := r.store.GetModelServer(ctx.ModelServerName)
+	if modelServer != nil && modelServer.Spec.PipelineMode != nil && *modelServer.Spec.PipelineMode == v1alpha1.PipelineModeEPD {
+		if ctx.BestPods != nil {
+			err := fmt.Errorf("pipelineMode epd requires pdGroup configuration, but got aggregated scheduling")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+			return err
+		}
+	}
+
 	// proxy to pd aggregated pod
 	if ctx.BestPods != nil {
 		// build request
@@ -835,6 +844,11 @@ func (r *Router) proxyModelEndpoint(
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to get KV connector: %v", err))
 		return fmt.Errorf("failed to get KV connector: %w", err)
+	}
+
+	if modelServer != nil && modelServer.Spec.PipelineMode != nil && *modelServer.Spec.PipelineMode == v1alpha1.PipelineModeEPD {
+		// EPD disaggregated mode
+		return r.proxyToEPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port)
 	}
 
 	// PD disaggregated mode - use KV connector
@@ -1128,6 +1142,114 @@ func (r *Router) proxyToPDDisaggregated(
 
 	c.AbortWithStatusJSON(http.StatusInternalServerError, "all prefill/decode attempts failed")
 	return fmt.Errorf("all prefill/decode attempts failed")
+}
+
+// proxyToEPDDisaggregated handles EPD disaggregated routing natively using direct API endpoints.
+func (r *Router) proxyToEPDDisaggregated(
+	c *gin.Context,
+	req *http.Request,
+	ctx *framework.Context,
+	kvConnector connectors.KVConnector,
+	modelRequest ModelRequest,
+	port int32,
+) error {
+	// Get metrics recorder from context
+	var metricsRecorder *metrics.RequestMetricsRecorder
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			metricsRecorder = rec
+		}
+	}
+
+	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
+	var modelRouteName string
+	if routeName, exists := c.Get("modelRouteName"); exists {
+		if name, ok := routeName.(string); ok {
+			modelRouteName = name
+		}
+	}
+
+	if metricsRecorder != nil {
+		metricsRecorder.SetUpstreamConnectionInfo(modelServerName, modelRouteName)
+	}
+
+	// Try multiple encode/prefill/decode triples
+	maxRetry := len(ctx.DecodePods)
+	if len(ctx.PrefillPods) < maxRetry {
+		maxRetry = len(ctx.PrefillPods)
+	}
+	if len(ctx.EncodePods) < maxRetry {
+		maxRetry = len(ctx.EncodePods)
+	}
+
+	var lastErr error
+	for i := 0; i < maxRetry; i++ {
+		if ctx.EncodePods[i] == nil || ctx.PrefillPods[i] == nil || ctx.DecodePods[i] == nil {
+			continue
+		}
+
+		encodePod := ctx.EncodePods[i].GetPod()
+		prefillPod := ctx.PrefillPods[i].GetPod()
+		decodePod := ctx.DecodePods[i].GetPod()
+
+		if encodePod.Status.PodIP == "" || prefillPod.Status.PodIP == "" || decodePod.Status.PodIP == "" {
+			klog.Warningf("one or more pods in tuple %d missing IP address", i)
+			continue
+		}
+
+		encodeAddr := net.JoinHostPort(encodePod.Status.PodIP, strconv.Itoa(int(port)))
+		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
+		decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(port)))
+
+		klog.V(4).Infof("Attempting EPD disaggregated request: encode=%s, prefill=%s, decode=%s", encodeAddr, prefillAddr, decodeAddr)
+
+		encodePodName := types.NamespacedName{Namespace: encodePod.Namespace, Name: encodePod.Name}
+		prefillPodName := types.NamespacedName{Namespace: prefillPod.Namespace, Name: prefillPod.Name}
+		decodePodName := types.NamespacedName{Namespace: decodePod.Namespace, Name: decodePod.Name}
+
+		hooks := &connectors.OnFlightHooks{
+			IncrPrefill: func() { r.store.IncrPodOnFlightRequests(prefillPodName) },
+			DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillPodName) },
+			IncrDecode:  func() { r.store.IncrPodOnFlightRequests(decodePodName) },
+			DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodePodName) },
+			IncrEncode:  func() { r.store.IncrPodOnFlightRequests(encodePodName) },
+			DecrEncode:  func() { r.store.DecrPodOnFlightRequests(encodePodName) },
+		}
+
+		// Delegate EPD request dispatch and lifecycle management to the native engine connector.
+		outputTokens, err := kvConnector.ProxyEPD(c, modelRequest, encodeAddr, prefillAddr, decodeAddr, hooks)
+
+		if err != nil {
+			klog.Errorf("proxy failed for encode %s, prefill %s, decode %s: %v",
+				encodePod.Name, prefillPod.Name, decodePod.Name, err)
+			if c.Writer.Written() {
+				klog.Errorf("proxy failed but response already started, aborting retry")
+				break
+			}
+			lastErr = err
+			continue
+		}
+
+		if outputTokens > 0 && r.loadRateLimiter != nil {
+			r.loadRateLimiter.RecordOutputTokens(ctx.Model, outputTokens)
+		}
+
+		if metricsRecorder != nil {
+			metricsRecorder.RecordOutputTokens(outputTokens)
+		}
+
+		r.scheduler.RunPostHooks(ctx, i)
+		klog.V(4).Infof("kv connector run successful for EPD, output tokens: %d", outputTokens)
+
+		return nil
+	}
+
+	errMsg := "all EPD attempts failed"
+	if lastErr != nil {
+		errMsg = fmt.Sprintf("all EPD attempts failed, last error: %v", lastErr)
+	}
+	c.AbortWithStatusJSON(http.StatusInternalServerError, errMsg)
+	return fmt.Errorf("%s", errMsg)
 }
 
 // handleFairnessScheduling handles the fairness scheduling flow for requests.
