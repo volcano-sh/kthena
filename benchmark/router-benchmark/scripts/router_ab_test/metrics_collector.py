@@ -65,22 +65,6 @@ class MetricsCollector:
             artifacts["pprof"] = self._collect_pprof(config_dir, router_debug_endpoint, metrics_config)
         return artifacts
 
-    def build_router_debug_patch(self, debug_port: int = 15000) -> dict[str, Any]:
-        return {
-            "spec": {
-                "template": {
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "kthena-router",
-                                "ports": [{"containerPort": debug_port, "name": "debug"}],
-                            }
-                        ]
-                    }
-                }
-            }
-        }
-
     def _collect_prometheus(self, config_dir: Path, router_metrics_endpoint: str) -> dict[str, Any]:
         url = f"http://{router_metrics_endpoint}/metrics"
         body = self._fetch_text(url)

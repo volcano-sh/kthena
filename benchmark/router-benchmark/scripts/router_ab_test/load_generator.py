@@ -64,7 +64,8 @@ class AIPerfRunner:
         traffic = load.get("traffic", {})
         concurrency = load.get("concurrency", {})
 
-        seed = int(hashlib.md5(scenario.name.encode()).hexdigest()[:8], 16) % (2**31)
+        # Deterministic per-scenario seed (not security-sensitive).
+        seed = int(hashlib.md5(scenario.name.encode(), usedforsecurity=False).hexdigest()[:8], 16) % (2**31)
         benchmark_secs = self._parse_duration_seconds(load.get("duration", "60s"))
 
         cmd = [
@@ -84,13 +85,9 @@ class AIPerfRunner:
             str(benchmark_secs),
             "--output-artifact-dir",
             str(self.output_dir / config_name),
-            "--concurrency",
-            str(concurrency.get("connections", 10)),
         ]
 
-        self._append_schedule_args(cmd, schedule)
-        self._append_traffic_args(cmd, traffic, benchmark_secs)
-        self._append_concurrency_args(cmd, concurrency)
+        self._append_load_mode_args(cmd, schedule, traffic, concurrency, benchmark_secs)
         self._append_token_args(cmd, load.get("prompts", []), load.get("max_tokens", []))
         return cmd
 
@@ -118,9 +115,26 @@ class AIPerfRunner:
             artifacts={},
         )
 
-    def _append_schedule_args(self, cmd: list[str], schedule: dict[str, Any]) -> None:
-        if schedule.get("mode") in {"rate", "constant_rate"}:
+    def _append_load_mode_args(
+        self,
+        cmd: list[str],
+        schedule: dict[str, Any],
+        traffic: dict[str, Any],
+        concurrency: dict[str, Any],
+        benchmark_secs: int,
+    ) -> None:
+        """Emit exactly one load-control mode selected by ``schedule.mode``.
+
+        AIPerf supports two load models: open-loop rate-based (``--request-rate``)
+        and closed-loop concurrency-based (``--concurrency``).
+        """
+        mode = str(schedule.get("mode", "")).lower()
+        if mode in {"rate", "constant_rate"}:
             cmd.extend(["--request-rate", str(schedule.get("rate", 10))])
+            self._append_traffic_args(cmd, traffic, benchmark_secs)
+        else:
+            cmd.extend(["--concurrency", str(concurrency.get("connections", 10))])
+            self._append_concurrency_args(cmd, concurrency)
 
     def _append_traffic_args(self, cmd: list[str], traffic: dict[str, Any], benchmark_secs: int) -> None:
         burstiness = float(traffic.get("burstiness", 1.0))

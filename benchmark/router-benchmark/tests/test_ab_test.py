@@ -140,8 +140,9 @@ class AIPerfRunnerTest(unittest.TestCase):
         self.assertIn("300", cmd)
         self.assertIn("--request-rate", cmd)
         self.assertIn("25", cmd)
-        self.assertIn("--concurrency", cmd)
-        self.assertIn("42", cmd)
+        # Rate mode: concurrency settings must not leak into the command —
+        # a scenario expresses exactly one load model (open-loop here).
+        self.assertNotIn("--concurrency", cmd)
         self.assertIn("--arrival-pattern", cmd)
         self.assertIn("gamma", cmd)
         self.assertIn("--arrival-smoothness", cmd)
@@ -151,6 +152,35 @@ class AIPerfRunnerTest(unittest.TestCase):
         self.assertIn("100,4000", cmd)
         self.assertIn("--output-tokens-mean", cmd)
         self.assertIn("128,1024", cmd)
+
+    def test_build_aiperf_cmd_concurrency_mode_omits_request_rate(self):
+        scenario = ab_test.ScenarioConfig(
+            name="smoke-test-s3-concurrency-scaling",
+            description="scenario",
+            load={
+                "duration": "60s",
+                "schedule": {"mode": "concurrency"},
+                "traffic": {
+                    "burstiness": 1.0,
+                    "ramp": {"strategy": "linear"},
+                },
+                "concurrency": {"connections": 200},
+            },
+            backends={},
+        )
+
+        cmd = self.runner.build_aiperf_cmd(
+            config_name="config_a",
+            scenario=scenario,
+            router_endpoint="localhost:8080",
+        )
+
+        self.assertIn("--concurrency", cmd)
+        self.assertEqual(cmd[cmd.index("--concurrency") + 1], "200")
+        # Closed-loop mode: rate-based flags must not appear.
+        self.assertNotIn("--request-rate", cmd)
+        self.assertNotIn("--arrival-pattern", cmd)
+        self.assertNotIn("--request-rate-ramp-duration", cmd)
 
     def test_parse_duration_seconds_supports_seconds_minutes_and_hours(self):
         self.assertEqual(self.runner._parse_duration_seconds("60s"), 60)
@@ -190,12 +220,43 @@ class AIPerfRunnerTest(unittest.TestCase):
             router_endpoint="localhost:8080",
         )
 
+        # Rate mode: only the request-rate ramp applies; concurrency ramp
+        # settings are ignored because --concurrency is not emitted.
         self.assertIn("--request-rate-ramp-duration", cmd)
         self.assertEqual(cmd[cmd.index("--request-rate-ramp-duration") + 1], "25")
+        self.assertNotIn("--concurrency-ramp-duration", cmd)
+        self.assertNotIn("--prefill-concurrency-ramp-duration", cmd)
+
+    def test_build_aiperf_cmd_maps_concurrency_ramp_in_concurrency_mode(self):
+        scenario = ab_test.ScenarioConfig(
+            name="smoke-test-s3-concurrency-scaling",
+            description="scenario",
+            load={
+                "duration": "2m",
+                "schedule": {"mode": "concurrency"},
+                "concurrency": {
+                    "connections": 42,
+                    "ramp": {
+                        "strategy": "linear",
+                        "duration": "15s",
+                        "prefill_duration": "12s",
+                    },
+                },
+            },
+            backends={},
+        )
+
+        cmd = self.runner.build_aiperf_cmd(
+            config_name="config_a",
+            scenario=scenario,
+            router_endpoint="localhost:8080",
+        )
+
         self.assertIn("--concurrency-ramp-duration", cmd)
         self.assertEqual(cmd[cmd.index("--concurrency-ramp-duration") + 1], "15")
         self.assertIn("--prefill-concurrency-ramp-duration", cmd)
         self.assertEqual(cmd[cmd.index("--prefill-concurrency-ramp-duration") + 1], "12")
+        self.assertNotIn("--request-rate-ramp-duration", cmd)
 
     def test_build_aiperf_cmd_ignores_none_ramp_strategy(self):
         scenario = ab_test.ScenarioConfig(
@@ -372,15 +433,6 @@ class MetricsCollectorTest(unittest.TestCase):
         self.assertEqual(artifacts, {})
         fetch_text.assert_not_called()
         fetch_bytes.assert_not_called()
-
-    def test_build_router_debug_patch_exposes_debug_container_port(self):
-        patch = self.collector.build_router_debug_patch()
-
-        self.assertEqual(patch["spec"]["template"]["spec"]["containers"][0]["name"], "kthena-router")
-        self.assertEqual(
-            patch["spec"]["template"]["spec"]["containers"][0]["ports"],
-            [{"containerPort": 15000, "name": "debug"}],
-        )
 
 
 class MainTest(unittest.TestCase):
@@ -600,6 +652,66 @@ class K8sManagerRestartStatsTest(unittest.TestCase):
             stats = k8s.get_mocker_pod_restart_stats()
         self.assertEqual(stats["total_restarts"], 0)
         self.assertEqual(stats["pods"], [])
+
+
+class TempManifestCleanupTest(unittest.TestCase):
+    """Regression test for the temp-manifest leak (PR #1285 review r3619142918)."""
+
+    def _backends_config(self):
+        return ab_test.ScenarioConfig(
+            name="s2",
+            description="d",
+            load={},
+            backends={
+                "common": {"engineType": "sglang", "model": "Qwen/Qwen3-0.6B"},
+                "profiles": [{"name": "homogeneous", "count": 1}],
+            },
+        ).backends
+
+    @staticmethod
+    def _spy_named_tempfile(created: list[str]):
+        real_named_tempfile = tempfile.NamedTemporaryFile
+
+        def spy(*args, **kwargs):
+            tmp = real_named_tempfile(*args, **kwargs)
+            created.append(tmp.name)
+            return tmp
+
+        return mock.patch("tempfile.NamedTemporaryFile", side_effect=spy)
+
+    def test_deploy_backends_deletes_temp_manifests(self):
+        from router_ab_test.kubernetes import K8sManager
+
+        k8s = K8sManager()
+        created: list[str] = []
+        with self._spy_named_tempfile(created):
+            with mock.patch.object(k8s, "_apply"):
+                with mock.patch.object(k8s, "_wait_for_deployment_ready"):
+                    k8s.deploy_backends(self._backends_config())
+
+        # One manifest for the mocker backends, one for the model CRDs.
+        self.assertEqual(len(created), 2)
+        for path in created:
+            self.assertFalse(Path(path).exists(), f"temp manifest leaked: {path}")
+
+    def test_deploy_backends_deletes_temp_manifest_when_apply_fails(self):
+        import subprocess
+
+        from router_ab_test.kubernetes import K8sManager
+
+        k8s = K8sManager()
+        created: list[str] = []
+        with self._spy_named_tempfile(created):
+            with mock.patch.object(
+                k8s, "_apply", side_effect=subprocess.CalledProcessError(1, "kubectl")
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    k8s.deploy_backends(self._backends_config())
+
+        # The CRD manifest is never reached, but the backends manifest must
+        # still be removed by the finally block.
+        self.assertEqual(len(created), 1)
+        self.assertFalse(Path(created[0]).exists(), f"temp manifest leaked: {created[0]}")
 
 
 if __name__ == "__main__":

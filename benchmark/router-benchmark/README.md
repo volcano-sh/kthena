@@ -1,8 +1,8 @@
 # Kthena Router A/B Test Framework
 
-基于"三明治模型"的 Kthena Router 性能基准测试框架，使用 AIPerf 作为负载生成器，Dynamo Mocker 作为模拟后端。
+A performance benchmarking framework for the Kthena Router based on the "sandwich model", using AIPerf as the load generator and Dynamo Mocker as the mock backend.
 
-## 架构设计
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -12,10 +12,10 @@
 │  │   AIPerf     │      │  Kthena Router   │      │  Dynamo Mocker   │   │
 │  │  (Load Gen)  │─────►│   (Under Test)   │─────►│  (Mock Backend)  │   │
 │  │              │      │                  │      │                  │   │
-│  │ • QPS 控制   │      │ • 路由决策       │      │ • TTFT 模拟      │   │
-│  │ • 并发控制   │      │ • 连接池管理     │      │ • TPOT 模拟      │   │
-│  │ • 到达分布   │      │ • 负载均衡       │      │ • KV Cache 模拟  │   │
-│  │ • 追踪回放   │      │ • 故障转移       │      │ • Prometheus 指标│   │
+│  │ • QPS control│      │ • Routing        │      │ • TTFT simulation│   │
+│  │ • Concurrency│      │ • Conn. pooling  │      │ • TPOT simulation│   │
+│  │ • Arrival    │      │ • Load balancing │      │ • KV Cache sim.  │   │
+│  │   distribution     │ • Failover       │      │ • Prom. metrics  │   │
 │  └──────────────┘      └──────────────────┘      └──────────────────┘   │
 │         │                      │                         │              │
 │         └──────────────────────┼─────────────────────────┘              │
@@ -25,81 +25,81 @@
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 为什么选择 AIPerf + Dynamo Mocker
+### Why AIPerf + Dynamo Mocker
 
-| 组件 | 选择理由 |
-|------|----------|
-| AIPerf | NVIDIA 官方工具，支持多种到达模式（Poisson/Gamma/Constant）、Credit-Based 流控、实时 TUI Dashboard、详细的 TTFT/TPOT 指标 |
-| Dynamo Mocker | GPU-free 的高保真 LLM 推理模拟，支持 vLLM/SGLang 两种引擎模式、KV Cache 模拟、Prefix Caching、可配置延迟模型 |
-| K8s 部署 | 复用 kthena 现有 Helm Charts 和 CRD 定义，与 E2E 测试基础设施一致 |
+| Component | Rationale |
+|-----------|-----------|
+| AIPerf | Official NVIDIA tool; supports multiple arrival patterns (Poisson/Gamma/Constant), credit-based flow control, a real-time TUI dashboard, and detailed TTFT/TPOT metrics |
+| Dynamo Mocker | GPU-free, high-fidelity LLM inference simulation; supports vLLM/SGLang engine modes, KV cache simulation, prefix caching, and a configurable latency model |
+| K8s deployment | Reuses kthena's existing Helm charts and CRD definitions, consistent with the E2E test infrastructure |
 
-## 当前模块化结构
+## Current Module Structure
 
-为了让当前的 `ab_test` 更容易 review，并逐步对齐 proposal 中的分层设计，脚本已经拆为如下结构：
+To make `ab_test` easier to review and to gradually align with the layered design in the proposal, the script is split into the following modules:
 
 ```
 router-benchmark/
 ├── scripts/
-│   ├── ab_test.py                         # CLI 入口
+│   ├── ab_test.py                         # CLI entrypoint
 │   └── router_ab_test/
-│       ├── __init__.py                    
+│       ├── __init__.py
 │       ├── models.py                      # ScenarioConfig / BenchmarkResult
-│       ├── kubernetes.py                  # K8sManager：apply、rollout、probe、port-forward
-│       ├── load_generator.py              # AIPerfRunner：scenario -> aiperf CLI
-│       ├── metrics_collector.py           # MetricsCollector：Prometheus / pprof 采集
-│       ├── orchestrator.py                # ABTestOrchestrator：执行 A/B 流程
-│       └── reporter.py                    # ResultReporter：compare / write / print report
+│       ├── kubernetes.py                  # K8sManager: apply, rollout, probe, port-forward
+│       ├── load_generator.py              # AIPerfRunner: scenario -> aiperf CLI
+│       ├── metrics_collector.py           # MetricsCollector: Prometheus / pprof collection
+│       ├── orchestrator.py                # ABTestOrchestrator: drives the A/B flow
+│       └── reporter.py                    # ResultReporter: compare / write / print report
 └── tests/
-    └── test_ab_test.py                    
+    └── test_ab_test.py
 ```
 
-### 模块职责
+### Module Responsibilities
 
 - `scripts/ab_test.py`
-  - 保留原始入口路径，避免已有命令、文档或测试失效
-  - 提供 CLI parser 和 `main()`
+  - Keeps the original entrypoint path so existing commands, docs, and tests stay valid
+  - Provides the CLI parser and `main()`
 - `scripts/router_ab_test/models.py`
-  - benchmark 领域模型与场景配置加载
-  - `ScenarioConfig.metrics` 定义每个场景是否采集 Prometheus / pprof
-  - `BenchmarkResult.artifacts` 保存额外采集结果
+  - Benchmark domain models and scenario config loading
+  - `ScenarioConfig.metrics` defines whether Prometheus / pprof collection is enabled per scenario
+  - `BenchmarkResult.artifacts` holds additional collection results
 - `scripts/router_ab_test/kubernetes.py`
-  - 负责 Kubernetes 资源操作、router rollout、service/debug 端口转发、route ready probe
+  - Kubernetes resource operations, router rollout, service/debug port-forwarding, route ready probe
 - `scripts/router_ab_test/load_generator.py`
-  - 负责把 scenario YAML 映射为 AIPerf CLI 参数
+  - Maps the scenario YAML to AIPerf CLI arguments
 - `scripts/router_ab_test/metrics_collector.py`
-  - 负责抓取 router `/metrics`
-  - 负责抓取 router `/debug/pprof/profile` 与其他 profile
-  - 负责把指标与 profile 文件写入 `artifacts/<config>/`
+  - Scrapes the router `/metrics` endpoint
+  - Fetches the router `/debug/pprof/profile` and other profiles
+  - Writes metrics and profile files to `artifacts/<config>/`
 - `scripts/router_ab_test/orchestrator.py`
-  - 负责串联 A/B 执行流程
-  - 在每轮 AIPerf 结束后触发 Metrics Collector
+  - Drives the end-to-end A/B execution flow
+  - Triggers the Metrics Collector after each AIPerf run
 - `scripts/router_ab_test/reporter.py`
-  - 负责比较指标、生成报告结构、写 JSON、打印 summary
+  - Compares metrics, builds the report structure, writes JSON, prints the summary
 
-## 快速开始
+## Quick Start
 
-### 前置条件
+### Prerequisites
 
-- Docker Desktop 或 Podman
+- Docker Desktop or Podman
 - Kind (Kubernetes in Docker)
 - Helm 3.x
 - kubectl
 - Python 3.10+
 
-### 1. 创建 Kind 集群并部署 Kthena
+### 1. Create a Kind cluster and deploy Kthena
 
 ```bash
 cd /path/to/kthena
 ./hack/local-up-kthena.sh
 ```
 
-### 2. 安装 AIPerf
+### 2. Install AIPerf
 
 ```bash
 pip install 'aiperf>=0.9,<0.11'
 ```
 
-### 3. 运行 A/B 测试
+### 3. Run an A/B test
 
 ```bash
 python scripts/ab_test.py \
@@ -109,22 +109,31 @@ python scripts/ab_test.py \
   --output /tmp/results/
 ```
 
-#### Router Endpoint 访问模式
+#### Router Endpoint Access Modes
 
-支持两种访问 Router 端点的模式，通过 `--endpoint-mode` 参数选择：
+Two modes are supported for reaching the router endpoint, selected via `--endpoint-mode`:
 
-| 模式       | 适用场景      | 说明                                                                        |
-|----------|-----------|---------------------------------------------------------------------------|
-| `pf`（默认） | Kind 测试集群 | 使用 `kubectl port-forward` 将 Router Service 端口转发到 `localhost:<local_port>` |
-| `lb`     | 生产集群      | 从 LoadBalancer 获取 EXTERNAL-IP，组成 `<external_ip>:<service_port>`              |
+| Mode | Scenario | Description |
+|------|----------|-------------|
+| `pf` (default) | Kind test clusters | Uses `kubectl port-forward` to forward the router Service port to `localhost:<local_port>` |
+| `lb` | Production clusters | Reads the EXTERNAL-IP from the LoadBalancer and forms `<external_ip>:<service_port>` |
 
-> 备注：Debug port (15000) 未通过 Service 暴露，两种模式下均使用 port-forward。
+> Note: the debug port (15000) is not exposed via a Service; both modes use port-forward for it.
 
-## 场景配置
+## Scenario Configuration
 
-场景配置遵循三明治模型，分为三部分。以 `smoke-test-s2.yaml` 为例，分别为 load、backends、metrics 三端。
+A scenario config follows the sandwich model and has three parts — `load`, `backends`, and `metrics` — as shown in `smoke-test-s2.yaml`.
 
-## A/B 测试流程
+The `load.schedule.mode` field selects exactly one load-control model:
+
+| Mode | Load model | Emitted AIPerf flag |
+|------|-----------|---------------------|
+| `rate` / `constant_rate` | Open-loop, rate-based | `--request-rate` (plus arrival-pattern/ramp from `traffic`) |
+| `concurrency` | Closed-loop, concurrency-based | `--concurrency` (plus concurrency ramp) |
+
+Only one mode is emitted per run — passing both `--request-rate` and `--concurrency` would make the effective load ambiguous.
+
+## A/B Test Flow
 
 ```
 1. Apply router config A
@@ -141,33 +150,33 @@ python scripts/ab_test.py \
 12. Exit non-zero if report contains regression
 ```
 
-## 输出结果
+## Output
 
-结果会写入 `--output` 指定目录。当前输出包括：
+Results are written to the directory given by `--output`. Current outputs:
 
-- `runs/config_a/` 与 `runs/config_b/`
-  - AIPerf 原始输出目录
-- `artifacts/config_a/` 与 `artifacts/config_b/`
-  - Router Prometheus 与 pprof 采集结果
+- `runs/config_a/` and `runs/config_b/`
+  - Raw AIPerf output directories
+- `artifacts/config_a/` and `artifacts/config_b/`
+  - Router Prometheus and pprof collection results
 - `report_<scenario>.json`
-  - A/B 对比结果
+  - A/B comparison result
 
-## 测试场景
+## Test Scenarios
 
-一共设计了 8 大场景：
+Eight scenarios are designed:
 
-| # | 场景 | 验证目标 | 关键参数 |
-|---|------|----------|----------|
-| S1 | Throughput Baseline | 最大可持续吞吐量 | 逐步增加 QPS |
-| S2 | Latency vs QPS | 不同负载下的路由开销 | QPS: 10, 50, 100, 200, 500 |
-| S3 | Concurrency Scaling | 连接池行为 | Connections: 10, 100, 500, 1000 |
-| S4 | Backend Count Impact | 调度器随 pod 数扩展 | Backends: 1, 4, 16, 32 |
-| S5 | Prompt Length Impact | 请求体解析开销 | Prompt tokens: 100, 1000, 4000 |
-| S6 | Long Response | SSE 中继开销 | Response tokens: 100, 1000, 4096 |
-| S7 | Backend Latency Variance | 异构后端调度行为 | 3 pods: TTFT 10/100/500ms |
-| S8 | Routing Strategy Comparison | 路由策略开销对比 | random vs least-latency vs least-request |
+| # | Scenario | Goal | Key parameters |
+|---|----------|------|----------------|
+| S1 | Throughput Baseline | Maximum sustainable throughput | Gradually increasing QPS |
+| S2 | Latency vs QPS | Routing overhead under different loads | QPS: 10, 50, 100, 200, 500 |
+| S3 | Concurrency Scaling | Connection pool behavior | Connections: 10, 100, 500, 1000 |
+| S4 | Backend Count Impact | Scheduler scaling with pod count | Backends: 1, 4, 16, 32 |
+| S5 | Prompt Length Impact | Request-body parsing overhead | Prompt tokens: 100, 1000, 4000 |
+| S6 | Long Response | SSE relay overhead | Response tokens: 100, 1000, 4096 |
+| S7 | Backend Latency Variance | Scheduling with heterogeneous backends | 3 pods: TTFT 10/100/500ms |
+| S8 | Routing Strategy Comparison | Routing strategy overhead | random vs least-latency vs least-request |
 
-## 参考文档
+## References
 
 - [Kthena Router Benchmark Proposal](../../docs/proposal/kthena-router-benchmark.md)
 - [AIPerf Documentation](https://github.com/ai-dynamo/aiperf)

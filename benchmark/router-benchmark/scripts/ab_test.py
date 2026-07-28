@@ -88,14 +88,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
 
     if args.dry_run:
         _dry_run(args.scenario)
         return
 
     if not args.router_config_a or not args.router_config_b:
-        build_parser().error("--router-config-a and --router-config-b are required (unless --dry-run)")
+        parser.error("--router-config-a and --router-config-b are required (unless --dry-run)")
 
     orchestrator = ABTestOrchestrator(
         scenario_path=args.scenario,
