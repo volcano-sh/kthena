@@ -152,12 +152,12 @@ spec:
                         fieldPath: status.podIP
                 image: vllm-prefill:latest
                 imagePullPolicy: IfNotPresent
-                livenessProbe:
-                  failureThreshold: 3
+                startupProbe:
+                  failureThreshold: 60
                   httpGet:
                     path: /health
                     port: 8000
-                  initialDelaySeconds: 180
+                  initialDelaySeconds: 5
                   periodSeconds: 5
                 name: vllm
                 ports:
@@ -167,7 +167,12 @@ spec:
                   httpGet:
                     path: /health
                     port: 8000
-                  initialDelaySeconds: 5
+                  periodSeconds: 5
+                livenessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
                   periodSeconds: 5
                 resources:
                   limits:
@@ -343,12 +348,12 @@ spec:
                     value: eth0
                 image: vllm-decode:latest
                 imagePullPolicy: IfNotPresent
-                livenessProbe:
-                  failureThreshold: 3
+                startupProbe:
+                  failureThreshold: 60
                   httpGet:
                     path: /health
                     port: 8000
-                  initialDelaySeconds: 180
+                  initialDelaySeconds: 5
                   periodSeconds: 5
                 name: vllm
                 ports:
@@ -358,7 +363,12 @@ spec:
                   httpGet:
                     path: /health
                     port: 8000
-                  initialDelaySeconds: 5
+                  periodSeconds: 5
+                livenessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /health
+                    port: 8000
                   periodSeconds: 5
                 resources:
                   limits:
