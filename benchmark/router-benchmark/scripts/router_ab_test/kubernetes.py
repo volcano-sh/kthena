@@ -67,13 +67,17 @@ class MockerDeploymentBuilder:
         self.memory_request = memory_request
         self.memory_limit = memory_limit
 
-    def build(self, config: BackendsConfig) -> str:
-        """Return a multi-document YAML string ready for ``kubectl apply -f``."""
+    def build_docs(self, config: BackendsConfig) -> list[dict[str, Any]]:
+        """Return the resource dicts: one Deployment per profile + the shared Service."""
         docs: list[dict[str, Any]] = []
         for profile in config.profiles:
             docs.append(self._build_deployment(profile, config))
         docs.append(self._build_service())
-        return yaml.safe_dump_all(docs, sort_keys=False)
+        return docs
+
+    def build(self, config: BackendsConfig) -> str:
+        """Return a multi-document YAML string ready for ``kubectl apply -f``."""
+        return yaml.safe_dump_all(self.build_docs(config), sort_keys=False)
 
     # ---- Deployment per profile ------------------------------------------------
 
@@ -245,13 +249,7 @@ class K8sManager:
     def build_backends_yaml(self, config: BackendsConfig) -> str:
         """Return multi-document YAML of all resources (deployments + service + CRDs),
         without applying them.  Used by ``--dry-run``."""
-        docs: list[dict[str, Any]] = []
-
-        # Mocker deployments
-        for profile in config.profiles:
-            docs.append(self._builder._build_deployment(profile, config))
-        # Mocker service
-        docs.append(self._builder._build_service())
+        docs = self._builder.build_docs(config)
         # ModelServer + ModelRoute
         docs.extend(self._build_model_crds_docs(config))
 
@@ -260,17 +258,13 @@ class K8sManager:
     def deploy_backends(self, config: BackendsConfig) -> None:
         """Render and apply mocker Deployment(s) + Service from a BackendsConfig."""
         yaml_text = self._builder.build(config)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".yaml",
-            prefix="mocker-backends-",
-            delete=False,
-        ) as tmp:
-            tmp.write(yaml_text)
-            manifest_path = tmp.name
+        manifest_path = self._write_temp_manifest(yaml_text, prefix="mocker-backends-")
 
         print(f"  Deploying mocker backends from {manifest_path} ...")
-        self._apply(manifest_path)
+        try:
+            self._apply(manifest_path)
+        finally:
+            os.unlink(manifest_path)
         # Wait for all deployments to roll out
         for profile in config.profiles:
             name = f"{self.MOCKER_DEPLOYMENT}-{profile.name}"
@@ -283,14 +277,13 @@ class K8sManager:
     def _deploy_model_crds(self, config: BackendsConfig) -> None:
         """Apply ModelServer and ModelRoute CRDs for the mocker model."""
         docs = self._build_model_crds_docs(config)
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", prefix="model-crds-", delete=False,
-        ) as tmp:
-            yaml.safe_dump_all(docs, tmp, sort_keys=False)
-            crd_path = tmp.name
+        crd_path = self._write_temp_manifest(yaml.safe_dump_all(docs, sort_keys=False), prefix="model-crds-")
 
         print(f"  Deploying ModelServer + ModelRoute from {crd_path} ...")
-        self._apply(crd_path)
+        try:
+            self._apply(crd_path)
+        finally:
+            os.unlink(crd_path)
 
     def _build_model_crds_docs(self, config: BackendsConfig) -> list[dict[str, Any]]:
         """Return ModelServer and ModelRoute dicts for the mocker model."""
@@ -360,6 +353,35 @@ class K8sManager:
                 "--ignore-not-found",
             ],
         )
+        self.wait_for_backends_deleted()
+
+    def wait_for_backends_deleted(self, timeout: int = 120) -> None:
+        """Block until all mocker pods are fully terminated.
+
+        Ensures the next ``deploy_backends`` starts from the same clean
+        state for every run, so A/B configs are compared on equal footing.
+        """
+        result = subprocess.run(
+            [
+                "kubectl", "get", "pods",
+                "-l", self._MOCKER_LABEL_SELECTOR,
+                "-n", self.MOCKER_NAMESPACE,
+                "-o", "name",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        if not result.stdout.strip():
+            return
+        _run(
+            [
+                "kubectl", "wait", "--for=delete", "pod",
+                "-l", self._MOCKER_LABEL_SELECTOR,
+                "-n", self.MOCKER_NAMESPACE,
+                f"--timeout={timeout}s",
+            ],
+        )
 
     # ---- Router config --------------------------------------------------------
 
@@ -424,6 +446,7 @@ class K8sManager:
             ],
             capture_output=True,
             text=True,
+            check=True,
         )
         external_ip = result.stdout.strip()
         if not external_ip:
@@ -439,6 +462,7 @@ class K8sManager:
             ],
             capture_output=True,
             text=True,
+            check=True,
         )
         port = result.stdout.strip()
         if not port:
@@ -603,7 +627,16 @@ class K8sManager:
 
     def _apply(self, manifest_path: str) -> None:
         _run(["kubectl", "apply", "-f", manifest_path])
-        time.sleep(5)
+
+    @staticmethod
+    def _write_temp_manifest(content: str, prefix: str) -> str:
+        """Write manifest content to a temp file and return its path.
+
+        The caller is responsible for deleting the file (``os.unlink``).
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix=prefix, delete=False) as tmp:
+            tmp.write(content)
+            return tmp.name
 
     def _wait_for_deployment_ready(self, name: str, namespace: str, timeout: int = 120) -> None:
         _run(

@@ -9,8 +9,6 @@ load:
     burstiness: 1.0
     ramp:
       strategy: "none"
-  concurrency:
-    connections: 60
   prompts:
     - tokens: 2048
       weight: 10

@@ -109,8 +109,7 @@ class ScenarioConfig:
     def from_yaml(cls, path: str | Path) -> "ScenarioConfig":
         with Path(path).open(encoding="utf-8") as file:
             data = yaml.safe_load(file)
-        # Convert raw dict to typed BackendsConfig
-        data["backends"] = BackendsConfig.from_dict(data["backends"])
+        # ``__post_init__`` coerces the raw ``backends`` dict to BackendsConfig.
         return cls(**data)
 
 

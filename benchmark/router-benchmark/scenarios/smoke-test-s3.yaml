@@ -3,12 +3,7 @@ description: "s3 scenario: connection pool stress at 200 concurrent connections"
 
 load:
   schedule:
-    mode: "rate"
-    rate: 50
-  traffic:
-    burstiness: 1.0
-    ramp:
-      strategy: "none"
+    mode: "concurrency"
   concurrency:
     connections: 200
     ramp:
