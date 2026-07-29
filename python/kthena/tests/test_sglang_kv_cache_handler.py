@@ -269,3 +269,14 @@ async def test_scan_keys_returns_empty_on_redis_error():
     client._client.scan = failing_scan
 
     assert await client.scan_keys("matrix:kv:block:qwen@*") == []
+
+
+@pytest.mark.asyncio
+async def test_scan_keys_handles_empty_round_before_cursor_returns_to_zero():
+    """SCAN may return nothing for a round while the cursor is still non-zero."""
+    client = _make_scanning_redis_client([(9, []), (0, ["matrix:kv:block:qwen@1"])])
+
+    assert await client.scan_keys("matrix:kv:block:qwen@*") == [
+        "matrix:kv:block:qwen@1"
+    ]
+    assert client._client.cursors == [0, 9]
