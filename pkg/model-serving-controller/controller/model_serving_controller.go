@@ -2136,7 +2136,8 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 					copy.Status.UpdateRevision = revision
 					copy.Status.LabelSelector = selector
 					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
-					if updateErr != nil {
+					if apierrors.IsConflict(updateErr) {
+						klog.V(4).Infof("ModelServing %s/%s status update conflicted (informer cache may be stale), retrying with a fresh read from the API server: %v", copy.Namespace, copy.Name, updateErr)
 						readFromAPI = true
 					}
 					return updateErr
@@ -2287,7 +2288,10 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 		if shouldUpdate {
 			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
 			if err != nil {
-				readFromAPI = true
+				if apierrors.IsConflict(err) {
+					klog.V(4).Infof("ModelServing %s/%s status update conflicted (informer cache may be stale), retrying with a fresh read from the API server: %v", copy.Namespace, copy.Name, err)
+					readFromAPI = true
+				}
 				return err
 			}
 			// Clean up old revisions only after roles have been updated (revision status changed)

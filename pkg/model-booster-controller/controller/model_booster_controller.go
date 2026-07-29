@@ -25,6 +25,7 @@ import (
 	"time"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -279,7 +280,10 @@ func (mc *ModelBoosterController) updateModelBoosterStatus(ctx context.Context, 
 		updated.Status.ObservedGeneration = updated.Generation
 		res, err := mc.client.WorkloadV1alpha1().ModelBoosters(updated.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
 		if err != nil {
-			readFromAPI = true
+			if apierrors.IsConflict(err) {
+				klog.V(4).Infof("ModelBooster %s/%s status update conflicted (informer cache may be stale), retrying with a fresh read from the API server: %v", updated.Namespace, updated.Name, err)
+				readFromAPI = true
+			}
 			return err
 		}
 		modelBooster.Status = res.Status
