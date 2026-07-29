@@ -32,6 +32,7 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.image.repository | string | `"ghcr.io/volcano-sh/kthena-router"` | Image repository for Kthena Router. |
 | networking.kthenaRouter.image.tag | string | `"latest"` | Image tag for Kthena Router. |
 | networking.kthenaRouter.port | int | `8080` | Container port for Kthena Router. |
+| networking.kthenaRouter.replicas | int | `1` | Number of Kthena Router instances to run. |
 | networking.kthenaRouter.sessionBoost.enabled | bool | `false` | Enable session-boost scheduling. Mutually exclusive with fairness. |
 | networking.kthenaRouter.sessionBoost.gracePeriod | string | `"0s"` | Wait time after a request completes for a same-session follow-up.<br/> Disabled by default (`0s`). |
 | networking.kthenaRouter.sessionBoost.header | string | `"X-Session-ID"` | HTTP header used to identify conversation sessions. |
@@ -55,6 +56,7 @@ A Helm chart for deploying Kthena
 | workload.controllerManager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the Controller Manager. |
 | workload.controllerManager.image.repository | string | `"ghcr.io/volcano-sh/kthena-controller-manager"` | Image repository for the Controller Manager. |
 | workload.controllerManager.image.tag | string | `"latest"` | Image tag for the Controller Manager. |
+| workload.controllerManager.replicas | int | `1` | Number of Controller Manager instances to run. |
 | workload.controllerManager.runtimeImage.repository | string | `"ghcr.io/volcano-sh/runtime"` | Image repository for the Runtime. |
 | workload.controllerManager.runtimeImage.tag | string | `"latest"` | Image tag for the Runtime. |
 | workload.controllerManager.webhook.enabled | bool | `true` | Enable webhook for the Controller Manager. |

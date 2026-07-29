@@ -2,6 +2,8 @@ workload:
   # -- Enable the workload subchart.
   enabled: true
   controllerManager:
+    # -- Number of Controller Manager instances to run.
+    replicas: 1
     image:
       # -- Image repository for the Controller Manager.
       repository: ghcr.io/volcano-sh/kthena-controller-manager
@@ -39,6 +41,8 @@ networking:
   kthenaRouter:
     # -- Enable Kthena Router.
     enabled: true
+    # -- Number of Kthena Router instances to run.
+    replicas: 1
     # -- Container port for Kthena Router.
     port: 8080
     # -- Debug server port for Kthena Router (localhost only).
