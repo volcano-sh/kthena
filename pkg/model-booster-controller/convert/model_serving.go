@@ -62,6 +62,9 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 	case workload.ModelBackendTypeVLLM:
 		serving, err = buildVllmModelServing(model)
 	case workload.ModelBackendTypeVLLMDisaggregated:
+		if err := ValidateKVConnectorConfig(*backend); err != nil {
+			return nil, err
+		}
 		serving, err = buildVllmDisaggregatedModelServing(model)
 	default:
 		return nil, fmt.Errorf("not support model backend type: %s", backend.Type)

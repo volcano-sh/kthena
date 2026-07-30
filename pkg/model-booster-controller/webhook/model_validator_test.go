@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -111,6 +112,107 @@ func TestValidateModel_NoErrors(t *testing.T) {
 	// Should be valid with no errors
 	assert.True(t, valid)
 	assert.Empty(t, errorMsg)
+}
+
+func TestValidateKVConnectorConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		workers     []registryv1alpha1.ModelWorker
+		expectValid bool
+		expectMsg   string
+	}{
+		{
+			name: "matching connectors and roles are valid",
+			workers: []registryv1alpha1.ModelWorker{
+				{
+					Type: registryv1alpha1.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+				{
+					Type: registryv1alpha1.ModelWorkerTypeDecode,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "mismatched connectors are rejected",
+			workers: []registryv1alpha1.ModelWorker{
+				{
+					Type: registryv1alpha1.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+				{
+					Type: registryv1alpha1.ModelWorkerTypeDecode,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+			},
+			expectMsg: `workers must use the same kv_connector`,
+		},
+		{
+			name: "missing decode connector is rejected",
+			workers: []registryv1alpha1.ModelWorker{
+				{
+					Type: registryv1alpha1.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+				{Type: registryv1alpha1.ModelWorkerTypeDecode},
+			},
+			expectMsg: "worker decode missing kv-transfer-config",
+		},
+		{
+			name: "reversed role is rejected",
+			workers: []registryv1alpha1.ModelWorker{
+				{
+					Type: registryv1alpha1.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+				{
+					Type: registryv1alpha1.ModelWorkerTypeDecode,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+			},
+			expectMsg: `worker prefill kv_role must be "kv_producer"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &registryv1alpha1.ModelBooster{
+				Spec: registryv1alpha1.ModelBoosterSpec{
+					Backend: registryv1alpha1.ModelBackend{
+						Name:    "test-backend",
+						Type:    registryv1alpha1.ModelBackendTypeVLLMDisaggregated,
+						Workers: tt.workers,
+					},
+				},
+			}
+
+			valid, errorMsg := (&ModelValidator{}).validateModel(model)
+
+			if tt.expectValid {
+				assert.True(t, valid, "expected valid but got error: %s", errorMsg)
+				assert.Empty(t, errorMsg)
+			} else {
+				assert.False(t, valid)
+				assert.Contains(t, errorMsg, tt.expectMsg)
+			}
+		})
+	}
 }
 
 func TestValidatePVCURICompatibility(t *testing.T) {

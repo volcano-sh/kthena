@@ -25,7 +25,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	icUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
 )
 
 var VLLMKvConnectorType = map[string]networking.KVConnectorType{
@@ -33,6 +32,11 @@ var VLLMKvConnectorType = map[string]networking.KVConnectorType{
 	"NixlConnector":      networking.ConnectorTypeNIXL,
 	"LMCacheConnectorV1": networking.ConnectorTypeLMCache,
 }
+
+const (
+	vLLMKVRoleProducer = "kv_producer"
+	vLLMKVRoleConsumer = "kv_consumer"
+)
 
 // BuildModelServer creates arrays of ModelServer for the given model.
 // Each model backend will create one model server.
@@ -92,56 +96,99 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 }
 
 func getKvConnectorSpec(backend workload.ModelBackend) (*networking.KVConnectorSpec, error) {
-	var connectorType *networking.KVConnectorType
+	var connectorType networking.KVConnectorType
+	var connectorName string
 	foundConfig := false
+	var workersMissingConfig []workload.ModelWorkerType
+
 	for _, worker := range backend.Workers {
 		if worker.Type != workload.ModelWorkerTypePrefill && worker.Type != workload.ModelWorkerTypeDecode {
 			continue
 		}
 
+		if len(worker.Config.Raw) == 0 {
+			workersMissingConfig = append(workersMissingConfig, worker.Type)
+			continue
+		}
 		kvTransferConfig, err := utils.TryGetField(worker.Config.Raw, "kv-transfer-config")
 		if err != nil {
 			return nil, fmt.Errorf("failed to get kv-transfer-config for worker %s: %w", worker.Type, err)
 		}
 		if kvTransferConfig == nil {
-			klog.Warningf("worker %s (backend %s) missing kv-transfer-config", worker.Type, backend.Name)
+			workersMissingConfig = append(workersMissingConfig, worker.Type)
 			continue
 		}
 		kvTransferConfigStr, ok := kvTransferConfig.(string)
 		if !ok {
-			klog.Warningf("invalid kv-transfer-config type %T for worker %s", kvTransferConfig, worker.Type)
-			continue
+			return nil, fmt.Errorf("kv-transfer-config for worker %s must be a string, got %T", worker.Type, kvTransferConfig)
 		}
 
 		kvTransferType, err := utils.TryGetField([]byte(kvTransferConfigStr), "kv_connector")
 		if err != nil {
-			klog.Warningf("invalid kv-transfer-config type %T for worker %s, str: %s", kvTransferConfig, worker.Type, kvTransferConfigStr)
 			return nil, fmt.Errorf("failed to get kv_connector for worker %s: %w", worker.Type, err)
 		}
 		if kvTransferType == nil {
-			klog.Warningf("worker %s (backend %s) missing kv_connector", worker.Type, backend.Name)
-			continue
+			return nil, fmt.Errorf("worker %s missing kv_connector", worker.Type)
 		}
 
-		if converted, ok := kvTransferType.(string); ok {
-			if ct, exists := VLLMKvConnectorType[converted]; exists {
-				connectorType = &ct
-				foundConfig = true
-			} else {
-				klog.Warningf("unknown kv_connector type %q for worker %s", converted, worker.Type)
-			}
-		} else {
-			klog.Warningf("invalid kv_connector type %T for worker %s", kvTransferType, worker.Type)
+		converted, ok := kvTransferType.(string)
+		if !ok || converted == "" {
+			return nil, fmt.Errorf("kv_connector for worker %s must be a non-empty string, got %T", worker.Type, kvTransferType)
 		}
+		currentConnectorType, exists := VLLMKvConnectorType[converted]
+		if !exists {
+			return nil, fmt.Errorf("unknown kv_connector type %q for worker %s", converted, worker.Type)
+		}
+
+		kvRole, err := utils.TryGetField([]byte(kvTransferConfigStr), "kv_role")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get kv_role for worker %s: %w", worker.Type, err)
+		}
+		if kvRole == nil {
+			return nil, fmt.Errorf("worker %s missing kv_role", worker.Type)
+		}
+		kvRoleStr, ok := kvRole.(string)
+		if !ok {
+			return nil, fmt.Errorf("kv_role for worker %s must be a string, got %T", worker.Type, kvRole)
+		}
+		expectedRole := vLLMKVRoleProducer
+		if worker.Type == workload.ModelWorkerTypeDecode {
+			expectedRole = vLLMKVRoleConsumer
+		}
+		if kvRoleStr != expectedRole {
+			return nil, fmt.Errorf("worker %s kv_role must be %q, got %q", worker.Type, expectedRole, kvRoleStr)
+		}
+
+		if foundConfig && converted != connectorName {
+			return nil, fmt.Errorf(
+				"workers must use the same kv_connector: got %q and %q",
+				connectorName,
+				converted,
+			)
+		}
+		connectorName = converted
+		connectorType = currentConnectorType
+		foundConfig = true
 	}
 
-	if foundConfig {
-		if connectorType == nil {
-			return nil, fmt.Errorf("kv connector type found but nil")
-		}
-		return &networking.KVConnectorSpec{Type: *connectorType}, nil
+	if !foundConfig {
+		return nil, nil
 	}
-	return nil, nil
+	if len(workersMissingConfig) > 0 {
+		return nil, fmt.Errorf(
+			"worker %s missing kv-transfer-config while another PD worker configures kv_connector %q",
+			workersMissingConfig[0],
+			connectorName,
+		)
+	}
+
+	return &networking.KVConnectorSpec{Type: connectorType}, nil
+}
+
+// ValidateKVConnectorConfig validates the connector and role contract shared by PD workers.
+func ValidateKVConnectorConfig(backend workload.ModelBackend) error {
+	_, err := getKvConnectorSpec(backend)
+	return err
 }
 
 func getPdGroup(backend workload.ModelBackend) *networking.PDGroup {

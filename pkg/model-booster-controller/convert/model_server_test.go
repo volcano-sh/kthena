@@ -119,19 +119,88 @@ func TestGetKvConnectorSpec(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name: "unknown connector type is ignored",
+			name: "PD workers with matching connectors and roles",
 			workers: []registry.ModelWorker{
 				{
 					Type: registry.ModelWorkerTypePrefill,
 					Config: apiextensionsv1.JSON{
-						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"UnknownConnector\"}"}`),
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}"}`),
 					},
 				},
+				{
+					Type: registry.ModelWorkerTypeDecode,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+			},
+			expected: &networking.KVConnectorSpec{Type: networking.ConnectorTypeNIXL},
+		},
+		{
+			name: "PD workers without connector configuration are allowed",
+			workers: []registry.ModelWorker{
+				{Type: registry.ModelWorkerTypePrefill},
+				{Type: registry.ModelWorkerTypeDecode},
 			},
 			expected: nil,
 		},
 		{
-			name: "missing connector field is ignored",
+			name: "mismatched connector types return error",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+				{
+					Type: registry.ModelWorkerTypeDecode,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+			},
+			expectErrMsg: `workers must use the same kv_connector: got "NixlConnector" and "MooncakeConnector"`,
+		},
+		{
+			name: "connector missing from decode worker returns error",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+				{Type: registry.ModelWorkerTypeDecode},
+			},
+			expectErrMsg: `worker decode missing kv-transfer-config while another PD worker configures kv_connector "NixlConnector"`,
+		},
+		{
+			name: "reversed prefill role returns error",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}"}`),
+					},
+				},
+			},
+			expectErrMsg: `worker prefill kv_role must be "kv_producer", got "kv_consumer"`,
+		},
+		{
+			name: "unknown connector type returns error",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"UnknownConnector\",\"kv_role\":\"kv_producer\"}"}`),
+					},
+				},
+			},
+			expectErrMsg: `unknown kv_connector type "UnknownConnector" for worker prefill`,
+		},
+		{
+			name: "missing connector field returns error",
 			workers: []registry.ModelWorker{
 				{
 					Type: registry.ModelWorkerTypePrefill,
@@ -140,7 +209,19 @@ func TestGetKvConnectorSpec(t *testing.T) {
 					},
 				},
 			},
-			expected: nil,
+			expectErrMsg: "worker prefill missing kv_connector",
+		},
+		{
+			name: "missing role field returns error",
+			workers: []registry.ModelWorker{
+				{
+					Type: registry.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"kv-transfer-config":"{\"kv_connector\":\"NixlConnector\"}"}`),
+					},
+				},
+			},
+			expectErrMsg: "worker prefill missing kv_role",
 		},
 		{
 			name: "malformed nested kv-transfer-config returns error",

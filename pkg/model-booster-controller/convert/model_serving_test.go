@@ -389,6 +389,24 @@ func TestBuildModelServingVLLMPreStopHandlesUnavailableMetrics(t *testing.T) {
 	assert.NotContains(t, script, "$ERR")
 }
 
+func TestBuildModelServingRejectsMismatchedKVConnectors(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-mooncake.yaml")
+	for i := range model.Spec.Backend.Workers {
+		if model.Spec.Backend.Workers[i].Type == workload.ModelWorkerTypeDecode {
+			model.Spec.Backend.Workers[i].Config.Raw = []byte(strings.ReplaceAll(
+				string(model.Spec.Backend.Workers[i].Config.Raw),
+				"MooncakeConnector",
+				"NixlConnector",
+			))
+		}
+	}
+
+	serving, err := BuildModelServing(model)
+
+	assert.Nil(t, serving)
+	assert.ErrorContains(t, err, `workers must use the same kv_connector`)
+}
+
 func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 	tests := []struct {
 		name              string

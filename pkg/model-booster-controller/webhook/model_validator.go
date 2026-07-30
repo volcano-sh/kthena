@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -81,6 +82,7 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 	allErrs = append(allErrs, validateBackendReplicaBounds(model)...)
 	allErrs = append(allErrs, validateWorkerImages(model)...)
 	allErrs = append(allErrs, validateBackendWorkerTypes(model)...)
+	allErrs = append(allErrs, validateKVConnectorConfig(model)...)
 	allErrs = append(allErrs, validatePVCURICompatibility(model)...)
 
 	if len(allErrs) > 0 {
@@ -149,6 +151,21 @@ func validateBackendWorkerTypes(model *registryv1alpha1.ModelBooster) field.Erro
 		}
 	}
 	return allErrs
+}
+
+func validateKVConnectorConfig(model *registryv1alpha1.ModelBooster) field.ErrorList {
+	backend := model.Spec.Backend
+	if backend.Type != registryv1alpha1.ModelBackendTypeVLLMDisaggregated {
+		return nil
+	}
+	if err := convert.ValidateKVConnectorConfig(backend); err != nil {
+		return field.ErrorList{field.Invalid(
+			field.NewPath("spec").Child("backend").Child("workers"),
+			"kv-transfer-config",
+			err.Error(),
+		)}
+	}
+	return nil
 }
 
 func validateBackendReplicaBounds(model *registryv1alpha1.ModelBooster) field.ErrorList {
