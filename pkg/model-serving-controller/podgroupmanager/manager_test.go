@@ -1320,7 +1320,10 @@ func TestAppendSubGroupPolicyWithRoleGroups(t *testing.T) {
 				Roles: []workloadv1alpha1.Role{
 					{Name: "prefill", Replicas: ptr.To(int32(2)), WorkerReplicas: 0},
 					{Name: "decode", Replicas: ptr.To(int32(1)), WorkerReplicas: 1},
-					{Name: "lb", Replicas: ptr.To(int32(2)), WorkerReplicas: 0},
+					// lb is ungrouped but keeps its own independent role-level policy,
+					// proving that roleGroups elsewhere does not disturb a role's own
+					// Role.NetworkTopology when that role isn't part of any group.
+					{Name: "lb", Replicas: ptr.To(int32(2)), WorkerReplicas: 0, NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{Mode: "soft"}},
 				},
 				NetworkTopology: &workloadv1alpha1.NetworkTopology{
 					RoleGroups: []workloadv1alpha1.RoleGroup{
@@ -1385,7 +1388,8 @@ func TestAppendSubGroupPolicyWithRoleGroups(t *testing.T) {
 	assert.Equal(t, ptr.To(int32(1)), group.MinSubGroups)
 	assert.Equal(t, groupPolicy, group.NetworkTopology)
 
-	// lb is untouched by the group and keeps the ordinary per-role, per-replica-instance shape.
+	// lb is untouched by the group and keeps the ordinary per-role, per-replica-instance shape,
+	// including its own independent role-level policy (roleGroups elsewhere must not disturb it).
 	assert.Equal(t, &metav1.LabelSelector{
 		MatchLabels: map[string]string{
 			workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
@@ -1393,7 +1397,7 @@ func TestAppendSubGroupPolicyWithRoleGroups(t *testing.T) {
 		},
 	}, lbEntry.LabelSelector)
 	assert.Equal(t, []string{workloadv1alpha1.RoleIDKey}, lbEntry.MatchLabelKeys)
-	assert.Nil(t, lbEntry.NetworkTopology)
+	assert.Equal(t, &schedulingv1beta1.NetworkTopologySpec{Mode: "soft"}, lbEntry.NetworkTopology)
 }
 
 // TestAppendSubGroupPolicyWithMultipleRoleGroups proves two independent role groups in the
