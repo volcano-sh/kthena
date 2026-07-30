@@ -13,7 +13,7 @@
 # limitations under the License.
 from router_ab_test.kubernetes import EndpointMode, K8sManager, MockerDeploymentBuilder
 from router_ab_test.load_generator import AIPerfRunner
-from router_ab_test.metrics_collector import MetricsCollector
+from router_ab_test.metrics_collector import MetricsCollector, PprofCollection
 from router_ab_test.models import (
     VERDICT_FRAMEWORK_ERROR,
     VERDICT_INVALID,
@@ -37,6 +37,7 @@ __all__ = [
     "K8sManager",
     "MetricsCollector",
     "MockerDeploymentBuilder",
+    "PprofCollection",
     "ResultReporter",
     "ScenarioConfig",
     "VERDICT_FRAMEWORK_ERROR",

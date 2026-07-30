@@ -61,7 +61,17 @@ class ABTestOrchestrator:
         self.k8s.apply_router_config(config_path)
         router_endpoint = self.k8s.get_router_endpoint()
         router_debug_endpoint = self.k8s.get_router_debug_endpoint()
+
         self.k8s.wait_for_router_ready(self.scenario.backends.default_model, router_endpoint, timeout=300)
+
+        # Start async pprof collection after the router is confirmed ready,
+        # so the CPU profile covers the router under load (not just idle).
+        metrics_config = getattr(self.scenario, "metrics", {}) or {}
+        pprof_handle = None
+        if metrics_config.get("pprof", False):
+            pprof_handle = self.collector.start_pprof_collection(
+                config_name, router_debug_endpoint, metrics_config,
+            )
         try:
             result = self.runner.run(
                 config_name=config_name,
@@ -72,6 +82,8 @@ class ABTestOrchestrator:
         except subprocess.CalledProcessError as exc:
             # Benchmark tooling itself failed — the run is not a measurement
             # and must not be judged against backend stability signals.
+            if pprof_handle is not None:
+                pprof_handle.abandon()
             result = BenchmarkResult(
                 config_name=config_name,
                 scenario=self.scenario.name,
@@ -101,7 +113,7 @@ class ABTestOrchestrator:
             config_name=config_name,
             scenario=self.scenario,
             router_metrics_endpoint=router_endpoint,
-            router_debug_endpoint=router_debug_endpoint,
+            pprof_handle=pprof_handle,
         )
         return result
 
