@@ -132,15 +132,7 @@ func TestModelServingLifecycle(t *testing.T) {
 	}, 2*time.Minute, 5*time.Second, "ModelServing was not deleted")
 
 	// Verify that associated pods are cleaned up
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		return len(pods.Items) == 0
-	}, 2*time.Minute, 5*time.Second, "Pods were not cleaned up after ModelServing deletion")
+	waitForPodsGone(t, ctx, kubeClient, labelSelector, 2*time.Minute)
 
 	t.Log("Phase 3 passed: ModelServing deleted and pods cleaned up")
 	t.Log("ModelServing lifecycle test passed successfully")
@@ -1291,15 +1283,7 @@ func TestLWSAPIBasic(t *testing.T) {
 
 	// Wait for all pods to be deleted
 	t.Log("Waiting for all pods to be deleted")
-	require.Eventually(t, func() bool {
-		podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		return len(podList.Items) == 0
-	}, 2*time.Minute, 2*time.Second, "Pods were not deleted after LWS deletion")
+	waitForPodsGone(t, ctx, kubeClient, labelSelector, 2*time.Minute)
 
 	t.Log("LWS API basic test passed successfully")
 }
