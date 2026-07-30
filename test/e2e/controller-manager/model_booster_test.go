@@ -168,6 +168,30 @@ func TestModelCR(t *testing.T) {
 		list, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).List(ctx, listOpts)
 		return err == nil && len(list.Items) == 0
 	}, 2*time.Minute, 5*time.Second, "Orphan ModelRoutes should be garbage-collected")
+
+	// Deleting the CR only removes the CR objects; the generated vLLM Pod has a long
+	// terminationGracePeriodSeconds and can still be Terminating for a while afterwards.
+	// Wait for it to fully disappear so the next test doesn't contend for node resources
+	// with a Pod that is still shutting down.
+	t.Log("Verifying generated workload Pods have terminated")
+	podLabelSelector := modelServingLabelSelector(expectedChildName)
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: podLabelSelector,
+		})
+		if err != nil {
+			t.Logf("Failed to list pods for %s: %v", expectedChildName, err)
+			return false
+		}
+		if len(pods.Items) > 0 {
+			names := make([]string, 0, len(pods.Items))
+			for _, pod := range pods.Items {
+				names = append(names, pod.Name)
+			}
+			t.Logf("Waiting for %d generated pod(s) to terminate: %v", len(pods.Items), names)
+		}
+		return len(pods.Items) == 0
+	}, 6*time.Minute, 5*time.Second, "Generated workload Pods for %s were not terminated", expectedChildName)
 }
 
 // TestModelCRDisaggregated verifies that a vLLMDisaggregated ModelBooster is
