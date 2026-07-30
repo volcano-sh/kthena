@@ -23,10 +23,10 @@ jobs:
         include:
           - scenario: smoke-test-s2
             router-config-a: router-config-random
-            router-config-b: router-config-least-latency
+            router-config-b: router-config-least-request
           - scenario: smoke-test-s3
             router-config-a: router-config-random
-            router-config-b: router-config-least-latency
+            router-config-b: router-config-least-request
 #          - scenario: smoke-test-s8
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-latency
