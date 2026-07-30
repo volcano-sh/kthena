@@ -43,7 +43,9 @@ from router_ab_test import (
     MetricsCollector,
     ResultReporter,
     ScenarioConfig,
+    analyze_router_metrics,
     compute_run_verdict,
+    format_router_analysis,
 )
 
 __all__ = [
@@ -58,8 +60,10 @@ __all__ = [
     "VERDICT_FRAMEWORK_ERROR",
     "VERDICT_INVALID",
     "VERDICT_VALID",
+    "analyze_router_metrics",
     "build_parser",
     "compute_run_verdict",
+    "format_router_analysis",
     "main",
 ]
 
