@@ -714,5 +714,197 @@ class TempManifestCleanupTest(unittest.TestCase):
         self.assertFalse(Path(created[0]).exists(), f"temp manifest leaked: {created[0]}")
 
 
+_PROM_FIXTURE = """\
+# HELP kthena_router_requests_total Total number of HTTP requests processed by the router
+# TYPE kthena_router_requests_total counter
+kthena_router_requests_total{error_type="successful_request",model="m",path="/v1/chat/completions",status_code="200"} 80
+kthena_router_requests_total{error_type="proxy",model="m",path="/v1/chat/completions",status_code="503"} 20
+# TYPE kthena_router_request_duration_seconds histogram
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="0.5"} 40
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="1"} 60
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="2.5"} 80
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="+Inf"} 80
+kthena_router_request_duration_seconds_sum{model="m",path="/v1/chat/completions",status_code="200"} 80
+kthena_router_request_duration_seconds_count{model="m",path="/v1/chat/completions",status_code="200"} 80
+# TYPE kthena_router_scheduler_plugin_duration_seconds histogram
+kthena_router_scheduler_plugin_duration_seconds_bucket{model="m",plugin="least-latency",type="score",le="0.001"} 50
+kthena_router_scheduler_plugin_duration_seconds_bucket{model="m",plugin="least-latency",type="score",le="0.005"} 90
+kthena_router_scheduler_plugin_duration_seconds_bucket{model="m",plugin="least-latency",type="score",le="0.01"} 100
+kthena_router_scheduler_plugin_duration_seconds_bucket{model="m",plugin="least-latency",type="score",le="+Inf"} 100
+kthena_router_scheduler_plugin_duration_seconds_sum{model="m",plugin="least-latency",type="score"} 0.2
+kthena_router_scheduler_plugin_duration_seconds_count{model="m",plugin="least-latency",type="score"} 100
+kthena_router_tokens_total{model="m",path="/v1/chat/completions",token_type="input"} 1000
+kthena_router_tokens_total{model="m",path="/v1/chat/completions",token_type="output"} 400
+# TYPE kthena_router_prefix_cache_match_ratio histogram
+kthena_router_prefix_cache_match_ratio_bucket{model="m",le="0.5"} 10
+kthena_router_prefix_cache_match_ratio_bucket{model="m",le="1"} 20
+kthena_router_prefix_cache_match_ratio_bucket{model="m",le="+Inf"} 20
+kthena_router_prefix_cache_match_ratio_sum{model="m"} 10
+kthena_router_prefix_cache_match_ratio_count{model="m"} 20
+kthena_router_prefix_cache_entries 123
+kthena_router_prefix_cache_evictions_total{model="m"} 7
+kthena_router_rate_limit_exceeded_total{limit_type="user",model="m",path="/v1/chat/completions"} 3
+go_goroutines 100
+process_resident_memory_bytes 104857600
+"""
+
+
+class RouterMetricsAnalysisTest(unittest.TestCase):
+    def test_analyze_requests_and_success_rate(self):
+        analysis = ab_test.analyze_router_metrics(_PROM_FIXTURE)
+        requests = analysis["requests"]
+        self.assertEqual(requests["total"], 100)
+        self.assertEqual(requests["by_status_code"], {"200": 80, "503": 20})
+        self.assertEqual(requests["success_rate_pct"], 80.0)
+        self.assertEqual(requests["by_error_type"]["proxy"], 20)
+
+    def test_analyze_request_duration_quantiles(self):
+        analysis = ab_test.analyze_router_metrics(_PROM_FIXTURE)
+        stats = analysis["request_duration_seconds"]["200"]
+        self.assertEqual(stats["count"], 80)
+        self.assertEqual(stats["avg_ms"], 1000.0)
+        # p50 rank=40 hits the le=0.5 bucket boundary exactly.
+        self.assertEqual(stats["p50_ms"], 500.0)
+        # p90 rank=72 interpolates between le=1 (cum 60) and le=2.5 (cum 80).
+        self.assertEqual(stats["p90_ms"], 1900.0)
+
+    def test_analyze_scheduler_plugin_duration(self):
+        analysis = ab_test.analyze_router_metrics(_PROM_FIXTURE)
+        plugin = analysis["scheduler_plugins"]["least-latency/score"]
+        self.assertEqual(plugin["count"], 100)
+        self.assertEqual(plugin["avg_ms"], 2.0)
+        self.assertEqual(plugin["p95_ms"], 7.5)
+
+    def test_analyze_tokens_prefix_cache_rate_limit_and_runtime(self):
+        analysis = ab_test.analyze_router_metrics(_PROM_FIXTURE)
+        self.assertEqual(analysis["tokens"]["input"], 1000)
+        self.assertEqual(analysis["tokens"]["output"], 400)
+        self.assertEqual(analysis["tokens"]["output_per_successful_request"], 5.0)
+        self.assertEqual(analysis["prefix_cache"]["match_ratio"]["avg"], 0.5)
+        self.assertEqual(analysis["prefix_cache"]["entries"], 123)
+        self.assertEqual(analysis["prefix_cache"]["evictions_total"], 7)
+        self.assertEqual(analysis["rate_limit"]["exceeded_total"], 3)
+        self.assertEqual(analysis["runtime"]["go_goroutines"], 100)
+        self.assertEqual(analysis["runtime"]["process_resident_memory_bytes"], 104857600)
+
+    def test_analyze_omits_absent_plugin_sections(self):
+        analysis = ab_test.analyze_router_metrics(
+            'kthena_router_requests_total{error_type="successful_request",model="m",'
+            'path="/v1/chat/completions",status_code="200"} 5\n'
+        )
+        self.assertNotIn("prefix_cache", analysis)
+        self.assertNotIn("kvcache_aware", analysis)
+        self.assertNotIn("rate_limit", analysis)
+        self.assertNotIn("scheduler_plugins", analysis)
+
+    def test_compare_router_flags_success_rate_regression_in_percentage_points(self):
+        analysis_a = {
+            "requests": {"success_rate_pct": 90.0},
+            "request_duration_seconds": {"200": {"avg_ms": 1000.0}},
+            "scheduler_plugins": {"least-latency/score": {"avg_ms": 2.0}},
+            "prefix_cache": {"match_ratio": {"avg": 0.5}},
+        }
+        analysis_b = {
+            "requests": {"success_rate_pct": 80.0},
+            "request_duration_seconds": {"200": {"avg_ms": 1100.0}},
+            "scheduler_plugins": {"least-latency/score": {"avg_ms": 2.3}},
+            "prefix_cache": {"match_ratio": {"avg": 0.6}},
+        }
+
+        comparison = ab_test.ResultReporter().compare_router(analysis_a, analysis_b)
+
+        self.assertEqual(comparison["request_success_rate_pct"]["delta_pp"], -10.0)
+        self.assertTrue(comparison["request_success_rate_pct"]["regression"])
+        self.assertEqual(comparison["request_duration_avg_ms"]["delta_pct"], -10.0)
+        self.assertTrue(comparison["request_duration_avg_ms"]["regression"])
+        self.assertEqual(comparison["plugin_avg_ms[least-latency/score]"]["delta_pct"], -15.0)
+        self.assertTrue(comparison["plugin_avg_ms[least-latency/score]"]["regression"])
+        self.assertEqual(comparison["prefix_cache_match_ratio_avg"]["delta_pct"], 20.0)
+        self.assertFalse(comparison["prefix_cache_match_ratio_avg"]["regression"])
+
+    def test_compare_router_only_compares_plugins_present_in_both_runs(self):
+        analysis_a = {"scheduler_plugins": {"random/score": {"avg_ms": 1.0}}}
+        analysis_b = {"scheduler_plugins": {"least-latency/score": {"avg_ms": 2.0}}}
+
+        comparison = ab_test.ResultReporter().compare_router(analysis_a, analysis_b)
+
+        self.assertEqual(comparison, {})
+
+    def test_build_report_attaches_router_analysis_from_prom_artifact(self):
+        output_dir = Path(tempfile.mkdtemp())
+        prom_path = output_dir / "router_metrics.prom"
+        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+
+        def make_result():
+            return ab_test.BenchmarkResult(
+                config_name="config",
+                scenario="scenario",
+                timestamp="2026-07-30T00:00:00",
+                metrics={},
+                raw_output="",
+                artifacts={"prometheus": {"path": str(prom_path)}},
+                verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
+            )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s",
+            description="d",
+            config_a_path="a.yaml",
+            config_b_path="b.yaml",
+            result_a=make_result(),
+            result_b=make_result(),
+        )
+
+        self.assertEqual(report["config_a"]["router_analysis"]["requests"]["total"], 100)
+        self.assertEqual(report["config_b"]["router_analysis"]["requests"]["total"], 100)
+        self.assertIn("request_success_rate_pct", report["router_comparison"])
+
+    def test_build_report_router_analysis_none_without_prom_artifact(self):
+        result = ab_test.BenchmarkResult(
+            config_name="config",
+            scenario="scenario",
+            timestamp="2026-07-30T00:00:00",
+            metrics={},
+            raw_output="",
+            artifacts={"prometheus": {"path": "/nonexistent/router_metrics.prom"}},
+        )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s",
+            description="d",
+            config_a_path="a.yaml",
+            config_b_path="b.yaml",
+            result_a=result,
+            result_b=result,
+        )
+
+        self.assertIsNone(report["config_a"]["router_analysis"])
+        self.assertEqual(report["router_comparison"], {})
+
+    def test_router_comparison_skipped_when_run_invalid(self):
+        output_dir = Path(tempfile.mkdtemp())
+        prom_path = output_dir / "router_metrics.prom"
+        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+        artifacts = {"prometheus": {"path": str(prom_path)}}
+        result_a = ab_test.BenchmarkResult(
+            config_name="config_a", scenario="s", timestamp="",
+            metrics={}, raw_output="", artifacts=artifacts,
+            verdict={"status": ab_test.VERDICT_INVALID, "reasons": [], "offenders": [], "restart_stats": {}},
+        )
+        result_b = ab_test.BenchmarkResult(
+            config_name="config_b", scenario="s", timestamp="",
+            metrics={}, raw_output="", artifacts=artifacts,
+            verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
+        )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s", description="d",
+            config_a_path="a.yaml", config_b_path="b.yaml",
+            result_a=result_a, result_b=result_b,
+        )
+
+        self.assertEqual(report["router_comparison"], {})
+
+
 if __name__ == "__main__":
     unittest.main()
