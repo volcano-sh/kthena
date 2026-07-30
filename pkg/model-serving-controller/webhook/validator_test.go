@@ -1780,6 +1780,80 @@ func TestValidateRoleGroups(t *testing.T) {
 			},
 		},
 		{
+			// Group-name uniqueness is enforced in the webhook rather than a CEL rule, since a
+			// quadratic uniqueness check nested in the roleGroups list pushes the CRD's
+			// estimated CEL cost over the API server's per-rule budget.
+			name: "duplicate roleGroup names - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+								{Name: "decode", Replicas: &replicas},
+								{Name: "worker-a", Replicas: &replicas},
+								{Name: "worker-b", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "same-name",
+										Roles:  []string{"prefill", "decode"},
+										Policy: hardPolicy,
+									},
+									{
+										Name:   "same-name",
+										Roles:  []string{"worker-a", "worker-b"},
+										Policy: hardPolicy,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Duplicate(
+					field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups").Index(1).Child("name"),
+					"same-name",
+				),
+			},
+		},
+		{
+			// The same role listed twice within one group's own roles list is caught by the
+			// same "already a member" check used for cross-group duplicates, since the role
+			// is recorded as a member of its group on first sight.
+			name: "duplicate role within a single roleGroup - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+								{Name: "decode", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "prefill-decode",
+										Roles:  []string{"prefill", "prefill", "decode"},
+										Policy: hardPolicy,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups").Index(0).Child("roles").Index(1),
+					"prefill",
+					`role "prefill" is already a member of roleGroup "prefill-decode"; a role may belong to at most one group`,
+				),
+			},
+		},
+		{
 			name: "role in roleGroup also sets its own networkTopology - invalid",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{

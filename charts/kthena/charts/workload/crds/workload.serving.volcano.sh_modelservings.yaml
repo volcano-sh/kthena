@@ -233,7 +233,10 @@ spec:
                         items:
                           description: |-
                             RoleGroup defines a named set of roles that must be scheduled onto the same network
-                            topology domain as a single scheduling unit.
+                            topology domain as a single scheduling unit. Name uniqueness across roleGroups and role
+                            uniqueness within a single group's roles are enforced by the validating webhook rather
+                            than a CEL XValidation rule here: a quadratic uniqueness check nested inside this list
+                            pushes the CRD's estimated CEL rule cost over the API server's per-rule budget.
                           properties:
                             name:
                               description: Name identifies this role group. Must be
@@ -279,9 +282,6 @@ spec:
                               maxItems: 4
                               minItems: 2
                               type: array
-                              x-kubernetes-validations:
-                              - message: roles within a roleGroup must be unique
-                                rule: self.all(x, self.exists_one(y, y == x))
                           required:
                           - name
                           - policy
@@ -289,9 +289,6 @@ spec:
                           type: object
                         maxItems: 4
                         type: array
-                        x-kubernetes-validations:
-                        - message: roleGroup names must be unique
-                          rule: self.all(x, self.exists_one(y, y.name == x.name))
                       rolePolicy:
                         description: |-
                           RolePolicy defines the default network topology scheduling requirement for roles.

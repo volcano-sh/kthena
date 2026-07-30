@@ -87,12 +87,14 @@ type NetworkTopology struct {
 	// constrained together with the rest of the group.
 	// +optional
 	// +kubebuilder:validation:MaxItems=4
-	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.name == x.name))", message="roleGroup names must be unique"
 	RoleGroups []RoleGroup `json:"roleGroups,omitempty"`
 }
 
 // RoleGroup defines a named set of roles that must be scheduled onto the same network
-// topology domain as a single scheduling unit.
+// topology domain as a single scheduling unit. Name uniqueness across roleGroups and role
+// uniqueness within a single group's roles are enforced by the validating webhook rather
+// than a CEL XValidation rule here: a quadratic uniqueness check nested inside this list
+// pushes the CRD's estimated CEL rule cost over the API server's per-rule budget.
 type RoleGroup struct {
 	// Name identifies this role group. Must be unique within networkTopology.roleGroups.
 	// +kubebuilder:validation:MinLength=1
@@ -103,7 +105,6 @@ type RoleGroup struct {
 	// defined in spec.template.roles, and a role may belong to at most one group.
 	// +kubebuilder:validation:MinItems=2
 	// +kubebuilder:validation:MaxItems=4
-	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y == x))", message="roles within a roleGroup must be unique"
 	Roles []string `json:"roles"`
 
 	// Policy defines the network topology scheduling requirement applied jointly to all pods

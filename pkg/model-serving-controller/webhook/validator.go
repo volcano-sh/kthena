@@ -354,11 +354,19 @@ func validateNetworkTopologyPolicy(ms *workloadv1alpha1.ModelServing) field.Erro
 }
 
 // validateRoleGroups validates spec.template.networkTopology.roleGroups:
+//   - group names must be unique,
 //   - every referenced role name must exist in spec.template.roles,
-//   - a role may belong to at most one group,
+//   - a role may belong to at most one group (this also rejects a role name repeated
+//     within a single group's own roles list, since that role would already be
+//     recorded as a member of that same group),
 //   - a role that belongs to a group must not also configure its own
 //     spec.template.roles[*].networkTopology, since the group's policy governs it instead
 //     and mixing the two would create ambiguous precedence.
+//
+// Name and role-list uniqueness are checked here in Go rather than via a CEL
+// XValidation rule on the CRD: a quadratic uniqueness check nested inside the
+// roleGroups list pushes the CRD's estimated CEL rule cost over the API server's
+// per-rule budget, so the CRD itself is rejected at install time.
 func validateRoleGroups(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 
@@ -375,9 +383,18 @@ func validateRoleGroups(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 		roleHasOwnTopology[role.Name] = role.NetworkTopology != nil
 	}
 
+	groupNames := make(map[string]bool, len(ms.Spec.Template.NetworkTopology.RoleGroups))
 	roleGroupOf := make(map[string]string)
 	for i, group := range ms.Spec.Template.NetworkTopology.RoleGroups {
 		groupPath := roleGroupsPath.Index(i)
+
+		if groupNames[group.Name] {
+			allErrs = append(allErrs, field.Duplicate(
+				groupPath.Child("name"),
+				group.Name,
+			))
+		}
+		groupNames[group.Name] = true
 
 		for j, roleName := range group.Roles {
 			rolePath := groupPath.Child("roles").Index(j)

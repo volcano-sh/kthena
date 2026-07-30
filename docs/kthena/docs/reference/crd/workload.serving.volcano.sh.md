@@ -897,7 +897,10 @@ _Appears in:_
 
 
 RoleGroup defines a named set of roles that must be scheduled onto the same network
-topology domain as a single scheduling unit.
+topology domain as a single scheduling unit. Name uniqueness across roleGroups and role
+uniqueness within a single group's roles are enforced by the validating webhook rather
+than a CEL XValidation rule here: a quadratic uniqueness check nested inside this list
+pushes the CRD's estimated CEL rule cost over the API server's per-rule budget.
 
 
 
