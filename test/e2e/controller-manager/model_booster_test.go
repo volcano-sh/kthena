@@ -235,6 +235,14 @@ func TestModelCRDisaggregated(t *testing.T) {
 	}, 2*time.Minute, 2*time.Second, "Disaggregated ModelServer should be garbage-collected")
 }
 
+// modelBoosterPodCleanupTimeout bounds how long cleanup waits for a ModelBooster's generated Pods to
+// disappear. The vLLM backend template (pkg/model-booster-controller/convert/templates/vllm.yaml) sets
+// terminationGracePeriodSeconds: 300 on the leader pod, and observed CI behavior shows it uses the full
+// grace period rather than exiting early on SIGTERM. The timeout below leaves headroom above that 300s
+// floor for the owner-reference GC cascade (ModelBooster -> ModelServing -> Pod) and kubelet reap latency
+// on top of it.
+const modelBoosterPodCleanupTimeout = 8 * time.Minute
+
 // cleanupModelBoosterAndWaitForPods deletes a ModelBooster and waits for both the CR and the Pods
 // generated for its backend to be fully removed before returning. Deleting the CR (or waiting only for
 // its removal) is not enough: the ModelBooster's generated ModelServing is garbage-collected
@@ -258,7 +266,7 @@ func cleanupModelBoosterAndWaitForPods(t *testing.T, kthenaClient *clientset.Cli
 	}, 2*time.Minute, 5*time.Second, "cleanup: ModelBooster %s was not deleted", model.Name)
 
 	backendResourceName := mbutils.GetBackendResourceName(model.Name, model.Spec.Backend.Name)
-	waitForPodsGone(t, cleanupCtx, kubeClient, modelServingLabelSelector(backendResourceName), 3*time.Minute)
+	waitForPodsGone(t, cleanupCtx, kubeClient, modelServingLabelSelector(backendResourceName), modelBoosterPodCleanupTimeout)
 }
 
 // assertModelBoosterChildrenSelfHeal verifies that deleting child resources triggers controller recreation.
