@@ -269,7 +269,7 @@ class K8sManager:
         for profile in config.profiles:
             name = f"{self.MOCKER_DEPLOYMENT}-{profile.name}"
             print(f"  Waiting for deployment/{name} to be ready ...")
-            self._wait_for_deployment_ready(name, self.MOCKER_NAMESPACE)
+            self._wait_for_deployment_ready(name, self.MOCKER_NAMESPACE, timeout=300)
 
         # Register with Kthena via ModelServer + ModelRoute CRDs
         self._deploy_model_crds(config)
