@@ -5,7 +5,7 @@ load:
   schedule:
     mode: "concurrency"
   concurrency:
-    connections: 100
+    connections: 10
     ramp:
       strategy: "linear"
       duration: "15s"
