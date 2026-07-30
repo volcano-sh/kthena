@@ -1402,8 +1402,8 @@ func TestAppendSubGroupPolicyWithRoleGroups(t *testing.T) {
 
 // TestAppendSubGroupPolicyWithMultipleRoleGroups proves two independent role groups in the
 // same ServingGroup do not collide: each group's LabelSelector only spans its own roles, so
-// role name disjointness (enforced by the webhook) keeps every pod matching exactly one
-// group's SubGroupPolicy entry.
+// keeping role names disjoint across groups (enforced by the webhook) keeps every pod
+// matching exactly one group's SubGroupPolicy entry.
 func TestAppendSubGroupPolicyWithMultipleRoleGroups(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
