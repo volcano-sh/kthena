@@ -148,10 +148,10 @@ func (g *GlobalRateLimiter) AllowN(now time.Time, n int) bool {
 			
 			return 1 -- Return 1 to indicate request is allowed
 		else
-			-- Insufficient tokens: reject request, but still update bucket state for time synchronization
-			redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
-			redis.call('expire', key, expire_seconds)
-			
+			-- Insufficient tokens: reject request.
+			-- No state update: no tokens were consumed. The next AllowN call
+			-- computes elapsed time from the existing last_update, so time-based
+			-- refill remains accurate without a write here.
 			return 0 -- Return 0 to indicate request is rate limited
 		end
 	`
@@ -228,8 +228,8 @@ func (g *GlobalRateLimiter) Tokens() float64 {
 	defer cancel()
 
 	// Lua script to get current available tokens without consuming any
-	// This script implements a read-only query for the token bucket state, updating
-	// the bucket's time-based refill but not consuming tokens
+	// This script implements a read-only query: it computes the available tokens
+	// from the bucket state without modifying it.
 	//
 	// Use case: Check available tokens for monitoring, debugging, or deciding
 	// whether to make a request before actually attempting it
@@ -238,7 +238,7 @@ func (g *GlobalRateLimiter) Tokens() float64 {
 		local key = KEYS[1]                           -- Redis key name for the token bucket
 		local capacity = tonumber(ARGV[1])            -- Maximum capacity of the token bucket
 		local refill_rate = tonumber(ARGV[2])         -- Token refill rate (tokens per second)
-		local expire_seconds = tonumber(ARGV[3])      -- Expiration time for Redis key (seconds)
+		-- expire_seconds not needed: Tokens() is read-only and does not write
 		
 		-- Get current time from Redis for consistency across distributed systems
 		local time_result = redis.call('time')
@@ -250,27 +250,24 @@ func (g *GlobalRateLimiter) Tokens() float64 {
 		local last_update = tonumber(redis.call('hget', key, 'last_update')) or current_time
 		
 		-- Calculate tokens to add based on elapsed time since last update
-		-- This ensures the bucket reflects the proper state even for read-only operations
+		-- Computes the theoretical token count without modifying bucket state
 		local time_passed = math.max(0, current_time - last_update)
 		local tokens_to_add = time_passed * refill_rate
 		
 		-- Calculate current available tokens, ensuring we don't exceed bucket capacity
 		local available_tokens = math.min(capacity, current_tokens + tokens_to_add)
 		
-		-- Update bucket state to maintain accurate timing for subsequent operations
-		-- Even though this is a read-only query, we update the state to keep the
-		-- token bucket synchronized with real time
-		redis.call('hset', key, 'tokens', available_tokens, 'last_update', current_time)
-		redis.call('expire', key, expire_seconds)
+		-- Read-only: do not write state. Callers use Tokens() for monitoring and
+		-- approximate availability checks. State is updated only in AllowN()
+		-- when tokens are actually consumed.
 		
 		-- Return the number of tokens currently available in the bucket
 		return available_tokens
 	`
 
 	refillRate := g.getRefillRate()
-	expireSeconds := g.getExpireSeconds()
 
-	result := g.client.Eval(ctx, luaScript, []string{key}, g.burst, refillRate, expireSeconds)
+	result := g.client.Eval(ctx, luaScript, []string{key}, g.burst, refillRate)
 
 	if result.Err() != nil {
 		klog.Errorf("failed to execute tokens check lua script: %v", result.Err())

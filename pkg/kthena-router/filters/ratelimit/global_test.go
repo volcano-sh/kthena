@@ -278,19 +278,19 @@ func TestGlobalRateLimiter_Tokens_CorrectArgsPassed(t *testing.T) {
 
 	limiter := newTestGlobalRateLimiter(t, mr, "test-model", "input", 50, networkingv1alpha1.Second)
 
-	// Call Tokens() which executes the Lua script
-	tokens := limiter.Tokens()
-	assert.Equal(t, float64(50), tokens, "Tokens() should return capacity when bucket is full")
+	// Tokens() is now read-only and does not create the Redis key.
+	// AllowN() creates the key with the correct TTL; Tokens() only reads it.
+	allowed := limiter.AllowN(time.Now(), 1)
+	assert.True(t, allowed)
 
-	// Verify the Redis key TTL is set to a reasonable expire value (not a huge timestamp).
-	// The bug fix removed the unused currentTime argument, which was being consumed
-	// as expire_seconds in the Lua script. With the bug, TTL would be ~1.7 billion seconds
-	// (the Unix timestamp). With the fix, TTL should be the actual expire value (600 seconds minimum).
+	tokens := limiter.Tokens()
+	assert.InDelta(t, 49, tokens, 2, "Tokens() should return ~49 after consuming 1 from 50")
+
+	// Verify the key TTL was set by AllowN, not Tokens
 	key := "kthena:ratelimit:test-model:input"
 	ttl := mr.TTL(key)
-	assert.True(t, ttl > 0, "Redis key should have a TTL set")
+	assert.True(t, ttl > 0, "Redis key should have a TTL set by AllowN")
 	assert.LessOrEqual(t, ttl, 90*24*time.Hour, "Redis key TTL should not exceed 90 days maximum")
-	// For Second unit, expire is 600 seconds (minimum bound)
 	assert.InDelta(t, 600, ttl.Seconds(), 10, "TTL should be approximately 600 seconds for Second unit")
 }
 
@@ -330,11 +330,14 @@ func TestGlobalRateLimiter_Tokens_ExpireSecondsPerUnit(t *testing.T) {
 
 			limiter := newTestGlobalRateLimiter(t, mr, "test-model", "input", 100, tt.unit)
 
-			// Call Tokens() to trigger the Lua script
-			tokens := limiter.Tokens()
-			assert.Equal(t, float64(100), tokens)
+			// Tokens() is now read-only and does not set TTL.
+			// AllowN() creates the key with the correct TTL.
+			allowed := limiter.AllowN(time.Now(), 1)
+			assert.True(t, allowed)
 
-			// Verify TTL matches expected expire seconds
+			tokens := limiter.Tokens()
+			assert.InDelta(t, 99, tokens, 2)
+
 			key := "kthena:ratelimit:test-model:input"
 			ttl := mr.TTL(key)
 			assert.InDelta(t, tt.expectedExpire, ttl.Seconds(), 10,
@@ -448,15 +451,17 @@ func TestGlobalRateLimiter_Tokens_KeyFormat(t *testing.T) {
 
 	limiter := newTestGlobalRateLimiter(t, mr, "my-model", "output", 100, networkingv1alpha1.Second)
 
-	// Call Tokens() to create the key
-	limiter.Tokens()
+	// Tokens() is now read-only and does not create the Redis key.
+	// AllowN() creates the key; Tokens() reads it without writing.
+	allowed := limiter.AllowN(time.Now(), 1)
+	assert.True(t, allowed)
 
-	// Verify the Redis key follows the expected format
+	tokens := limiter.Tokens()
+	assert.InDelta(t, 99, tokens, 2)
+
 	key := "kthena:ratelimit:my-model:output"
-	assert.True(t, mr.Exists(key),
-		"Redis key should be in format keyPrefix:modelName:tokenType")
+	assert.True(t, mr.Exists(key), "Redis key should exist after AllowN")
 
-	// Verify hash fields exist
 	hkeys, err := mr.HKeys(key)
 	require.NoError(t, err)
 	assert.Contains(t, hkeys, "tokens", "Hash should contain 'tokens' field")
@@ -540,28 +545,23 @@ func TestGlobalRateLimiter_TokensAndAllowN_ConsistentArgs(t *testing.T) {
 
 	limiter := newTestGlobalRateLimiter(t, mr, "test-model", "input", 100, networkingv1alpha1.Second)
 
-	// Call Tokens() first to initialize the bucket via the Tokens Lua script
+	key := "kthena:ratelimit:test-model:input"
+
+	// Tokens() is now read-only: it must NOT create the Redis key.
 	tokens := limiter.Tokens()
 	assert.Equal(t, float64(100), tokens)
+	assert.False(t, mr.Exists(key), "Tokens() must not create Redis key (read-only fix verification)")
 
-	key := "kthena:ratelimit:test-model:input"
-	ttlAfterTokens := mr.TTL(key)
-
-	// Call AllowN() which uses a separate Lua script
+	// AllowN() creates the key with the correct TTL.
 	allowed := limiter.AllowN(time.Now(), 10)
 	assert.True(t, allowed)
 
 	ttlAfterAllowN := mr.TTL(key)
-
-	// Both should set similar TTLs (both use getExpireSeconds())
-	assert.InDelta(t, ttlAfterTokens.Seconds(), ttlAfterAllowN.Seconds(), 10,
-		"Tokens() and AllowN() should set consistent TTLs")
-
-	// Verify TTL is reasonable (not a Unix timestamp)
-	assert.Less(t, ttlAfterTokens.Seconds(), float64(7776001),
-		"TTL should not be a Unix timestamp (should be ≤ 90 days)")
+	assert.True(t, ttlAfterAllowN > 0, "AllowN should set TTL")
 	assert.Less(t, ttlAfterAllowN.Seconds(), float64(7776001),
 		"TTL should not be a Unix timestamp (should be ≤ 90 days)")
+	assert.InDelta(t, 600, ttlAfterAllowN.Seconds(), 10,
+		"AllowN should set correct TTL for Second unit")
 }
 
 func TestGlobalRateLimiter_Tokens_IntAndFloatReturn(t *testing.T) {
@@ -655,9 +655,22 @@ func TestGlobalRateLimiter_Tokens_AllModelsIsolated(t *testing.T) {
 	assert.InDelta(t, 150, tokensB, 5, "model-b should have ~150 tokens remaining")
 	assert.Equal(t, float64(50), tokensC, "model-c should have full capacity")
 
-	// Verify separate Redis keys exist
-	for _, m := range models {
+	// Verify keys exist only for models that had AllowN calls
+	// (model-c only had Tokens(), which is now read-only and does not create keys)
+	type modelKeyCheck struct {
+		name      string
+		expectKey bool
+	}
+	for _, m := range []modelKeyCheck{
+		{"model-a", true},
+		{"model-b", true},
+		{"model-c", false},
+	} {
 		key := fmt.Sprintf("kthena:ratelimit:%s:input", m.name)
-		assert.True(t, mr.Exists(key), "Redis key should exist for %s", m.name)
+		if m.expectKey {
+			assert.True(t, mr.Exists(key), "Redis key should exist for %s", m.name)
+		} else {
+			assert.False(t, mr.Exists(key), "Redis key should not exist for %s (no AllowN call)", m.name)
+		}
 	}
 }
