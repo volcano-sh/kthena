@@ -1,5 +1,5 @@
 name: "smoke-test-s6-long-response"
-description: "s6 scenario: SSE relay overhead with 1024-token output streams"
+description: "s6 scenario: SSE relay overhead under long output streams"
 
 load:
   schedule:

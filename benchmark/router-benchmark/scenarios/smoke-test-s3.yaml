@@ -1,5 +1,5 @@
 name: "smoke-test-s3-concurrency-scaling"
-description: "s3 scenario: connection pool stress at 200 concurrent connections"
+description: "s3 scenario: connection pool behavior as concurrent connections scale"
 
 load:
   schedule:
