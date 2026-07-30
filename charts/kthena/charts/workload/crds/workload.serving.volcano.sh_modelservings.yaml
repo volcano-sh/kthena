@@ -239,6 +239,7 @@ spec:
                               description: Name identifies this role group. Must be
                                 unique within networkTopology.roleGroups.
                               maxLength: 63
+                              minLength: 1
                               type: string
                             policy:
                               description: |-

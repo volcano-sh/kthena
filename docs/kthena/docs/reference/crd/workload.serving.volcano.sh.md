@@ -906,7 +906,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name identifies this role group. Must be unique within networkTopology.roleGroups. |  | MaxLength: 63 <br /> |
+| `name` _string_ | Name identifies this role group. Must be unique within networkTopology.roleGroups. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
 | `roles` _string array_ | Roles lists the role names that belong to this group. Every name must reference a role<br />defined in spec.template.roles, and a role may belong to at most one group. |  | MaxItems: 4 <br />MinItems: 2 <br /> |
 | `policy` _[NetworkTopologySpec](#networktopologyspec)_ | Policy defines the network topology scheduling requirement applied jointly to all pods<br />across the grouped roles. |  |  |
 

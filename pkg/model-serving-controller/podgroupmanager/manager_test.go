@@ -28,6 +28,7 @@ import (
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
@@ -1393,6 +1394,81 @@ func TestAppendSubGroupPolicyWithRoleGroups(t *testing.T) {
 	}, lbEntry.LabelSelector)
 	assert.Equal(t, []string{workloadv1alpha1.RoleIDKey}, lbEntry.MatchLabelKeys)
 	assert.Nil(t, lbEntry.NetworkTopology)
+}
+
+// TestAppendSubGroupPolicyWithMultipleRoleGroups proves two independent role groups in the
+// same ServingGroup do not collide: each group's LabelSelector only spans its own roles, so
+// role name disjointness (enforced by the webhook) keeps every pod matching exactly one
+// group's SubGroupPolicy entry.
+func TestAppendSubGroupPolicyWithMultipleRoleGroups(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-model-serving",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{Name: "prefill", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+					{Name: "decode", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+					{Name: "worker-a", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+					{Name: "worker-b", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+				},
+				NetworkTopology: &workloadv1alpha1.NetworkTopology{
+					RoleGroups: []workloadv1alpha1.RoleGroup{
+						{
+							Name:   "prefill-decode",
+							Roles:  []string{"prefill", "decode"},
+							Policy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard", HighestTierAllowed: ptr.To(1)},
+						},
+						{
+							Name:   "worker-pair",
+							Roles:  []string{"worker-a", "worker-b"},
+							Policy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard", HighestTierAllowed: ptr.To(2)},
+						},
+					},
+				},
+			},
+		},
+	}
+	minRoleMember := map[string]int32{"prefill": 1, "decode": 1, "worker-a": 1, "worker-b": 1}
+	podGroup := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{}}
+
+	result := appendSubGroupPolicy(ms, podGroup, minRoleMember)
+
+	// No independent per-role entries at all: every role belongs to exactly one of the two
+	// groups, and exactly two merged entries must be produced.
+	require.Len(t, result.Spec.SubGroupPolicy, 2)
+
+	byName := make(map[string]*schedulingv1beta1.SubGroupPolicySpec, 2)
+	for i := range result.Spec.SubGroupPolicy {
+		entry := &result.Spec.SubGroupPolicy[i]
+		byName[entry.Name] = entry
+	}
+
+	pd := byName["prefill-decode"]
+	wp := byName["worker-pair"]
+	require.NotNil(t, pd)
+	require.NotNil(t, wp)
+
+	assert.ElementsMatch(t, []string{"prefill", "decode"}, pd.LabelSelector.MatchExpressions[0].Values)
+	assert.ElementsMatch(t, []string{"worker-a", "worker-b"}, wp.LabelSelector.MatchExpressions[0].Values)
+	assert.Equal(t, ptr.To(1), pd.NetworkTopology.HighestTierAllowed)
+	assert.Equal(t, ptr.To(2), wp.NetworkTopology.HighestTierAllowed)
+
+	// Each group's selector must only ever match its own roles, never the other group's.
+	pdSelector, err := metav1.LabelSelectorAsSelector(pd.LabelSelector)
+	require.NoError(t, err)
+	assert.False(t, pdSelector.Matches(labels.Set{
+		workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+		workloadv1alpha1.RoleLabelKey:             "worker-a",
+	}), "prefill-decode group selector must not match worker-a")
+
+	wpSelector, err := metav1.LabelSelectorAsSelector(wp.LabelSelector)
+	require.NoError(t, err)
+	assert.False(t, wpSelector.Matches(labels.Set{
+		workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+		workloadv1alpha1.RoleLabelKey:             "prefill",
+	}), "worker-pair group selector must not match prefill")
 }
 
 // TestResolveRoleNetworkTopology directly exercises resolveRoleNetworkTopology's nil-safety:

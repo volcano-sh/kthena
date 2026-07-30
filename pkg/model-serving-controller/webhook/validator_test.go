@@ -1838,6 +1838,35 @@ func TestValidateRoleGroups(t *testing.T) {
 				),
 			},
 		},
+		{
+			// A role outside any group may keep its own independent role-level policy while
+			// unrelated roles are grouped; each role still has exactly one unambiguous policy
+			// source, so this is not the kind of mixed-style configuration that must be rejected.
+			name: "role-level policy on an unrelated ungrouped role alongside roleGroups - valid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+								{Name: "decode", Replicas: &replicas},
+								{Name: "lb", Replicas: &replicas, NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{Mode: "soft"}},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "prefill-decode",
+										Roles:  []string{"prefill", "decode"},
+										Policy: hardPolicy,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
 	}
 
 	for _, tt := range tests {

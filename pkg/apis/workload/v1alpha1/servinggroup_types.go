@@ -95,6 +95,7 @@ type NetworkTopology struct {
 // topology domain as a single scheduling unit.
 type RoleGroup struct {
 	// Name identifies this role group. Must be unique within networkTopology.roleGroups.
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
