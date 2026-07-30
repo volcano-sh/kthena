@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -135,5 +136,28 @@ func TestTickToken(t *testing.T) {
 				assert.LessOrEqual(t, got, tt.wantMax)
 			}
 		})
+	}
+}
+
+func TestTickToken_ConcurrentSafety(t *testing.T) {
+	tokenizer := &TickToken{}
+	const goroutines = 50
+	var wg sync.WaitGroup
+	results := make([]int, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			count, err := tokenizer.CalculateTokenNum("hello world")
+			require.NoError(t, err)
+			results[idx] = count
+		}(i)
+	}
+	wg.Wait()
+
+	for i := range results {
+		assert.Equal(t, results[0], results[i],
+			"goroutine %d returned different token count", i)
 	}
 }
