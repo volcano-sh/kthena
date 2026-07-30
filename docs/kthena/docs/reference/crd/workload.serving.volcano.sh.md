@@ -659,6 +659,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `groupPolicy` _[NetworkTopologySpec](#networktopologyspec)_ | GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`. |  |  |
 | `rolePolicy` _[NetworkTopologySpec](#networktopologyspec)_ | RolePolicy defines the default network topology scheduling requirement for roles.<br />Deprecated: use roles[*].networkTopology instead. This field is retained for backward<br />compatibility only and must not be configured together with any role-level networkTopology. |  |  |
+| `roleGroups` _[RoleGroup](#rolegroup) array_ | RoleGroups defines sets of roles whose pods are scheduled as a single unit onto the<br />same network topology domain, e.g. so a `prefill` role and a `decode` role share a<br />HyperNode while an unrelated `lb` role is left unconstrained. Each named role must be<br />unique across all groups and must not also configure spec.template.roles[*].networkTopology.<br />The generated constraint applies at ServingGroup-instance granularity: every pod across<br />every replica of the grouped roles within one ServingGroup instance is scheduled as a<br />single subgroup. It does not pair specific replica indices across roles (e.g. the first<br />`prefill` replica with the first `decode` replica specifically, letting other replica<br />pairs land elsewhere) -- if a grouped role has multiple replicas, all of them are<br />constrained together with the rest of the group. |  | MaxItems: 4 <br /> |
 
 
 #### NetworkTopologySpec
@@ -674,6 +675,7 @@ the Kthena workload API stable if the underlying scheduler API changes incompati
 _Appears in:_
 - [NetworkTopology](#networktopology)
 - [Role](#role)
+- [RoleGroup](#rolegroup)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -887,7 +889,26 @@ _Appears in:_
 | `workerTemplate` _[PodTemplateSpec](#podtemplatespec)_ | WorkerTemplate defines the template for the worker pod of a role. |  |  |
 | `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | The maximum number of replicas that can be unavailable during the update.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).<br />Absolute number is calculated from percentage by rounding down.<br />This can not be 0.<br />By default, a fixed value of 1 is used. | 1 | XIntOrString: \{\} <br /> |
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition indicates the ordinal at which the ModelServing should be partitioned<br />for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to<br />Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
-| `networkTopology` _[NetworkTopologySpec](#networktopologyspec)_ | NetworkTopology defines the network topology scheduling requirement for this role.<br />When set, it takes precedence over spec.template.networkTopology.rolePolicy for this<br />role. It must not be configured together with spec.template.networkTopology.rolePolicy<br />in the same ServingGroup. |  |  |
+| `networkTopology` _[NetworkTopologySpec](#networktopologyspec)_ | NetworkTopology defines the network topology scheduling requirement for this role.<br />When set, it takes precedence over spec.template.networkTopology.rolePolicy for this<br />role. It must not be configured together with spec.template.networkTopology.rolePolicy,<br />and must not be set on a role that is also a member of a<br />spec.template.networkTopology.roleGroups entry. |  |  |
+
+
+#### RoleGroup
+
+
+
+RoleGroup defines a named set of roles that must be scheduled onto the same network
+topology domain as a single scheduling unit.
+
+
+
+_Appears in:_
+- [NetworkTopology](#networktopology)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name identifies this role group. Must be unique within networkTopology.roleGroups. |  | MaxLength: 63 <br /> |
+| `roles` _string array_ | Roles lists the role names that belong to this group. Every name must reference a role<br />defined in spec.template.roles, and a role may belong to at most one group. |  | MaxItems: 4 <br />MinItems: 2 <br /> |
+| `policy` _[NetworkTopologySpec](#networktopologyspec)_ | Policy defines the network topology scheduling requirement applied jointly to all pods<br />across the grouped roles. |  |  |
 
 
 #### RoleRatioConstraint

@@ -73,6 +73,41 @@ type NetworkTopology struct {
 	// Deprecated: use roles[*].networkTopology instead. This field is retained for backward
 	// compatibility only and must not be configured together with any role-level networkTopology.
 	RolePolicy *NetworkTopologySpec `json:"rolePolicy,omitempty"`
+
+	// RoleGroups defines sets of roles whose pods are scheduled as a single unit onto the
+	// same network topology domain, e.g. so a `prefill` role and a `decode` role share a
+	// HyperNode while an unrelated `lb` role is left unconstrained. Each named role must be
+	// unique across all groups and must not also configure spec.template.roles[*].networkTopology.
+	//
+	// The generated constraint applies at ServingGroup-instance granularity: every pod across
+	// every replica of the grouped roles within one ServingGroup instance is scheduled as a
+	// single subgroup. It does not pair specific replica indices across roles (e.g. the first
+	// `prefill` replica with the first `decode` replica specifically, letting other replica
+	// pairs land elsewhere) -- if a grouped role has multiple replicas, all of them are
+	// constrained together with the rest of the group.
+	// +optional
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.name == x.name))", message="roleGroup names must be unique"
+	RoleGroups []RoleGroup `json:"roleGroups,omitempty"`
+}
+
+// RoleGroup defines a named set of roles that must be scheduled onto the same network
+// topology domain as a single scheduling unit.
+type RoleGroup struct {
+	// Name identifies this role group. Must be unique within networkTopology.roleGroups.
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// Roles lists the role names that belong to this group. Every name must reference a role
+	// defined in spec.template.roles, and a role may belong to at most one group.
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y == x))", message="roles within a roleGroup must be unique"
+	Roles []string `json:"roles"`
+
+	// Policy defines the network topology scheduling requirement applied jointly to all pods
+	// across the grouped roles.
+	Policy *NetworkTopologySpec `json:"policy"`
 }
 
 // Role defines the specific pod instance role that performs the inference task.
@@ -110,8 +145,9 @@ type Role struct {
 
 	// NetworkTopology defines the network topology scheduling requirement for this role.
 	// When set, it takes precedence over spec.template.networkTopology.rolePolicy for this
-	// role. It must not be configured together with spec.template.networkTopology.rolePolicy
-	// in the same ServingGroup.
+	// role. It must not be configured together with spec.template.networkTopology.rolePolicy,
+	// and must not be set on a role that is also a member of a
+	// spec.template.networkTopology.roleGroups entry.
 	// +optional
 	NetworkTopology *NetworkTopologySpec `json:"networkTopology,omitempty"`
 }

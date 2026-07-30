@@ -1610,6 +1610,37 @@ func TestValidateNetworkTopologyPolicy(t *testing.T) {
 				),
 			},
 		},
+		{
+			name: "rolePolicy and roleGroups set together - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+								{Name: "decode", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RolePolicy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"},
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "prefill-decode",
+										Roles:  []string{"prefill", "decode"},
+										Policy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups"),
+					"spec.template.networkTopology.rolePolicy and spec.template.networkTopology.roleGroups are mutually exclusive",
+				),
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1618,6 +1649,203 @@ func TestValidateNetworkTopologyPolicy(t *testing.T) {
 
 			if len(got) != len(tt.want) {
 				t.Errorf("validateNetworkTopologyPolicy() = %v, want %v", got, tt.want)
+				return
+			}
+
+			for i := range got {
+				assert.Equalf(t, tt.want[i].Error(), got[i].Error(), "Error mismatch at index %d", i)
+			}
+		})
+	}
+}
+
+func TestValidateRoleGroups(t *testing.T) {
+	replicas := int32(2)
+	hardPolicy := &workloadv1alpha1.NetworkTopologySpec{Mode: "hard", HighestTierAllowed: ptr.To(1)}
+
+	type args struct {
+		ms *workloadv1alpha1.ModelServing
+	}
+	tests := []struct {
+		name string
+		args args
+		want field.ErrorList
+	}{
+		{
+			name: "no roleGroups configured - valid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "valid roleGroup grouping prefill and decode, lb left out",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+								{Name: "decode", Replicas: &replicas},
+								{Name: "lb", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "prefill-decode",
+										Roles:  []string{"prefill", "decode"},
+										Policy: hardPolicy,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "roleGroup referencing unknown role - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "prefill-decode",
+										Roles:  []string{"prefill", "decode"},
+										Policy: hardPolicy,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups").Index(0).Child("roles").Index(1),
+					"decode",
+					`role "decode" does not exist in spec.template.roles`,
+				),
+			},
+		},
+		{
+			name: "role in two roleGroups - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+								{Name: "decode", Replicas: &replicas},
+								{Name: "lb", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "group-a",
+										Roles:  []string{"prefill", "decode"},
+										Policy: hardPolicy,
+									},
+									{
+										Name:   "group-b",
+										Roles:  []string{"prefill", "lb"},
+										Policy: hardPolicy,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups").Index(1).Child("roles").Index(0),
+					"prefill",
+					`role "prefill" is already a member of roleGroup "group-a"; a role may belong to at most one group`,
+				),
+			},
+		},
+		{
+			name: "role in roleGroup also sets its own networkTopology - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas, NetworkTopology: hardPolicy},
+								{Name: "decode", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:   "prefill-decode",
+										Roles:  []string{"prefill", "decode"},
+										Policy: hardPolicy,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups").Index(0).Child("roles").Index(0),
+					`role "prefill" configures its own spec.template.roles[*].networkTopology and cannot also be a member of roleGroup "prefill-decode"`,
+				),
+			},
+		},
+		{
+			name: "roleGroup missing policy - invalid",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "prefill", Replicas: &replicas},
+								{Name: "decode", Replicas: &replicas},
+							},
+							NetworkTopology: &workloadv1alpha1.NetworkTopology{
+								RoleGroups: []workloadv1alpha1.RoleGroup{
+									{
+										Name:  "prefill-decode",
+										Roles: []string{"prefill", "decode"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Required(
+					field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups").Index(0).Child("policy"),
+					"policy is required for a roleGroup",
+				),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateRoleGroups(tt.args.ms)
+
+			if len(got) != len(tt.want) {
+				t.Errorf("validateRoleGroups() = %v, want %v", got, tt.want)
 				return
 			}
 

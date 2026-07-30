@@ -217,6 +217,80 @@ spec:
                         - message: highestTierAllowed and highestTierName cannot be
                             set simultaneously
                           rule: '!(has(self.highestTierAllowed) && has(self.highestTierName))'
+                      roleGroups:
+                        description: |-
+                          RoleGroups defines sets of roles whose pods are scheduled as a single unit onto the
+                          same network topology domain, e.g. so a `prefill` role and a `decode` role share a
+                          HyperNode while an unrelated `lb` role is left unconstrained. Each named role must be
+                          unique across all groups and must not also configure spec.template.roles[*].networkTopology.
+
+                          The generated constraint applies at ServingGroup-instance granularity: every pod across
+                          every replica of the grouped roles within one ServingGroup instance is scheduled as a
+                          single subgroup. It does not pair specific replica indices across roles (e.g. the first
+                          `prefill` replica with the first `decode` replica specifically, letting other replica
+                          pairs land elsewhere) -- if a grouped role has multiple replicas, all of them are
+                          constrained together with the rest of the group.
+                        items:
+                          description: |-
+                            RoleGroup defines a named set of roles that must be scheduled onto the same network
+                            topology domain as a single scheduling unit.
+                          properties:
+                            name:
+                              description: Name identifies this role group. Must be
+                                unique within networkTopology.roleGroups.
+                              maxLength: 63
+                              type: string
+                            policy:
+                              description: |-
+                                Policy defines the network topology scheduling requirement applied jointly to all pods
+                                across the grouped roles.
+                              properties:
+                                highestTierAllowed:
+                                  description: HighestTierAllowed specifies the highest
+                                    tier that a job is allowed to cross when scheduling.
+                                  minimum: 0
+                                  type: integer
+                                highestTierName:
+                                  description: |-
+                                    HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.
+                                    HighestTierName and HighestTierAllowed cannot be set simultaneously.
+                                  maxLength: 253
+                                  type: string
+                                mode:
+                                  default: hard
+                                  description: Mode specifies the mode of the network
+                                    topology constraint.
+                                  enum:
+                                  - hard
+                                  - soft
+                                  type: string
+                              type: object
+                              x-kubernetes-validations:
+                              - message: highestTierAllowed and highestTierName cannot
+                                  be set simultaneously
+                                rule: '!(has(self.highestTierAllowed) && has(self.highestTierName))'
+                            roles:
+                              description: |-
+                                Roles lists the role names that belong to this group. Every name must reference a role
+                                defined in spec.template.roles, and a role may belong to at most one group.
+                              items:
+                                type: string
+                              maxItems: 4
+                              minItems: 2
+                              type: array
+                              x-kubernetes-validations:
+                              - message: roles within a roleGroup must be unique
+                                rule: self.all(x, self.exists_one(y, y == x))
+                          required:
+                          - name
+                          - policy
+                          - roles
+                          type: object
+                        maxItems: 4
+                        type: array
+                        x-kubernetes-validations:
+                        - message: roleGroup names must be unique
+                          rule: self.all(x, self.exists_one(y, y.name == x.name))
                       rolePolicy:
                         description: |-
                           RolePolicy defines the default network topology scheduling requirement for roles.
@@ -8910,8 +8984,9 @@ spec:
                           description: |-
                             NetworkTopology defines the network topology scheduling requirement for this role.
                             When set, it takes precedence over spec.template.networkTopology.rolePolicy for this
-                            role. It must not be configured together with spec.template.networkTopology.rolePolicy
-                            in the same ServingGroup.
+                            role. It must not be configured together with spec.template.networkTopology.rolePolicy,
+                            and must not be set on a role that is also a member of a
+                            spec.template.networkTopology.roleGroups entry.
                           properties:
                             highestTierAllowed:
                               description: HighestTierAllowed specifies the highest

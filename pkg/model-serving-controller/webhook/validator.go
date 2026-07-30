@@ -92,6 +92,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 	allErrs = append(allErrs, validateNetworkTopologyPolicy(modelServing)...)
+	allErrs = append(allErrs, validateRoleGroups(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -319,7 +320,9 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 
 // validateNetworkTopologyPolicy rejects manifests that configure both the compatibility
 // spec.template.networkTopology.rolePolicy field and a role-level networkTopology policy,
-// since the two are mutually exclusive per the accepted role-scoped network topology design.
+// or both rolePolicy and roleGroups, since each style is mutually exclusive with the
+// others per the accepted role-scoped network topology design: exactly one style governs
+// a given ServingGroup's roles, so there is never any ambiguous precedence to resolve.
 func validateNetworkTopologyPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 
@@ -338,6 +341,80 @@ func validateNetworkTopologyPolicy(ms *workloadv1alpha1.ModelServing) field.Erro
 			templatePath.Child("roles").Index(i).Child("networkTopology"),
 			"spec.template.networkTopology.rolePolicy and spec.template.roles[*].networkTopology are mutually exclusive",
 		))
+	}
+
+	if len(ms.Spec.Template.NetworkTopology.RoleGroups) > 0 {
+		allErrs = append(allErrs, field.Forbidden(
+			templatePath.Child("networkTopology").Child("roleGroups"),
+			"spec.template.networkTopology.rolePolicy and spec.template.networkTopology.roleGroups are mutually exclusive",
+		))
+	}
+
+	return allErrs
+}
+
+// validateRoleGroups validates spec.template.networkTopology.roleGroups:
+//   - every referenced role name must exist in spec.template.roles,
+//   - a role may belong to at most one group,
+//   - a role that belongs to a group must not also configure its own
+//     spec.template.roles[*].networkTopology, since the group's policy governs it instead
+//     and mixing the two would create ambiguous precedence.
+func validateRoleGroups(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if ms.Spec.Template.NetworkTopology == nil || len(ms.Spec.Template.NetworkTopology.RoleGroups) == 0 {
+		return allErrs
+	}
+
+	roleGroupsPath := field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups")
+
+	roleNames := make(map[string]bool, len(ms.Spec.Template.Roles))
+	roleHasOwnTopology := make(map[string]bool, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		roleNames[role.Name] = true
+		roleHasOwnTopology[role.Name] = role.NetworkTopology != nil
+	}
+
+	roleGroupOf := make(map[string]string)
+	for i, group := range ms.Spec.Template.NetworkTopology.RoleGroups {
+		groupPath := roleGroupsPath.Index(i)
+
+		for j, roleName := range group.Roles {
+			rolePath := groupPath.Child("roles").Index(j)
+
+			if !roleNames[roleName] {
+				allErrs = append(allErrs, field.Invalid(
+					rolePath,
+					roleName,
+					fmt.Sprintf("role %q does not exist in spec.template.roles", roleName),
+				))
+				continue
+			}
+
+			if existingGroup, exists := roleGroupOf[roleName]; exists {
+				allErrs = append(allErrs, field.Invalid(
+					rolePath,
+					roleName,
+					fmt.Sprintf("role %q is already a member of roleGroup %q; a role may belong to at most one group", roleName, existingGroup),
+				))
+				continue
+			}
+			roleGroupOf[roleName] = group.Name
+
+			if roleHasOwnTopology[roleName] {
+				allErrs = append(allErrs, field.Forbidden(
+					rolePath,
+					fmt.Sprintf("role %q configures its own spec.template.roles[*].networkTopology and cannot also be a member of roleGroup %q", roleName, group.Name),
+				))
+			}
+		}
+
+		if group.Policy == nil {
+			allErrs = append(allErrs, field.Required(
+				groupPath.Child("policy"),
+				"policy is required for a roleGroup",
+			))
+		}
 	}
 
 	return allErrs

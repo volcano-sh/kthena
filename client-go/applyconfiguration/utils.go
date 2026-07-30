@@ -136,6 +136,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.PrometheusMetricSourceApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleGroup"):
+		return &applyconfigurationworkloadv1alpha1.RoleGroupApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioConstraint"):
 		return &applyconfigurationworkloadv1alpha1.RoleRatioConstraintApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioStatus"):

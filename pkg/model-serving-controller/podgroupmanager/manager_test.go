@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -1293,6 +1294,105 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAppendSubGroupPolicyWithRoleGroups proves the actual scheduler-facing mechanism behind
+// cross-role topology grouping, not just that two roles share equal NetworkTopology field
+// values: prefill and decode must collapse into a single SubGroupPolicy entry whose
+// LabelSelector spans both roles and whose MatchLabelKeys is GroupNameLabelKey (not the
+// per-role RoleIDKey used elsewhere in this file). Per Volcano's SubJobInfo construction
+// (getOrCreateSubJob/getSubJobID), pods sharing one SubGroupPolicy entry's LabelSelector and
+// MatchLabelKeys values collapse into one SubJobInfo with one shared AllocatedHyperNode --
+// that shared identity, not merely equal field values, is what the grouping guarantee rests on.
+func TestAppendSubGroupPolicyWithRoleGroups(t *testing.T) {
+	groupPolicy := &schedulingv1beta1.NetworkTopologySpec{
+		Mode:               "hard",
+		HighestTierAllowed: ptr.To(1),
+	}
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-model-serving",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{Name: "prefill", Replicas: ptr.To(int32(2)), WorkerReplicas: 0},
+					{Name: "decode", Replicas: ptr.To(int32(1)), WorkerReplicas: 1},
+					{Name: "lb", Replicas: ptr.To(int32(2)), WorkerReplicas: 0},
+				},
+				NetworkTopology: &workloadv1alpha1.NetworkTopology{
+					RoleGroups: []workloadv1alpha1.RoleGroup{
+						{
+							Name:   "prefill-decode",
+							Roles:  []string{"prefill", "decode"},
+							Policy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard", HighestTierAllowed: ptr.To(1)},
+						},
+					},
+				},
+			},
+		},
+	}
+	minRoleMember := map[string]int32{
+		"prefill": 1,
+		"decode":  2,
+		"lb":      1,
+	}
+	podGroup := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{}}
+
+	result := appendSubGroupPolicy(ms, podGroup, minRoleMember)
+
+	// Exactly two entries: one merged prefill+decode group, one independent lb entry.
+	// Neither prefill nor decode may appear as their own independent entry.
+	require.Len(t, result.Spec.SubGroupPolicy, 2)
+
+	var group, lbEntry *schedulingv1beta1.SubGroupPolicySpec
+	for i := range result.Spec.SubGroupPolicy {
+		entry := &result.Spec.SubGroupPolicy[i]
+		switch entry.Name {
+		case "prefill-decode":
+			group = entry
+		case "lb":
+			lbEntry = entry
+		case "prefill", "decode":
+			t.Fatalf("grouped role %q must not have its own independent SubGroupPolicy entry", entry.Name)
+		}
+	}
+	require.NotNil(t, group, "expected a merged prefill-decode SubGroupPolicy entry")
+	require.NotNil(t, lbEntry, "expected lb to keep its own independent SubGroupPolicy entry")
+
+	// This is the actual coupling mechanism: one LabelSelector spanning both role names,
+	// keyed by the ServingGroup-instance-scoped GroupNameLabelKey rather than the per-role
+	// RoleIDKey, so prefill and decode pods resolve to the same Volcano SubJobInfo.
+	assert.Equal(t, &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+		},
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{
+				Key:      workloadv1alpha1.RoleLabelKey,
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"prefill", "decode"},
+			},
+		},
+	}, group.LabelSelector)
+	assert.Equal(t, []string{workloadv1alpha1.GroupNameLabelKey}, group.MatchLabelKeys)
+	assert.NotEqual(t, []string{workloadv1alpha1.RoleIDKey}, group.MatchLabelKeys,
+		"grouping must not use the per-role RoleIDKey, which would keep prefill and decode independent")
+	// prefill: (1 entry + 0 workers) * 2 replicas = 2; decode: (1 entry + 1 worker) * 1 replica = 2; total 4.
+	assert.Equal(t, ptr.To(int32(4)), group.SubGroupSize)
+	assert.Equal(t, ptr.To(int32(1)), group.MinSubGroups)
+	assert.Equal(t, groupPolicy, group.NetworkTopology)
+
+	// lb is untouched by the group and keeps the ordinary per-role, per-replica-instance shape.
+	assert.Equal(t, &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+			workloadv1alpha1.RoleLabelKey:             "lb",
+		},
+	}, lbEntry.LabelSelector)
+	assert.Equal(t, []string{workloadv1alpha1.RoleIDKey}, lbEntry.MatchLabelKeys)
+	assert.Nil(t, lbEntry.NetworkTopology)
 }
 
 // TestResolveRoleNetworkTopology directly exercises resolveRoleNetworkTopology's nil-safety:
