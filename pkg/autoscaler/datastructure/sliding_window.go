@@ -234,3 +234,12 @@ func (window *SnapshotSlidingWindow[T]) GetLastUnfreshSnapshot() (value T, ok bo
 	}
 	return front.value, true
 }
+
+func (window *SnapshotSlidingWindow[T]) GetLastSnapshot() (value T, ok bool) {
+	currentTimestamp := window.getCurrentTimestamp()
+	window.expire(currentTimestamp)
+	if window.pool.Len() == 0 {
+		return value, false
+	}
+	return window.pool.Back().value, true
+}
