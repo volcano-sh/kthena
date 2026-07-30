@@ -34,7 +34,13 @@ backends:
 
 metrics:
   prometheus: true
-  pprof: false
+  pprof: true
+  cpuProfileSeconds: 15
+  profiles:
+    - heap
+    - goroutine
+    - allocs
+    - mutex
 
 aiperf:
   extraArgs:

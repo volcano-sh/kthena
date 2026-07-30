@@ -14,6 +14,7 @@
 import importlib.util
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -389,17 +390,20 @@ class MetricsCollectorTest(unittest.TestCase):
             requested_urls.append(url)
             return "go_goroutines 17\nprocess_resident_memory_bytes 42\n"
 
-        def fake_fetch_bytes(url):
+        def fake_fetch_bytes(url, timeout=60):
             requested_urls.append(url)
             return f"payload:{url}".encode()
 
         with mock.patch.object(self.collector, "_fetch_text", side_effect=fake_fetch_text):
             with mock.patch.object(self.collector, "_fetch_bytes", side_effect=fake_fetch_bytes):
+                handle = self.collector.start_pprof_collection(
+                    "config_a", "localhost:18080", scenario.metrics
+                )
                 artifacts = self.collector.collect_artifacts(
                     config_name="config_a",
                     scenario=scenario,
                     router_metrics_endpoint="localhost:8080",
-                    router_debug_endpoint="localhost:18080",
+                    pprof_handle=handle,
                 )
 
         self.assertEqual(artifacts["prometheus"]["key_metrics"]["go_goroutines"], 17.0)
@@ -427,12 +431,150 @@ class MetricsCollectorTest(unittest.TestCase):
                     config_name="config_a",
                     scenario=scenario,
                     router_metrics_endpoint="localhost:8080",
-                    router_debug_endpoint="localhost:18080",
                 )
 
         self.assertEqual(artifacts, {})
         fetch_text.assert_not_called()
         fetch_bytes.assert_not_called()
+
+    def test_start_pprof_collection_fetches_profiles(self):
+        fetched = []
+
+        def fake_fetch(url, timeout=60):
+            fetched.append(url)
+            return b"pb"
+
+        with mock.patch.object(self.collector, "_fetch_bytes", side_effect=fake_fetch):
+            handle = self.collector.start_pprof_collection(
+                "config_a",
+                "localhost:18080",
+                {"pprof": True, "cpuProfileSeconds": 7, "profiles": ["heap"]},
+            )
+            result = handle.result(timeout=10)
+
+        self.assertIn("http://localhost:18080/debug/pprof/profile?seconds=7", fetched)
+        self.assertIn("http://localhost:18080/debug/pprof/heap", fetched)
+        self.assertTrue((self.output_dir / "config_a" / "pprof" / "cpu.pb.gz").exists())
+        self.assertIn("cpu", result["profiles"])
+
+    def test_cpu_profile_fetch_timeout_scales_with_seconds(self):
+        calls = []
+
+        def fake_fetch(url, timeout=60):
+            calls.append((url, timeout))
+            return b"pb"
+
+        with mock.patch.object(self.collector, "_fetch_bytes", side_effect=fake_fetch):
+            handle = self.collector.start_pprof_collection(
+                "config_a",
+                "localhost:18080",
+                {"pprof": True, "cpuProfileSeconds": 90, "profiles": []},
+            )
+            handle.result(timeout=10)
+
+        cpu_call = next(c for c in calls if "profile?seconds=90" in c[0])
+        self.assertEqual(cpu_call[1], 120)  # seconds + 30 margin
+
+    def test_pprof_thread_error_is_captured_not_raised(self):
+        with mock.patch.object(self.collector, "_fetch_bytes", side_effect=OSError("boom")):
+            handle = self.collector.start_pprof_collection(
+                "config_a",
+                "localhost:18080",
+                {"pprof": True, "cpuProfileSeconds": 1},
+            )
+            result = handle.result(timeout=10)
+        self.assertIn("boom", result["error"])
+
+    def test_pprof_abandon_then_result_returns_error(self):
+        block = threading.Event()
+
+        def hanging_fetch(url, timeout=60):
+            block.wait(5)  # simulates a stuck fetch; abandon() must not wait for it
+            return b"pb"
+
+        with mock.patch.object(self.collector, "_fetch_bytes", side_effect=hanging_fetch):
+            handle = self.collector.start_pprof_collection(
+                "config_a",
+                "localhost:18080",
+                {"pprof": True},
+            )
+            handle.abandon()
+            result = handle.result(timeout=0.2)  # thread still alive -> timeout branch
+            block.set()  # let the daemon thread finish
+        self.assertIn("error", result)
+
+
+class OrchestratorPprofTest(unittest.TestCase):
+    """Test async pprof wiring in run_single_config."""
+
+    def setUp(self):
+        self.scenario = ab_test.ScenarioConfig(
+            name="test",
+            description="test",
+            load={"duration": "10s"},
+            backends={},
+            metrics={"pprof": True, "cpuProfileSeconds": 7},
+        )
+        self.collector = mock.MagicMock()
+        self.collector.start_pprof_collection.return_value = mock.MagicMock()
+        self.k8s = mock.MagicMock()
+        self.runner = mock.MagicMock()
+        self.runner.run.return_value = ab_test.BenchmarkResult(
+            config_name="config_a",
+            scenario="test",
+            timestamp="",
+            metrics={},
+            raw_output="",
+        )
+
+    def test_starts_pprof_collection_before_aiperf(self):
+        events = []
+
+        def track_start(*args, **kwargs):
+            events.append("pprof_start")
+            return self.collector.start_pprof_collection.return_value
+
+        self.collector.start_pprof_collection.side_effect = track_start
+        self.runner.run.side_effect = lambda **kw: (events.append("aiperf") or self.runner.run.return_value)
+
+        orch = ab_test.ABTestOrchestrator.__new__(ab_test.ABTestOrchestrator)
+        orch.scenario = self.scenario
+        orch.k8s = self.k8s
+        orch.runner = self.runner
+        orch.collector = self.collector
+        orch.router_config_a_path = mock.MagicMock()
+        orch.router_config_b_path = mock.MagicMock()
+        orch.output_dir = mock.MagicMock()
+
+        orch.run_single_config("a.yaml", "config_a")
+
+        self.collector.start_pprof_collection.assert_called_once()
+        self.runner.run.assert_called_once()
+        self.assertEqual(events, ["pprof_start", "aiperf"])
+        self.collector.collect_artifacts.assert_called_once()
+        self.assertIs(
+            self.collector.collect_artifacts.call_args.kwargs["pprof_handle"],
+            self.collector.start_pprof_collection.return_value,
+        )
+
+    def test_aiperf_failure_abandons_pprof_handle(self):
+        import subprocess
+
+        self.runner.run.side_effect = subprocess.CalledProcessError(1, "aiperf")
+
+        orch = ab_test.ABTestOrchestrator.__new__(ab_test.ABTestOrchestrator)
+        orch.scenario = self.scenario
+        orch.k8s = self.k8s
+        orch.runner = self.runner
+        orch.collector = self.collector
+        orch.router_config_a_path = mock.MagicMock()
+        orch.router_config_b_path = mock.MagicMock()
+        orch.output_dir = mock.MagicMock()
+
+        result = orch.run_single_config("a.yaml", "config_a")
+
+        self.assertEqual(result.verdict["status"], "framework_error")
+        self.collector.start_pprof_collection.return_value.abandon.assert_called_once()
 
 
 class MainTest(unittest.TestCase):
