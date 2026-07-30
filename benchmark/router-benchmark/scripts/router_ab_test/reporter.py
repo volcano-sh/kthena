@@ -581,14 +581,14 @@ class ResultReporter:
         if comparison.get("_skipped"):
             print(f"\nComparison skipped: {comparison.get('reason', '<no reason>')}")
         else:
-            print("\nComparison (B vs A, positive delta means improvement):")
+            print("\nEnd-to-end Metrics Comparison (B vs A, positive delta means improvement):")
             for metric, data in comparison.items():
                 status = "REGRESSION" if data["regression"] else "OK"
                 print(f"  {metric}: {data['delta_pct']:+.2f}% [{status}]")
 
         router_comparison = report.get("router_comparison") or {}
         if router_comparison:
-            print("\nRouter metrics comparison (B vs A):")
+            print("\nRouter Metrics Comparison (B vs A):")
             for metric, data in router_comparison.items():
                 status = "REGRESSION" if data["regression"] else "OK"
                 if "delta_pp" in data:
