@@ -18,6 +18,7 @@ package controller_manager
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -55,7 +56,41 @@ func TestModelCR(t *testing.T) {
 	require.NoError(t, err, "Failed to create Model CR")
 	require.NotNil(t, createdModel)
 	t.Cleanup(func() {
-		cleanupModelBoosterAndWaitForPods(t, kthenaClient, kubeClient, model)
+		cleanupCtx := context.Background()
+		if err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(cleanupCtx, model.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("cleanup: failed to delete ModelBooster %s: %v", model.Name, err)
+		}
+
+		// Deleting the CR only removes the CR objects; the generated vLLM Pod has a long
+		// terminationGracePeriodSeconds and can still be Terminating for a while afterwards.
+		// Best-effort wait for it to disappear so the next test doesn't contend for node
+		// resources with a Pod that is still shutting down. This runs as part of cleanup (not
+		// as a trailing test-body assertion) so it is attempted even if an earlier assertion in
+		// this test already failed, and it uses assert.Eventually (not require.Eventually) so a
+		// slow-terminating Pod is logged rather than treated as a fatal failure of TestModelCR.
+		backendResourceName := mbutils.GetBackendResourceName(model.Name, model.Spec.Backend.Name)
+		podLabelSelector := modelServingLabelSelector(backendResourceName)
+		assert.Eventually(t, func() bool {
+			pods, err := kubeClient.CoreV1().Pods(testNamespace).List(cleanupCtx, metav1.ListOptions{
+				LabelSelector: podLabelSelector,
+			})
+			if err != nil {
+				t.Logf("cleanup: failed to list pods for %s: %v", backendResourceName, err)
+				return false
+			}
+			if len(pods.Items) > 0 {
+				remaining := make([]string, 0, len(pods.Items))
+				for _, pod := range pods.Items {
+					deletionState := "not-set"
+					if pod.DeletionTimestamp != nil {
+						deletionState = pod.DeletionTimestamp.Format(time.RFC3339)
+					}
+					remaining = append(remaining, fmt.Sprintf("%s(phase=%s,deletionTimestamp=%s)", pod.Name, pod.Status.Phase, deletionState))
+				}
+				t.Logf("cleanup: waiting for %d generated pod(s) to terminate: %v", len(pods.Items), remaining)
+			}
+			return len(pods.Items) == 0
+		}, 6*time.Minute, 5*time.Second, "cleanup: generated workload Pods for %s were not terminated", backendResourceName)
 	})
 	t.Logf("Created Model CR: %s/%s", createdModel.Namespace, createdModel.Name)
 
@@ -168,30 +203,6 @@ func TestModelCR(t *testing.T) {
 		list, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).List(ctx, listOpts)
 		return err == nil && len(list.Items) == 0
 	}, 2*time.Minute, 5*time.Second, "Orphan ModelRoutes should be garbage-collected")
-
-	// Deleting the CR only removes the CR objects; the generated vLLM Pod has a long
-	// terminationGracePeriodSeconds and can still be Terminating for a while afterwards.
-	// Wait for it to fully disappear so the next test doesn't contend for node resources
-	// with a Pod that is still shutting down.
-	t.Log("Verifying generated workload Pods have terminated")
-	podLabelSelector := modelServingLabelSelector(expectedChildName)
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: podLabelSelector,
-		})
-		if err != nil {
-			t.Logf("Failed to list pods for %s: %v", expectedChildName, err)
-			return false
-		}
-		if len(pods.Items) > 0 {
-			names := make([]string, 0, len(pods.Items))
-			for _, pod := range pods.Items {
-				names = append(names, pod.Name)
-			}
-			t.Logf("Waiting for %d generated pod(s) to terminate: %v", len(pods.Items), names)
-		}
-		return len(pods.Items) == 0
-	}, 6*time.Minute, 5*time.Second, "Generated workload Pods for %s were not terminated", expectedChildName)
 }
 
 // TestModelCRDisaggregated verifies that a vLLMDisaggregated ModelBooster is
