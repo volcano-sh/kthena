@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,11 +32,9 @@ import (
 )
 
 // LineDispatcher executes one batch input line against a model endpoint.
-// Implementations typically reuse the router's load-balancing path.
 type LineDispatcher func(ctx context.Context, endpoint string, body json.RawMessage) (statusCode int, responseBody []byte, requestID string, err error)
 
 // InteractiveLoadFunc returns the current interactive active-request count.
-// Used so batch concurrency can back off under interactive pressure.
 type InteractiveLoadFunc func() int64
 
 // Worker processes batch jobs asynchronously inside the router process.
@@ -47,11 +46,12 @@ type Worker struct {
 	concurrency   int
 	busyThreshold int64
 
-	queue chan string
-	wg    sync.WaitGroup
-
-	mu       sync.Mutex
-	inflight map[string]struct{}
+	queue       chan string
+	loopWG      sync.WaitGroup
+	jobWG       sync.WaitGroup
+	mu          sync.Mutex
+	inflight    map[string]struct{}
+	activeLines atomic.Int64
 }
 
 // WorkerConfig configures the batch worker.
@@ -61,7 +61,7 @@ type WorkerConfig struct {
 	QueueSize                int
 }
 
-// NewWorker constructs a batch worker. dispatch must be non-nil for processing.
+// NewWorker constructs a batch worker.
 func NewWorker(files FileStore, batches BatchStore, dispatch LineDispatcher, interactive InteractiveLoadFunc, cfg WorkerConfig) *Worker {
 	concurrency := cfg.Concurrency
 	if concurrency <= 0 {
@@ -73,7 +73,7 @@ func NewWorker(files FileStore, batches BatchStore, dispatch LineDispatcher, int
 	}
 	qsize := cfg.QueueSize
 	if qsize <= 0 {
-		qsize = 256
+		qsize = DefaultWorkerQueueSize
 	}
 	return &Worker{
 		files:         files,
@@ -87,117 +87,123 @@ func NewWorker(files FileStore, batches BatchStore, dispatch LineDispatcher, int
 	}
 }
 
-// Enqueue schedules a batch ID for processing (non-blocking; drops if full after warn).
-func (w *Worker) Enqueue(batchID string) {
+// Enqueue schedules a batch ID for processing. Blocks until queued or ctx is done.
+func (w *Worker) Enqueue(ctx context.Context, batchID string) error {
 	if w == nil || batchID == "" {
-		return
+		return nil
 	}
 	select {
 	case w.queue <- batchID:
-	default:
-		klog.Warningf("batch worker queue full; dropping enqueue for %s", batchID)
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %v", ErrEnqueueTimeout, ctx.Err())
 	}
 }
 
-// Start runs the worker loop until ctx is cancelled, then waits for in-flight jobs.
+// Start runs the worker loop until ctx is cancelled.
 func (w *Worker) Start(ctx context.Context) {
 	if w == nil {
 		return
 	}
-	w.wg.Add(1)
+	w.loopWG.Add(1)
 	go func() {
-		defer w.wg.Done()
+		defer w.loopWG.Done()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case id := <-w.queue:
-				w.processOne(ctx, id)
+				w.jobWG.Add(1)
+				go func(batchID string) {
+					defer w.jobWG.Done()
+					w.processOne(ctx, batchID)
+				}(id)
 			}
 		}
 	}()
 }
 
-// Stop waits for the worker loop to exit (caller must cancel Start's context first).
+// Stop waits for the loop and in-flight jobs to finish.
+// Caller must cancel the context passed to Start first.
 func (w *Worker) Stop() {
 	if w == nil {
 		return
 	}
-	w.wg.Wait()
+	w.loopWG.Wait()
+	w.jobWG.Wait()
+}
+
+func (w *Worker) tryBegin(batchID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.inflight[batchID]; ok {
+		return false
+	}
+	w.inflight[batchID] = struct{}{}
+	return true
+}
+
+func (w *Worker) end(batchID string) {
+	w.mu.Lock()
+	delete(w.inflight, batchID)
+	w.mu.Unlock()
 }
 
 func (w *Worker) processOne(ctx context.Context, batchID string) {
-	w.mu.Lock()
-	if _, ok := w.inflight[batchID]; ok {
-		w.mu.Unlock()
+	if !w.tryBegin(batchID) {
 		return
 	}
-	w.inflight[batchID] = struct{}{}
-	w.mu.Unlock()
-	defer func() {
-		w.mu.Lock()
-		delete(w.inflight, batchID)
-		w.mu.Unlock()
-	}()
+	defer w.end(batchID)
 
-	batch, err := w.batches.Get(ctx, batchID)
+	b, err := w.batches.Get(ctx, batchID)
 	if err != nil {
 		klog.Errorf("batch worker: get %s: %v", batchID, err)
 		return
 	}
 
-	switch batch.Status {
+	switch b.Status {
 	case StatusValidating:
-		w.runValidating(ctx, batch)
-	case StatusInProgress, StatusCancelling:
-		// Resume / continue — re-read input and process remaining is complex;
-		// for MVP re-run full processing only from validating → in_progress.
-		// If already in_progress after restart, mark failed with clear error.
-		if batch.Status == StatusInProgress && batch.RequestCounts.Completed+batch.RequestCounts.Failed == 0 {
-			w.runInProgress(ctx, batch, nil)
-			return
+		w.runValidating(ctx, b)
+	case StatusInProgress:
+		if b.RequestCounts.Completed+b.RequestCounts.Failed == 0 {
+			w.runInProgress(ctx, b, nil)
 		}
-		if batch.Status == StatusCancelling {
-			w.finishCancelled(ctx, batch)
-		}
-	default:
-		// Terminal or finalizing — nothing to do.
+	case StatusCancelling:
+		w.finishCancelled(ctx, b)
 	}
 }
 
-func (w *Worker) runValidating(ctx context.Context, batch *BatchObject) {
-	lines, verrs, err := w.readAndValidate(ctx, batch)
+func (w *Worker) runValidating(ctx context.Context, b *BatchObject) {
+	lines, verrs, err := w.readAndValidate(ctx, b)
 	if err != nil {
-		w.failBatch(ctx, batch, "invalid_request_error", err.Error(), nil)
+		w.failBatch(ctx, b, "invalid_request_error", err.Error(), nil)
 		return
 	}
 	if len(verrs) > 0 {
-		w.failBatch(ctx, batch, verrs[0].Code, verrs[0].Message, verrs)
+		w.failBatch(ctx, b, verrs[0].Code, verrs[0].Message, verrs)
 		return
 	}
 
 	now := time.Now().Unix()
-	batch.Status = StatusInProgress
-	batch.InProgressAt = &now
-	batch.RequestCounts.Total = len(lines)
-	if _, err := w.batches.Update(ctx, batch); err != nil {
-		klog.Errorf("batch worker: update in_progress %s: %v", batch.ID, err)
+	b.Status = StatusInProgress
+	b.InProgressAt = &now
+	b.RequestCounts.Total = len(lines)
+	if _, err := w.batches.Update(ctx, b); err != nil {
+		klog.Errorf("batch worker: update in_progress %s: %v", b.ID, err)
 		return
 	}
-	w.runInProgress(ctx, batch, lines)
+	w.runInProgress(ctx, b, lines)
 }
 
-func (w *Worker) readAndValidate(ctx context.Context, batch *BatchObject) ([]InputLine, []BatchError, error) {
-	rc, meta, err := w.files.Open(ctx, batch.InputFileID)
+func (w *Worker) readAndValidate(ctx context.Context, b *BatchObject) ([]InputLine, []BatchError, error) {
+	rc, _, err := w.files.Open(ctx, b.InputFileID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open input file: %w", err)
 	}
 	defer rc.Close()
-	_ = meta
 
 	scanner := bufio.NewScanner(rc)
-	// Allow large JSONL lines (up to ~1 MiB per line by default buffer growth).
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, DefaultScannerBufSize), DefaultScannerMaxToken)
 
 	var lines []InputLine
 	var errs []BatchError
@@ -226,36 +232,11 @@ func (w *Worker) readAndValidate(ctx context.Context, batch *BatchObject) ([]Inp
 			errs = append(errs, BatchError{Code: "invalid_json", Message: err.Error(), Line: &ln})
 			continue
 		}
-		if in.CustomID == "" {
-			ln := lineNo
-			errs = append(errs, BatchError{Code: "missing_custom_id", Message: "custom_id is required", Line: &ln})
-			continue
-		}
-		if _, dup := seen[in.CustomID]; dup {
-			ln := lineNo
-			errs = append(errs, BatchError{Code: "duplicate_custom_id", Message: in.CustomID, Line: &ln})
+		if verr := validateInputLine(in, b.Endpoint, lineNo, seen); verr != nil {
+			errs = append(errs, *verr)
 			continue
 		}
 		seen[in.CustomID] = struct{}{}
-		if !strings.EqualFold(in.Method, "POST") {
-			ln := lineNo
-			errs = append(errs, BatchError{Code: "invalid_method", Message: in.Method, Line: &ln})
-			continue
-		}
-		if in.URL != batch.Endpoint {
-			ln := lineNo
-			errs = append(errs, BatchError{
-				Code:    "invalid_url",
-				Message: fmt.Sprintf("url %q does not match batch endpoint %q", in.URL, batch.Endpoint),
-				Line:    &ln,
-			})
-			continue
-		}
-		if len(in.Body) == 0 || string(in.Body) == "null" {
-			ln := lineNo
-			errs = append(errs, BatchError{Code: "missing_body", Message: "body is required", Line: &ln})
-			continue
-		}
 		lines = append(lines, in)
 	}
 	if err := scanner.Err(); err != nil {
@@ -267,46 +248,77 @@ func (w *Worker) readAndValidate(ctx context.Context, batch *BatchObject) ([]Inp
 	return lines, errs, nil
 }
 
-func (w *Worker) runInProgress(ctx context.Context, batch *BatchObject, lines []InputLine) {
-	var err error
+func validateInputLine(in InputLine, endpoint string, lineNo int, seen map[string]struct{}) *BatchError {
+	ln := lineNo
+	if in.CustomID == "" {
+		return &BatchError{Code: "missing_custom_id", Message: "custom_id is required", Line: &ln}
+	}
+	if _, dup := seen[in.CustomID]; dup {
+		return &BatchError{Code: "duplicate_custom_id", Message: in.CustomID, Line: &ln}
+	}
+	if !strings.EqualFold(in.Method, httpMethodPOST) {
+		return &BatchError{Code: "invalid_method", Message: in.Method, Line: &ln}
+	}
+	if in.URL != endpoint {
+		return &BatchError{
+			Code:    "invalid_url",
+			Message: fmt.Sprintf("url %q does not match batch endpoint %q", in.URL, endpoint),
+			Line:    &ln,
+		}
+	}
+	if len(in.Body) == 0 || string(in.Body) == "null" {
+		return &BatchError{Code: "missing_body", Message: "body is required", Line: &ln}
+	}
+	return nil
+}
+
+const httpMethodPOST = "POST"
+
+func (w *Worker) runInProgress(ctx context.Context, b *BatchObject, lines []InputLine) {
 	if lines == nil {
-		lines, _, err = w.readAndValidate(ctx, batch)
+		var err error
+		lines, _, err = w.readAndValidate(ctx, b)
 		if err != nil || len(lines) == 0 {
-			w.failBatch(ctx, batch, "invalid_request_error", "failed to resume batch", nil)
+			w.failBatch(ctx, b, "invalid_request_error", "failed to resume batch", nil)
 			return
 		}
 	}
 
+	endpoint := b.Endpoint
+	batchID := b.ID
+	total := len(lines)
+
 	sem := make(chan struct{}, w.concurrency)
 	var (
-		mu        sync.Mutex
-		outLines  []OutputLine
-		errLines  []OutputLine
-		completed int
-		failed    int
-		cancelled bool
-		expired   bool
+		mu          sync.Mutex
+		outLines    []OutputLine
+		errLines    []OutputLine
+		completed   int
+		failed      int
+		cancelled   bool
+		expired     bool
+		interrupted bool
+		processed   = make(map[string]struct{}, total)
 	)
 
 	var wg sync.WaitGroup
 	for _, line := range lines {
-		// Refresh cancel / expiry between scheduling.
-		cur, gerr := w.batches.Get(ctx, batch.ID)
+		cur, gerr := w.batches.Get(ctx, batchID)
 		if gerr == nil {
-			batch = cur
-		}
-		if batch.Status == StatusCancelling {
-			cancelled = true
-			break
-		}
-		if batch.ExpiresAt != nil && time.Now().Unix() > *batch.ExpiresAt {
-			expired = true
-			break
+			if cur.Status == StatusCancelling {
+				cancelled = true
+				break
+			}
+			if cur.ExpiresAt != nil && time.Now().Unix() > *cur.ExpiresAt {
+				expired = true
+				break
+			}
 		}
 
 		w.waitForCapacity(ctx)
 		if ctx.Err() != nil {
-			return
+			interrupted = true
+			break
 		}
 
 		sem <- struct{}{}
@@ -315,9 +327,10 @@ func (w *Worker) runInProgress(ctx context.Context, batch *BatchObject, lines []
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			out := w.dispatchLine(ctx, batch.Endpoint, in)
+			out := w.dispatchLine(ctx, endpoint, in)
+
 			mu.Lock()
-			defer mu.Unlock()
+			processed[in.CustomID] = struct{}{}
 			if out.Error != nil {
 				errLines = append(errLines, out)
 				failed++
@@ -325,128 +338,158 @@ func (w *Worker) runInProgress(ctx context.Context, batch *BatchObject, lines []
 				outLines = append(outLines, out)
 				completed++
 			}
-			batch.RequestCounts.Completed = completed
-			batch.RequestCounts.Failed = failed
-			batch.RequestCounts.Total = len(lines)
-			if _, uerr := w.batches.Update(ctx, batch); uerr != nil {
-				klog.Warningf("batch worker: progress update %s: %v", batch.ID, uerr)
+			counts := RequestCounts{Total: total, Completed: completed, Failed: failed}
+			mu.Unlock()
+
+			if err := w.batches.UpdateRequestCounts(ctx, batchID, counts); err != nil {
+				klog.Warningf("batch worker: progress update %s: %v", batchID, err)
 			}
 		}(line)
 	}
 	wg.Wait()
 
-	// Re-read for cancel that arrived during run.
-	if cur, gerr := w.batches.Get(ctx, batch.ID); gerr == nil {
-		batch = cur
-		if batch.Status == StatusCancelling {
-			cancelled = true
+	cur, err := w.batches.Get(ctx, batchID)
+	if err != nil {
+		klog.Errorf("batch worker: reload %s: %v", batchID, err)
+		return
+	}
+	if cur.Status == StatusCancelling {
+		cancelled = true
+	}
+
+	// Lines never started because of cancel/expiry/interrupt.
+	for _, in := range lines {
+		if _, ok := processed[in.CustomID]; ok {
+			continue
 		}
+		code := "batch_cancelled"
+		msg := "This request was not executed because the batch was cancelled."
+		if expired {
+			code = "batch_expired"
+			msg = "This request could not be executed before the completion window expired."
+		} else if interrupted {
+			code = "batch_interrupted"
+			msg = "This request was not executed because the batch worker was interrupted."
+		} else if !cancelled {
+			continue
+		}
+		errLines = append(errLines, OutputLine{
+			ID:       BatchRequestIDPrefix + uuid.New().String(),
+			CustomID: in.CustomID,
+			Error:    &LineError{Code: code, Message: msg},
+		})
+		failed++
 	}
 
-	batch.RequestCounts = RequestCounts{Total: len(lines), Completed: completed, Failed: failed}
+	cur.RequestCounts = RequestCounts{Total: total, Completed: completed, Failed: failed}
 
-	if cancelled {
-		_ = w.writeResultFiles(ctx, batch, outLines, errLines)
-		w.finishCancelled(ctx, batch)
-		return
-	}
-	if expired {
-		_ = w.writeResultFiles(ctx, batch, outLines, errLines)
+	switch {
+	case cancelled:
+		_ = w.writeResultFiles(ctx, cur, outLines, errLines)
+		w.finishCancelled(ctx, cur)
+	case expired:
+		_ = w.writeResultFiles(ctx, cur, outLines, errLines)
 		now := time.Now().Unix()
-		batch.Status = StatusExpired
-		batch.ExpiredAt = &now
-		_, _ = w.batches.Update(ctx, batch)
-		return
-	}
-
-	now := time.Now().Unix()
-	batch.Status = StatusFinalizing
-	batch.FinalizingAt = &now
-	_, _ = w.batches.Update(ctx, batch)
-
-	if err := w.writeResultFiles(ctx, batch, outLines, errLines); err != nil {
-		w.failBatch(ctx, batch, "server_error", err.Error(), nil)
-		return
-	}
-
-	now = time.Now().Unix()
-	batch.Status = StatusCompleted
-	batch.CompletedAt = &now
-	if _, err := w.batches.Update(ctx, batch); err != nil {
-		klog.Errorf("batch worker: complete %s: %v", batch.ID, err)
+		cur.Status = StatusExpired
+		cur.ExpiredAt = &now
+		if _, err := w.batches.Update(ctx, cur); err != nil {
+			klog.Errorf("batch worker: expire %s: %v", batchID, err)
+		}
+	case interrupted:
+		_ = w.writeResultFiles(ctx, cur, outLines, errLines)
+		w.failBatch(ctx, cur, "server_error", "batch worker interrupted", nil)
+	default:
+		now := time.Now().Unix()
+		cur.Status = StatusFinalizing
+		cur.FinalizingAt = &now
+		if _, err := w.batches.Update(ctx, cur); err != nil {
+			klog.Errorf("batch worker: finalizing %s: %v", batchID, err)
+			return
+		}
+		if err := w.writeResultFiles(ctx, cur, outLines, errLines); err != nil {
+			w.failBatch(ctx, cur, "server_error", err.Error(), nil)
+			return
+		}
+		now = time.Now().Unix()
+		cur.Status = StatusCompleted
+		cur.CompletedAt = &now
+		if _, err := w.batches.Update(ctx, cur); err != nil {
+			klog.Errorf("batch worker: complete %s: %v", batchID, err)
+		}
 	}
 }
 
 func (w *Worker) dispatchLine(ctx context.Context, endpoint string, in InputLine) OutputLine {
-	id := "batch_req_" + uuid.New().String()
+	id := BatchRequestIDPrefix + uuid.New().String()
+	w.activeLines.Add(1)
+	defer w.activeLines.Add(-1)
+
 	if w.dispatch == nil {
 		return OutputLine{
-			ID:       id,
-			CustomID: in.CustomID,
-			Error:    &LineError{Code: "server_error", Message: "batch dispatcher not configured"},
+			ID: id, CustomID: in.CustomID,
+			Error: &LineError{Code: "server_error", Message: "batch dispatcher not configured"},
 		}
 	}
+
 	status, body, reqID, err := w.dispatch(ctx, endpoint, in.Body)
 	if err != nil {
 		return OutputLine{
-			ID:       id,
-			CustomID: in.CustomID,
-			Error:    &LineError{Code: "server_error", Message: err.Error()},
+			ID: id, CustomID: in.CustomID,
+			Error: &LineError{Code: "server_error", Message: err.Error()},
 		}
+	}
+
+	raw := asJSONBody(body)
+	line := OutputLine{
+		ID:       id,
+		CustomID: in.CustomID,
+		Response: &LineResponse{StatusCode: status, RequestID: reqID, Body: raw},
 	}
 	if status >= 400 {
 		msg := string(body)
 		if msg == "" {
 			msg = fmt.Sprintf("upstream status %d", status)
 		}
-		raw := body
-		if !json.Valid(raw) {
-			quoted, _ := json.Marshal(string(raw))
-			raw = quoted
-		}
-		return OutputLine{
-			ID:       id,
-			CustomID: in.CustomID,
-			Response: &LineResponse{StatusCode: status, RequestID: reqID, Body: raw},
-			Error:    &LineError{Code: "upstream_error", Message: msg},
-		}
+		line.Error = &LineError{Code: "upstream_error", Message: msg}
 	}
-	raw := body
-	if !json.Valid(raw) {
-		quoted, _ := json.Marshal(string(raw))
-		raw = quoted
-	}
-	return OutputLine{
-		ID:       id,
-		CustomID: in.CustomID,
-		Response: &LineResponse{StatusCode: status, RequestID: reqID, Body: raw},
-	}
+	return line
 }
 
-func (w *Worker) writeResultFiles(ctx context.Context, batch *BatchObject, outLines, errLines []OutputLine) error {
+func asJSONBody(body []byte) json.RawMessage {
+	if json.Valid(body) {
+		return body
+	}
+	quoted, err := json.Marshal(string(body))
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return quoted
+}
+
+func (w *Worker) writeResultFiles(ctx context.Context, b *BatchObject, outLines, errLines []OutputLine) error {
 	if len(outLines) > 0 {
 		buf, err := encodeJSONL(outLines)
 		if err != nil {
 			return err
 		}
-		obj, err := w.files.Create(ctx, batch.ID+"-output.jsonl", PurposeBatchOutput, bytes.NewReader(buf))
+		obj, err := w.files.Create(ctx, b.ID+"-output.jsonl", PurposeBatchOutput, bytes.NewReader(buf))
 		if err != nil {
 			return fmt.Errorf("create output file: %w", err)
 		}
-		batch.OutputFileID = &obj.ID
+		b.OutputFileID = &obj.ID
 	}
 	if len(errLines) > 0 {
 		buf, err := encodeJSONL(errLines)
 		if err != nil {
 			return err
 		}
-		obj, err := w.files.Create(ctx, batch.ID+"-errors.jsonl", PurposeBatchOutput, bytes.NewReader(buf))
+		obj, err := w.files.Create(ctx, b.ID+"-errors.jsonl", PurposeBatchOutput, bytes.NewReader(buf))
 		if err != nil {
 			return fmt.Errorf("create error file: %w", err)
 		}
-		batch.ErrorFileID = &obj.ID
+		b.ErrorFileID = &obj.ID
 	}
-	_, err := w.batches.Update(ctx, batch)
+	_, err := w.batches.Update(ctx, b)
 	return err
 }
 
@@ -461,25 +504,25 @@ func encodeJSONL(lines []OutputLine) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (w *Worker) failBatch(ctx context.Context, batch *BatchObject, code, message string, details []BatchError) {
+func (w *Worker) failBatch(ctx context.Context, b *BatchObject, code, message string, details []BatchError) {
 	now := time.Now().Unix()
-	batch.Status = StatusFailed
-	batch.FailedAt = &now
+	b.Status = StatusFailed
+	b.FailedAt = &now
 	if len(details) == 0 {
 		details = []BatchError{{Code: code, Message: message}}
 	}
-	batch.Errors = &BatchErrors{Object: "list", Data: details}
-	if _, err := w.batches.Update(ctx, batch); err != nil {
-		klog.Errorf("batch worker: fail %s: %v", batch.ID, err)
+	b.Errors = &BatchErrors{Object: ObjectList, Data: details}
+	if _, err := w.batches.Update(ctx, b); err != nil {
+		klog.Errorf("batch worker: fail %s: %v", b.ID, err)
 	}
 }
 
-func (w *Worker) finishCancelled(ctx context.Context, batch *BatchObject) {
+func (w *Worker) finishCancelled(ctx context.Context, b *BatchObject) {
 	now := time.Now().Unix()
-	batch.Status = StatusCancelled
-	batch.CancelledAt = &now
-	if _, err := w.batches.Update(ctx, batch); err != nil {
-		klog.Errorf("batch worker: cancel %s: %v", batch.ID, err)
+	b.Status = StatusCancelled
+	b.CancelledAt = &now
+	if _, err := w.batches.Update(ctx, b); err != nil {
+		klog.Errorf("batch worker: cancel %s: %v", b.ID, err)
 	}
 }
 
@@ -488,16 +531,21 @@ func (w *Worker) waitForCapacity(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if w.interactive == nil || w.busyThreshold <= 0 {
+		if w.busyThreshold <= 0 {
 			return
 		}
-		if w.interactive() < w.busyThreshold {
+		var interactive int64
+		if w.interactive != nil {
+			interactive = w.interactive()
+		}
+		load := interactive + w.activeLines.Load()
+		if load < w.busyThreshold {
 			return
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(DefaultBusyPollInterval):
 		}
 	}
 }

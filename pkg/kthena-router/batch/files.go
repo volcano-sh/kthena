@@ -31,12 +31,21 @@ import (
 // It is analogous to Router.ListModels: a dedicated control-plane handler that
 // does not enter ParseModelRequest / doLoadbalance.
 type Handler struct {
-	store FileStore
+	store        FileStore
+	maxFileBytes int64
 }
 
 // NewHandler returns a Files API handler. store may be nil (feature disabled).
 func NewHandler(store FileStore) *Handler {
-	return &Handler{store: store}
+	return NewHandlerWithLimits(store, DefaultMaxFileBytes)
+}
+
+// NewHandlerWithLimits returns a Files API handler with an explicit upload size cap.
+func NewHandlerWithLimits(store FileStore, maxFileBytes int64) *Handler {
+	if maxFileBytes <= 0 {
+		maxFileBytes = DefaultMaxFileBytes
+	}
+	return &Handler{store: store, maxFileBytes: maxFileBytes}
 }
 
 // ServeHTTP dispatches by method and path suffix under /v1/files or /files.
@@ -97,6 +106,12 @@ func filesPathSuffix(path string) (string, bool) {
 }
 
 func (h *Handler) upload(c *gin.Context) {
+	// Bound multipart parse memory/disk before reading form fields/file.
+	if err := c.Request.ParseMultipartForm(h.maxFileBytes); err != nil {
+		abortFromStoreError(c, fmt.Errorf("%w: %v", ErrTooLarge, err))
+		return
+	}
+
 	purpose := c.PostForm(FormFieldPurpose)
 	if purpose == "" {
 		abortFromStoreError(c, ErrMissingPurpose)
@@ -110,6 +125,10 @@ func (h *Handler) upload(c *gin.Context) {
 	fileHeader, err := c.FormFile(FormFieldFile)
 	if err != nil {
 		abortFromStoreError(c, ErrMissingFile)
+		return
+	}
+	if fileHeader.Size > 0 && fileHeader.Size > h.maxFileBytes {
+		abortFromStoreError(c, fmt.Errorf("%w: max %d bytes", ErrTooLarge, h.maxFileBytes))
 		return
 	}
 
@@ -194,11 +213,22 @@ func (h *Handler) content(c *gin.Context, id string) {
 	defer rc.Close()
 
 	c.Header("Content-Type", "application/octet-stream")
-	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, obj.Filename))
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, safeContentFilename(obj.Filename)))
 	c.Status(http.StatusOK)
 	if _, err := io.Copy(c.Writer, rc); err != nil {
 		klog.Errorf("failed to stream file content id=%s: %v", id, err)
 	}
+}
+
+func safeContentFilename(name string) string {
+	name = strings.ReplaceAll(name, `"`, "")
+	name = strings.ReplaceAll(name, "\r", "")
+	name = strings.ReplaceAll(name, "\n", "")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "download"
+	}
+	return name
 }
 
 func (h *Handler) delete(c *gin.Context, id string) {

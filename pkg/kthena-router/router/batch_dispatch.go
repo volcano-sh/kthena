@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-    10|Unless required by applicable law or agreed to in writing, software
+Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -51,15 +51,15 @@ func (r *Router) ExecuteBatchLine(ctx context.Context, endpoint string, body jso
 		return http.StatusBadRequest, nil, "", fmt.Errorf("model not found in body")
 	}
 
-	// Force non-streaming for batch capture.
+	// Force non-streaming so responses can be captured as a single body.
 	modelRequest["stream"] = false
 	rewritten, err := json.Marshal(modelRequest)
 	if err != nil {
 		return 0, nil, "", err
 	}
 
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rewritten))
 	if err != nil {
 		return 0, nil, "", err
@@ -78,14 +78,14 @@ func (r *Router) ExecuteBatchLine(ctx context.Context, endpoint string, body jso
 	c.Set("metricsRecorder", metrics.NewRequestMetricsRecorder(r.metrics, modelName, endpoint))
 
 	if err := r.doLoadbalance(c, modelRequest); err != nil {
-		if w.Code == 0 || w.Code == http.StatusOK {
-			return http.StatusInternalServerError, w.Body.Bytes(), requestID, err
+		if recorder.Code == 0 || recorder.Code == http.StatusOK {
+			return http.StatusInternalServerError, recorder.Body.Bytes(), requestID, err
 		}
-		return w.Code, w.Body.Bytes(), requestID, nil
+		return recorder.Code, recorder.Body.Bytes(), requestID, nil
 	}
-	status := w.Code
+	status := recorder.Code
 	if status == 0 {
 		status = http.StatusOK
 	}
-	return status, w.Body.Bytes(), requestID, nil
+	return status, recorder.Body.Bytes(), requestID, nil
 }

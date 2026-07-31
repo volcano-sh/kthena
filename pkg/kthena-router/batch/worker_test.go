@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-    10|Unless required by applicable law or agreed to in writing, software
+Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -76,7 +76,7 @@ func TestWorker_CompletesBatch(t *testing.T) {
 		t.Fatalf("create batch: %v", err)
 	}
 
-	w.Enqueue(batch.ID)
+	w.Enqueue(context.Background(), batch.ID)
 
 	deadline := time.Now().Add(5 * time.Second)
 	var got *BatchObject
@@ -138,7 +138,7 @@ func TestWorker_FailsInvalidJSONL(t *testing.T) {
 		Metadata:         map[string]string{},
 	}
 	_, _ = jobs.Create(context.Background(), batch)
-	w.Enqueue(batch.ID)
+	w.Enqueue(context.Background(), batch.ID)
 
 	deadline := time.Now().Add(5 * time.Second)
 	var got *BatchObject

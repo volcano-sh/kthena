@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-    10|Unless required by applicable law or agreed to in writing, software
+Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -18,6 +18,7 @@ package batch
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -38,7 +39,7 @@ func (s *MemoryBatchStore) Create(ctx context.Context, batch *BatchObject) (*Bat
 		return nil, err
 	}
 	if batch == nil || batch.ID == "" {
-		return nil, ErrInvalidInputFile
+		return nil, fmt.Errorf("%w: missing batch id", ErrBatchNotFound)
 	}
 	cp := cloneBatch(batch)
 	s.mu.Lock()
@@ -64,20 +65,7 @@ func (s *MemoryBatchStore) List(ctx context.Context, opts ListOptions) ([]BatchO
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = DefaultListLimit
-	}
-	if limit < MinListLimit {
-		limit = MinListLimit
-	}
-	if limit > MaxListLimit {
-		limit = MaxListLimit
-	}
-	order := opts.Order
-	if order == "" {
-		order = OrderDesc
-	}
+	limit, order := normalizeListOpts(opts)
 
 	s.mu.RLock()
 	items := make([]BatchObject, 0, len(s.batches))
@@ -87,34 +75,10 @@ func (s *MemoryBatchStore) List(ctx context.Context, opts ListOptions) ([]BatchO
 	s.mu.RUnlock()
 
 	sort.Slice(items, func(i, j int) bool {
-		if order == OrderAsc {
-			if items[i].CreatedAt == items[j].CreatedAt {
-				return items[i].ID < items[j].ID
-			}
-			return items[i].CreatedAt < items[j].CreatedAt
-		}
-		if items[i].CreatedAt == items[j].CreatedAt {
-			return items[i].ID > items[j].ID
-		}
-		return items[i].CreatedAt > items[j].CreatedAt
+		return lessCreatedAtID(order, items[i].CreatedAt, items[j].CreatedAt, items[i].ID, items[j].ID)
 	})
-
-	if opts.After != "" {
-		idx := -1
-		for i, item := range items {
-			if item.ID == opts.After {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			items = items[idx+1:]
-		}
-	}
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return items, nil
+	items = applyCursorAfter(items, opts.After, func(b BatchObject) string { return b.ID })
+	return applyLimit(items, limit), nil
 }
 
 func (s *MemoryBatchStore) Update(ctx context.Context, batch *BatchObject) (*BatchObject, error) {
@@ -132,6 +96,20 @@ func (s *MemoryBatchStore) Update(ctx context.Context, batch *BatchObject) (*Bat
 	cp := cloneBatch(batch)
 	s.batches[cp.ID] = cp
 	return cloneBatch(cp), nil
+}
+
+func (s *MemoryBatchStore) UpdateRequestCounts(ctx context.Context, id string, counts RequestCounts) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.batches[id]
+	if !ok {
+		return ErrBatchNotFound
+	}
+	b.RequestCounts = counts
+	return nil
 }
 
 func cloneBatch(in *BatchObject) *BatchObject {

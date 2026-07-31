@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-    10|Unless required by applicable law or agreed to in writing, software
+Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -42,7 +42,10 @@ func TestBatchesHandler_CreateGetListCancel(t *testing.T) {
 	jobs := NewMemoryBatchStore()
 
 	var enqueued []string
-	h := NewBatchesHandler(files, jobs, func(id string) { enqueued = append(enqueued, id) })
+	h := NewBatchesHandler(files, jobs, func(ctx context.Context, id string) error {
+		enqueued = append(enqueued, id)
+		return nil
+	})
 
 	line := `{"custom_id":"1","method":"POST","url":"/v1/chat/completions","body":{"model":"m","messages":[{"role":"user","content":"hi"}]}}`
 	fileObj, err := files.Create(context.Background(), "in.jsonl", PurposeBatch, strings.NewReader(line+"\n"))

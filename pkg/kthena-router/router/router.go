@@ -255,7 +255,7 @@ func initBatchWithRouter(r *Router) (*batch.Handler, *batch.BatchesHandler, *bat
 	batchesHandler := batch.NewBatchesHandler(fileStore, jobStore, worker.Enqueue)
 	ctx, cancel := context.WithCancel(context.Background())
 	worker.Start(ctx)
-	return batch.NewHandler(fileStore), batchesHandler, worker, cancel, nil
+	return batch.NewHandlerWithLimits(fileStore, cfg.MaxFileBytes), batchesHandler, worker, cancel, nil
 }
 
 const defaultQueueTimeout = 60 * time.Second

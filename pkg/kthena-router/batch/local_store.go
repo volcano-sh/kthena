@@ -150,21 +150,7 @@ func (s *LocalFileStore) List(ctx context.Context, opts ListOptions) ([]FileObje
 		return nil, err
 	}
 
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = DefaultListLimit
-	}
-	if limit < MinListLimit {
-		limit = MinListLimit
-	}
-	if limit > MaxListLimit {
-		limit = MaxListLimit
-	}
-
-	order := opts.Order
-	if order == "" {
-		order = OrderDesc
-	}
+	limit, order := normalizeListOpts(opts)
 
 	s.mu.RLock()
 	items := make([]FileObject, 0, len(s.files))
@@ -177,35 +163,10 @@ func (s *LocalFileStore) List(ctx context.Context, opts ListOptions) ([]FileObje
 	s.mu.RUnlock()
 
 	sort.Slice(items, func(i, j int) bool {
-		if order == OrderAsc {
-			if items[i].CreatedAt == items[j].CreatedAt {
-				return items[i].ID < items[j].ID
-			}
-			return items[i].CreatedAt < items[j].CreatedAt
-		}
-		if items[i].CreatedAt == items[j].CreatedAt {
-			return items[i].ID > items[j].ID
-		}
-		return items[i].CreatedAt > items[j].CreatedAt
+		return lessCreatedAtID(order, items[i].CreatedAt, items[j].CreatedAt, items[i].ID, items[j].ID)
 	})
-
-	if opts.After != "" {
-		idx := -1
-		for i, item := range items {
-			if item.ID == opts.After {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			items = items[idx+1:]
-		}
-	}
-
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return items, nil
+	items = applyCursorAfter(items, opts.After, func(f FileObject) string { return f.ID })
+	return applyLimit(items, limit), nil
 }
 
 func (s *LocalFileStore) Delete(ctx context.Context, id string) (*DeleteFileResponse, error) {

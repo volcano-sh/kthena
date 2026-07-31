@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-    10|Unless required by applicable law or agreed to in writing, software
+Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -17,6 +17,7 @@ limitations under the License.
 package batch
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -32,12 +33,12 @@ import (
 type BatchesHandler struct {
 	files   FileStore
 	batches BatchStore
-	enqueue func(batchID string)
+	enqueue func(ctx context.Context, batchID string) error
 }
 
 // NewBatchesHandler returns a batches HTTP handler.
 // enqueue is called after a batch is created (nil-safe).
-func NewBatchesHandler(files FileStore, batches BatchStore, enqueue func(batchID string)) *BatchesHandler {
+func NewBatchesHandler(files FileStore, batches BatchStore, enqueue func(ctx context.Context, batchID string) error) *BatchesHandler {
 	return &BatchesHandler{files: files, batches: batches, enqueue: enqueue}
 }
 
@@ -149,7 +150,10 @@ func (h *BatchesHandler) create(c *gin.Context) {
 
 	klog.V(4).Infof("created batch id=%s input_file_id=%s endpoint=%s", created.ID, created.InputFileID, created.Endpoint)
 	if h.enqueue != nil {
-		h.enqueue(created.ID)
+		if err := h.enqueue(c.Request.Context(), created.ID); err != nil {
+			abortFromStoreError(c, err)
+			return
+		}
 	}
 	c.JSON(http.StatusOK, created)
 }
@@ -245,7 +249,8 @@ func (h *BatchesHandler) cancel(c *gin.Context, id string) {
 		return
 	}
 	if h.enqueue != nil {
-		h.enqueue(updated.ID)
+		// Best-effort wake of the worker; cancel is already persisted.
+		_ = h.enqueue(c.Request.Context(), updated.ID)
 	}
 	c.JSON(http.StatusOK, updated)
 }

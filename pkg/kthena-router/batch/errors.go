@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-    10|Unless required by applicable law or agreed to in writing, software
+Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -39,6 +39,7 @@ var (
 	ErrInvalidWindow    = errors.New("unsupported completion_window")
 	ErrInvalidInputFile = errors.New("invalid input_file_id")
 	ErrNotCancellable   = errors.New("batch cannot be cancelled in its current status")
+	ErrEnqueueTimeout   = errors.New("batch worker queue is full")
 )
 
 func abortJSON(c *gin.Context, status int, errType, code, message string) {
@@ -63,6 +64,8 @@ func abortFromStoreError(c *gin.Context, err error) {
 		errors.Is(err, ErrMissingFile), errors.Is(err, ErrMissingPurpose),
 		errors.Is(err, ErrEmptyFile), errors.Is(err, ErrNotCancellable):
 		abortJSON(c, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
+	case errors.Is(err, ErrEnqueueTimeout):
+		abortJSON(c, http.StatusServiceUnavailable, "server_error", "queue_full", err.Error())
 	case errors.Is(err, ErrTooLarge):
 		abortJSON(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "file_too_large", err.Error())
 	default:
