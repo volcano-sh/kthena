@@ -139,13 +139,10 @@ func TestLocalFileStore_ListPaginationAndOrder(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	var ids []string
 	for i := 0; i < 3; i++ {
-		obj, err := store.Create(ctx, "f.jsonl", PurposeBatch, strings.NewReader(strings.Repeat("x", i+1)))
-		if err != nil {
+		if _, err := store.Create(ctx, "f.jsonl", PurposeBatch, strings.NewReader(strings.Repeat("x", i+1))); err != nil {
 			t.Fatalf("Create %d: %v", i, err)
 		}
-		ids = append(ids, obj.ID)
 		time.Sleep(2 * time.Millisecond)
 	}
 
