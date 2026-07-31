@@ -28,13 +28,13 @@ import (
 
 // Sentinel errors for store and handler mapping.
 var (
-	ErrNotFound      = errors.New("file not found")
-	ErrDisabled      = errors.New("batch files API is disabled")
+	ErrNotFound       = errors.New("file not found")
+	ErrDisabled       = errors.New("batch files API is disabled")
 	ErrInvalidPurpose = errors.New("unsupported file purpose")
-	ErrMissingFile   = errors.New("missing file upload")
+	ErrMissingFile    = errors.New("missing file upload")
 	ErrMissingPurpose = errors.New("missing purpose")
-	ErrTooLarge      = errors.New("file exceeds maximum size")
-	ErrEmptyFile     = errors.New("file is empty")
+	ErrTooLarge       = errors.New("file exceeds maximum size")
+	ErrEmptyFile      = errors.New("file is empty")
 )
 
 // abortJSON writes an OpenAI-shaped error and records it on the access log.
