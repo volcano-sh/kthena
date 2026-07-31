@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
+    10|Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -24,27 +24,29 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// Config holds runtime settings for the Files API storage backend.
-// Empty FilesDir disables the API (store is not constructed).
+// Config holds runtime settings for Files + Batches.
+// Empty FilesDir disables the APIs (stores are not constructed).
 type Config struct {
-	FilesDir     string
-	MaxFileBytes int64
-	BatchTTL     time.Duration
+	FilesDir                 string
+	MaxFileBytes             int64
+	BatchTTL                 time.Duration
+	MaxConcurrency           int
+	InteractiveBusyThreshold int64
 }
 
-// Enabled reports whether file storage is configured.
+// Enabled reports whether batch storage is configured.
 func (c Config) Enabled() bool {
 	return c.FilesDir != ""
 }
 
-// LoadConfigFromEnv reads batch file settings from the environment.
-// Missing or invalid values fall back to named defaults (same pattern as
-// fairness / access-log env parsing in the router).
+// LoadConfigFromEnv reads batch settings from the environment.
 func LoadConfigFromEnv() Config {
 	cfg := Config{
-		FilesDir:     os.Getenv(EnvFilesDir),
-		MaxFileBytes: DefaultMaxFileBytes,
-		BatchTTL:     DefaultBatchTTL,
+		FilesDir:                 os.Getenv(EnvFilesDir),
+		MaxFileBytes:             DefaultMaxFileBytes,
+		BatchTTL:                 DefaultBatchTTL,
+		MaxConcurrency:           DefaultMaxConcurrency,
+		InteractiveBusyThreshold: DefaultInteractiveBusyThreshold,
 	}
 
 	if s, ok := os.LookupEnv(EnvMaxFileBytes); ok && s != "" {
@@ -62,6 +64,24 @@ func LoadConfigFromEnv() Config {
 			klog.Warningf("Invalid %s %q, using default %v", EnvBatchTTL, s, DefaultBatchTTL)
 		} else {
 			cfg.BatchTTL = d
+		}
+	}
+
+	if s, ok := os.LookupEnv(EnvMaxConcurrency); ok && s != "" {
+		v, err := strconv.Atoi(s)
+		if err != nil || v <= 0 {
+			klog.Warningf("Invalid %s %q, using default %d", EnvMaxConcurrency, s, DefaultMaxConcurrency)
+		} else {
+			cfg.MaxConcurrency = v
+		}
+	}
+
+	if s, ok := os.LookupEnv(EnvInteractiveBusy); ok && s != "" {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || v < 0 {
+			klog.Warningf("Invalid %s %q, using default %d", EnvInteractiveBusy, s, DefaultInteractiveBusyThreshold)
+		} else {
+			cfg.InteractiveBusyThreshold = v
 		}
 	}
 

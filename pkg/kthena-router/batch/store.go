@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
+    10|Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -31,6 +31,14 @@ type FileStore interface {
 	Open(ctx context.Context, id string) (io.ReadCloser, *FileObject, error)
 }
 
+// BatchStore persists OpenAI-compatible batch job metadata.
+type BatchStore interface {
+	Create(ctx context.Context, batch *BatchObject) (*BatchObject, error)
+	Get(ctx context.Context, id string) (*BatchObject, error)
+	List(ctx context.Context, opts ListOptions) ([]BatchObject, error)
+	Update(ctx context.Context, batch *BatchObject) (*BatchObject, error)
+}
+
 // NewFileStoreFromConfig constructs a local file store when enabled.
 // Returns nil when FilesDir is unset so callers can treat the feature as off.
 func NewFileStoreFromConfig(cfg Config) (FileStore, error) {
@@ -38,4 +46,9 @@ func NewFileStoreFromConfig(cfg Config) (FileStore, error) {
 		return nil, nil
 	}
 	return NewLocalFileStore(cfg)
+}
+
+// NewBatchStore constructs an in-memory batch job store.
+func NewBatchStore() BatchStore {
+	return NewMemoryBatchStore()
 }

@@ -104,8 +104,11 @@ type Router struct {
 	// KV Connector management
 	connectorFactory *connectors.Factory
 
-	// OpenAI-compatible Files API (batch control plane). Nil store disables it.
-	filesHandler *batch.Handler
+	// OpenAI-compatible Files + Batches APIs (control plane + worker).
+	filesHandler   *batch.Handler
+	batchesHandler *batch.BatchesHandler
+	batchWorker    *batch.Worker
+	batchCancel    context.CancelFunc
 
 	// Priority queue configuration
 	queueTimeout     time.Duration
@@ -195,12 +198,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
 
-	filesHandler, err := newFilesHandlerFromEnv()
-	if err != nil {
-		klog.Fatalf("failed to initialize batch files store: %v", err)
-	}
-
-	return &Router{
+	r := &Router{
 		store:            store,
 		scheduler:        scheduler.NewScheduler(store, routerConfig),
 		authenticator:    auth.NewJWTAuthenticator(routerConfig),
@@ -209,25 +207,55 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		metrics:          metricsInstance,
 		tokenizer:        tokenizerInstance,
 		connectorFactory: connectors.NewDefaultFactory(),
-		filesHandler:     filesHandler,
 		queueTimeout:     parseQueueTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 
 		sessionBoostTimeout: parseSessionBoostTimeout(),
 	}
+
+	filesHandler, batchesHandler, batchWorker, batchCancel, err := initBatchWithRouter(r)
+	if err != nil {
+		klog.Fatalf("failed to initialize batch subsystem: %v", err)
+	}
+	r.filesHandler = filesHandler
+	r.batchesHandler = batchesHandler
+	r.batchWorker = batchWorker
+	r.batchCancel = batchCancel
+
+	return r
 }
 
-// newFilesHandlerFromEnv builds the OpenAI Files API handler from env config.
-// When KTHENA_BATCH_FILES_DIR is unset the handler is still created but serves
-// 503 until storage is configured (mirrors optional feature flags elsewhere).
-func newFilesHandlerFromEnv() (*batch.Handler, error) {
-	cfg := batch.LoadConfigFromEnv()
-	store, err := batch.NewFileStoreFromConfig(cfg)
-	if err != nil {
-		return nil, err
+// Close stops the batch worker if running.
+func (r *Router) Close() {
+	if r.batchCancel != nil {
+		r.batchCancel()
+		r.batchCancel = nil
 	}
-	return batch.NewHandler(store), nil
+	if r.batchWorker != nil {
+		r.batchWorker.Stop()
+	}
+}
+
+func initBatchWithRouter(r *Router) (*batch.Handler, *batch.BatchesHandler, *batch.Worker, context.CancelFunc, error) {
+	cfg := batch.LoadConfigFromEnv()
+	fileStore, err := batch.NewFileStoreFromConfig(cfg)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if fileStore == nil {
+		return batch.NewHandler(nil), batch.NewBatchesHandler(nil, nil, nil), nil, nil, nil
+	}
+
+	jobStore := batch.NewBatchStore()
+	worker := batch.NewWorker(fileStore, jobStore, r.ExecuteBatchLine, r.ActiveRequestCount, batch.WorkerConfig{
+		Concurrency:              cfg.MaxConcurrency,
+		InteractiveBusyThreshold: cfg.InteractiveBusyThreshold,
+	})
+	batchesHandler := batch.NewBatchesHandler(fileStore, jobStore, worker.Enqueue)
+	ctx, cancel := context.WithCancel(context.Background())
+	worker.Start(ctx)
+	return batch.NewHandler(fileStore), batchesHandler, worker, cancel, nil
 }
 
 const defaultQueueTimeout = 60 * time.Second
@@ -302,6 +330,12 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Must run before ParseModelRequest: uploads are multipart and have no "model" field.
 		if batch.IsFilesPath(c.Request.URL.Path) {
 			r.HandleFiles(c)
+			return
+		}
+
+		// Handle /v1/batches (OpenAI-compatible Batches API).
+		if batch.IsBatchesPath(c.Request.URL.Path) {
+			r.HandleBatches(c)
 			return
 		}
 
@@ -933,6 +967,21 @@ func (r *Router) HandleFiles(c *gin.Context) {
 		return
 	}
 	r.filesHandler.ServeHTTP(c)
+}
+
+// HandleBatches implements the OpenAI-compatible /v1/batches endpoints.
+func (r *Router) HandleBatches(c *gin.Context) {
+	if r.batchesHandler == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, batch.ErrorBody{
+			Error: batch.ErrorDetail{
+				Message: fmt.Sprintf("batch API is disabled; set %s to enable", batch.EnvFilesDir),
+				Type:    "server_error",
+				Code:    "batch_disabled",
+			},
+		})
+		return
+	}
+	r.batchesHandler.ServeHTTP(c)
 }
 
 func (r *Router) Auth() gin.HandlerFunc {

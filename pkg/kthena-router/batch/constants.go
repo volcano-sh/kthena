@@ -7,7 +7,7 @@ You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
+    10|Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
@@ -18,29 +18,26 @@ package batch
 
 import "time"
 
-// OpenAI-compatible Files API path segments and object identifiers.
+// OpenAI-compatible Files / Batches API path segments and object identifiers.
 const (
-	// PathV1Files is the full path used when the catch-all listener sees the
-	// complete URL (gateway mode). PathFiles is used when Gin mounts under
-	// Group("/v1") and the remaining path is "/files" (default listener).
-	PathV1Files = "/v1/files"
-	PathFiles   = "/files"
+	PathV1Files   = "/v1/files"
+	PathFiles     = "/files"
+	PathV1Batches = "/v1/batches"
+	PathBatches   = "/batches"
 
-	ObjectFile = "file"
-	ObjectList = "list"
+	ObjectFile  = "file"
+	ObjectList  = "list"
+	ObjectBatch = "batch"
 
-	FileIDPrefix = "file-"
+	FileIDPrefix  = "file-"
+	BatchIDPrefix = "batch_"
 
-	// Multipart form field names for POST /v1/files.
 	FormFieldFile    = "file"
 	FormFieldPurpose = "purpose"
 
-	// Supported upload purposes for this slice. batch_output is reserved for
-	// files produced by the future batch worker (not accepted on upload).
 	PurposeBatch       = "batch"
 	PurposeBatchOutput = "batch_output"
 
-	// Query parameter names for GET /v1/files.
 	QueryPurpose = "purpose"
 	QueryLimit   = "limit"
 	QueryOrder   = "order"
@@ -50,21 +47,39 @@ const (
 	OrderDesc = "desc"
 
 	ContentSuffix = "/content"
+	CancelSuffix  = "/cancel"
+
+	StatusValidating = "validating"
+	StatusFailed     = "failed"
+	StatusInProgress = "in_progress"
+	StatusFinalizing = "finalizing"
+	StatusCompleted  = "completed"
+	StatusExpired    = "expired"
+	StatusCancelling = "cancelling"
+	StatusCancelled  = "cancelled"
+
+	CompletionWindow24h = "24h"
+
+	EndpointChatCompletions = "/v1/chat/completions"
+	EndpointCompletions     = "/v1/completions"
 )
 
-// Environment variable keys for batch file storage configuration.
 const (
-	EnvFilesDir     = "KTHENA_BATCH_FILES_DIR"
-	EnvMaxFileBytes = "KTHENA_BATCH_MAX_FILE_BYTES"
-	EnvBatchTTL     = "KTHENA_BATCH_FILE_TTL"
+	EnvFilesDir        = "KTHENA_BATCH_FILES_DIR"
+	EnvMaxFileBytes    = "KTHENA_BATCH_MAX_FILE_BYTES"
+	EnvBatchTTL        = "KTHENA_BATCH_FILE_TTL"
+	EnvMaxConcurrency  = "KTHENA_BATCH_MAX_CONCURRENCY"
+	EnvInteractiveBusy = "KTHENA_BATCH_INTERACTIVE_BUSY_THRESHOLD"
 )
 
-// Named defaults. Values mirror OpenAI Batch Files limits where applicable
-// (JSONL inputs up to 200 MiB; batch files expire after 30 days).
 const (
-	DefaultMaxFileBytes int64 = 200 * 1024 * 1024
-	DefaultBatchTTL           = 30 * 24 * time.Hour
-	DefaultListLimit          = 10000
-	MinListLimit              = 1
-	MaxListLimit              = 10000
+	DefaultMaxFileBytes             int64 = 200 * 1024 * 1024
+	DefaultBatchTTL                       = 30 * 24 * time.Hour
+	DefaultCompletionWindow               = 24 * time.Hour
+	DefaultMaxConcurrency                 = 4
+	DefaultInteractiveBusyThreshold int64 = 32
+	DefaultListLimit                      = 10000
+	MinListLimit                          = 1
+	MaxListLimit                          = 10000
+	DefaultMaxRequestsPerBatch            = 50000
 )

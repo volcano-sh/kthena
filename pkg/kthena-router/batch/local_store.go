@@ -79,7 +79,7 @@ func (s *LocalFileStore) Create(ctx context.Context, filename, purpose string, r
 	if filename == "" {
 		filename = "upload"
 	}
-	if !IsUploadPurposeAllowed(purpose) {
+	if !IsStoredPurposeAllowed(purpose) {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidPurpose, purpose)
 	}
 
