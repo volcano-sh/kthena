@@ -186,7 +186,7 @@ The following operating points have been empirically validated by running the ac
 
 | Scenario | Validated load | Mocker pods | Per-pod resources | Result |
 |---|---|---|---|---|
-| `smoke-test-s1` | `rate: 2` | 4 | default (no override) | 94.9-98% success (random/least-request), 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs |
+| `smoke-test-s1` | `rate: 2` | 4 | default (no override) | 94.9-98% success (random/least-request), 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs — see the design-intent caveat below |
 | `smoke-test-s2` | `rate: 3`, `duration: 45s` | 8 | `requests: {cpu: 250m, memory: 256Mi}`, `limits: {cpu: 1, memory: 1Gi}` | 100%/100% success (random/least-request), 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs |
 | `smoke-test-s3` | `concurrency: 5` | 8 | same as above | >97% success both plugins, 0 mocker restarts, ~2.4s p95, across 2 independent runs |
 | `smoke-test-s4` | `rate: 2` | 6 | same 250m/1CPU shape as s2/s3 | 96.7-100% success both plugins, 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs |
@@ -201,6 +201,10 @@ Loads that were tried and rejected, to save the next person from re-discovering 
 - `s5`/`s6` at `rate: 1` and `rate: 0.5` on their original 4-pod, default-resource shape: both stayed unsafe until the 8-pod/250m-1CPU shape validated for s2-s4 was applied. `s6` additionally needed its duration extended to 120s — at 60s, enough concurrent long-running (1024-token) requests were still in flight when the window ended that the harness's own cutoff was inflating the failure count independent of real saturation.
 
 See each scenario's own header comment for the full run-by-run numbers and CI run IDs.
+
+**On `s1`'s design intent:** `rate: 2` is confirmed stable across 2 independent runs, but `s1`'s name ("throughput baseline") and description ("high-load burst baseline") suggest it may be *meant* to deliberately probe toward saturation rather than provide a safe, controlled comparison point the way `s2`-`s8` do. That question was not resolved as part of this calibration pass. `rate: 2` should be read as "known not to be dominated by backend saturation", not as "the load level this scenario was designed to exercise" — do not treat it as a drop-in replacement for whatever `s1`'s original throughput-ceiling purpose was meant to measure without revisiting that purpose first.
+
+**On `s5`'s one anomalous run:** of the 3 runs backing `s5`'s validation, 2 were clean (93.94%/96.97% and 100%/100%) and 1 showed a single isolated genuine AIPerf error on one arm (90.91%/100%). That is treated here as an isolated event rather than a recurring instability — unlike `s2`'s rejected `rate: 5`, where multiple metrics were consistently marginal across all three runs — but it is `s5`'s only sample with any imperfection, so it is the least clean-cut validation of the eight scenarios. A tie-breaking rerun would increase confidence if `s5` starts seeing regular use.
 
 **On the tail-latency warning for `s7`/`s8`:** both validated runs of these two scenarios show p95/p50 ratios well above the 3.0x warning threshold (5.3x-40.0x). This is expected, not a saturation signal — `s7`/`s8` deliberately mix a 10x-speedup "fast" pod with a 0.2x-speedup "slow" pod, so a wide latency spread is the scenario working as designed. The tail-latency check in `apply_request_level_verdict` was calibrated on homogeneous scenarios and does not distinguish "queueing under load" from "intentionally slower pod by design" — treat its warning as uninformative for heterogeneous-backend scenarios specifically, and rely on success rate and the genuine-error/cancelled checks instead, which stayed clean on every validated run of both scenarios.
 

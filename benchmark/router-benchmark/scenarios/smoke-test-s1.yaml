@@ -12,11 +12,12 @@ description: "s1 scenario: high-load burst baseline under homogeneous backends"
 # and 1175 of them failing with 503 - a catastrophic, asymmetric result,
 # not a borderline one.
 #
-# Note: rate=2 has only been validated once here; s1's original intent
-# ("high-load burst baseline") may call for deliberately probing toward
-# saturation rather than a safe comparison point like the other scenarios -
-# that design question is unresolved. Treat rate=2 as "known safe", not
-# as "the intended load for this scenario's stated purpose".
+# Note: rate=2 is confirmed stable across the 2 runs above, but s1's
+# original intent ("high-load burst baseline") may call for deliberately
+# probing toward saturation rather than a safe comparison point like the
+# other scenarios - that design question is unresolved. Treat rate=2 as
+# "known safe for a controlled A/B comparison", not as "the load this
+# scenario was originally meant to exercise".
 #
 # See volcano-sh/kthena#1452 for the full experiment history.
 load:
