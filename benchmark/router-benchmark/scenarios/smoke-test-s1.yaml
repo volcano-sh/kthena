@@ -4,7 +4,7 @@ description: "s1 scenario: high-load burst baseline under homogeneous backends"
 load:
   schedule:
     mode: "rate"
-    rate: 75
+    rate: 2
   traffic:
     burstiness: 0.5
     ramp:

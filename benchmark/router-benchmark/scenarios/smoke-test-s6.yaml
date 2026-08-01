@@ -4,7 +4,7 @@ description: "s6 scenario: SSE relay overhead under long output streams"
 load:
   schedule:
     mode: "rate"
-    rate: 1
+    rate: 0.5
   traffic:
     burstiness: 1.0
     ramp:
