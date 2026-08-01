@@ -125,6 +125,21 @@ spec:
             - name: ACCESS_LOG_OUTPUT
               value: {{ .Values.kthenaRouter.accessLog.output | quote }}
 
+            {{- with .Values.kthenaRouter.batchFiles }}
+            {{- if .enabled }}
+            - name: KTHENA_BATCH_FILES_DIR
+              value: {{ .mountPath | quote }}
+            {{- if .maxFileBytes }}
+            - name: KTHENA_BATCH_MAX_FILE_BYTES
+              value: {{ .maxFileBytes | quote }}
+            {{- end }}
+            {{- if .ttl }}
+            - name: KTHENA_BATCH_FILE_TTL
+              value: {{ .ttl | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+
             - name: DRAIN_TIMEOUT
               value: {{ .Values.kthenaRouter.drainTimeout | quote }}
           resources: {{- toYaml .Values.kthenaRouter.resource | nindent 12 }}
@@ -160,6 +175,10 @@ spec:
             mountPath: /etc/tls
             readOnly: true
           {{- end }}
+          {{- if .Values.kthenaRouter.batchFiles.enabled }}
+          - name: batch-files
+            mountPath: {{ .Values.kthenaRouter.batchFiles.mountPath }}
+          {{- end }}
       volumes:
         - name: scheduler-config
           configMap:
@@ -174,6 +193,10 @@ spec:
           secret:
             secretName: {{ .Values.kthenaRouter.webhook.tls.secretName }}
             optional: true
+        {{- end }}
+        {{- if .Values.kthenaRouter.batchFiles.enabled }}
+        - name: batch-files
+          emptyDir: {}
         {{- end }}
       serviceAccountName: kthena-router
       terminationGracePeriodSeconds: {{ .Values.kthenaRouter.terminationGracePeriodSeconds }}

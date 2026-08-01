@@ -163,6 +163,37 @@ func TestLocalFileStore_ListPaginationAndOrder(t *testing.T) {
 	}
 }
 
+func TestLocalFileStore_ExpiresAtEnforced(t *testing.T) {
+	store, err := NewLocalFileStore(Config{
+		FilesDir:     t.TempDir(),
+		MaxFileBytes: 1024,
+		BatchTTL:     time.Millisecond, // expire almost immediately
+	})
+	if err != nil {
+		t.Fatalf("NewLocalFileStore: %v", err)
+	}
+	ctx := context.Background()
+	obj, err := store.Create(ctx, "f.jsonl", PurposeBatch, strings.NewReader("hello"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if _, err := store.Get(ctx, obj.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get after expiry: err=%v want ErrNotFound", err)
+	}
+	listed, err := store.List(ctx, ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("List after expiry len=%d want 0", len(listed))
+	}
+	if _, _, err := store.Open(ctx, obj.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Open after expiry: err=%v want ErrNotFound", err)
+	}
+}
+
 func TestLoadConfigFromEnv_DefaultsAndOverrides(t *testing.T) {
 	t.Setenv(EnvFilesDir, "")
 	t.Setenv(EnvMaxFileBytes, "")

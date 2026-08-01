@@ -135,10 +135,14 @@ func (s *LocalFileStore) Get(ctx context.Context, id string) (*FileObject, error
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	sf, ok := s.files[id]
 	if !ok {
+		return nil, ErrNotFound
+	}
+	if isExpired(sf.meta, time.Now().Unix()) {
+		s.purgeLocked(id, sf)
 		return nil, ErrNotFound
 	}
 	out := sf.meta
@@ -166,15 +170,20 @@ func (s *LocalFileStore) List(ctx context.Context, opts ListOptions) ([]FileObje
 		order = OrderDesc
 	}
 
-	s.mu.RLock()
+	now := time.Now().Unix()
+	s.mu.Lock()
 	items := make([]FileObject, 0, len(s.files))
-	for _, sf := range s.files {
+	for id, sf := range s.files {
+		if isExpired(sf.meta, now) {
+			s.purgeLocked(id, sf)
+			continue
+		}
 		if opts.Purpose != "" && sf.meta.Purpose != opts.Purpose {
 			continue
 		}
 		items = append(items, sf.meta)
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
 	sort.Slice(items, func(i, j int) bool {
 		if order == OrderAsc {
@@ -239,15 +248,20 @@ func (s *LocalFileStore) Open(ctx context.Context, id string) (io.ReadCloser, *F
 		return nil, nil, err
 	}
 
-	s.mu.RLock()
+	s.mu.Lock()
 	sf, ok := s.files[id]
 	if !ok {
-		s.mu.RUnlock()
+		s.mu.Unlock()
+		return nil, nil, ErrNotFound
+	}
+	if isExpired(sf.meta, time.Now().Unix()) {
+		s.purgeLocked(id, sf)
+		s.mu.Unlock()
 		return nil, nil, ErrNotFound
 	}
 	meta := sf.meta
 	diskPath := sf.diskPath
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
 	f, err := os.Open(diskPath)
 	if err != nil {
@@ -257,4 +271,20 @@ func (s *LocalFileStore) Open(ctx context.Context, id string) (io.ReadCloser, *F
 		return nil, nil, fmt.Errorf("open file content: %w", err)
 	}
 	return f, &meta, nil
+}
+
+func isExpired(meta FileObject, now int64) bool {
+	return meta.ExpiresAt != nil && *meta.ExpiresAt <= now
+}
+
+// purgeLocked removes metadata and best-effort deletes the on-disk blob.
+// Caller must hold s.mu for writing.
+func (s *LocalFileStore) purgeLocked(id string, sf *storedFile) {
+	delete(s.files, id)
+	if sf == nil {
+		return
+	}
+	if err := os.Remove(sf.diskPath); err != nil && !os.IsNotExist(err) {
+		klog.Warningf("failed to purge expired batch file %s from disk: %v", id, err)
+	}
 }
