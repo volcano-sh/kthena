@@ -23,7 +23,14 @@ backends:
     model: "Qwen/Qwen3-0.6B"
   profiles:
     - name: "homogeneous"
-      count: 4
+      count: 8
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
 
 metrics:
   prometheus: true

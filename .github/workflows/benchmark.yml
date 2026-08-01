@@ -32,14 +32,18 @@ jobs:
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
 
-          # Round 1 calibration for issue #1452: s1/s4-s8 have not yet been
-          # empirically validated. Running them together as parallel matrix
-          # jobs so one CI trigger yields a first data point for all of
-          # them, instead of six sequential dispatches.
+          # s4 and s8 validated (2 consistent runs each) after rounds 1-2 of
+          # issue #1452 calibration; not rerun here. s1/s7 need a stability
+          # rerun; s5/s6 need a fresh attempt with the validated 8-pod
+          # 250m/1CPU shape after failing even at very low rates with the
+          # original 4-pod default-resource shape.
+#          - scenario: smoke-test-s4
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
+#          - scenario: smoke-test-s8
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
           - scenario: smoke-test-s1
-            router-config-a: router-config-random
-            router-config-b: router-config-least-request
-          - scenario: smoke-test-s4
             router-config-a: router-config-random
             router-config-b: router-config-least-request
           - scenario: smoke-test-s5
@@ -49,9 +53,6 @@ jobs:
             router-config-a: router-config-random
             router-config-b: router-config-least-request
           - scenario: smoke-test-s7
-            router-config-a: router-config-random
-            router-config-b: router-config-least-request
-          - scenario: smoke-test-s8
             router-config-a: router-config-random
             router-config-b: router-config-least-request
 
