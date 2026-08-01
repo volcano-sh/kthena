@@ -883,6 +883,39 @@ class ApplyRequestLevelVerdictTest(unittest.TestCase):
         self.assertEqual(len(verdict["offenders"]), 1)
         self.assertEqual(verdict["offenders"][0]["name"], "p")
 
+    def test_invalid_when_success_rate_below_floor(self):
+        # smoke-test-s6 least-request shape: 503s fully covered by
+        # cancellations, 0 genuine errors, but success rate (81.48%) is
+        # still well below the floor because the whole latency distribution
+        # is uniformly slow (p50=19.8s) rather than a fast median with a
+        # stretched tail - the ratio check alone would miss this.
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {
+                "genuine_errors": 0, "cancelled": 12, "total_503": 10,
+                "p50_ms": 19767.4, "p95_ms": 28976.7, "success_rate_pct": 81.48,
+            },
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(any("success_rate_pct=81.48" in o["reasons"][0] for o in verdict["offenders"]))
+
+    def test_valid_when_success_rate_at_floor(self):
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {
+                "genuine_errors": 0, "cancelled": 2, "total_503": 0,
+                "p50_ms": 1744.1, "p95_ms": 2424.4, "success_rate_pct": 90.0,
+            },
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+
+    def test_unknown_success_rate_does_not_invalidate(self):
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": 2, "total_503": 0, "p50_ms": 1744.1, "p95_ms": 2424.4},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+
 
 class ReporterVerdictTest(unittest.TestCase):
     def make_result(self, verdict_status=None, **metrics):
@@ -942,19 +975,24 @@ class ReporterVerdictTest(unittest.TestCase):
 
     def test_build_report_downgrades_verdict_on_genuine_aiperf_errors(self):
         output_dir = Path(tempfile.mkdtemp())
-        prom_path = output_dir / "router_metrics.prom"
-        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+        # config_a: low-success fixture (its genuine errors invalidate it
+        # regardless). config_b: high-success fixture, to legitimately
+        # demonstrate that cancellation-covered 503s alone don't invalidate.
+        prom_path_a = output_dir / "router_metrics_a.prom"
+        prom_path_a.write_text(_PROM_FIXTURE, encoding="utf-8")
+        prom_path_b = output_dir / "router_metrics_b.prom"
+        prom_path_b.write_text(_PROM_FIXTURE_SAFE, encoding="utf-8")
 
         result_a = ab_test.BenchmarkResult(
             config_name="config_a", scenario="s", timestamp="",
             metrics={"aiperf_genuine_errors": 19, "aiperf_cancelled": 5}, raw_output="",
-            artifacts={"prometheus": {"path": str(prom_path)}},
+            artifacts={"prometheus": {"path": str(prom_path_a)}},
             verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
         )
         result_b = ab_test.BenchmarkResult(
             config_name="config_b", scenario="s", timestamp="",
-            metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 20}, raw_output="",
-            artifacts={"prometheus": {"path": str(prom_path)}},
+            metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 4}, raw_output="",
+            artifacts={"prometheus": {"path": str(prom_path_b)}},
             verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
         )
 
@@ -964,9 +1002,9 @@ class ReporterVerdictTest(unittest.TestCase):
             result_a=result_a, result_b=result_b,
         )
 
-        # _PROM_FIXTURE has 20/100 503s. config_a's 20 genuine errors
-        # invalidate it regardless of cancelled count; config_b's 20 503s
-        # are fully covered by its 20 cancellations, so it stays valid.
+        # config_a's 20 genuine errors invalidate it regardless of cancelled
+        # count; config_b's 4 503s are fully covered by its 4 cancellations
+        # and its 96% success rate clears the floor, so it stays valid.
         self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_INVALID)
         self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_VALID)
         self.assertTrue(report["comparison"]["_skipped"])
@@ -975,12 +1013,12 @@ class ReporterVerdictTest(unittest.TestCase):
     def test_build_report_stays_valid_when_cancelled_data_present_and_sufficient(self):
         output_dir = Path(tempfile.mkdtemp())
         prom_path = output_dir / "router_metrics.prom"
-        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+        prom_path.write_text(_PROM_FIXTURE_SAFE, encoding="utf-8")
 
         def make_clean_result(config_name):
             return ab_test.BenchmarkResult(
                 config_name=config_name, scenario="s", timestamp="",
-                metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 20}, raw_output="",
+                metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 4}, raw_output="",
                 artifacts={"prometheus": {"path": str(prom_path)}},
                 verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
             )
@@ -995,6 +1033,31 @@ class ReporterVerdictTest(unittest.TestCase):
         self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_VALID)
         self.assertNotIn("_skipped", report["comparison"] if report["comparison"] else {})
         self.assertIn("request_success_rate_pct", report["router_comparison"])
+
+    def test_build_report_invalid_when_success_rate_below_floor_despite_covered_503s(self):
+        # Documents the new floor's purpose: _PROM_FIXTURE's 503s are fully
+        # covered by cancellations and there are no genuine errors, but its
+        # 80% success rate is still below SUCCESS_RATE_FLOOR_PCT (90.0).
+        output_dir = Path(tempfile.mkdtemp())
+        prom_path = output_dir / "router_metrics.prom"
+        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+
+        def make_result(config_name):
+            return ab_test.BenchmarkResult(
+                config_name=config_name, scenario="s", timestamp="",
+                metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 20}, raw_output="",
+                artifacts={"prometheus": {"path": str(prom_path)}},
+                verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
+            )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s", description="d",
+            config_a_path="a.yaml", config_b_path="b.yaml",
+            result_a=make_result("config_a"), result_b=make_result("config_b"),
+        )
+
+        self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(any("below the 90.0% floor" in r for r in report["config_a"]["verdict"]["reasons"]))
 
 
 class K8sManagerRestartStatsTest(unittest.TestCase):
@@ -1141,6 +1204,21 @@ go_goroutines 100
 process_resident_memory_bytes 104857600
 """
 
+# Minimal fixture for tests that need a verdict to legitimately stay valid:
+# 96% success sits above SUCCESS_RATE_FLOOR_PCT (90.0), unlike _PROM_FIXTURE
+# above (80%, intentionally low to exercise the metrics-parsing paths in
+# RouterMetricsAnalysisTest, not meant to represent a healthy run).
+_PROM_FIXTURE_SAFE = """\
+kthena_router_requests_total{error_type="successful_request",model="m",path="/v1/chat/completions",status_code="200"} 96
+kthena_router_requests_total{error_type="proxy",model="m",path="/v1/chat/completions",status_code="503"} 4
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="0.5"} 48
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="1"} 72
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="2.5"} 96
+kthena_router_request_duration_seconds_bucket{model="m",path="/v1/chat/completions",status_code="200",le="+Inf"} 96
+kthena_router_request_duration_seconds_sum{model="m",path="/v1/chat/completions",status_code="200"} 96
+kthena_router_request_duration_seconds_count{model="m",path="/v1/chat/completions",status_code="200"} 96
+"""
+
 
 class RouterMetricsAnalysisTest(unittest.TestCase):
     def test_analyze_requests_and_success_rate(self):
@@ -1226,14 +1304,17 @@ class RouterMetricsAnalysisTest(unittest.TestCase):
     def test_build_report_attaches_router_analysis_from_prom_artifact(self):
         output_dir = Path(tempfile.mkdtemp())
         prom_path = output_dir / "router_metrics.prom"
-        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+        # Uses the high-success fixture (not _PROM_FIXTURE) so the run stays
+        # valid and router_comparison actually gets populated - this test is
+        # about analysis attachment, not about verdict/saturation behavior.
+        prom_path.write_text(_PROM_FIXTURE_SAFE, encoding="utf-8")
 
         def make_result():
             return ab_test.BenchmarkResult(
                 config_name="config",
                 scenario="scenario",
                 timestamp="2026-07-30T00:00:00",
-                metrics={},
+                metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 4},
                 raw_output="",
                 artifacts={"prometheus": {"path": str(prom_path)}},
                 verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},

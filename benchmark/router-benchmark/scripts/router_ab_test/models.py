@@ -146,6 +146,21 @@ INVALIDATING_WAITING_REASONS = frozenset({"CrashLoopBackOff", "ImagePullBackOff"
 # hard-invalidate on — this flags it for human review instead.
 TAIL_LATENCY_WARNING_RATIO = 3.0
 
+# Absolute success-rate floor below which a run is invalid regardless of the
+# genuine-error/cancelled-503 checks. Added after s1/s4-s8 round-1
+# calibration (issue #1452) surfaced a failure mode those checks miss: a run
+# where the whole latency distribution shifts up together (p50 ~20s, p95/p50
+# ratio a mundane ~1.5x) rather than a fast median with a stretched tail, and
+# where every 503 happens to be covered by end-of-window cancellations, so
+# neither existing check fires even though the run is clearly unhealthy
+# (smoke-test-s6's least-request arm: 81.48% success, p50=19.8s). Every
+# validated-safe sample collected for this issue stayed >=95% success; every
+# confirmed-bad sample (s2 rate=20's 31-33%, s2 rate=5/60s's 74-77%, s1's
+# 5-73%, s6's 81.48%) sat well under 90%. This floor is a coarse backstop for
+# catching that kind of obviously-bad single run, not a replacement for the
+# repeated-run methodology used to validate a load level.
+SUCCESS_RATE_FLOOR_PCT = 90.0
+
 
 def compute_run_verdict(restart_stats: dict[str, Any]) -> dict[str, Any]:
     """Compute the run verdict from post-traffic mocker pod restart stats.
@@ -208,9 +223,14 @@ def apply_request_level_verdict(verdict: dict[str, Any], request_stats: dict[str
       count. 503s beyond it indicate requests failed mid-run rather than
       being cut off by the harness — i.e. this deliberately does NOT treat
       every 503 as saturation.
+    - success rate below ``SUCCESS_RATE_FLOOR_PCT``. This is a coarse
+      backstop for a failure mode the other two checks miss entirely: a run
+      where the whole latency distribution shifts up together (not just the
+      tail) and every 503 happens to be covered by cancellations, so neither
+      check above fires despite the run being clearly unhealthy.
 
-    Either check is skipped (not assumed clean) when its input is missing,
-    since "unknown" is not the same as "zero".
+    Each check is skipped (not assumed clean/full-rate) when its input is
+    missing, since "unknown" is not the same as "zero".
 
     A high p95/p50 tail-latency ratio is recorded as a non-fatal warning
     (see ``TAIL_LATENCY_WARNING_RATIO``) rather than an invalidating
@@ -218,7 +238,7 @@ def apply_request_level_verdict(verdict: dict[str, Any], request_stats: dict[str
     sample, not a clean separator like the two checks above.
 
     ``request_stats`` keys (all optional): genuine_errors, cancelled,
-    total_503, p50_ms, p95_ms.
+    total_503, p50_ms, p95_ms, success_rate_pct.
     """
     if verdict.get("status") == VERDICT_FRAMEWORK_ERROR:
         # Benchmark tooling itself failed; there is no real traffic to judge.
@@ -246,6 +266,13 @@ def apply_request_level_verdict(verdict: dict[str, Any], request_stats: dict[str
                 f"AIPerf's {cancelled} end-of-window cancellation(s) — requests failed mid-run"
             )
             offenders.append({"name": "router", "reasons": [f"unexplained_503s={unexplained_503s}"]})
+
+    success_rate_pct = request_stats.get("success_rate_pct")
+    if success_rate_pct is not None and success_rate_pct < SUCCESS_RATE_FLOOR_PCT:
+        reasons.append(
+            f"success rate {success_rate_pct}% is below the {SUCCESS_RATE_FLOOR_PCT}% floor"
+        )
+        offenders.append({"name": "router", "reasons": [f"success_rate_pct={success_rate_pct}"]})
 
     p50_ms = request_stats.get("p50_ms")
     p95_ms = request_stats.get("p95_ms")

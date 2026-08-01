@@ -584,6 +584,7 @@ class ResultReporter:
             "total_503": total_503,
             "p50_ms": duration_200.get("p50_ms"),
             "p95_ms": duration_200.get("p95_ms"),
+            "success_rate_pct": requests.get("success_rate_pct"),
         }
 
     @staticmethod
