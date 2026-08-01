@@ -549,11 +549,82 @@ func TestStoreDeleteModelServer(t *testing.T) {
 	assert.False(t, podExists, "pod should be deleted if no modelServer left")
 }
 
+// TestStoreDeleteModelServerCleansUpOnFlightCounter verifies that when a ModelServer is
+// deleted and a pod it owns has no remaining model-server references, DeleteModelServer
+// calls onFlightCounter.Delete for that pod so no stale Redis key is left behind.
+// Prior to the fix, the counter was only cleaned up in DeletePod; pods evicted through
+// DeleteModelServer would accumulate ghost entries in the kthena:on-flight-requests hash.
+func TestStoreDeleteModelServerCleansUpOnFlightCounter(t *testing.T) {
+	podName := types.NamespacedName{Namespace: "default", Name: "pod-a"}
+
+	// fakeCounter records which pods had their counter deleted.
+	deleted := make(map[types.NamespacedName]bool)
+	fc := &fakeOnFlightCounter{deleted: deleted}
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms1"},
+	}
+	msName := utils.GetNamespaceName(ms)
+
+	modelSrv := newModelServer(ms)
+	modelSrv.addPod(podName)
+
+	s := &store{
+		modelServer:     sync.Map{},
+		pods:            sync.Map{},
+		onFlightCounter: fc,
+	}
+
+	s.modelServer.Store(msName, modelSrv)
+	s.pods.Store(podName, &PodInfo{
+		Pod:         &corev1.Pod{},
+		modelServer: sets.New[types.NamespacedName](msName),
+		models:      sets.New[string](),
+	})
+
+	err := s.DeleteModelServer(msName)
+	assert.NoError(t, err)
+
+	// The pod must have been removed from the store.
+	_, podExists := s.pods.Load(podName)
+	assert.False(t, podExists, "pod should be removed from store after DeleteModelServer")
+
+	// The on-flight counter must have been cleaned up.
+	assert.True(t, deleted[podName], "onFlightCounter.Delete must be called for the evicted pod")
+}
+
+// fakeOnFlightCounter is a minimal in-process OnFlightCounter that records
+// which pods had their counter deleted, for use in unit tests.
+type fakeOnFlightCounter struct {
+	mu      sync.Mutex
+	deleted map[types.NamespacedName]bool
+}
+
+func (f *fakeOnFlightCounter) Incr(_ context.Context, pod types.NamespacedName) (int64, error) {
+	return 1, nil
+}
+
+func (f *fakeOnFlightCounter) Decr(_ context.Context, pod types.NamespacedName) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeOnFlightCounter) Delete(_ context.Context, pod types.NamespacedName) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted[pod] = true
+	return nil
+}
+
+func (f *fakeOnFlightCounter) BatchGet(_ context.Context, pods []types.NamespacedName) (map[types.NamespacedName]int64, error) {
+	return nil, nil
+}
+
 func TestStoreGetPodsByModelServer(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
 	}
+
 	ms := &aiv1alpha1.ModelServer{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",

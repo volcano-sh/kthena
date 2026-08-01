@@ -879,6 +879,14 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 			podInfo.RemoveModelServer(ms)
 			if podInfo.GetModelServerCount() == 0 {
 				s.pods.Delete(podName)
+				// Remove the pod's Redis counter so stale keys do not accumulate.
+				if s.onFlightCounter != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					defer cancel()
+					if err := s.onFlightCounter.Delete(ctx, podName); err != nil {
+						klog.V(4).Infof("failed to delete Redis on-flight counter for pod %s: %v", podName, err)
+					}
+				}
 			}
 		} else {
 			klog.Warningf("pod %s not found", podName)
