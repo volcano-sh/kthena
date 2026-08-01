@@ -186,12 +186,25 @@ The following operating points have been empirically validated by running the ac
 
 | Scenario | Validated load | Mocker pods | Per-pod resources | Result |
 |---|---|---|---|---|
+| `smoke-test-s1` | `rate: 2` | 4 | default (no override) | 94.9-98% success (random/least-request), 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs |
 | `smoke-test-s2` | `rate: 3`, `duration: 45s` | 8 | `requests: {cpu: 250m, memory: 256Mi}`, `limits: {cpu: 1, memory: 1Gi}` | 100%/100% success (random/least-request), 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs |
 | `smoke-test-s3` | `concurrency: 5` | 8 | same as above | >97% success both plugins, 0 mocker restarts, ~2.4s p95, across 2 independent runs |
+| `smoke-test-s4` | `rate: 2` | 6 | same 250m/1CPU shape as s2/s3 | 96.7-100% success both plugins, 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs |
+| `smoke-test-s5` | `rate: 0.5`, 2048-token prompts | 8 | same 250m/1CPU shape as s2-s4 (originally 4 default-resource pods — see below) | 90.9-100% success both plugins across 3 runs (one run had a single isolated genuine error on one arm — not a recurring pattern), 0 mocker restarts |
+| `smoke-test-s6` | `rate: 0.5`, 1024-token completions, `duration: 120s` (extended from 60s) | 8 | same 250m/1CPU shape | 94.44%/94.44% success both plugins, identical across 2 independent runs, 0 mocker restarts, 0 genuine AIPerf errors |
+| `smoke-test-s7` | `rate: 0.5` | 3 (heterogeneous: fast/normal/slow at 10x/1x/0.2x speedup) | default (no override) | 96.8-100% success both plugins, 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs — see the tail-latency caveat below |
+| `smoke-test-s8` | `rate: 1` | 4 (heterogeneous: fast/normal x2/slow at 10x/1x/0.2x speedup) | default (no override) | 96.7-98.4% success both plugins, 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs — same caveat |
 
-Loads that were tried and rejected, to save the next person from re-discovering the same dead ends: `s2` at `rate: 20` (known-unsafe baseline, ~31-33% success) and `rate: 5` (unstable across three repeated runs, 74-99% depending on the run and whether the 45s or 60s duration was used — increasing the duration made it *worse*, not better, ruling out "the fixed window's cutoff is the whole problem" as an explanation). See `smoke-test-s2.yaml`'s and `smoke-test-s3.yaml`'s header comments for the full numbers and CI run IDs.
+Loads that were tried and rejected, to save the next person from re-discovering the same dead ends:
+- `s2` at `rate: 20` (known-unsafe baseline, ~31-33% success) and `rate: 5` (unstable across three repeated runs, 74-99% depending on the run and whether the 45s or 60s duration was used — increasing the duration made it *worse*, not better, ruling out "the fixed window's cutoff is the whole problem" as an explanation).
+- `s1` at its original `rate: 75` (catastrophic and asymmetric: 73.33%/5.24% success, with the two plugins generating 90 vs. 1240 total requests in the same window).
+- `s5`/`s6` at `rate: 1` and `rate: 0.5` on their original 4-pod, default-resource shape: both stayed unsafe until the 8-pod/250m-1CPU shape validated for s2-s4 was applied. `s6` additionally needed its duration extended to 120s — at 60s, enough concurrent long-running (1024-token) requests were still in flight when the window ended that the harness's own cutoff was inflating the failure count independent of real saturation.
 
-`s1`, `s4`-`s8` have not yet been through this calibration process and their current `rate`/`concurrency` values should not be assumed safe — several of them (`s1`, `s7`, `s8` in particular) combine a higher offered rate with fewer pods and no per-pod resource shrink than either validated scenario above, which is exactly the combination that caused the original saturation.
+See each scenario's own header comment for the full run-by-run numbers and CI run IDs.
+
+**On the tail-latency warning for `s7`/`s8`:** both validated runs of these two scenarios show p95/p50 ratios well above the 3.0x warning threshold (5.3x-40.0x). This is expected, not a saturation signal — `s7`/`s8` deliberately mix a 10x-speedup "fast" pod with a 0.2x-speedup "slow" pod, so a wide latency spread is the scenario working as designed. The tail-latency check in `apply_request_level_verdict` was calibrated on homogeneous scenarios and does not distinguish "queueing under load" from "intentionally slower pod by design" — treat its warning as uninformative for heterogeneous-backend scenarios specifically, and rely on success rate and the genuine-error/cancelled checks instead, which stayed clean on every validated run of both scenarios.
+
+All eight smoke-test scenarios (`s1`-`s8`) have now been through this empirical process at least once. "Validated" here means the specific `rate`/`concurrency`/pod-topology combination documented above and in each scenario's header comment — it does not mean every parameter in that scenario is understood or that no further tuning would help; it means these are the values known, from repeated real CI runs, not to be dominated by backend saturation.
 
 ## References
 

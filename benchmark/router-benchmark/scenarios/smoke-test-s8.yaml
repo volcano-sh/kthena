@@ -1,6 +1,24 @@
 name: "smoke-test-s8-routing-strategy"
 description: "s8 scenario: schedule strategy comparison"
 
+# rate=1 was empirically validated on the 4c/16g CI runner against this
+# exact backend shape (4 heterogeneous mocker pods: fast/normal x2/slow at
+# 10x/1x/0.2x speedup, default resources): CI runs 30693603161 and
+# 30694269799 cleared 96.72-98.36% success on random and least-request
+# (identical between the two plugins on each run), 0 mocker restarts, 0
+# genuine AIPerf errors on both runs.
+#
+# The scenario's original rate=50 was never run directly (superseded
+# before any dispatch), but sits alongside s7's rejected rate=50 on a
+# similarly small, heterogeneous, default-resource pod pool.
+#
+# Same caveat as s7: both validated runs show large p95/p50 tail-latency
+# ratios (5.9x-13.4x), consistently above the 3.0x warning threshold, on
+# every run. This is expected given the deliberately 5x-slower "slow"
+# pod (speedupRatio: 0.2) - do not treat the tail-latency warning as a
+# saturation signal for this scenario.
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
 load:
   schedule:
     mode: "rate"

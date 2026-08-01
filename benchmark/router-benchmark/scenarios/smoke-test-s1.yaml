@@ -1,6 +1,24 @@
 name: "smoke-test-s1-throughput-baseline"
 description: "s1 scenario: high-load burst baseline under homogeneous backends"
 
+# rate=2 was empirically validated on the 4c/16g CI runner against this
+# exact backend shape (4 mocker pods, default resources): CI runs
+# 30694269799 and 30695729677 both cleared 94-98% success on random and
+# least-request, with 0 mocker restarts and 0 genuine AIPerf errors.
+#
+# The scenario's original rate=75 was tested first and rejected outright:
+# CI run 30693603161 measured 73.33%/5.24% success, with least-request
+# generating 1240 total requests (vs random's 90) in the same 60s window
+# and 1175 of them failing with 503 - a catastrophic, asymmetric result,
+# not a borderline one.
+#
+# Note: rate=2 has only been validated once here; s1's original intent
+# ("high-load burst baseline") may call for deliberately probing toward
+# saturation rather than a safe comparison point like the other scenarios -
+# that design question is unresolved. Treat rate=2 as "known safe", not
+# as "the intended load for this scenario's stated purpose".
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
 load:
   schedule:
     mode: "rate"

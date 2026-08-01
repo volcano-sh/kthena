@@ -21,23 +21,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-#          - scenario: smoke-test-s2
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-latency
-#          - scenario: smoke-test-s2
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-request
+          # All eight smoke-test scenarios have empirically validated
+          # rate/concurrency/pod-topology values as of issue #1452 (see
+          # each scenario YAML's header comment and the README's "CI
+          # Runner Capacity and Validated Scenario Parameters" section for
+          # the run-by-run evidence). Only s2/s3 run by default here to
+          # keep routine PR-triggered CI cost bounded; the rest are left
+          # commented but are safe to enable or dispatch manually
+          # (workflow_dispatch) without re-guessing their parameters.
+          - scenario: smoke-test-s2
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
+          - scenario: smoke-test-s3
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
 
-#          - scenario: smoke-test-s3
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-request
-
-          # s1/s4/s7/s8 validated (2 consistent runs each) after rounds 1-3
-          # of issue #1452 calibration; not rerun here.
 #          - scenario: smoke-test-s1
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
 #          - scenario: smoke-test-s4
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
+#          - scenario: smoke-test-s5
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
+#          - scenario: smoke-test-s6
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
 #          - scenario: smoke-test-s7
@@ -46,19 +54,6 @@ jobs:
 #          - scenario: smoke-test-s8
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
-
-          # s5: round 3 (8-pod 250m/1CPU shape) produced one clean run -
-          # stability rerun. s6: still failing at the same shape/rate, but
-          # cancelled >= 503 both times and p50/p95 (7-28s) are a large
-          # fraction of the 60s window - testing whether the real problem is
-          # duration too short for this scenario's inherently long individual
-          # request latency, not load level.
-          - scenario: smoke-test-s5
-            router-config-a: router-config-random
-            router-config-b: router-config-least-request
-          - scenario: smoke-test-s6
-            router-config-a: router-config-random
-            router-config-b: router-config-least-request
 
     steps:
       - name: Free Disk Space

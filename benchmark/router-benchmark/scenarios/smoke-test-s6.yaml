@@ -1,6 +1,29 @@
 name: "smoke-test-s6-long-response"
 description: "s6 scenario: SSE relay overhead under long output streams"
 
+# rate=0.5, 8 pods at 250m/1 CPU, and duration=120s (extended from the
+# default 60s) were empirically validated on the 4c/16g CI runner: CI runs
+# 30696222084 and 30696682560 both cleared 94.44%/94.44% success on random
+# and least-request (identical between the two runs), 0 mocker restarts,
+# 0 genuine AIPerf errors, no warnings.
+#
+# This scenario needed a duration fix, not just a lower rate:
+#   - rate=1, then rate=0.5, on the original 4-pod default-resource shape
+#     (CI runs 30693603161, 30694269799): both unsafe, caught by the
+#     success-rate floor (81.25%/78.12% and worse).
+#   - Applying the 8-pod/250m-1CPU shape validated for s2-s5 at rate=0.5
+#     (CI run 30695729677) improved latency but success rate stayed at
+#     81.25%/81.25% - unlike s5, the topology fix alone did not help here.
+#   - The key observation: cancelled-at-window-end counts were always >=
+#     the 503 count (not "unexplained" failures), and p50/p95 (7-28s) were
+#     a large fraction of the 60s window. With 1024-token completions,
+#     enough concurrent long-running requests are naturally still in
+#     flight when a 60s window ends that the harness itself, not backend
+#     saturation, was inflating the failure count.
+#   - Extending duration to 120s (same rate, same pod shape) fixed it:
+#     success jumped to 94.44%/94.44% and stayed there on rerun.
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
 load:
   schedule:
     mode: "rate"
