@@ -32,27 +32,31 @@ jobs:
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
 
-          # s4 and s8 validated (2 consistent runs each) after rounds 1-2 of
-          # issue #1452 calibration; not rerun here. s1/s7 need a stability
-          # rerun; s5/s6 need a fresh attempt with the validated 8-pod
-          # 250m/1CPU shape after failing even at very low rates with the
-          # original 4-pod default-resource shape.
+          # s1/s4/s7/s8 validated (2 consistent runs each) after rounds 1-3
+          # of issue #1452 calibration; not rerun here.
+#          - scenario: smoke-test-s1
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
 #          - scenario: smoke-test-s4
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
+#          - scenario: smoke-test-s7
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
 #          - scenario: smoke-test-s8
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
-          - scenario: smoke-test-s1
-            router-config-a: router-config-random
-            router-config-b: router-config-least-request
+
+          # s5: round 3 (8-pod 250m/1CPU shape) produced one clean run -
+          # stability rerun. s6: still failing at the same shape/rate, but
+          # cancelled >= 503 both times and p50/p95 (7-28s) are a large
+          # fraction of the 60s window - testing whether the real problem is
+          # duration too short for this scenario's inherently long individual
+          # request latency, not load level.
           - scenario: smoke-test-s5
             router-config-a: router-config-random
             router-config-b: router-config-least-request
           - scenario: smoke-test-s6
-            router-config-a: router-config-random
-            router-config-b: router-config-least-request
-          - scenario: smoke-test-s7
             router-config-a: router-config-random
             router-config-b: router-config-least-request
 

@@ -15,7 +15,7 @@ load:
   max_tokens:
     - tokens: 1024
       weight: 10
-  duration: "60s"
+  duration: "120s"
 
 backends:
   common:
