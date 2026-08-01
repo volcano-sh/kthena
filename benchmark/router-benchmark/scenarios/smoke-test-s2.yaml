@@ -4,7 +4,7 @@ description: "s2 scenario: mid-QPS steady-state comparison point"
 load:
   schedule:
     mode: "rate"
-    rate: 20
+    rate: 5
   traffic:
     burstiness: 1.0
     ramp:
