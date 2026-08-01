@@ -176,6 +176,23 @@ Eight scenarios are designed:
 | S7 | Backend Latency Variance | Scheduling with heterogeneous backends | 3 pods: TTFT 10/100/500ms |
 | S8 | Routing Strategy Comparison | Routing strategy overhead | random vs least-latency vs least-request |
 
+## CI Runner Capacity and Validated Scenario Parameters
+
+**Scenario load parameters must be calibrated against the actual CI runner's capacity, not guessed.** Issue [#1452](https://github.com/volcano-sh/kthena/issues/1452) tracked exactly this failure mode: an early version of this benchmark picked `rate`/`concurrency` values that saturated the mock backend before the router or plugin under test was meaningfully stressed, so every plugin comparison was actually just measuring how the backend collapsed under too much load — success rates as low as 13-33%, both arms failing near-identically regardless of which scheduler plugin was active.
+
+The GitHub-hosted CI runner these workflows run on has **4 CPU / 16GB RAM**, hosting the entire stack on one node: the Kind control plane, `kthena-controller-manager`, `kthena-router`, and every mocker pod. This is a small, fixed budget — a scenario's `rate`/`concurrency`, mocker pod `count`, and per-pod resource `requests`/`limits` all have to fit inside it simultaneously, and there is no way to derive a safe combination analytically; it has to be measured.
+
+The following operating points have been empirically validated by running the actual scenario against this actual CI runner repeatedly (not derived from local testing, and not accepted on a single run — see the per-scenario comments in the YAML files for the full experiment history and CI run IDs):
+
+| Scenario | Validated load | Mocker pods | Per-pod resources | Result |
+|---|---|---|---|---|
+| `smoke-test-s2` | `rate: 3`, `duration: 45s` | 8 | `requests: {cpu: 250m, memory: 256Mi}`, `limits: {cpu: 1, memory: 1Gi}` | 100%/100% success (random/least-request), 0 mocker restarts, 0 genuine AIPerf errors, across 2 independent runs |
+| `smoke-test-s3` | `concurrency: 5` | 8 | same as above | >97% success both plugins, 0 mocker restarts, ~2.4s p95, across 2 independent runs |
+
+Loads that were tried and rejected, to save the next person from re-discovering the same dead ends: `s2` at `rate: 20` (known-unsafe baseline, ~31-33% success) and `rate: 5` (unstable across three repeated runs, 74-99% depending on the run and whether the 45s or 60s duration was used — increasing the duration made it *worse*, not better, ruling out "the fixed window's cutoff is the whole problem" as an explanation). See `smoke-test-s2.yaml`'s and `smoke-test-s3.yaml`'s header comments for the full numbers and CI run IDs.
+
+`s1`, `s4`-`s8` have not yet been through this calibration process and their current `rate`/`concurrency` values should not be assumed safe — several of them (`s1`, `s7`, `s8` in particular) combine a higher offered rate with fewer pods and no per-pod resource shrink than either validated scenario above, which is exactly the combination that caused the original saturation.
+
 ## References
 
 - [Kthena Router Benchmark Proposal](../../docs/proposal/kthena-router-benchmark.md)

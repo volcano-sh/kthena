@@ -22,6 +22,7 @@ from router_ab_test.models import (
     BackendsConfig,
     BenchmarkResult,
     ScenarioConfig,
+    apply_request_level_verdict,
     compute_run_verdict,
 )
 from router_ab_test.orchestrator import ABTestOrchestrator
@@ -44,6 +45,7 @@ __all__ = [
     "VERDICT_INVALID",
     "VERDICT_VALID",
     "analyze_router_metrics",
+    "apply_request_level_verdict",
     "compute_run_verdict",
     "format_router_analysis",
 ]

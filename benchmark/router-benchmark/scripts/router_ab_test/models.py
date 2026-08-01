@@ -136,6 +136,16 @@ VERDICT_FRAMEWORK_ERROR = "framework_error"
 INVALIDATING_TERMINATED_REASONS = frozenset({"OOMKilled", "Error"})
 INVALIDATING_WAITING_REASONS = frozenset({"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull"})
 
+# p95/p50 latency ratio above which a run is annotated with a non-fatal
+# warning (see apply_request_level_verdict). Evidence from issue #1452's CI
+# experiments: every empirically-validated safe run (s2 rate=3, s3
+# concurrency=5) stayed at p95/p50 <= ~1.4x across repeated runs; the one s2
+# rate=5 run later rejected for run-to-run instability hit ~3.2x on its
+# random-plugin arm; the confirmed-saturated s2 rate=20 baseline hit
+# 10-25x+. A single ambiguous sample near 3x isn't enough evidence to
+# hard-invalidate on — this flags it for human review instead.
+TAIL_LATENCY_WARNING_RATIO = 3.0
+
 
 def compute_run_verdict(restart_stats: dict[str, Any]) -> dict[str, Any]:
     """Compute the run verdict from post-traffic mocker pod restart stats.
@@ -175,4 +185,84 @@ def compute_run_verdict(restart_stats: dict[str, Any]) -> dict[str, Any]:
         "reasons": [],
         "offenders": [],
         "restart_stats": restart_stats,
+    }
+
+
+def apply_request_level_verdict(verdict: dict[str, Any], request_stats: dict[str, Any]) -> dict[str, Any]:
+    """Layer request-level saturation checks onto an existing pod-based verdict.
+
+    ``compute_run_verdict`` only sees mocker pod restart/crash signals, which
+    stay clean even when the backend is saturated at the request level: every
+    CI run in issue #1452's investigation showed 0 mocker restarts on both
+    safe and saturated loads. This adds two additional, evidence-derived
+    checks on top of that verdict:
+
+    - genuine AIPerf-reported request errors (``request_stats["genuine_errors"]``,
+      summed from AIPerf's own ``error_summary``) — 0 on every validated-safe
+      run this issue produced, and >0 whenever a load was later rejected as
+      saturated.
+    - router 503s in excess of AIPerf's own end-of-window cancellation count
+      (``request_stats["cancelled"]``). A fixed-duration benchmark always
+      cancels a few trailing in-flight requests when it ends; every
+      validated-safe run's 503 count stayed at or below that cancellation
+      count. 503s beyond it indicate requests failed mid-run rather than
+      being cut off by the harness — i.e. this deliberately does NOT treat
+      every 503 as saturation.
+
+    Either check is skipped (not assumed clean) when its input is missing,
+    since "unknown" is not the same as "zero".
+
+    A high p95/p50 tail-latency ratio is recorded as a non-fatal warning
+    (see ``TAIL_LATENCY_WARNING_RATIO``) rather than an invalidating
+    condition — the evidence for a hard cutoff there is a single ambiguous
+    sample, not a clean separator like the two checks above.
+
+    ``request_stats`` keys (all optional): genuine_errors, cancelled,
+    total_503, p50_ms, p95_ms.
+    """
+    if verdict.get("status") == VERDICT_FRAMEWORK_ERROR:
+        # Benchmark tooling itself failed; there is no real traffic to judge.
+        return verdict
+
+    reasons = list(verdict.get("reasons", []))
+    offenders = list(verdict.get("offenders", []))
+    warnings = list(verdict.get("warnings", []))
+
+    genuine_errors = request_stats.get("genuine_errors")
+    if genuine_errors:
+        reasons.append(
+            f"aiperf reported {genuine_errors} genuine request error(s) "
+            "(excludes end-of-window cancellations)"
+        )
+        offenders.append({"name": "aiperf_client", "reasons": [f"genuine_errors={genuine_errors}"]})
+
+    cancelled = request_stats.get("cancelled")
+    total_503 = request_stats.get("total_503") or 0
+    if cancelled is not None and total_503 > 0:
+        unexplained_503s = max(0, total_503 - min(total_503, cancelled))
+        if unexplained_503s > 0:
+            reasons.append(
+                f"{unexplained_503s} of {total_503} router 503(s) are not accounted for by "
+                f"AIPerf's {cancelled} end-of-window cancellation(s) — requests failed mid-run"
+            )
+            offenders.append({"name": "router", "reasons": [f"unexplained_503s={unexplained_503s}"]})
+
+    p50_ms = request_stats.get("p50_ms")
+    p95_ms = request_stats.get("p95_ms")
+    if p50_ms and p95_ms and p50_ms > 0:
+        ratio = p95_ms / p50_ms
+        if ratio > TAIL_LATENCY_WARNING_RATIO:
+            warnings.append(
+                f"p95/p50 latency ratio {ratio:.1f}x exceeds {TAIL_LATENCY_WARNING_RATIO}x "
+                "(possible queueing under load; not treated as invalidating on its own)"
+            )
+
+    status = VERDICT_INVALID if offenders else verdict.get("status", VERDICT_VALID)
+    return {
+        **verdict,
+        "status": status,
+        "reasons": reasons,
+        "offenders": offenders,
+        "warnings": warnings,
+        "request_stats": request_stats,
     }

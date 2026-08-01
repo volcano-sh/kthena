@@ -1,6 +1,29 @@
 name: "smoke-test-s2-latency-vs-qps"
 description: "s2 scenario: mid-QPS steady-state comparison point"
 
+# rate=3 (45s duration) was empirically validated on the GitHub-hosted CI
+# runner (4 CPU / 16GB, single-node Kind cluster) against this exact
+# backend shape (8 mocker pods, 250m/1 CPU each): CI runs 30690218656 and
+# 30690813255 both cleared 100% success on random and least-request, with
+# 0 mocker restarts, 0 genuine AIPerf errors, and identical p50/p95/p99
+# latency across both runs and both plugins.
+#
+# Rejected alternatives, in the order tried:
+#   - rate=20: known-unsafe baseline, ~31-33% success (CI run 30544274253).
+#   - rate=5 (45s): unstable across three repeated runs — random success
+#     swung 91.87% / 96.65% / 93.30%, least-request 98.09% / 98.56% / 95.69%
+#     (CI runs 30687307473, 30688773166, 30689203624). 0 genuine AIPerf
+#     errors on all three, so this wasn't hard saturation, but the variance
+#     was too wide to call the parameter safe.
+#   - rate=5 (60s): tested to see whether a longer window (giving trailing
+#     cancellations less relative weight) would stabilize rate=5. It got
+#     worse instead: 77.39%/74.2% success with genuine AIPerf errors (19
+#     and 53) appearing for the first time (CI run 30689646184) — this
+#     falsified the "45s cutoff is the whole problem" hypothesis and showed
+#     rate=5 sustained for longer is a real capacity problem, not a
+#     window-cutoff artifact.
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
 load:
   schedule:
     mode: "rate"

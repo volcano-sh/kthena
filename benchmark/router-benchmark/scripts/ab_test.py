@@ -45,6 +45,7 @@ from router_ab_test import (
     ResultReporter,
     ScenarioConfig,
     analyze_router_metrics,
+    apply_request_level_verdict,
     compute_run_verdict,
     format_router_analysis,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "VERDICT_INVALID",
     "VERDICT_VALID",
     "analyze_router_metrics",
+    "apply_request_level_verdict",
     "build_parser",
     "compute_run_verdict",
     "format_router_analysis",
@@ -116,10 +118,17 @@ def main() -> None:
     comparison = report.get("comparison", {})
     if comparison.get("_skipped"):
         # At least one run was invalid/framework_error — not a regression
-        # signal, but the run itself failed the validity gate (issue #1271).
+        # signal, but the run itself failed the validity gate (issue #1271,
+        # extended to request-level saturation in issue #1452).
         raise SystemExit(2)
+    # Router-level regressions (e.g. request success rate) are computed by
+    # reporter.py alongside the AIPerf-level comparison but previously never
+    # affected the exit code, so a benchmark could report a severely
+    # degraded router success rate while CI stayed green (issue #1452).
+    router_comparison = report.get("router_comparison", {})
     has_regression = any(metric.get("regression", False) for metric in comparison.values())
-    raise SystemExit(1 if has_regression else 0)
+    has_router_regression = any(metric.get("regression", False) for metric in router_comparison.values())
+    raise SystemExit(1 if (has_regression or has_router_regression) else 0)
 
 
 def _dry_run(scenario_path: str) -> None:

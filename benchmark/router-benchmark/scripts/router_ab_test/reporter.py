@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.models import BenchmarkResult, VERDICT_VALID
+from router_ab_test.models import BenchmarkResult, VERDICT_VALID, apply_request_level_verdict
 
 _METRIC_SPECS: dict[str, dict[str, Any]] = {
     "ttft_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
@@ -521,9 +521,23 @@ class ResultReporter:
         result_a: BenchmarkResult,
         result_b: BenchmarkResult,
     ) -> dict[str, Any]:
-        comparison = self.compare(result_a, result_b)
         analysis_a = self._router_analysis_for(result_a)
         analysis_b = self._router_analysis_for(result_b)
+        # Extend each run's pod-based verdict with request-level saturation
+        # checks now that router metrics are available (issue #1452: pods
+        # can stay healthy while requests are still failing). This must run
+        # before compare() so a newly-detected saturation correctly skips
+        # the A/B comparison via the existing verdict gate (issue #1271).
+        if analysis_a:
+            result_a.verdict = apply_request_level_verdict(
+                result_a.verdict, self._request_stats_for_verdict(analysis_a, result_a.metrics)
+            )
+        if analysis_b:
+            result_b.verdict = apply_request_level_verdict(
+                result_b.verdict, self._request_stats_for_verdict(analysis_b, result_b.metrics)
+            )
+
+        comparison = self.compare(result_a, result_b)
         # Router counters from an invalid/framework_error run are no more
         # comparable than the AIPerf numbers — gate on the same verdict rule.
         router_comparison: dict[str, Any] = {}
@@ -549,6 +563,27 @@ class ResultReporter:
             },
             "comparison": comparison,
             "router_comparison": router_comparison,
+        }
+
+    @staticmethod
+    def _request_stats_for_verdict(analysis: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+        """Assemble the request_stats payload for apply_request_level_verdict.
+
+        genuine_errors/cancelled come from AIPerf's own output (populated by
+        AIPerfRunner._read_metrics_from_output); total_503/p50_ms/p95_ms come
+        from the router's own Prometheus counters. Missing fields are left as
+        None rather than defaulted to 0, so apply_request_level_verdict can
+        tell "known clean" apart from "unknown".
+        """
+        requests = analysis.get("requests") or {}
+        total_503 = (requests.get("by_status_code") or {}).get("503", 0)
+        duration_200 = (analysis.get("request_duration_seconds") or {}).get("200") or {}
+        return {
+            "genuine_errors": metrics.get("aiperf_genuine_errors"),
+            "cancelled": metrics.get("aiperf_cancelled"),
+            "total_503": total_503,
+            "p50_ms": duration_200.get("p50_ms"),
+            "p95_ms": duration_200.get("p95_ms"),
         }
 
     @staticmethod
@@ -606,6 +641,8 @@ class ResultReporter:
             print(f"  verdict: {verdict.get('status', '<unset>')}")
             for reason in verdict.get("reasons", []):
                 print(f"    - {reason}")
+            for warning in verdict.get("warnings", []):
+                print(f"    ! {warning}")
         for key, value in config_report["metrics"].items():
             print(f"  {key}: {value}")
 

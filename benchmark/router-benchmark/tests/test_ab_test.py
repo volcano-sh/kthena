@@ -288,6 +288,65 @@ class AIPerfRunnerTest(unittest.TestCase):
         self.assertNotIn("--concurrency-ramp-duration", cmd)
         self.assertNotIn("--prefill-concurrency-ramp-duration", cmd)
 
+    def _write_summary(self, run_dir: Path, error_summary=None) -> None:
+        import json
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "time_to_first_token": {"avg": 100.0},
+            "request_latency": {"avg": 200.0},
+            "request_throughput": {"avg": 5.0},
+            "error_summary": error_summary or [],
+        }
+        (run_dir / "profile_export_aiperf.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    def test_read_metrics_from_output_sums_genuine_errors(self):
+        run_dir = Path(tempfile.mkdtemp())
+        self._write_summary(
+            run_dir,
+            error_summary=[
+                {"error_details": {"code": 503}, "count": 53},
+                {"error_details": {"type": "InvalidInferenceResultError"}, "count": 1},
+            ],
+        )
+
+        metrics = self.runner._read_metrics_from_output(run_dir)
+
+        self.assertEqual(metrics["aiperf_genuine_errors"], 54)
+
+    def test_read_metrics_from_output_zero_errors_when_summary_empty(self):
+        run_dir = Path(tempfile.mkdtemp())
+        self._write_summary(run_dir, error_summary=[])
+
+        metrics = self.runner._read_metrics_from_output(run_dir)
+
+        self.assertEqual(metrics["aiperf_genuine_errors"], 0)
+
+    def test_read_cancelled_count_parses_phase_summary_line(self):
+        run_dir = Path(tempfile.mkdtemp())
+        self._write_summary(run_dir)
+        log_dir = run_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "aiperf.log").write_text(
+            "2026-08-01 07:32:03.010 - PhaseRunner - NOTICE - "
+            "Phase profiling complete | completed=237, cancelled=45, errors=19 | "
+            "sessions: completed=237, cancelled=45\n",
+            encoding="utf-8",
+        )
+
+        metrics = self.runner._read_metrics_from_output(run_dir)
+
+        self.assertEqual(metrics["aiperf_cancelled"], 45)
+
+    def test_read_metrics_from_output_omits_cancelled_when_log_missing(self):
+        run_dir = Path(tempfile.mkdtemp())
+        self._write_summary(run_dir)
+        # No logs/aiperf.log written.
+
+        metrics = self.runner._read_metrics_from_output(run_dir)
+
+        self.assertNotIn("aiperf_cancelled", metrics)
+
 
 class BackendsConfigTest(unittest.TestCase):
     def test_profile_resources_are_parsed_from_yaml_dict(self):
@@ -599,6 +658,57 @@ class MainTest(unittest.TestCase):
 
         self.assertEqual(exit_ctx.exception.code, 1)
 
+    def test_main_exits_non_zero_when_only_router_comparison_contains_regression(self):
+        # comparison (AIPerf-level) looks clean; only router_comparison
+        # (e.g. request success rate) shows a regression. Before this fix
+        # the exit code ignored router_comparison entirely (issue #1452).
+        report = {
+            "comparison": {"latency_avg_ms": {"regression": False}},
+            "router_comparison": {"request_success_rate_pct": {"regression": True}},
+        }
+        args = mock.Mock(
+            scenario="scenario.yaml",
+            router_config_a="config-a.yaml",
+            router_config_b="config-b.yaml",
+            output="./results",
+            local_port=ab_test.K8sManager.DEFAULT_LOCAL_PORT,
+            dry_run=False,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = args
+
+        with mock.patch.object(ab_test, "ABTestOrchestrator") as orchestrator_cls:
+            orchestrator_cls.return_value.run.return_value = report
+            with mock.patch.object(ab_test, "build_parser", return_value=parser):
+                with self.assertRaises(SystemExit) as exit_ctx:
+                    ab_test.main()
+
+        self.assertEqual(exit_ctx.exception.code, 1)
+
+    def test_main_exits_zero_when_no_regression_in_either_comparison(self):
+        report = {
+            "comparison": {"latency_avg_ms": {"regression": False}},
+            "router_comparison": {"request_success_rate_pct": {"regression": False}},
+        }
+        args = mock.Mock(
+            scenario="scenario.yaml",
+            router_config_a="config-a.yaml",
+            router_config_b="config-b.yaml",
+            output="./results",
+            local_port=ab_test.K8sManager.DEFAULT_LOCAL_PORT,
+            dry_run=False,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = args
+
+        with mock.patch.object(ab_test, "ABTestOrchestrator") as orchestrator_cls:
+            orchestrator_cls.return_value.run.return_value = report
+            with mock.patch.object(ab_test, "build_parser", return_value=parser):
+                with self.assertRaises(SystemExit) as exit_ctx:
+                    ab_test.main()
+
+        self.assertEqual(exit_ctx.exception.code, 0)
+
     @mock.patch("router_ab_test.kubernetes.K8sManager")
     @mock.patch.object(ab_test, "ScenarioConfig")
     def test_dry_run_writes_yaml_to_tmp(self, mock_scenario_cls, mock_k8s_cls):
@@ -689,6 +799,91 @@ class ComputeRunVerdictTest(unittest.TestCase):
         self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
 
 
+class ApplyRequestLevelVerdictTest(unittest.TestCase):
+    def _valid_verdict(self):
+        return ab_test.compute_run_verdict({"total_restarts": 0, "pods": []})
+
+    def test_stays_valid_when_503s_fully_explained_by_cancellations(self):
+        # s2 rate=3 stability rerun shape: 0 503s, 0 genuine errors.
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": 2, "total_503": 0, "p50_ms": 1744.1, "p95_ms": 2424.4},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(verdict["reasons"], [])
+        self.assertEqual(verdict["warnings"], [])
+
+    def test_valid_when_503s_within_cancelled_count(self):
+        # s3 concurrency=5 shape: some 503s, all covered by cancellations.
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": 5, "total_503": 5, "p50_ms": 1750.0, "p95_ms": 2430.0},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+
+    def test_invalid_when_genuine_errors_present(self):
+        # s2 rate=5/60s shape: genuine AIPerf errors observed.
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 19, "cancelled": 45, "total_503": 64, "p50_ms": 1800.0, "p95_ms": 6750.0},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(any("genuine_errors=19" in o["reasons"][0] for o in verdict["offenders"]))
+
+    def test_invalid_when_503s_exceed_cancellations(self):
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": 2, "total_503": 17, "p50_ms": 1750.0, "p95_ms": 2450.0},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(any("unexplained_503s=15" in o["reasons"][0] for o in verdict["offenders"]))
+
+    def test_unknown_cancelled_count_does_not_invalidate(self):
+        # cancelled is None (unknown), not 0 - must not be treated as "no
+        # cancellations occurred", or every unrelated 503 count would be
+        # flagged as fully unexplained.
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": None, "total_503": 20, "p50_ms": 1750.0, "p95_ms": 2450.0},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+
+    def test_tail_latency_ratio_warns_but_does_not_invalidate(self):
+        # s2 rate=5/45s random-arm outlier shape: p95/p50 ~3.2x, no errors.
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": 11, "total_503": 7, "p50_ms": 1800.0, "p95_ms": 5790.0},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(len(verdict["warnings"]), 1)
+        self.assertIn("p95/p50", verdict["warnings"][0])
+
+    def test_tail_latency_ratio_below_threshold_no_warning(self):
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": 2, "total_503": 0, "p50_ms": 1744.1, "p95_ms": 2424.4},
+        )
+        self.assertEqual(verdict["warnings"], [])
+
+    def test_framework_error_verdict_is_untouched(self):
+        verdict = {"status": ab_test.VERDICT_FRAMEWORK_ERROR, "reasons": ["aiperf exited with code 1"], "offenders": []}
+        result = ab_test.apply_request_level_verdict(
+            verdict, {"genuine_errors": 5, "cancelled": 0, "total_503": 10, "p50_ms": None, "p95_ms": None},
+        )
+        self.assertEqual(result, verdict)
+
+    def test_preexisting_pod_restart_invalidity_is_preserved(self):
+        pod = {"name": "p", "restarts": 1, "last_reason": "Error", "waiting_reason": None}
+        pod_verdict = ab_test.compute_run_verdict({"total_restarts": 1, "pods": [pod]})
+        verdict = ab_test.apply_request_level_verdict(
+            pod_verdict,
+            {"genuine_errors": 0, "cancelled": 2, "total_503": 0, "p50_ms": 1744.1, "p95_ms": 2424.4},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertEqual(len(verdict["offenders"]), 1)
+        self.assertEqual(verdict["offenders"][0]["name"], "p")
+
+
 class ReporterVerdictTest(unittest.TestCase):
     def make_result(self, verdict_status=None, **metrics):
         result = ab_test.BenchmarkResult(
@@ -744,6 +939,62 @@ class ReporterVerdictTest(unittest.TestCase):
         self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_VALID)
         self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_INVALID)
         self.assertTrue(report["comparison"]["_skipped"])
+
+    def test_build_report_downgrades_verdict_on_genuine_aiperf_errors(self):
+        output_dir = Path(tempfile.mkdtemp())
+        prom_path = output_dir / "router_metrics.prom"
+        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+
+        result_a = ab_test.BenchmarkResult(
+            config_name="config_a", scenario="s", timestamp="",
+            metrics={"aiperf_genuine_errors": 19, "aiperf_cancelled": 5}, raw_output="",
+            artifacts={"prometheus": {"path": str(prom_path)}},
+            verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
+        )
+        result_b = ab_test.BenchmarkResult(
+            config_name="config_b", scenario="s", timestamp="",
+            metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 20}, raw_output="",
+            artifacts={"prometheus": {"path": str(prom_path)}},
+            verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
+        )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s", description="d",
+            config_a_path="a.yaml", config_b_path="b.yaml",
+            result_a=result_a, result_b=result_b,
+        )
+
+        # _PROM_FIXTURE has 20/100 503s. config_a's 20 genuine errors
+        # invalidate it regardless of cancelled count; config_b's 20 503s
+        # are fully covered by its 20 cancellations, so it stays valid.
+        self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_INVALID)
+        self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_VALID)
+        self.assertTrue(report["comparison"]["_skipped"])
+        self.assertEqual(report["router_comparison"], {})
+
+    def test_build_report_stays_valid_when_cancelled_data_present_and_sufficient(self):
+        output_dir = Path(tempfile.mkdtemp())
+        prom_path = output_dir / "router_metrics.prom"
+        prom_path.write_text(_PROM_FIXTURE, encoding="utf-8")
+
+        def make_clean_result(config_name):
+            return ab_test.BenchmarkResult(
+                config_name=config_name, scenario="s", timestamp="",
+                metrics={"aiperf_genuine_errors": 0, "aiperf_cancelled": 20}, raw_output="",
+                artifacts={"prometheus": {"path": str(prom_path)}},
+                verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
+            )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s", description="d",
+            config_a_path="a.yaml", config_b_path="b.yaml",
+            result_a=make_clean_result("config_a"), result_b=make_clean_result("config_b"),
+        )
+
+        self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_VALID)
+        self.assertNotIn("_skipped", report["comparison"] if report["comparison"] else {})
+        self.assertIn("request_success_rate_pct", report["router_comparison"])
 
 
 class K8sManagerRestartStatsTest(unittest.TestCase):

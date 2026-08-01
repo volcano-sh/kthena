@@ -29,6 +29,15 @@ _AIPERF_METRIC_MAP = {
     "request_throughput": "throughput_rps",
 }
 
+# AIPerf logs a single summary line per run: "Phase profiling complete |
+# completed=X, cancelled=Y, errors=Z". The "cancelled" count (requests still
+# in flight when the fixed benchmark duration elapsed) is not exposed in the
+# structured profile_export_aiperf.json output, so the log is currently the
+# only source for it. Used by the request-level saturation verdict to tell
+# benign end-of-window cutoffs apart from genuine mid-run failures
+# (see issue #1452).
+_PHASE_CANCELLED_RE = re.compile(r"Phase profiling complete \|.*\bcancelled=(\d+)")
+
 
 class AIPerfRunner:
     """Run AIPerf benchmarks against the router endpoint."""
@@ -209,4 +218,35 @@ class AIPerfRunner:
             entry = data.get(aiperf_key)
             if isinstance(entry, dict) and "avg" in entry:
                 metrics[internal_key] = entry["avg"]
+
+        # Genuine, AIPerf-observed request errors (e.g. connection failures,
+        # non-2xx responses) — distinct from requests cancelled because the
+        # benchmark's fixed duration elapsed while they were still in flight.
+        # Used by the request-level saturation verdict (issue #1452).
+        error_summary = data.get("error_summary") or []
+        metrics["aiperf_genuine_errors"] = sum(
+            entry.get("count", 0) for entry in error_summary if isinstance(entry, dict)
+        )
+
+        cancelled = self._read_cancelled_count(run_dir)
+        if cancelled is not None:
+            metrics["aiperf_cancelled"] = cancelled
+
         return metrics
+
+    @staticmethod
+    def _read_cancelled_count(run_dir: Path) -> int | None:
+        """Extract AIPerf's end-of-window cancellation count from its log.
+
+        Returns None if the log or the summary line isn't found, so callers
+        must treat this as "unknown" rather than assuming zero cancellations.
+        """
+        log_path = run_dir / "logs" / "aiperf.log"
+        if not log_path.exists():
+            return None
+        cancelled: int | None = None
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            match = _PHASE_CANCELLED_RE.search(line)
+            if match:
+                cancelled = int(match.group(1))  # keep the last match (the profiling phase)
+        return cancelled
