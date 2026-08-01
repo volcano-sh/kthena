@@ -4,7 +4,7 @@ description: "s2 scenario: mid-QPS steady-state comparison point"
 load:
   schedule:
     mode: "rate"
-    rate: 5
+    rate: 3
   traffic:
     burstiness: 1.0
     ramp:
@@ -15,7 +15,7 @@ load:
   max_tokens:
     - tokens: 128
       weight: 10
-  duration: "60s"
+  duration: "45s"
 
 backends:
   common:
