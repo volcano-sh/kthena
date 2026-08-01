@@ -4,7 +4,7 @@ description: "s5 scenario: request parsing cost with long prompts (2048 tokens)"
 load:
   schedule:
     mode: "rate"
-    rate: 30
+    rate: 1
   traffic:
     burstiness: 1.0
     ramp:

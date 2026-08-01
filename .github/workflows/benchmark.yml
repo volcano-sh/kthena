@@ -24,23 +24,36 @@ jobs:
 #          - scenario: smoke-test-s2
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-latency
-          - scenario: smoke-test-s2
-            router-config-a: router-config-random
-            router-config-b: router-config-least-request
+#          - scenario: smoke-test-s2
+#            router-config-a: router-config-random
+#            router-config-b: router-config-least-request
 
 #          - scenario: smoke-test-s3
 #            router-config-a: router-config-random
 #            router-config-b: router-config-least-request
 
-#          - scenario: smoke-test-s8
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-latency
-#          - scenario: smoke-test-s8
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-request
-#          - scenario: smoke-test-s8
-#            router-config-a: router-config-least-latency
-#            router-config-b: router-config-least-request
+          # Round 1 calibration for issue #1452: s1/s4-s8 have not yet been
+          # empirically validated. Running them together as parallel matrix
+          # jobs so one CI trigger yields a first data point for all of
+          # them, instead of six sequential dispatches.
+          - scenario: smoke-test-s1
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
+          - scenario: smoke-test-s4
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
+          - scenario: smoke-test-s5
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
+          - scenario: smoke-test-s6
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
+          - scenario: smoke-test-s7
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
+          - scenario: smoke-test-s8
+            router-config-a: router-config-random
+            router-config-b: router-config-least-request
 
     steps:
       - name: Free Disk Space
