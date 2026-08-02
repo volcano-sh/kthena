@@ -160,6 +160,19 @@ Results are written to the directory given by `--output`. Current outputs:
   - Router Prometheus and pprof collection results
 - `report_<scenario>.json`
   - A/B comparison result
+  - Includes scheduler/plugin top functions from each collected pprof profile
+
+Pprof analysis is produced automatically by `ResultReporter.build_report()` when a run contains pprof artifacts. The JSON report records flat and cumulative values for the ten hottest `kthena-router/scheduler` functions in each profile.
+
+The parser tests use captured CPU and heap profiles from the router pprof endpoint under `tests/testdata/pprof` so they exercise the real protobuf wire format.
+
+To regenerate the checked-in protobuf binding, run the following from `benchmark/router-benchmark`:
+
+```bash
+python -m grpc_tools.protoc -I scripts/router_ab_test --python_out=scripts/router_ab_test scripts/router_ab_test/profile.proto
+```
+
+Then run `make gen-copyright` from the repository root to restore the generated file's license header.
 
 ## Test Scenarios
 

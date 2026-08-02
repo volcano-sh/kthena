@@ -22,6 +22,7 @@ from unittest import mock
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ab_test.py"
 SCRIPT_ROOT = SCRIPT_PATH.parent
+PPROF_FIXTURES = Path(__file__).parent / "testdata" / "pprof"
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
@@ -889,6 +890,60 @@ kthena_router_rate_limit_exceeded_total{limit_type="user",model="m",path="/v1/ch
 go_goroutines 100
 process_resident_memory_bytes 104857600
 """
+
+
+class PprofAnalysisTest(unittest.TestCase):
+    def test_analyze_cpu_profile_filters_scheduler_functions(self):
+        analysis = ab_test.analyze_pprof_profile(PPROF_FIXTURES / "cpu.pb.gz")
+
+        self.assertEqual(analysis["sample_type"], "cpu")
+        self.assertEqual(analysis["unit"], "nanoseconds")
+        self.assertGreater(analysis["total"], 0)
+        names = [function["name"] for function in analysis["top_functions"]]
+        self.assertTrue(any(name.endswith(".computeStandardizedHash") for name in names))
+        self.assertTrue(all("kthena-router/scheduler" in name for name in names))
+
+    def test_analyze_heap_profile_supports_explicit_sample_type(self):
+        analysis = ab_test.analyze_pprof_profile(PPROF_FIXTURES / "heap.pb.gz", sample_type="inuse_space", focus=None)
+
+        self.assertEqual(analysis["sample_type"], "inuse_space")
+        self.assertEqual(analysis["unit"], "bytes")
+        self.assertGreater(analysis["total"], 0)
+
+    def test_analyze_profile_rejects_unknown_sample_type(self):
+        with self.assertRaisesRegex(ValueError, "unknown sample type"):
+            ab_test.analyze_pprof_profile(PPROF_FIXTURES / "heap.pb.gz", sample_type="invalid")
+
+    def test_build_report_attaches_pprof_analysis(self):
+        result = ab_test.BenchmarkResult(
+            config_name="config",
+            scenario="scenario",
+            timestamp="2026-08-01T00:00:00",
+            metrics={},
+            raw_output="",
+            artifacts={
+                "pprof": {
+                    "profiles": {
+                        "cpu": str(PPROF_FIXTURES / "cpu.pb.gz"),
+                        "heap": str(PPROF_FIXTURES / "heap.pb.gz"),
+                    }
+                }
+            },
+        )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s",
+            description="d",
+            config_a_path="a.yaml",
+            config_b_path="b.yaml",
+            result_a=result,
+            result_b=result,
+        )
+
+        analysis = report["config_a"]["pprof_analysis"]
+        self.assertEqual(analysis["cpu"]["sample_type"], "cpu")
+        self.assertEqual(analysis["heap"]["sample_type"], "alloc_space")
+        self.assertTrue(analysis["cpu"]["top_functions"])
 
 
 class RouterMetricsAnalysisTest(unittest.TestCase):

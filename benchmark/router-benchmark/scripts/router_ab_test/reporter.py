@@ -14,14 +14,19 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import re
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from google.protobuf.message import DecodeError
+
 from router_ab_test.models import BenchmarkResult, VERDICT_VALID
+from router_ab_test.profile_pb2 import Profile
 
 _METRIC_SPECS: dict[str, dict[str, Any]] = {
     "ttft_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
@@ -39,6 +44,10 @@ _ROUTER_METRIC_SPECS: dict[str, dict[str, Any]] = {
 # Success rate is compared in absolute percentage points, not relative %.
 _SUCCESS_RATE_REGRESSION_PP = 1.0
 _PLUGIN_DURATION_REGRESSION_THRESHOLD = 10
+
+_DEFAULT_PPROF_FOCUS = r"kthena-router/scheduler"
+_DEFAULT_PPROF_LIMIT = 10
+
 
 _PROM_LINE_RE = re.compile(
     r"^(?P<metric>[a-zA-Z_:][a-zA-Z0-9_:]*)"
@@ -414,6 +423,95 @@ def format_router_analysis(analysis: dict[str, Any], indent: str = "  ") -> list
     return lines
 
 
+def analyze_pprof_profile(
+    path: str | Path,
+    sample_type: str | None = None,
+    focus: str | None = _DEFAULT_PPROF_FOCUS,
+    limit: int = _DEFAULT_PPROF_LIMIT,
+) -> dict[str, Any]:
+    """Return the hottest scheduler/plugin functions from a pprof profile."""
+    if limit < 1:
+        raise ValueError("limit must be greater than zero")
+    profile = Profile()
+    with gzip.open(path, "rb") as profile_file:
+        profile.ParseFromString(profile_file.read())
+    if not profile.sample_type:
+        raise ValueError("profile has no sample types")
+
+    profile_strings = profile.string_table
+    if sample_type is None:
+        sample_type = (
+            profile_strings[profile.default_sample_type]
+            if profile.default_sample_type
+            else profile_strings[profile.sample_type[-1].type]
+        )
+
+    sample_index = None
+    unit = ""
+    available_types = []
+    for index, value_type in enumerate(profile.sample_type):
+        type_name = profile_strings[value_type.type]
+        available_types.append(type_name)
+        if type_name == sample_type:
+            sample_index = index
+            unit = profile_strings[value_type.unit]
+    if sample_index is None:
+        available = ", ".join(available_types)
+        raise ValueError(f"unknown sample type {sample_type!r}; available: {available}")
+
+    locations_by_id = {location.id: location for location in profile.location}
+    functions_by_id = {function.id: function for function in profile.function}
+    flat_values: dict[str, int] = defaultdict(int)
+    cumulative_values: dict[str, int] = defaultdict(int)
+    total = 0
+    for sample in profile.sample:
+        value = sample.value[sample_index]
+        total += value
+        stack_functions = []
+        leaf_function = None
+        for location_index, location_id in enumerate(sample.location_id):
+            location = locations_by_id.get(location_id)
+            if location is None:
+                continue
+            for line_index, line in enumerate(location.line):
+                function = functions_by_id.get(line.function_id)
+                if function is None:
+                    continue
+                function_name = profile_strings[function.name]
+                stack_functions.append(function_name)
+                if location_index == 0 and line_index == 0:
+                    leaf_function = function_name
+
+        if leaf_function:
+            flat_values[leaf_function] += value
+        for function_name in set(stack_functions):
+            cumulative_values[function_name] += value
+
+    pattern = re.compile(focus) if focus else None
+    function_names = flat_values.keys() | cumulative_values.keys()
+    if pattern:
+        function_names = {name for name in function_names if pattern.search(name)}
+    top_functions = sorted(
+        ((name, flat_values[name], cumulative_values[name]) for name in function_names),
+        key=lambda item: (-item[1], -item[2], item[0]),
+    )[:limit]
+    return {
+        "sample_type": sample_type,
+        "unit": unit,
+        "total": total,
+        "top_functions": [
+            {
+                "name": name,
+                "flat": flat,
+                "flat_pct": round(flat / total * 100, 2) if total else 0,
+                "cumulative": cumulative,
+                "cumulative_pct": round(cumulative / total * 100, 2) if total else 0,
+            }
+            for name, flat, cumulative in top_functions
+        ],
+    }
+
+
 class ResultReporter:
     """Build, persist, and print A/B benchmark reports."""
 
@@ -524,6 +622,8 @@ class ResultReporter:
         comparison = self.compare(result_a, result_b)
         analysis_a = self._router_analysis_for(result_a)
         analysis_b = self._router_analysis_for(result_b)
+        pprof_analysis_a = self._pprof_analysis_for(result_a)
+        pprof_analysis_b = self._pprof_analysis_for(result_b)
         # Router counters from an invalid/framework_error run are no more
         # comparable than the AIPerf numbers — gate on the same verdict rule.
         router_comparison: dict[str, Any] = {}
@@ -539,6 +639,7 @@ class ResultReporter:
                 "artifacts": result_a.artifacts,
                 "verdict": result_a.verdict,
                 "router_analysis": analysis_a,
+                "pprof_analysis": pprof_analysis_a,
             },
             "config_b": {
                 "path": config_b_path,
@@ -546,6 +647,7 @@ class ResultReporter:
                 "artifacts": result_b.artifacts,
                 "verdict": result_b.verdict,
                 "router_analysis": analysis_b,
+                "pprof_analysis": pprof_analysis_b,
             },
             "comparison": comparison,
             "router_comparison": router_comparison,
@@ -562,6 +664,27 @@ class ResultReporter:
         if not path.is_file():
             return None
         return analyze_router_metrics(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _pprof_analysis_for(result: BenchmarkResult) -> dict[str, Any] | None:
+        """Analyze every pprof artifact collected for one benchmark run."""
+        pprof = result.artifacts.get("pprof") or {}
+        if pprof.get("error"):
+            return {"error": pprof["error"]}
+        profiles = pprof.get("profiles") or {}
+        if not profiles:
+            return None
+        analysis: dict[str, Any] = {}
+        for profile_name, profile_path in sorted(profiles.items()):
+            path = Path(profile_path)
+            if not path.is_file():
+                analysis[profile_name] = {"error": f"profile not found: {path}"}
+                continue
+            try:
+                analysis[profile_name] = analyze_pprof_profile(path)
+            except (OSError, ValueError, re.error, DecodeError) as error:
+                analysis[profile_name] = {"error": str(error)}
+        return analysis
 
     def write_report(self, output_path: str | Path, report: dict[str, Any]) -> None:
         output_path = Path(output_path)
@@ -614,6 +737,25 @@ class ResultReporter:
             print("  router metrics (from router_metrics.prom):")
             for line in format_router_analysis(router_analysis, indent="    "):
                 print(line)
+
+        pprof_analysis = config_report.get("pprof_analysis") or {}
+        for profile_name, profile in pprof_analysis.items():
+            if profile_name == "error":
+                print(f"  pprof: {profile}")
+                continue
+            if "error" in profile:
+                print(f"  pprof[{profile_name}]: {profile['error']}")
+                continue
+            print(
+                f"  pprof[{profile_name}]: sample_type={profile['sample_type']} "
+                f"unit={profile['unit']} total={profile['total']}"
+            )
+            for function in profile["top_functions"]:
+                print(
+                    f"    {function['flat']:>12} {function['flat_pct']:>6.2f}% "
+                    f"{function['cumulative']:>12} {function['cumulative_pct']:>6.2f}%  "
+                    f"{function['name']}"
+                )
 
         if config_report["artifacts"]:
             print("  artifacts:")

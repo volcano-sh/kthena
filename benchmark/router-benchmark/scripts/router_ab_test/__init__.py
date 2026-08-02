@@ -25,7 +25,12 @@ from router_ab_test.models import (
     compute_run_verdict,
 )
 from router_ab_test.orchestrator import ABTestOrchestrator
-from router_ab_test.reporter import ResultReporter, analyze_router_metrics, format_router_analysis
+from router_ab_test.reporter import (
+    ResultReporter,
+    analyze_pprof_profile,
+    analyze_router_metrics,
+    format_router_analysis,
+)
 
 __all__ = [
     "ABTestOrchestrator",
@@ -43,6 +48,7 @@ __all__ = [
     "VERDICT_FRAMEWORK_ERROR",
     "VERDICT_INVALID",
     "VERDICT_VALID",
+    "analyze_pprof_profile",
     "analyze_router_metrics",
     "compute_run_verdict",
     "format_router_analysis",
