@@ -18,6 +18,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -37,6 +38,70 @@ func TestNewServerDebugPortDefault(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := NewServer("8080", false, "", "", false, false, tc.debugPort, 0, 0)
 			assert.Equal(t, tc.debugPort, server.DebugPort, "DebugPort should match the provided value")
+		})
+	}
+}
+
+// TestParseServerLimits tests that listener bounds are read from the
+// environment and that invalid values never leave a listener unbounded.
+func TestParseServerLimits(t *testing.T) {
+	testCases := []struct {
+		name              string
+		readHeaderTimeout string
+		idleTimeout       string
+		maxHeaderBytes    string
+		want              serverLimits
+	}{
+		{
+			name: "defaults when unset",
+			want: serverLimits{
+				readHeaderTimeout: defaultReadHeaderTimeout,
+				idleTimeout:       defaultIdleTimeout,
+				maxHeaderBytes:    defaultMaxHeaderBytes,
+			},
+		},
+		{
+			name:              "overrides are honoured",
+			readHeaderTimeout: "3s",
+			idleTimeout:       "45s",
+			maxHeaderBytes:    "8192",
+			want: serverLimits{
+				readHeaderTimeout: 3 * time.Second,
+				idleTimeout:       45 * time.Second,
+				maxHeaderBytes:    8192,
+			},
+		},
+		{
+			name:              "unparsable values fall back to defaults",
+			readHeaderTimeout: "ten-seconds",
+			idleTimeout:       "120",
+			maxHeaderBytes:    "1MiB",
+			want: serverLimits{
+				readHeaderTimeout: defaultReadHeaderTimeout,
+				idleTimeout:       defaultIdleTimeout,
+				maxHeaderBytes:    defaultMaxHeaderBytes,
+			},
+		},
+		{
+			name:              "non-positive values fall back to defaults",
+			readHeaderTimeout: "0s",
+			idleTimeout:       "-1s",
+			maxHeaderBytes:    "0",
+			want: serverLimits{
+				readHeaderTimeout: defaultReadHeaderTimeout,
+				idleTimeout:       defaultIdleTimeout,
+				maxHeaderBytes:    defaultMaxHeaderBytes,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("READ_HEADER_TIMEOUT", tc.readHeaderTimeout)
+			t.Setenv("IDLE_TIMEOUT", tc.idleTimeout)
+			t.Setenv("MAX_HEADER_BYTES", tc.maxHeaderBytes)
+
+			assert.Equal(t, tc.want, parseServerLimits())
 		})
 	}
 }

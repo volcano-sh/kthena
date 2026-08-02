@@ -149,6 +149,34 @@ kthenaRouter:
 | `kthenaRouter.terminationGracePeriodSeconds` | int    | `330`   | Pod termination grace period for the router                             |
 | `kthenaRouter.drainTimeout`                  | string | `"5m"`  | Time allowed for the router to drain in-flight requests before shutdown |
 
+### Request and Connection Limits
+
+The router listeners bound request size and connection lifetime so that a single
+client cannot exhaust router memory or connections. Requests below the limits
+behave exactly as before, and no write deadline is applied, so long-running
+streaming inference responses are never truncated.
+
+```yaml
+kthenaRouter:
+  requestLimits:
+    maxRequestBodyBytes: 33554432
+    readHeaderTimeout: 10s
+    idleTimeout: 120s
+    maxHeaderBytes: 1048576
+```
+
+| Parameter                                     | Type   | Default    | Description                                                                                                             |
+| --------------------------------------------- | ------ | ---------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `kthenaRouter.requestLimits.maxRequestBodyBytes` | int    | `33554432` | Largest inference request body accepted, in bytes (32Mi). A larger request is rejected with HTTP 413 before it is buffered. Set to `0` to disable the limit. |
+| `kthenaRouter.requestLimits.readHeaderTimeout`   | string | `"10s"`    | Maximum time a client may take to send the complete request headers                                                     |
+| `kthenaRouter.requestLimits.idleTimeout`         | string | `"120s"`   | Maximum time an idle keep-alive connection is kept open between requests                                                |
+| `kthenaRouter.requestLimits.maxHeaderBytes`      | int    | `1048576`  | Largest request header block accepted, in bytes (1Mi). A larger header block is rejected with HTTP 431. `net/http` allows a few KiB of slack above this value. |
+
+Each value maps to an environment variable on the router container
+(`MAX_REQUEST_BODY_BYTES`, `READ_HEADER_TIMEOUT`, `IDLE_TIMEOUT`,
+`MAX_HEADER_BYTES`). An unparsable or non-positive timeout or header size falls
+back to its default, so a bad value never leaves a listener unbounded.
+
 ## Installation
 
 ### Basic Installation

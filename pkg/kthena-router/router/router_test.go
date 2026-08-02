@@ -1327,6 +1327,129 @@ func TestParseModelRequestValidatesModelName(t *testing.T) {
 	}
 }
 
+// countingReader counts how many bytes were actually pulled from the request
+// body, so a test can prove an oversized payload was never fully buffered.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// modelRequestBody returns a valid inference request body of exactly size
+// bytes, padding the prompt to reach the requested length.
+func modelRequestBody(t *testing.T, size int) string {
+	t.Helper()
+	const prefix = `{"model":"test-model","prompt":"`
+	const suffix = `"}`
+	if size < len(prefix)+len(suffix) {
+		t.Fatalf("size %d is too small for a valid request body", size)
+	}
+	return prefix + strings.Repeat("a", size-len(prefix)-len(suffix)) + suffix
+}
+
+func TestParseModelRequestEnforcesMaxRequestBodyBytes(t *testing.T) {
+	const limit int64 = 512
+
+	tests := []struct {
+		name       string
+		limit      int64
+		bodySize   int
+		wantStatus int
+	}{
+		{
+			name:     "below limit",
+			limit:    limit,
+			bodySize: int(limit) - 1,
+		},
+		{
+			name:     "exactly at limit",
+			limit:    limit,
+			bodySize: int(limit),
+		},
+		{
+			name:       "one byte above limit",
+			limit:      limit,
+			bodySize:   int(limit) + 1,
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:       "far above limit",
+			limit:      limit,
+			bodySize:   int(limit) * 8,
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:     "limit disabled",
+			limit:    0,
+			bodySize: int(limit) * 8,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prevLimit := MaxRequestBodyBytes
+			MaxRequestBodyBytes = tt.limit
+			defer func() { MaxRequestBodyBytes = prevLimit }()
+
+			counter := &countingReader{r: strings.NewReader(modelRequestBody(t, tt.bodySize))}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", io.NopCloser(counter))
+
+			got, err := ParseModelRequest(c)
+			if tt.wantStatus != 0 {
+				assert.Error(t, err)
+				assert.Nil(t, got)
+				assert.Equal(t, tt.wantStatus, w.Code)
+				assert.Contains(t, w.Body.String(), "request body exceeds")
+				// The payload must be rejected before it is fully buffered.
+				assert.LessOrEqual(t, counter.n, tt.limit+1)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, "test-model", got["model"])
+			assert.Equal(t, int64(tt.bodySize), counter.n)
+		})
+	}
+}
+
+func TestParseMaxRequestBodyBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		set  bool
+		want int64
+	}{
+		{name: "unset uses default", want: defaultMaxRequestBodyBytes},
+		{name: "explicit value", env: "1048576", set: true, want: 1048576},
+		{name: "zero disables the limit", env: "0", set: true, want: 0},
+		{name: "negative disables the limit", env: "-1", set: true, want: -1},
+		{name: "invalid value uses default", env: "1MiB", set: true, want: defaultMaxRequestBodyBytes},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv("MAX_REQUEST_BODY_BYTES", tt.env)
+			} else {
+				prev, existed := os.LookupEnv("MAX_REQUEST_BODY_BYTES")
+				os.Unsetenv("MAX_REQUEST_BODY_BYTES")
+				defer func() {
+					if existed {
+						os.Setenv("MAX_REQUEST_BODY_BYTES", prev)
+					}
+				}()
+			}
+			assert.Equal(t, tt.want, parseMaxRequestBodyBytes())
+		})
+	}
+}
+
 func TestAccessLogConfigurationFromEnv(t *testing.T) {
 	// Save original environment variables
 	originalEnabled := os.Getenv("ACCESS_LOG_ENABLED")

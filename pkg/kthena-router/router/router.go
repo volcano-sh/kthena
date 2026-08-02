@@ -91,6 +91,32 @@ func getEnvBool(key string, fallback bool) bool {
 var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
 var EnableSessionBoost = getEnvBool("ENABLE_SESSION_BOOST", false)
 
+// defaultMaxRequestBodyBytes bounds the inference request body the router
+// buffers. It is generous enough for multimodal and tool-call payloads while
+// keeping a single client from forcing an unbounded allocation.
+const defaultMaxRequestBodyBytes = 32 << 20 // 32 MiB
+
+// MaxRequestBodyBytes is the largest inference request body the router accepts,
+// configured by MAX_REQUEST_BODY_BYTES. A larger request is rejected with
+// HTTP 413 before the payload is fully buffered. A non-positive value disables
+// the limit.
+var MaxRequestBodyBytes = parseMaxRequestBodyBytes()
+
+// parseMaxRequestBodyBytes reads the request body limit in bytes from the
+// MAX_REQUEST_BODY_BYTES environment variable. Setting it to a non-positive
+// value (e.g. "0") explicitly disables the limit. An invalid value falls back
+// to defaultMaxRequestBodyBytes.
+func parseMaxRequestBodyBytes() int64 {
+	if s, ok := os.LookupEnv("MAX_REQUEST_BODY_BYTES"); ok {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			// A non-positive value explicitly disables the limit.
+			return n
+		}
+		klog.Warningf("Invalid MAX_REQUEST_BODY_BYTES %q, using default %v", s, defaultMaxRequestBodyBytes)
+	}
+	return defaultMaxRequestBodyBytes
+}
+
 type Router struct {
 	scheduler       scheduler.Scheduler
 	authenticator   *auth.JWTAuthenticator
@@ -585,8 +611,20 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
+	// Cap the body before reading it so an oversized payload is rejected
+	// instead of being buffered in full.
+	if MaxRequestBodyBytes > 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxRequestBodyBytes)
+	}
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			// Report the limit only; the client does not need router internals.
+			msg := fmt.Sprintf("request body exceeds the %d byte limit", maxBytesErr.Limit)
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, msg)
+			return nil, errors.New(msg)
+		}
 		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 		return nil, err
 	}
