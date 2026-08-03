@@ -17,7 +17,7 @@ External providers must use HTTPS. The Router does not use Pod scheduling, KV-ca
 
 ## Configure Credentials
 
-Create a Kubernetes `Secret` in the same namespace as the `ExternalModelProvider`. The provider references one key from that Secret.
+Create a Kubernetes `Secret` in the same namespace as the `ExternalModelProvider`. Add the label `networking.serving.volcano.sh/external-model-provider-credential: "true"`. The Router only watches credential Secrets with this label, and the provider references one key from the Secret.
 
 ```yaml
 apiVersion: v1
@@ -25,18 +25,24 @@ kind: Secret
 metadata:
   name: openai-api-key
   namespace: default
+  labels:
+    networking.serving.volcano.sh/external-model-provider-credential: "true"
 type: Opaque
 stringData:
   api-key: "replace-with-your-openai-api-key"
 ```
 
-The `secretRef.key` value controls which key in the Secret is used. If the Secret or the key is missing, the provider is not ready and Router requests return `503`.
+The `secretRef.key` value controls which key in the Secret is used. If the Secret, label, or key is missing, the provider is not ready and Router requests return `503`.
 
 ### Access control
 
 Treat `ExternalModelProvider` as an administrator API. Anyone who can create or update one can use any Secret in the same namespace and choose where the Router sends that credential. For example, a user could set `baseURL` to an HTTPS server they control and reference another Secret in the namespace.
 
 Do not grant tenant roles permission to create or update `ExternalModelProvider`. Limit that permission to cluster administrators. Router egress should also be restricted with NetworkPolicy or an egress proxy. Same-namespace Secret references prevent cross-namespace selection, but they do not remove this credential-forwarding risk.
+
+The Router uses a label-filtered informer so unrelated Secrets are not loaded into its normal cache. Kubernetes RBAC cannot restrict `list` and `watch` by label, so the Router service account still has cluster-wide permission for those operations. The label reduces the Router's in-memory Secret footprint. It is not an authorization boundary.
+
+Use a dedicated Secret that contains only provider credentials. A labeled Secret enters the informer cache as a complete Kubernetes object, although the Router datastore retains only keys referenced by `ExternalModelProvider` resources.
 
 ## Configure an OpenAI-Compatible Provider
 
@@ -229,7 +235,7 @@ kubectl get externalmodelprovider -n default
 kubectl describe externalmodelprovider openai-provider -n default
 ```
 
-`Ready=True` means the provider can be selected by Router. `CredentialsResolved=False` usually means the referenced Secret or key is missing.
+`Ready=True` means the provider can be selected by Router. `CredentialsResolved=False` usually means the referenced Secret, required label, or key is missing.
 
 ## Limitations
 
