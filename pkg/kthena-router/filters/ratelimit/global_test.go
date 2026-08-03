@@ -674,3 +674,71 @@ func TestGlobalRateLimiter_Tokens_AllModelsIsolated(t *testing.T) {
 		}
 	}
 }
+
+func TestGlobalRateLimiter_SyncExpireMigratesTTLOnUnitChange(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	// Old config: Second unit -> 600s minimum TTL
+	oldLimiter := newTestGlobalRateLimiter(t, mr, "test-model", "input", 10, networkingv1alpha1.Second)
+	allowed := oldLimiter.AllowN(time.Now(), 10)
+	require.True(t, allowed)
+
+	key := "kthena:ratelimit:test-model:input"
+	assert.InDelta(t, 600, mr.TTL(key).Seconds(), 10, "Second unit should set the 600s minimum TTL")
+
+	// Config update: Month unit -> 7776000s (3x 30 days, max bound)
+	newLimiter := newTestGlobalRateLimiter(t, mr, "test-model", "input", 100, networkingv1alpha1.Month)
+	require.NoError(t, newLimiter.SyncExpire())
+
+	assert.InDelta(t, 7776000, mr.TTL(key).Seconds(), 10,
+		"SyncExpire should migrate the key TTL to the new Month unit")
+}
+
+func TestTokenRateLimiter_Global_UnitChangeReconcilesTTL(t *testing.T) {
+	mr, redisConfig := setupMiniRedis(t)
+	defer mr.Close()
+
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	secondTokens := uint32(10)
+	monthTokens := uint32(100)
+
+	// Initial config: Second unit
+	secondLimit := &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &secondTokens,
+		Unit:               networkingv1alpha1.Second,
+		Global:             &networkingv1alpha1.GlobalRateLimit{Redis: redisConfig},
+	}
+	require.NoError(t, rl.AddOrUpdateLimiter(model, secondLimit))
+
+	// Deplete the bucket ("test" = 1 token each, 10 tokens)
+	for i := 0; i < 10; i++ {
+		require.NoError(t, rl.RateLimit(model, "test"))
+	}
+
+	// Sanity check: the bucket is truly depleted after 10 requests of 1 token.
+	// The deny path is read-only, so this does not write or refresh the TTL.
+	require.Error(t, rl.RateLimit(model, "test"),
+		"request should be rate limited once the Second-unit bucket is depleted")
+
+	key := "kthena:ratelimit:test-model:input"
+	assert.InDelta(t, 600, mr.TTL(key).Seconds(), 10, "Second unit should set ~600s TTL")
+
+	// Config update: Month unit — must migrate TTL with no requests flowing
+	monthLimit := &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &monthTokens,
+		Unit:               networkingv1alpha1.Month,
+		Global:             &networkingv1alpha1.GlobalRateLimit{Redis: redisConfig},
+	}
+	require.NoError(t, rl.AddOrUpdateLimiter(model, monthLimit))
+
+	assert.InDelta(t, 7776000, mr.TTL(key).Seconds(), 10,
+		"AddOrUpdateLimiter should migrate the key TTL to the new Month unit")
+
+	// The bucket must STAY depleted after the unit change — SyncExpire must not
+	// reset the bucket, or the early-expiry burst bug would return.
+	require.Error(t, rl.RateLimit(model, "test"),
+		"request should still be rate limited after the unit change: bucket must stay depleted")
+}

@@ -161,7 +161,7 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 
 		// Create global rate limiters
 		if ratelimit.InputTokensPerUnit != nil {
-			r.inputLimiter[model] = NewGlobalRateLimiter(
+			inputLimiter := NewGlobalRateLimiter(
 				r.redisClient,
 				"kthena:ratelimit",
 				model,
@@ -169,10 +169,17 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				*ratelimit.InputTokensPerUnit,
 				ratelimit.Unit,
 			)
+			r.inputLimiter[model] = inputLimiter
+			// Reconcile the key TTL to the configured unit on config updates;
+			// otherwise a unit change can leave a short TTL on a depleted bucket,
+			// which expires early and grants an unexpected burst.
+			if err := inputLimiter.SyncExpire(); err != nil {
+				klog.Warningf("failed to sync input rate-limit key TTL for model %s: %v", model, err)
+			}
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
-			r.outputLimiter[model] = NewGlobalRateLimiter(
+			outputLimiter := NewGlobalRateLimiter(
 				r.redisClient,
 				"kthena:ratelimit",
 				model,
@@ -180,6 +187,10 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				*ratelimit.OutputTokensPerUnit,
 				ratelimit.Unit,
 			)
+			r.outputLimiter[model] = outputLimiter
+			if err := outputLimiter.SyncExpire(); err != nil {
+				klog.Warningf("failed to sync output rate-limit key TTL for model %s: %v", model, err)
+			}
 		}
 	} else {
 		// Create local rate limiters

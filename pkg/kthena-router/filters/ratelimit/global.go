@@ -220,6 +220,21 @@ func (g *GlobalRateLimiter) getExpireSeconds() int {
 	return expireSeconds
 }
 
+// SyncExpire reconciles the Redis key TTL with the current limiter configuration.
+// AddOrUpdateLimiter reuses the same Redis key when a model's rate-limit unit
+// changes, so the key can retain the old (short) TTL. Since denied requests and
+// Tokens() no longer write, nothing else migrates the TTL, and the key could
+// expire early, granting an unexpected burst. SyncExpire fixes this on config
+// update without reintroducing per-request writes.
+func (g *GlobalRateLimiter) SyncExpire() error {
+	key := fmt.Sprintf("%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	return g.client.Expire(ctx, key, time.Duration(g.getExpireSeconds())*time.Second).Err()
+}
+
 // Tokens returns the estimated number of tokens currently available
 func (g *GlobalRateLimiter) Tokens() float64 {
 	key := fmt.Sprintf("%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType)
