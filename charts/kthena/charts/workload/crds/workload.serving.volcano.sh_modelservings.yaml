@@ -4516,9 +4516,6 @@ spec:
                                     - ip
                                     type: object
                                   type: array
-                                  x-kubernetes-list-map-keys:
-                                  - ip
-                                  x-kubernetes-list-type: map
                                 hostIPC:
                                   description: |-
                                     Use the host's ipc namespace.
@@ -13191,9 +13188,6 @@ spec:
                                     - ip
                                     type: object
                                   type: array
-                                  x-kubernetes-list-map-keys:
-                                  - ip
-                                  x-kubernetes-list-type: map
                                 hostIPC:
                                   description: |-
                                     Use the host's ipc namespace.
