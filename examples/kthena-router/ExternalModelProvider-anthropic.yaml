@@ -3,6 +3,8 @@ kind: Secret
 metadata:
   name: anthropic-api-key
   namespace: default
+  labels:
+    networking.serving.volcano.sh/external-model-provider-credential: "true"
 type: Opaque
 stringData:
   api-key: "replace-with-your-anthropic-api-key"

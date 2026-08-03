@@ -162,7 +162,13 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, namespace, externalProviderMockName, 1, 2*time.Minute)
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: externalProviderSecretName, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      externalProviderSecretName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				networkingv1alpha1.ExternalModelProviderSecretLabelKey: networkingv1alpha1.ExternalModelProviderSecretLabelValue,
+			},
+		},
 		StringData: map[string]string{
 			externalProviderOpenAISecretKey:    externalProviderOpenAIKey,
 			externalProviderAnthropicSecretKey: externalProviderAnthropicKey,
