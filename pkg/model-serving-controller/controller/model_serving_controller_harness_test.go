@@ -76,6 +76,7 @@ func newTestController(t *testing.T, modelServings ...*workloadv1alpha1.ModelSer
 	if !cache.WaitForCacheSync(syncCtx.Done(),
 		controller.podsInformer.HasSynced,
 		controller.servicesInformer.HasSynced,
+		controller.pdbsInformer.HasSynced,
 		controller.modelServingsInformer.HasSynced,
 	) {
 		cancel()

@@ -25,12 +25,13 @@ import (
 // ModelServingSpecApplyConfiguration represents a declarative configuration of the ModelServingSpec type for use
 // with apply.
 type ModelServingSpecApplyConfiguration struct {
-	Replicas        *int32                             `json:"replicas,omitempty"`
-	SchedulerName   *string                            `json:"schedulerName,omitempty"`
-	Plugins         []PluginSpecApplyConfiguration     `json:"plugins,omitempty"`
-	Template        *ServingGroupApplyConfiguration    `json:"template,omitempty"`
-	RolloutStrategy *RolloutStrategyApplyConfiguration `json:"rolloutStrategy,omitempty"`
-	RecoveryPolicy  *workloadv1alpha1.RecoveryPolicy   `json:"recoveryPolicy,omitempty"`
+	Replicas         *int32                              `json:"replicas,omitempty"`
+	SchedulerName    *string                             `json:"schedulerName,omitempty"`
+	Plugins          []PluginSpecApplyConfiguration      `json:"plugins,omitempty"`
+	Template         *ServingGroupApplyConfiguration     `json:"template,omitempty"`
+	RolloutStrategy  *RolloutStrategyApplyConfiguration  `json:"rolloutStrategy,omitempty"`
+	RecoveryPolicy   *workloadv1alpha1.RecoveryPolicy    `json:"recoveryPolicy,omitempty"`
+	EvictionStrategy *EvictionStrategyApplyConfiguration `json:"evictionStrategy,omitempty"`
 }
 
 // ModelServingSpecApplyConfiguration constructs a declarative configuration of the ModelServingSpec type for use with
@@ -89,5 +90,13 @@ func (b *ModelServingSpecApplyConfiguration) WithRolloutStrategy(value *RolloutS
 // If called multiple times, the RecoveryPolicy field is set to the value of the last call.
 func (b *ModelServingSpecApplyConfiguration) WithRecoveryPolicy(value workloadv1alpha1.RecoveryPolicy) *ModelServingSpecApplyConfiguration {
 	b.RecoveryPolicy = &value
+	return b
+}
+
+// WithEvictionStrategy sets the EvictionStrategy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the EvictionStrategy field is set to the value of the last call.
+func (b *ModelServingSpecApplyConfiguration) WithEvictionStrategy(value *EvictionStrategyApplyConfiguration) *ModelServingSpecApplyConfiguration {
+	b.EvictionStrategy = value
 	return b
 }

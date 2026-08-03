@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -136,6 +137,73 @@ func TestModelServingLifecycle(t *testing.T) {
 
 	t.Log("Phase 3 passed: ModelServing deleted and pods cleaned up")
 	t.Log("ModelServing lifecycle test passed successfully")
+}
+
+func TestModelServingServingGroupEvictionProtection(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	minAvailable := int32(2)
+	modelServing := createBasicModelServing("test-eviction-protection", 3, 0, createRole("prefill", 1, 1))
+	modelServing.Spec.RecoveryPolicy = workload.NoneRestartPolicy
+	modelServing.Spec.EvictionStrategy = &workload.EvictionStrategy{
+		Level:        workload.ServingGroupEvictionProtection,
+		MinAvailable: &minAvailable,
+	}
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	var protectedGroups map[string]struct{}
+	require.Eventually(t, func() bool {
+		pdbs, err := kubeClient.PolicyV1().PodDisruptionBudgets(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s=%s", workload.ModelServingNameLabelKey, modelServing.Name),
+		})
+		if err != nil || len(pdbs.Items) != int(minAvailable) {
+			return false
+		}
+
+		groups := make(map[string]struct{}, len(pdbs.Items))
+		for _, pdb := range pdbs.Items {
+			if pdb.Status.CurrentHealthy != pdb.Spec.MinAvailable.IntVal || pdb.Status.DisruptionsAllowed != 0 {
+				return false
+			}
+			groups[pdb.Spec.Selector.MatchLabels[workload.GroupNameLabelKey]] = struct{}{}
+		}
+		protectedGroups = groups
+		return true
+	}, 2*time.Minute, 2*time.Second, "PodDisruptionBudgets did not become ready")
+
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(modelServing.Name),
+	})
+	require.NoError(t, err)
+
+	var protectedPod *corev1.Pod
+	unprotectedPods := make([]corev1.Pod, 0, 2)
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		groupName := pod.Labels[workload.GroupNameLabelKey]
+		if _, protected := protectedGroups[groupName]; protected {
+			protectedPod = pod
+			continue
+		}
+		unprotectedPods = append(unprotectedPods, *pod)
+	}
+	require.NotNil(t, protectedPod)
+	require.Len(t, unprotectedPods, 2)
+
+	err = kubeClient.CoreV1().Pods(testNamespace).EvictV1(ctx, &policyv1.Eviction{
+		ObjectMeta: metav1.ObjectMeta{Name: protectedPod.Name, Namespace: testNamespace},
+	})
+	require.True(t, apierrors.IsTooManyRequests(err), "expected protected ServingGroup eviction to be rejected, got %v", err)
+
+	for _, pod := range unprotectedPods {
+		err = kubeClient.CoreV1().Pods(testNamespace).EvictV1(ctx, &policyv1.Eviction{
+			ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: testNamespace},
+			DeleteOptions: &metav1.DeleteOptions{
+				GracePeriodSeconds: ptr.To(int64(0)),
+			},
+		})
+		require.NoError(t, err, "expected unprotected ServingGroup eviction to proceed")
+	}
 }
 
 // TestModelServingScaleUp tests the ability to scale up a ModelServing's ServingGroup

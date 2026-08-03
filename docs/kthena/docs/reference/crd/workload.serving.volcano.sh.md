@@ -224,6 +224,41 @@ _Appears in:_
 | `ratioConstraint` _[RoleRatioConstraint](#roleratioconstraint)_ | RatioConstraint defines the acceptable ratio range of a single role pair.<br />It enforces that replicas[numeratorRole] / replicas[denominatorRole] stays<br />within [minRatio, maxRatio] when denominator replica is non-zero. |  |  |
 
 
+#### EvictionProtectionLevel
+
+_Underlying type:_ _string_
+
+EvictionProtectionLevel defines the unit protected during voluntary disruptions.
+
+
+
+_Appears in:_
+- [EvictionStrategy](#evictionstrategy)
+
+| Field | Description |
+| --- | --- |
+| `ServingGroup` | ServingGroupEvictionProtection protects complete ServingGroups.<br /> |
+| `Role` | RoleEvictionProtection protects instances of individual roles.<br /> |
+
+
+#### EvictionStrategy
+
+
+
+EvictionStrategy defines how voluntary Pod disruptions are limited.
+
+
+
+_Appears in:_
+- [ModelServingSpec](#modelservingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `level` _[EvictionProtectionLevel](#evictionprotectionlevel)_ | Level defines whether availability is protected for ServingGroups or individual roles. |  | Enum: [ServingGroup Role] <br /> |
+| `minAvailable` _integer_ | MinAvailable is the minimum number of complete ServingGroups that must remain available.<br />It is used when level is ServingGroup. |  | Minimum: 0 <br /> |
+| `roleMinAvailable` _object (keys:string, values:integer)_ | RoleMinAvailable defines the minimum number of available instances for each role.<br />It is used when level is Role. |  |  |
+
+
 #### GangPolicy
 
 
@@ -557,6 +592,7 @@ _Appears in:_
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
+| `evictionStrategy` _[EvictionStrategy](#evictionstrategy)_ | EvictionStrategy defines the minimum serving capacity preserved during voluntary disruptions. |  |  |
 
 
 #### ModelServingStatus

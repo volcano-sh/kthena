@@ -63,7 +63,41 @@ type ModelServingSpec struct {
 	// +kubebuilder:validation:Enum={ServingGroupRecreate,RoleRecreate,None}
 	// +optional
 	RecoveryPolicy RecoveryPolicy `json:"recoveryPolicy,omitempty"`
+
+	// EvictionStrategy defines the minimum serving capacity preserved during voluntary disruptions.
+	// +optional
+	EvictionStrategy *EvictionStrategy `json:"evictionStrategy,omitempty"`
 }
+
+// EvictionStrategy defines how voluntary Pod disruptions are limited.
+// +kubebuilder:validation:XValidation:rule="self.level == 'ServingGroup' ? has(self.minAvailable) && !has(self.roleMinAvailable) : !has(self.minAvailable) && has(self.roleMinAvailable)",message="minAvailable is required for ServingGroup level and roleMinAvailable is required for Role level"
+type EvictionStrategy struct {
+	// Level defines whether availability is protected for ServingGroups or individual roles.
+	// +kubebuilder:validation:Enum={ServingGroup,Role}
+	Level EvictionProtectionLevel `json:"level"`
+
+	// MinAvailable is the minimum number of complete ServingGroups that must remain available.
+	// It is used when level is ServingGroup.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
+
+	// RoleMinAvailable defines the minimum number of available instances for each role.
+	// It is used when level is Role.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.all(role, self[role] >= 0)",message="roleMinAvailable values must be non-negative"
+	RoleMinAvailable map[string]int32 `json:"roleMinAvailable,omitempty"`
+}
+
+// EvictionProtectionLevel defines the unit protected during voluntary disruptions.
+type EvictionProtectionLevel string
+
+const (
+	// ServingGroupEvictionProtection protects complete ServingGroups.
+	ServingGroupEvictionProtection EvictionProtectionLevel = "ServingGroup"
+	// RoleEvictionProtection protects instances of individual roles.
+	RoleEvictionProtection EvictionProtectionLevel = "Role"
+)
 
 type RecoveryPolicy string
 

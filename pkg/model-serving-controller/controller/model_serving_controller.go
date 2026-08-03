@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"reflect"
 	"slices"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apiextClientSet "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,6 +67,8 @@ const (
 
 	GroupNameKey = "GroupName"
 	RoleIDKey    = "RoleID"
+
+	evictionProtectionLabelKey = "modelserving.volcano.sh/eviction-protection"
 )
 
 // PodGroupManager is the interface for managing PodGroups.
@@ -90,6 +94,7 @@ type ModelServingController struct {
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
 	servicesInformer      cache.SharedIndexInformer
+	pdbsInformer          cache.SharedIndexInformer
 	modelServingLister    listerv1alpha1.ModelServingLister
 	modelServingsInformer cache.SharedIndexInformer
 
@@ -122,6 +127,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	)
 	podsInformer := kubeInformerFactory.Core().V1().Pods()
 	servicesInformer := kubeInformerFactory.Core().V1().Services()
+	pdbsInformer := kubeInformerFactory.Policy().V1().PodDisruptionBudgets()
 	modelServingInformerFactory := informersv1alpha1.NewSharedInformerFactory(modelServingClient, 0)
 	modelServingInformer := modelServingInformerFactory.Workload().V1alpha1().ModelServings()
 
@@ -162,6 +168,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		podsInformer:          podsInformer.Informer(),
 		servicesLister:        servicesInformer.Lister(),
 		servicesInformer:      servicesInformer.Informer(),
+		pdbsInformer:          pdbsInformer.Informer(),
 		modelServingLister:    modelServingInformer.Lister(),
 		modelServingsInformer: modelServingInformer.Informer(),
 		// nolint
@@ -242,6 +249,24 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		},
 	})
 
+	_, _ = c.pdbsInformer.AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: func(obj interface{}) bool {
+			metaObj := getMetaObject(obj)
+			if metaObj == nil {
+				return false
+			}
+			return isOwnedByModelServing(metaObj)
+		},
+		Handler: cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				c.updatePodDisruptionBudget(oldObj, newObj)
+			},
+			DeleteFunc: func(obj interface{}) {
+				c.deletePodDisruptionBudget(obj)
+			},
+		},
+	})
+
 	c.syncHandler = c.syncModelServing
 
 	return c, nil
@@ -315,7 +340,7 @@ func (c *ModelServingController) addPod(obj interface{}) {
 	c.updatePod(nil, obj)
 }
 
-func (c *ModelServingController) updatePod(_, newObj interface{}) {
+func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 	newPod, ok := newObj.(*corev1.Pod)
 	if !ok {
 		klog.Error("failed to parse newPod type when updatePod")
@@ -341,6 +366,15 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 
 	if c.shouldSkipHandling(ms, servingGroupName, newPod) {
 		return
+	}
+	if ms.Spec.EvictionStrategy != nil {
+		oldReady := false
+		if oldPod, ok := oldObj.(*corev1.Pod); ok {
+			oldReady = utils.IsPodRunningAndReady(oldPod)
+		}
+		if oldReady != utils.IsPodRunningAndReady(newPod) {
+			c.enqueueModelServing(ms)
+		}
 	}
 
 	switch {
@@ -410,6 +444,9 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	if err != nil {
 		klog.Errorf("handle deleted pod failed: %v", err)
 	}
+	if ms.Spec.EvictionStrategy != nil {
+		c.enqueueModelServing(ms)
+	}
 }
 
 func (c *ModelServingController) deleteService(obj interface{}) {
@@ -446,6 +483,48 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 
 	klog.V(4).Infof("Service %s/%s deleted, enqueuing ModelServing %s for reconcile", svc.GetNamespace(), svc.GetName(), ms.Name)
 	c.enqueueModelServing(ms)
+}
+
+func (c *ModelServingController) deletePodDisruptionBudget(obj interface{}) {
+	pdb, ok := obj.(*policyv1.PodDisruptionBudget)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			klog.Error("failed to parse PodDisruptionBudget type")
+			return
+		}
+		pdb, ok = tombstone.Obj.(*policyv1.PodDisruptionBudget)
+		if !ok {
+			klog.Errorf("failed to parse PodDisruptionBudget from tombstone %#v", tombstone.Obj)
+			return
+		}
+	}
+
+	ms, _, err := c.getModelServingByChildResource(pdb)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			klog.Errorf("failed to get ModelServing of PodDisruptionBudget %s/%s: %v", pdb.Namespace, pdb.Name, err)
+		}
+		return
+	}
+	if c.shouldSkipHandling(ms, pdb.Labels[workloadv1alpha1.GroupNameLabelKey], pdb) {
+		return
+	}
+
+	c.enqueueModelServing(ms)
+}
+
+func (c *ModelServingController) updatePodDisruptionBudget(oldObj, newObj interface{}) {
+	oldPDB, oldOK := oldObj.(*policyv1.PodDisruptionBudget)
+	newPDB, newOK := newObj.(*policyv1.PodDisruptionBudget)
+	if !oldOK || !newOK {
+		klog.Error("failed to parse PodDisruptionBudget type")
+		return
+	}
+	if oldPDB.Generation == newPDB.Generation {
+		return
+	}
+	c.deletePodDisruptionBudget(newPDB)
 }
 
 func (c *ModelServingController) deletePodGroup(obj interface{}) {
@@ -567,12 +646,198 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return fmt.Errorf("failed to sync headless services: %v", err)
 	}
 
-	// 5. Calculate and update the overall condition and replica status fields of the ModelServing.
+	// 5. Create or update PodDisruptionBudgets for voluntary eviction protection.
+	if err := c.syncPodDisruptionBudgets(ctx, ms); err != nil {
+		return fmt.Errorf("failed to sync PodDisruptionBudgets: %v", err)
+	}
+
+	// 6. Calculate and update the overall condition and replica status fields of the ModelServing.
 	if err := c.UpdateModelServingStatus(ms, revision); err != nil {
 		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
 	}
 
 	return nil
+}
+
+func (c *ModelServingController) syncPodDisruptionBudgets(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	desired, err := c.desiredPodDisruptionBudgets(ms)
+	if err != nil {
+		return err
+	}
+
+	pdbClient := c.kubeClientSet.PolicyV1().PodDisruptionBudgets(ms.Namespace)
+	selector := labels.SelectorFromSet(map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		evictionProtectionLabelKey:                "true",
+	})
+	existingList, err := pdbClient.List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return fmt.Errorf("failed to list PodDisruptionBudgets: %v", err)
+	}
+
+	existing := make(map[string]*policyv1.PodDisruptionBudget, len(existingList.Items))
+	for i := range existingList.Items {
+		pdb := &existingList.Items[i]
+		if metav1.IsControlledBy(pdb, ms) {
+			existing[pdb.Name] = pdb
+		}
+	}
+
+	for name, wanted := range desired {
+		current, found := existing[name]
+		if !found {
+			if _, err := pdbClient.Create(ctx, wanted, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("failed to create PodDisruptionBudget %s: %v", name, err)
+			}
+			continue
+		}
+
+		delete(existing, name)
+		if reflect.DeepEqual(current.Spec, wanted.Spec) {
+			continue
+		}
+		copy := current.DeepCopy()
+		copy.Spec = wanted.Spec
+		if _, err := pdbClient.Update(ctx, copy, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to update PodDisruptionBudget %s: %v", name, err)
+		}
+	}
+
+	for name := range existing {
+		if err := pdbClient.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete PodDisruptionBudget %s: %v", name, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *ModelServingController) desiredPodDisruptionBudgets(ms *workloadv1alpha1.ModelServing) (map[string]*policyv1.PodDisruptionBudget, error) {
+	desired := make(map[string]*policyv1.PodDisruptionBudget)
+	strategy := ms.Spec.EvictionStrategy
+	if strategy == nil {
+		return desired, nil
+	}
+
+	servingGroups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+	if errors.Is(err, datastore.ErrServingGroupNotFound) {
+		return desired, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	addPDB := func(name string, selector map[string]string, minAvailable int32) {
+		minAvailableValue := intstr.FromInt32(minAvailable)
+		pdbLabels := make(map[string]string, len(selector)+1)
+		for key, value := range selector {
+			pdbLabels[key] = value
+		}
+		pdbLabels[evictionProtectionLabelKey] = "true"
+		desired[name] = &policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: ms.Namespace,
+				Labels:    pdbLabels,
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing")),
+				},
+			},
+			Spec: policyv1.PodDisruptionBudgetSpec{
+				MinAvailable: &minAvailableValue,
+				Selector:     &metav1.LabelSelector{MatchLabels: selector},
+			},
+		}
+	}
+
+	// A PDB counts Pods, so protect each logical unit separately.
+	switch strategy.Level {
+	case workloadv1alpha1.ServingGroupEvictionProtection:
+		if strategy.MinAvailable == nil || *strategy.MinAvailable == 0 {
+			return desired, nil
+		}
+		var podsPerGroup int64
+		for _, role := range ms.Spec.Template.Roles {
+			if role.Replicas == nil {
+				return nil, fmt.Errorf("replicas is required for role %s", role.Name)
+			}
+			rolePods := int64(*role.Replicas) * (int64(role.WorkerReplicas) + 1)
+			if rolePods > math.MaxInt32-podsPerGroup {
+				return nil, fmt.Errorf("pod count for a ServingGroup exceeds the supported limit")
+			}
+			podsPerGroup += rolePods
+		}
+
+		remaining := *strategy.MinAvailable
+		for _, group := range servingGroups {
+			if remaining == 0 {
+				break
+			}
+			if group.Status != datastore.ServingGroupRunning {
+				continue
+			}
+			ready, err := c.checkServingGroupReady(ms, group.Name)
+			if err != nil {
+				return nil, err
+			}
+			if !ready {
+				continue
+			}
+			name := group.Name + "-pdb"
+			addPDB(name, map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        group.Name,
+			}, int32(podsPerGroup))
+			remaining--
+		}
+	case workloadv1alpha1.RoleEvictionProtection:
+		for _, roleSpec := range ms.Spec.Template.Roles {
+			remaining := strategy.RoleMinAvailable[roleSpec.Name]
+			if remaining == 0 {
+				continue
+			}
+			if roleSpec.WorkerReplicas == math.MaxInt32 {
+				return nil, fmt.Errorf("pod count for role %s exceeds the supported limit", roleSpec.Name)
+			}
+
+			for _, group := range servingGroups {
+				roles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, roleSpec.Name)
+				if err != nil {
+					return nil, err
+				}
+				for _, role := range roles {
+					if remaining == 0 {
+						break
+					}
+					if role.Status != datastore.RoleRunning {
+						continue
+					}
+					ready, err := c.checkRoleReady(ms, group.Name, roleSpec.Name, role.Name)
+					if err != nil {
+						return nil, err
+					}
+					if !ready {
+						continue
+					}
+					name := fmt.Sprintf("%s-%s-pdb", group.Name, role.Name)
+					addPDB(name, map[string]string{
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+						workloadv1alpha1.GroupNameLabelKey:        group.Name,
+						workloadv1alpha1.RoleLabelKey:             roleSpec.Name,
+						workloadv1alpha1.RoleIDKey:                role.Name,
+					}, roleSpec.WorkerReplicas+1)
+					remaining--
+				}
+				if remaining == 0 {
+					break
+				}
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported eviction protection level %q", strategy.Level)
+	}
+
+	return desired, nil
 }
 
 func (c *ModelServingController) Run(ctx context.Context, workers int) {
@@ -582,6 +847,7 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	// start informers
 	go c.podsInformer.RunWithContext(ctx)
 	go c.servicesInformer.RunWithContext(ctx)
+	go c.pdbsInformer.RunWithContext(ctx)
 	go c.modelServingsInformer.RunWithContext(ctx)
 
 	if err := c.podGroupManager.Run(ctx); err != nil {
@@ -591,6 +857,7 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	cache.WaitForCacheSync(ctx.Done(),
 		c.podsInformer.HasSynced,
 		c.servicesInformer.HasSynced,
+		c.pdbsInformer.HasSynced,
 		c.modelServingsInformer.HasSynced,
 	)
 
@@ -1813,6 +2080,13 @@ func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.Mod
 			if r.Status != datastore.RoleRunning {
 				klog.V(4).Infof("checkServingGroupReady: role %s/%s in group %s not ready: status=%s",
 					role.Name, r.Name, servingGroupName, r.Status)
+				return false, nil
+			}
+			ready, err := c.checkRoleReady(ms, servingGroupName, role.Name, r.Name)
+			if err != nil {
+				return false, err
+			}
+			if !ready {
 				return false, nil
 			}
 		}

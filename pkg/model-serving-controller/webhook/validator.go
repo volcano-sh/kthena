@@ -91,6 +91,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
+	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -472,6 +473,76 @@ func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing)
 				workloadv1alpha1.RoleRollingUpdate,
 			),
 		))
+	}
+
+	return allErrs
+}
+
+func validateEvictionStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	strategy := ms.Spec.EvictionStrategy
+	if strategy == nil {
+		return allErrs
+	}
+
+	strategyPath := field.NewPath("spec").Child("evictionStrategy")
+	switch strategy.Level {
+	case workloadv1alpha1.ServingGroupEvictionProtection:
+		if strategy.MinAvailable == nil {
+			allErrs = append(allErrs, field.Required(strategyPath.Child("minAvailable"),
+				"minAvailable is required when level is ServingGroup"))
+		} else {
+			if *strategy.MinAvailable < 0 {
+				allErrs = append(allErrs, field.Invalid(strategyPath.Child("minAvailable"),
+					*strategy.MinAvailable, "minAvailable must be a non-negative integer"))
+			}
+			if ms.Spec.Replicas != nil && *strategy.MinAvailable > *ms.Spec.Replicas {
+				allErrs = append(allErrs, field.Invalid(strategyPath.Child("minAvailable"),
+					*strategy.MinAvailable, fmt.Sprintf("minAvailable cannot exceed replicas (%d)", *ms.Spec.Replicas)))
+			}
+		}
+		if len(strategy.RoleMinAvailable) > 0 {
+			allErrs = append(allErrs, field.Forbidden(strategyPath.Child("roleMinAvailable"),
+				"roleMinAvailable is only valid when level is Role"))
+		}
+	case workloadv1alpha1.RoleEvictionProtection:
+		if strategy.MinAvailable != nil {
+			allErrs = append(allErrs, field.Forbidden(strategyPath.Child("minAvailable"),
+				"minAvailable is only valid when level is ServingGroup"))
+		}
+		if len(strategy.RoleMinAvailable) == 0 {
+			allErrs = append(allErrs, field.Required(strategyPath.Child("roleMinAvailable"),
+				"roleMinAvailable is required when level is Role"))
+			return allErrs
+		}
+
+		roles := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
+		for _, role := range ms.Spec.Template.Roles {
+			roles[role.Name] = role
+		}
+		for roleName, minAvailable := range strategy.RoleMinAvailable {
+			rolePath := strategyPath.Child("roleMinAvailable").Key(roleName)
+			role, found := roles[roleName]
+			if !found {
+				allErrs = append(allErrs, field.Invalid(rolePath, minAvailable,
+					fmt.Sprintf("role %s does not exist in template.roles", roleName)))
+				continue
+			}
+			if minAvailable < 0 {
+				allErrs = append(allErrs, field.Invalid(rolePath, minAvailable,
+					"roleMinAvailable must be a non-negative integer"))
+			}
+			if ms.Spec.Replicas != nil && role.Replicas != nil {
+				instances := int64(*ms.Spec.Replicas) * int64(*role.Replicas)
+				if int64(minAvailable) > instances {
+					allErrs = append(allErrs, field.Invalid(rolePath, minAvailable,
+						fmt.Sprintf("roleMinAvailable cannot exceed role instances (%d)", instances)))
+				}
+			}
+		}
+	default:
+		allErrs = append(allErrs, field.NotSupported(strategyPath.Child("level"), strategy.Level,
+			[]string{string(workloadv1alpha1.ServingGroupEvictionProtection), string(workloadv1alpha1.RoleEvictionProtection)}))
 	}
 
 	return allErrs

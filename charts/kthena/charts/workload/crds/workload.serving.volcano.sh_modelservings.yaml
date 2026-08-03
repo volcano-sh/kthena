@@ -56,6 +56,43 @@ spec:
             description: ModelServingSpec defines the specification of the ModelServing
               resource.
             properties:
+              evictionStrategy:
+                description: EvictionStrategy defines the minimum serving capacity
+                  preserved during voluntary disruptions.
+                properties:
+                  level:
+                    description: Level defines whether availability is protected for
+                      ServingGroups or individual roles.
+                    enum:
+                    - ServingGroup
+                    - Role
+                    type: string
+                  minAvailable:
+                    description: |-
+                      MinAvailable is the minimum number of complete ServingGroups that must remain available.
+                      It is used when level is ServingGroup.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  roleMinAvailable:
+                    additionalProperties:
+                      format: int32
+                      type: integer
+                    description: |-
+                      RoleMinAvailable defines the minimum number of available instances for each role.
+                      It is used when level is Role.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: roleMinAvailable values must be non-negative
+                      rule: self.all(role, self[role] >= 0)
+                required:
+                - level
+                type: object
+                x-kubernetes-validations:
+                - message: minAvailable is required for ServingGroup level and roleMinAvailable
+                    is required for Role level
+                  rule: 'self.level == ''ServingGroup'' ? has(self.minAvailable) &&
+                    !has(self.roleMinAvailable) : !has(self.minAvailable) && has(self.roleMinAvailable)'
               plugins:
                 description: Plugins defines optional plugin chain to customize serving
                   pods.
@@ -4479,6 +4516,9 @@ spec:
                                     - ip
                                     type: object
                                   type: array
+                                  x-kubernetes-list-map-keys:
+                                  - ip
+                                  x-kubernetes-list-type: map
                                 hostIPC:
                                   description: |-
                                     Use the host's ipc namespace.
@@ -13151,6 +13191,9 @@ spec:
                                     - ip
                                     type: object
                                   type: array
+                                  x-kubernetes-list-map-keys:
+                                  - ip
+                                  x-kubernetes-list-type: map
                                 hostIPC:
                                   description: |-
                                     Use the host's ipc namespace.

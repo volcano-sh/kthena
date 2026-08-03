@@ -146,6 +146,17 @@ rules:
       - update
       - delete
   - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
       - admissionregistration.k8s.io
     resources:
       - mutatingwebhookconfigurations

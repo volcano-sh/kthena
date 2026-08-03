@@ -25,6 +25,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,193 @@ import (
 type resourceSpec struct {
 	name   string
 	labels map[string]string
+}
+
+func TestDesiredPodDisruptionBudgets(t *testing.T) {
+	replicas := int32(3)
+	prefillReplicas := int32(1)
+	decodeReplicas := int32(2)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: &replicas,
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{Name: "prefill", Replicas: &prefillReplicas, WorkerReplicas: 1},
+					{Name: "decode", Replicas: &decodeReplicas},
+				},
+			},
+		},
+	}
+	kubeClient := kubefake.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	podInformer := informerFactory.Core().V1().Pods()
+	require.NoError(t, podInformer.Informer().AddIndexers(cache.Indexers{
+		GroupNameKey: utils.GroupNameIndexFunc,
+		RoleIDKey:    utils.RoleIDIndexFunc,
+	}))
+	controller := &ModelServingController{
+		podsInformer: podInformer.Informer(),
+		store:        datastore.New(),
+	}
+	key := utils.GetNamespaceName(ms)
+	for groupIndex := 0; groupIndex < int(replicas); groupIndex++ {
+		groupName := utils.GenerateServingGroupName(ms.Name, groupIndex)
+		controller.store.AddServingGroup(key, groupIndex, "revision")
+		for _, role := range ms.Spec.Template.Roles {
+			for roleIndex := 0; roleIndex < int(*role.Replicas); roleIndex++ {
+				roleID := utils.GenerateRoleID(role.Name, roleIndex)
+				controller.store.AddRole(key, groupName, role.Name, roleID, "revision", "role-hash")
+				require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, role.Name, roleID, datastore.RoleRunning))
+				for podIndex := int32(0); podIndex <= role.WorkerReplicas; podIndex++ {
+					pod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      fmt.Sprintf("%s-%s-%d", groupName, roleID, podIndex),
+							Namespace: ms.Namespace,
+							Labels: map[string]string{
+								workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+								workloadv1alpha1.GroupNameLabelKey:        groupName,
+								workloadv1alpha1.RoleLabelKey:             role.Name,
+								workloadv1alpha1.RoleIDKey:                roleID,
+							},
+						},
+						Status: corev1.PodStatus{
+							Phase: corev1.PodRunning,
+							Conditions: []corev1.PodCondition{
+								{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+							},
+						},
+					}
+					require.NoError(t, controller.podsInformer.GetIndexer().Add(pod))
+				}
+			}
+		}
+		require.NoError(t, controller.store.UpdateServingGroupStatus(key, groupName, datastore.ServingGroupRunning))
+	}
+
+	t.Run("ServingGroup", func(t *testing.T) {
+		minAvailable := int32(2)
+		ms.Spec.EvictionStrategy = &workloadv1alpha1.EvictionStrategy{
+			Level:        workloadv1alpha1.ServingGroupEvictionProtection,
+			MinAvailable: &minAvailable,
+		}
+
+		pdbs, err := controller.desiredPodDisruptionBudgets(ms)
+		require.NoError(t, err)
+		require.Len(t, pdbs, 2)
+		pdb := pdbs["test-0-pdb"]
+		require.NotNil(t, pdb)
+		assert.Equal(t, int32(4), pdb.Spec.MinAvailable.IntVal)
+		assert.Equal(t, map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: "test",
+			workloadv1alpha1.GroupNameLabelKey:        "test-0",
+		}, pdb.Spec.Selector.MatchLabels)
+		assert.Nil(t, pdb.Spec.UnhealthyPodEvictionPolicy)
+		assert.True(t, metav1.IsControlledBy(pdb, ms))
+		assert.NotContains(t, pdbs, "test-2-pdb")
+
+		pods, err := controller.getPodsByIndex(GroupNameKey, "default/test-0")
+		require.NoError(t, err)
+		require.NotEmpty(t, pods)
+		notReadyPod := pods[0].DeepCopy()
+		notReadyPod.Status.Conditions[0].Status = corev1.ConditionFalse
+		require.NoError(t, controller.podsInformer.GetIndexer().Update(notReadyPod))
+
+		pdbs, err = controller.desiredPodDisruptionBudgets(ms)
+		require.NoError(t, err)
+		assert.NotContains(t, pdbs, "test-0-pdb")
+		assert.Contains(t, pdbs, "test-2-pdb")
+
+		require.NoError(t, controller.podsInformer.GetIndexer().Update(pods[0]))
+	})
+
+	t.Run("Role", func(t *testing.T) {
+		ms.Spec.EvictionStrategy = &workloadv1alpha1.EvictionStrategy{
+			Level: workloadv1alpha1.RoleEvictionProtection,
+			RoleMinAvailable: map[string]int32{
+				"prefill": 2,
+				"decode":  4,
+			},
+		}
+
+		pdbs, err := controller.desiredPodDisruptionBudgets(ms)
+		require.NoError(t, err)
+		require.Len(t, pdbs, 6)
+		prefillPDB := pdbs["test-0-prefill-0-pdb"]
+		require.NotNil(t, prefillPDB)
+		assert.Equal(t, int32(2), prefillPDB.Spec.MinAvailable.IntVal)
+		assert.Equal(t, "prefill-0", prefillPDB.Spec.Selector.MatchLabels[workloadv1alpha1.RoleIDKey])
+
+		decodePDB := pdbs["test-1-decode-1-pdb"]
+		require.NotNil(t, decodePDB)
+		assert.Equal(t, int32(1), decodePDB.Spec.MinAvailable.IntVal)
+		assert.Equal(t, "decode", decodePDB.Spec.Selector.MatchLabels[workloadv1alpha1.RoleLabelKey])
+		assert.NotContains(t, pdbs, "test-2-decode-0-pdb")
+	})
+}
+
+func TestSyncPodDisruptionBudgetsCleansUpOldStrategy(t *testing.T) {
+	replicas := int32(2)
+	roleReplicas := int32(1)
+	minAvailable := int32(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: &replicas,
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: &roleReplicas}},
+			},
+			EvictionStrategy: &workloadv1alpha1.EvictionStrategy{
+				Level:        workloadv1alpha1.ServingGroupEvictionProtection,
+				MinAvailable: &minAvailable,
+			},
+		},
+	}
+	kubeClient := kubefake.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	podInformer := informerFactory.Core().V1().Pods()
+	require.NoError(t, podInformer.Informer().AddIndexers(cache.Indexers{
+		GroupNameKey: utils.GroupNameIndexFunc,
+		RoleIDKey:    utils.RoleIDIndexFunc,
+	}))
+	controller := &ModelServingController{
+		kubeClientSet: kubeClient,
+		podsInformer:  podInformer.Informer(),
+		store:         datastore.New(),
+	}
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "revision")
+	controller.store.AddRole(utils.GetNamespaceName(ms), "test-0", "decode", "decode-0", "revision", "role-hash")
+	require.NoError(t, controller.store.UpdateRoleStatus(utils.GetNamespaceName(ms), "test-0", "decode", "decode-0", datastore.RoleRunning))
+	require.NoError(t, controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), "test-0", datastore.ServingGroupRunning))
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-0-decode-0-0",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "test-0",
+				workloadv1alpha1.RoleLabelKey:             "decode",
+				workloadv1alpha1.RoleIDKey:                "decode-0",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}))
+
+	require.NoError(t, controller.syncPodDisruptionBudgets(context.Background(), ms))
+	_, err := kubeClient.PolicyV1().PodDisruptionBudgets(ms.Namespace).Get(
+		context.Background(), "test-0-pdb", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	ms.Spec.EvictionStrategy = nil
+	require.NoError(t, controller.syncPodDisruptionBudgets(context.Background(), ms))
+	_, err = kubeClient.PolicyV1().PodDisruptionBudgets(ms.Namespace).Get(
+		context.Background(), "test-0-pdb", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
 }
 
 type testQueue interface {
@@ -197,6 +385,7 @@ func TestNewTestController_HasSyncedQueueAndStores(t *testing.T) {
 	require.Equal(t, 0, h.controller.workqueue.Len())
 	require.True(t, h.controller.podsInformer.HasSynced())
 	require.True(t, h.controller.servicesInformer.HasSynced())
+	require.True(t, h.controller.pdbsInformer.HasSynced())
 	require.True(t, h.controller.modelServingsInformer.HasSynced())
 	require.True(t, h.controller.initialSync)
 }
@@ -320,6 +509,100 @@ func TestDeletePodGroupOwnerMismatchDoesNotEnqueue(t *testing.T) {
 	controller.deletePodGroup(podGroup)
 
 	assertQueueStaysEmpty(t, controller.workqueue, 200*time.Millisecond)
+}
+
+func TestDeletePodDisruptionBudgetEnqueues(t *testing.T) {
+	ms := newModelServingForDeleteTest("default", "ms")
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	require.Eventually(t, func() bool {
+		_, err := controller.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	drainWorkqueue(t, controller.workqueue)
+
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms-0-pdb",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        ms.UID,
+				},
+			},
+		},
+	}
+	controller.deletePodDisruptionBudget(pdb)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+
+	oldPDB := pdb.DeepCopy()
+	oldPDB.Generation = 1
+	newPDB := pdb.DeepCopy()
+	newPDB.Generation = 2
+	controller.updatePodDisruptionBudget(oldPDB, newPDB)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+
+	controller.updatePodDisruptionBudget(newPDB, newPDB.DeepCopy())
+	assertQueueEmpty(t, controller.workqueue)
+}
+
+func TestPodChangesEnqueueEvictionProtection(t *testing.T) {
+	ms := newModelServingForDeleteTest("default", "ms")
+	minAvailable := int32(1)
+	ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+	ms.Spec.EvictionStrategy = &workloadv1alpha1.EvictionStrategy{
+		Level:        workloadv1alpha1.ServingGroupEvictionProtection,
+		MinAvailable: &minAvailable,
+	}
+	h := newTestController(t, ms)
+	controller := h.controller
+	drainWorkqueue(t, controller.workqueue)
+
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms-0-prefill-0-0",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "prefill",
+				workloadv1alpha1.RoleIDKey:                "prefill-0",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        ms.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	newPod := oldPod.DeepCopy()
+	newPod.Status.Conditions[0].Status = corev1.ConditionFalse
+
+	controller.updatePod(oldPod, newPod)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+
+	controller.deletePod(oldPod)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+
+	controller.addPod(oldPod)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
 func TestIsServingGroupOutdated(t *testing.T) {

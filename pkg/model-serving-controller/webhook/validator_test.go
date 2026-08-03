@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1500,6 +1501,52 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 
 func int32Ptr(i int32) *int32 {
 	return &i
+}
+
+func TestValidateEvictionStrategy(t *testing.T) {
+	replicas := int32(3)
+	roleReplicas := int32(2)
+	newModelServing := func(strategy *workloadv1alpha1.EvictionStrategy) *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: &replicas,
+				Template: workloadv1alpha1.ServingGroup{
+					Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: &roleReplicas}},
+				},
+				EvictionStrategy: strategy,
+			},
+		}
+	}
+
+	minAvailable := int32(2)
+	assert.Empty(t, validateEvictionStrategy(newModelServing(&workloadv1alpha1.EvictionStrategy{
+		Level:        workloadv1alpha1.ServingGroupEvictionProtection,
+		MinAvailable: &minAvailable,
+	})))
+
+	tooMany := int32(4)
+	errs := validateEvictionStrategy(newModelServing(&workloadv1alpha1.EvictionStrategy{
+		Level:        workloadv1alpha1.ServingGroupEvictionProtection,
+		MinAvailable: &tooMany,
+	}))
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "cannot exceed replicas")
+
+	assert.Empty(t, validateEvictionStrategy(newModelServing(&workloadv1alpha1.EvictionStrategy{
+		Level: workloadv1alpha1.RoleEvictionProtection,
+		RoleMinAvailable: map[string]int32{
+			"decode": 4,
+		},
+	})))
+
+	errs = validateEvictionStrategy(newModelServing(&workloadv1alpha1.EvictionStrategy{
+		Level: workloadv1alpha1.RoleEvictionProtection,
+		RoleMinAvailable: map[string]int32{
+			"prefill": 1,
+		},
+	}))
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "does not exist")
 }
 
 func int32PtrNil() *int32 {
