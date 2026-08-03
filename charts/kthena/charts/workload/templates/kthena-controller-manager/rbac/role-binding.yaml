@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kthena-controller-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-controller-manager
+    {{- include "kthena.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kthena-controller-manager
+subjects:
+  - kind: ServiceAccount
+    name: kthena-controller-manager
+    namespace: {{ .Release.Namespace }}

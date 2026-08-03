@@ -83,14 +83,6 @@ rules:
       - create
       - update
   - apiGroups:
-      - ""
-    resources:
-      - configmaps
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
       - workload.serving.volcano.sh
     resources:
       - modelboosters
@@ -122,15 +114,6 @@ rules:
     verbs:
       - create
       - delete
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - create
       - get
       - list
       - watch
