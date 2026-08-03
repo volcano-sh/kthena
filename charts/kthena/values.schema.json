@@ -1,6 +1,38 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "definitions": {
+    "podScheduling": {
+      "type": "object",
+      "properties": {
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Node labels that the Pod must match."
+        },
+        "affinity": {
+          "type": "object",
+          "description": "Affinity and anti-affinity rules for the Pod."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Tolerations applied to the Pod."
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Topology spread constraints for the Pod."
+        }
+      }
+    }
+  },
   "properties": {
     "global": {
       "type": "object",
@@ -21,6 +53,22 @@
         }
       },
       "required": ["certManagementMode"]
+    },
+    "networking": {
+      "type": "object",
+      "properties": {
+        "kthenaRouter": {
+          "$ref": "#/definitions/podScheduling"
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "properties": {
+        "controllerManager": {
+          "$ref": "#/definitions/podScheduling"
+        }
+      }
     }
   }
 }

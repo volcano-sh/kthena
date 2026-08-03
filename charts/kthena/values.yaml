@@ -14,6 +14,14 @@ workload:
     # -- Reconcile interval in seconds for the autoscaler. Smaller values react
     # faster to traffic spikes but increase API server load. 0 uses the binary default (15).
     autoscalingSyncPeriodSeconds: 0
+    # -- Node labels that the Controller Manager Pod must match.
+    nodeSelector: {}
+    # -- Affinity and anti-affinity rules for the Controller Manager Pod.
+    affinity: {}
+    # -- Tolerations applied to the Controller Manager Pod.
+    tolerations: []
+    # -- Topology spread constraints for the Controller Manager Pod.
+    topologySpreadConstraints: []
     downloaderImage:
       # -- Image repository for the Downloader.
       repository: ghcr.io/volcano-sh/downloader
@@ -50,6 +58,14 @@ networking:
       tag: latest
       # -- Image pull policy for Kthena Router.
       pullPolicy: IfNotPresent
+    # -- Node labels that the Kthena Router Pod must match.
+    nodeSelector: {}
+    # -- Affinity and anti-affinity rules for the Kthena Router Pod.
+    affinity: {}
+    # -- Tolerations applied to the Kthena Router Pod.
+    tolerations: []
+    # -- Topology spread constraints for the Kthena Router Pod.
+    topologySpreadConstraints: []
     tls:
       # -- Enable TLS for Kthena Router server.
       enabled: false

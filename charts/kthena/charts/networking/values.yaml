@@ -34,6 +34,14 @@ kthenaRouter:
     requests:
       cpu: 100m
       memory: 128Mi
+  # nodeSelector specifies node labels that the Kthena Router Pod must match.
+  nodeSelector: {}
+  # affinity specifies affinity and anti-affinity rules for the Kthena Router Pod.
+  affinity: {}
+  # tolerations specifies tolerations applied to the Kthena Router Pod.
+  tolerations: []
+  # topologySpreadConstraints specifies topology spread constraints for the Kthena Router Pod.
+  topologySpreadConstraints: []
   # -- The router will drain all in-flight requests before forcefully closing connections
   terminationGracePeriodSeconds: 330
   # -- Drain timeout for kthena-router graceful shutdown.
