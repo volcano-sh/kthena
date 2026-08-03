@@ -209,6 +209,8 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +genclient
+// +kubebuilder:printcolumn:name="Active",type="string",JSONPath=".status.conditions[?(@.type=='Active')].status",description="Whether the model booster is active"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // ModelBooster is the Schema for the models API.
 type ModelBooster struct {

@@ -14,7 +14,23 @@ spec:
     singular: modelserving
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: Total number of serving groups
+      jsonPath: .status.replicas
+      name: Replicas
+      type: integer
+    - description: Number of serving groups that are ready
+      jsonPath: .status.availableReplicas
+      name: Available
+      type: integer
+    - description: Number of serving groups updated to the latest revision
+      jsonPath: .status.updatedReplicas
+      name: Updated
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: ModelServing is the Schema for the LLM Serving API

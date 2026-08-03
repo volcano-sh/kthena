@@ -243,6 +243,10 @@ type ModelServingStatus struct {
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.labelSelector
 // +kubebuilder:storageversion
 // +genclient
+// +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".status.replicas",description="Total number of serving groups"
+// +kubebuilder:printcolumn:name="Available",type="integer",JSONPath=".status.availableReplicas",description="Number of serving groups that are ready"
+// +kubebuilder:printcolumn:name="Updated",type="integer",JSONPath=".status.updatedReplicas",description="Number of serving groups updated to the latest revision"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // ModelServing is the Schema for the LLM Serving API
 type ModelServing struct {
