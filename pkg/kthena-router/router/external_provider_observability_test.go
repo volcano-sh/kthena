@@ -380,7 +380,7 @@ func responseParserFor(
 	t.Helper()
 	adapter, err := providers.NewAdapter(providerType)
 	require.NoError(t, err)
-	return adapter.ResponseParser(path)
+	return adapter.ResponseParser(nil, path)
 }
 
 type terminalWriteErrorRecorder struct {

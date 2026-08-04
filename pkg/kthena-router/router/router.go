@@ -936,10 +936,7 @@ func (r *Router) proxyExternalProvider(
 	defer accesslog.MarkUpstreamEnd(c)
 
 	providerName := fmt.Sprintf("%s/%s", provider.Namespace, provider.Name)
-	upstreamModel := modelName
-	if provider.Spec.Model != nil && *provider.Spec.Model != "" {
-		upstreamModel = *provider.Spec.Model
-	}
+	upstreamModel := providers.UpstreamModelName(provider, modelName)
 	accesslog.SetBackendInfo(c, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
 
 	modelRouteName := ""
