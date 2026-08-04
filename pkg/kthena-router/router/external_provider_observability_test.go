@@ -163,6 +163,35 @@ func TestExternalProviderObservabilityNonTextInputUsesLocalTextAccounting(t *tes
 	}
 }
 
+func TestExternalProviderRouteInputRateLimitRejectsBeforeUpstream(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"rate-limit","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer upstream.Close()
+
+	fixture := newExternalObservabilityFixture(t, "route-rate-limit", aiv1alpha1.OpenAI, upstream.URL)
+	inputLimit := uint32(1)
+	require.NoError(t, fixture.router.loadRateLimiter.AddOrUpdateLimiter(fixture.clientModel, &aiv1alpha1.RateLimit{
+		InputTokensPerUnit: &inputLimit,
+		Unit:               aiv1alpha1.Minute,
+	}))
+	before := externalCounterValue(t, &fixture.router.metrics.RateLimitExceeded,
+		fixture.clientModel, metrics.LimitTypeInputTokens, "/v1/chat/completions")
+
+	body := addModelToRequestBody(`{"messages":[{"role":"user","content":"x"}]}`, fixture.clientModel)
+	w, accessCtx := executeExternalObservabilityRequest(t, fixture, "/v1/chat/completions", body)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Zero(t, upstreamCalls)
+	require.NotNil(t, accessCtx.Error)
+	assert.Equal(t, "input_rate_limit", accessCtx.Error.Type)
+	assert.Equal(t, before+1, externalCounterValue(t, &fixture.router.metrics.RateLimitExceeded,
+		fixture.clientModel, metrics.LimitTypeInputTokens, "/v1/chat/completions"))
+}
+
 func TestExternalProviderObservabilityStreamingResponses(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
