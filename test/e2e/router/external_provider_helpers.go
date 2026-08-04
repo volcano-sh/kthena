@@ -58,17 +58,20 @@ const (
 	externalProviderOpenAISecretKey    = "openai-key"
 	externalProviderAnthropicSecretKey = "anthropic-key"
 
-	externalOpenAIChatProviderName = "external-openai-chat"
-	externalResponsesProviderName  = "external-openai-responses"
-	externalAnthropicProviderName  = "external-anthropic"
+	externalOpenAIChatProviderName      = "external-openai-chat"
+	externalResponsesProviderName       = "external-openai-responses"
+	externalAnthropicProviderName       = "external-anthropic"
+	externalAnthropicBearerProviderName = "external-anthropic-bearer"
 
-	externalOpenAIChatRouteName = "external-openai-chat"
-	externalResponsesRouteName  = "external-openai-responses"
-	externalAnthropicRouteName  = "external-anthropic"
+	externalOpenAIChatRouteName      = "external-openai-chat"
+	externalResponsesRouteName       = "external-openai-responses"
+	externalAnthropicRouteName       = "external-anthropic"
+	externalAnthropicBearerRouteName = "external-anthropic-bearer"
 
-	externalOpenAIChatModel = "e2e-openai-chat"
-	externalResponsesModel  = "e2e-openai-responses"
-	externalAnthropicModel  = "e2e-anthropic"
+	externalOpenAIChatModel      = "e2e-openai-chat"
+	externalResponsesModel       = "e2e-openai-responses"
+	externalAnthropicModel       = "e2e-anthropic"
+	externalAnthropicBearerModel = "e2e-anthropic-bearer"
 
 	externalOpenAIChatUpstreamModel = "mock-openai-chat"
 	externalResponsesUpstreamModel  = "mock-responses"
@@ -80,11 +83,13 @@ var (
 		externalOpenAIChatProviderName,
 		externalResponsesProviderName,
 		externalAnthropicProviderName,
+		externalAnthropicBearerProviderName,
 	}
 	externalRouteNames = []string{
 		externalOpenAIChatRouteName,
 		externalResponsesRouteName,
 		externalAnthropicRouteName,
+		externalAnthropicBearerRouteName,
 	}
 )
 
@@ -100,8 +105,10 @@ type mockCapture struct {
 	Path             string          `json:"path"`
 	RawQuery         string          `json:"raw_query"`
 	Authorized       bool            `json:"authorized"`
+	AuthScheme       string          `json:"auth_scheme"`
 	ContentType      string          `json:"content_type"`
 	AnthropicVersion string          `json:"anthropic_version"`
+	AnthropicBeta    string          `json:"anthropic_beta"`
 	Body             json.RawMessage `json:"body"`
 }
 
@@ -178,12 +185,17 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 	require.NoError(t, err, "create external provider mock credentials")
 
 	baseURL := fmt.Sprintf("https://%s.%s.svc", externalProviderMockName, namespace)
+	anthropicBearerProvider := newExternalProvider(namespace, externalAnthropicBearerProviderName, networkingv1alpha1.Anthropic, baseURL, externalAnthropicUpstreamModel, externalProviderAnthropicSecretKey, map[string]string{
+		"anthropic-version": "2023-06-01",
+	})
+	anthropicBearerProvider.Spec.Auth.Scheme = networkingv1alpha1.ProviderAuthSchemeBearer
 	providers := []*networkingv1alpha1.ExternalModelProvider{
 		newExternalProvider(namespace, externalOpenAIChatProviderName, networkingv1alpha1.OpenAI, baseURL, externalOpenAIChatUpstreamModel, externalProviderOpenAISecretKey, nil),
 		newExternalProvider(namespace, externalResponsesProviderName, networkingv1alpha1.OpenAI, baseURL, externalResponsesUpstreamModel, externalProviderOpenAISecretKey, nil),
 		newExternalProvider(namespace, externalAnthropicProviderName, networkingv1alpha1.Anthropic, baseURL, externalAnthropicUpstreamModel, externalProviderAnthropicSecretKey, map[string]string{
 			"anthropic-version": "2023-06-01",
 		}),
+		anthropicBearerProvider,
 	}
 	for _, provider := range providers {
 		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ExternalModelProviders(namespace).Create(ctx, provider, metav1.CreateOptions{})
@@ -195,6 +207,7 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 		newExternalModelRoute(namespace, externalOpenAIChatRouteName, externalOpenAIChatModel, externalOpenAIChatProviderName),
 		newExternalModelRoute(namespace, externalResponsesRouteName, externalResponsesModel, externalResponsesProviderName),
 		newExternalModelRoute(namespace, externalAnthropicRouteName, externalAnthropicModel, externalAnthropicProviderName),
+		newExternalModelRoute(namespace, externalAnthropicBearerRouteName, externalAnthropicBearerModel, externalAnthropicBearerProviderName),
 	}
 	for _, route := range routes {
 		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(namespace).Create(ctx, route, metav1.CreateOptions{})
@@ -235,6 +248,11 @@ func waitForExternalRoutesReady(t *testing.T, routerURL, adminURL string) {
 			name: "anthropic",
 			path: "/v1/messages",
 			body: []byte(`{"model":"` + externalAnthropicModel + `","max_tokens":8,"messages":[{"role":"user","content":"route ready"}],"stream":false}`),
+		},
+		{
+			name: "anthropic-bearer",
+			path: "/v1/messages",
+			body: []byte(`{"model":"` + externalAnthropicBearerModel + `","max_tokens":8,"messages":[{"role":"user","content":"route ready"}],"stream":false}`),
 		},
 	}
 	for _, tt := range tests {
@@ -297,20 +315,34 @@ func waitForExternalProviderReady(t *testing.T, ctx context.Context, kthenaClien
 
 func (f externalProviderFixture) sendJSONRequest(t *testing.T, path, requestID string, body []byte) externalHTTPResponse {
 	t.Helper()
+	return f.sendJSONRequestWithHeaders(t, path, requestID, body, nil)
+}
+
+func (f externalProviderFixture) sendJSONRequestWithHeaders(t *testing.T, path, requestID string, body []byte, headers http.Header) externalHTTPResponse {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	response, err := doExternalJSONRequest(ctx, f.routerURL, path, requestID, body)
+	response, err := doExternalJSONRequestWithHeaders(ctx, f.routerURL, path, requestID, body, headers)
 	require.NoError(t, err, "send external provider request")
 	return response
 }
 
 func doExternalJSONRequest(ctx context.Context, routerURL, path, requestID string, body []byte) (externalHTTPResponse, error) {
+	return doExternalJSONRequestWithHeaders(ctx, routerURL, path, requestID, body, nil)
+}
+
+func doExternalJSONRequestWithHeaders(ctx context.Context, routerURL, path, requestID string, body []byte, headers http.Header) (externalHTTPResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+path, bytes.NewReader(body))
 	if err != nil {
 		return externalHTTPResponse{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-ID", requestID)
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

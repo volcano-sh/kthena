@@ -50,8 +50,10 @@ type capturedRequest struct {
 	Path             string          `json:"path"`
 	RawQuery         string          `json:"raw_query,omitempty"`
 	Authorized       bool            `json:"authorized"`
+	AuthScheme       string          `json:"auth_scheme,omitempty"`
 	ContentType      string          `json:"content_type,omitempty"`
 	AnthropicVersion string          `json:"anthropic_version,omitempty"`
+	AnthropicBeta    string          `json:"anthropic_beta,omitempty"`
 	Body             json.RawMessage `json:"body"`
 }
 
@@ -256,7 +258,9 @@ func (s *mockServer) handleAnthropicMessages(w http.ResponseWriter, r *http.Requ
 		writeProviderError(w, protocolAnthropic, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
-	if !constantTimeEqual(r.Header.Get("X-Api-Key"), s.config.AnthropicKey) {
+	apiKeyAuthorized := constantTimeEqual(r.Header.Get("X-Api-Key"), s.config.AnthropicKey)
+	bearerAuthorized := constantTimeEqual(r.Header.Get("Authorization"), "Bearer "+s.config.AnthropicKey)
+	if !apiKeyAuthorized && !bearerAuthorized {
 		writeProviderError(w, protocolAnthropic, http.StatusUnauthorized, "authentication_error", "invalid mock credential")
 		return
 	}
@@ -269,11 +273,11 @@ func (s *mockServer) handleAnthropicMessages(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !isStreaming(capture.Body) {
-		writeJSON(w, http.StatusOK, `{"id":"msg-mock","type":"message","role":"assistant","model":"mock-anthropic","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":13,"output_tokens":6}}`)
+		writeJSON(w, http.StatusOK, `{"id":"msg-mock","type":"message","role":"assistant","model":"mock-anthropic","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":13,"cache_creation_input_tokens":7,"cache_read_input_tokens":5,"output_tokens":6}}`)
 		return
 	}
 	writeSSE(w,
-		`{"type":"message_start","message":{"id":"msg-mock","type":"message","role":"assistant","model":"mock-anthropic","content":[],"usage":{"input_tokens":13,"output_tokens":1}}}`,
+		`{"type":"message_start","message":{"id":"msg-mock","type":"message","role":"assistant","model":"mock-anthropic","content":[],"usage":{"input_tokens":13,"cache_creation_input_tokens":7,"cache_read_input_tokens":5,"output_tokens":1}}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6}}`,
 		`{"type":"message_stop"}`,
@@ -364,12 +368,24 @@ func (s *mockServer) captureJSONRequest(w http.ResponseWriter, r *http.Request, 
 		Path:             r.URL.Path,
 		RawQuery:         r.URL.RawQuery,
 		Authorized:       authorized,
+		AuthScheme:       requestAuthScheme(r),
 		ContentType:      r.Header.Get("Content-Type"),
 		AnthropicVersion: r.Header.Get("Anthropic-Version"),
+		AnthropicBeta:    r.Header.Get("Anthropic-Beta"),
 		Body:             append(json.RawMessage(nil), compact.Bytes()...),
 	}
 	s.captures.put(capture)
 	return capture, true
+}
+
+func requestAuthScheme(r *http.Request) string {
+	if r.Header.Get("Authorization") != "" {
+		return "Bearer"
+	}
+	if r.Header.Get("X-Api-Key") != "" {
+		return "APIKey"
+	}
+	return ""
 }
 
 func (s *mockServer) handleCaptureAdmin(w http.ResponseWriter, r *http.Request) {

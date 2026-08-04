@@ -284,6 +284,8 @@ func TestStreamingProviderProtocols(t *testing.T) {
 			wantMarkers: []string{
 				`"type":"message_start"`,
 				`"input_tokens":13`,
+				`"cache_creation_input_tokens":7`,
+				`"cache_read_input_tokens":5`,
 				`"type":"message_delta"`,
 				`"output_tokens":6`,
 				`"type":"message_stop"`,
@@ -316,6 +318,24 @@ func TestStreamingProviderProtocols(t *testing.T) {
 			assert.JSONEq(t, tt.body, string(capture.Body))
 		})
 	}
+}
+
+func TestAnthropicAcceptsBearerAndCapturesBetaHeader(t *testing.T) {
+	server := newTestMockServer()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m","stream":false}`))
+	req.Header.Set("Authorization", "Bearer e2e-anthropic-key")
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+	req.Header.Set("Anthropic-Beta", "context-1m-2025-08-07")
+	req.Header.Set("X-Request-Id", "anthropic-bearer-1")
+	recorder := httptest.NewRecorder()
+
+	server.providerHandler().ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	capture, ok := server.captures.get("anthropic-bearer-1")
+	require.True(t, ok)
+	assert.Equal(t, "Bearer", capture.AuthScheme)
+	assert.Equal(t, "context-1m-2025-08-07", capture.AnthropicBeta)
 }
 
 func TestMockStatusControl(t *testing.T) {
