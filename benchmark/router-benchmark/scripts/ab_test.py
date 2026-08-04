@@ -46,6 +46,7 @@ from router_ab_test import (
     ScenarioConfig,
     analyze_router_metrics,
     apply_request_level_verdict,
+    classify_aiperf_errors,
     compute_run_verdict,
     format_router_analysis,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "analyze_router_metrics",
     "apply_request_level_verdict",
     "build_parser",
+    "classify_aiperf_errors",
     "compute_run_verdict",
     "format_router_analysis",
     "main",

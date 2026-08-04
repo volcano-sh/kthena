@@ -569,17 +569,20 @@ class ResultReporter:
     def _request_stats_for_verdict(analysis: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
         """Assemble the request_stats payload for apply_request_level_verdict.
 
-        genuine_errors/cancelled come from AIPerf's own output (populated by
-        AIPerfRunner._read_metrics_from_output); total_503/p50_ms/p95_ms come
-        from the router's own Prometheus counters. Missing fields are left as
-        None rather than defaulted to 0, so apply_request_level_verdict can
-        tell "known clean" apart from "unknown".
+        genuine_errors/empty_content_errors/cancelled come from AIPerf's own
+        output (populated by AIPerfRunner._read_metrics_from_output, which
+        splits error_summary via classify_aiperf_errors); total_503/p50_ms/
+        p95_ms come from the router's own Prometheus counters. Missing
+        fields are left as None rather than defaulted to 0, so
+        apply_request_level_verdict can tell "known clean" apart from
+        "unknown".
         """
         requests = analysis.get("requests") or {}
         total_503 = (requests.get("by_status_code") or {}).get("503", 0)
         duration_200 = (analysis.get("request_duration_seconds") or {}).get("200") or {}
         return {
             "genuine_errors": metrics.get("aiperf_genuine_errors"),
+            "empty_content_errors": metrics.get("aiperf_empty_content_errors"),
             "cancelled": metrics.get("aiperf_cancelled"),
             "total_503": total_503,
             "p50_ms": duration_200.get("p50_ms"),

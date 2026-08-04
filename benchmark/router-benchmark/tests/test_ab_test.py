@@ -321,6 +321,33 @@ class AIPerfRunnerTest(unittest.TestCase):
         metrics = self.runner._read_metrics_from_output(run_dir)
 
         self.assertEqual(metrics["aiperf_genuine_errors"], 0)
+        self.assertEqual(metrics["aiperf_empty_content_errors"], 0)
+
+    def test_read_metrics_from_output_splits_empty_content_from_genuine_errors(self):
+        run_dir = Path(tempfile.mkdtemp())
+        self._write_summary(
+            run_dir,
+            error_summary=[
+                {
+                    "error_details": {
+                        "type": "InvalidInferenceResultError",
+                        "message": (
+                            "InvalidInferenceResultError('Invalid inference result: "
+                            "No responses with actual content were received from the "
+                            "server (only usage/metadata, null/empty data, or [DONE] "
+                            "markers)')"
+                        ),
+                    },
+                    "count": 2,
+                },
+                {"error_details": {"code": 503}, "count": 5},
+            ],
+        )
+
+        metrics = self.runner._read_metrics_from_output(run_dir)
+
+        self.assertEqual(metrics["aiperf_genuine_errors"], 5)
+        self.assertEqual(metrics["aiperf_empty_content_errors"], 2)
 
     def test_read_cancelled_count_parses_phase_summary_line(self):
         run_dir = Path(tempfile.mkdtemp())
@@ -799,6 +826,70 @@ class ComputeRunVerdictTest(unittest.TestCase):
         self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
 
 
+_EMPTY_CONTENT_MESSAGE = (
+    "InvalidInferenceResultError('Invalid inference result: No responses with actual "
+    "content were received from the server (only usage/metadata, null/empty data, "
+    "or [DONE] markers)')"
+)
+_TIMESTAMP_INVALID_MESSAGE = (
+    "InvalidInferenceResultError('Invalid inference result: Start perf ns timestamp "
+    "is invalid: -1')"
+)
+
+
+class ClassifyAiperfErrorsTest(unittest.TestCase):
+    def test_empty_content_note_classified_separately(self):
+        summary = [
+            {"error_details": {"type": "InvalidInferenceResultError", "message": _EMPTY_CONTENT_MESSAGE}, "count": 2},
+        ]
+        invalidating, empty_content = ab_test.classify_aiperf_errors(summary)
+        self.assertEqual(invalidating, 0)
+        self.assertEqual(empty_content, 2)
+
+    def test_timestamp_invalid_note_still_invalidating(self):
+        details = {"type": "InvalidInferenceResultError", "message": _TIMESTAMP_INVALID_MESSAGE}
+        summary = [{"error_details": details, "count": 1}]
+        invalidating, empty_content = ab_test.classify_aiperf_errors(summary)
+        self.assertEqual(invalidating, 1)
+        self.assertEqual(empty_content, 0)
+
+    def test_other_error_type_still_invalidating(self):
+        summary = [
+            {"error_details": {"code": 503, "type": "Service Unavailable"}, "count": 53},
+        ]
+        invalidating, empty_content = ab_test.classify_aiperf_errors(summary)
+        self.assertEqual(invalidating, 53)
+        self.assertEqual(empty_content, 0)
+
+    def test_entry_with_both_notes_is_still_invalidating(self):
+        # An error carrying the empty-content note AND a timestamp-invalid
+        # note indicates something more clearly broken than the narrow
+        # exempted condition - must not be exempted.
+        combined_message = _EMPTY_CONTENT_MESSAGE[:-1] + "; " + _TIMESTAMP_INVALID_MESSAGE
+        summary = [
+            {"error_details": {"type": "InvalidInferenceResultError", "message": combined_message}, "count": 1},
+        ]
+        invalidating, empty_content = ab_test.classify_aiperf_errors(summary)
+        self.assertEqual(invalidating, 1)
+        self.assertEqual(empty_content, 0)
+
+    def test_multiple_entries_aggregate_correctly(self):
+        empty_content_details = {"type": "InvalidInferenceResultError", "message": _EMPTY_CONTENT_MESSAGE}
+        timestamp_details = {"type": "InvalidInferenceResultError", "message": _TIMESTAMP_INVALID_MESSAGE}
+        summary = [
+            {"error_details": empty_content_details, "count": 2},
+            {"error_details": timestamp_details, "count": 1},
+            {"error_details": {"code": 503}, "count": 5},
+        ]
+        invalidating, empty_content = ab_test.classify_aiperf_errors(summary)
+        self.assertEqual(invalidating, 6)
+        self.assertEqual(empty_content, 2)
+
+    def test_empty_or_none_summary_returns_zero_zero(self):
+        self.assertEqual(ab_test.classify_aiperf_errors([]), (0, 0))
+        self.assertEqual(ab_test.classify_aiperf_errors(None), (0, 0))
+
+
 class ApplyRequestLevelVerdictTest(unittest.TestCase):
     def _valid_verdict(self):
         return ab_test.compute_run_verdict({"total_restarts": 0, "pods": []})
@@ -916,6 +1007,52 @@ class ApplyRequestLevelVerdictTest(unittest.TestCase):
         )
         self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
 
+    def test_empty_content_errors_warn_but_stay_valid(self):
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {
+                "genuine_errors": 0, "empty_content_errors": 1, "cancelled": 5,
+                "total_503": 2, "p50_ms": 1750.0, "p95_ms": 2450.0,
+            },
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(verdict["offenders"], [])
+        self.assertTrue(any("1 AIPerf InvalidInferenceResultError" in w for w in verdict["warnings"]))
+
+    def test_multiple_empty_content_errors_warn_and_stay_valid(self):
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {
+                "genuine_errors": 0, "empty_content_errors": 3, "cancelled": 5,
+                "total_503": 2, "p50_ms": 1750.0, "p95_ms": 2450.0,
+            },
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+        self.assertTrue(any("3 AIPerf InvalidInferenceResultError" in w for w in verdict["warnings"]))
+
+    def test_unknown_empty_content_errors_does_not_warn(self):
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {"genuine_errors": 0, "cancelled": 2, "total_503": 0, "p50_ms": 1744.1, "p95_ms": 2424.4},
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(verdict["warnings"], [])
+
+    def test_empty_content_errors_do_not_mask_genuine_errors(self):
+        # Both signals present at once must be handled independently: the
+        # genuine error still invalidates, and the empty-content note still
+        # produces its own warning.
+        verdict = ab_test.apply_request_level_verdict(
+            self._valid_verdict(),
+            {
+                "genuine_errors": 1, "empty_content_errors": 2, "cancelled": 5,
+                "total_503": 2, "p50_ms": 1750.0, "p95_ms": 2450.0,
+            },
+        )
+        self.assertEqual(verdict["status"], ab_test.VERDICT_INVALID)
+        self.assertTrue(any("genuine_errors=1" in o["reasons"][0] for o in verdict["offenders"]))
+        self.assertTrue(any("2 AIPerf InvalidInferenceResultError" in w for w in verdict["warnings"]))
+
 
 class ReporterVerdictTest(unittest.TestCase):
     def make_result(self, verdict_status=None, **metrics):
@@ -1031,6 +1168,36 @@ class ReporterVerdictTest(unittest.TestCase):
 
         self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_VALID)
         self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_VALID)
+        self.assertNotIn("_skipped", report["comparison"] if report["comparison"] else {})
+        self.assertIn("request_success_rate_pct", report["router_comparison"])
+
+    def test_build_report_stays_valid_with_only_empty_content_errors(self):
+        # End-to-end: a run whose only AIPerf errors are the empty-content
+        # InvalidInferenceResultError note must stay valid and comparable,
+        # with the occurrence surfaced as a warning (issue #1452).
+        output_dir = Path(tempfile.mkdtemp())
+        prom_path = output_dir / "router_metrics.prom"
+        prom_path.write_text(_PROM_FIXTURE_SAFE, encoding="utf-8")
+
+        def make_result(config_name):
+            return ab_test.BenchmarkResult(
+                config_name=config_name, scenario="s", timestamp="",
+                metrics={"aiperf_genuine_errors": 0, "aiperf_empty_content_errors": 2, "aiperf_cancelled": 4},
+                raw_output="",
+                artifacts={"prometheus": {"path": str(prom_path)}},
+                verdict={"status": ab_test.VERDICT_VALID, "reasons": [], "offenders": [], "restart_stats": {}},
+            )
+
+        report = ab_test.ResultReporter().build_report(
+            scenario_name="s", description="d",
+            config_a_path="a.yaml", config_b_path="b.yaml",
+            result_a=make_result("config_a"), result_b=make_result("config_b"),
+        )
+
+        self.assertEqual(report["config_a"]["verdict"]["status"], ab_test.VERDICT_VALID)
+        self.assertEqual(report["config_b"]["verdict"]["status"], ab_test.VERDICT_VALID)
+        warnings_a = report["config_a"]["verdict"]["warnings"]
+        self.assertTrue(any("2 AIPerf InvalidInferenceResultError" in w for w in warnings_a))
         self.assertNotIn("_skipped", report["comparison"] if report["comparison"] else {})
         self.assertIn("request_success_rate_pct", report["router_comparison"])
 

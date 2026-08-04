@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.models import BenchmarkResult, ScenarioConfig
+from router_ab_test.models import BenchmarkResult, ScenarioConfig, classify_aiperf_errors
 
 _AIPERF_METRIC_MAP = {
     "time_to_first_token": "ttft_avg_ms",
@@ -223,10 +223,18 @@ class AIPerfRunner:
         # non-2xx responses) — distinct from requests cancelled because the
         # benchmark's fixed duration elapsed while they were still in flight.
         # Used by the request-level saturation verdict (issue #1452).
+        #
+        # classify_aiperf_errors splits out one specific, evidence-backed
+        # exception: InvalidInferenceResultError's empty-content note (see
+        # its docstring in models.py for the evidence). That count is
+        # reported separately as aiperf_empty_content_errors and does not
+        # count toward aiperf_genuine_errors — every other AIPerf error,
+        # including InvalidInferenceResultError with a different note,
+        # still does.
         error_summary = data.get("error_summary") or []
-        metrics["aiperf_genuine_errors"] = sum(
-            entry.get("count", 0) for entry in error_summary if isinstance(entry, dict)
-        )
+        genuine_errors, empty_content_errors = classify_aiperf_errors(error_summary)
+        metrics["aiperf_genuine_errors"] = genuine_errors
+        metrics["aiperf_empty_content_errors"] = empty_content_errors
 
         cancelled = self._read_cancelled_count(run_dir)
         if cancelled is not None:

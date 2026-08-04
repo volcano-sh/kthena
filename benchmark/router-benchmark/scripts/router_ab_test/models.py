@@ -161,6 +161,72 @@ TAIL_LATENCY_WARNING_RATIO = 3.0
 # repeated-run methodology used to validate a load level.
 SUCCESS_RATE_FLOOR_PCT = 90.0
 
+# AIPerf classifies a completed (non-transport-error) request as
+# InvalidInferenceResultError when its SSE stream contained no content
+# chunks (only usage/metadata or [DONE] markers) - see AIPerf's
+# create_error_from_invalid() in aiperf/common/models/record_models.py.
+# It attaches one of several notes to the exception depending on which
+# validity check failed; that note text is currently the only place this
+# distinction is exposed (embedded in error_summary's `message` field,
+# not a separate structured field).
+_INVALID_INFERENCE_RESULT_ERROR_TYPE = "InvalidInferenceResultError"
+_EMPTY_CONTENT_NOTE = "No responses with actual content were received from the server"
+_TIMESTAMP_INVALID_NOTE = "timestamp is invalid"
+
+# Evidence for treating the empty-content note as non-fatal (issue #1452):
+# across 6 independent smoke-test-s3 (concurrency mode) CI runs, 12
+# config-arm samples showed this exact note at a bounded 0-1.61% rate
+# (counts of 0-3 out of ~180-220 requests each), never escalating, and
+# every occurrence found in the router's own access log was a severe
+# latency outlier (6-8x that run's own p50, several beyond its p99
+# bucket) - HTTP 200, zero completion tokens, 10-15s response times
+# against a ~1.7s median. Across 4 independent smoke-test-s2 (rate mode)
+# CI runs, 8 config-arm samples showed zero occurrences. This supports
+# treating it as a bounded, mode-specific tail-latency artifact of this
+# mocker under closed-loop concurrency load - it does NOT establish that
+# the condition is universally harmless, only that it has behaved this
+# way, consistently, for this mocker and these scenarios across the runs
+# collected so far. Any other note on the same exception type (e.g. the
+# timestamp-invalid notes, which indicate a more clearly malformed
+# record) still hard-invalidates, as does every other AIPerf error type.
+_EMPTY_CONTENT_WARNING_TEMPLATE = (
+    "{count} AIPerf InvalidInferenceResultError(s) with empty-content responses "
+    "(HTTP response received, no generated tokens) - not treated as invalidating; "
+    "see issue #1452 calibration evidence (bounded, tail-latency-correlated, "
+    "concurrency-mode-specific across runs 30620977224, 30686693047, 30787547593, "
+    "30792795471, 30792800835, 30792806030)"
+)
+
+
+def classify_aiperf_errors(error_summary: list[dict[str, Any]] | None) -> tuple[int, int]:
+    """Split AIPerf's error_summary into (invalidating_count, empty_content_count).
+
+    An entry counts as "empty_content" only if it is specifically an
+    InvalidInferenceResultError carrying the empty-content note and NOT also
+    a timestamp-invalid note (an error can carry both notes at once; if it
+    does, treat it as invalidating rather than exempting it). Every other
+    entry — any other error type, or an InvalidInferenceResultError with a
+    different note — counts as invalidating. See the evidence above for why
+    only this specific, narrow condition is treated as non-fatal.
+    """
+    invalidating = 0
+    empty_content = 0
+    for entry in error_summary or []:
+        if not isinstance(entry, dict):
+            continue
+        count = entry.get("count", 0) or 0
+        details = entry.get("error_details") or {}
+        message = details.get("message") or ""
+        if (
+            details.get("type") == _INVALID_INFERENCE_RESULT_ERROR_TYPE
+            and _EMPTY_CONTENT_NOTE in message
+            and _TIMESTAMP_INVALID_NOTE not in message
+        ):
+            empty_content += count
+        else:
+            invalidating += count
+    return invalidating, empty_content
+
 
 def compute_run_verdict(restart_stats: dict[str, Any]) -> dict[str, Any]:
     """Compute the run verdict from post-traffic mocker pod restart stats.
@@ -213,9 +279,13 @@ def apply_request_level_verdict(verdict: dict[str, Any], request_stats: dict[str
     checks on top of that verdict:
 
     - genuine AIPerf-reported request errors (``request_stats["genuine_errors"]``,
-      summed from AIPerf's own ``error_summary``) — 0 on every validated-safe
-      run this issue produced, and >0 whenever a load was later rejected as
-      saturated.
+      classified from AIPerf's own ``error_summary`` via ``classify_aiperf_errors``)
+      — 0 on every validated-safe run this issue produced, and >0 whenever a
+      load was later rejected as saturated. This excludes the specific
+      empty-content InvalidInferenceResultError note (see
+      ``request_stats["empty_content_errors"]`` below and the evidence next
+      to ``_EMPTY_CONTENT_NOTE``) — every other AIPerf error, including
+      InvalidInferenceResultError with a different note, still counts here.
     - router 503s in excess of AIPerf's own end-of-window cancellation count
       (``request_stats["cancelled"]``). A fixed-duration benchmark always
       cancels a few trailing in-flight requests when it ends; every
@@ -237,8 +307,14 @@ def apply_request_level_verdict(verdict: dict[str, Any], request_stats: dict[str
     condition — the evidence for a hard cutoff there is a single ambiguous
     sample, not a clean separator like the two checks above.
 
-    ``request_stats`` keys (all optional): genuine_errors, cancelled,
-    total_503, p50_ms, p95_ms, success_rate_pct.
+    Similarly, empty-content InvalidInferenceResultError occurrences
+    (``request_stats["empty_content_errors"]``) are recorded as a non-fatal
+    warning rather than folded into ``genuine_errors`` — see the evidence
+    next to ``_EMPTY_CONTENT_NOTE`` for why this specific, narrow condition
+    is treated differently from every other AIPerf error.
+
+    ``request_stats`` keys (all optional): genuine_errors, empty_content_errors,
+    cancelled, total_503, p50_ms, p95_ms, success_rate_pct.
     """
     if verdict.get("status") == VERDICT_FRAMEWORK_ERROR:
         # Benchmark tooling itself failed; there is no real traffic to judge.
@@ -283,6 +359,10 @@ def apply_request_level_verdict(verdict: dict[str, Any], request_stats: dict[str
                 f"p95/p50 latency ratio {ratio:.1f}x exceeds {TAIL_LATENCY_WARNING_RATIO}x "
                 "(possible queueing under load; not treated as invalidating on its own)"
             )
+
+    empty_content_errors = request_stats.get("empty_content_errors")
+    if empty_content_errors:
+        warnings.append(_EMPTY_CONTENT_WARNING_TEMPLATE.format(count=empty_content_errors))
 
     status = VERDICT_INVALID if offenders else verdict.get("status", VERDICT_VALID)
     return {
