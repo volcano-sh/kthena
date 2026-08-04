@@ -17,12 +17,14 @@ limitations under the License.
 package router
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/vllm"
@@ -42,6 +44,12 @@ const (
 	gpuCacheUsageLoadWaitTimeout   = 90 * time.Second
 	gpuCacheUsageLoadConcurrency   = 2
 	gpuCacheUsageLoadMaxTokens     = 256
+
+	kvCacheRedisWaitTimeout = 90 * time.Second
+	kvCacheWarmupRequests   = 30
+	kvCacheE2EMaxTokens     = 8
+	redisServerAppLabel     = "app.kubernetes.io/component=redis-server"
+	kvCacheMatrixKeyPrefix  = "matrix:kv:block:"
 )
 
 func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string) []corev1.Pod {
@@ -334,4 +342,113 @@ const (
       enabled:
         - name: gpu-usage
           weight: 1`
+
+	schedulerOnlyKVCacheAware = `scheduler:
+  pluginConfig:
+  - name: kvcache-aware
+    args:
+      blockSizeToHash: 8
+      maxBlocksToMatch: 128
+  plugins:
+    Filter:
+      enabled: []
+    Score:
+      enabled:
+        - name: kvcache-aware
+          weight: 1`
 )
+
+func setupRedisClient(t *testing.T, kube kubernetes.Interface, namespace string) (*redis.Client, func()) {
+	t.Helper()
+	pods := utils.ListReadyPodsByLabel(t, kube, namespace, redisServerAppLabel)
+	require.NotEmpty(t, pods, "no ready redis pods in namespace %s", namespace)
+
+	localPort := utils.AllocateLocalPort(t)
+	pf, err := utils.SetupPortForwardToPod(namespace, pods[0].Name, localPort, "6379")
+	require.NoError(t, err, "port-forward to redis pod %s", pods[0].Name)
+
+	addr := fmt.Sprintf("127.0.0.1:%s", localPort)
+	client := redis.NewClient(&redis.Options{Addr: addr})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Ping(ctx).Err(), "redis ping via port-forward")
+
+	return client, func() {
+		_ = client.Close()
+		pf.Close()
+	}
+}
+
+func logMockPodContainerTail(t *testing.T, kube kubernetes.Interface, pod corev1.Pod, container string, tailLines int64) {
+	t.Helper()
+	raw, err := kube.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: container,
+		TailLines: &tailLines,
+	}).Do(context.Background()).Raw()
+	if err != nil {
+		t.Logf("kvcache-aware: failed to read %s logs from pod %s: %v", container, pod.Name, err)
+		return
+	}
+	t.Logf("kvcache-aware: pod %s container %s (tail %d lines):\n%s", pod.Name, container, tailLines, string(raw))
+}
+
+func waitForKVCachePodInRedis(t *testing.T, kube kubernetes.Interface, redisNamespace string, pod corev1.Pod, modelName string) {
+	t.Helper()
+	podIdentifier := fmt.Sprintf("%s.%s", pod.Name, pod.Namespace)
+	keyPattern := fmt.Sprintf("%s%s@*", kvCacheMatrixKeyPrefix, modelName)
+
+	deadline := time.Now().Add(kvCacheRedisWaitTimeout)
+	poll := 0
+	for time.Now().Before(deadline) {
+		poll++
+		client, closeRedis := setupRedisClient(t, kube, redisNamespace)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		keys, err := client.Keys(ctx, keyPattern).Result()
+		cancel()
+		closeRedis()
+
+		if err != nil {
+			if poll%5 == 0 {
+				t.Logf("kvcache-aware: redis poll #%d keys lookup failed: %v", poll, err)
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if len(keys) == 0 {
+			if poll%5 == 0 {
+				t.Logf("kvcache-aware: redis poll #%d no keys matching %q", poll, keyPattern)
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		for _, key := range keys {
+			client, closeRedis := setupRedisClient(t, kube, redisNamespace)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			fields, err := client.HKeys(ctx, key).Result()
+			cancel()
+			closeRedis()
+			if err != nil {
+				continue
+			}
+			for _, field := range fields {
+				if field == podIdentifier {
+					t.Logf("kvcache-aware redis ready: key=%s pod=%s (poll #%d, %d keys)", key, podIdentifier, poll, len(keys))
+					logMockPodContainerTail(t, kube, pod, "zmq-bridge", 30)
+					logMockPodContainerTail(t, kube, pod, "runtime", 60)
+					return
+				}
+			}
+		}
+
+		if poll%5 == 0 {
+			t.Logf("kvcache-aware: redis poll #%d found %d keys but pod %s not listed yet", poll, len(keys), podIdentifier)
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	logMockPodContainerTail(t, kube, pod, "zmq-bridge", 60)
+	logMockPodContainerTail(t, kube, pod, "runtime", 120)
+	t.Fatalf("redis did not contain kv block mappings for pod %s model %q (pattern %q)", podIdentifier, modelName, keyPattern)
+}

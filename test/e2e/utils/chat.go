@@ -276,7 +276,7 @@ func SendRouterChatRequests(t *testing.T, routerChatURL, modelName, prompt strin
 }
 
 // DirectChatToPod sends count streaming chat requests directly to a pod via port-forward.
-func DirectChatToPod(t *testing.T, pod corev1.Pod, model, prompt string, count int) {
+func DirectChatToPod(t *testing.T, pod corev1.Pod, model, prompt string, count, maxTokens int) {
 	t.Helper()
 	localPort := AllocateLocalPort(t)
 	pf, err := SetupPortForwardToPod(pod.Namespace, pod.Name, localPort, "8000")
@@ -284,12 +284,13 @@ func DirectChatToPod(t *testing.T, pod corev1.Pod, model, prompt string, count i
 	defer pf.Close()
 
 	url := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", localPort)
-	body, _ := json.Marshal(map[string]interface{}{
+	body, err := json.Marshal(map[string]interface{}{
 		"model":      model,
 		"messages":   []map[string]string{{"role": "user", "content": prompt}},
-		"max_tokens": 32,
+		"max_tokens": maxTokens,
 		"stream":     true,
 	})
+	require.NoError(t, err)
 	client := &http.Client{Timeout: 30 * time.Second}
 	for i := 0; i < count; i++ {
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
@@ -301,6 +302,7 @@ func DirectChatToPod(t *testing.T, pod corev1.Pod, model, prompt string, count i
 		resp.Body.Close()
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 	}
+	t.Logf("sent %d streaming chat warmup requests to pod %s (max_tokens=%d)", count, pod.Name, maxTokens)
 }
 
 // StartSustainedLongRequestsToPod keeps concurrent long requests on one pod via port-forward.
