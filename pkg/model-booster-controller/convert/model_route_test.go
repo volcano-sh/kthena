@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	networking "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	registry "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestBuildModelRoute(t *testing.T) {
@@ -42,4 +43,32 @@ func TestBuildModelRoute(t *testing.T) {
 			assert.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+func TestBuildModelRouteUsesModelBoosterSpecName(t *testing.T) {
+	model := &registry.ModelBooster{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen25", Namespace: "default"},
+		Spec: registry.ModelBoosterSpec{
+			Name: "qwen25-coder-32b",
+			Backend: registry.ModelBackend{
+				Name: "backend",
+				Type: registry.ModelBackendTypeVLLM,
+				Workers: []registry.ModelWorker{{
+					Type: registry.ModelWorkerTypeServer,
+				}},
+			},
+		},
+	}
+
+	route := BuildModelRoute(model)
+	assert.Equal(t, model.Spec.Name, route.Spec.ModelName)
+}
+
+func TestBuildModelRouteUsesMetadataNameWhenSpecNameIsEmpty(t *testing.T) {
+	model := &registry.ModelBooster{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen25", Namespace: "default"},
+	}
+
+	route := BuildModelRoute(model)
+	assert.Equal(t, model.Name, route.Spec.ModelName)
 }
