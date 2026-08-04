@@ -363,8 +363,8 @@ The output shows pod identifiers (e.g., `pod-name.namespace`) as field names and
 The router exposes scheduler plugin metrics at the `/metrics` endpoint. You can check for score plugin activity:
 
 ```bash
-kubectl port-forward svc/kthena-router 8080:8080 -n <namespace>
-curl -s http://localhost:8080/metrics | grep -i kvcache
+kubectl port-forward svc/kthena-router-metrics 9090:9090 -n <namespace>
+curl -s http://localhost:9090/metrics | grep -i kvcache
 ```
 
 ### 5. Send Test Requests

@@ -31,6 +31,8 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for Kthena Router. |
 | networking.kthenaRouter.image.repository | string | `"ghcr.io/volcano-sh/kthena-router"` | Image repository for Kthena Router. |
 | networking.kthenaRouter.image.tag | string | `"latest"` | Image tag for Kthena Router. |
+| networking.kthenaRouter.metrics.exposeOnRouterPort | bool | `false` | Also expose /metrics on the public inference listener. Enable only for legacy compatibility. |
+| networking.kthenaRouter.metrics.port | int | `9090` | Internal Prometheus metrics port for Kthena Router. |
 | networking.kthenaRouter.port | int | `8080` | Container port for Kthena Router. |
 | networking.kthenaRouter.sessionBoost.enabled | bool | `false` | Enable session-boost scheduling. Mutually exclusive with fairness. |
 | networking.kthenaRouter.sessionBoost.gracePeriod | string | `"0s"` | Wait time after a request completes for a same-session follow-up.<br/> Disabled by default (`0s`). |

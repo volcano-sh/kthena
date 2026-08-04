@@ -9,8 +9,8 @@ spec:
       - kthena-system
   selector:
     matchLabels:
-      app.kubernetes.io/component: kthena-router
+      app.kubernetes.io/component: kthena-router-metrics
   endpoints:
-    - port: http
+    - port: metrics
       path: /metrics
       interval: 15s

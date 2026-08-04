@@ -23,6 +23,7 @@ import (
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 )
 
 func TestNewRequestPriorityQueue(t *testing.T) {
@@ -539,7 +540,7 @@ func TestRequeueRequestRestoresQueueSizeMetric(t *testing.T) {
 	pq.requeueRequest(req)
 
 	var metric dto.Metric
-	if err := pq.metrics.FairnessQueueSize.WithLabelValues(model, user).Write(&metric); err != nil {
+	if err := pq.metrics.FairnessQueueSize.WithLabelValues(model, metrics.FairnessAggregateUserID).Write(&metric); err != nil {
 		t.Fatalf("failed to read queue size metric: %v", err)
 	}
 	got := metric.GetGauge().GetValue()

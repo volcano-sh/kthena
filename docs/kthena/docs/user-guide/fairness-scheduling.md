@@ -186,13 +186,13 @@ Confirm that the router is running with the fairness variables you expect.
 Port-forward the router metrics endpoint:
 
 ```bash
-kubectl -n kthena-system port-forward deploy/kthena-router 8080:8080
+kubectl -n kthena-system port-forward svc/kthena-router-metrics 9090:9090
 ```
 
 Then inspect fairness metrics:
 
 ```bash
-curl -s http://localhost:8080/metrics | grep kthena_router_fairness_queue
+curl -s http://localhost:9090/metrics | grep kthena_router_fairness_queue
 ```
 
 Key metrics to watch:
@@ -204,6 +204,10 @@ Key metrics to watch:
 - `kthena_router_fairness_queue_inflight`
 - `kthena_router_fairness_queue_priority_refresh_total`
 - `kthena_router_fairness_queue_heap_rebuild_total`
+
+Fairness metrics are aggregated per model. Their `user_id` label is fixed to
+`_all`; raw user identities are not exported, which bounds Prometheus series
+cardinality and avoids exposing identity data.
 
 ### 3. Compare Competing Users
 

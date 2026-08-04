@@ -41,13 +41,15 @@ type Server struct {
 	EnableGatewayAPI                   bool
 	EnableGatewayAPIInferenceExtension bool
 	DebugPort                          int
+	MetricsPort                        int
+	ExposeMetricsOnRouterPort          bool
 	KubeAPIQPS                         float32
 	KubeAPIBurst                       int
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
 }
 
-func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int) *Server {
+func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort, metricsPort int, exposeMetricsOnRouterPort bool, kubeAPIQPS float32, kubeAPIBurst int) *Server {
 	return &Server{
 		store:                              nil,
 		EnableTLS:                          enableTLS,
@@ -57,6 +59,8 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		EnableGatewayAPI:                   enableGatewayAPI,
 		EnableGatewayAPIInferenceExtension: enableGatewayAPIInferenceExtension,
 		DebugPort:                          debugPort,
+		MetricsPort:                        metricsPort,
+		ExposeMetricsOnRouterPort:          exposeMetricsOnRouterPort,
 		KubeAPIQPS:                         kubeAPIQPS,
 		KubeAPIBurst:                       kubeAPIBurst,
 		drainTimeout:                       parseDrainTimeout(),

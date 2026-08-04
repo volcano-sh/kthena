@@ -27,11 +27,13 @@ Together they enable fast root-cause analysis, performance tuning, capacity plan
 
 ### Endpoint
 
-- **Metrics Port**: `8080` (default)  
+- **Metrics Port**: `9090` (default)
 - **Metrics Path**: `/metrics`  
 
-**Note:** The Prometheus metrics are exposed on port **8080** by default.  
-The debug endpoints (`/debug/config_dump/*`) are served on port **15000**.
+**Note:** Prometheus metrics are exposed through the internal
+`kthena-router-metrics` Service on port **9090** by default. They are not served
+on the public inference listener unless legacy compatibility is explicitly
+enabled. Debug and pprof endpoints are bound to localhost on port **15000**.
 
 ### Core Request & Latency Metrics
 
@@ -56,8 +58,12 @@ The debug endpoints (`/debug/config_dump/*`) are served on port **15000**.
 | Metric Name                                           | Type      | Description                                            | Labels                        | Buckets                                                                |
 |-------------------------------------------------------|-----------|--------------------------------------------------------|-------------------------------|------------------------------------------------------------------------|
 | `kthena_router_scheduler_plugin_duration_seconds`     | Histogram | Execution time per scheduler plugin                    | `model`, `plugin`, `type`     | 0.001, 0.005, 0.01, 0.05, 0.1, 0.5                                     |
-| `kthena_router_fairness_queue_size`                   | Gauge     | Current queued requests per model/user                 | `model`, `user_id`            | —                                                                      |
-| `kthena_router_fairness_queue_duration_seconds`       | Histogram | Time spent waiting in fairness/priority queue          | `model`, `user_id`            | 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5             |
+| `kthena_router_fairness_queue_size`                   | Gauge     | Current queued requests per model, aggregated across users | `model`, `user_id="_all"` | —                                                                      |
+| `kthena_router_fairness_queue_duration_seconds`       | Histogram | Time spent waiting in fairness/priority queue, aggregated across users | `model`, `user_id="_all"` | 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5             |
+
+Raw user identifiers are deliberately not exported in Prometheus labels. This
+keeps label cardinality bounded and avoids exposing user identity through the
+metrics endpoint.
 
 ### Rate Limiting & Protection
 
@@ -121,11 +127,11 @@ env:
 #### Metrics Configuration
 
 ```yaml
-observability:
-  metrics:
-    enabled: true
-    port: 8080           # Default metrics port
-    path: /metrics
+networking:
+  kthenaRouter:
+    metrics:
+      port: 9090
+      exposeOnRouterPort: false
 ```
 
 ## Debug Endpoints
@@ -143,14 +149,14 @@ All available on the same `:15000` port
 ## Quick Start – Observability in Action
 
 ```bash
-# Forward metrics port (8080)
-kubectl port-forward -n kthena-system svc/kthena-router 8080:8080 &
+# Forward the internal metrics Service
+kubectl port-forward -n kthena-system svc/kthena-router-metrics 9090:9090 &
 
-# Forward debug port (15000) when needed
-kubectl port-forward -n kthena-system svc/kthena-router 15000:15000 &
+# Forward the pod-local debug port when needed
+kubectl port-forward -n kthena-system deployment/kthena-router 15000:15000 &
 
 # Watch real-time request rate by model
-watch -n 2 'curl -s http://localhost:8080/metrics | grep kthena_router_requests_total | sort'
+watch -n 2 'curl -s http://localhost:9090/metrics | grep kthena_router_requests_total | sort'
 
 # Tail logs and filter access log entries (JSON lines only)
 kubectl logs -n kthena-system deployment/kthena-router -f \
@@ -172,11 +178,11 @@ kubectl logs -n kthena-system deployment/kthena-router -f \
 ### Preparation
 
 ```bash
-# Forward metrics port (8080) for metrics queries
-kubectl port-forward -n kthena-system svc/kthena-router 8080:8080 &
+# Forward the internal metrics Service
+kubectl port-forward -n kthena-system svc/kthena-router-metrics 9090:9090 &
 
-# Forward debug port (15000) for debug endpoints
-kubectl port-forward -n kthena-system svc/kthena-router 15000:15000 &
+# Forward the pod-local debug port
+kubectl port-forward -n kthena-system deployment/kthena-router 15000:15000 &
 
 # Live structured logs (recommended, with filtering)
 kubectl logs -n kthena-system deployment/kthena-router -f \
@@ -188,13 +194,13 @@ kubectl logs -n kthena-system deployment/kthena-router -f \
 Count errors by status & model:
 
 ```bash
-curl -s http://localhost:8080/metrics | grep 'status_code=5' | sort -nr
+curl -s http://localhost:9090/metrics | grep 'status_code=5' | sort -nr
 ```
 
 Top affected models:
 
 ```bash
-curl -s http://localhost:8080/metrics \
+curl -s http://localhost:9090/metrics \
   | grep 'status_code=5' \
   | grep -o 'model="[^"]*"' | sort | uniq -c | sort -nr
 ```
@@ -218,7 +224,7 @@ curl http://localhost:15000/debug/config_dump/pods | jq .
 Latency percentiles (p50/p95/p99):
 
 ```bash
-curl -s http://localhost:8080/metrics \
+curl -s http://localhost:9090/metrics \
   | grep -E 'kthena_router_request_duration_seconds_(bucket|sum|count)'
 ```
 
@@ -232,7 +238,7 @@ kubectl logs -n kthena-system deployment/kthena-router --since=20m \
 Check queue pressure:
 
 ```bash
-watch -n 2 'curl -s http://localhost:8080/metrics | grep -E "(active_downstream|fairness_queue_size)"'
+watch -n 2 'curl -s http://localhost:9090/metrics | grep -E "(active_downstream|fairness_queue_size)"'
 ```
 
 #### 3. Queue Buildup / Fairness / Throttling
@@ -240,13 +246,13 @@ watch -n 2 'curl -s http://localhost:8080/metrics | grep -E "(active_downstream|
 Live queue monitoring:
 
 ```bash
-watch -n 3 'curl -s http://localhost:8080/metrics | grep fairness_queue_size'
+watch -n 3 'curl -s http://localhost:9090/metrics | grep fairness_queue_size'
 ```
 
 Queue wait time distribution:
 
 ```bash
-curl -s http://localhost:8080/metrics | grep fairness_queue_duration_seconds
+curl -s http://localhost:9090/metrics | grep fairness_queue_duration_seconds
 ```
 
 Find throttled/rejected requests:
@@ -283,7 +289,7 @@ kubectl logs -n kthena-system deployment/kthena-router \
 Current token consumption rate:
 
 ```bash
-curl -s http://localhost:8080/metrics | grep kthena_router_tokens_total
+curl -s http://localhost:9090/metrics | grep kthena_router_tokens_total
 ```
 
 High-token requests:

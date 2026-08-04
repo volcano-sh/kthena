@@ -2,6 +2,13 @@ kthenaRouter:
   # replicas is the number of kthena-router instances to run.
   replicas: 1
   enabled: true
+  # metrics configures the dedicated internal Prometheus listener.
+  metrics:
+    # port is the internal metrics listener and Service port.
+    port: 9090
+    # exposeOnRouterPort restores the legacy /metrics endpoint on the inference listener.
+    # Keep disabled when the inference Service is publicly reachable.
+    exposeOnRouterPort: false
   tls:
     enabled: false
     # The DNS name to use for the certificate.

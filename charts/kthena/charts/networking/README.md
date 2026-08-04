@@ -20,6 +20,22 @@ kthenaRouter:
     pullPolicy: IfNotPresent
 ```
 
+#### Metrics Configuration
+
+Prometheus metrics use a dedicated ClusterIP Service and are not exposed on the
+public inference listener by default:
+
+```yaml
+kthenaRouter:
+  metrics:
+    port: 9090
+    exposeOnRouterPort: false
+```
+
+Set `exposeOnRouterPort` only when compatibility with the legacy
+`/metrics` endpoint is required and the inference listener is appropriately
+restricted.
+
 #### Request Scheduling Configuration
 
 The router schedules requests through a per-model queue using one of two mutually
@@ -54,6 +70,8 @@ kthenaRouter:
 
 | Parameter                                  | Type    | Default          | Description                                                                   |
 | ------------------------------------------ | ------- | ---------------- | ----------------------------------------------------------------------------- |
+| `kthenaRouter.metrics.port`                | int     | `9090`           | Dedicated internal Prometheus listener and Service port                       |
+| `kthenaRouter.metrics.exposeOnRouterPort`  | boolean | `false`          | Also expose `/metrics` on the inference listener for legacy compatibility     |
 | `kthenaRouter.fairness.enabled`            | boolean | `false`          | Enable user-fairness scheduling (mutually exclusive with boost)               |
 | `kthenaRouter.fairness.windowSize`         | string  | `"1h"`           | Fairness: sliding window duration (1m-1h)                                     |
 | `kthenaRouter.fairness.inputTokenWeight`   | float   | `1.0`            | Fairness: weight for input tokens (≥0)                                        |

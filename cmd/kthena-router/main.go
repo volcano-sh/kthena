@@ -51,6 +51,8 @@ func main() {
 		certSecretName                     string
 		serviceName                        string
 		debugPort                          int
+		metricsPort                        int
+		exposeMetricsOnRouterPort          bool
 		kubeAPIQPS                         float32
 		kubeAPIBurst                       int
 	)
@@ -76,6 +78,8 @@ func main() {
 	pflag.StringVar(&certSecretName, "cert-secret-name", "kthena-router-webhook-certs", "Name of the secret to store auto-generated webhook certificates")
 	pflag.StringVar(&serviceName, "webhook-service-name", "kthena-router-webhook", "Service name for the webhook server")
 	pflag.IntVar(&debugPort, "debug-port", 15000, "The port for the debug server (localhost only)")
+	pflag.IntVar(&metricsPort, "metrics-port", 9090, "The port for the Prometheus metrics server")
+	pflag.BoolVar(&exposeMetricsOnRouterPort, "expose-metrics-on-router-port", false, "Also expose /metrics on the inference listener for compatibility (not recommended for public listeners)")
 	pflag.Float32Var(&kubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&kubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	defer klog.Flush()
@@ -95,6 +99,9 @@ func main() {
 
 	if debugPort <= 0 || debugPort > 65535 {
 		klog.Fatalf("invalid debug port: %d", debugPort)
+	}
+	if metricsPort <= 0 || metricsPort > 65535 {
+		klog.Fatalf("invalid metrics port: %d", metricsPort)
 	}
 
 	pflag.CommandLine.VisitAll(func(f *pflag.Flag) {
@@ -118,7 +125,7 @@ func main() {
 		klog.Info("Webhook server is disabled")
 	}
 
-	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, kubeAPIQPS, kubeAPIBurst).Run(ctx)
+	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort, metricsPort, exposeMetricsOnRouterPort, kubeAPIQPS, kubeAPIBurst).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.

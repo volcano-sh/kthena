@@ -11,10 +11,10 @@ spec:
   endpoints:
     - interval: 15s
       path: /metrics
-      port: http
+      port: metrics
   namespaceSelector:
     matchNames:
       - kthena-system
   selector:
     matchLabels:
-      app.kubernetes.io/component: kthena-router
+      app.kubernetes.io/component: kthena-router-metrics
