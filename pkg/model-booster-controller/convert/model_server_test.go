@@ -92,6 +92,7 @@ func TestBuildModelServerExplicitServedModelNameOverridesModelBoosterSpecName(t 
 	modelServers, err := BuildModelServer(model)
 	assert.NoError(t, err)
 	assert.Len(t, modelServers, 1)
+	assert.NotNil(t, modelServers[0].Spec.Model)
 	assert.Equal(t, "deepseek-v3", *modelServers[0].Spec.Model)
 }
 
