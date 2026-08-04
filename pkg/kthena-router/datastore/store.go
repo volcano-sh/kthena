@@ -878,15 +878,15 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 			podInfo := value.(*PodInfo)
 			podInfo.RemoveModelServer(ms)
 			if podInfo.GetModelServerCount() == 0 {
+				// Deleting a ModelServer does not mean the pod itself is gone: it may
+				// still be running and get reselected by another ModelServer later. The
+				// Redis on-flight counter tracks the pod's real traffic, not its
+				// ModelServer association, so we intentionally leave it in place here.
+				// Eagerly deleting it would race with in-flight requests dispatched
+				// before this point and corrupt the counter once the pod is
+				// reassociated. The counter is only removed in DeletePod, once the pod
+				// is confirmed gone and can no longer receive traffic.
 				s.pods.Delete(podName)
-				// Remove the pod's Redis counter so stale keys do not accumulate.
-				if s.onFlightCounter != nil {
-					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-					defer cancel()
-					if err := s.onFlightCounter.Delete(ctx, podName); err != nil {
-						klog.V(4).Infof("failed to delete Redis on-flight counter for pod %s: %v", podName, err)
-					}
-				}
 			}
 		} else {
 			klog.Warningf("pod %s not found", podName)

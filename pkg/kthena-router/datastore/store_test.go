@@ -549,12 +549,14 @@ func TestStoreDeleteModelServer(t *testing.T) {
 	assert.False(t, podExists, "pod should be deleted if no modelServer left")
 }
 
-// TestStoreDeleteModelServerCleansUpOnFlightCounter verifies that when a ModelServer is
-// deleted and a pod it owns has no remaining model-server references, DeleteModelServer
-// calls onFlightCounter.Delete for that pod so no stale Redis key is left behind.
-// Prior to the fix, the counter was only cleaned up in DeletePod; pods evicted through
-// DeleteModelServer would accumulate ghost entries in the kthena:on-flight-requests hash.
-func TestStoreDeleteModelServerCleansUpOnFlightCounter(t *testing.T) {
+// TestStoreDeleteModelServerLeavesOnFlightCounterIntact verifies that DeleteModelServer
+// removes the evicted pod from the store's local view but does NOT touch its Redis
+// on-flight counter. The pod may still be running and get reselected by another
+// ModelServer later, so eagerly deleting the shared counter here could race with
+// in-flight requests dispatched before the ModelServer was deleted and corrupt the
+// count once the pod is reassociated. Counter cleanup only happens in DeletePod, once
+// the pod is confirmed gone.
+func TestStoreDeleteModelServerLeavesOnFlightCounterIntact(t *testing.T) {
 	podName := types.NamespacedName{Namespace: "default", Name: "pod-a"}
 
 	// fakeCounter records which pods had their counter deleted.
@@ -585,12 +587,12 @@ func TestStoreDeleteModelServerCleansUpOnFlightCounter(t *testing.T) {
 	err := s.DeleteModelServer(msName)
 	assert.NoError(t, err)
 
-	// The pod must have been removed from the store.
+	// The pod must have been removed from the store's local view.
 	_, podExists := s.pods.Load(podName)
 	assert.False(t, podExists, "pod should be removed from store after DeleteModelServer")
 
-	// The on-flight counter must have been cleaned up.
-	assert.True(t, deleted[podName], "onFlightCounter.Delete must be called for the evicted pod")
+	// The shared Redis on-flight counter must NOT have been touched.
+	assert.False(t, deleted[podName], "onFlightCounter.Delete must not be called from DeleteModelServer")
 }
 
 // fakeOnFlightCounter is a minimal in-process OnFlightCounter that records
