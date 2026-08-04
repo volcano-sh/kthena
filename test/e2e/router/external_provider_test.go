@@ -42,6 +42,7 @@ func TestExternalModelProviders(t *testing.T) {
 	t.Run("OpenAIResponsesStreaming", fixture.testOpenAIResponsesStreaming)
 	t.Run("AnthropicNonStreaming", fixture.testAnthropicNonStreaming)
 	t.Run("AnthropicStreaming", fixture.testAnthropicStreaming)
+	t.Run("AnthropicBearerGateway", fixture.testAnthropicBearerGateway)
 	t.Run("NonTextInputAccounting", fixture.testNonTextInputAccounting)
 	t.Run("Upstream429", fixture.testUpstream429)
 	t.Run("ActiveGaugeLifecycle", fixture.testActiveGaugeLifecycle)
@@ -256,11 +257,40 @@ func (f externalProviderFixture) testAnthropicNonStreaming(t *testing.T) {
 
 	capture := fetchMockCapture(t, f.adminURL, requestID)
 	assertExternalCapture(t, capture, path, true)
+	assert.Equal(t, "APIKey", capture.AuthScheme)
 	assertRewrittenExternalPayload(t, body, capture.Body, externalAnthropicUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalAnthropicModel, path, http.StatusOK, successfulExternalRequest, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel, 6)
 	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalAnthropicModel, path, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel, 6)
+	assertPositiveExternalInputAccounting(t, before, after, entry)
+	deleteMockCapture(t, f.adminURL, requestID)
+}
+
+func (f externalProviderFixture) testAnthropicBearerGateway(t *testing.T) {
+	requestID := "external-anthropic-bearer-" + utils.RandomString(10)
+	path := "/v1/messages"
+	body := []byte(`{
+		"model":"` + externalAnthropicBearerModel + `",
+		"max_tokens":16,
+		"stream":false,
+		"messages":[{"role":"user","content":"Reply with OK."}]
+	}`)
+	beta := "context-1m-2025-08-07"
+
+	before := f.readMetricSnapshot(t, externalAnthropicBearerModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalAnthropicBearerRouteName, externalAnthropicBearerProviderName, externalAnthropicUpstreamModel)
+	response := f.sendJSONRequestWithHeaders(t, path, requestID, body, http.Header{"Anthropic-Beta": []string{beta}})
+	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
+
+	capture := fetchMockCapture(t, f.adminURL, requestID)
+	assertExternalCapture(t, capture, path, true)
+	assert.Equal(t, "Bearer", capture.AuthScheme)
+	assert.Equal(t, beta, capture.AnthropicBeta)
+	assertRewrittenExternalPayload(t, body, capture.Body, externalAnthropicUpstreamModel, false)
+
+	after := f.waitForMetricDelta(t, before, externalAnthropicBearerModel, path, http.StatusOK, successfulExternalRequest, externalAnthropicBearerRouteName, externalAnthropicBearerProviderName, externalAnthropicUpstreamModel, 6)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	assertSuccessfulExternalAccessLog(t, entry, externalAnthropicBearerModel, path, externalAnthropicBearerRouteName, externalAnthropicBearerProviderName, externalAnthropicUpstreamModel, 6)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
 	deleteMockCapture(t, f.adminURL, requestID)
 }

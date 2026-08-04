@@ -64,7 +64,7 @@ spec:
       key: api-key
 ```
 
-The Router sends the Secret value as `Authorization: Bearer <token>`. If `spec.model` is set, the Router rewrites the upstream request model to that value. If `spec.model` is omitted, the original request model is preserved.
+The Router sends the Secret value as `Authorization: Bearer <token>` by default. Set `auth.scheme: APIKey` only when an OpenAI-compatible gateway requires `x-api-key`. If `spec.model` is set, the Router rewrites the upstream request model to that value. If `spec.model` is omitted, the original request model is preserved.
 
 For streaming Chat/Completions requests, the Router may add `stream_options.include_usage=true` upstream so it can read the provider's final usage event. Existing fields in `stream_options` are preserved. The Router does not inject `include_usage` or `stream_options` into non-streaming requests.
 
@@ -138,7 +138,24 @@ spec:
     anthropic-version: "2023-06-01"
 ```
 
-The Router sends the Secret value as `x-api-key: <token>`. Anthropic also requires an API version header, which can be configured through `spec.headers`.
+By default, the Router sends the Secret value as `x-api-key: <token>`, which follows the Anthropic API-key convention.
+
+Some Anthropic-compatible gateways, including gateways used with Claude Code and `ANTHROPIC_AUTH_TOKEN`, expect Bearer authentication instead. Configure that explicitly:
+
+```yaml
+spec:
+  providerType: Anthropic
+  baseURL: "https://gateway.example.com"
+  auth:
+    scheme: Bearer
+    secretRef:
+      name: anthropic-api-key
+      key: api-key
+```
+
+`auth.scheme` accepts `Bearer` or `APIKey`. When omitted, OpenAI defaults to `Bearer` and Anthropic defaults to `APIKey`. The Router always removes credential headers supplied by the client and injects the selected Secret after applying static headers.
+
+Anthropic requires an API version header, which can be configured through `spec.headers`. The Router also forwards downstream `anthropic-version` and `anthropic-beta` headers. A static value in `spec.headers` takes precedence over a downstream value.
 
 `baseURL` can be the API host, such as `https://api.anthropic.com`, or a URL ending in `/v1`. The Router avoids adding a second `/v1` when the version is already present.
 
@@ -191,7 +208,7 @@ Kthena records two token counts for different purposes:
 - Before dispatch, the Router tokenizes the text it can extract from the request. This local estimate is used for input-token rate limiting and for the input count in access logs and `kthena_router_tokens_total`.
 - After a successful response, the Router reads usage reported by the provider. The provider's input and output counts update per-user usage history. The reported output count also updates output-token rate limiting, access logs, and `kthena_router_tokens_total`.
 
-Provider-reported input usage does not replace the local input estimate in access logs or Prometheus metrics. The two values can differ because providers may use another tokenizer or count cached and non-text input differently. If the provider omits usage, Kthena cannot record provider-derived output tokens or update the per-user token history for that response.
+Provider-reported input usage does not replace the local input estimate in access logs or Prometheus metrics. The two values can differ because providers may use another tokenizer or count cached and non-text input differently. For Anthropic responses, Kthena calculates provider-reported input as `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. If the provider omits usage, Kthena cannot record provider-derived output tokens or update the per-user token history for that response.
 
 Metrics for a selected external destination use `backend_type="external_provider"`. The `backend_name` label contains the namespaced `ExternalModelProvider` name, and `upstream_model` contains the configured provider model or the route model when `spec.model` is unset. The same destination fields appear in structured access logs.
 
@@ -224,7 +241,7 @@ Do not use `externalModelProviderName` in a route with `loraAdapters`. LoRA rout
 
 ## Static Headers
 
-Use `spec.headers` for non-sensitive provider headers, such as provider API version headers. Do not put API keys in `spec.headers`; use `spec.auth.secretRef` instead. Credential headers such as `Authorization` and `x-api-key` are reserved and are set by the provider adapter.
+Use `spec.headers` for non-sensitive provider headers, such as provider API version headers. Do not put API keys in `spec.headers`; use `spec.auth.secretRef` and, when needed, `spec.auth.scheme`. Credential headers such as `Authorization` and `x-api-key` are reserved and are set by the provider adapter.
 
 ## Check Provider Status
 
