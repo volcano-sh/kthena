@@ -42,6 +42,16 @@ func (mc *ModelBoosterController) createOrUpdateModelRoute(ctx context.Context, 
 		klog.Errorf("failed to get ModelRoute %s: %v", klog.KObj(modelRoute), err)
 		return err
 	}
+	if oldModelRoute.Spec.ModelName != modelRoute.Spec.ModelName {
+		klog.Infof("Delete ModelBooster Route %s because spec.modelName is immutable", modelRoute.Name)
+		if err := mc.client.NetworkingV1alpha1().ModelRoutes(model.Namespace).Delete(ctx, modelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			klog.Errorf("failed to delete ModelRoute %s for recreation: %v", klog.KObj(oldModelRoute), err)
+			return err
+		}
+		// The delete event enqueues the owning ModelBooster. Its next reconcile
+		// observes the missing route and creates it with the desired model name.
+		return nil
+	}
 	if oldModelRoute.Labels[utils.RevisionLabelKey] == modelRoute.Labels[utils.RevisionLabelKey] {
 		klog.Infof("ModelBooster Route %s of model %s does not need to update", modelRoute.Name, model.Name)
 		return nil
