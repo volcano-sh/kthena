@@ -276,3 +276,60 @@ func TestTokenRateLimiter_InputAndOutputErrors(t *testing.T) {
 		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
 	}
 }
+
+func TestTokenRateLimiter_DeleteLimiter_ClearsAllLimits(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model-delete"
+	tokens := uint32(1)
+	unit := networkingv1alpha1.Second
+
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &tokens,
+		Unit:               unit,
+	})
+
+	// Consume token
+	_ = rl.RateLimit(model, "hello world")
+	// Second call fails with limit exceeded
+	err := rl.RateLimit(model, "hello world")
+	if err == nil {
+		t.Fatalf("expected rate limit error before DeleteLimiter")
+	}
+
+	// Delete limiter
+	rl.DeleteLimiter(model)
+
+	// Calls should now succeed without rate limiting
+	err = rl.RateLimit(model, "hello world")
+	if err != nil {
+		t.Fatalf("expected nil error after DeleteLimiter, got: %v", err)
+	}
+}
+
+func TestTokenRateLimiter_UpdateClearsNilDirectionalLimits(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model-update-nil"
+	inputTokens := uint32(1)
+	outputTokens := uint32(1)
+	unit := networkingv1alpha1.Second
+
+	// Set both input and output limits
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	})
+
+	// Update to keep only output limit, input limit removed (nil)
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  nil,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	})
+
+	// Input token check should now pass freely
+	err := rl.RateLimit(model, "very long prompt with many tokens")
+	if err != nil {
+		t.Fatalf("expected input token check to pass after clearing input limit, got: %v", err)
+	}
+}

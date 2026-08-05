@@ -1943,3 +1943,50 @@ type failingEnqueueStore struct {
 func (s *failingEnqueueStore) Enqueue(req *datastore.Request) error {
 	return fmt.Errorf("injected enqueue failure")
 }
+
+func TestRouter_ModelRouteRateLimitClearedOnUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+
+	modelName := "model-rate-limit-test"
+	tokens := uint32(1)
+	unit := aiv1alpha1.Second
+
+	// 1. Add ModelRoute with restrictive rateLimit
+	mrWithLimit := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-test", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: modelName,
+			RateLimit: &aiv1alpha1.RateLimit{
+				InputTokensPerUnit: &tokens,
+				Unit:               unit,
+			},
+		},
+	}
+	store.AddOrUpdateModelRoute(mrWithLimit)
+	time.Sleep(20 * time.Millisecond)
+
+	// Consume token
+	err := router.loadRateLimiter.RateLimit(modelName, "a")
+	assert.NoError(t, err)
+
+	// Second request fails due to rate limit
+	err = router.loadRateLimiter.RateLimit(modelName, "a")
+	assert.Error(t, err)
+
+	// 2. Update ModelRoute clearing rateLimit (setting it to nil)
+	mrWithoutLimit := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-test", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: modelName,
+			RateLimit: nil,
+		},
+	}
+	store.AddOrUpdateModelRoute(mrWithoutLimit)
+	time.Sleep(20 * time.Millisecond)
+
+	// Requests should now succeed because the rate limiter was cleared
+	err = router.loadRateLimiter.RateLimit(modelName, "a")
+	assert.NoError(t, err, "rate limiting should be removed after spec.rateLimit is set to nil")
+}

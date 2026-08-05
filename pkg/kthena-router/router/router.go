@@ -139,7 +139,12 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
 		switch data.EventType {
 		case datastore.EventAdd, datastore.EventUpdate:
-			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
+			if data.ModelRoute == nil {
+				return
+			}
+			if data.ModelRoute.Spec.RateLimit == nil {
+				klog.Infof("delete rate limit for model %s as rateLimit is nil", data.ModelName)
+				loadRateLimiter.DeleteLimiter(data.ModelName)
 				return
 			}
 			klog.Infof("add or update rate limit for model %s", data.ModelName)
