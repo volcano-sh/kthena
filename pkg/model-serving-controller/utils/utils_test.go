@@ -18,6 +18,7 @@ package utils
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -101,7 +102,7 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2, 3}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups, nil)
 		assert.True(t, shouldUpdate)
 		assert.Len(t, ms.Status.Conditions, 1)
 		cond := ms.Status.Conditions[0]
@@ -122,7 +123,7 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2, 3}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups, nil)
 		assert.True(t, shouldUpdate)
 		assert.Len(t, ms.Status.Conditions, 1)
 		cond := ms.Status.Conditions[0]
@@ -152,7 +153,7 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups, nil)
 		assert.True(t, shouldUpdate)
 		assert.Len(t, ms.Status.Conditions, 1)
 		cond := ms.Status.Conditions[0]
@@ -160,6 +161,202 @@ func TestSetCondition(t *testing.T) {
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)
 	})
+
+	t.Run("progressing with pod failure detail uses the specific reason and message", func(t *testing.T) {
+		ms := &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{},
+			Status: workloadv1alpha1.ModelServingStatus{
+				Conditions: []metav1.Condition{},
+			},
+		}
+
+		progressingGroups := []int{0}
+		failure := &PodFailureDetail{
+			Reason:  "ImagePullBackOff",
+			Message: "pod test-ms-0-prefill-0-0 init container downloader: back-off pulling image",
+		}
+
+		shouldUpdate := SetCondition(ms, progressingGroups, nil, nil, failure)
+		assert.True(t, shouldUpdate)
+		assert.Len(t, ms.Status.Conditions, 1)
+		cond := ms.Status.Conditions[0]
+		assert.Equal(t, string(workloadv1alpha1.ModelServingProgressing), cond.Type)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		// The specific, stable failure reason replaces the generic "GroupProgressing" reason.
+		assert.Equal(t, "ImagePullBackOff", cond.Reason)
+		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)
+		assert.Contains(t, cond.Message, failure.Message)
+	})
+
+	t.Run("re-evaluating with an unchanged status still refreshes reason/message", func(t *testing.T) {
+		ms := &workloadv1alpha1.ModelServing{
+			Status: workloadv1alpha1.ModelServingStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(workloadv1alpha1.ModelServingProgressing),
+						Status:             metav1.ConditionTrue,
+						Reason:             "GroupProgressing",
+						Message:            "stale message",
+						LastTransitionTime: metav1.NewTime(metav1.Now().Add(-time.Hour)),
+					},
+				},
+			},
+		}
+		originalTransitionTime := ms.Status.Conditions[0].LastTransitionTime
+
+		failure := &PodFailureDetail{Reason: "CrashLoopBackOff", Message: "pod p container c: crash looping"}
+		shouldUpdate := SetCondition(ms, []int{0}, nil, nil, failure)
+		assert.True(t, shouldUpdate, "message/reason changed even though Status stayed True, so an update is still required")
+
+		cond := ms.Status.Conditions[0]
+		assert.Equal(t, "CrashLoopBackOff", cond.Reason)
+		assert.Contains(t, cond.Message, failure.Message)
+		// Status didn't actually transition (True -> True), so the transition time must be preserved.
+		assert.Equal(t, originalTransitionTime, cond.LastTransitionTime)
+	})
+}
+
+func TestExtractPodFailureDetail(t *testing.T) {
+	tests := []struct {
+		name           string
+		pod            *corev1.Pod
+		expectFailure  bool
+		expectedReason string
+	}{
+		{
+			name: "unschedulable pod is reported as a scheduling failure",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: "0/3 nodes are available: insufficient cpu"},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "Unschedulable",
+		},
+		{
+			name: "pod still pending on normal container creation is not a failure",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+					},
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "main", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}},
+					},
+				},
+			},
+			expectFailure: false,
+		},
+		{
+			name: "init container image pull failure is reported",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "downloader", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+							Reason: "ImagePullBackOff", Message: "back-off pulling image \"bad-registry/model:latest\"",
+						}}},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "ImagePullBackOff",
+		},
+		{
+			name: "init container non-zero exit (e.g. downloader/model-path failure) is reported",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "downloader", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 1, Reason: "Error", Message: "model path not found",
+						}}},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "Error",
+		},
+		{
+			name: "main container crash loop is reported",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "engine", RestartCount: 3, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+							Reason: "CrashLoopBackOff", Message: "back-off restarting failed container",
+						}}},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "CrashLoopBackOff",
+		},
+		{
+			name: "main container OOMKilled after restart is reported from LastTerminationState",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name:         "engine",
+							RestartCount: 1,
+							State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+							LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+								Reason: "OOMKilled", ExitCode: 137,
+							}},
+						},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "OOMKilled",
+		},
+		{
+			name: "pod failed phase without container detail falls back to PodFailed",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			expectFailure:  true,
+			expectedReason: "PodFailed",
+		},
+		{
+			name: "ready running pod has no failure",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "engine", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+					},
+				},
+			},
+			expectFailure: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detail, ok := ExtractPodFailureDetail(tt.pod)
+			assert.Equal(t, tt.expectFailure, ok)
+			if tt.expectFailure {
+				assert.Equal(t, tt.expectedReason, detail.Reason)
+				assert.NotEmpty(t, detail.Message)
+				assert.Contains(t, detail.Message, "p")
+			}
+		})
+	}
 }
 
 func TestGetMaxUnavailable(t *testing.T) {
