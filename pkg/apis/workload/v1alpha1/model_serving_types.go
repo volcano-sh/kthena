@@ -133,23 +133,29 @@ const (
 // RolloutStrategy defines the strategy that the ModelServing controller
 // will use to perform replica updates.
 type RolloutStrategy struct {
-	// Type defines the rollout strategy. Supported values are
-	// "ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,
-	// it defaults to "ServingGroupRollingUpdate".
-	// For `RoleRollingUpdate`, the `maxUnavailable` field in each Role will be used to determine the maximum number of role instances that can be unavailable during the update.
+	// Type selects the granularity of rolling updates. Supported values are
+	// ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to
+	// ServingGroupRollingUpdate.
+	//
+	// ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;
+	// rolling update settings on individual Roles are invalid.
+	// RoleRollingUpdate uses the rolling update configuration on each Role and
+	// does not allow rolloutStrategy.rollingUpdateConfiguration.
 	//
 	// +kubebuilder:default=ServingGroupRollingUpdate
 	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}
 	Type RolloutStrategyType `json:"type"`
 
-	// RollingUpdateConfiguration defines the parameters to be used when type is ServingGroupRollingUpdate.
-	// optional
+	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
+	// It must not be set maxUnavailable when type is RoleRollingUpdate;
+	// +optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
 }
 
 // RolloutStrategyType defines the strategy to use to update replicas.
-// Note that if `recoveryPolicy` is set to `ServingGroupRecreate` and `rolloutStrategyType` is set to `RoleRollingUpdate`,
-// the entire servingGroup will be deleted during a rolling update because the outdated role is removed.
+// Note that if recoveryPolicy is ServingGroupRecreate and the rollout strategy
+// is RoleRollingUpdate, deleting an outdated Role causes its entire ServingGroup
+// to be recreated.
 type RolloutStrategyType string
 
 const (
@@ -160,23 +166,20 @@ const (
 	RoleRollingUpdate RolloutStrategyType = "RoleRollingUpdate"
 )
 
-// RollingUpdateConfiguration defines the parameters to be used for ServingGroupRollingUpdate.
+// RollingUpdateConfiguration defines the parameters to be used for RollingUpdate.
 type RollingUpdateConfiguration struct {
-	// The maximum number of replicas that can be unavailable during the update.
-	// Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).
-	// Absolute number is calculated from percentage by rounding down.
-	// This can not be 0.
-	// By default, a fixed value of 1 is used.
+	// MaxUnavailable is the maximum number of resources that may be
+	// unavailable during an update. It can be an absolute number (for example,
+	// 5) or a percentage of ModelServing replicas (for example, 10%). A
+	// percentage is rounded down. The value must not resolve to 0. Defaults to 1.
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:default=1
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
-	// Partition indicates the ordinal at which the ModelServing should be partitioned
-	// for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to
-	// Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.
-	// Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).
-	// Absolute number is calculated from percentage by rounding up.
-	// The default value is 0.
+	// Partition is the resource ordinal below which replicas are protected
+	// from updates. Resources with ordinals greater than or equal to Partition
+	// are updated. It can be an absolute number or a percentage.
+	// A percentage is rounded up. Defaults to 0.
 	// +kubebuilder:validation:XIntOrString
 	// +optional
 	Partition *intstr.IntOrString `json:"partition,omitempty"`
