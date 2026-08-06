@@ -57,6 +57,15 @@ type Limiter interface {
 	Tokens() float64
 }
 
+// LimiterConfig stores the configuration used to create a rate limiter,
+// so that we can avoid recreating limiters if the configuration hasn't changed.
+type LimiterConfig struct {
+	InputTokensPerUnit  int64
+	OutputTokensPerUnit int64
+	Unit                networkingv1alpha1.RateLimitUnit
+	RedisAddress        string
+}
+
 // TokenRateLimiter provides rate limiting functionality for both input and output tokens
 type TokenRateLimiter struct {
 	mutex sync.RWMutex
@@ -64,6 +73,9 @@ type TokenRateLimiter struct {
 	// Unified rate limiters using Limiter interface
 	inputLimiter  map[string]Limiter
 	outputLimiter map[string]Limiter
+
+	// Configs to avoid recreating unchanged limiters
+	limiterConfigs map[string]*LimiterConfig
 
 	// Redis client for global rate limiting
 	redisClient *redis.Client
@@ -91,9 +103,10 @@ func (l *LocalLimiter) Tokens() float64 {
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
 func NewTokenRateLimiter() *TokenRateLimiter {
 	return &TokenRateLimiter{
-		inputLimiter:  make(map[string]Limiter),
-		outputLimiter: make(map[string]Limiter),
-		tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
+		inputLimiter:   make(map[string]Limiter),
+		outputLimiter:  make(map[string]Limiter),
+		limiterConfigs: make(map[string]*LimiterConfig),
+		tokenizer:      tokenizer.NewSimpleEstimateTokenizer(),
 	}
 }
 
@@ -141,8 +154,38 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	// Determine if we should use global or local rate limiting
+	// Extract incoming config
+	var input int64 = -1
+	if ratelimit.InputTokensPerUnit != nil {
+		input = int64(*ratelimit.InputTokensPerUnit)
+	}
+
+	var output int64 = -1
+	if ratelimit.OutputTokensPerUnit != nil {
+		output = int64(*ratelimit.OutputTokensPerUnit)
+	}
+
+	var redisAddr string
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
+	if useGlobal {
+		redisAddr = ratelimit.Global.Redis.Address
+	}
+
+	newConfig := &LimiterConfig{
+		InputTokensPerUnit:  input,
+		OutputTokensPerUnit: output,
+		Unit:                ratelimit.Unit,
+		RedisAddress:        redisAddr,
+	}
+
+	oldConfig := r.limiterConfigs[model]
+	if !configChanged(oldConfig, newConfig) {
+		// Preserve existing limiter state if config is unchanged
+		return nil
+	}
+
+	// Save new config
+	r.limiterConfigs[model] = newConfig
 
 	if useGlobal {
 		// Initialize Redis client if not already done
@@ -210,6 +253,17 @@ func (r *TokenRateLimiter) DeleteLimiter(model string) {
 
 	delete(r.inputLimiter, model)
 	delete(r.outputLimiter, model)
+	delete(r.limiterConfigs, model)
+}
+
+func configChanged(oldConfig, newConfig *LimiterConfig) bool {
+	if oldConfig == nil {
+		return true
+	}
+	return oldConfig.InputTokensPerUnit != newConfig.InputTokensPerUnit ||
+		oldConfig.OutputTokensPerUnit != newConfig.OutputTokensPerUnit ||
+		oldConfig.Unit != newConfig.Unit ||
+		oldConfig.RedisAddress != newConfig.RedisAddress
 }
 
 func getTimeUnitDuration(unit networkingv1alpha1.RateLimitUnit) time.Duration {
