@@ -40,6 +40,8 @@ const (
 	LabelUserID      = "user_id"
 	LabelStage       = "stage"
 
+	UnknownModel = "unknown"
+
 	// kvcache-aware error stage values
 	StageTokenize = "tokenize"
 	StageRedis    = "redis"

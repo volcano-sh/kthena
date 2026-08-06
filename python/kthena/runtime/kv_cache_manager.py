@@ -170,7 +170,7 @@ class VLLMKVCacheRedisManager:
                     self.hash_mapping[engine_hash] = std_hash
             else:
                 pattern = f"{self.MAPPING_KEY_PREFIX}:*@{engine_hash}"
-                keys = await self.redis_client.keys(pattern)
+                keys = await self.redis_client.scan_keys(pattern)
                 if keys:
                     std_hash_str = await client.get(keys[0])
                     if std_hash_str:
@@ -217,8 +217,8 @@ class VLLMKVCacheRedisManager:
             matrix_pattern = f"{get_matrix_key_prefix()}:{model_name}@*"
             mapping_pattern = f"{self.MAPPING_KEY_PREFIX}:{pod_identifier}@*"
 
-            matrix_keys = await self.redis_client.keys(matrix_pattern)
-            mapping_keys = await self.redis_client.keys(mapping_pattern)
+            matrix_keys = await self.redis_client.scan_keys(matrix_pattern)
+            mapping_keys = await self.redis_client.scan_keys(mapping_pattern)
 
             if not matrix_keys:
                 if mapping_keys:

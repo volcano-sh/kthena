@@ -218,7 +218,7 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		for _, err := range allErrs {
 			messages = append(messages, fmt.Sprintf("  - %s", err.Error()))
 		}
-		return false, fmt.Sprintf("validation failed: %s", strings.Join(messages, ""))
+		return false, fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
 	}
 	return true, ""
 }

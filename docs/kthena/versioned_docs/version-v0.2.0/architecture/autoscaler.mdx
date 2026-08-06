@@ -42,7 +42,7 @@ Heterogeneous Instances Autoscale employs a greedy algorithm with a doubling str
 Based on the multiplication principle, the `capacity` is divided into multiple chunks according to powers of `costExpansionRate`. These chunks serve as scaling batches. At the batch level, batches from different serving instances are mixed and sorted in ascending order by cost. The sorted batches are then expanded into corresponding instance combinations, resulting in a scaling sequence `seq` with length equal to the capacity.
 
 $$
-seq = sorted(\bigcup_{i=1}^{N} P^k \cdot c_i \mid k \in (0,1,\ldots,M_i) \cup (C_i - \sum_{k=0}^{M_i} P^k) \cdot c_i)
+seq = sorted(\bigcup_{i=1}^{N} \{ P^k \cdot c_i \mid k \in \{0,1,\ldots,M_i\} \} \cup \{ (C_i - \sum_{k=0}^{M_i} P^k) \cdot c_i \})
 $$
 
 Where:

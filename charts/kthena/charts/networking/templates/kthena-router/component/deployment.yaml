@@ -50,10 +50,15 @@ spec:
           ports:
             - containerPort: {{ .Values.kthenaRouter.port }}
               name: http
-          {{- if .Values.kthenaRouter.webhook.enabled }}
+            {{- if .Values.kthenaRouter.webhook.enabled }}
             - containerPort: {{ .Values.kthenaRouter.webhook.port }}
               name: webhook
-          {{- end }}
+            {{- end }}
+            {{- if .Values.kthenaRouter.debugPort }}
+            - containerPort: {{ int .Values.kthenaRouter.debugPort }}
+              name: debug
+              protocol: TCP
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -106,6 +111,10 @@ spec:
             {{- end }}
             - name: SESSION_BOOST_GRACE_PERIOD
               value: {{ .gracePeriod | quote }}
+            {{- if .timeout }}
+            - name: SESSION_BOOST_TIMEOUT
+              value: {{ .timeout | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             # Access log configuration
@@ -152,7 +161,7 @@ spec:
           {{- end }}
           {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
           - name: router-tls-certs
-            mountPath: /etc/tls
+            mountPath: /etc/router-tls
             readOnly: true
           {{- end }}
           {{- if .Values.kthenaRouter.webhook.enabled }}

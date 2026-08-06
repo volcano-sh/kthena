@@ -1,0 +1,89 @@
+name: Bug report
+description: Create a bug report to help improve Kthena
+labels: [kind/bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If you are reporting a new issue, make sure that we do not have any duplicates
+        already open. You can ensure this by searching the issue list for this
+        repository. If there is a duplicate, please close your issue and add a comment
+        to the existing issue instead.
+
+        Every bug report must include evidence. See "Evidence and production path"
+        below. A suggested fix is optional.
+
+        If you're looking for help, check our [Slack channel](https://cloud-native.slack.com/messages/volcano).
+
+  - type: textarea
+    attributes:
+      label: Description
+      description: |
+        Describe the user scenario, observed behavior, and impact. State whether the
+        problem was observed in a cluster or found through source review.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Steps to reproduce the issue
+      description: |
+        Provide a minimal reproduction or exact event sequence. Include the relevant
+        configuration or workload.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Evidence and production path
+      description: |
+        1. For a bug observed in a cluster, include relevant logs, events, or a stack
+           trace.
+        2. For a race, panic, or deadlock, include a race report, panic stack,
+           reproducer, or complete concurrent execution path.
+        3. For a performance problem, include a profile or representative benchmark.
+           State the tested scale.
+        4. For validation or hardening, explain why the input is valid or expected in
+           normal use. Describe the failure it causes.
+
+        If the report cites source code, use permalinks that point to the exact
+        commit. A copied code block is not sufficient. If the problem has not been
+        reproduced, state that clearly. Trace the complete path from a user action or
+        cluster event to the failure.
+
+        AI-generated analysis, a static scan, or a unit test that only calls an
+        internal function does not prove a bug on its own.
+
+        If you cannot provide instructions on how to reproduce the bug and are relying solely on AI analysis, 
+        the maintainer may close the issue.
+      placeholder: |
+        Add the relevant evidence and code links.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Describe the results you received and expected
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: What version of Kthena are you using?
+      placeholder: Kthena image tag
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Any other relevant information
+      description: |
+        Kubernetes version, OS configuration, OS/Kernel version, etc.
+        Use the following commands:
+        $ kubectl version
+        $ cat /etc/os-release
+        $ uname -a

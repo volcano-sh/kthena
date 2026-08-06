@@ -393,7 +393,8 @@ func (lm *ListenerManager) findBestMatchingListener(port int32, hostname string)
 	for i := range portInfo.Listeners {
 		listener := &portInfo.Listeners[i]
 		if listener.Hostname != nil && strings.EqualFold(*listener.Hostname, hostname) {
-			return listener, true
+			matched := *listener
+			return &matched, true
 		}
 	}
 
@@ -410,14 +411,16 @@ func (lm *ListenerManager) findBestMatchingListener(port int32, hostname string)
 		}
 	}
 	if wildcardMatch != nil {
-		return wildcardMatch, true
+		matched := *wildcardMatch
+		return &matched, true
 	}
 
 	// If no exact/wildcard match, try a listener without hostname restriction.
 	for i := range portInfo.Listeners {
 		listener := &portInfo.Listeners[i]
 		if listener.Hostname == nil {
-			return listener, true
+			matched := *listener
+			return &matched, true
 		}
 	}
 

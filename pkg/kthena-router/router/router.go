@@ -58,7 +58,22 @@ const (
 	// Context keys for gin context
 	GatewayKey = "gatewayKey"
 	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
+
+	successfulRequestFinishReason = "successful_request"
+	failedRequestFinishReason     = "request_failed"
 )
+
+func requestFinishReason(c *gin.Context) string {
+	if reason, exists := c.Get("finishReason"); exists {
+		if value, ok := reason.(string); ok && value != "" {
+			return value
+		}
+	}
+	if c.Writer.Status() >= http.StatusBadRequest {
+		return failedRequestFinishReason
+	}
+	return successfulRequestFinishReason
+}
 
 func getEnvBool(key string, fallback bool) bool {
 	if value, ok := os.LookupEnv(key); ok {
@@ -92,6 +107,12 @@ type Router struct {
 	queueTimeout     time.Duration
 	tokenWeight      float64 // Weight for token-based priority in the fairness strategy (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority in the fairness strategy (default 0.0)
+
+	// Session-boost queue-wait timeout. A request that waits in the session-boost
+	// queue longer than sessionBoostTimeout is rejected with HTTP 504 instead of
+	// waiting indefinitely for backend capacity. It defaults to 30s; a non-positive
+	// value disables the timeout (the request is bounded only by client disconnect).
+	sessionBoostTimeout time.Duration
 }
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
@@ -225,6 +246,8 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		queueTimeout:     parseQueueTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+
+		sessionBoostTimeout: parseSessionBoostTimeout(),
 	}
 }
 
@@ -238,6 +261,29 @@ func parseQueueTimeout() time.Duration {
 		klog.Warningf("Invalid FAIRNESS_QUEUE_TIMEOUT %q, using default %v", s, defaultQueueTimeout)
 	}
 	return defaultQueueTimeout
+}
+
+// defaultSessionBoostTimeout is the session-boost queue-wait timeout applied
+// when SESSION_BOOST_TIMEOUT is not set. It is enabled by default so that a
+// session-boost request does not wait indefinitely for backend capacity.
+const defaultSessionBoostTimeout = 30 * time.Second
+
+// parseSessionBoostTimeout reads the session-boost queue-wait timeout from the
+// SESSION_BOOST_TIMEOUT environment variable. A request that waits in the
+// session-boost queue longer than the timeout is rejected with HTTP 504. The
+// timeout defaults to defaultSessionBoostTimeout (30s) when the variable is
+// unset. Setting it to a non-positive duration (e.g. "0s") disables the timeout,
+// in which case a session-boost request is bounded only by client disconnect. An
+// invalid value falls back to the default.
+func parseSessionBoostTimeout() time.Duration {
+	if s, ok := os.LookupEnv("SESSION_BOOST_TIMEOUT"); ok {
+		if d, err := time.ParseDuration(s); err == nil {
+			// A non-positive duration explicitly disables the timeout.
+			return d
+		}
+		klog.Warningf("Invalid SESSION_BOOST_TIMEOUT %q, using default %v", s, defaultSessionBoostTimeout)
+	}
+	return defaultSessionBoostTimeout
 }
 
 func parseEnvFloat(key string, fallback float64) float64 {
@@ -291,20 +337,20 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
-		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, modelName, path)
+		metricsModel := metrics.UnknownModel
+		if r.store.HasModel(modelName) {
+			metricsModel = modelName
+		}
+		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, metricsModel, path)
 
 		// Increment downstream request count at request start
-		r.metrics.IncActiveDownstreamRequests(modelName)
+		r.metrics.IncActiveDownstreamRequests(metricsModel)
 		defer func() {
 			// Decrement downstream request count when request completes
-			r.metrics.DecActiveDownstreamRequests(modelName)
+			r.metrics.DecActiveDownstreamRequests(metricsModel)
 			if metricsRecorder != nil {
 				statusCode := strconv.Itoa(c.Writer.Status())
-				reason := "successful_request"
-				if r, exists := c.Get("finishReason"); exists {
-					reason = r.(string)
-				}
-				metricsRecorder.Finish(statusCode, reason)
+				metricsRecorder.Finish(statusCode, requestFinishReason(c))
 			}
 		}()
 
@@ -424,11 +470,20 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		klog.V(4).Infof("modelServer is %v, is_lora: %v", modelServerName, isLora)
 
 		pods, modelServer, err = r.getPodsAndServer(modelServerName)
-		if err != nil || len(pods) == 0 {
+		if err != nil {
 			klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
+		}
+		if modelServer == nil {
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find model server: %v", modelServerName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find model server: %v", modelServerName))
+			c.Set("finishReason", "pod_discovery")
 			return fmt.Errorf("can't find model server: %v", modelServerName)
+		}
+		if len(pods) == 0 {
+			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("no available pods for model server: %v", modelServerName))
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("no available pods for model server: %v", modelServerName))
+			c.Set("finishReason", "pod_discovery")
+			return fmt.Errorf("no available pods for model server: %v", modelServerName)
 		}
 
 		model := modelServer.Spec.Model
@@ -437,7 +492,13 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
-	} else if matched, inferencePoolName := r.handleHTTPRoute(c, gatewayKey); matched {
+	} else if matched, inferencePoolName, httpRouteErr := r.handleHTTPRoute(c, gatewayKey); httpRouteErr != nil {
+		klog.Errorf("failed to select InferencePool for matched HTTPRoute: %v", httpRouteErr)
+		accesslog.SetError(c, "inference_pool_selection", httpRouteErr.Error())
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, httpRouteErr.Error())
+		c.Set("finishReason", "inference_pool_selection")
+		return httpRouteErr
+	} else if matched {
 		// If ModelRoute is not matched, try to match HTTPRoute
 
 		// Get InferencePool from store
@@ -447,16 +508,31 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			klog.Errorf("failed to get inference pool: %v", inferencePoolName)
 			accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
+			c.Set("finishReason", "inference_pool_discovery")
 			return fmt.Errorf("can't find inference pool: %v", inferencePoolName)
 		}
 
 		// Get pods from InferencePool
 		pods, err = r.store.GetPodsByInferencePool(inferencePoolName)
-		if err != nil || len(pods) == 0 {
+		if err != nil {
 			klog.Errorf("failed to get pods for inference pool: %v, %v", inferencePoolName, err)
-			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
-			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
-			return fmt.Errorf("can't find pods for inference pool: %v", inferencePoolName)
+			if r.store.GetInferencePool(inferencePoolKey) == nil {
+				accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
+				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
+				c.Set("finishReason", "inference_pool_discovery")
+				return fmt.Errorf("can't find inference pool %v: %w", inferencePoolName, err)
+			}
+			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("failed to get pods for inference pool: %v", inferencePoolName))
+			c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to get pods for inference pool: %v", inferencePoolName))
+			c.Set("finishReason", "pod_discovery")
+			return fmt.Errorf("failed to get pods for inference pool %v: %w", inferencePoolName, err)
+		}
+		if len(pods) == 0 {
+			klog.Errorf("no available pods for inference pool: %v", inferencePoolName)
+			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("no available pods for inference pool: %v", inferencePoolName))
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("no available pods for inference pool: %v", inferencePoolName))
+			c.Set("finishReason", "pod_discovery")
+			return fmt.Errorf("no available pods for inference pool: %v", inferencePoolName)
 		}
 
 		// Get target port from InferencePool
@@ -464,6 +540,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			klog.Errorf("inference pool %v has no target ports", inferencePoolName)
 			accesslog.SetError(c, "port_discovery", fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
+			c.Set("finishReason", "port_discovery")
 			return fmt.Errorf("inference pool %v has no target ports", inferencePoolName)
 		}
 		// Use the first target port
@@ -473,6 +550,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	} else {
 		accesslog.SetError(c, "route_not_found", "route not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
+		c.Set("finishReason", "route_not_found")
 		return fmt.Errorf("route not found")
 	}
 
@@ -555,7 +633,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
-		c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+		if !c.Writer.Written() {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+		}
 		return err
 	}
 	return nil
@@ -584,24 +664,25 @@ func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 }
 
 func (r *Router) getPodsAndServer(modelServerName types.NamespacedName) ([]*datastore.PodInfo, *v1alpha1.ModelServer, error) {
-	pods, err := r.store.GetPodsByModelServer(modelServerName)
-	if err != nil || len(pods) == 0 {
-		return nil, nil, fmt.Errorf("can't find target pods of model server: %v, err: %v", modelServerName, err)
-	}
 	modelServer := r.store.GetModelServer(modelServerName)
 	if modelServer == nil {
 		return nil, nil, fmt.Errorf("can't find model server: %v", modelServerName)
 	}
+
+	pods, err := r.store.GetPodsByModelServer(modelServerName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("can't find target pods of model server: %v, err: %w", modelServerName, err)
+	}
 	return pods, modelServer, nil
 }
 
-// handleHTTPRoute handles HTTPRoute matching for non-/v1/ paths
-// Returns true if HTTPRoute was matched and request is being handled, false otherwise
-// Also returns the InferencePool NamespacedName if found
-func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName) {
+// handleHTTPRoute handles HTTPRoute matching for non-/v1/ paths.
+// It returns whether a route matched, the selected InferencePool, and an error
+// when a matched rule has no eligible InferencePool backend.
+func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName, error) {
 	matchResult, matched := r.findHTTPRouteMatch(c, gatewayKey)
 	if !matched {
-		return false, types.NamespacedName{}
+		return false, types.NamespacedName{}, nil
 	}
 
 	// Record Gateway API match into access log (gatewayKey is already "namespace/name").
@@ -615,7 +696,7 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 
 	inferencePoolName, found := inferencePoolFromHTTPRouteRule(matchResult.route, matchResult.rule)
 	if !found {
-		return false, types.NamespacedName{}
+		return true, types.NamespacedName{}, fmt.Errorf("matched HTTPRoute %s/%s has no eligible InferencePool backend", matchResult.route.Namespace, matchResult.route.Name)
 	}
 
 	// Record InferencePool match into access log.
@@ -631,7 +712,7 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 		}
 	}
 
-	return true, inferencePoolName
+	return true, inferencePoolName, nil
 }
 
 // applyURLRewrite applies HTTPURLRewriteFilter to the request
@@ -747,7 +828,8 @@ func (r *Router) proxy(
 		r.scheduler.RunPostHooks(ctx, i)
 		return nil
 	}
-	c.AbortWithStatusJSON(http.StatusNotFound, "request to all pods failed")
+	c.AbortWithStatusJSON(http.StatusServiceUnavailable, "request to all pods failed")
+	c.Set("finishReason", "proxy")
 	return fmt.Errorf("request to all pods failed")
 }
 
@@ -1128,11 +1210,35 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		klog.Warningf("user ID not found in request %s", requestID)
 	}
 
-	klog.V(4).Infof("[FairnessScheduling] incoming request: reqID=%s user=%s model=%s",
-		requestID, userId, modelName)
+	// logPrefix reflects the active scheduling strategy so log lines emitted from
+	// this shared handler are attributed to the right queue (session boost vs
+	// user fairness).
+	logPrefix := "[FairnessScheduling]"
+	if EnableSessionBoost {
+		logPrefix = "[SessionBoost]"
+	}
 
-	// Create request-scoped context that unifies client disconnect and server timeout
-	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	klog.V(4).Infof("%s incoming request: reqID=%s user=%s model=%s",
+		logPrefix, requestID, userId, modelName)
+
+	// Create the request-scoped context that also drives the queue's cancellation
+	// cleanup (CancelCh). The queue-wait deadline differs by strategy:
+	//   - Fairness mode: bounded by FAIRNESS_QUEUE_TIMEOUT; exceeding it returns 504.
+	//   - Session-boost mode: FAIRNESS_QUEUE_TIMEOUT does NOT apply. SESSION_BOOST_TIMEOUT
+	//     (default 30s) bounds the wait and exceeding it returns 504; setting it to a
+	//     non-positive value disables the timeout, leaving the request bounded only by
+	//     client disconnect.
+	var reqCtx context.Context
+	var cancel context.CancelFunc
+	if EnableSessionBoost {
+		if r.sessionBoostTimeout > 0 {
+			reqCtx, cancel = context.WithTimeout(c.Request.Context(), r.sessionBoostTimeout)
+		} else {
+			reqCtx, cancel = context.WithCancel(c.Request.Context())
+		}
+	} else {
+		reqCtx, cancel = context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	}
 	defer cancel()
 
 	var pri float64
@@ -1155,11 +1261,12 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		RequestTime: time.Now(),
 		NotifyChan:  make(chan struct{}),
 		CancelCh:    reqCtx.Done(),
+		Cancel:      cancel,
 	}
 
 	if err := r.store.Enqueue(queueReq); err != nil {
-		klog.Errorf("[FairnessScheduling] failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
-			requestID, sessionID, userId, modelName, err)
+		klog.Errorf("%s failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
+			logPrefix, requestID, sessionID, userId, modelName, err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to enqueue request: %v", err))
 		return fmt.Errorf("failed to enqueue request: %v", err)
 	}
@@ -1169,8 +1276,8 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		if queueReq.Release != nil {
 			defer queueReq.Release()
 		}
-		klog.V(4).Infof("[FairnessScheduling] request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
-			requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
+		klog.V(4).Infof("%s request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
+			logPrefix, requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
 		lbErr := r.doLoadbalance(c, modelRequest)
 
 		// After a successful proxy, mark the session request as completed so follow-up
@@ -1181,18 +1288,29 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		return nil
 	case <-reqCtx.Done():
-		if queueReq.Release != nil {
-			queueReq.Release()
-		}
+		// Abandon() atomically coordinates with the dequeue loop: if admission raced
+		// in first it releases the inflight permit we own; otherwise it marks the
+		// request abandoned so the loop skips admission and no permit can leak.
+		queueReq.Abandon()
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
-			klog.Errorf("[FairnessScheduling] request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
-				requestID, sessionID, userId, modelName, r.queueTimeout)
-			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out")
-			return fmt.Errorf("request processing timed out in fairness queue")
+			// Exceeded the queue-wait timeout. In session-boost mode this is expected
+			// load-shedding when SESSION_BOOST_TIMEOUT is set, and under sustained
+			// overload it can fire for many requests, so log at a verbose level to avoid
+			// flooding the logs. In fairness mode the FAIRNESS_QUEUE_TIMEOUT is unexpected
+			// and logs at error level.
+			if EnableSessionBoost {
+				klog.V(2).Infof("%s request rejected after exceeding queue-wait timeout: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
+					logPrefix, requestID, sessionID, userId, modelName, r.sessionBoostTimeout)
+			} else {
+				klog.Errorf("%s request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
+					logPrefix, requestID, sessionID, userId, modelName, r.queueTimeout)
+			}
+			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out in queue")
+			return fmt.Errorf("request processing timed out in queue")
 		}
-		klog.V(4).Infof("[FairnessScheduling] request cancelled (client disconnected): reqID=%s sessionID=%s user=%s model=%s",
-			requestID, sessionID, userId, modelName)
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in fairness queue")
-		return fmt.Errorf("client disconnected while waiting in fairness queue")
+		klog.V(4).Infof("%s request cancelled (client disconnected): reqID=%s sessionID=%s user=%s model=%s",
+			logPrefix, requestID, sessionID, userId, modelName)
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in queue")
+		return fmt.Errorf("client disconnected while waiting in queue")
 	}
 }

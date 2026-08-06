@@ -173,6 +173,7 @@ type ModelRouteStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +genclient
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 //
 // ModelRoute is the Schema for the Modelroutes API.
 type ModelRoute struct {

@@ -228,6 +228,7 @@ type RoleRatioStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +genclient
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // AutoscalingPolicy defines the autoscaling policy configuration for model serving workloads.
 // It specifies scaling rules, metrics, and behavior for automatic replica adjustment.

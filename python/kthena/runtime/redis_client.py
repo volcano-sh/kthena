@@ -23,6 +23,10 @@ from redis.exceptions import RedisError, ConnectionError, TimeoutError
 
 logger = logging.getLogger(__name__)
 
+# COUNT hint per SCAN iteration. Bounds the work the server does per round rather
+# than the number of keys returned, which Redis is free to vary.
+SCAN_BATCH_SIZE = 500
+
 
 class RedisConfig:
     def __init__(self):
@@ -123,6 +127,28 @@ class RedisClient:
             return result or []
         except (RedisError, ConnectionError, TimeoutError):
             return []
+
+    async def scan_keys(self, pattern: str, count: int = SCAN_BATCH_SIZE) -> List[str]:
+        """Return keys matching pattern, walking the keyspace with SCAN.
+
+        KEYS blocks the server until it has walked the whole keyspace, so it is not
+        safe on a Redis shared with the router. SCAN bounds the work per round instead.
+        A round may return any number of keys, including none while the cursor is still
+        non-zero, and a key may be reported more than once, so results are deduped.
+        """
+        keys: List[str] = []
+        cursor = 0
+        try:
+            while True:
+                cursor, batch = await self._execute_with_retry(
+                    self._client.scan, cursor=cursor, match=pattern, count=count
+                )
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+        except (RedisError, ConnectionError, TimeoutError):
+            return []
+        return list(dict.fromkeys(keys))
 
     async def get_connection(self):
         await self._ensure_connected()

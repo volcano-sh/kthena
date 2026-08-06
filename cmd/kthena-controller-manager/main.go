@@ -233,7 +233,11 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 
 // getNamespace returns the current pod namespace or "default".
 func getNamespace() string {
-	return os.Getenv("POD_NAMESPACE")
+	ns := os.Getenv("POD_NAMESPACE")
+	if ns == "" {
+		return "default"
+	}
+	return ns
 }
 
 // fileExists returns true if the file exists.

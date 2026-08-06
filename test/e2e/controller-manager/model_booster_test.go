@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	mbutils "github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 )
 
 const (
@@ -40,9 +42,10 @@ const (
 
 // TestModelCR creates a ModelBooster CR from YAML, waits for it to become active,
 // tests chat functionality, verifies generated child resources and ownership,
-// updates the CR, and verifies cascading deletion.
+// validates self-healing of deleted child resources, updates the CR,
+// and verifies cascading deletion.
 func TestModelCR(t *testing.T) {
-	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Load the ModelBooster CR from YAML fixture
 	model := utils.LoadYAMLFromFile[workload.ModelBooster](filepath.Join(testDataDir, "ModelBooster-vllm.yaml"))
@@ -52,9 +55,7 @@ func TestModelCR(t *testing.T) {
 	require.NoError(t, err, "Failed to create Model CR")
 	require.NotNil(t, createdModel)
 	t.Cleanup(func() {
-		if err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(context.Background(), model.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			t.Logf("cleanup: failed to delete ModelBooster %s: %v", model.Name, err)
-		}
+		cleanupModelBoosterAndWaitForPods(t, kthenaClient, kubeClient, model)
 	})
 	t.Logf("Created Model CR: %s/%s", createdModel.Namespace, createdModel.Name)
 
@@ -97,6 +98,9 @@ func TestModelCR(t *testing.T) {
 	// Record revision label for comparison
 	msRevisionBefore := ms.Labels[mbutils.RevisionLabelKey]
 	require.NotEmpty(t, msRevisionBefore, "ModelServing revision label should be set")
+
+	t.Log("Testing self-healing of child resources")
+	assertModelBoosterChildrenSelfHeal(t, ctx, kthenaClient, model)
 
 	t.Log("Testing update of ModelBooster")
 	require.Eventually(t, func() bool {
@@ -169,7 +173,7 @@ func TestModelCR(t *testing.T) {
 // TestModelCRDisaggregated verifies that a vLLMDisaggregated ModelBooster is
 // reconciled into the split prefill/decode ModelServing shape.
 func TestModelCRDisaggregated(t *testing.T) {
-	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	model := utils.LoadYAMLFromFile[workload.ModelBooster](filepath.Join(testDataDir, "ModelBooster-vllm-disaggregated.yaml"))
 	model.Namespace = testNamespace
@@ -178,9 +182,7 @@ func TestModelCRDisaggregated(t *testing.T) {
 	require.NoError(t, err, "Failed to create disaggregated ModelBooster")
 	require.NotNil(t, createdModel)
 	t.Cleanup(func() {
-		if err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(context.Background(), model.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			t.Logf("cleanup: failed to delete ModelBooster %s: %v", model.Name, err)
-		}
+		cleanupModelBoosterAndWaitForPods(t, kthenaClient, kubeClient, model)
 	})
 
 	expectedChildName := mbutils.GetBackendResourceName(model.Name, model.Spec.Backend.Name)
@@ -233,42 +235,46 @@ func TestModelCRDisaggregated(t *testing.T) {
 	}, 2*time.Minute, 2*time.Second, "Disaggregated ModelServer should be garbage-collected")
 }
 
-// TestModelBoosterSelfHealing validates that the controller instantly self-heals deleted child resources.
-func TestModelBoosterSelfHealing(t *testing.T) {
-	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
+// modelBoosterPodCleanupTimeout bounds how long cleanup waits for a ModelBooster's generated Pods to
+// disappear. The vLLM backend template (pkg/model-booster-controller/convert/templates/vllm.yaml) sets
+// terminationGracePeriodSeconds: 300 on the leader pod, and observed CI behavior shows it uses the full
+// grace period rather than exiting early on SIGTERM. The timeout below leaves headroom above that 300s
+// floor for the owner-reference GC cascade (ModelBooster -> ModelServing -> Pod) and kubelet reap latency
+// on top of it.
+const modelBoosterPodCleanupTimeout = 8 * time.Minute
 
-	// Load the ModelBooster CR with autoscaling policy from YAML fixture
-	model := utils.LoadYAMLFromFile[workload.ModelBooster](filepath.Join(testDataDir, "ModelBooster-autoscaling.yaml"))
-	model.Namespace = testNamespace
+// cleanupModelBoosterAndWaitForPods deletes a ModelBooster and waits for both the CR and the Pods
+// generated for its backend to be fully removed before returning. Deleting the CR (or waiting only for
+// its removal) is not enough: the ModelBooster's generated ModelServing is garbage-collected
+// asynchronously, and its Pods can still be Terminating afterwards. Since the controller-manager E2E
+// suite runs sequentially against one shared namespace, a leftover Terminating pod from a heavy backend
+// (e.g. the real vLLM image used by ModelBooster-vllm.yaml) can bleed resource pressure into the next
+// test. The wait is scoped via the deterministic backend resource name so it never depends on, or
+// blocks on, pods belonging to other tests.
+func cleanupModelBoosterAndWaitForPods(t *testing.T, kthenaClient *clientset.Clientset, kubeClient *kubernetes.Clientset, model *workload.ModelBooster) {
+	t.Helper()
+	cleanupCtx := context.Background()
 
-	waitForWebhookReady(t, ctx, kthenaClient, model.Namespace)
+	if err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(cleanupCtx, model.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		t.Logf("cleanup: failed to delete ModelBooster %s: %v", model.Name, err)
+		return
+	}
 
-	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create Model CR")
-	assert.NotNil(t, createdModel)
-
-	t.Cleanup(func() {
-		if err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(context.Background(), model.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("cleanup: failed to delete ModelBooster %s: %v", model.Name, err)
-		}
-	})
-
-	t.Logf("Created Model CR: %s/%s", createdModel.Namespace, createdModel.Name)
-
-	// Wait for the Model to be Active
 	require.Eventually(t, func() bool {
-		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		return meta.IsStatusConditionPresentAndEqual(m.Status.Conditions,
-			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
-	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
+		_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(cleanupCtx, model.Name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, 2*time.Minute, 5*time.Second, "cleanup: ModelBooster %s was not deleted", model.Name)
 
-	t.Log("Model is active. Testing self-healing of ModelServing...")
+	backendResourceName := mbutils.GetBackendResourceName(model.Name, model.Spec.Backend.Name)
+	waitForPodsGone(t, cleanupCtx, kubeClient, modelServingLabelSelector(backendResourceName), modelBoosterPodCleanupTimeout)
+}
 
+// assertModelBoosterChildrenSelfHeal verifies that deleting child resources triggers controller recreation.
+func assertModelBoosterChildrenSelfHeal(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, model *workload.ModelBooster) {
+	t.Helper()
 	expectedChildName := mbutils.GetBackendResourceName(model.Name, model.Spec.Backend.Name)
 
+	t.Log("Testing self-healing of ModelServing...")
 	servingToDelete, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
 	require.NoError(t, err, "Expected ModelServing to be generated with deterministic name")
 
@@ -283,8 +289,7 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 		return recreated.UID != servingToDelete.UID
 	}, 1*time.Minute, 2*time.Second, "Controller failed to self-heal deleted ModelServing")
 
-	t.Log("ModelServing was successfully self-healed. Testing ModelServer...")
-
+	t.Log("Testing self-healing of ModelServer...")
 	serverToDelete, err := kthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Get(ctx, expectedChildName, metav1.GetOptions{})
 	require.NoError(t, err, "Expected ModelServer to be generated with deterministic name")
 
@@ -299,8 +304,7 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 		return recreated.UID != serverToDelete.UID
 	}, 1*time.Minute, 2*time.Second, "Controller failed to self-heal deleted ModelServer")
 
-	t.Log("ModelServer was successfully self-healed. Testing ModelRoute...")
-
+	t.Log("Testing self-healing of ModelRoute...")
 	routeToDelete, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Expected ModelRoute to be generated with model name")
 
@@ -314,8 +318,6 @@ func TestModelBoosterSelfHealing(t *testing.T) {
 		}
 		return recreated.UID != routeToDelete.UID
 	}, 1*time.Minute, 2*time.Second, "Controller failed to self-heal deleted ModelRoute")
-
-	t.Log("All child resources self-healed successfully. Test complete.")
 }
 
 func createValidModelBoosterForWebhookTest() *workload.ModelBooster {

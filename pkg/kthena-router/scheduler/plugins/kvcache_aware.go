@@ -158,9 +158,9 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort)
 
 	managerConfig := tokenization.TokenizerManagerConfig{
-		EndpointTemplates: map[string]string{
-			tokenization.EngineVLLM:   fmt.Sprintf("http://%%s:%d", vllmPort),
-			tokenization.EngineSGLang: fmt.Sprintf("http://%%s:%d", sglangPort),
+		EndpointPorts: map[string]int{
+			tokenization.EngineVLLM:   vllmPort,
+			tokenization.EngineSGLang: sglangPort,
 		},
 	}
 	manager := tokenization.NewTokenizerManager(managerConfig)
@@ -274,7 +274,7 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 
 	candidateNames := make(map[string]struct{}, len(pods))
 	for _, p := range pods {
-		candidateNames[p.GetPodNamespacedName().Name] = struct{}{}
+		candidateNames[podCacheOwnerIdentifier(p)] = struct{}{}
 	}
 	for hash, podNames := range blockToPods {
 		kept := podNames[:0]
@@ -296,8 +296,7 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	}
 	scoreResults := make(map[*datastore.PodInfo]int, len(podScores))
 	for _, pod := range pods {
-		podName := pod.GetPodNamespacedName()
-		podScoreKey := fmt.Sprintf("%s.%s", podName.Name, podName.Namespace)
+		podScoreKey := podCacheOwnerIdentifier(pod)
 		if score, exists := podScores[podScoreKey]; exists {
 			scoreResults[pod] = score
 		}
@@ -358,6 +357,12 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 
 	klog.V(4).Infof("KVCacheAware.queryRedis: total blocks with hits: %d/%d", len(blockToPods), len(blockHashes))
 	return blockToPods, nil
+}
+
+// podCacheOwnerIdentifier matches the pod.namespace Redis owner format written by the Runtime.
+func podCacheOwnerIdentifier(pod *datastore.PodInfo) string {
+	podName := pod.GetPodNamespacedName()
+	return fmt.Sprintf("%s.%s", podName.Name, podName.Namespace)
 }
 
 func (t *KVCacheAware) startGC() {

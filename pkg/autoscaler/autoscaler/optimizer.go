@@ -19,9 +19,11 @@ package autoscaler
 import (
 	"context"
 	"sort"
+	"strings"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
+	corev1 "k8s.io/api/core/v1"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -43,22 +45,33 @@ type OptimizerMeta struct {
 }
 
 type ReplicaBlock struct {
-	name     string
-	index    int32
-	replicas int32
-	cost     int64
+	targetKey string
+	index     int32
+	replicas  int32
+	cost      int64
+}
+
+// HeterogeneousTargetKey returns a namespace-qualified key for a
+// heterogeneous autoscaling target. An empty target namespace refers to the
+// namespace of the AutoscalingPolicy.
+func HeterogeneousTargetKey(targetRef corev1.ObjectReference, policyNamespace string) string {
+	namespace := targetRef.Namespace
+	if namespace == "" {
+		namespace = policyNamespace
+	}
+	return namespace + "/" + targetRef.Name
 }
 
 func (meta *OptimizerMeta) RestoreReplicasOfEachBackend(replicas int32) map[string]int32 {
 	replicasMap := make(map[string]int32, len(meta.Config.Params))
 	for _, param := range meta.Config.Params {
-		replicasMap[param.Target.TargetRef.Name] = param.MinReplicas
+		replicasMap[HeterogeneousTargetKey(param.Target.TargetRef, meta.Scope.Namespace)] = param.MinReplicas
 	}
 	replicas = min(max(replicas, meta.MinReplicas), meta.MaxReplicas)
 	replicas -= meta.MinReplicas
 	for _, block := range meta.ScalingOrder {
 		slot := min(replicas, block.replicas)
-		replicasMap[block.name] += slot
+		replicasMap[block.targetKey] += slot
 		replicas -= slot
 		if replicas <= 0 {
 			break
@@ -77,6 +90,7 @@ func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
 	maxReplicas := int32(0)
 	var scalingOrder []*ReplicaBlock
 	for index, param := range policy.Spec.HeterogeneousTarget.Params {
+		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, policy.Namespace)
 		minReplicas += param.MinReplicas
 		maxReplicas += param.MaxReplicas
 		replicas := param.MaxReplicas - param.MinReplicas
@@ -85,10 +99,10 @@ func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
 		}
 		if costExpansionRatePercent == 100 {
 			scalingOrder = append(scalingOrder, &ReplicaBlock{
-				index:    int32(index),
-				name:     param.Target.TargetRef.Name,
-				replicas: replicas,
-				cost:     int64(param.Cost),
+				index:     int32(index),
+				targetKey: targetKey,
+				replicas:  replicas,
+				cost:      int64(param.Cost),
 			})
 			continue
 		}
@@ -96,10 +110,10 @@ func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
 		for replicas > 0 {
 			currentLen := min(replicas, max(int32(packageLen), 1))
 			scalingOrder = append(scalingOrder, &ReplicaBlock{
-				name:     param.Target.TargetRef.Name,
-				index:    int32(index),
-				replicas: currentLen,
-				cost:     int64(param.Cost) * int64(currentLen),
+				targetKey: targetKey,
+				index:     int32(index),
+				replicas:  currentLen,
+				cost:      int64(param.Cost) * int64(currentLen),
 			})
 			replicas -= currentLen
 			packageLen = packageLen * float64(costExpansionRatePercent) / 100
@@ -127,7 +141,8 @@ func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy) *Optimizer {
 	metricTargets := GetMetricTargets(autoscalePolicy)
 	collectors := make(map[string]*MetricCollector)
 	for _, param := range autoscalePolicy.Spec.HeterogeneousTarget.Params {
-		collectors[param.Target.TargetRef.Name] = NewMetricCollector(&param.Target, autoscalePolicy, metricTargets)
+		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		collectors[targetKey] = NewMetricCollector(&param.Target, autoscalePolicy, metricTargets)
 	}
 
 	meta := NewOptimizerMeta(autoscalePolicy)
@@ -150,17 +165,21 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
-	externalMetrics := make(algorithm.Metrics)
+	// externalSamples accumulates per-backend (value, replicas) pairs for each
+	// external metric so that the correct aggregation can be applied afterwards.
+	externalSamples := make(map[string][]backendExternalSample)
 	instancesCountSum := int32(0)
 	// Update all model serving instances' metrics
 	for _, param := range optimizer.Meta.Config.Params {
-		collector, exists := optimizer.Collectors[param.Target.TargetRef.Name]
+		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		collector, exists := optimizer.Collectors[targetKey]
 		if !exists {
-			klog.Warningf("collector for target %s not exists", param.Target.TargetRef.Name)
+			klog.Warningf("collector for target %s not exists", targetKey)
 			continue
 		}
 
-		instancesCountSum += currentInstancesCounts[param.Target.TargetRef.Name]
+		backendReplicas := currentInstancesCounts[targetKey]
+		instancesCountSum += backendReplicas
 		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
@@ -168,14 +187,20 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		}
 		unreadyInstancesCount += currentUnreadyInstancesCount
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
-		// TODO: External metrics are aggregated with a plain sum across targets.
-		// This is correct for additive metrics (for example queue length), but it
-		// is semantically wrong for ratio metrics such as GPU utilization.
-		// Introduce per-metric aggregation strategy (sum/avg/max/weighted) in a
-		// follow-up change and apply it here instead of unconditional summation.
 		for metricName, metricValue := range currentExternalMetrics {
-			addMetric(externalMetrics, metricName, metricValue)
+			externalSamples[metricName] = append(externalSamples[metricName], backendExternalSample{
+				value:    metricValue,
+				replicas: backendReplicas,
+			})
 		}
+	}
+	// Aggregate external metrics using the semantics appropriate for each metric
+	// type: additive metrics are summed; ratio metrics use a replica-weighted
+	// average so that heterogeneous backends (different replica counts) do not
+	// distort the result.
+	externalMetrics := make(algorithm.Metrics, len(externalSamples))
+	for name, samples := range externalSamples {
+		externalMetrics[name] = aggregateExternalSamples(name, samples)
 	}
 	// Get recommended replicas of all model serving instances
 	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
@@ -212,4 +237,64 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 
 	replicasMap := optimizer.Meta.RestoreReplicasOfEachBackend(recommendedInstances)
 	return replicasMap, nil
+}
+
+// backendExternalSample pairs an external metric value with the replica count
+// of the backend that reported it.
+type backendExternalSample struct {
+	value    float64
+	replicas int32
+}
+
+// isRatioMetric reports whether name represents a ratio (bounded) metric that
+// must be aggregated as a weighted average across backends rather than summed.
+// Recognised suffixes: _utilization, _usage, _ratio, _percent, _saturation.
+// The "rate" suffix is intentionally excluded: throughput and request-rate
+// metrics are additive across backends.
+func isRatioMetric(name string) bool {
+	lowerName := strings.ToLower(name)
+	for _, sfx := range []string{"_utilization", "_usage", "_ratio", "_percent", "_saturation"} {
+		if strings.HasSuffix(lowerName, sfx) {
+			return true
+		}
+	}
+	return false
+}
+
+// aggregateExternalSamples combines per-backend metric samples into a single
+// value using the semantics appropriate for the metric:
+//
+//   - Additive metrics (queue length, request count, …): sum across backends.
+//   - Ratio metrics (utilization, usage, …): replica-count weighted average,
+//     Σ(value_i × replicas_i) / Σ(replicas_i), matching Kubernetes HPA
+//     semantics for cross-instance metric aggregation.
+//
+// When all backend replica counts are zero the function falls back to a plain
+// unweighted average so that ratio metrics are never silently dropped.
+func aggregateExternalSamples(name string, samples []backendExternalSample) float64 {
+	if !isRatioMetric(name) {
+		total := 0.0
+		for _, s := range samples {
+			total += s.value
+		}
+		return total
+	}
+
+	// Weighted average: Σ(value_i × replicas_i) / Σ(replicas_i)
+	weightedSum := 0.0
+	totalReplicas := int32(0)
+	for _, s := range samples {
+		weightedSum += s.value * float64(s.replicas)
+		totalReplicas += s.replicas
+	}
+	if totalReplicas == 0 {
+		// Replica counts are unavailable; fall back to unweighted average so
+		// the metric still influences scaling decisions.
+		sum := 0.0
+		for _, s := range samples {
+			sum += s.value
+		}
+		return sum / float64(len(samples))
+	}
+	return weightedSum / float64(totalReplicas)
 }

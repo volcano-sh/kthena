@@ -39,6 +39,7 @@ Enabling session boost therefore reconfigures the same per-model priority queue 
 3. **KV cache optimization**: Prioritize follow-up requests from recently completed sessions to maximize warm cache hits.
 4. **Grace period (advanced, off by default)**: An optional, tricky tuning knob that, after a request completes, briefly holds the dequeue slot for a potential follow-up from the same session before dispatching unrelated requests. It is **disabled by default** and should only be enabled by operators who fully understand that it deliberately delays unrelated requests in exchange for a higher same-session prefix-cache hit rate.
 5. **Backpressure-aware**: Respect backend pod capacity to avoid flooding, using two-level admission control (inflight limit + backend metrics).
+6. **Fail-fast queue wait timeout (optional, off by default)**: Optionally reject requests that wait in the queue longer than a configurable threshold with HTTP 504, so latency-sensitive clients shed load or retry instead of waiting indefinitely for backend capacity. `FAIRNESS_QUEUE_TIMEOUT` governs only the user-fairness queue and does not apply in session-boost mode.
 
 #### Non-Goals
 
@@ -78,11 +79,12 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │  ┌──────────────────┐     ┌─────────────────────────┐    │
 │  │ SessionTracker   │<────│ MarkSessionRequest      │    │
 │  │ (bounded LRU)    │     │ Completed()             │    │
-│  │ keys: sessionID  │     │ (after response sent)   │    │
-│  │ cap: 4096 default│     └─────────────────────────┘    │
+│  │ key:   sessionID │     │ (after response sent)   │    │
+│  │ value: completeAt│     └─────────────────────────┘    │
+│  │ cap: 4096 default│                                    │
 │  └────────┬─────────┘                                    │
 │            │                                             │
-│            │ HasRecentCompletion(sessionID)?             │
+│            │ CompletionTime(sessionID)?                  │
 │            ▼                                             │
 │  ┌──────────────────┐                                    │
 │  │  PushRequest()   │                                    │
@@ -97,9 +99,10 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │  │                                      │                │
 │  │  Ordering:                           │                │
 │  │  1. SessionBoost=true > false        │                │
-│  │  2. Within same boost: FIFO          │                │
+│  │  2. Within boosted: most recently     │                │
+│  │     completed session first          │                │
 │  │                                      │                │
-│  │  [Boosted-1] [Boosted-2] [Normal-1]  │                │
+│  │  [Boosted-warm][Boosted-cooler][Norm]│                │
 │  └──────────────────────────────────────┘                │
 │            │                                             │
 │            ▼                                             │
@@ -158,14 +161,14 @@ Timeline:
          ▼  ▼                                  ▼
     ─────┼──┼──────────────────────────────────┼─────
          │  │                                  │
-         │  │  Case A: Head already boosted →  │
-         │  │  skip grace, dequeue immediately │
-         │  │                                  │
-         │  │  Case B: Otherwise hold the slot │
-         │  │  for the full grace period, then │
-         │  │  dequeue the head (boosted ranks │
-         │  │  first, so a follow-up that      │
-         │  │  arrived wins automatically)     │
+         │  │  Hold the slot for the full      │
+         │  │  grace period, then dequeue the  │
+         │  │  head. Boosted requests rank     │
+         │  │  first and, among boosted, the   │
+         │  │  newest-arrived wins, so a       │
+         │  │  same-session follow-up that     │
+         │  │  arrived during the window is    │
+         │  │  dequeued first automatically.   │
          │  └────────────────────────────────┐
 ```
 
@@ -177,16 +180,17 @@ It is important that grace is **triggered only by release events**, because a re
 
 1. A request finishes → `Release()` runs → `inflightCount` is decremented → a signal is sent on `releaseCh`.
 2. The freed slot would normally be claimed immediately by the current heap head (which may be an unrelated, non-boosted request). The grace wait instead **holds that just-freed slot for up to `SessionBoostGracePeriod`**, betting that a same-session follow-up is about to arrive and reuse the warm prefix cache.
-3. When the wait resolves, `tryBackpressureDequeue` runs and re-checks **both** capacity gates before admitting anyone. A boosted follow-up that arrived during grace is admitted first because boosted requests outrank others in the heap, and only when `inflight < MaxConcurrent` **and** at least one backend pod reports capacity.
+3. When the wait resolves, `tryBackpressureDequeue` runs and re-checks **both** capacity gates before admitting anyone. A boosted follow-up that arrived during grace is admitted first because boosted requests outrank others in the heap and, among boosted requests, the one whose session completed most recently is at the head — and only when `inflight < MaxConcurrent` **and** at least one backend pod reports capacity.
 
-The grace wait can resolve in three ways, and in every case the two capacity gates are the final arbiter:
+The grace wait always runs for the full window (subject to shutdown), and in every case the two capacity gates are the final arbiter:
 
-| Outcome                    | Trigger                                                                                       | What happens next                                                                                                                                                                                                                                       |
-| -------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Skip grace (fast path)** | The heap head is *already* session-boosted when the release fires (`isHeadSessionBoosted()`). | No wait at all — go straight to the capacity gates and admit if they pass. There is nothing to wait for.                                                                                                                                                |
-| **Grace expires**          | The timer fires (`timer.C`).                                                                  | Stop holding the slot and fall through to the capacity gates, which admit the heap head. If a same-session follow-up arrived during the wait it is now boosted and sits at the head, so it wins automatically (subject to inflight + backend capacity). |
+| Outcome           | Trigger                      | What happens next                                                                                                                                                                                                                                                                                       |
+| ----------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Grace expires** | The timer fires (`timer.C`). | Stop holding the slot and fall through to the capacity gates, which admit the heap head. If a same-session follow-up arrived during the wait it is now boosted and sits at the head (session with the most recent completion first), so it wins automatically (subject to inflight + backend capacity). |
 
-This ordering matters because the three checks answer different questions and run in sequence:
+> There is no "head already boosted" fast path. The queue holds the freed slot for the full grace window even when a boosted request is already at the head, because a still-newer same-session follow-up may yet arrive during the window and should be the one to ride the warm prefix cache.
+
+This ordering matters because the timing layer and the two gates answer different questions and run in sequence:
 
 ```
 Release frees a slot
@@ -214,17 +218,18 @@ Two interactions are worth calling out explicitly:
 - **Grace never overrides backpressure.** If the grace window ends but the inflight limit is already reached or every backend pod is busy, the request is **not** admitted — `tryBackpressureDequeue` simply holds (and drains any cancelled requests from the heap) until the next release or new arrival reopens the gates. Grace only chooses *who* tries next; the capacity gates decide *whether* anyone runs.
 - **Fresh arrivals on an idle queue bypass grace.** Grace is tied to `releaseCh` (a freed slot), not to `notifyCh` (a new arrival). When a request lands on an otherwise idle queue with no pending release, it goes straight to the capacity gates with no grace delay, so enabling grace adds no admission latency to first turns. The only place a new arrival waits is *inside* an already-running grace window, where it is precisely the boosted follow-up the window exists to catch. When both a release and a new arrival are pending at once, the release is preferred so the freed slot is the one held for the grace window.
 
-The net effect is a strict precedence: **grace timing → inflight gate → backend gate**. The grace layer is purely additive and optional (`SessionBoostGracePeriod = 0` removes it entirely, taking the no-grace fast path), and it can only ever *delay* an admission to favor a session-boosted follow-up — it can never admit a request that the inflight or backend gates would otherwise reject.
+The net effect is a strict precedence: **grace timing → inflight gate → backend gate**. The grace layer is purely additive and optional (`SessionBoostGracePeriod = 0` removes it entirely, dequeuing immediately on each release), and it can only ever *delay* an admission to favor a session-boosted follow-up — it can never admit a request that the inflight or backend gates would otherwise reject.
 
 #### Configuration
 
-| Environment Variable             | Default        | Description                                                                                                                                                                           |
-| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ENABLE_SESSION_BOOST`           | `false`        | Enable the session-boost scheduling strategy (mutually exclusive with `ENABLE_FAIRNESS_SCHEDULING`)                                                                                   |
-| `SESSION_BOOST_HEADER`           | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                    |
-| `SESSION_BOOST_MAX_SESSIONS`     | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time |
-| `SESSION_BOOST_GRACE_PERIOD`     | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                        |
-| `SESSION_BOOST_INFLIGHT_PER_POD` | `16`           | Inflight requests admitted per backend pod; total inflight = perPod x backend pod count. Size it from the estimated per-pod concurrency (e.g. vLLM's --max-num-seqs)                  |
+| Environment Variable             | Default        | Description                                                                                                                                                                                                                                                              |
+| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ENABLE_SESSION_BOOST`           | `false`        | Enable the session-boost scheduling strategy (mutually exclusive with `ENABLE_FAIRNESS_SCHEDULING`)                                                                                                                                                                      |
+| `SESSION_BOOST_HEADER`           | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                                                                                                       |
+| `SESSION_BOOST_MAX_SESSIONS`     | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time                                                                                    |
+| `SESSION_BOOST_GRACE_PERIOD`     | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                                                                                                           |
+| `SESSION_BOOST_INFLIGHT_PER_POD` | `16`           | Inflight requests admitted per backend pod; total inflight = perPod x backend pod count. Size it from the estimated per-pod concurrency (e.g. vLLM's --max-num-seqs)                                                                                                     |
+| `SESSION_BOOST_TIMEOUT`          | `30s`          | Maximum time a request may wait in the queue before it is rejected with HTTP 504. Enabled by default; set a non-positive duration (e.g. `0s`) to disable it. It is the only server-side queue-wait bound in session-boost mode (`FAIRNESS_QUEUE_TIMEOUT` does not apply) |
 
 ### Design Details
 
@@ -264,7 +269,9 @@ type RequestPriorityQueue struct {
 
 // Session-boost ordering (RequestPriorityQueue.Less when sessionBoost == true):
 // 1. SessionBoost=true comes before SessionBoost=false
-// 2. Within same boost status: earlier RequestTime comes first (FIFO)
+// 2. Within boosted requests: the session whose previous turn completed most
+//    recently comes first (warmest prefix cache); ties broken FIFO by RequestTime
+// 3. Within non-boosted requests: earlier RequestTime comes first (FIFO)
 ```
 
 #### Session Identification
@@ -296,6 +303,23 @@ The queue uses two-level admission control:
 2. **Backend metrics check**: The `BackendWaitingChecker` reads the backend pod metrics already scraped by the store (e.g., vLLM's `RequestWaitingNum`) to confirm at least one pod has capacity. It does not scrape backends itself.
 
 When a request completes (Release), the queue immediately attempts to dequeue the next request (release-driven dequeue), ensuring minimal latency between sequential requests. The loop is fully event-driven — there is no independent polling timer. In single-router operation every moment a backend frees capacity coincides with one of our own requests completing (a release), so release and arrival events alone cover every dequeue opportunity; the capacity check simply reads the pod metrics already scraped by the store (`METRICS_SCRAPE_INTERVAL`).
+
+#### Queue Wait Timeout (504 Rejection)
+
+Under sustained overload the two-level admission control legitimately holds requests in the queue until backend capacity frees up. `FAIRNESS_QUEUE_TIMEOUT` governs **only** the user-fairness queue and does not apply in session-boost mode. Instead, session boost bounds the wait with its own timeout so latency-sensitive front ends are told *quickly* that the system is saturated and can retry elsewhere or shed load rather than waiting open-endedly (until the client disconnects, which returns `503`).
+
+The queue wait timeout provides this fail-fast behavior:
+
+- It is controlled by `SESSION_BOOST_TIMEOUT` and enabled by default at `30s`. Setting it to a non-positive duration (e.g. `0s`) disables the timeout, leaving a session-boost request bounded only by client disconnect.
+- When a request has been waiting in the queue longer than `SESSION_BOOST_TIMEOUT`, the router stops waiting, removes the request from the queue, and responds with `504 Gateway Timeout`.
+
+It is implemented in the router's request-handling path rather than in the queue's dequeue loop, mirroring how the fairness queue's own `FAIRNESS_QUEUE_TIMEOUT` (504) is handled. Both queue-wait timeouts therefore return the same `504` status; they differ only in what arms them (`FAIRNESS_QUEUE_TIMEOUT` vs `SESSION_BOOST_TIMEOUT`). In session-boost mode the request context carries the `SESSION_BOOST_TIMEOUT` deadline (via `context.WithTimeout`) instead of the fairness deadline, so `FAIRNESS_QUEUE_TIMEOUT` has no effect. The handler waits on the admission (`NotifyChan`) and cancellation/timeout (`reqCtx.Done()`) signals:
+
+- **Admitted first**: the request proceeds to the backend as usual (no rejection).
+- **Timeout fires first**: the request context's deadline is exceeded, which makes the queue drop the request from the heap via its existing cancellation check (`isCancelled` / `drainCancelledLocked`), reusing the same cleanup path as client disconnects; the handler abandons the request, releases any permit that may have been granted concurrently, and returns `504 Gateway Timeout`.
+- **Client disconnect fires first**: the existing behavior is unchanged (`503`).
+
+Because it reuses the queue's cancellation cleanup, the wait timeout adds no new state to the queue and no extra polling. It is orthogonal to the inflight and backend capacity gates: those gates decide *whether* a request may run, while the wait timeout only bounds *how long* a request is willing to wait before giving up. `SESSION_BOOST_TIMEOUT` is the only server-side queue-wait bound in session-boost mode; the feature only applies in session-boost mode.
 
 ### Multi-Turn Conversation Advantages
 

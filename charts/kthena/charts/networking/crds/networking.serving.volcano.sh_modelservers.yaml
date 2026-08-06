@@ -14,7 +14,23 @@ spec:
     singular: modelserver
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: Inference engine used to serve the model
+      jsonPath: .spec.inferenceEngine
+      name: Engine
+      type: string
+    - description: Model server port
+      jsonPath: .spec.workloadPort.port
+      name: Port
+      type: integer
+    - description: Model server protocol
+      jsonPath: .spec.workloadPort.protocol
+      name: Protocol
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: ModelServer is the Schema for the modelservers API.

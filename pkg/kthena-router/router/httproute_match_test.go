@@ -273,3 +273,91 @@ func TestMatchHTTPRouteHostname(t *testing.T) {
 		})
 	}
 }
+
+func TestInferencePoolFromHTTPRouteRuleWeights(t *testing.T) {
+	group := inferencePoolBackendGroup
+	kind := inferencePoolBackendKind
+	zero := int32(0)
+	one := int32(1)
+
+	backendRef := func(name string, weight *int32) gatewayv1.HTTPBackendRef {
+		return gatewayv1.HTTPBackendRef{
+			BackendRef: gatewayv1.BackendRef{
+				BackendObjectReference: gatewayv1.BackendObjectReference{
+					Group: &group,
+					Kind:  &kind,
+					Name:  gatewayv1.ObjectName(name),
+				},
+				Weight: weight,
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		backendRefs []gatewayv1.HTTPBackendRef
+		expected    types.NamespacedName
+		found       bool
+	}{
+		{
+			name: "skips a zero-weight backend",
+			backendRefs: []gatewayv1.HTTPBackendRef{
+				backendRef("pool-zero", &zero),
+				backendRef("pool-live", &one),
+			},
+			expected: types.NamespacedName{Namespace: "default", Name: "pool-live"},
+			found:    true,
+		},
+		{
+			name: "uses the default weight when omitted",
+			backendRefs: []gatewayv1.HTTPBackendRef{
+				backendRef("pool-default", nil),
+			},
+			expected: types.NamespacedName{Namespace: "default", Name: "pool-default"},
+			found:    true,
+		},
+		{
+			name: "returns no backend when all weights are zero",
+			backendRefs: []gatewayv1.HTTPBackendRef{
+				backendRef("pool-zero", &zero),
+			},
+			found: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			route := &gatewayv1.HTTPRoute{ObjectMeta: v1.ObjectMeta{Namespace: "default"}}
+			rule := &gatewayv1.HTTPRouteRule{BackendRefs: tt.backendRefs}
+
+			pool, found := inferencePoolFromHTTPRouteRule(route, rule)
+			assert.Equal(t, tt.found, found)
+			assert.Equal(t, tt.expected, pool)
+		})
+	}
+}
+
+func TestSelectWeightedInferencePool(t *testing.T) {
+	pools := []weightedInferencePool{
+		{name: types.NamespacedName{Namespace: "default", Name: "pool-a"}, weight: 3},
+		{name: types.NamespacedName{Namespace: "default", Name: "pool-b"}, weight: 1},
+	}
+
+	tests := []struct {
+		name      string
+		selection int
+		expected  string
+	}{
+		{name: "first weight slot", selection: 0, expected: "pool-a"},
+		{name: "last first-pool weight slot", selection: 2, expected: "pool-a"},
+		{name: "second-pool weight slot", selection: 3, expected: "pool-b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, found := selectWeightedInferencePool(pools, tt.selection)
+			assert.True(t, found)
+			assert.Equal(t, tt.expected, pool.Name)
+		})
+	}
+}

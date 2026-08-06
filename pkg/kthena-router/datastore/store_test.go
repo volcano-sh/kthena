@@ -2039,6 +2039,7 @@ func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
 
 func TestMatchModelServer_GatewayScoped(t *testing.T) {
 	kindGateway := gatewayv1.Kind("Gateway")
+	kindService := gatewayv1.Kind("Service")
 	sectionHTTPS := gatewayv1.SectionName("https")
 	sectionNonexistent := gatewayv1.SectionName("nonexistent-listener")
 
@@ -2078,6 +2079,31 @@ func TestMatchModelServer_GatewayScoped(t *testing.T) {
 			expectedServer: types.NamespacedName{Namespace: "default", Name: "llama3-server"},
 			expectedIsLora: false,
 			expectedError:  false,
+		},
+		{
+			name: "route skipped for non-gateway parentRef kind",
+			setupStore: func() *store {
+				s := newStore()
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}}},
+				})
+				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName:  "llama3",
+						ParentRefs: []gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindService}},
+						Rules: []*aiv1alpha1.Rule{
+							{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "llama3-server", Weight: ptr(uint32(100))}}},
+						},
+					},
+				})
+				return s
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
 		},
 		{
 			name: "route skipped for different gateway",

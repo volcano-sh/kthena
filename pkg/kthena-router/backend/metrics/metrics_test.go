@@ -16,7 +16,11 @@ limitations under the License.
 
 package metrics
 
-import "testing"
+import (
+	"testing"
+
+	dto "github.com/prometheus/client_model/go"
+)
 
 func TestPodEndpointURL(t *testing.T) {
 	tests := []struct {
@@ -47,6 +51,58 @@ func TestPodEndpointURL(t *testing.T) {
 			got := PodEndpointURL(tt.ip, tt.port, tt.path)
 			if got != tt.want {
 				t.Fatalf("PodEndpointURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLastPeriodAvg(t *testing.T) {
+	histogram := func(sum float64, count uint64) *dto.Histogram {
+		return &dto.Histogram{SampleSum: &sum, SampleCount: &count}
+	}
+
+	tests := []struct {
+		name     string
+		previous *dto.Histogram
+		current  *dto.Histogram
+		want     float64
+	}{
+		{
+			name:     "new observations",
+			previous: histogram(10, 5),
+			current:  histogram(18, 9),
+			want:     2,
+		},
+		{
+			name:     "no new observations",
+			previous: histogram(10, 5),
+			current:  histogram(10, 5),
+			want:     0,
+		},
+		{
+			name:     "count reset",
+			previous: histogram(10, 5),
+			current:  histogram(9, 2),
+			want:     4.5,
+		},
+		{
+			name:     "sum reveals reset after count catches up",
+			previous: histogram(100, 10),
+			current:  histogram(15, 15),
+			want:     1,
+		},
+		{
+			name:     "reset without new observations",
+			previous: histogram(10, 5),
+			current:  histogram(0, 0),
+			want:     0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LastPeriodAvg(tt.previous, tt.current); got != tt.want {
+				t.Fatalf("LastPeriodAvg() = %v, want %v", got, tt.want)
 			}
 		})
 	}

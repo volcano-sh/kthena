@@ -151,6 +151,10 @@ type ModelServerStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +genclient
+// +kubebuilder:printcolumn:name="Engine",type="string",JSONPath=".spec.inferenceEngine",description="Inference engine used to serve the model"
+// +kubebuilder:printcolumn:name="Port",type="integer",JSONPath=".spec.workloadPort.port",description="Model server port"
+// +kubebuilder:printcolumn:name="Protocol",type="string",JSONPath=".spec.workloadPort.protocol",description="Model server protocol"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 //
 // ModelServer is the Schema for the modelservers API.
 type ModelServer struct {

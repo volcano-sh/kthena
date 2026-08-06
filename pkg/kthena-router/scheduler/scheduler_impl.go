@@ -123,12 +123,6 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		s.store.SyncOnFlightCounts()
 	}
 
-	// first filter out invalid pods that wonot be selected to loadbalance to.
-	pods, err := s.RunFilterPlugins(pods, ctx)
-	if err != nil {
-		return err
-	}
-
 	if ctx.PDGroup != nil {
 		// Use optimized PDGroup scheduling with pre-categorized pods from store
 		klog.V(4).Info("Using optimized PD disaggregated scheduling")
@@ -141,6 +135,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 
 		if len(decodePods) == 0 {
 			return fmt.Errorf("no decode pod found")
+		}
+
+		// The initial pod list contains both prefill and decode roles. Filter the
+		// role-specific list after retrieving it from the store so overloaded
+		// decode pods cannot bypass filters in the optimized PD path.
+		decodePods, err = s.RunFilterPlugins(decodePods, ctx)
+		if err != nil {
+			return err
 		}
 
 		klog.V(4).Info("Running score plugins for decode pod")
@@ -163,6 +165,12 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				continue
 			}
 
+			selectedPods, err = s.RunFilterPlugins(selectedPods, ctx)
+			if err != nil {
+				klog.V(4).InfoS("prefill pods were filtered out", "decode instance", decodePodName, "error", err)
+				continue
+			}
+
 			klog.V(4).Info("Running score plugins for prefill pod")
 			scores = s.RunScorePlugins(selectedPods, ctx)
 			bestPrefillPod := TopNPodInfos(scores, 1)
@@ -180,6 +188,11 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		}
 
 		return nil
+	}
+
+	pods, err := s.RunFilterPlugins(pods, ctx)
+	if err != nil {
+		return err
 	}
 
 	klog.V(4).Info("Running score plugins for PD aggregated pod")

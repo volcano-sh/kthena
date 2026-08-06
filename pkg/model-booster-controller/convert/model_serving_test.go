@@ -357,6 +357,99 @@ func TestCreateModelServingResources(t *testing.T) {
 	}
 }
 
+func TestBuildModelServingVLLMPreStopHandlesUnavailableMetrics(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+	serving, err := BuildModelServing(model)
+	require.NoError(t, err)
+	require.NotEmpty(t, serving.Spec.Template.Roles)
+
+	var engine *corev1.Container
+	for roleIndex := range serving.Spec.Template.Roles {
+		for containerIndex := range serving.Spec.Template.Roles[roleIndex].EntryTemplate.Spec.Containers {
+			container := &serving.Spec.Template.Roles[roleIndex].EntryTemplate.Spec.Containers[containerIndex]
+			if container.Name == "engine" {
+				engine = container
+				break
+			}
+		}
+		if engine != nil {
+			break
+		}
+	}
+	require.NotNil(t, engine)
+	require.NotNil(t, engine.Lifecycle)
+	require.NotNil(t, engine.Lifecycle.PreStop)
+	require.NotNil(t, engine.Lifecycle.PreStop.Exec)
+	require.Len(t, engine.Lifecycle.PreStop.Exec.Command, 3)
+
+	script := engine.Lifecycle.PreStop.Exec.Command[2]
+	assert.Contains(t, script, "curl -s --max-time 2 http://localhost:8000/metrics")
+	assert.Contains(t, script, `if [ -z "$RUNNING" ]; then`)
+	assert.Contains(t, script, "Metrics endpoint unavailable, exiting preStop")
+	assert.NotContains(t, script, "$ERR")
+}
+
+func TestBuildModelServingCustomEnginePort(t *testing.T) {
+	t.Run("aggregated", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+		model.Spec.Backend.Workers[0].Config.Raw = []byte(`{"port":9000}`)
+
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		var runtime, engine *corev1.Container
+		for i := range serving.Spec.Template.Roles[0].EntryTemplate.Spec.Containers {
+			container := &serving.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[i]
+			switch container.Name {
+			case "runtime":
+				runtime = container
+			case "engine":
+				engine = container
+			}
+		}
+		require.NotNil(t, runtime)
+		require.NotNil(t, engine)
+		assert.Contains(t, runtime.Args, "http://localhost:9000")
+		assert.Contains(t, strings.Join(engine.Command, " "), "--port 9000")
+		assert.Equal(t, int32(9000), engine.ReadinessProbe.HTTPGet.Port.IntVal)
+		assert.Contains(t, engine.Lifecycle.PreStop.Exec.Command[2], "http://localhost:9000/metrics")
+	})
+
+	t.Run("disaggregated", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-npu.yaml")
+		for i := range model.Spec.Backend.Workers {
+			worker := &model.Spec.Backend.Workers[i]
+			if worker.Type == workload.ModelWorkerTypePrefill || worker.Type == workload.ModelWorkerTypeDecode {
+				worker.Config.Raw = []byte(`{"port":9000}`)
+			}
+		}
+
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		for i := range serving.Spec.Template.Roles {
+			var runtime, engine *corev1.Container
+			for j := range serving.Spec.Template.Roles[i].EntryTemplate.Spec.Containers {
+				container := &serving.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[j]
+				switch container.Name {
+				case "runtime":
+					runtime = container
+				case "vllm":
+					engine = container
+				}
+			}
+			require.NotNil(t, runtime)
+			require.NotNil(t, engine)
+			assert.Contains(t, runtime.Args, "http://localhost:9000")
+			assert.Contains(t, engine.Command, "--port")
+			assert.Contains(t, engine.Command, "9000")
+			assert.Equal(t, int32(9000), engine.Ports[0].ContainerPort)
+			assert.Equal(t, int32(9000), engine.ReadinessProbe.HTTPGet.Port.IntVal)
+			assert.Equal(t, int32(9000), engine.LivenessProbe.HTTPGet.Port.IntVal)
+		}
+	})
+}
+
 func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 	tests := []struct {
 		name              string

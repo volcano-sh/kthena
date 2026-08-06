@@ -276,6 +276,8 @@ type Store interface {
 	// GetModelNames returns all model names registered via ModelRoutes,
 	// including both base model names and LoRA adapter names.
 	GetModelNames() []string
+	// HasModel reports whether a base model or LoRA adapter is registered.
+	HasModel(name string) bool
 
 	// Debug interface methods
 	GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute
@@ -1363,6 +1365,10 @@ func (s *store) matchesSpecificGateway(mr *aiv1alpha1.ModelRoute, gatewayKey str
 	}
 
 	for _, parentRef := range mr.Spec.ParentRefs {
+		if !isGatewayParentRef(parentRef) {
+			continue
+		}
+
 		// Get namespace from parentRef, default to ModelRoute's namespace
 		namespace := mr.Namespace
 		if parentRef.Namespace != nil {
@@ -1956,6 +1962,18 @@ func (s *store) GetModelNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// HasModel reports whether a base model or LoRA adapter is registered.
+func (s *store) HasModel(name string) bool {
+	s.routeMutex.RLock()
+	defer s.routeMutex.RUnlock()
+
+	if _, exists := s.routes[name]; exists {
+		return true
+	}
+	_, exists := s.loraRoutes[name]
+	return exists
 }
 
 // GetAllModelServers returns all ModelServers in the store

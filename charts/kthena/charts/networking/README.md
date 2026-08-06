@@ -52,18 +52,19 @@ kthenaRouter:
 
 #### Configuration Parameters
 
-| Parameter                                  | Type    | Default          | Description                                                        |
-| ------------------------------------------ | ------- | ---------------- | ------------------------------------------------------------------ |
-| `kthenaRouter.fairness.enabled`            | boolean | `false`          | Enable user-fairness scheduling (mutually exclusive with boost)    |
-| `kthenaRouter.fairness.windowSize`         | string  | `"1h"`           | Fairness: sliding window duration (1m-1h)                          |
-| `kthenaRouter.fairness.inputTokenWeight`   | float   | `1.0`            | Fairness: weight for input tokens (≥0)                             |
-| `kthenaRouter.fairness.outputTokenWeight`  | float   | `2.0`            | Fairness: weight for output tokens (≥0)                            |
-| `kthenaRouter.fairness.maxConcurrent`      | int     | `0`              | Fairness: global inflight limit (`0` falls back to QPS mode)       |
-| `kthenaRouter.sessionBoost.enabled`        | boolean | `false`          | Enable session-boost scheduling (mutually exclusive with fairness) |
-| `kthenaRouter.sessionBoost.header`         | string  | `"X-Session-ID"` | HTTP header used to identify conversation sessions                 |
-| `kthenaRouter.sessionBoost.maxSessions`    | int     | `4096`           | Max recently-completed sessions kept warm (LRU-evicted)            |
-| `kthenaRouter.sessionBoost.inflightPerPod` | int     | `16`             | Inflight requests per backend pod; total = perPod x pod count      |
-| `kthenaRouter.sessionBoost.gracePeriod`    | string  | `"0s"`           | Wait time for a same-session follow-up (disabled by default)       |
+| Parameter                                  | Type    | Default          | Description                                                                   |
+| ------------------------------------------ | ------- | ---------------- | ----------------------------------------------------------------------------- |
+| `kthenaRouter.fairness.enabled`            | boolean | `false`          | Enable user-fairness scheduling (mutually exclusive with boost)               |
+| `kthenaRouter.fairness.windowSize`         | string  | `"1h"`           | Fairness: sliding window duration (1m-1h)                                     |
+| `kthenaRouter.fairness.inputTokenWeight`   | float   | `1.0`            | Fairness: weight for input tokens (≥0)                                        |
+| `kthenaRouter.fairness.outputTokenWeight`  | float   | `2.0`            | Fairness: weight for output tokens (≥0)                                       |
+| `kthenaRouter.fairness.maxConcurrent`      | int     | `0`              | Fairness: global inflight limit (`0` falls back to QPS mode)                  |
+| `kthenaRouter.sessionBoost.enabled`        | boolean | `false`          | Enable session-boost scheduling (mutually exclusive with fairness)            |
+| `kthenaRouter.sessionBoost.header`         | string  | `"X-Session-ID"` | HTTP header used to identify conversation sessions                            |
+| `kthenaRouter.sessionBoost.maxSessions`    | int     | `4096`           | Max recently-completed sessions kept warm (LRU-evicted)                       |
+| `kthenaRouter.sessionBoost.inflightPerPod` | int     | `16`             | Inflight requests per backend pod; total = perPod x pod count                 |
+| `kthenaRouter.sessionBoost.gracePeriod`    | string  | `"0s"`           | Wait time for a same-session follow-up (disabled by default)                  |
+| `kthenaRouter.sessionBoost.timeout`        | string  | `"30s"`          | Max queue wait before 504; set a non-positive duration (e.g. `0s`) to disable |
 
 #### Session Boost Configuration
 

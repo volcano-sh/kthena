@@ -20,6 +20,9 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -729,6 +732,84 @@ func TestKVCacheAware_Score_Core(t *testing.T) {
 				t.Errorf("Expected scores %v, got %v", tt.expectedScores, resultMap)
 			}
 		})
+	}
+}
+
+func TestKVCacheAware_ScoreMatchesOnlyNamespacedRedisOwner(t *testing.T) {
+	tokenizerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tokenize" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"count":1,"max_model_len":2048,"tokens":[1]}`)
+	}))
+	defer tokenizerServer.Close()
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer redisClient.Close()
+
+	const (
+		model     = "test-model"
+		podName   = "pod-1"
+		namespace = "test-namespace"
+	)
+	pod := datastore.NewPodInfo(&v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: namespace,
+		},
+		Status: v1.PodStatus{PodIP: "127.0.0.1"},
+	}, tokenization.EngineVLLM)
+
+	tokenizerPort := tokenizerServer.Listener.Addr().(*net.TCPAddr).Port
+	processor := &TokenBlockProcessor{blockSize: 1}
+	blockHashes := processor.TokensToBlockHashes([]uint32{1}, 1)
+	key := KVCacheAwareBlock{ModelName: model, ChunkHash: blockHashes[0]}.String(kvCacheKeyPrefix)
+	if err := redisClient.HSet(context.Background(), key, podName+"."+namespace, time.Now().Unix()).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	plugin := &KVCacheAware{
+		name:             KVCacheAwarePluginName,
+		maxBlocksToMatch: 1,
+		keyPrefix:        kvCacheKeyPrefix,
+		redisClient:      redisClient,
+		processor:        processor,
+		tokenizerManager: tokenization.NewTokenizerManager(tokenization.TokenizerManagerConfig{
+			EndpointPorts: map[string]int{tokenization.EngineVLLM: tokenizerPort},
+		}),
+	}
+
+	scores := plugin.Score(&framework.Context{
+		Model:  model,
+		Prompt: &common.ChatMessage{Text: "hello"},
+	}, []*datastore.PodInfo{pod})
+
+	if score := scores[pod]; score != 100 {
+		t.Fatalf("namespaced Redis owner score = %d, want 100; all scores: %v", score, scores)
+	}
+
+	if err := redisClient.HDel(context.Background(), key, podName+"."+namespace).Err(); err != nil {
+		t.Fatalf("failed to remove namespaced Redis owner: %v", err)
+	}
+	if err := redisClient.HSet(context.Background(), key, podName, time.Now().Unix()).Err(); err != nil {
+		t.Fatalf("failed to seed bare Redis owner: %v", err)
+	}
+
+	scores = plugin.Score(&framework.Context{
+		Model:  model,
+		Prompt: &common.ChatMessage{Text: "hello"},
+	}, []*datastore.PodInfo{pod})
+
+	if score, exists := scores[pod]; exists {
+		t.Fatalf("bare Redis owner matched namespaced pod with score %d; all scores: %v", score, scores)
 	}
 }
 

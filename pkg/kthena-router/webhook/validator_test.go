@@ -170,7 +170,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec: Required value: either modelName or loraAdapters must be specified",
+			expectedReason: "validation failed:\n  - spec: Required value: either modelName or loraAdapters must be specified",
 		},
 		{
 			name: "invalid model route - empty string in lora adapters",
@@ -198,7 +198,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.loraAdapters[1]: Invalid value: \"\": lora adapter name cannot be an empty string",
+			expectedReason: "validation failed:\n  - spec.loraAdapters[1]: Invalid value: \"\": lora adapter name cannot be an empty string",
 		},
 		{
 			name: "invalid model route - multiple empty strings in lora adapters",
@@ -226,7 +226,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.loraAdapters[0]: Invalid value: \"\": lora adapter name cannot be an empty string  - spec.loraAdapters[2]: Invalid value: \"\": lora adapter name cannot be an empty string",
+			expectedReason: "validation failed:\n  - spec.loraAdapters[0]: Invalid value: \"\": lora adapter name cannot be an empty string\n  - spec.loraAdapters[2]: Invalid value: \"\": lora adapter name cannot be an empty string",
 		},
 		{
 			name: "invalid model route - all lora adapters are empty",
@@ -254,7 +254,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.loraAdapters[0]: Invalid value: \"\": lora adapter name cannot be an empty string  - spec.loraAdapters[1]: Invalid value: \"\": lora adapter name cannot be an empty string",
+			expectedReason: "validation failed:\n  - spec.loraAdapters[0]: Invalid value: \"\": lora adapter name cannot be an empty string\n  - spec.loraAdapters[1]: Invalid value: \"\": lora adapter name cannot be an empty string",
 		},
 		{
 			name: "invalid model route - empty model name and empty lora adapters list",
@@ -283,7 +283,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec: Required value: either modelName or loraAdapters must be specified",
+			expectedReason: "validation failed:\n  - spec: Required value: either modelName or loraAdapters must be specified",
 		},
 		{
 			name: "invalid model route - rule with empty targetModels",
@@ -307,7 +307,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
+			expectedReason: "validation failed:\n  - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
 		},
 		{
 			name: "invalid model route - multiple rules with empty targetModels",
@@ -337,7 +337,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.rules[1].targetModels: Required value: each rule must have at least one target model",
+			expectedReason: "validation failed:\n  - spec.rules[1].targetModels: Required value: each rule must have at least one target model",
 		},
 		{
 			name: "invalid model route - empty modelServerName",
@@ -363,7 +363,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.rules[0].targetModels[0].modelServerName: Invalid value: \"\": modelServerName cannot be an empty string",
+			expectedReason: "validation failed:\n  - spec.rules[0].targetModels[0].modelServerName: Invalid value: \"\": modelServerName cannot be an empty string",
 		},
 		{
 			name: "invalid model route - all target weights are zero",
@@ -390,7 +390,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.rules[0].targetModels: Invalid value: 0: total weight must be greater than zero",
+			expectedReason: "validation failed:\n  - spec.rules[0].targetModels: Invalid value: 0: total weight must be greater than zero",
 		},
 		{
 			name: "invalid model route - invalid header regex",
@@ -421,7 +421,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.rules[0].modelMatch.headers[x-user].regex: Invalid value: \"[\": error parsing regexp: missing closing ]: `[`",
+			expectedReason: "validation failed:\n  - spec.rules[0].modelMatch.headers[x-user].regex: Invalid value: \"[\": error parsing regexp: missing closing ]: `[`",
 		},
 		{
 			name: "invalid model route - invalid uri regex",
@@ -452,7 +452,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.rules[0].modelMatch.uri.regex: Invalid value: \"[\": error parsing regexp: missing closing ]: `[`",
+			expectedReason: "validation failed:\n  - spec.rules[0].modelMatch.uri.regex: Invalid value: \"[\": error parsing regexp: missing closing ]: `[`",
 		},
 		{
 			name: "invalid model route - nil rule",
@@ -473,7 +473,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.rules[0]: Invalid value: null: rule must not be nil",
+			expectedReason: "validation failed:\n  - spec.rules[0]: Invalid value: null: rule must not be nil",
 		},
 		{
 			name: "invalid model route - combined errors: missing model name and empty targetModels",
@@ -496,7 +496,7 @@ func TestValidateModelRoute(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec: Required value: either modelName or loraAdapters must be specified  - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
+			expectedReason: "validation failed:\n  - spec: Required value: either modelName or loraAdapters must be specified\n  - spec.rules[0].targetModels: Required value: each rule must have at least one target model",
 		},
 	}
 

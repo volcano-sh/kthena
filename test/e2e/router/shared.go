@@ -34,6 +34,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	routermetrics "github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
@@ -1323,11 +1324,15 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 			utils.NewChatMessage("user", "Hello"),
 		}
 
-		resp := utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, "lora-NonExistent", messages, nil)
+		resp := utils.SendChatRequest(t, "lora-NonExistent", messages)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err, "Failed to read response body")
 
 		// Non-existent LoRA adapter should return 404
-		assert.Equal(t, 404, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
-		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, resp.Body)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
+		require.Contains(t, string(body), "route not found", "Expected route-not-found response body")
+		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, body)
 	})
 
 	// Unload LoRA adapters after test is complete
@@ -1513,7 +1518,8 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 	t.Run("VerifyErrorMetrics", func(t *testing.T) {
 		nonExistentModel := "non-existent-model-xyz"
 		labels := map[string]string{
-			"model":       nonExistentModel,
+			"error_type":  "route_not_found",
+			"model":       routermetrics.UnknownModel,
 			"status_code": "404",
 		}
 
