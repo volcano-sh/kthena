@@ -342,6 +342,39 @@ not a valid prometheus metric line
 	require.Error(t, err)
 }
 
+func TestBuildPodMetricURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		podIP     string
+		podSource *workload.PodMetricSource
+		want      string
+	}{
+		{
+			name:      "IPv4 with defaults",
+			podIP:     "10.1.2.3",
+			podSource: &workload.PodMetricSource{},
+			want:      "http://10.1.2.3:8100/metrics",
+		},
+		{
+			name:  "IPv6 with custom port and path",
+			podIP: "fd00::1",
+			podSource: &workload.PodMetricSource{
+				Port: 8000,
+				Uri:  "/custom-metrics",
+			},
+			want: "http://[fd00::1]:8000/custom-metrics",
+		},
+	}
+
+	collector := &MetricCollector{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{Status: corev1.PodStatus{PodIP: tt.podIP}}
+			assert.Equal(t, tt.want, collector.buildPodMetricURL(pod, tt.podSource))
+		})
+	}
+}
+
 func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n# TYPE queue_depth_alt gauge\nqueue_depth_alt 40\n")

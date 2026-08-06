@@ -75,6 +75,16 @@ func TestBuildModelServer(t *testing.T) {
 	}
 }
 
+func TestBuildModelServerCustomPort(t *testing.T) {
+	model := loadYaml[registry.ModelBooster](t, "testdata/input/model.yaml")
+	model.Spec.Backend.Workers[0].Config.Raw = []byte(`{"port":9000}`)
+
+	servers, err := BuildModelServer(model)
+
+	assert.NoError(t, err)
+	assert.Equal(t, int32(9000), servers[0].Spec.WorkloadPort.Port)
+}
+
 func mooncakeWorker(workerType registry.ModelWorkerType, role string) registry.ModelWorker {
 	return registry.ModelWorker{
 		Type: workerType,

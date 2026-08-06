@@ -17,6 +17,7 @@ limitations under the License.
 package router
 
 import (
+	"math/rand"
 	"net"
 	"regexp"
 	"strings"
@@ -180,16 +181,47 @@ func compareHTTPRoutePathPrecedence(a, b httpRoutePathPrecedence) int {
 // already matched rule. Other Gateway API backend kinds are ignored because this
 // router currently forwards only through InferencePool.
 func inferencePoolFromHTTPRouteRule(route *gatewayv1.HTTPRoute, rule *gatewayv1.HTTPRouteRule) (types.NamespacedName, bool) {
-	var inferencePoolName types.NamespacedName
+	pools := make([]weightedInferencePool, 0, len(rule.BackendRefs))
+	totalWeight := 0
 	for _, backendRef := range rule.BackendRefs {
 		if backendRef.Group != nil && *backendRef.Group == inferencePoolBackendGroup &&
 			backendRef.Kind != nil && *backendRef.Kind == inferencePoolBackendKind {
-			inferencePoolName.Namespace = route.Namespace
+			weight := 1
+			if backendRef.Weight != nil {
+				weight = int(*backendRef.Weight)
+			}
+			// Gateway API defines an omitted weight as 1 and a zero weight as
+			// receiving no traffic.
+			if weight <= 0 {
+				continue
+			}
+
+			inferencePoolName := types.NamespacedName{Namespace: route.Namespace}
 			if backendRef.Namespace != nil {
 				inferencePoolName.Namespace = string(*backendRef.Namespace)
 			}
 			inferencePoolName.Name = string(backendRef.Name)
-			return inferencePoolName, true
+			pools = append(pools, weightedInferencePool{name: inferencePoolName, weight: weight})
+			totalWeight += weight
+		}
+	}
+	if totalWeight == 0 {
+		return types.NamespacedName{}, false
+	}
+
+	return selectWeightedInferencePool(pools, rand.Intn(totalWeight))
+}
+
+type weightedInferencePool struct {
+	name   types.NamespacedName
+	weight int
+}
+
+func selectWeightedInferencePool(pools []weightedInferencePool, selection int) (types.NamespacedName, bool) {
+	for _, pool := range pools {
+		selection -= pool.weight
+		if selection < 0 {
+			return pool.name, true
 		}
 	}
 	return types.NamespacedName{}, false

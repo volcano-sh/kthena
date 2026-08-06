@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	lwsutils "sigs.k8s.io/lws/pkg/utils"
@@ -833,6 +834,22 @@ func createAndWaitForModelServing(t *testing.T, ctx context.Context, kthenaClien
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 }
 
+// updateModelServingWithRetry applies a spec mutation to the latest object so
+// concurrent controller status updates cannot make the E2E update stale.
+func updateModelServingWithRetry(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, name string, mutate func(*workload.ModelServing)) {
+	t.Helper()
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mutate(current)
+		_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, current, metav1.UpdateOptions{})
+		return err
+	})
+	require.NoError(t, err, "Failed to update ModelServing %s", name)
+}
+
 // waitForRunningPodCount waits until the expected number of non-terminating running pods exist for a ModelServing.
 func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName string, expected int, timeout time.Duration) {
 	t.Helper()
@@ -1463,28 +1480,23 @@ func TestModelServingPartitionScaleDown(t *testing.T) {
 	t.Logf("Initial CurrentRevision: %s", initialRevision)
 	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
 
-	updatedMS := initialMS.DeepCopy()
-	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
 	t.Logf("Updating image to %s to establish partition state", nginxAlpineImage)
 
 	// rolling update
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
-	require.NoError(t, err)
+	updateModelServingWithRetry(t, ctx, kthenaClient, modelServing.Name, func(ms *workload.ModelServing) {
+		ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+	})
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
 	updateRevision := waitForPartitionState(t, ctx, kthenaClient, kubeClient, modelServing.Name, partition, initialReplicas, initialRevision)
 
 	// Scale down from 5 to 3 replicas (equal to partition, so all updated groups should be removed)
-	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-
-	scaleDownMS := currentMS.DeepCopy()
-	scaleDownMS.Spec.Replicas = ptr.To(scaledReplicas)
 	t.Logf("Scaling down from %d to %d replicas while partition=%d", initialReplicas, scaledReplicas, partition)
 
 	// Update the ModelServing to scale down
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
-	require.NoError(t, err)
+	updateModelServingWithRetry(t, ctx, kthenaClient, modelServing.Name, func(ms *workload.ModelServing) {
+		ms.Spec.Replicas = ptr.To(scaledReplicas)
+	})
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
 	// Verify: only protected ordinals 0-2 remain with old revision, no updated groups

@@ -198,6 +198,63 @@ func makeParam(name string, cost, minReplicas, maxReplicas int32) workload.Heter
 	}
 }
 
+func TestHeterogeneousTargetKey(t *testing.T) {
+	tests := []struct {
+		name            string
+		targetRef       corev1.ObjectReference
+		policyNamespace string
+		want            string
+	}{
+		{
+			name:            "uses explicit target namespace",
+			targetRef:       corev1.ObjectReference{Namespace: "team-a", Name: "llama"},
+			policyNamespace: "policy-ns",
+			want:            "team-a/llama",
+		},
+		{
+			name:            "uses policy namespace when target namespace is empty",
+			targetRef:       corev1.ObjectReference{Name: "llama"},
+			policyNamespace: "policy-ns",
+			want:            "policy-ns/llama",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, HeterogeneousTargetKey(tt.targetRef, tt.policyNamespace))
+		})
+	}
+}
+
+func TestHeterogeneousTargetsWithSameNameAcrossNamespaces(t *testing.T) {
+	policy := makePolicy("uid-same-name", "policy-ns", 100, []workload.HeterogeneousTargetParam{
+		{
+			Target: workload.Target{
+				TargetRef: corev1.ObjectReference{Namespace: "team-a", Name: "llama"},
+			},
+			Cost:        100,
+			MinReplicas: 1,
+			MaxReplicas: 3,
+		},
+		{
+			Target: workload.Target{
+				TargetRef: corev1.ObjectReference{Namespace: "team-b", Name: "llama"},
+			},
+			Cost:        60,
+			MinReplicas: 2,
+			MaxReplicas: 5,
+		},
+	})
+
+	optimizer := NewOptimizer(policy)
+
+	// Names are unique only within a namespace. The optimizer must preserve
+	// one metric collector for each separately addressable ModelServing target.
+	require.Len(t, optimizer.Collectors, 2)
+	assert.Contains(t, optimizer.Collectors, "team-a/llama")
+	assert.Contains(t, optimizer.Collectors, "team-b/llama")
+}
+
 func TestNewOptimizerMeta(t *testing.T) {
 	t.Run("nil when HeterogeneousTarget unset", func(t *testing.T) {
 		policy := &workload.AutoscalingPolicy{
@@ -285,8 +342,8 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			rate:     100,
 			replicas: 5,
 			want: map[string]int32{
-				"a100": 3,
-				"h100": 2,
+				"ns/a100": 3,
+				"ns/h100": 2,
 			},
 		},
 		{
@@ -297,7 +354,7 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			rate:     100,
 			replicas: 0,
 			want: map[string]int32{
-				"h100": 2,
+				"ns/h100": 2,
 			},
 		},
 		{
@@ -308,7 +365,7 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			rate:     100,
 			replicas: 999,
 			want: map[string]int32{
-				"h100": 3,
+				"ns/h100": 3,
 			},
 		},
 		{
@@ -319,7 +376,30 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			rate:     100,
 			replicas: 4,
 			want: map[string]int32{
-				"h100": 4,
+				"ns/h100": 4,
+			},
+		},
+		{
+			name: "same target name in different namespaces remains distinct",
+			params: []workload.HeterogeneousTargetParam{
+				{
+					Target:      workload.Target{TargetRef: corev1.ObjectReference{Namespace: "team-a", Name: "llama"}},
+					Cost:        100,
+					MinReplicas: 1,
+					MaxReplicas: 3,
+				},
+				{
+					Target:      workload.Target{TargetRef: corev1.ObjectReference{Namespace: "team-b", Name: "llama"}},
+					Cost:        60,
+					MinReplicas: 2,
+					MaxReplicas: 5,
+				},
+			},
+			rate:     100,
+			replicas: 8,
+			want: map[string]int32{
+				"team-a/llama": 3,
+				"team-b/llama": 5,
 			},
 		},
 	}
@@ -330,9 +410,7 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			meta := NewOptimizerMeta(policy)
 			require.NotNil(t, meta)
 			got := meta.RestoreReplicasOfEachBackend(tt.replicas)
-			for backend, wantCount := range tt.want {
-				assert.Equal(t, wantCount, got[backend], "backend %q", backend)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

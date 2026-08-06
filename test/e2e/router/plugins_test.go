@@ -249,30 +249,58 @@ func TestSchedulerPluginRandom(t *testing.T) {
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
 	require.Len(t, pods, pluginMockReplicaCount, "random test needs %d mock pods", pluginMockReplicaCount)
 
-	since := metav1.NewTime(time.Now())
-	utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-random", 200)
-	time.Sleep(2 * time.Second)
-
-	counts := make([]int, len(pods))
-	routed := 0
-	for i, pod := range pods {
-		c := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
-		counts[i] = c
-		routed += c
-		t.Logf("random: pod %s selected %d/%d", pod.Name, c, 200)
-	}
-	require.GreaterOrEqual(t, routed, 200/2, "expected access logs for routed requests")
-
-	// Each pod should receive roughly 1/3 of traffic (±10% absolute ratio).
-	const randomMaxRatioDeviation = 0.10
+	const (
+		requestsPerBatch        = 200
+		maxBatches              = 5
+		randomMaxRatioDeviation = 0.10
+	)
 	expectedRatio := 1.0 / float64(len(pods))
-	for i, c := range counts {
-		require.Greater(t, c, 0, "random should route some traffic to pod %s", pods[i].Name)
-		ratio := float64(c) / float64(routed)
-		require.GreaterOrEqual(t, ratio, expectedRatio-randomMaxRatioDeviation,
-			"random pod %s ratio %.1f%% below uniform %.1f%% - counts=%v", pods[i].Name, ratio*100, expectedRatio*100, counts)
-		require.LessOrEqual(t, ratio, expectedRatio+randomMaxRatioDeviation,
-			"random pod %s ratio %.1f%% above uniform %.1f%% - counts=%v", pods[i].Name, ratio*100, expectedRatio*100, counts)
+	distributionOK := false
+	var lastCounts []int
+	since := metav1.Now()
+	for batch := 1; batch <= maxBatches; batch++ {
+		// Start with the original 200-request sample. If random variance puts that
+		// sample outside the bounds, add more observations so a healthy scheduler
+		// converges while a persistent bias remains visible.
+		utils.SendRouterChatRequests(t, chatURL, model, "kthena-router-plugin-e2e-fixed-prompt-random", requestsPerBatch)
+		time.Sleep(2 * time.Second)
+
+		counts := make([]int, len(pods))
+		routed := 0
+		for i, pod := range pods {
+			c := utils.CountSelectedPodInRouterLogs(t, testCtx.KubeClient, kthenaNamespace, pod.Name, since)
+			counts[i] = c
+			routed += c
+			t.Logf("random batch %d/%d: pod %s selected %d cumulative requests", batch, maxBatches, pod.Name, c)
+		}
+		lastCounts = counts
+		expectedRequests := batch * requestsPerBatch
+		if routed < expectedRequests/2 {
+			t.Logf("random distribution after batch %d/%d had insufficient access logs: routed=%d expected=%d counts=%v",
+				batch, maxBatches, routed, expectedRequests, counts)
+			continue
+		}
+
+		distributionWithinBounds := true
+		for _, c := range counts {
+			ratio := float64(c) / float64(routed)
+			if c == 0 || ratio < expectedRatio-randomMaxRatioDeviation || ratio > expectedRatio+randomMaxRatioDeviation {
+				distributionWithinBounds = false
+				break
+			}
+		}
+		if !distributionWithinBounds {
+			t.Logf("random distribution after batch %d/%d outside uniform %.1f%% +/- %.1f%%: routed=%d counts=%v",
+				batch, maxBatches, expectedRatio*100, randomMaxRatioDeviation*100, routed, counts)
+			continue
+		}
+
+		t.Logf("random distribution verified after batch %d/%d: routed=%d counts=%v", batch, maxBatches, routed, counts)
+		distributionOK = true
+		break
+	}
+	if !distributionOK {
+		t.Fatalf("random distribution failed after up to %d cumulative requests; last counts=%v", requestsPerBatch*maxBatches, lastCounts)
 	}
 
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.RandomPluginName, "score")

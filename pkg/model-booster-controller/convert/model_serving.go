@@ -82,6 +82,10 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 	if workersMap[workload.ModelWorkerTypeDecode] == nil {
 		return nil, fmt.Errorf("decode worker not found in backend")
 	}
+	enginePort, err := utils.GetEnginePort(backend)
+	if err != nil {
+		return nil, err
+	}
 	cacheVolume, err := buildCacheVolume(backend)
 	if err != nil {
 		return nil, err
@@ -188,8 +192,9 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		},
 		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
 		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
-		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:8000"),
+		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, fmt.Sprintf("http://localhost:%d", enginePort)),
 		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
+		"ENGINE_PORT":                        enginePort,
 		"ENGINE_PREFILL_ENV":                 prefillEngineEnv,
 		"ENGINE_DECODE_ENV":                  decodeEngineEnv,
 		"MODEL_SERVING_RUNTIME_ENGINE":       strings.ToLower(string(backend.Type)),
@@ -216,6 +221,10 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	workersMap := mapWorkers(backend.Workers)
 	if workersMap[workload.ModelWorkerTypeServer] == nil {
 		return nil, fmt.Errorf("server worker not found in backend: %s", backend.Name)
+	}
+	enginePort, err := utils.GetEnginePort(backend)
+	if err != nil {
+		return nil, err
 	}
 	cacheVolume, err := buildCacheVolume(backend)
 	if err != nil {
@@ -316,10 +325,11 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"MODEL_DOWNLOAD_ENVFROM":             backend.EnvFrom,
 		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
 		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
-		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:8000"),
+		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, fmt.Sprintf("http://localhost:%d", enginePort)),
 		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
 		"MODEL_SERVING_RUNTIME_ENGINE":       strings.ToLower(string(backend.Type)),
 		"MODEL_SERVING_RUNTIME_POD":          "$(POD_NAME).$(NAMESPACE)",
+		"ENGINE_PORT":                        enginePort,
 		"ENGINE_SERVER_RESOURCES":            workersMap[workload.ModelWorkerTypeServer].Resources,
 		"ENGINE_SERVER_IMAGE":                workersMap[workload.ModelWorkerTypeServer].Image,
 		"ENGINE_SERVER_COMMAND":              commands,

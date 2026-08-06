@@ -474,7 +474,13 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
-	} else if matched, inferencePoolName := r.handleHTTPRoute(c, gatewayKey); matched {
+	} else if matched, inferencePoolName, httpRouteErr := r.handleHTTPRoute(c, gatewayKey); httpRouteErr != nil {
+		klog.Errorf("failed to select InferencePool for matched HTTPRoute: %v", httpRouteErr)
+		accesslog.SetError(c, "inference_pool_selection", httpRouteErr.Error())
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, httpRouteErr.Error())
+		c.Set("finishReason", "inference_pool_selection")
+		return httpRouteErr
+	} else if matched {
 		// If ModelRoute is not matched, try to match HTTPRoute
 
 		// Get InferencePool from store
@@ -657,13 +663,13 @@ func (r *Router) getPodsAndServer(modelServerName types.NamespacedName) ([]*data
 	return pods, modelServer, nil
 }
 
-// handleHTTPRoute handles HTTPRoute matching for non-/v1/ paths
-// Returns true if HTTPRoute was matched and request is being handled, false otherwise
-// Also returns the InferencePool NamespacedName if found
-func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName) {
+// handleHTTPRoute handles HTTPRoute matching for non-/v1/ paths.
+// It returns whether a route matched, the selected InferencePool, and an error
+// when a matched rule has no eligible InferencePool backend.
+func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName, error) {
 	matchResult, matched := r.findHTTPRouteMatch(c, gatewayKey)
 	if !matched {
-		return false, types.NamespacedName{}
+		return false, types.NamespacedName{}, nil
 	}
 
 	// Record Gateway API match into access log (gatewayKey is already "namespace/name").
@@ -677,7 +683,7 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 
 	inferencePoolName, found := inferencePoolFromHTTPRouteRule(matchResult.route, matchResult.rule)
 	if !found {
-		return false, types.NamespacedName{}
+		return true, types.NamespacedName{}, fmt.Errorf("matched HTTPRoute %s/%s has no eligible InferencePool backend", matchResult.route.Namespace, matchResult.route.Name)
 	}
 
 	// Record InferencePool match into access log.
@@ -693,7 +699,7 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 		}
 	}
 
-	return true, inferencePoolName
+	return true, inferencePoolName, nil
 }
 
 // applyURLRewrite applies HTTPURLRewriteFilter to the request

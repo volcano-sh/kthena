@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -391,7 +393,8 @@ func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *
 	if port == 0 {
 		port = 8100
 	}
-	return fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, port, uri)
+	hostPort := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(int(port)))
+	return fmt.Sprintf("http://%s%s", hostPort, uri)
 }
 
 // parsePrometheusFamilies decodes a Prometheus text exposition payload once and

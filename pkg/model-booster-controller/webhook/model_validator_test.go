@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -112,6 +113,82 @@ func TestValidateModel_NoErrors(t *testing.T) {
 	// Should be valid with no errors
 	assert.True(t, valid)
 	assert.Empty(t, errorMsg)
+}
+
+func TestValidateEnginePorts(t *testing.T) {
+	tests := []struct {
+		name            string
+		ports           []string
+		expectErrMsg    string
+		expectErrorPath string
+	}{
+		{
+			name:  "matching numeric ports",
+			ports: []string{"9000", "9000"},
+		},
+		{
+			name:  "matching string ports",
+			ports: []string{`"9000"`, `"9000"`},
+		},
+		{
+			name:            "null port",
+			ports:           []string{"null", "8000"},
+			expectErrMsg:    "invalid port",
+			expectErrorPath: "spec.backend.workers[0].config.port",
+		},
+		{
+			name:            "different ports",
+			ports:           []string{"9000", "8000"},
+			expectErrMsg:    "workers use different engine ports",
+			expectErrorPath: "spec.backend.workers[1].config.port",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &registryv1alpha1.ModelBooster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model",
+					Namespace: "default",
+				},
+				Spec: registryv1alpha1.ModelBoosterSpec{
+					Backend: registryv1alpha1.ModelBackend{
+						Name:     "backend1",
+						Type:     registryv1alpha1.ModelBackendTypeVLLMDisaggregated,
+						Replicas: 1,
+						Workers: []registryv1alpha1.ModelWorker{
+							{
+								Type:  registryv1alpha1.ModelWorkerTypePrefill,
+								Pods:  1,
+								Image: "test-image:latest",
+								Config: apiextensionsv1.JSON{
+									Raw: []byte(fmt.Sprintf(`{"port":%s}`, tt.ports[0])),
+								},
+							},
+							{
+								Type:  registryv1alpha1.ModelWorkerTypeDecode,
+								Pods:  1,
+								Image: "test-image:latest",
+								Config: apiextensionsv1.JSON{
+									Raw: []byte(fmt.Sprintf(`{"port":%s}`, tt.ports[1])),
+								},
+							},
+						},
+					},
+				},
+			}
+
+			valid, errorMsg := (&ModelValidator{}).validateModel(model)
+			if tt.expectErrMsg == "" {
+				assert.True(t, valid, "expected valid but got error: %s", errorMsg)
+				return
+			}
+			assert.False(t, valid)
+			assert.Contains(t, errorMsg, tt.expectErrMsg)
+			assert.Contains(t, errorMsg, tt.expectErrorPath)
+			assert.NotContains(t, errorMsg, "test-image:latest")
+		})
+	}
 }
 
 func TestValidatePVCURICompatibility(t *testing.T) {

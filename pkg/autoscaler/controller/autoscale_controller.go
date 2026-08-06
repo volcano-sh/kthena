@@ -263,7 +263,8 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 			klog.Errorf("failed to get current replicas, err: %v", err)
 			return err
 		}
-		replicasMap[param.Target.TargetRef.Name] = currentInstancesCount
+		targetKey := autoscaler.HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		replicasMap[targetKey] = currentInstancesCount
 	}
 
 	// Get recommended replicas
@@ -274,9 +275,10 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 	}
 	// Do update replicas
 	for _, param := range optimizer.Meta.Config.Params {
-		instancesCount, exists := recommendedInstances[param.Target.TargetRef.Name]
+		targetKey := autoscaler.HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		instancesCount, exists := recommendedInstances[targetKey]
 		if !exists {
-			klog.Warningf("recommended instances not exists, target ref name: %s", param.Target.TargetRef.Name)
+			klog.Warningf("recommended instances not exists, target: %s", targetKey)
 			continue
 		}
 		if err := ac.updateTargetReplicas(ctx, &param.Target, autoscalePolicy.Namespace, instancesCount); err != nil {

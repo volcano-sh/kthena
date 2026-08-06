@@ -69,6 +69,10 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 	default:
 		return nil, fmt.Errorf("not support %s backend yet, please use vLLM backend", backend.Type)
 	}
+	enginePort, err := utils.GetEnginePort(&backend)
+	if err != nil {
+		return nil, err
+	}
 	servedModelName := getServedModelName(model, backend)
 	pdGroup := getPdGroup(backend)
 	kvConnector, err := GetKvConnectorSpec(backend)
@@ -97,7 +101,7 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 				PDGroup: pdGroup,
 			},
 			WorkloadPort: networking.WorkloadPort{
-				Port: 8000, // todo: get port from config
+				Port: enginePort,
 			},
 			TrafficPolicy: &networking.TrafficPolicy{
 				Retry: &networking.Retry{

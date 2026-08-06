@@ -64,7 +64,7 @@ spec:
                   failureThreshold: 3
                   httpGet:
                     path: /health
-                    port: 8000
+                    port: ${ENGINE_PORT}
                     scheme: HTTP
                   initialDelaySeconds: 180
                   periodSeconds: 5
@@ -78,7 +78,7 @@ spec:
                         - -c
                         - |
                           while true; do
-                            METRICS=$(curl -s --max-time 2 http://localhost:8000/metrics)
+                            METRICS=$(curl -s --max-time 2 http://localhost:${ENGINE_PORT}/metrics)
                             RUNNING=$(echo "$METRICS" | grep 'vllm:num_requests_running' | grep -v '#' | awk '{print $2}' || true)
                             WAITING=$(echo "$METRICS" | grep 'vllm:num_requests_waiting' | grep -v '#' | awk '{print $2}' || true)
                             if [ -z "$RUNNING" ]; then

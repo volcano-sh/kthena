@@ -288,7 +288,8 @@ func TestRouter_HandleHTTPRoute_PathPrefix(t *testing.T) {
 			c, _ := gin.CreateTestContext(w)
 			c.Request, _ = http.NewRequest(http.MethodPost, tt.path, nil)
 
-			matched, pool := router.handleHTTPRoute(c, "default/gw")
+			matched, pool, err := router.handleHTTPRoute(c, "default/gw")
+			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedMatch, matched)
 			if !tt.expectedMatch {
 				return
@@ -373,7 +374,8 @@ func TestRouter_HandleHTTPRoute_UsesMatchedRuleBackend(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request, _ = http.NewRequest(http.MethodPost, "/b/chat", nil)
 
-	matched, pool := router.handleHTTPRoute(c, "default/gw")
+	matched, pool, err := router.handleHTTPRoute(c, "default/gw")
+	assert.NoError(t, err)
 	assert.True(t, matched)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pool-b"}, pool)
 }
@@ -450,7 +452,8 @@ func TestRouter_HandleHTTPRoute_PrefersLongestPrefix(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request, _ = http.NewRequest(http.MethodPost, "/chat/completions", nil)
 
-	matched, pool := router.handleHTTPRoute(c, "default/gw")
+	matched, pool, err := router.handleHTTPRoute(c, "default/gw")
+	assert.NoError(t, err)
 	assert.True(t, matched)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pool-chat"}, pool)
 	prefix, exists := c.Get("matchedPrefix")
@@ -555,7 +558,8 @@ func TestRouter_HandleHTTPRoute_UsesMatchedRuleURLRewrite(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request, _ = http.NewRequest(http.MethodPost, "/b/chat", nil)
 
-	matched, pool := router.handleHTTPRoute(c, "default/gw")
+	matched, pool, err := router.handleHTTPRoute(c, "default/gw")
+	assert.NoError(t, err)
 	assert.True(t, matched)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pool-b"}, pool)
 	assert.Equal(t, "/right/chat", c.Request.URL.Path)
@@ -687,7 +691,8 @@ func TestRouter_HandleHTTPRoute_HostnameMatch(t *testing.T) {
 			c.Request, _ = http.NewRequest(http.MethodPost, "/chat", nil)
 			c.Request.Host = tt.host
 
-			matched, pool := router.handleHTTPRoute(c, "default/gw")
+			matched, pool, err := router.handleHTTPRoute(c, "default/gw")
+			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedMatch, matched)
 			if tt.expectedMatch {
 				assert.Equal(t, tt.expectedPool, pool)
@@ -1193,6 +1198,62 @@ func TestRouter_HandlerFunc_InferencePoolPodDiscovery(t *testing.T) {
 			)-requestsBefore)
 		})
 	}
+}
+
+func TestRouter_HandlerFunc_AllZeroHTTPRouteBackendWeights(t *testing.T) {
+	router, store, backend := setupTestRouter(t, nil)
+	defer backend.Close()
+
+	pathType := gatewayv1.PathMatchPathPrefix
+	pathValue := "/"
+	gatewayKind := gatewayv1.Kind("Gateway")
+	poolGroup := inferencePoolBackendGroup
+	poolKind := inferencePoolBackendKind
+	zero := int32(0)
+	httpRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "route-all-zero", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &gatewayKind}},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{
+					Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &pathValue},
+				}},
+				BackendRefs: []gatewayv1.HTTPBackendRef{{
+					BackendRef: gatewayv1.BackendRef{
+						BackendObjectReference: gatewayv1.BackendObjectReference{
+							Group: &poolGroup,
+							Kind:  &poolKind,
+							Name:  "pool-zero",
+						},
+						Weight: &zero,
+					},
+				}},
+			}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(httpRoute))
+
+	requestsBefore := requestCounterValue(
+		t, router, metrics.UnknownModel, "/custom", "503", "inference_pool_selection",
+	)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(GatewayKey, "default/gw")
+	var err error
+	c.Request, err = http.NewRequest(http.MethodPost, "/custom", bytes.NewBufferString(`{"model":"inference-model","prompt":"hello"}`))
+	assert.NoError(t, err)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "matched HTTPRoute default/route-all-zero has no eligible InferencePool backend")
+	assert.NotContains(t, w.Body.String(), "route not found")
+	assert.Equal(t, float64(1), requestCounterValue(
+		t, router, metrics.UnknownModel, "/custom", "503", "inference_pool_selection",
+	)-requestsBefore)
 }
 
 func TestRouter_GetPodsAndServer_ModelServerDeletedDuringPodLookup(t *testing.T) {

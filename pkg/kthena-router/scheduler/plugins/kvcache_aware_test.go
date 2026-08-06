@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -767,7 +768,7 @@ func TestKVCacheAware_ScoreMatchesOnlyNamespacedRedisOwner(t *testing.T) {
 		Status: v1.PodStatus{PodIP: "127.0.0.1"},
 	}, tokenization.EngineVLLM)
 
-	endpointTemplate := strings.Replace(tokenizerServer.URL, "127.0.0.1", "%s", 1)
+	tokenizerPort := tokenizerServer.Listener.Addr().(*net.TCPAddr).Port
 	processor := &TokenBlockProcessor{blockSize: 1}
 	blockHashes := processor.TokensToBlockHashes([]uint32{1}, 1)
 	key := KVCacheAwareBlock{ModelName: model, ChunkHash: blockHashes[0]}.String(kvCacheKeyPrefix)
@@ -782,7 +783,7 @@ func TestKVCacheAware_ScoreMatchesOnlyNamespacedRedisOwner(t *testing.T) {
 		redisClient:      redisClient,
 		processor:        processor,
 		tokenizerManager: tokenization.NewTokenizerManager(tokenization.TokenizerManagerConfig{
-			EndpointTemplates: map[string]string{tokenization.EngineVLLM: endpointTemplate},
+			EndpointPorts: map[string]int{tokenization.EngineVLLM: tokenizerPort},
 		}),
 	}
 

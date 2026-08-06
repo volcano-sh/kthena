@@ -23,6 +23,7 @@ import (
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
+	corev1 "k8s.io/api/core/v1"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -44,22 +45,33 @@ type OptimizerMeta struct {
 }
 
 type ReplicaBlock struct {
-	name     string
-	index    int32
-	replicas int32
-	cost     int64
+	targetKey string
+	index     int32
+	replicas  int32
+	cost      int64
+}
+
+// HeterogeneousTargetKey returns a namespace-qualified key for a
+// heterogeneous autoscaling target. An empty target namespace refers to the
+// namespace of the AutoscalingPolicy.
+func HeterogeneousTargetKey(targetRef corev1.ObjectReference, policyNamespace string) string {
+	namespace := targetRef.Namespace
+	if namespace == "" {
+		namespace = policyNamespace
+	}
+	return namespace + "/" + targetRef.Name
 }
 
 func (meta *OptimizerMeta) RestoreReplicasOfEachBackend(replicas int32) map[string]int32 {
 	replicasMap := make(map[string]int32, len(meta.Config.Params))
 	for _, param := range meta.Config.Params {
-		replicasMap[param.Target.TargetRef.Name] = param.MinReplicas
+		replicasMap[HeterogeneousTargetKey(param.Target.TargetRef, meta.Scope.Namespace)] = param.MinReplicas
 	}
 	replicas = min(max(replicas, meta.MinReplicas), meta.MaxReplicas)
 	replicas -= meta.MinReplicas
 	for _, block := range meta.ScalingOrder {
 		slot := min(replicas, block.replicas)
-		replicasMap[block.name] += slot
+		replicasMap[block.targetKey] += slot
 		replicas -= slot
 		if replicas <= 0 {
 			break
@@ -78,6 +90,7 @@ func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
 	maxReplicas := int32(0)
 	var scalingOrder []*ReplicaBlock
 	for index, param := range policy.Spec.HeterogeneousTarget.Params {
+		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, policy.Namespace)
 		minReplicas += param.MinReplicas
 		maxReplicas += param.MaxReplicas
 		replicas := param.MaxReplicas - param.MinReplicas
@@ -86,10 +99,10 @@ func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
 		}
 		if costExpansionRatePercent == 100 {
 			scalingOrder = append(scalingOrder, &ReplicaBlock{
-				index:    int32(index),
-				name:     param.Target.TargetRef.Name,
-				replicas: replicas,
-				cost:     int64(param.Cost),
+				index:     int32(index),
+				targetKey: targetKey,
+				replicas:  replicas,
+				cost:      int64(param.Cost),
 			})
 			continue
 		}
@@ -97,10 +110,10 @@ func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
 		for replicas > 0 {
 			currentLen := min(replicas, max(int32(packageLen), 1))
 			scalingOrder = append(scalingOrder, &ReplicaBlock{
-				name:     param.Target.TargetRef.Name,
-				index:    int32(index),
-				replicas: currentLen,
-				cost:     int64(param.Cost) * int64(currentLen),
+				targetKey: targetKey,
+				index:     int32(index),
+				replicas:  currentLen,
+				cost:      int64(param.Cost) * int64(currentLen),
 			})
 			replicas -= currentLen
 			packageLen = packageLen * float64(costExpansionRatePercent) / 100
@@ -128,7 +141,8 @@ func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy) *Optimizer {
 	metricTargets := GetMetricTargets(autoscalePolicy)
 	collectors := make(map[string]*MetricCollector)
 	for _, param := range autoscalePolicy.Spec.HeterogeneousTarget.Params {
-		collectors[param.Target.TargetRef.Name] = NewMetricCollector(&param.Target, autoscalePolicy, metricTargets)
+		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		collectors[targetKey] = NewMetricCollector(&param.Target, autoscalePolicy, metricTargets)
 	}
 
 	meta := NewOptimizerMeta(autoscalePolicy)
@@ -157,13 +171,14 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	instancesCountSum := int32(0)
 	// Update all model serving instances' metrics
 	for _, param := range optimizer.Meta.Config.Params {
-		collector, exists := optimizer.Collectors[param.Target.TargetRef.Name]
+		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		collector, exists := optimizer.Collectors[targetKey]
 		if !exists {
-			klog.Warningf("collector for target %s not exists", param.Target.TargetRef.Name)
+			klog.Warningf("collector for target %s not exists", targetKey)
 			continue
 		}
 
-		backendReplicas := currentInstancesCounts[param.Target.TargetRef.Name]
+		backendReplicas := currentInstancesCounts[targetKey]
 		instancesCountSum += backendReplicas
 		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {

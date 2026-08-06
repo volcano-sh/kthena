@@ -155,9 +155,9 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort)
 
 	managerConfig := tokenization.TokenizerManagerConfig{
-		EndpointTemplates: map[string]string{
-			tokenization.EngineVLLM:   fmt.Sprintf("http://%%s:%d", vllmPort),
-			tokenization.EngineSGLang: fmt.Sprintf("http://%%s:%d", sglangPort),
+		EndpointPorts: map[string]int{
+			tokenization.EngineVLLM:   vllmPort,
+			tokenization.EngineSGLang: sglangPort,
 		},
 	}
 	manager := tokenization.NewTokenizerManager(managerConfig)

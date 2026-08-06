@@ -24,6 +24,7 @@ import (
 
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
+	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -82,6 +83,7 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 	allErrs = append(allErrs, validateBackendReplicaBounds(model)...)
 	allErrs = append(allErrs, validateWorkerImages(model)...)
 	allErrs = append(allErrs, validateBackendWorkerTypes(model)...)
+	allErrs = append(allErrs, validateEnginePorts(model)...)
 	allErrs = append(allErrs, validatePVCURICompatibility(model)...)
 	allErrs = append(allErrs, validateKvConnectorConfig(model)...)
 
@@ -168,6 +170,31 @@ func validateKvConnectorConfig(model *registryv1alpha1.ModelBooster) field.Error
 		))
 	}
 	return allErrs
+}
+
+func validateEnginePorts(model *registryv1alpha1.ModelBooster) field.ErrorList {
+	backend := &model.Spec.Backend
+	if backend.Type != registryv1alpha1.ModelBackendTypeVLLM &&
+		backend.Type != registryv1alpha1.ModelBackendTypeVLLMDisaggregated {
+		return nil
+	}
+
+	if _, err := utils.GetEnginePort(backend); err != nil {
+		portPath := field.NewPath("spec").Child("backend").Child("workers")
+		var badValue any
+		if portErr, ok := err.(*utils.EnginePortError); ok {
+			portPath = portPath.Index(portErr.WorkerIndex).Child("config").Child("port")
+			badValue = portErr.BadValue
+		}
+		return field.ErrorList{
+			field.Invalid(
+				portPath,
+				badValue,
+				err.Error(),
+			),
+		}
+	}
+	return nil
 }
 
 func validateBackendReplicaBounds(model *registryv1alpha1.ModelBooster) field.ErrorList {

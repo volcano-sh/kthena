@@ -265,6 +265,100 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	}
 }
 
+func TestHeterogeneousSameNameTargetsAcrossNamespaces(t *testing.T) {
+	const (
+		policyNamespace = "policy-ns"
+		teamANamespace  = "team-a"
+		teamBNamespace  = "team-b"
+		modelName       = "llama"
+	)
+
+	msA := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: modelName, Namespace: teamANamespace},
+		Spec:       workload.ModelServingSpec{Replicas: ptrInt32(1)},
+	}
+	msB := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: modelName, Namespace: teamBNamespace},
+		Spec:       workload.ModelServingSpec{Replicas: ptrInt32(2)},
+	}
+	client := clientfake.NewSimpleClientset(msA, msB)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 100\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	newTarget := func(namespace string) workload.Target {
+		return workload.Target{
+			TargetRef: corev1.ObjectReference{
+				Kind:      workload.ModelServingKind.Kind,
+				Namespace: namespace,
+				Name:      modelName,
+			},
+			MetricSources: map[string]workload.MetricSource{
+				"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}},
+			},
+		}
+	}
+
+	panicThreshold := int32(200)
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "same-name-targets", Namespace: policyNamespace},
+		Spec: workload.AutoscalingPolicySpec{
+			TolerancePercent: 0,
+			Metrics: []workload.AutoscalingPolicyMetric{
+				{Name: "load", TargetValue: resource.MustParse("1")},
+			},
+			Behavior: workload.AutoscalingPolicyBehavior{
+				ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{
+					PanicPolicy: workload.AutoscalingPolicyPanicPolicy{
+						Period:                metav1.Duration{Duration: time.Second},
+						PanicThresholdPercent: &panicThreshold,
+					},
+				},
+			},
+			HeterogeneousTarget: &workload.HeterogeneousTarget{
+				CostExpansionRatePercent: 100,
+				Params: []workload.HeterogeneousTargetParam{
+					{Target: newTarget(teamANamespace), Cost: 100, MinReplicas: 1, MaxReplicas: 3},
+					{Target: newTarget(teamBNamespace), Cost: 60, MinReplicas: 2, MaxReplicas: 5},
+				},
+			},
+		},
+	}
+
+	ac := &AutoscaleController{
+		client:             client,
+		modelServingLister: msLister,
+		podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{
+			teamANamespace: {readyPod(teamANamespace, "llama-a", host, nil)},
+			teamBNamespace: {readyPod(teamBNamespace, "llama-b", host, nil)},
+		}},
+		optimizerMap: map[string]*autoscalerOptimizer{},
+	}
+
+	if err := ac.schedule(context.Background(), policy); err != nil {
+		t.Fatalf("schedule error: %v", err)
+	}
+
+	updatedA, err := client.WorkloadV1alpha1().ModelServings(teamANamespace).Get(context.Background(), modelName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated team-a target: %v", err)
+	}
+	updatedB, err := client.WorkloadV1alpha1().ModelServings(teamBNamespace).Get(context.Background(), modelName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated team-b target: %v", err)
+	}
+
+	// A total recommendation of eight replicas should respect each target's
+	// independent bounds: team-a/llama=3 and team-b/llama=5.
+	if *updatedA.Spec.Replicas != 3 || *updatedB.Spec.Replicas != 5 {
+		t.Fatalf("expected team-a/llama=3 and team-b/llama=5, got team-a/llama=%d and team-b/llama=%d", *updatedA.Spec.Replicas, *updatedB.Spec.Replicas)
+	}
+}
+
 func httpHandlerWithBody(body string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) })
 }

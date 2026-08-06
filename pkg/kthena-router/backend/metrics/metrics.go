@@ -71,6 +71,17 @@ func LastPeriodAvg(previous, current *dto.Histogram) float64 {
 
 	currentSum := current.GetSampleSum()
 	currentCount := current.GetSampleCount()
+	if currentCount == 0 {
+		return 0
+	}
+
+	// Prometheus histogram sums and counts are cumulative for non-negative
+	// observations. If either value decreases, the backend process has likely
+	// restarted and reset its metrics. In that case, use the samples collected
+	// since the reset instead of subtracting values from the previous process.
+	if currentCount < previousCount || currentSum < previousSum {
+		return currentSum / float64(currentCount)
+	}
 
 	deltaSum := currentSum - previousSum
 	deltaCount := currentCount - previousCount
