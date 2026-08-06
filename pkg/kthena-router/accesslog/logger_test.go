@@ -18,6 +18,7 @@ package accesslog
 
 import (
 	"encoding/json"
+	"sort"
 	"testing"
 	"time"
 
@@ -27,16 +28,23 @@ import (
 
 func TestAccessLogEntry_ToJSON(t *testing.T) {
 	entry := &AccessLogEntry{
-		Timestamp:                  time.Date(2024, 1, 15, 10, 30, 45, 123000000, time.UTC),
-		Method:                     "POST",
-		Path:                       "/v1/chat/completions",
-		Protocol:                   "HTTP/1.1",
-		StatusCode:                 200,
+		Timestamp:  time.Date(2024, 1, 15, 10, 30, 45, 123000000, time.UTC),
+		Method:     "POST",
+		Path:       "/v1/chat/completions",
+		Protocol:   "HTTP/1.1",
+		StatusCode: 502,
+		Error: &ErrorInfo{
+			Type:    "upstream_error",
+			Message: "backend unavailable",
+		},
 		ModelName:                  "llama2-7b",
 		ModelRoute:                 "default/llama2-route-v1",
 		ModelServer:                "default/llama2-server",
 		SelectedPod:                "llama2-deployment-5f7b8c9d-xk2p4",
 		RequestID:                  "test-request-id",
+		Gateway:                    "default/gateway",
+		HTTPRoute:                  "default/chat-route",
+		InferencePool:              "default/llama2-pool",
 		InputTokens:                150,
 		OutputTokens:               75,
 		DurationTotal:              2350,
@@ -63,11 +71,15 @@ func TestAccessLogEntry_ToJSON(t *testing.T) {
 
 	assert.Equal(t, "POST", parsed["method"])
 	assert.Equal(t, "/v1/chat/completions", parsed["path"])
-	assert.Equal(t, float64(200), parsed["status_code"])
+	assert.Equal(t, float64(502), parsed["status_code"])
 	assert.Equal(t, "llama2-7b", parsed["model_name"])
 	assert.Equal(t, "default/llama2-route-v1", parsed["model_route"])
 	assert.Equal(t, "default/llama2-server", parsed["model_server"])
 	assert.Equal(t, "llama2-deployment-5f7b8c9d-xk2p4", parsed["selected_pod"])
+	assert.Equal(t, "test-request-id", parsed["request_id"])
+	assert.Equal(t, "default/gateway", parsed["gateway"])
+	assert.Equal(t, "default/chat-route", parsed["http_route"])
+	assert.Equal(t, "default/llama2-pool", parsed["inference_pool"])
 	assert.Equal(t, float64(150), parsed["input_tokens"])
 	assert.Equal(t, float64(75), parsed["output_tokens"])
 
@@ -76,6 +88,64 @@ func TestAccessLogEntry_ToJSON(t *testing.T) {
 	assert.Equal(t, float64(45), parsed["duration_request_processing"])
 	assert.Equal(t, float64(2180), parsed["duration_upstream_processing"])
 	assert.Equal(t, float64(5), parsed["duration_response_processing"])
+	errorInfo, ok := parsed["error"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, []string{"message", "type"}, sortedJSONKeys(errorInfo))
+	assert.Equal(t, "upstream_error", errorInfo["type"])
+	assert.Equal(t, "backend unavailable", errorInfo["message"])
+
+	assert.Equal(t, []string{
+		"duration_request_processing",
+		"duration_response_processing",
+		"duration_total",
+		"duration_upstream_processing",
+		"error",
+		"gateway",
+		"http_route",
+		"inference_pool",
+		"input_tokens",
+		"method",
+		"model_name",
+		"model_route",
+		"model_server",
+		"output_tokens",
+		"path",
+		"protocol",
+		"request_id",
+		"selected_pod",
+		"status_code",
+		"timestamp",
+	}, sortedJSONKeys(parsed), "access-log JSON field names are part of the observable contract")
+}
+
+func TestAccessLogEntry_JSONRequiredFields(t *testing.T) {
+	logger := &accessLoggerImpl{config: &AccessLoggerConfig{Format: FormatJSON}}
+	output, err := logger.formatJSON(&AccessLogEntry{})
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(output), &parsed))
+	assert.Equal(t, []string{
+		"duration_request_processing",
+		"duration_response_processing",
+		"duration_total",
+		"duration_upstream_processing",
+		"method",
+		"model_name",
+		"path",
+		"protocol",
+		"status_code",
+		"timestamp",
+	}, sortedJSONKeys(parsed), "required fields must remain present even when their values are empty")
+}
+
+func sortedJSONKeys(value map[string]interface{}) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func TestAccessLogEntry_ToText(t *testing.T) {
