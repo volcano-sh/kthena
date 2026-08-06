@@ -46,11 +46,13 @@ class VLLMBlockStoredEvent:
     token_ids: Optional[List[int]] = None
     block_size: Optional[int] = None
     lora_id: Optional[int] = None
+    medium: Optional[str] = None
 
 
 @dataclass
 class VLLMBlockRemovedEvent:
     block_hashes: List[int]
+    medium: Optional[str] = None
 
 
 @dataclass

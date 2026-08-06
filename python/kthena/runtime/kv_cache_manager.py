@@ -67,7 +67,8 @@ class VLLMKVCacheRedisManager:
         return f"{cls.MAPPING_KEY_PREFIX}:{pod_identifier}@{engine_hash}"
 
     async def add_blocks(self, model_name: str, block_hashes: List[int],
-                         pod_identifier: str, token_ids: Optional[List[int]] = None) -> bool:
+                         pod_identifier: str, token_ids: Optional[List[int]] = None,
+                         medium: Optional[str] = None) -> bool:
         if not block_hashes or not model_name or not pod_identifier:
             return not block_hashes
 
@@ -80,7 +81,7 @@ class VLLMKVCacheRedisManager:
             timestamp = str(int(time.time()))
 
             success = await self._process_token_blocks_with_mapping(
-                model_name, block_hashes, token_ids, pod_identifier, timestamp, pipe)
+                model_name, block_hashes, token_ids, pod_identifier, timestamp, pipe, medium)
 
             if not success:
                 return False
@@ -98,7 +99,7 @@ class VLLMKVCacheRedisManager:
 
     async def _process_token_blocks_with_mapping(self, model_name: str, engine_hashes: List[int],
                                                  token_ids: List[int], pod_identifier: str,
-                                                 timestamp: str, pipe) -> bool:
+                                                 timestamp: str, pipe, medium: Optional[str] = None) -> bool:
         if not engine_hashes:
             return False
 
@@ -120,7 +121,8 @@ class VLLMKVCacheRedisManager:
             mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
             pipe.set(mapping_key, str(std_hash))
             pipe.expire(mapping_key, 86400)
-            pipe.hset(matrix_block_key, pod_identifier, timestamp)
+            value = f"{timestamp}|{medium}" if medium else timestamp
+            pipe.hset(matrix_block_key, pod_identifier, value)
         return True
 
     async def remove_blocks(self, model_name: str, block_hashes: List[int],
@@ -291,7 +293,8 @@ class VLLMKVCacheEventHandler(EventHandler):
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
-            token_ids=block_event.token_ids
+            token_ids=block_event.token_ids,
+            medium=block_event.medium,
         )
 
     async def _handle_block_removed(self, event_data: VLLMEventData) -> None:
@@ -302,7 +305,7 @@ class VLLMKVCacheEventHandler(EventHandler):
         await self.redis_manager.remove_blocks(
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
-            pod_identifier=event_data.pod_identifier
+            pod_identifier=event_data.pod_identifier,
         )
 
     async def _handle_all_blocks_cleared(self, event_data: VLLMEventData) -> None:
@@ -362,6 +365,7 @@ class SGLangKVCacheEventHandler(EventHandler):
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
             token_ids=block_event.token_ids,
+            medium=block_event.medium,
         )
 
     async def _handle_block_removed(self, event_data: SGLangEventData) -> None:
