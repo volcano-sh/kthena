@@ -15,7 +15,7 @@
 import os
 import uvicorn
 from fastapi import FastAPI
-from python.tokenizer.app.routes import router as routes
+from app.routes import router as routes
 
 app = FastAPI(title="Kthena Tokenizer Service")
 app.include_router(routes, tags=["Tokenizer Service"])

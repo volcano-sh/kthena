@@ -188,6 +188,11 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 			}()
 
 		case datastore.EventDelete:
+			if modelName != "" && store.HasModelServerForModel(modelName) {
+				klog.Infof("Skipping tokenizer unload for ModelServer %s/%s: model %s is still served by another ModelServer", data.ModelServer.Namespace, data.ModelServer.Name, modelName)
+				return
+			}
+
 			klog.Infof("Unloading tokenizer for ModelServer %s", modelName)
 
 			go func() {
