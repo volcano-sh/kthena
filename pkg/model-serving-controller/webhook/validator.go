@@ -146,7 +146,8 @@ func validateRoleNames(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	return allErrs
 }
 
-// validateRollingUpdateConfiguration is validates maxUnavailable and maxSurge in rollingUpdateConfiguration.
+// validateRollingUpdateConfiguration validates the ServingGroup-level rolling
+// update configuration and rejects it for RoleRollingUpdate.
 func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil {

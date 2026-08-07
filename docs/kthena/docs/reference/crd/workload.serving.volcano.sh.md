@@ -864,8 +864,8 @@ _Appears in:_
 | `entryTemplate` _[PodTemplateSpec](#podtemplatespec)_ | EntryTemplate defines the template for the entry pod of a role.<br />Required: Currently, a role must have only one entry-pod. |  |  |
 | `workerReplicas` _integer_ | WorkerReplicas defines the number for the worker pod of a role.<br />Required: Need to set the number of worker-pod replicas. |  |  |
 | `workerTemplate` _[PodTemplateSpec](#podtemplatespec)_ | WorkerTemplate defines the template for the worker pod of a role. |  |  |
-| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | The maximum number of replicas that can be unavailable during the update.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).<br />Absolute number is calculated from percentage by rounding down.<br />This can not be 0.<br />By default, a fixed value of 1 is used. | 1 | XIntOrString: \{\} <br /> |
-| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition indicates the ordinal at which the ModelServing should be partitioned<br />for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to<br />Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage of ModelServing replicas (for example, 10%). A<br />percentage is rounded down. The value must not resolve to 0. Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
+| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition is the resource ordinal below which replicas are protected<br />from updates. Resources with ordinals greater than or equal to Partition<br />are updated. It can be an absolute number or a percentage.<br />A percentage is rounded up. Defaults to 0. |  | XIntOrString: \{\} <br /> |
 
 
 #### RoleRatioConstraint
@@ -928,7 +928,7 @@ _Appears in:_
 
 
 
-RollingUpdateConfiguration defines the parameters to be used for ServingGroupRollingUpdate.
+RollingUpdateConfiguration defines the parameters to be used for RollingUpdate.
 
 
 
@@ -938,8 +938,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | The maximum number of replicas that can be unavailable during the update.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).<br />Absolute number is calculated from percentage by rounding down.<br />This can not be 0.<br />By default, a fixed value of 1 is used. | 1 | XIntOrString: \{\} <br /> |
-| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition indicates the ordinal at which the ModelServing should be partitioned<br />for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to<br />Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage of ModelServing replicas (for example, 10%). A<br />percentage is rounded down. The value must not resolve to 0. Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
+| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition is the resource ordinal below which replicas are protected<br />from updates. Resources with ordinals greater than or equal to Partition<br />are updated. It can be an absolute number or a percentage.<br />A percentage is rounded up. Defaults to 0. |  | XIntOrString: \{\} <br /> |
 
 
 #### RolloutStrategy
@@ -956,8 +956,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type defines the rollout strategy. Supported values are<br />"ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,<br />it defaults to "ServingGroupRollingUpdate".<br />For `RoleRollingUpdate`, the `maxUnavailable` field in each Role will be used to determine the maximum number of role instances that can be unavailable during the update. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
-| `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration defines the parameters to be used when type is ServingGroupRollingUpdate.<br />optional |  |  |
+| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles are invalid.<br />RoleRollingUpdate uses the rolling update configuration on each Role and<br />does not allow rolloutStrategy.rollingUpdateConfiguration. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
+| `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set maxUnavailable when type is RoleRollingUpdate; |  |  |
 
 
 #### RolloutStrategyType
@@ -965,8 +965,9 @@ _Appears in:_
 _Underlying type:_ _string_
 
 RolloutStrategyType defines the strategy to use to update replicas.
-Note that if `recoveryPolicy` is set to `ServingGroupRecreate` and `rolloutStrategyType` is set to `RoleRollingUpdate`,
-the entire servingGroup will be deleted during a rolling update because the outdated role is removed.
+Note that if recoveryPolicy is ServingGroupRecreate and the rollout strategy
+is RoleRollingUpdate, deleting an outdated Role causes its entire ServingGroup
+to be recreated.
 
 
 
