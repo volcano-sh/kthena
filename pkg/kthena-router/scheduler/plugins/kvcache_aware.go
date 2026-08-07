@@ -33,7 +33,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -471,13 +470,6 @@ func freshOwners(entries map[string]string, ownerStartedAt map[string]int64) []s
 		owners = append(owners, owner)
 	}
 	return owners
-}
-
-func extractPodNameFromIdentifier(podIdentifier string) string {
-	if idx := strings.IndexByte(podIdentifier, '.'); idx >= 0 {
-		return podIdentifier[:idx]
-	}
-	return podIdentifier
 }
 
 // calculatePodScores returns per-pod scores and the longest block match length (used for the match_ratio metric).
