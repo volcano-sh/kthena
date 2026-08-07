@@ -308,10 +308,13 @@ type PodMetricSource struct {
 	// Uri defines the HTTP path where metrics are exposed (e.g., "/metrics").
 	// +optional
 	// +kubebuilder:default="/metrics"
+	// +kubebuilder:validation:Pattern="^/"
 	Uri string `json:"uri,omitempty"`
 	// Port defines the network port where metrics are exposed by the pods (e.g., 8000).
 	// +optional
 	// +kubebuilder:default=8100
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
 	// LabelSelector defines additional filtering for pods exposing this metric.
 	// Only pods matching both the target and this selector are scraped, e.g.

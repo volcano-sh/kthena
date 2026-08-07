@@ -763,8 +763,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the Prometheus metric name matched against labels in the pod's scraped output.<br />Defaults to the policy metric key when omitted.<br />For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series. |  |  |
-| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics |  |
-| `port` _integer_ | Port defines the network port where metrics are exposed by the pods (e.g., 8000). | 8100 |  |
+| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics | Pattern: `^/` <br /> |
+| `port` _integer_ | Port defines the network port where metrics are exposed by the pods (e.g., 8000). | 8100 | Maximum: 65535 <br />Minimum: 1 <br /> |
 
 
 #### PodTemplateSpec

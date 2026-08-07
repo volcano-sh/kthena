@@ -310,11 +310,14 @@ spec:
                                     description: Port defines the network port where
                                       metrics are exposed by the pods (e.g., 8000).
                                     format: int32
+                                    maximum: 65535
+                                    minimum: 1
                                     type: integer
                                   uri:
                                     default: /metrics
                                     description: Uri defines the HTTP path where metrics
                                       are exposed (e.g., "/metrics").
+                                    pattern: ^/
                                     type: string
                                 type: object
                               prometheus:
@@ -591,11 +594,14 @@ spec:
                                           where metrics are exposed by the pods (e.g.,
                                           8000).
                                         format: int32
+                                        maximum: 65535
+                                        minimum: 1
                                         type: integer
                                       uri:
                                         default: /metrics
                                         description: Uri defines the HTTP path where
                                           metrics are exposed (e.g., "/metrics").
+                                        pattern: ^/
                                         type: string
                                     type: object
                                   prometheus:
@@ -793,11 +799,14 @@ spec:
                                   description: Port defines the network port where
                                     metrics are exposed by the pods (e.g., 8000).
                                   format: int32
+                                  maximum: 65535
+                                  minimum: 1
                                   type: integer
                                 uri:
                                   default: /metrics
                                   description: Uri defines the HTTP path where metrics
                                     are exposed (e.g., "/metrics").
+                                  pattern: ^/
                                   type: string
                               type: object
                             prometheus:
