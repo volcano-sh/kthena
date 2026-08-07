@@ -1469,6 +1469,12 @@ func (s *store) selectDestination(targets []*aiv1alpha1.TargetModel) (*aiv1alpha
 }
 
 func toWeightedSlice(targets []*aiv1alpha1.TargetModel) ([]uint32, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no target models specified")
+	}
+	if targets[0] == nil {
+		return nil, fmt.Errorf("target model cannot be nil")
+	}
 	var isWeighted bool
 	if targets[0].Weight != nil {
 		isWeighted = true
@@ -1477,6 +1483,9 @@ func toWeightedSlice(targets []*aiv1alpha1.TargetModel) ([]uint32, error) {
 	res := make([]uint32, len(targets))
 
 	for i, target := range targets {
+		if target == nil {
+			return nil, fmt.Errorf("target model cannot be nil")
+		}
 		if (isWeighted && target.Weight == nil) || (!isWeighted && target.Weight != nil) {
 			return nil, fmt.Errorf("the weight field in targetModel must be either fully specified or not specified")
 		}
