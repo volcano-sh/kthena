@@ -213,9 +213,9 @@ docker-buildx: ## Build and push docker image for cross-platform support
 ##@ Dependencies
 
 ## Location to install dependencies to
-LOCALBIN ?= $(shell pwd)/bin
+LOCALBIN ?= bin
 $(LOCALBIN):
-	mkdir -p $(LOCALBIN)
+	mkdir -p "$(LOCALBIN)"
 
 ## Tool Binaries
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
@@ -286,9 +286,9 @@ define go-install-tool
 set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
-rm -f $(1) || true ;\
-GOBIN=$(LOCALBIN) go install $${package} ;\
-mv $(1) $(1)-$(3) ;\
+rm -f "$(1)" || true ;\
+GOBIN="$(abspath $(LOCALBIN))" go install $${package} ;\
+mv "$(1)" "$(1)-$(3)" ;\
 } ;\
-ln -sf $(1)-$(3) $(1)
+ln -sf "$(notdir $(1)-$(3))" "$(1)"
 endef
