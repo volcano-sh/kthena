@@ -199,17 +199,9 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		}
 		if rule.ModelMatch != nil {
 			for key, sm := range rule.ModelMatch.Headers {
-				if sm != nil && sm.Regex != nil {
-					if _, err := regexp.Compile(*sm.Regex); err != nil {
-						allErrs = append(allErrs, field.Invalid(ruleField.Child("modelMatch").Child("headers").Key(key).Child("regex"), *sm.Regex, err.Error()))
-					}
-				}
+				allErrs = append(allErrs, validateStringMatch(sm, ruleField.Child("modelMatch").Child("headers").Key(key))...)
 			}
-			if rule.ModelMatch.Uri != nil && rule.ModelMatch.Uri.Regex != nil {
-				if _, err := regexp.Compile(*rule.ModelMatch.Uri.Regex); err != nil {
-					allErrs = append(allErrs, field.Invalid(ruleField.Child("modelMatch").Child("uri").Child("regex"), *rule.ModelMatch.Uri.Regex, err.Error()))
-				}
-			}
+			allErrs = append(allErrs, validateStringMatch(rule.ModelMatch.Uri, ruleField.Child("modelMatch").Child("uri"))...)
 		}
 	}
 
@@ -221,6 +213,34 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		return false, fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
 	}
 	return true, ""
+}
+
+func validateStringMatch(sm *networkingv1alpha1.StringMatch, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	if sm == nil {
+		return allErrs
+	}
+
+	var matchTypes []string
+	if sm.Exact != nil {
+		matchTypes = append(matchTypes, "exact")
+	}
+	if sm.Prefix != nil {
+		matchTypes = append(matchTypes, "prefix")
+	}
+	if sm.Regex != nil {
+		matchTypes = append(matchTypes, "regex")
+	}
+	if len(matchTypes) > 1 {
+		allErrs = append(allErrs, field.Invalid(fldPath, strings.Join(matchTypes, ","), "only one of exact, prefix, or regex may be set"))
+	}
+
+	if sm.Regex != nil {
+		if _, err := regexp.Compile(*sm.Regex); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("regex"), *sm.Regex, err.Error()))
+		}
+	}
+	return allErrs
 }
 
 // validateModelServer validates the ModelServer resource
