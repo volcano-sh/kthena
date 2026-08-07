@@ -276,3 +276,52 @@ func TestTokenRateLimiter_InputAndOutputErrors(t *testing.T) {
 		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
 	}
 }
+
+func TestTokenRateLimiter_PreserveStateOnReconciliation(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model-reconciliation"
+	prompt := "hello world" // 3 tokens
+	tokens := uint32(5)
+	unit := networkingv1alpha1.Hour // Use Hour so it doesn't refill during the test
+
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &tokens,
+		Unit:               unit,
+	})
+
+	// 1. Consume all tokens
+	err := rl.RateLimit(model, prompt) // consumes ~3 tokens
+	if err != nil {
+		t.Fatalf("first request should be allowed: %v", err)
+	}
+
+	err = rl.RateLimit(model, prompt) // tries to consume ~3 more tokens, but only ~2 left -> should block
+	if err == nil {
+		t.Fatalf("second request should be blocked due to rate limit")
+	}
+
+	// 2. Simulate reconciliation with the EXACT SAME config
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &tokens,
+		Unit:               unit,
+	})
+
+	// 3. Request should STILL be blocked because state was preserved!
+	err = rl.RateLimit(model, prompt)
+	if err == nil {
+		t.Fatalf("BUG REPRODUCED: request was allowed after reconciliation despite quota being exhausted!")
+	}
+
+	// 4. Simulate reconciliation with a CHANGED config
+	newTokens := uint32(100)
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &newTokens,
+		Unit:               unit,
+	})
+
+	// 5. Request should now be allowed because the config changed and limiter was recreated
+	err = rl.RateLimit(model, prompt)
+	if err != nil {
+		t.Fatalf("request should be allowed after config changed, got: %v", err)
+	}
+}
