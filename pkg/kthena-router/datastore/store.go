@@ -230,6 +230,9 @@ type Store interface {
 	// the given pod. Must be called once the response is received (or the request fails).
 	DecrPodOnFlightRequests(podName types.NamespacedName)
 
+	// RecordPodProxyResult records a proxy outcome: 5xx increments the counter, success resets it
+	RecordPodProxyResult(podName types.NamespacedName, is5xxFailure bool)
+
 	// GetTokenCount returns the token count for a user and model
 	GetTokenCount(userId, modelName string) (float64, error)
 	// UpdateTokenCount updates token usage for a user and model
@@ -309,6 +312,9 @@ type PodInfo struct {
 	// When a Redis-backed OnFlightCounter is configured on the store this field is also
 	// kept in sync with the global Redis counter so it reflects cross-router traffic.
 	onFlightRequestNum atomic.Int64
+
+	// consecutive5xxFailures counts consecutive 5xx proxy outcomes for this pod
+	consecutive5xxFailures atomic.Int64
 
 	mutex sync.RWMutex // Protects concurrent access to Pod, engine, metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
@@ -838,6 +844,21 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 		}
 	}
 	podInfo.DecrOnFlightRequests()
+}
+
+// RecordPodProxyResult records a proxy outcome; no-op if the pod is not tracked
+func (s *store) RecordPodProxyResult(podName types.NamespacedName, is5xxFailure bool) {
+	value, ok := s.pods.Load(podName)
+	if !ok {
+		klog.V(4).Infof("RecordPodProxyResult: pod %s not found in store", podName)
+		return
+	}
+	podInfo := value.(*PodInfo)
+	if is5xxFailure {
+		podInfo.IncrConsecutive5xxFailures()
+	} else {
+		podInfo.ResetConsecutive5xxFailures()
+	}
 }
 
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
@@ -1876,6 +1897,21 @@ func (p *PodInfo) SetOnFlightRequestNum(v int64) {
 // by this router instance (or globally, if a Redis counter is configured).
 func (p *PodInfo) GetOnFlightRequestNum() int64 {
 	return p.onFlightRequestNum.Load()
+}
+
+// IncrConsecutive5xxFailures atomically increments the consecutive-5xx failure counter.
+func (p *PodInfo) IncrConsecutive5xxFailures() int64 {
+	return p.consecutive5xxFailures.Add(1)
+}
+
+// ResetConsecutive5xxFailures atomically resets the consecutive-5xx failure counter.
+func (p *PodInfo) ResetConsecutive5xxFailures() {
+	p.consecutive5xxFailures.Store(0)
+}
+
+// GetConsecutive5xxFailures returns the current consecutive-5xx failure count.
+func (p *PodInfo) GetConsecutive5xxFailures() int64 {
+	return p.consecutive5xxFailures.Load()
 }
 
 // GetTPOT returns the time per output token
