@@ -64,12 +64,12 @@ func TestTokenRateLimiter_Global(t *testing.T) {
 
 	// Should allow multiple requests within limit
 	for i := 0; i < 3; i++ {
-		err := rl.RateLimit(model, prompt)
+		err := rl.RateLimit(model, prompt, 0)
 		assert.NoError(t, err, "Request %d should be allowed", i)
 	}
 
 	// Should be rate limited after exceeding limit
-	err = rl.RateLimit(model, prompt)
+	err = rl.RateLimit(model, prompt, 0)
 	assert.Error(t, err, "Should be rate limited after exceeding limit")
 	assert.IsType(t, &InputRateLimitExceededError{}, err)
 }
@@ -108,18 +108,18 @@ func TestTokenRateLimiter_LocalVsGlobal(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both should allow initial requests
-	err = rl.RateLimit(localModel, prompt)
+	err = rl.RateLimit(localModel, prompt, 0)
 	assert.NoError(t, err)
 
-	err = rl.RateLimit(globalModel, prompt)
+	err = rl.RateLimit(globalModel, prompt, 0)
 	assert.NoError(t, err)
 
 	// Use up local tokens
-	err = rl.RateLimit(localModel, prompt)
+	err = rl.RateLimit(localModel, prompt, 0)
 	assert.Error(t, err, "Local model should be rate limited")
 
 	// Use up global tokens
-	err = rl.RateLimit(globalModel, prompt)
+	err = rl.RateLimit(globalModel, prompt, 0)
 	assert.Error(t, err, "Global model should be rate limited")
 }
 
@@ -179,7 +179,7 @@ func TestTokenRateLimiter_GlobalDeleteLimiter(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify it works
-	err = rl.RateLimit(model, "test")
+	err = rl.RateLimit(model, "test", 0)
 	assert.NoError(t, err)
 
 	// Delete the limiter
@@ -187,7 +187,7 @@ func TestTokenRateLimiter_GlobalDeleteLimiter(t *testing.T) {
 
 	// Should now allow unlimited requests (no limiter configured)
 	for i := 0; i < 10; i++ {
-		err = rl.RateLimit(model, "test")
+		err = rl.RateLimit(model, "test", 0)
 		assert.NoError(t, err, "Request %d should be allowed after deletion", i)
 	}
 }

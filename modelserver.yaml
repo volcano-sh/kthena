@@ -1,0 +1,21 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: qwen-tokenizer-test
+  namespace: ntg
+spec:
+  backend:
+    name: qwen-backend
+    type: vLLM
+    modelURI: hf://Qwen/Qwen2.5-7B-Instruct
+    replicas: 0
+    workers:
+      - image: ghcr.io/volcano-sh/runtime:latest
+        pods: 1
+        type: server
+        config:
+          served-model-name: qwen
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi

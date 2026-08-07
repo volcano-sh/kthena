@@ -74,65 +74,12 @@ func TestSimpleEstimateTokenizer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tokenizer.CalculateTokenNum(tt.prompt)
+			_, got, err := tokenizer.Encode("", tt.prompt)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, tt.want, got)
-			}
-		})
-	}
-}
-
-// TestTickToken verifies that TickToken produces reasonable token counts
-// using the cl100k_ base encoding via the offline BPE loader
-// will not require network access
-func TestTickToken(t *testing.T) {
-	tokenizer := &TickToken{}
-
-	tests := []struct {
-		name    string
-		prompt  string
-		wantMin int
-		wantMax int
-		wantErr bool
-	}{
-		{
-			name:    "empty string returns 0 tokens",
-			prompt:  "",
-			wantMin: 0,
-			wantMax: 0,
-		},
-		{
-			name:    "simple english word",
-			prompt:  "hello",
-			wantMin: 1,
-			wantMax: 3,
-		},
-		{
-			name:    "sentence produces reasonable token count",
-			prompt:  "The quick brown fox",
-			wantMin: 3,
-			wantMax: 8,
-		},
-		{
-			name:    "longer prompt produces more tokens than shorter",
-			prompt:  "This is a much longer sentence that should produce more tokens than a single word",
-			wantMin: 10,
-			wantMax: 30,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := tokenizer.CalculateTokenNum(tt.prompt)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				assert.GreaterOrEqual(t, got, tt.wantMin)
-				assert.LessOrEqual(t, got, tt.wantMax)
 			}
 		})
 	}

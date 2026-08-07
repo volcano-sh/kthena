@@ -132,8 +132,9 @@ type EventData struct {
 	Pod       types.NamespacedName
 	Gateway   types.NamespacedName
 
-	ModelName  string
-	ModelRoute *aiv1alpha1.ModelRoute
+	ModelName   string
+	ModelRoute  *aiv1alpha1.ModelRoute
+	ModelServer *aiv1alpha1.ModelServer
 }
 
 // CallbackFunc is the type of function that can be registered as a callback
@@ -183,6 +184,8 @@ type Store interface {
 	// Get modelServer
 	GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer
 	GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error)
+	// HasModelServerForModel checks if any active ModelServer in the store serves the given model.
+	HasModelServerForModel(modelName string) bool
 
 	// Refresh Store and ModelServer when add a new pod or update a pod
 	AddOrUpdatePod(pod *corev1.Pod, modelServer []*aiv1alpha1.ModelServer) error
@@ -862,6 +865,10 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
+	s.triggerCallbacks("ModelServer", EventData{
+		EventType:   EventUpdate,
+		ModelServer: ms,
+	})
 	return nil
 }
 
@@ -885,7 +892,26 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 		}
 	}
 
+	s.triggerCallbacks("ModelServer", EventData{EventType: EventDelete, ModelServer: modelServerObj.modelServer})
 	return nil
+}
+
+func (s *store) HasModelServerForModel(modelName string) bool {
+	if modelName == "" {
+		return false
+	}
+	var found bool
+	s.modelServer.Range(func(key, value any) bool {
+		if msObj, ok := value.(*modelServer); ok {
+			ms := msObj.getModelServer()
+			if ms != nil && ms.Spec.Model != nil && *ms.Spec.Model == modelName {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func (s *store) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer {

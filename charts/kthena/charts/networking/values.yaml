@@ -96,3 +96,38 @@ kthenaRouter:
   # kubeAPIBurst is the burst to use while talking with kubernetes apiserver
   # If 0 or not specified, uses default value (10)
   kubeAPIBurst: 0
+  # tokenizer configuration for token counting
+  tokenizer:
+    # -- Deployment mode: "sidecar" or "independent".
+    deployment: sidecar
+    image:
+      # -- Image repository for the tokenizer.
+      repository: ghcr.io/volcano-sh/kthena-tokenizer
+      # -- Image tag for the tokenizer.
+      tag: latest
+      # -- Image pull policy for the tokenizer.
+      pullPolicy: IfNotPresent
+
+
+webhook:
+  enabled: true
+  # replicas is the number of router-webhook instances to run.
+  replicas: 1
+  image:
+    # repository is the container image repository for the router-webhook.
+    repository: ghcr.io/volcano-sh/kthena-router-webhook
+    # tag is the container image tag for the router-webhook.
+    # node: edit by CI. No need to modify manually
+    tag: latest
+    # pullPolicy is the image pull policy for the router-webhook.
+    pullPolicy: IfNotPresent
+    # args are the command line arguments for the router-webhook.
+    args: ["--port=8443"]
+  # resource defines the resource limits and requests for the router-webhook.
+  resource:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
