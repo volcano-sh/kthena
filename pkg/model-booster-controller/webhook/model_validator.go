@@ -19,8 +19,10 @@ package webhook
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
+	"unicode"
 
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
@@ -331,12 +333,12 @@ func pvcModelSourcePath(modelURI string) string {
 // ://, trim surrounding slashes, and prepend /.  path.Clean is applied so that the result
 // is always a canonical path, matching the normalization done in pvcModelSourcePath.
 func cacheVolumeMountPath(cacheURI string) string {
-	const sep = "://"
-	idx := strings.Index(cacheURI, sep)
-	if idx < 0 {
+	u, err := url.ParseRequestURI(cacheURI)
+	if err != nil || u.Scheme == "" {
 		return ""
 	}
-	s := strings.Trim(cacheURI[idx+len(sep):], "/")
+
+	s := strings.Trim(u.Host+u.Path, "/")
 	if s == "" {
 		return ""
 	}
@@ -350,18 +352,13 @@ func validateImageField(image string) error {
 		return nil
 	}
 
-	// Simple validation: check if image contains at least one character and no spaces
+	// Reject empty or whitespace-only values and any whitespace anywhere in the image reference.
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("image cannot be empty or whitespace only")
 	}
 
-	if strings.Contains(image, " ") {
-		return fmt.Errorf("image cannot contain spaces")
-	}
-
-	// Basic format check: should contain at least one character
-	if len(strings.TrimSpace(image)) == 0 {
-		return fmt.Errorf("invalid image format")
+	if strings.IndexFunc(image, unicode.IsSpace) != -1 {
+		return fmt.Errorf("image cannot contain whitespace")
 	}
 
 	return nil

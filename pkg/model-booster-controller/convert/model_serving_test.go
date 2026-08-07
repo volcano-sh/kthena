@@ -97,6 +97,11 @@ func TestGetCachePath(t *testing.T) {
 			input:    "pvc://path/with/multiple/separators",
 			expected: "/path/with/multiple/separators",
 		},
+		{
+			name:     "path containing separator",
+			input:    "pvc://path/with://separator",
+			expected: "/path/with://separator",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -105,6 +110,17 @@ func TestGetCachePath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildCacheVolumeRejectsMalformedCacheURI(t *testing.T) {
+	backend := &workload.ModelBackend{
+		Name:     "backend1",
+		CacheURI: "pvc://",
+	}
+
+	_, err := buildCacheVolume(backend)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid cacheURI")
 }
 
 func TestGetPVCClaimName(t *testing.T) {

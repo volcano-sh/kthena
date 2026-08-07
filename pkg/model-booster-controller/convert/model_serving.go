@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/env"
@@ -441,20 +442,28 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 			},
 		}, nil
 	case strings.HasPrefix(backend.CacheURI, CacheURIPrefixPVC):
+		claimName := GetPVCClaimName(backend.CacheURI)
+		if claimName == "" {
+			return nil, fmt.Errorf("invalid cacheURI %q: must include a PVC claim name", backend.CacheURI)
+		}
 		return &corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: GetPVCClaimName(backend.CacheURI),
+					ClaimName: claimName,
 				},
 			},
 		}, nil
 	case strings.HasPrefix(backend.CacheURI, CacheURIPrefixHostPath):
+		cachePath := GetCachePath(backend.CacheURI)
+		if cachePath == "" {
+			return nil, fmt.Errorf("invalid cacheURI %q: must include a host path", backend.CacheURI)
+		}
 		return &corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
-					Path: GetCachePath(backend.CacheURI),
+					Path: cachePath,
 					Type: ptr.To(corev1.HostPathDirectoryOrCreate),
 				},
 			},
@@ -477,15 +486,23 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 // container and the inference engine containers.  It is NOT the PVC claim name;
 // use GetPVCClaimName for that.
 func GetCachePath(path string) string {
-	if path == "" || !strings.Contains(path, URIPrefixSeparator) {
+	if path == "" {
 		return ""
 	}
-	s := strings.Split(path, URIPrefixSeparator)[1]
-	s = strings.Trim(s, "/")
-	builder := strings.Builder{}
-	builder.WriteString("/")
-	builder.WriteString(s)
-	return builder.String()
+
+	// Parse the URI robustly rather than using manual string splitting
+	u, err := url.ParseRequestURI(path)
+	if err != nil || u.Scheme == "" {
+		return ""
+	}
+
+	// Reconstruct the path after the scheme (e.g. for pvc://my-cache/path -> my-cache/path)
+	s := strings.Trim(u.Host+u.Path, "/")
+	if s == "" {
+		return ""
+	}
+
+	return "/" + s
 }
 
 // GetPVCClaimName extracts the bare PVC name from a "pvc://" cache URI, trimming

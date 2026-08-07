@@ -115,6 +115,44 @@ func TestValidateModel_NoErrors(t *testing.T) {
 	assert.Empty(t, errorMsg)
 }
 
+func TestValidateWorkerImagesRejectsWhitespace(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+	}{
+		{name: "space", image: "example/image:latest "},
+		{name: "tab", image: "example/image:\tlatest"},
+		{name: "newline", image: "example/image:latest\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &registryv1alpha1.ModelBooster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model",
+					Namespace: "default",
+				},
+				Spec: registryv1alpha1.ModelBoosterSpec{
+					Backend: registryv1alpha1.ModelBackend{
+						Name:     "backend1",
+						Type:     registryv1alpha1.ModelBackendTypeVLLM,
+						Replicas: 1,
+						Workers: []registryv1alpha1.ModelWorker{{
+							Type:  registryv1alpha1.ModelWorkerTypeServer,
+							Pods:  1,
+							Image: tt.image,
+						}},
+					},
+				},
+			}
+
+			valid, errorMsg := (&ModelValidator{}).validateModel(model)
+			assert.False(t, valid)
+			assert.Contains(t, errorMsg, "image cannot contain whitespace")
+		})
+	}
+}
+
 func TestValidateEnginePorts(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -599,6 +637,69 @@ func TestCacheVolumeMountPath(t *testing.T) {
 		t.Run(tt.input, func(t *testing.T) {
 			got := cacheVolumeMountPath(tt.input)
 			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestValidateImageField(t *testing.T) {
+	tests := []struct {
+		name    string
+		image   string
+		wantErr bool
+	}{
+		{
+			name:    "valid image without tag",
+			image:   "nginx",
+			wantErr: false,
+		},
+		{
+			name:    "valid image with tag",
+			image:   "nginx:latest",
+			wantErr: false,
+		},
+		{
+			name:    "valid image with registry",
+			image:   "docker.io/library/nginx:1.19",
+			wantErr: false,
+		},
+		{
+			name:    "empty image",
+			image:   "",
+			wantErr: false, // Optional fields return nil in validateImageField
+		},
+		{
+			name:    "whitespace only",
+			image:   "   ",
+			wantErr: true,
+		},
+		{
+			name:    "image with spaces",
+			image:   "nginx:latest ",
+			wantErr: true,
+		},
+		{
+			name:    "image with internal spaces",
+			image:   "my registry/nginx:latest",
+			wantErr: true,
+		},
+		{
+			name:    "image with tabs",
+			image:   "nginx\t:latest",
+			wantErr: true,
+		},
+		{
+			name:    "image with newline",
+			image:   "nginx\n:latest",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateImageField(tt.image)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateImageField() error = %v, wantErr %v", err, tt.wantErr)
+			}
 		})
 	}
 }
