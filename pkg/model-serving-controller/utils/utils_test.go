@@ -28,6 +28,54 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
+func TestGetParentNameAndOrdinal(t *testing.T) {
+	tests := []struct {
+		name        string
+		groupName   string
+		wantParent  string
+		wantOrdinal int
+	}{
+		{
+			name:        "generated serving group name",
+			groupName:   "vllm-sample-0",
+			wantParent:  "vllm-sample",
+			wantOrdinal: 0,
+		},
+		{
+			name:        "parent name with numeric suffix",
+			groupName:   "model-7b-12",
+			wantParent:  "model-7b",
+			wantOrdinal: 12,
+		},
+		{
+			name:        "missing ordinal separator",
+			groupName:   "vllm-sample",
+			wantParent:  "",
+			wantOrdinal: -1,
+		},
+		{
+			name:        "empty ordinal",
+			groupName:   "vllm-sample-",
+			wantParent:  "",
+			wantOrdinal: -1,
+		},
+		{
+			name:        "empty parent",
+			groupName:   "-1",
+			wantParent:  "",
+			wantOrdinal: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent, ordinal := GetParentNameAndOrdinal(tt.groupName)
+			assert.Equal(t, tt.wantParent, parent)
+			assert.Equal(t, tt.wantOrdinal, ordinal)
+		})
+	}
+}
+
 func TestGenerateEntryPod_WithAnnotations(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
