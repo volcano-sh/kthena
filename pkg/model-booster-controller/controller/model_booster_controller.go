@@ -429,12 +429,7 @@ func (mc *ModelBoosterController) triggerModel(old any, new any) {
 		klog.Error("failed to parse old ModelServing")
 		return
 	}
-	if len(modelServing.OwnerReferences) > 0 {
-		// Find the owner of modelServing and reconcile the owner to change its status
-		if model, err := mc.modelBoosterLister.ModelBoosters(modelServing.Namespace).Get(modelServing.OwnerReferences[0].Name); err == nil {
-			mc.enqueueModelBooster(model)
-		}
-	}
+	mc.enqueueModelBoosterOwner(modelServing)
 }
 
 // unwrapTombstone safely extracts the underlying object from a potential cache.DeletedFinalStateUnknown tombstone.
@@ -461,11 +456,7 @@ func (mc *ModelBoosterController) deleteModelServing(obj any) {
 		return
 	}
 	klog.V(4).Infof("model serving: %s is deleted", klog.KObj(modelServing))
-	if len(modelServing.OwnerReferences) > 0 {
-		if model, err := mc.modelBoosterLister.ModelBoosters(modelServing.Namespace).Get(modelServing.OwnerReferences[0].Name); err == nil {
-			mc.enqueueModelBooster(model)
-		}
-	}
+	mc.enqueueModelBoosterOwner(modelServing)
 }
 
 // deleteModelRoute is called when a ModelRoute is deleted. It will reconcile the ModelBooster. Recreate model route.
@@ -481,11 +472,7 @@ func (mc *ModelBoosterController) deleteModelRoute(obj any) {
 		return
 	}
 	klog.V(4).Infof("model route: %s is deleted", klog.KObj(modelRoute))
-	if len(modelRoute.OwnerReferences) > 0 {
-		if model, err := mc.modelBoosterLister.ModelBoosters(modelRoute.Namespace).Get(modelRoute.OwnerReferences[0].Name); err == nil {
-			mc.enqueueModelBooster(model)
-		}
-	}
+	mc.enqueueModelBoosterOwner(modelRoute)
 }
 
 // deleteModelServer is called when a ModelServer is deleted. It will reconcile the ModelBooster. Recreate model server.
@@ -501,9 +488,34 @@ func (mc *ModelBoosterController) deleteModelServer(obj any) {
 		return
 	}
 	klog.V(4).Infof("model server: %s is deleted", klog.KObj(modelServer))
-	if len(modelServer.OwnerReferences) > 0 {
-		if model, err := mc.modelBoosterLister.ModelBoosters(modelServer.Namespace).Get(modelServer.OwnerReferences[0].Name); err == nil {
-			mc.enqueueModelBooster(model)
+	mc.enqueueModelBoosterOwner(modelServer)
+}
+
+func (mc *ModelBoosterController) enqueueModelBoosterOwner(obj metav1.Object) {
+	ownerName, ok := modelBoosterOwnerName(obj)
+	if !ok {
+		return
+	}
+	model, err := mc.modelBoosterLister.ModelBoosters(obj.GetNamespace()).Get(ownerName)
+	if err != nil {
+		klog.V(4).Infof("failed to get ModelBooster owner %s/%s: %v", obj.GetNamespace(), ownerName, err)
+		return
+	}
+	mc.enqueueModelBooster(model)
+}
+
+func modelBoosterOwnerName(obj metav1.Object) (string, bool) {
+	var modelOwnerName string
+	for _, ownerRef := range obj.GetOwnerReferences() {
+		if ownerRef.APIVersion != workload.GroupVersion.String() || ownerRef.Kind != workload.ModelKind.Kind || ownerRef.Name == "" {
+			continue
+		}
+		if ownerRef.Controller != nil && *ownerRef.Controller {
+			return ownerRef.Name, true
+		}
+		if modelOwnerName == "" {
+			modelOwnerName = ownerRef.Name
 		}
 	}
+	return modelOwnerName, modelOwnerName != ""
 }
