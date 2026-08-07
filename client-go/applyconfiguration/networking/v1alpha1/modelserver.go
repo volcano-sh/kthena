@@ -19,7 +19,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
@@ -30,8 +29,8 @@ import (
 type ModelServerApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
-	Spec                             *ModelServerSpecApplyConfiguration    `json:"spec,omitempty"`
-	Status                           *networkingv1alpha1.ModelServerStatus `json:"status,omitempty"`
+	Spec                             *ModelServerSpecApplyConfiguration   `json:"spec,omitempty"`
+	Status                           *ModelServerStatusApplyConfiguration `json:"status,omitempty"`
 }
 
 // ModelServer constructs a declarative configuration of the ModelServer type for use with
@@ -215,8 +214,8 @@ func (b *ModelServerApplyConfiguration) WithSpec(value *ModelServerSpecApplyConf
 // WithStatus sets the Status field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Status field is set to the value of the last call.
-func (b *ModelServerApplyConfiguration) WithStatus(value networkingv1alpha1.ModelServerStatus) *ModelServerApplyConfiguration {
-	b.Status = &value
+func (b *ModelServerApplyConfiguration) WithStatus(value *ModelServerStatusApplyConfiguration) *ModelServerApplyConfiguration {
+	b.Status = value
 	return b
 }
 

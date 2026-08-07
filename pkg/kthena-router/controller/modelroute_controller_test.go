@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
@@ -36,7 +37,7 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller, err := NewModelRouteController(kthenaInformerFactory, store)
+	controller, err := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
 	require.NoError(t, err)
 
 	stop := make(chan struct{})
@@ -148,7 +149,7 @@ func TestModelRouteController_ErrorHandling(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller, err := NewModelRouteController(kthenaInformerFactory, store)
+	controller, err := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
 	require.NoError(t, err)
 
 	stop := make(chan struct{})
@@ -174,7 +175,7 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller, err := NewModelRouteController(kthenaInformerFactory, store)
+	controller, err := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
 	require.NoError(t, err)
 
 	stop := make(chan struct{})
@@ -195,5 +196,103 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 		controller.workqueue.Add(12345)
 		result := controller.processNextWorkItem()
 		assert.True(t, result)
+	})
+}
+
+// TestModelRouteController_StatusUpdate verifies that syncHandler sets
+// the Ready condition on the ModelRoute status.
+func TestModelRouteController_StatusUpdate(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := datastore.New()
+
+	controller, err := NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	kthenaInformerFactory.Start(stop)
+
+	// sync of a newly created ModelRoute writes the Ready condition
+	t.Run("SetsReadyConditionAfterSync", func(t *testing.T) {
+		mr := &aiv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "test-status-route",
+			},
+			Spec: aiv1alpha1.ModelRouteSpec{
+				ModelName: "status-test-model",
+				Rules: []*aiv1alpha1.Rule{
+					{
+						Name: "rule-1",
+						TargetModels: []*aiv1alpha1.TargetModel{
+							{ModelServerName: "test-server"},
+						},
+					},
+				},
+			},
+		}
+
+		_, err := kthenaClient.NetworkingV1alpha1().ModelRoutes("default").Create(
+			context.Background(), mr, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		waitForCacheSync(t, 5*time.Second, controller.modelRouteSynced)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelRouteLister.ModelRoutes("default").Get("test-status-route")
+			return err == nil
+		})
+
+		err = controller.syncHandler("default/test-status-route")
+		assert.NoError(t, err)
+
+		// verify status was written to the fake API server
+		updated, err := kthenaClient.NetworkingV1alpha1().ModelRoutes("default").Get(
+			context.Background(), "test-status-route", metav1.GetOptions{})
+		assert.NoError(t, err)
+
+		cond := meta.FindStatusCondition(updated.Status.Conditions, string(aiv1alpha1.ModelRouteConditionReady))
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		assert.Equal(t, aiv1alpha1.ReasonRouteRegistered, cond.Reason)
+	})
+
+	// sync skips status update when already up-to-date
+	t.Run("SkipsUpdateWhenAlreadyReady", func(t *testing.T) {
+		mr := &aiv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "test-status-skip",
+			},
+			Spec: aiv1alpha1.ModelRouteSpec{
+				ModelName: "skip-test-model",
+				Rules: []*aiv1alpha1.Rule{
+					{
+						Name: "rule-1",
+						TargetModels: []*aiv1alpha1.TargetModel{
+							{ModelServerName: "test-server"},
+						},
+					},
+				},
+			},
+		}
+
+		_, err := kthenaClient.NetworkingV1alpha1().ModelRoutes("default").Create(
+			context.Background(), mr, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		waitForCacheSync(t, 5*time.Second, controller.modelRouteSynced)
+		waitForObjectInCache(t, 2*time.Second, func() bool {
+			_, err := controller.modelRouteLister.ModelRoutes("default").Get("test-status-skip")
+			return err == nil
+		})
+
+		// first sync: sets status
+		err = controller.syncHandler("default/test-status-skip")
+		assert.NoError(t, err)
+
+		// second sync: should skip (already ready) and not error
+		err = controller.syncHandler("default/test-status-skip")
+		assert.NoError(t, err)
 	})
 }

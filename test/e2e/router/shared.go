@@ -49,6 +49,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/util/retry"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -961,12 +962,23 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Update ModelRoute to disable input token limit
-		createdModelRoute.Spec.RateLimit.InputTokensPerUnit = nil
-		outputLimit := uint32(outputTokenLimit)
-		createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
+		// Update ModelRoute to disable input token limit.
+		// Retry on conflict: the router controller writes ModelRoute status
+		// asynchronously, which bumps resourceVersion and can conflict with this update.
+		var updatedModelRoute *networkingv1alpha1.ModelRoute
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest, getErr := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			if getErr != nil {
+				return getErr
+			}
+			latest.Spec.RateLimit.InputTokensPerUnit = nil
+			outputLimit := uint32(outputTokenLimit)
+			latest.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
 
-		updatedModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
+			var updateErr error
+			updatedModelRoute, updateErr = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, latest, metav1.UpdateOptions{})
+			return updateErr
+		})
 		require.NoError(t, err, "Failed to update ModelRoute")
 
 		// Wait for update to propagate

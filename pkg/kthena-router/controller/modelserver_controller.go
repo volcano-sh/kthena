@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,9 +34,11 @@ import (
 	"k8s.io/client-go/informers"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	kthenaclient "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/networking/v1alpha1"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -50,6 +54,15 @@ const (
 	ResourceTypePod         ResourceType = "Pod"
 )
 
+// Condition reasons for ModelServer status.
+const (
+	ReasonNoReadyPods       = "NoReadyPods"
+	ReasonPodsReady         = "PodsReady"
+	ReasonNoMatchedPods     = "NoMatchedPods"
+	ReasonPodsNotFullyReady = "PodsNotFullyReady"
+	ReasonAllPodsReady      = "AllPodsReady"
+)
+
 // QueueItem represents an item in the work queue
 type QueueItem struct {
 	ResourceType ResourceType
@@ -57,6 +70,7 @@ type QueueItem struct {
 }
 
 type ModelServerController struct {
+	kthenaClient      kthenaclient.Interface
 	modelServerLister listerv1alpha1.ModelServerLister
 	podLister         corelisters.PodLister
 
@@ -73,6 +87,7 @@ type ModelServerController struct {
 }
 
 func NewModelServerController(
+	kthenaClient kthenaclient.Interface,
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
@@ -81,6 +96,7 @@ func NewModelServerController(
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 
 	controller := &ModelServerController{
+		kthenaClient:      kthenaClient,
 		modelServerLister: modelServerInformer.Lister(),
 		podLister:         podInformer.Lister(),
 		modelServerSynced: modelServerInformer.Informer().HasSynced,
@@ -214,7 +230,14 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		}
 	}
 
-	_ = c.store.AddOrUpdateModelServer(ms, pods)
+	if err := c.store.AddOrUpdateModelServer(ms, pods); err != nil {
+		return err
+	}
+
+	if err := c.updateModelServerStatus(ms, podList, pods); err != nil {
+		klog.Errorf("Failed to update ModelServer status for %s/%s: %v", ms.Namespace, ms.Name, err)
+		return err
+	}
 
 	// Bind every ready pod selected by this ModelServer. Pods that already have
 	// an entry in the store get the binding appended so their runtime metrics and
@@ -245,6 +268,78 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 	return nil
 }
 
+func (c *ModelServerController) updateModelServerStatus(ms *aiv1alpha1.ModelServer, podList []*corev1.Pod, readyPods sets.Set[types.NamespacedName]) error {
+	matchedReplicas := int32(len(podList))
+	readyReplicas := int32(readyPods.Len())
+
+	// Ready condition (at least one pod ready)
+	readyStatus := metav1.ConditionFalse
+	readyReason := ReasonNoReadyPods
+	readyMessage := "No ready pods match workloadSelector"
+	if readyReplicas > 0 {
+		readyStatus = metav1.ConditionTrue
+		readyReason = ReasonPodsReady
+		readyMessage = fmt.Sprintf("%d ready pods matched", readyReplicas)
+	}
+
+	// AllPodsReady condition (every matched pod ready)
+	allPodsReadyStatus := metav1.ConditionFalse
+	allPodsReadyReason := ReasonNoMatchedPods
+	allPodsReadyMessage := "No pods match workloadSelector"
+	if matchedReplicas > 0 {
+		allPodsReadyReason = ReasonPodsNotFullyReady
+		allPodsReadyMessage = fmt.Sprintf("%d of %d matched pods are ready", readyReplicas, matchedReplicas)
+		if readyReplicas == matchedReplicas {
+			allPodsReadyStatus = metav1.ConditionTrue
+			allPodsReadyReason = ReasonAllPodsReady
+			allPodsReadyMessage = fmt.Sprintf("All %d matched pods are ready", matchedReplicas)
+		}
+	}
+
+	// Check if status is already up-to-date
+	if ms.Status.ObservedGeneration == ms.Generation &&
+		ms.Status.MatchedReplicas == matchedReplicas &&
+		ms.Status.ReadyReplicas == readyReplicas {
+		readyCond := meta.FindStatusCondition(ms.Status.Conditions, string(aiv1alpha1.ModelServerConditionReady))
+		allReadyCond := meta.FindStatusCondition(ms.Status.Conditions, string(aiv1alpha1.ModelServerConditionAllPodsReady))
+		if readyCond != nil && readyCond.Status == readyStatus && readyCond.Reason == readyReason &&
+			allReadyCond != nil && allReadyCond.Status == allPodsReadyStatus && allReadyCond.Reason == allPodsReadyReason {
+			return nil
+		}
+	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get latest version from API server to avoid conflicts
+		ctx := context.Background()
+		latest, err := c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		msCopy := latest.DeepCopy()
+		msCopy.Status.ObservedGeneration = latest.Generation
+		msCopy.Status.MatchedReplicas = matchedReplicas
+		msCopy.Status.ReadyReplicas = readyReplicas
+
+		meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+			Type:    string(aiv1alpha1.ModelServerConditionReady),
+			Status:  readyStatus,
+			Reason:  readyReason,
+			Message: readyMessage,
+		})
+
+		meta.SetStatusCondition(&msCopy.Status.Conditions, metav1.Condition{
+			Type:    string(aiv1alpha1.ModelServerConditionAllPodsReady),
+			Status:  allPodsReadyStatus,
+			Reason:  allPodsReadyReason,
+			Message: allPodsReadyMessage,
+		})
+
+		_, err = c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).UpdateStatus(ctx, msCopy, metav1.UpdateOptions{})
+		return err
+	})
+}
+
 func (c *ModelServerController) syncPodHandler(key string) error {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -255,6 +350,9 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 	pod, err := c.podLister.Pods(namespace).Get(name)
 	if errors.IsNotFound(err) {
 		_ = c.store.DeletePod(types.NamespacedName{Namespace: namespace, Name: name})
+		// When a pod is deleted, enqueue all ModelServers in the namespace
+		// to refresh their status (we no longer have the pod to check labels).
+		c.enqueueModelServersInNamespace(namespace)
 		return nil
 	}
 	if err != nil {
@@ -263,27 +361,25 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 
 	if !isPodReady(pod) {
 		_ = c.store.DeletePod(types.NamespacedName{Namespace: namespace, Name: name})
+		// Pod became not ready: enqueue matching ModelServers to refresh status
+		c.enqueueMatchingModelServers(pod)
 		return nil
 	}
 
-	return c.addOrUpdatePod(pod)
+	if err := c.addOrUpdatePod(pod); err != nil {
+		return err
+	}
+	// Pod became ready: enqueue matching ModelServers to refresh status
+	c.enqueueMatchingModelServers(pod)
+	return nil
 }
 
 // addOrUpdatePod finds all ModelServers that match the given pod
 // and adds or updates the pod-server binding in the data store
 func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
-	modelServers, err := c.modelServerLister.ModelServers(pod.Namespace).List(labels.Everything())
+	servers, err := c.getMatchingModelServers(pod)
 	if err != nil {
-		return fmt.Errorf("failed to list ModelServers for pod %s/%s: %v", pod.Namespace, pod.Name, err)
-	}
-
-	servers := []*aiv1alpha1.ModelServer{}
-	for _, item := range modelServers {
-		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: item.Spec.WorkloadSelector.MatchLabels})
-		if err != nil || !selector.Matches(labels.Set(pod.Labels)) {
-			continue
-		}
-		servers = append(servers, item)
+		return err
 	}
 
 	if len(servers) > 0 {
@@ -293,6 +389,51 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 	}
 
 	return nil
+}
+
+// getMatchingModelServers returns all ModelServers in the same namespace whose
+// workloadSelector matches the pod's labels.
+func (c *ModelServerController) getMatchingModelServers(pod *corev1.Pod) ([]*aiv1alpha1.ModelServer, error) {
+	modelServers, err := c.modelServerLister.ModelServers(pod.Namespace).List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ModelServers for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+	}
+
+	var matching []*aiv1alpha1.ModelServer
+	for _, item := range modelServers {
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: item.Spec.WorkloadSelector.MatchLabels})
+		if err != nil || !selector.Matches(labels.Set(pod.Labels)) {
+			continue
+		}
+		matching = append(matching, item)
+	}
+	return matching, nil
+}
+
+// enqueueMatchingModelServers enqueues all ModelServers whose workloadSelector
+// matches the pod, triggering a status re-evaluation.
+func (c *ModelServerController) enqueueMatchingModelServers(pod *corev1.Pod) {
+	matching, err := c.getMatchingModelServers(pod)
+	if err != nil {
+		klog.V(4).Infof("failed to find matching ModelServers for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return
+	}
+	for _, ms := range matching {
+		c.enqueueModelServer(ms)
+	}
+}
+
+// enqueueModelServersInNamespace enqueues all ModelServers in the given namespace.
+// Used when a pod is deleted and we no longer have pod labels to narrow the search.
+func (c *ModelServerController) enqueueModelServersInNamespace(namespace string) {
+	msList, err := c.modelServerLister.ModelServers(namespace).List(labels.Everything())
+	if err != nil {
+		klog.V(4).Infof("failed to list ModelServers in namespace %s: %v", namespace, err)
+		return
+	}
+	for _, ms := range msList {
+		c.enqueueModelServer(ms)
+	}
 }
 
 func (c *ModelServerController) enqueueModelServer(obj interface{}) {

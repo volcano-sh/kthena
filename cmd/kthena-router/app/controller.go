@@ -77,11 +77,11 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := kthenaInformers.NewSharedInformerFactory(kthenaClient, 0)
-	modelRouteController, err := controller.NewModelRouteController(kthenaInformerFactory, store)
+	modelRouteController, err := controller.NewModelRouteController(kthenaClient, kthenaInformerFactory, store)
 	if err != nil {
 		klog.Fatalf("Error creating model route controller: %s", err.Error())
 	}
-	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+	modelServerController, err := controller.NewModelServerController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
 	if err != nil {
 		klog.Fatalf("Error creating model server controller: %s", err.Error())
 	}
