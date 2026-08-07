@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,7 +28,9 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 )
 
@@ -119,6 +122,48 @@ func TestReconcile(t *testing.T) {
 		}
 		return len(modelList.Items) == 0
 	}))
+}
+
+func TestReconcileRecreatesModelRouteWhenModelRequestNameChanges(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	kubeClient := fake.NewClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller := NewModelBoosterController(kubeClient, kthenaClient)
+	go controller.Run(ctx, 1)
+	assert.True(t, waitForControllerCacheSync(controller), "controller informers did not sync")
+
+	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
+	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	assert.True(t, waitForCondition(func() bool {
+		route, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+		return err == nil && route.Spec.ModelName == model.Name
+	}))
+
+	var deletes, creates atomic.Int32
+	kthenaClient.PrependReactor("delete", "modelroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deletes.Add(1)
+		return false, nil, nil
+	})
+	kthenaClient.PrependReactor("create", "modelroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		creates.Add(1)
+		return false, nil, nil
+	})
+
+	createdModel.Spec.Name = "deepseek-v3-request"
+	createdModel.Generation++
+	_, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(createdModel.Namespace).Update(ctx, createdModel, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+
+	assert.True(t, waitForCondition(func() bool {
+		route, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+		return err == nil && route.Spec.ModelName == createdModel.Spec.Name
+	}))
+	assert.Equal(t, int32(1), deletes.Load())
+	assert.Equal(t, int32(1), creates.Load())
 }
 
 func TestReconcile_ReturnsError(t *testing.T) {

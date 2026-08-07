@@ -40,12 +40,21 @@ func BuildModelRoute(model *workload.ModelBooster) *networking.ModelRoute {
 			},
 		},
 		Spec: networking.ModelRouteSpec{
-			ModelName: model.Name,
+			ModelName: modelRequestName(model),
 			Rules:     rules,
 		},
 	}
 	route.Labels = utils.GetModelControllerLabels(model, "", icUtils.Revision(route.Spec))
 	return route
+}
+
+// modelRequestName returns the client-facing model name used as the ModelRoute lookup key.
+// ModelBooster metadata.name remains the Kubernetes identity for generated resources.
+func modelRequestName(model *workload.ModelBooster) string {
+	if model.Spec.Name != "" {
+		return model.Spec.Name
+	}
+	return model.Name
 }
 
 // getRules generates routing rules based on the model's backend.

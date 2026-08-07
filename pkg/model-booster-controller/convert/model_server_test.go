@@ -85,6 +85,17 @@ func TestBuildModelServerCustomPort(t *testing.T) {
 	assert.Equal(t, int32(9000), servers[0].Spec.WorkloadPort.Port)
 }
 
+func TestBuildModelServerExplicitServedModelNameOverridesModelBoosterSpecName(t *testing.T) {
+	model := loadYaml[registry.ModelBooster](t, "testdata/input/model.yaml")
+	model.Spec.Name = "client-facing-model-name"
+
+	modelServers, err := BuildModelServer(model)
+	assert.NoError(t, err)
+	assert.Len(t, modelServers, 1)
+	assert.NotNil(t, modelServers[0].Spec.Model)
+	assert.Equal(t, "deepseek-v3", *modelServers[0].Spec.Model)
+}
+
 func mooncakeWorker(workerType registry.ModelWorkerType, role string) registry.ModelWorker {
 	return registry.ModelWorker{
 		Type: workerType,
