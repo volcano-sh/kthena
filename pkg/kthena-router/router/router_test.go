@@ -779,6 +779,119 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	assert.Equal(t, float64(1), requestCounterValue(t, router, "test-model", "/v1/chat/completions", "200", "successful_request")-requestsBefore)
 }
 
+func TestRouter_HandlerFunc_InferencePoolAccessLogDestination(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var reqBody ModelRequest
+		json.Unmarshal(body, &reqBody)
+		assert.Equal(t, "pool-model", reqBody["model"])
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"pool-response"}`)
+	})
+	router, store, backend := setupTestRouter(t, backendHandler)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: v1.ObjectMeta{Name: "pool", Namespace: "default"},
+		Spec: inferencev1.InferencePoolSpec{
+			TargetPorts: []inferencev1.Port{{Number: inferencev1.PortNumber(backendPort)}},
+			Selector: inferencev1.LabelSelector{MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+				"app": "pool",
+			}},
+			EndpointPickerRef: inferencev1.EndpointPickerRef{Name: "pool-picker"},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "pool-pod",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "pool"},
+		},
+		Status: corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+	}
+	pathType := gatewayv1.PathMatchPathPrefix
+	pathPrefix := "/v1"
+	parentKind := gatewayv1.Kind("Gateway")
+	backendGroup := inferencePoolBackendGroup
+	backendKind := inferencePoolBackendKind
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "pool-route", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{
+				Name: "gw",
+				Kind: &parentKind,
+			}}},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{
+					Type:  &pathType,
+					Value: &pathPrefix,
+				}}},
+				BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{
+					BackendObjectReference: gatewayv1.BackendObjectReference{
+						Group: &backendGroup,
+						Kind:  &backendKind,
+						Name:  "pool",
+					},
+				}}},
+			}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateInferencePool(pool))
+	assert.NoError(t, store.AddOrUpdatePod(pod, nil))
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"pool-model","prompt":"hello"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(GatewayKey, "default/gw")
+	accessCtx := accesslog.NewAccessLogContext("pool-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "pool-model")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	activeLabels := []string{
+		metrics.DestinationLabelValueNone,
+		metrics.DestinationLabelValueNone,
+		metrics.BackendTypeInferencePool,
+		"default/pool",
+		metrics.DestinationLabelValueNone,
+	}
+	activeBefore := externalGaugeValue(t, &router.metrics.ActiveUpstreamRequests, activeLabels...)
+	done := make(chan struct{})
+	go func() {
+		router.HandlerFunc()(c)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("timed out waiting for inference pool upstream request")
+	}
+	assert.Equal(t, activeBefore+1, externalGaugeValue(t, &router.metrics.ActiveUpstreamRequests, activeLabels...))
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for inference pool request completion")
+	}
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, metrics.BackendTypeInferencePool, accessCtx.BackendType)
+	assert.Equal(t, "default/pool", accessCtx.BackendName)
+	assert.Equal(t, metrics.DestinationLabelValueNone, accessCtx.UpstreamModel)
+	assert.Equal(t, 1, accessCtx.UpstreamAttempts)
+	assert.Equal(t, http.StatusOK, accessCtx.UpstreamStatusCode)
+	assert.Equal(t, activeBefore, externalGaugeValue(t, &router.metrics.ActiveUpstreamRequests, activeLabels...))
+}
+
 func TestRouter_HandlerFunc_ExternalOpenAIProvider(t *testing.T) {
 	providerModel := "gpt-4o-mini"
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -912,6 +1025,11 @@ func TestRouter_HandlerFunc_ExternalOpenAIResponsesProvider(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"id":"resp_1"`)
+	assert.Equal(t, metrics.BackendTypeExternalProvider, accessCtx.BackendType)
+	assert.Equal(t, "default/responses-provider", accessCtx.BackendName)
+	assert.Equal(t, providerModel, accessCtx.UpstreamModel)
+	assert.Equal(t, 1, accessCtx.UpstreamAttempts)
+	assert.Equal(t, http.StatusOK, accessCtx.UpstreamStatusCode)
 	assert.Equal(t, 3, accessCtx.OutputTokens)
 }
 
@@ -1614,15 +1732,30 @@ func countMetricsWithModelPrefix(t *testing.T, prefix string) int {
 func requestCounterValue(t *testing.T, router *Router, model, path, statusCode, errorType string) float64 {
 	t.Helper()
 
-	counter, err := router.metrics.RequestsTotal.GetMetricWithLabelValues(model, path, statusCode, errorType)
-	if err != nil {
-		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	metricsCh := make(chan prometheus.Metric)
+	go func() {
+		router.metrics.RequestsTotal.Collect(metricsCh)
+		close(metricsCh)
+	}()
+
+	var value float64
+	for collected := range metricsCh {
+		metric := &dto.Metric{}
+		if err := collected.Write(metric); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		labels := make(map[string]string, len(metric.Label))
+		for _, label := range metric.Label {
+			labels[label.GetName()] = label.GetValue()
+		}
+		if labels[metrics.LabelModel] == model &&
+			labels[metrics.LabelPath] == path &&
+			labels[metrics.LabelStatusCode] == statusCode &&
+			labels[metrics.LabelErrorType] == errorType {
+			value += metric.GetCounter().GetValue()
+		}
 	}
-	metric := &dto.Metric{}
-	if err := counter.Write(metric); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	return metric.GetCounter().GetValue()
+	return value
 }
 
 func TestRequestFinishReason(t *testing.T) {
@@ -2374,6 +2507,11 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 		// first attempt, so this would be an empty string.
 		assert.Contains(t, receivedBodies[1], "test prompt for retry path", "retry attempt sent empty body (body reuse regression)")
 	}
+	assert.Equal(t, metrics.BackendTypeModelServer, accessCtx.BackendType)
+	assert.Equal(t, "default/ms-retry", accessCtx.BackendName)
+	assert.Equal(t, "base-model", accessCtx.UpstreamModel)
+	assert.Equal(t, 2, accessCtx.UpstreamAttempts)
+	assert.Equal(t, http.StatusOK, accessCtx.UpstreamStatusCode)
 }
 
 func TestRouter_HandlerFunc_ListModels(t *testing.T) {
