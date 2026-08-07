@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -48,6 +49,7 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/batch"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
@@ -1712,6 +1714,81 @@ func TestRouter_HandlerFunc_ListModels_Empty(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "list", resp.Object)
 	assert.Empty(t, resp.Data)
+}
+
+func TestRouter_HandlerFunc_Files_UploadAndGet(t *testing.T) {
+	router, _, backend := setupTestRouter(t, nil)
+	defer backend.Close()
+
+	store, err := batch.NewLocalFileStore(batch.Config{
+		FilesDir:     t.TempDir(),
+		MaxFileBytes: batch.DefaultMaxFileBytes,
+		BatchTTL:     time.Hour,
+	})
+	assert.NoError(t, err)
+	router.filesHandler = batch.NewHandler(store)
+
+	payload := `{"custom_id":"1","method":"POST","url":"/v1/chat/completions","body":{"model":"m"}}`
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	assert.NoError(t, mw.WriteField(batch.FormFieldPurpose, batch.PurposeBatch))
+	part, err := mw.CreateFormFile(batch.FormFieldFile, "requests.jsonl")
+	assert.NoError(t, err)
+	_, err = io.Copy(part, strings.NewReader(payload))
+	assert.NoError(t, err)
+	assert.NoError(t, mw.Close())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, batch.PathV1Files, &body)
+	c.Request.Header.Set("Content-Type", mw.FormDataContentType())
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var uploaded batch.FileObject
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &uploaded))
+	assert.Equal(t, batch.ObjectFile, uploaded.Object)
+	assert.Equal(t, batch.PurposeBatch, uploaded.Purpose)
+	assert.True(t, strings.HasPrefix(uploaded.ID, batch.FileIDPrefix))
+
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodGet, batch.PathV1Files+"/"+uploaded.ID, nil)
+	router.HandlerFunc()(c)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRouter_HandlerFunc_Files_DisabledWithoutStore(t *testing.T) {
+	router, _, backend := setupTestRouter(t, nil)
+	defer backend.Close()
+	router.filesHandler = batch.NewHandler(nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodGet, batch.PathV1Files, nil)
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+func TestRouter_HandlerFunc_Files_DoesNotRequireModelField(t *testing.T) {
+	// Proves Files early-return never reaches ParseModelRequest (which requires "model").
+	router, _, backend := setupTestRouter(t, nil)
+	defer backend.Close()
+	store, err := batch.NewLocalFileStore(batch.Config{
+		FilesDir:     t.TempDir(),
+		MaxFileBytes: 1024,
+		BatchTTL:     time.Hour,
+	})
+	assert.NoError(t, err)
+	router.filesHandler = batch.NewHandler(store)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodGet, batch.PathV1Files, nil)
+	router.HandlerFunc()(c)
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 // Helper function to parse boolean (same logic as strconv.ParseBool but simpler for test)
