@@ -141,6 +141,16 @@ func modelOverride(provider *networkingv1alpha1.ExternalModelProvider) (string, 
 	return *provider.Spec.Model, true
 }
 
+// UpstreamModelName returns the model name the provider serves for a request:
+// the configured spec.model override when set, otherwise the route model from
+// the client request. It mirrors the rewrite applied by BuildRequest.
+func UpstreamModelName(provider *networkingv1alpha1.ExternalModelProvider, requestModel string) string {
+	if model, ok := modelOverride(provider); ok {
+		return model
+	}
+	return requestModel
+}
+
 // ValidateConfiguration validates provider settings that are required by every
 // request. It is used both by reconciliation and as defense in depth in the
 // request-building path.

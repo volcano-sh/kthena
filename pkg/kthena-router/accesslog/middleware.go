@@ -87,6 +87,27 @@ func SetRequestRouting(c *gin.Context, modelRoute, modelServer, selectedPod stri
 	}
 }
 
+// SetBackendInfo sets destination-neutral backend information in the access log context.
+func SetBackendInfo(c *gin.Context, backendType, backendName, upstreamModel string) {
+	if ctx := GetAccessLogContext(c); ctx != nil {
+		ctx.SetBackendInfo(backendType, backendName, upstreamModel)
+	}
+}
+
+// SetUpstreamInfo sets upstream attempt outcome information in the access log context.
+func SetUpstreamInfo(c *gin.Context, statusCode, attempts int) {
+	if ctx := GetAccessLogContext(c); ctx != nil {
+		ctx.SetUpstreamInfo(statusCode, attempts)
+	}
+}
+
+// SetErrorOrigin sets the bounded error origin in the access log context.
+func SetErrorOrigin(c *gin.Context, origin string) {
+	if ctx := GetAccessLogContext(c); ctx != nil {
+		ctx.SetErrorOrigin(origin)
+	}
+}
+
 // SetGatewayAPIInfo sets Gateway API / inference extension routing information in the access log context.
 func SetGatewayAPIInfo(c *gin.Context, gateway, httpRoute, inferencePool string) {
 	if ctx := GetAccessLogContext(c); ctx != nil {
