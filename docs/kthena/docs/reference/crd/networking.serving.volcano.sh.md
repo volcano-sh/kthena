@@ -31,6 +31,45 @@ _Appears in:_
 | `model` _string_ | Model is the name of the model or lora adapter to match.<br />If this field is not specified, any model or lora adapter will be matched. |  |  |
 
 
+#### ExternalProvider
+
+
+
+ExternalProvider specifies an external cloud LLM provider to route requests to.
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerType` _[ExternalProviderType](#externalprovidertype)_ | The type of the external provider (e.g., OpenAI, Anthropic, Custom). |  | Enum: [OpenAI Anthropic AzureOpenAI AWSBedrock Custom] <br />Required: \{\} <br /> |
+| `endpoint` _string_ | The full base URL for the external provider endpoint (e.g., https://api.openai.com/v1). |  | Format: uri <br />Required: \{\} <br /> |
+| `credentialsRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#localobjectreference-v1-core)_ | Reference to a Kubernetes Secret containing the API credentials/keys for the external provider.<br />The Secret should contain the token/key under the expected key name (e.g., 'api-key' or 'token'). |  |  |
+
+
+#### ExternalProviderType
+
+_Underlying type:_ _string_
+
+ExternalProviderType defines the type of external cloud LLM provider.
+
+_Validation:_
+- Enum: [OpenAI Anthropic AzureOpenAI AWSBedrock Custom]
+
+_Appears in:_
+- [ExternalProvider](#externalprovider)
+
+| Field | Description |
+| --- | --- |
+| `OpenAI` |  |
+| `Anthropic` |  |
+| `AzureOpenAI` |  |
+| `AWSBedrock` |  |
+| `Custom` |  |
+
+
 #### GlobalRateLimit
 
 
@@ -240,11 +279,12 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | The real model that the modelServers are running.<br />If the `model` in LLM inference request is different from this field, it should be overwritten by this field.<br />Otherwise, the `model` in LLM inference request will not be mutated. |  | MaxLength: 256 <br /> |
-| `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang] <br />Required: \{\} <br /> |
-| `workloadSelector` _[WorkloadSelector](#workloadselector)_ | WorkloadSelector is used to match the model serving instances.<br />Currently, they must be pods within the same namespace as modelServer object. |  | Required: \{\} <br /> |
+| `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang] <br /> |
+| `workloadSelector` _[WorkloadSelector](#workloadselector)_ | WorkloadSelector is used to match the model serving instances.<br />Currently, they must be pods within the same namespace as modelServer object. |  |  |
 | `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server. |  |  |
 | `trafficPolicy` _[TrafficPolicy](#trafficpolicy)_ | Traffic Policy for accessing the model server instance. |  |  |
 | `kvConnector` _[KVConnectorSpec](#kvconnectorspec)_ | KVConnector specifies the KV connector configuration for PD disaggregated routing |  |  |
+| `externalProvider` _[ExternalProvider](#externalprovider)_ | ExternalProvider specifies an external cloud LLM provider to route requests to.<br />When this is set, WorkloadSelector is ignored and requests are proxied to the external endpoint. |  |  |
 
 
 #### ModelServerStatus
