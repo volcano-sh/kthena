@@ -1243,6 +1243,59 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 	})
 }
 
+func TestHandlePodGroupCRDDelete(t *testing.T) {
+	crd := &apiextv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: podGroupCRDName},
+	}
+
+	tests := []struct {
+		name        string
+		obj         interface{}
+		wantDeleted bool
+	}{
+		{
+			name:        "direct CRD",
+			obj:         crd,
+			wantDeleted: true,
+		},
+		{
+			name: "tombstone CRD",
+			obj: cache.DeletedFinalStateUnknown{
+				Key: podGroupCRDName,
+				Obj: crd,
+			},
+			wantDeleted: true,
+		},
+		{
+			name:        "unexpected object",
+			obj:         &corev1.Pod{},
+			wantDeleted: false,
+		},
+		{
+			name: "unexpected tombstone object",
+			obj: cache.DeletedFinalStateUnknown{
+				Key: podGroupCRDName,
+				Obj: &corev1.Pod{},
+			},
+			wantDeleted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &Manager{}
+			manager.hasPodGroupCRD.Store(true)
+			manager.hasSubGroupPolicy.Store(true)
+
+			assert.NotPanics(t, func() {
+				manager.handlePodGroupCRDDelete(tt.obj)
+			})
+			assert.Equal(t, !tt.wantDeleted, manager.hasPodGroupCRD.Load())
+			assert.Equal(t, !tt.wantDeleted, manager.hasSubGroupPolicy.Load())
+		})
+	}
+}
+
 // TestExtractQueueName verifies the extractQueueName helper directly.
 func TestExtractQueueName(t *testing.T) {
 	t.Run("nil ModelServing returns empty string", func(t *testing.T) {

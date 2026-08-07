@@ -130,15 +130,31 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 
 			newManager.handlePodGroupCRDChange(newCrd, false)
 		},
-		DeleteFunc: func(obj interface{}) {
-			crd := obj.(*apiextv1.CustomResourceDefinition)
-			newManager.handlePodGroupCRDChange(crd, true)
-		},
+		DeleteFunc: newManager.handlePodGroupCRDDelete,
 	})
 
 	newManager.CrdInformer = crdInformer
 
 	return &newManager
+}
+
+func (m *Manager) handlePodGroupCRDDelete(obj interface{}) {
+	crd, ok := obj.(*apiextv1.CustomResourceDefinition)
+	if !ok {
+		tombstone, tombstoneOK := obj.(cache.DeletedFinalStateUnknown)
+		if !tombstoneOK {
+			klog.Errorf("failed to parse CustomResourceDefinition type when deleting: %#v", obj)
+			return
+		}
+
+		crd, ok = tombstone.Obj.(*apiextv1.CustomResourceDefinition)
+		if !ok {
+			klog.Errorf("failed to parse CustomResourceDefinition from tombstone: %#v", tombstone.Obj)
+			return
+		}
+	}
+
+	m.handlePodGroupCRDChange(crd, true)
 }
 
 func (m *Manager) HasPodGroupCRD() bool {
