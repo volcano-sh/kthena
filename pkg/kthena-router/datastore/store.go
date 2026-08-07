@@ -1528,6 +1528,35 @@ func (s *store) selectRule(modelName string, req *http.Request, rules []*aiv1alp
 	return nil, fmt.Errorf("failed to find a matching rule")
 }
 
+// compiledPattern is a memoised compile result. Failures are cached too so an
+// invalid pattern is not recompiled on every request.
+type compiledPattern struct {
+	re  *regexp.Regexp
+	err error
+}
+
+// regexCache memoises compiled ModelRoute match patterns. Patterns come from the
+// ModelRoute spec and only change when the CR does, so the key set is bounded by
+// cluster configuration rather than by traffic.
+var regexCache sync.Map
+
+// compileRegex returns the compiled form of pattern, compiling it on first use.
+// matchString runs on the request path, so compiling per call would pay the full
+// parse cost for every request that hits a regex matcher.
+func compileRegex(pattern string) (*regexp.Regexp, error) {
+	if v, ok := regexCache.Load(pattern); ok {
+		cp := v.(*compiledPattern)
+		return cp.re, cp.err
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		klog.Warningf("invalid regex %q in ModelRoute match, treating as no match: %v", pattern, err)
+	}
+	v, _ := regexCache.LoadOrStore(pattern, &compiledPattern{re: re, err: err})
+	cp := v.(*compiledPattern)
+	return cp.re, cp.err
+}
+
 func matchString(sm *aiv1alpha1.StringMatch, value string) bool {
 	switch {
 	case sm.Exact != nil:
@@ -1535,8 +1564,11 @@ func matchString(sm *aiv1alpha1.StringMatch, value string) bool {
 	case sm.Prefix != nil:
 		return strings.HasPrefix(value, *sm.Prefix)
 	case sm.Regex != nil:
-		matched, _ := regexp.MatchString(*sm.Regex, value)
-		return matched
+		re, err := compileRegex(*sm.Regex)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(value)
 	default:
 		return true
 	}
