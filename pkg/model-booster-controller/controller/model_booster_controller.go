@@ -219,9 +219,22 @@ func (mc *ModelBoosterController) reconcile(ctx context.Context, namespaceAndNam
 		mc.setModelFailedCondition(ctx, model, err)
 		return err
 	}
-	modelServingActive, err := mc.isModelServingActive(model)
-	if err != nil || !modelServingActive {
+	modelServingActive, blockingReason, blockingMessage, err := mc.isModelServingActive(model)
+	if err != nil {
 		return err
+	}
+	if !modelServingActive {
+		// If the generated ModelServing's own condition already identifies an actionable,
+		// non-generic cause (e.g. a Pod scheduling/image-pull/crash failure surfaced by
+		// model-serving-controller), propagate it here so users don't have to inspect the
+		// ModelServing separately. Otherwise leave the generic "still initializing" Active
+		// condition set by setModelProcessingCondition above untouched.
+		if blockingReason != "" && !genericModelServingProgressReasons[blockingReason] {
+			if err := mc.setModelWorkloadDegradedCondition(ctx, model, blockingReason, blockingMessage); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if err := mc.setModelActiveCondition(ctx, model); err != nil {
 		return err
@@ -230,26 +243,36 @@ func (mc *ModelBoosterController) reconcile(ctx context.Context, namespaceAndNam
 	return nil
 }
 
-// isModelServingActive returns true if all ModelServings are available.
-func (mc *ModelBoosterController) isModelServingActive(model *workload.ModelBooster) (bool, error) {
+// isModelServingActive returns true if all ModelServings are available. When a ModelServing
+// isn't available, it also returns the Reason/Message of that ModelServing's blocking
+// Progressing or UpdateInProgress condition (if present), so the caller can decide whether it
+// describes normal startup progress or an actionable failure worth surfacing on ModelBooster.
+func (mc *ModelBoosterController) isModelServingActive(model *workload.ModelBooster) (active bool, blockingReason string, blockingMessage string, err error) {
 	modelServings, err := mc.listModelServingsByLabel(model)
 	if err != nil {
-		return false, err
+		return false, "", "", err
 	}
 	// Ensure exactly one ModelServing exists for the single backend
 	if len(modelServings) != 1 {
 		klog.Infof("Number of ModelServings: %d, expected: %d", len(modelServings), 1)
-		return false, fmt.Errorf("ModelServing number not equal to backend number")
+		return false, "", "", fmt.Errorf("ModelServing number not equal to backend number")
 	}
 	// Check if all ModelServings are available
 	for _, modelServing := range modelServings {
 		if !meta.IsStatusConditionPresentAndEqual(modelServing.Status.Conditions, string(workload.ModelServingAvailable), metav1.ConditionTrue) {
 			// requeue until all ModelServings are active
 			klog.InfoS("ModelServing is not available", "ModelServing", klog.KObj(modelServing))
-			return false, nil
+			cond := meta.FindStatusCondition(modelServing.Status.Conditions, string(workload.ModelServingProgressing))
+			if cond == nil {
+				cond = meta.FindStatusCondition(modelServing.Status.Conditions, string(workload.ModelServingUpdateInProgress))
+			}
+			if cond != nil {
+				return false, cond.Reason, cond.Message, nil
+			}
+			return false, "", "", nil
 		}
 	}
-	return true, nil
+	return true, "", "", nil
 }
 
 // updateModelBoosterStatus updates model status.
