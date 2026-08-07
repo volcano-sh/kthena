@@ -75,9 +75,14 @@ func (r *Router) findHTTPRouteMatch(c *gin.Context, gatewayKey string) (httpRout
 	if len(httpRoutes) == 0 {
 		return httpRouteMatchResult{}, false
 	}
+	listenerName := c.GetString(GatewayListenerNameKey)
+	listenerPort := c.GetInt(GatewayListenerPortKey)
 
 	for _, route := range httpRoutes {
 		if route == nil {
+			continue
+		}
+		if !httpRouteMatchesGatewayListener(route, gatewayKey, listenerName, listenerPort) {
 			continue
 		}
 		if !matchHTTPRouteHostnames(route.Spec.Hostnames, c.Request.Host) {
@@ -89,6 +94,36 @@ func (r *Router) findHTTPRouteMatch(c *gin.Context, gatewayKey string) (httpRout
 		}
 	}
 	return httpRouteMatchResult{}, false
+}
+
+func httpRouteMatchesGatewayListener(route *gatewayv1.HTTPRoute, gatewayKey, listenerName string, listenerPort int) bool {
+	for _, parentRef := range route.Spec.ParentRefs {
+		if !isGatewayParentRef(parentRef) {
+			continue
+		}
+		gatewayNamespace := route.Namespace
+		if parentRef.Namespace != nil {
+			gatewayNamespace = string(*parentRef.Namespace)
+		}
+		if gatewayNamespace+"/"+string(parentRef.Name) != gatewayKey {
+			continue
+		}
+		if listenerName == "" && listenerPort == 0 {
+			return parentRef.SectionName == nil && parentRef.Port == nil
+		}
+		if parentRef.SectionName != nil && string(*parentRef.SectionName) == listenerName &&
+			parentRef.Port != nil && int(*parentRef.Port) == listenerPort {
+			return true
+		}
+	}
+	return false
+}
+
+func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
+	if parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName {
+		return false
+	}
+	return parentRef.Kind == nil || *parentRef.Kind == "Gateway"
 }
 
 func findBestHTTPRouteRuleMatch(route *gatewayv1.HTTPRoute, requestPath string) (httpRouteMatchResult, bool) {

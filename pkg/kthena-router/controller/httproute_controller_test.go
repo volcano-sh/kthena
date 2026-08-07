@@ -196,8 +196,10 @@ func TestHTTPRouteController_AllowedRoutesNamespaces(t *testing.T) {
 		routeNS       string
 		routeLabels   map[string]string
 		allowedRoutes *gatewayv1.AllowedRoutes
+		listeners     []gatewayv1.Listener
 		defaultParent bool
 		wantStored    bool
+		wantListener  gatewayv1.SectionName
 	}{
 		{
 			name:          "default same namespace allows same namespace",
@@ -250,6 +252,30 @@ func TestHTTPRouteController_AllowedRoutesNamespaces(t *testing.T) {
 			},
 			wantStored: false,
 		},
+		{
+			name:    "unscoped parent stores only accepting listener",
+			routeNS: "default",
+			listeners: []gatewayv1.Listener{
+				{
+					Name:     gatewayv1.SectionName("public"),
+					Port:     gatewayv1.PortNumber(8080),
+					Protocol: gatewayv1.HTTPProtocolType,
+				},
+				{
+					Name:     gatewayv1.SectionName("private"),
+					Port:     gatewayv1.PortNumber(8081),
+					Protocol: gatewayv1.HTTPProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{
+							From:     &nsFromSelector,
+							Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"access": "private"}},
+						},
+					},
+				},
+			},
+			wantStored:   true,
+			wantListener: gatewayv1.SectionName("public"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -266,18 +292,22 @@ func TestHTTPRouteController_AllowedRoutesNamespaces(t *testing.T) {
 			gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 			store := datastore.New()
 
+			listeners := tt.listeners
+			if len(listeners) == 0 {
+				listeners = []gatewayv1.Listener{
+					{
+						Name:          gatewayv1.SectionName("http"),
+						Port:          gatewayv1.PortNumber(80),
+						Protocol:      gatewayv1.HTTPProtocolType,
+						AllowedRoutes: tt.allowedRoutes,
+					},
+				}
+			}
 			gw := &gatewayv1.Gateway{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gateway"},
 				Spec: gatewayv1.GatewaySpec{
 					GatewayClassName: gatewayv1.ObjectName(DefaultGatewayClassName),
-					Listeners: []gatewayv1.Listener{
-						{
-							Name:          gatewayv1.SectionName("http"),
-							Port:          gatewayv1.PortNumber(80),
-							Protocol:      gatewayv1.HTTPProtocolType,
-							AllowedRoutes: tt.allowedRoutes,
-						},
-					},
+					Listeners:        listeners,
 				},
 			}
 			assert.NoError(t, store.AddOrUpdateGateway(gw))
@@ -318,6 +348,14 @@ func TestHTTPRouteController_AllowedRoutesNamespaces(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantStored, store.GetHTTPRoute(tt.routeNS+"/route") != nil)
 			assert.Equal(t, tt.wantStored, len(store.GetHTTPRoutesByGateway("default/gateway")) > 0)
+			if tt.wantListener != "" {
+				storedRoute := store.GetHTTPRoute(tt.routeNS + "/route")
+				require.Len(t, storedRoute.Spec.ParentRefs, 1)
+				require.NotNil(t, storedRoute.Spec.ParentRefs[0].SectionName)
+				require.NotNil(t, storedRoute.Spec.ParentRefs[0].Port)
+				assert.Equal(t, tt.wantListener, *storedRoute.Spec.ParentRefs[0].SectionName)
+				assert.Equal(t, gatewayv1.PortNumber(8080), *storedRoute.Spec.ParentRefs[0].Port)
+			}
 		})
 	}
 }

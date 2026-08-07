@@ -83,16 +83,101 @@ func TestRouter_FindHTTPRouteMatch(t *testing.T) {
 		}
 	}
 	method := gatewayv1.HTTPMethodGet
+	routeForListener := func(name, listenerName string, listenerPort gatewayv1.PortNumber, rules []gatewayv1.HTTPRouteRule) *gatewayv1.HTTPRoute {
+		httpRoute := route(name, nil, rules)
+		sectionName := gatewayv1.SectionName(listenerName)
+		httpRoute.Spec.ParentRefs[0].SectionName = &sectionName
+		httpRoute.Spec.ParentRefs[0].Port = &listenerPort
+		return httpRoute
+	}
 
 	tests := []struct {
 		name           string
 		routes         []*gatewayv1.HTTPRoute
 		host           string
 		path           string
+		listenerName   string
+		listenerPort   int
 		expectedRoute  string
 		expectedPool   string
 		expectedPrefix string
 	}{
+		{
+			name: "matches route accepted by selected listener",
+			routes: []*gatewayv1.HTTPRoute{
+				routeForListener("route", "public", 8080, []gatewayv1.HTTPRouteRule{
+					pathRule("/chat", "pool"),
+				}),
+			},
+			host:           "api.example.com",
+			path:           "/chat",
+			listenerName:   "public",
+			listenerPort:   8080,
+			expectedRoute:  "route",
+			expectedPool:   "pool",
+			expectedPrefix: "/chat",
+		},
+		{
+			name: "matches route attached to selected listener",
+			routes: []*gatewayv1.HTTPRoute{
+				routeForListener("route", "private", 8081, []gatewayv1.HTTPRouteRule{
+					pathRule("/chat", "pool"),
+				}),
+			},
+			host:           "api.example.com",
+			path:           "/chat",
+			listenerName:   "private",
+			listenerPort:   8081,
+			expectedRoute:  "route",
+			expectedPool:   "pool",
+			expectedPrefix: "/chat",
+		},
+		{
+			name: "skips route attached to another listener",
+			routes: []*gatewayv1.HTTPRoute{
+				routeForListener("route", "private", 8081, []gatewayv1.HTTPRouteRule{
+					pathRule("/chat", "pool"),
+				}),
+			},
+			host:         "api.example.com",
+			path:         "/chat",
+			listenerName: "public",
+			listenerPort: 8080,
+		},
+		{
+			name: "skips route attached to another port",
+			routes: []*gatewayv1.HTTPRoute{
+				routeForListener("route", "http", 8081, []gatewayv1.HTTPRouteRule{
+					pathRule("/chat", "pool"),
+				}),
+			},
+			host:         "api.example.com",
+			path:         "/chat",
+			listenerName: "http",
+			listenerPort: 8080,
+		},
+		{
+			name: "skips unprocessed route with listener context",
+			routes: []*gatewayv1.HTTPRoute{
+				route("route", nil, []gatewayv1.HTTPRouteRule{
+					pathRule("/chat", "pool"),
+				}),
+			},
+			host:         "api.example.com",
+			path:         "/chat",
+			listenerName: "public",
+			listenerPort: 8080,
+		},
+		{
+			name: "skips listener-scoped route without listener context",
+			routes: []*gatewayv1.HTTPRoute{
+				routeForListener("route", "private", 8081, []gatewayv1.HTTPRouteRule{
+					pathRule("/chat", "pool"),
+				}),
+			},
+			host: "api.example.com",
+			path: "/chat",
+		},
 		{
 			name: "prefers longest prefix in a single route",
 			routes: []*gatewayv1.HTTPRoute{
@@ -199,6 +284,10 @@ func TestRouter_FindHTTPRouteMatch(t *testing.T) {
 			c, _ := gin.CreateTestContext(w)
 			c.Request, _ = http.NewRequest(http.MethodPost, tt.path, nil)
 			c.Request.Host = tt.host
+			if tt.listenerName != "" {
+				c.Set(GatewayListenerNameKey, tt.listenerName)
+				c.Set(GatewayListenerPortKey, tt.listenerPort)
+			}
 
 			result, matched := router.findHTTPRouteMatch(c, "default/gw")
 			if tt.expectedRoute == "" {
