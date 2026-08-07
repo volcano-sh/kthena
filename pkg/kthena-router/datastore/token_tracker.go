@@ -37,6 +37,17 @@ type TokenTracker interface {
 	GetTokenCount(user, model string) (float64, error)
 	UpdateTokenCount(user, model string, inputTokens, outputTokens float64) error
 	GetRequestCount(user, model string) (int, error)
+
+	// OnRequestStart notifies the tracker that a request for user/model has
+	// entered the fairness queue. Trackers that need to know when a user
+	// transitions from idle to active (e.g. the VTC tracker's counter-lift)
+	// implement this; others can leave it a no-op.
+	OnRequestStart(user, model string)
+	// OnRequestFinish notifies the tracker that a request started via
+	// OnRequestStart has left the fairness queue, whether admitted, timed out,
+	// or cancelled. Every OnRequestStart call is paired with exactly one
+	// OnRequestFinish call.
+	OnRequestFinish(user, model string)
 }
 
 // bucketNode stores the data for a single time bucket with cumulative sum.
@@ -323,3 +334,11 @@ func (t *InMemorySlidingWindowTokenTracker) GetRequestCount(user, model string) 
 
 	return t.getActiveRequestCount(bucketData, cutoff), nil
 }
+
+// OnRequestStart is a no-op: the sliding-window tracker derives priority purely
+// from the token/request history in the current window and has no active-user
+// state to update on queue entry.
+func (t *InMemorySlidingWindowTokenTracker) OnRequestStart(user, model string) {}
+
+// OnRequestFinish is a no-op for the same reason as OnRequestStart.
+func (t *InMemorySlidingWindowTokenTracker) OnRequestFinish(user, model string) {}

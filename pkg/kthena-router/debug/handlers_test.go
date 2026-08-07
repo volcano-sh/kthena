@@ -171,6 +171,10 @@ func (m *MockStore) GetRequestCount(userId, modelName string) (int, error) {
 	return args.Int(0), args.Error(1)
 }
 
+func (m *MockStore) OnRequestStart(userId, modelName string) {}
+
+func (m *MockStore) OnRequestFinish(userId, modelName string) {}
+
 func (m *MockStore) Enqueue(req *datastore.Request) error {
 	args := m.Called(req)
 	return args.Error(0)
