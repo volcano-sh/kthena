@@ -26,6 +26,7 @@ import (
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	msplugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 )
 
 func TestConstructModelServing(t *testing.T) {
@@ -354,6 +355,14 @@ func TestConstructModelServing(t *testing.T) {
 			assert.Equal(t, expectedRole.Name, role.Name)
 			assert.Equal(t, *expectedRole.Replicas, *role.Replicas)
 			assert.Equal(t, expectedRole.WorkerReplicas, role.WorkerReplicas)
+			hasHeadlessServicePlugin := false
+			for _, plugin := range got.Spec.Plugins {
+				if plugin.Name == msplugins.HeadlessServicePluginName {
+					hasHeadlessServicePlugin = true
+					break
+				}
+			}
+			assert.Equal(t, expectedRole.WorkerReplicas > 0, hasHeadlessServicePlugin)
 
 			// Verify Templates
 			assert.Equal(t, expectedRole.EntryTemplate.Spec.Containers[0].Name, role.EntryTemplate.Spec.Containers[0].Name)

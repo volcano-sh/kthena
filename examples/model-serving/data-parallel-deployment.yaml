@@ -5,6 +5,9 @@ metadata:
   name: my-model
   namespace: kthena-system
 spec:
+  plugins:
+    - name: headless-service
+      type: BuiltIn
   schedulerName: volcano
   replicas: 1
   template:

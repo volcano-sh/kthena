@@ -249,6 +249,23 @@ spec:
 
 Below are examples of ModelServing configurations for different deployment scenarios.
 
+### Headless Service plugin
+
+ModelServing does not create per-Role-replica Headless Services by default. If
+entry and worker Pods rely on the generated `ENTRY_ADDRESS` or per-Pod DNS,
+enable the built-in plugin explicitly:
+
+```yaml
+spec:
+  plugins:
+    - name: headless-service
+      type: BuiltIn
+```
+
+Without the plugin, no new Headless Services are created or recovered. Removing
+the plugin does not immediately delete existing Services; they are deleted when
+their corresponding Roles are deleted.
+
 ### GPU PD Disaggregation
 
 This example demonstrates a disaggregated deployment using NVIDIA GPUs with prefill and decode roles.

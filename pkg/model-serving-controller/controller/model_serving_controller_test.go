@@ -49,6 +49,7 @@ import (
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -284,7 +285,7 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 		},
 	}
 
-	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", nil, newPod, true, nil, "entry")
 	assert.ErrorContains(t, err, "does not match expected identity")
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
@@ -878,13 +879,13 @@ func TestIsServingGroupDeleted(t *testing.T) {
 			want:               false,
 		},
 		{
-			name: "ServingGroup status is Deleting - target group services exist - should return false",
+			name: "ServingGroup status is Deleting - target group services are ignored - should return true",
 			pods: nil,
 			services: []resourceSpec{
 				{name: "svc-1", labels: map[string]string{workloadv1alpha1.GroupNameLabelKey: groupName}},
 			},
 			servingGroupStatus: datastore.ServingGroupDeleting,
-			want:               false,
+			want:               true,
 		},
 		{
 			name: "ServingGroup status is Deleting - both target group resources exist - should return false",
@@ -1080,7 +1081,7 @@ func TestIsRoleDeleted(t *testing.T) {
 			want:       false,
 		},
 		{
-			name: "role status is Deleting - target role services exist - should return false",
+			name: "role status is Deleting - target role services are ignored - should return true",
 			pods: nil,
 			services: []resourceSpec{
 				{name: "svc-1", labels: map[string]string{
@@ -1090,7 +1091,7 @@ func TestIsRoleDeleted(t *testing.T) {
 				}},
 			},
 			roleStatus: datastore.RoleDeleting,
-			want:       false,
+			want:       true,
 		},
 		{
 			name: "role status is Deleting - both target role resources exist - should return false",
@@ -2866,7 +2867,7 @@ func TestManageRoleReplicas(t *testing.T) {
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			require.NoError(t, controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision, nil))
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -2937,7 +2938,7 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 		controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", ordinal), "old-revision", "old-hash")
 	}
 
-	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision")
+	require.NoError(t, controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision", nil))
 
 	roles, err := controller.store.GetRoleList(key, groupName, "decode")
 	require.NoError(t, err)
@@ -5593,9 +5594,14 @@ func TestManageHeadlessService(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-ms",
 					Namespace: "default",
+					UID:       types.UID("test-ms-uid"),
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
@@ -5635,6 +5641,10 @@ func TestManageHeadlessService(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
@@ -5660,9 +5670,14 @@ func TestManageHeadlessService(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-ms",
 					Namespace: "default",
+					UID:       types.UID("test-ms-uid"),
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
@@ -5693,11 +5708,21 @@ func TestManageHeadlessService(t *testing.T) {
 						Name:      "test-ms-0-prefill-0-0",
 						Namespace: "default",
 						Labels: map[string]string{
-							workloadv1alpha1.GroupNameLabelKey: "test-ms-0",
-							workloadv1alpha1.RoleLabelKey:      "prefill",
-							workloadv1alpha1.RoleIDKey:         "prefill-0",
+							plugins.HeadlessServicePluginLabelKey:     plugins.HeadlessServicePluginName,
+							workloadv1alpha1.ModelServingNameLabelKey: "test-ms",
+							workloadv1alpha1.GroupNameLabelKey:        "test-ms-0",
+							workloadv1alpha1.RoleLabelKey:             "prefill",
+							workloadv1alpha1.RoleIDKey:                "prefill-0",
 						},
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+							Kind:       workloadv1alpha1.ModelServingKind.Kind,
+							Name:       "test-ms",
+							UID:        types.UID("test-ms-uid"),
+							Controller: ptr.To(true),
+						}},
 					},
+					Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
 				},
 			},
 			servingGroupStatus:   datastore.ServingGroupRunning,
@@ -5713,6 +5738,10 @@ func TestManageHeadlessService(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
@@ -5742,6 +5771,10 @@ func TestManageHeadlessService(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
@@ -5780,6 +5813,10 @@ func TestManageHeadlessService(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
 							{
@@ -5809,6 +5846,62 @@ func TestManageHeadlessService(t *testing.T) {
 			expectedServiceCount: 0,
 			expectServiceCreated: false,
 		},
+		{
+			name: "do not create headless service when the plugin is omitted",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](1),
+								WorkerReplicas: 1,
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
+			},
+			servingGroupStatus:   datastore.ServingGroupRunning,
+			expectedServiceCount: 0,
+			expectServiceCreated: false,
+		},
+		{
+			name: "do not create headless service when the plugin list is empty",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](1),
+								WorkerReplicas: 1,
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
+			},
+			servingGroupStatus:   datastore.ServingGroupRunning,
+			expectedServiceCount: 0,
+			expectServiceCreated: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -5834,7 +5927,7 @@ func TestManageHeadlessService(t *testing.T) {
 				controller.store.UpdateRoleStatus(utils.GetNamespaceName(tt.modelServing), groupName, "prefill", role.Name, role.Status)
 			}
 
-			// Add existing services to the fake client
+			// Add existing services to the fake client.
 			for _, svc := range tt.existingServices {
 				_, err := kubeClient.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
 				assert.NoError(t, err)
@@ -5846,12 +5939,32 @@ func TestManageHeadlessService(t *testing.T) {
 				})
 			}
 
-			// Call the function being tested
-			err = controller.syncHeadlessServices(context.TODO(), tt.modelServing)
-			if tt.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
+			// Run the Role-scoped plugin hook used by manageRoleReplicas.
+			chain, err := controller.buildPluginChain(tt.modelServing)
+			assert.NoError(t, err)
+			if chain != nil && tt.servingGroupStatus != datastore.ServingGroupDeleting {
+				roleSpec := tt.modelServing.Spec.Template.Roles[0].DeepCopy()
+				for _, role := range tt.existingRoles {
+					if role.Status == datastore.RoleDeleting {
+						continue
+					}
+					_, roleIndex := utils.GetParentNameAndOrdinal(role.Name)
+					err = chain.OnRoleSync(context.TODO(), &plugins.HookRequest{
+						ModelServing:  tt.modelServing,
+						ServingGroup:  groupName,
+						RoleName:      "prefill",
+						RoleID:        role.Name,
+						RoleIndex:     roleIndex,
+						Role:          roleSpec,
+						KubeClient:    kubeClient,
+						ServiceLister: controller.servicesLister,
+					})
+					if tt.expectError {
+						assert.Error(t, err)
+						break
+					}
+					assert.NoError(t, err)
+				}
 			}
 
 			// Verify the expected number of services exist
@@ -5874,6 +5987,125 @@ func TestManageHeadlessService(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCleanupHeadlessServices(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("test-ms-uid"),
+		},
+	}
+	ownerRef := func(uid types.UID) []metav1.OwnerReference {
+		return []metav1.OwnerReference{
+			{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+				Kind:       workloadv1alpha1.ModelServingKind.Kind,
+				Name:       ms.Name,
+				UID:        uid,
+				Controller: ptr.To(true),
+			},
+		}
+	}
+	service := func(name string, clusterIP string, owners []metav1.OwnerReference) *corev1.Service {
+		serviceLabels := map[string]string{workloadv1alpha1.ModelServingNameLabelKey: ms.Name}
+		if name == "test-ms-0-prefill-0-0" {
+			serviceLabels[workloadv1alpha1.GroupNameLabelKey] = "test-ms-0"
+			serviceLabels[workloadv1alpha1.RoleLabelKey] = "prefill"
+			serviceLabels[workloadv1alpha1.RoleIDKey] = "prefill-0"
+		}
+		return &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            name,
+				Namespace:       ms.Namespace,
+				Labels:          serviceLabels,
+				OwnerReferences: owners,
+			},
+			Spec: corev1.ServiceSpec{ClusterIP: clusterIP},
+		}
+	}
+
+	services := []*corev1.Service{
+		service("test-ms-0-prefill-0-0", corev1.ClusterIPNone, ownerRef(ms.UID)),
+		service("user-headless", corev1.ClusterIPNone, nil),
+		service("stale-headless", corev1.ClusterIPNone, ownerRef(types.UID("stale-uid"))),
+		service("owned-cluster-ip", "10.0.0.1", ownerRef(ms.UID)),
+	}
+
+	kubeClient := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		volcanofake.NewSimpleClientset(),
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	for _, svc := range services {
+		_, err = kubeClient.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, controller.servicesInformer.GetIndexer().Add(svc))
+	}
+
+	require.NoError(t, controller.runRoleDeletePlugins(context.TODO(), ms, "test-ms-0", "prefill", "prefill-0"))
+
+	remaining, err := kubeClient.CoreV1().Services(ms.Namespace).List(context.TODO(), metav1.ListOptions{})
+	require.NoError(t, err)
+	remainingNames := make([]string, 0, len(remaining.Items))
+	for _, svc := range remaining.Items {
+		remainingNames = append(remainingNames, svc.Name)
+	}
+	assert.ElementsMatch(t, []string{"user-headless", "stale-headless", "owned-cluster-ip"}, remainingNames)
+}
+
+func TestCleanupHeadlessServicesReturnsDeleteError(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("test-ms-uid"),
+		},
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms-0-prefill-0-0",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "test-ms-0",
+				workloadv1alpha1.RoleLabelKey:             "prefill",
+				workloadv1alpha1.RoleIDKey:                "prefill-0",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        ms.UID,
+					Controller: ptr.To(true),
+				},
+			},
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset(svc)
+	kubeClient.PrependReactor("delete", "services", func(kubetesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInternalError(fmt.Errorf("delete failed"))
+	})
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		volcanofake.NewSimpleClientset(),
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+	require.NoError(t, controller.servicesInformer.GetIndexer().Add(svc))
+
+	err = controller.runRoleDeletePlugins(context.TODO(), ms, "test-ms-0", "prefill", "prefill-0")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "delete Headless Service default/test-ms-0-prefill-0-0")
 }
 
 // TestSyncAllWithFailedPods tests that failed pods at startup are properly handled
@@ -6766,8 +6998,8 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			initialRoleStatus:    datastore.RoleRunning,
 			podDeletionError:     nil,
 			serviceDeletionError: nil,
-			expectedFinalStatus:  datastore.RoleDeleting,
-			expectEnqueueCalled:  false,
+			expectedFinalStatus:  datastore.RoleNotFound,
+			expectEnqueueCalled:  true,
 			description:          "are deletions succeed, no rollback needed",
 		},
 		{
@@ -6808,6 +7040,7 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-model-serving",
 					Namespace: "default",
+					UID:       types.UID("test-model-serving-uid"),
 				},
 			}
 
@@ -6827,23 +7060,33 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 					Name:      "test-pod",
 					Namespace: "default",
 					Labels: map[string]string{
-						workloadv1alpha1.GroupNameLabelKey: groupName,
-						workloadv1alpha1.RoleLabelKey:      roleName,
-						workloadv1alpha1.RoleIDKey:         roleID,
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+						workloadv1alpha1.GroupNameLabelKey:        groupName,
+						workloadv1alpha1.RoleLabelKey:             roleName,
+						workloadv1alpha1.RoleIDKey:                roleID,
 					},
 				},
 			}
 
 			service := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-service",
+					Name:      utils.GeneratePodName(groupName, roleID, 0),
 					Namespace: "default",
 					Labels: map[string]string{
-						workloadv1alpha1.GroupNameLabelKey: groupName,
-						workloadv1alpha1.RoleLabelKey:      roleName,
-						workloadv1alpha1.RoleIDKey:         roleID,
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+						workloadv1alpha1.GroupNameLabelKey:        groupName,
+						workloadv1alpha1.RoleLabelKey:             roleName,
+						workloadv1alpha1.RoleIDKey:                roleID,
 					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+						Kind:       workloadv1alpha1.ModelServingKind.Kind,
+						Name:       ms.Name,
+						UID:        ms.UID,
+						Controller: ptr.To(true),
+					}},
 				},
+				Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
 			}
 
 			drainWorkqueue(t, controller.workqueue)
@@ -7344,13 +7587,17 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-model-serving",
 					Namespace: "default",
+					UID:       types.UID("test-model-serving-uid"),
 				},
 			}
 
 			sgName := "test-model-serving-0"
+			roleName := "test-role"
+			roleID := "test-role-0"
 
 			nsn := utils.GetNamespaceName(ms)
 			controller.store.AddServingGroup(nsn, 0, "test-revision")
+			controller.store.AddRole(nsn, sgName, roleName, roleID, "test-revision", "test-role-revision")
 			controller.store.UpdateServingGroupStatus(nsn, sgName, tt.initialSgStatus)
 
 			initialStatus := controller.store.GetServingGroupStatus(nsn, sgName)
@@ -7361,19 +7608,31 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 					Name:      "test-pod",
 					Namespace: "default",
 					Labels: map[string]string{
-						workloadv1alpha1.GroupNameLabelKey: sgName,
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+						workloadv1alpha1.GroupNameLabelKey:        sgName,
 					},
 				},
 			}
 
 			service := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-service",
+					Name:      utils.GeneratePodName(sgName, roleID, 0),
 					Namespace: "default",
 					Labels: map[string]string{
-						workloadv1alpha1.GroupNameLabelKey: sgName,
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+						workloadv1alpha1.GroupNameLabelKey:        sgName,
+						workloadv1alpha1.RoleLabelKey:             roleName,
+						workloadv1alpha1.RoleIDKey:                roleID,
 					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+						Kind:       workloadv1alpha1.ModelServingKind.Kind,
+						Name:       ms.Name,
+						UID:        ms.UID,
+						Controller: ptr.To(true),
+					}},
 				},
+				Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
 			}
 
 			drainWorkqueue(t, controller.workqueue)

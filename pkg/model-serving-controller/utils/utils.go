@@ -27,7 +27,6 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -239,8 +238,17 @@ func newModelServingOwnerRef(ms *workloadv1alpha1.ModelServing) metav1.OwnerRefe
 	}
 }
 
-func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, ms *workloadv1alpha1.ModelServing, serviceSelector map[string]string, groupName, roleLabel string, roleIndex int) error {
+func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, ms *workloadv1alpha1.ModelServing, serviceSelector map[string]string, groupName, roleLabel string, roleIndex int, additionalLabels map[string]string) error {
 	serviceName := GeneratePodName(groupName, GenerateRoleID(roleLabel, roleIndex), 0)
+	serviceLabels := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        groupName,
+		workloadv1alpha1.RoleLabelKey:             roleLabel,
+		workloadv1alpha1.RoleIDKey:                GenerateRoleID(roleLabel, roleIndex),
+	}
+	for key, value := range additionalLabels {
+		serviceLabels[key] = value
+	}
 	headlessService := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
@@ -248,12 +256,7 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(ms),
 			},
-			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-				workloadv1alpha1.GroupNameLabelKey:        groupName,
-				workloadv1alpha1.RoleLabelKey:             roleLabel,
-				workloadv1alpha1.RoleIDKey:                GenerateRoleID(roleLabel, roleIndex),
-			},
+			Labels: serviceLabels,
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP:                "None", // defines service as headless
@@ -264,13 +267,7 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 	// create the service in the cluster
 	klog.V(4).Infof("Creating headless service %s", headlessService.Name)
 	_, err := k8sClient.CoreV1().Services(ms.Namespace).Create(ctx, &headlessService, metav1.CreateOptions{})
-
-	if err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create headless service failed: %v", err)
-		}
-	}
-	return nil
+	return err
 }
 
 func GetModelServingAndGroupByLabel(podLabels map[string]string) (string, string, bool) {
