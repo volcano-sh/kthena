@@ -1591,6 +1591,70 @@ func newStore(inspector ...PodRuntimeInspector) *store {
 	return New(WithPodRuntimeInspector(inspector[0])).(*store)
 }
 
+func TestAddOrUpdateModelRoute_UpdatesLoraRoutes(t *testing.T) {
+	s := newStore()
+
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName:    "llama",
+			LoraAdapters: []string{"math-lora"},
+			Rules: []*aiv1alpha1.Rule{
+				{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "math-server", Weight: ptr(uint32(100))}}},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+	s.requestWaitingQueue.Store("llama", NewRequestPriorityQueue(nil))
+	s.requestWaitingQueue.Store("math-lora", NewRequestPriorityQueue(nil))
+
+	mr = mr.DeepCopy()
+	mr.Spec.LoraAdapters = []string{"code-lora"}
+	mr.Spec.Rules[0].TargetModels[0].ModelServerName = "code-server"
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
+	_, _, _, err := s.MatchModelServer("math-lora", req, "")
+	assert.Error(t, err)
+
+	server, isLora, _, err := s.MatchModelServer("code-lora", req, "")
+	assert.NoError(t, err)
+	assert.True(t, isLora)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "code-server"}, server)
+
+	_, exists := s.requestWaitingQueue.Load("llama")
+	assert.True(t, exists)
+	_, exists = s.requestWaitingQueue.Load("math-lora")
+	assert.False(t, exists)
+}
+
+func TestAddOrUpdateModelRoute_UpdatesGatewayRoutes(t *testing.T) {
+	s := newStore()
+	kindGateway := gatewayv1.Kind("Gateway")
+
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName:  "llama",
+			ParentRefs: []gatewayv1.ParentReference{{Name: "gateway-a", Kind: &kindGateway}},
+			Rules: []*aiv1alpha1.Rule{
+				{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "server-a", Weight: ptr(uint32(100))}}},
+			},
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	mr = mr.DeepCopy()
+	mr.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: "gateway-b", Kind: &kindGateway}}
+	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
+
+	s.routeMutex.RLock()
+	_, exists := s.gatewayModelRoutes["default/gateway-a"]
+	assert.False(t, exists)
+	assert.True(t, s.gatewayModelRoutes["default/gateway-b"].Contains("default/route"))
+	s.routeMutex.RUnlock()
+}
+
 func TestAddOrUpdateHTTPRoute_UpdatesGatewayRoutes(t *testing.T) {
 	s := newStore()
 
