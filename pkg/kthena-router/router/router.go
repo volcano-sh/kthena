@@ -40,6 +40,7 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/batch"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
@@ -102,6 +103,9 @@ type Router struct {
 
 	// KV Connector management
 	connectorFactory *connectors.Factory
+
+	// OpenAI-compatible Files API (batch control plane). Nil store disables it.
+	filesHandler *batch.Handler
 
 	// Priority queue configuration
 	queueTimeout     time.Duration
@@ -191,6 +195,11 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
 
+	filesHandler, err := newFilesHandlerFromEnv()
+	if err != nil {
+		klog.Fatalf("failed to initialize batch files store: %v", err)
+	}
+
 	return &Router{
 		store:            store,
 		scheduler:        scheduler.NewScheduler(store, routerConfig),
@@ -200,12 +209,25 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		metrics:          metricsInstance,
 		tokenizer:        tokenizerInstance,
 		connectorFactory: connectors.NewDefaultFactory(),
+		filesHandler:     filesHandler,
 		queueTimeout:     parseQueueTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 
 		sessionBoostTimeout: parseSessionBoostTimeout(),
 	}
+}
+
+// newFilesHandlerFromEnv builds the OpenAI Files API handler from env config.
+// When KTHENA_BATCH_FILES_DIR is unset the handler is still created but serves
+// 503 until storage is configured (mirrors optional feature flags elsewhere).
+func newFilesHandlerFromEnv() (*batch.Handler, error) {
+	cfg := batch.LoadConfigFromEnv()
+	store, err := batch.NewFileStoreFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return batch.NewHandler(store), nil
 }
 
 const defaultQueueTimeout = 60 * time.Second
@@ -273,6 +295,13 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		if c.Request.Method == http.MethodGet &&
 			(c.Request.URL.Path == "/v1/models" || c.Request.URL.Path == "/models") {
 			r.ListModels(c)
+			return
+		}
+
+		// Handle /v1/files (OpenAI-compatible Files API for batch jobs).
+		// Must run before ParseModelRequest: uploads are multipart and have no "model" field.
+		if batch.IsFilesPath(c.Request.URL.Path) {
+			r.HandleFiles(c)
 			return
 		}
 
@@ -894,6 +923,22 @@ func (r *Router) ListModels(c *gin.Context) {
 		Object: "list",
 		Data:   data,
 	})
+}
+
+// HandleFiles implements the OpenAI-compatible /v1/files endpoints.
+// Like ListModels, this is control-plane traffic and never enters doLoadbalance.
+func (r *Router) HandleFiles(c *gin.Context) {
+	if r.filesHandler == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, batch.ErrorBody{
+			Error: batch.ErrorDetail{
+				Message: fmt.Sprintf("batch files API is disabled; set %s to enable", batch.EnvFilesDir),
+				Type:    "server_error",
+				Code:    "files_disabled",
+			},
+		})
+		return
+	}
+	r.filesHandler.ServeHTTP(c)
 }
 
 func (r *Router) Auth() gin.HandlerFunc {

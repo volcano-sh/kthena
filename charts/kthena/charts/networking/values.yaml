@@ -83,6 +83,17 @@ kthenaRouter:
     format: "text"
     # output specifies where to write logs: "stdout", "stderr", or file path (default: stdout)
     output: "stdout"
+  # batchFiles configures the OpenAI-compatible /v1/files API used by Batch workloads.
+  # Local-disk metadata is process-local: prefer replicas: 1 until a shared FileStore backend lands.
+  batchFiles:
+    # enabled mounts storage and sets KTHENA_BATCH_FILES_DIR on the router.
+    enabled: false
+    # mountPath is the container path used as KTHENA_BATCH_FILES_DIR.
+    mountPath: /var/lib/kthena/batch-files
+    # maxFileBytes is optional; when empty the router default (200MiB) is used.
+    maxFileBytes: ""
+    # ttl is optional Go duration (e.g. "720h"); when empty the router default (30d) is used.
+    ttl: ""
   # gatewayAPI configuration
   gatewayAPI:
     # enabled controls whether Gateway API related features are enabled
