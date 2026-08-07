@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"testing"
@@ -91,6 +92,163 @@ func TestParsePrompt(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "message content as text parts",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text", "text": "hi "},
+							map[string]interface{}{"type": "text", "text": "there"},
+						},
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "hi there"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "message content mixes text and image parts",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text", "text": "describe this"},
+							map[string]interface{}{
+								"type":      "image_url",
+								"image_url": map[string]interface{}{"url": "https://example.com/a.png"},
+							},
+						},
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "describe this"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "assistant message with null content is kept",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "what is the weather",
+					},
+					map[string]interface{}{
+						"role":       "assistant",
+						"content":    nil,
+						"tool_calls": []interface{}{map[string]interface{}{"id": "call_1"}},
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "what is the weather"},
+					{Role: "assistant", Content: ""},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "message content of unsupported type",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": 123,
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "text content part without text field",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text"},
+						},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message content part is not an object",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": []interface{}{"hi"},
+					},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message is not an object",
+			body: map[string]interface{}{
+				"messages": []interface{}{"hi"},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message without a role",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"content": "hi"},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message with a non-string role",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": 1, "content": "hi"},
+				},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
+			name: "message without a content key is kept",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": "assistant"},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "assistant", Content: ""},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty message list",
+			body: map[string]interface{}{
+				"messages": []interface{}{},
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
 			name: "messages not a list",
 			body: map[string]interface{}{
 				"messages": "not a list",
@@ -117,6 +275,59 @@ func TestParsePrompt(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ParsePrompt() got = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParsePromptErrorKind pins down which failures are "prompt absent" and which
+// are "prompt malformed", since the router answers the two with different status
+// codes (404 and 400 respectively).
+func TestParsePromptErrorKind(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         map[string]interface{}
+		wantNotFound bool
+	}{
+		{
+			name:         "neither prompt nor messages",
+			body:         map[string]interface{}{"foo": "bar"},
+			wantNotFound: true,
+		},
+		{
+			name:         "messages is not a list",
+			body:         map[string]interface{}{"messages": "not a list"},
+			wantNotFound: false,
+		},
+		{
+			name:         "empty message list",
+			body:         map[string]interface{}{"messages": []interface{}{}},
+			wantNotFound: false,
+		},
+		{
+			name: "malformed content",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": "user", "content": 123},
+				},
+			},
+			wantNotFound: false,
+		},
+		{
+			name:         "prompt is not a string",
+			body:         map[string]interface{}{"prompt": 123},
+			wantNotFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParsePrompt(tt.body)
+			if err == nil {
+				t.Fatalf("ParsePrompt() error = nil, want an error")
+			}
+			if got := errors.Is(err, ErrPromptNotFound); got != tt.wantNotFound {
+				t.Errorf("errors.Is(err, ErrPromptNotFound) = %v, want %v (err = %v)", got, tt.wantNotFound, err)
 			}
 		})
 	}

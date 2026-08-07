@@ -313,8 +313,15 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		prompt, err := utils.ParsePrompt(modelRequest)
 		if err != nil {
-			accesslog.SetError(c, "prompt_parsing", "prompt not found")
-			c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
+			// A body with no prompt at all keeps the existing 404, but a body that
+			// carries a prompt the router cannot parse is a client error, so it is
+			// answered with 400 and the reason rather than "prompt not found".
+			status, msg := http.StatusBadRequest, err.Error()
+			if errors.Is(err, utils.ErrPromptNotFound) {
+				status, msg = http.StatusNotFound, "prompt not found"
+			}
+			accesslog.SetError(c, "prompt_parsing", msg)
+			c.AbortWithStatusJSON(status, msg)
 			c.Set("finishReason", "prompt_parsing")
 			return
 		}
