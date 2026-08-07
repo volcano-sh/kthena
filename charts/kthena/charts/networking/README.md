@@ -20,6 +20,22 @@ kthenaRouter:
     pullPolicy: IfNotPresent
 ```
 
+#### Access Log Configuration
+
+Access logging is enabled in text format by default for compatibility. Select
+JSON explicitly when a structured log collector expects JSON records.
+
+```yaml
+kthenaRouter:
+  accessLog:
+    enabled: true
+    format: json
+    output: stdout
+```
+
+Prefer `stdout` in Kubernetes. A file path writes inside the router container
+and requires a mounted volume and separate collection strategy.
+
 #### Request Scheduling Configuration
 
 The router schedules requests through a per-model queue using one of two mutually
@@ -65,6 +81,9 @@ kthenaRouter:
 | `kthenaRouter.sessionBoost.inflightPerPod` | int     | `16`             | Inflight requests per backend pod; total = perPod x pod count                 |
 | `kthenaRouter.sessionBoost.gracePeriod`    | string  | `"0s"`           | Wait time for a same-session follow-up (disabled by default)                  |
 | `kthenaRouter.sessionBoost.timeout`        | string  | `"30s"`          | Max queue wait before 504; set a non-positive duration (e.g. `0s`) to disable |
+| `kthenaRouter.accessLog.enabled`           | boolean | `true`           | Enable request access logging                                                  |
+| `kthenaRouter.accessLog.format`            | string  | `"text"`         | Access-log format: `text` or `json`                                            |
+| `kthenaRouter.accessLog.output`            | string  | `"stdout"`       | Access-log destination: `stdout`, `stderr`, or a file path                     |
 
 #### Session Boost Configuration
 

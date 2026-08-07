@@ -1,109 +1,114 @@
 # Router Access Log Fields Reference
 
-This document provides a comprehensive reference for all fields available in Kthena Router access logs.
+Kthena emits one access-log entry after each `/v1/*` inference request.
+Requests routed through Gateway API on other paths currently do not emit an
+access-log entry. Each recorded entry contains the HTTP result, routing
+selection, token counts, timing checkpoints, and any router error captured
+during processing.
 
-## Overview
+## Formats and defaults
 
-Kthena Router generates structured access logs for all AI inference requests. These logs provide detailed information about request processing, including timing breakdowns, routing decisions, token usage, and error information.
+Access logs support two formats:
 
-## Log Format
+- `text` is the current Helm default and preserves existing installations.
+- `json` is recommended for log aggregation and field-based queries, but must
+  be enabled explicitly.
 
-Access logs are available in two formats:
-- **JSON**: Structured JSON format suitable for log aggregation and analysis
-- **Text**: Human-readable format for development and debugging
+The text representation is a single line with this shape:
 
-### Text Format Structure
-
-The text format follows this structure:
+```text
+[timestamp] "METHOD /path PROTOCOL" status_code [error=type:message] [model_name=name] [model_route=route] [model_server=server] [selected_pod=pod] [request_id=id] [gateway=gateway] [http_route=route] [inference_pool=pool] [tokens=input/output] timings=totalms(request+upstream+response)
 ```
-[timestamp] "METHOD /path PROTOCOL" status_code [error=type:message] model_name=name model_route=route model_server=server selected_pod=pod request_id=id tokens=input/output timings=total(req+upstream+resp)ms
-```
 
-Key features of the text format:
-- **Error placement**: Error information appears immediately after the status code when present
-- **Timing format**: Shows total time with breakdown in parentheses: `timings=2350ms(45+2180+5)`
-- **Compact representation**: All information on a single line for easy parsing
+Fields in square brackets are omitted when no value is available. JSON uses
+the names in the tables below.
 
-## Field Reference
+## HTTP fields
 
-### Standard HTTP Fields
+| Field | Type | Presence | Description | Example |
+| --- | --- | --- | --- | --- |
+| `timestamp` | RFC3339 timestamp | Always | Time the router received the request | `2026-01-09T14:35:22.147Z` |
+| `method` | String | Always | HTTP method | `POST` |
+| `path` | String | Always | URL path only; the query string is not included | `/v1/chat/completions` |
+| `protocol` | String | Always | HTTP protocol reported by Go | `HTTP/1.1` |
+| `status_code` | Integer | Always | Final HTTP response status | `200` |
 
-These fields follow the Envoy access log format for compatibility with existing log processing tools.
+## Error fields
 
-| Field         | Type               | Description                                      | Example                    |
-| ------------- | ------------------ | ------------------------------------------------ | -------------------------- |
-| `timestamp`   | `string` (RFC3339) | ISO 8601 timestamp when the request was received | `2024-01-15T10:30:45.123Z` |
-| `method`      | `string`           | HTTP method used for the request                 | `POST`, `GET`              |
-| `path`        | `string`           | Request path including query parameters          | `/v1/chat/completions`     |
-| `protocol`    | `string`           | HTTP protocol version                            | `HTTP/1.1`, `HTTP/2`       |
-| `status_code` | `integer`          | HTTP response status code                        | `200`, `400`, `500`        |
+The `error` object is omitted from JSON when the router did not record an
+error. In text logs it appears immediately after the status code.
 
-### Error Information
+| Field | Type | Description | Example |
+| --- | --- | --- | --- |
+| `error.type` | String | Stable error category assigned by the router | `pod_discovery` |
+| `error.message` | String | Diagnostic message for this failure | `no available pods for model server: default/llama2-server` |
 
-Error information is included when a request fails and appears immediately after the status code.
+Current router error categories are:
 
-| Field           | Type     | Description            | Example                                    |
-| --------------- | -------- | ---------------------- | ------------------------------------------ |
-| `error.type`    | `string` | Error category or type | `timeout`, `rate_limit`, `model_not_found` |
-| `error.message` | `string` | Detailed error message | `Model inference timeout after 30s`        |
+| Error type | Failure area |
+| --- | --- |
+| `request_parsing` | Request body or required model field could not be parsed |
+| `prompt_parsing` | Prompt extraction failed |
+| `input_rate_limit` | Input-token limit was exceeded |
+| `output_rate_limit` | Output-token limit was exceeded |
+| `rate_limit` | General request/token rate limit was exceeded |
+| `model_server_matching` | No matching ModelServer could be selected |
+| `pod_discovery` | Backend pod lookup failed or returned no available pods |
+| `inference_pool_selection` | A matched HTTPRoute had no eligible InferencePool backend |
+| `inference_pool_discovery` | The selected InferencePool could not be found |
+| `port_discovery` | An InferencePool had no usable target port |
+| `route_not_found` | Neither ModelRoute nor HTTPRoute routing matched |
+| `scheduling` | Queue admission or backend scheduling failed |
+| `proxy` | Forwarding to the selected backend failed |
 
-#### Common Error Types
+An HTTP status is not uniquely determined by `error.type`; consult
+`status_code` for the actual result.
 
-| Error Type              | Description                          | Typical Status Code |
-| ----------------------- | ------------------------------------ | ------------------- |
-| `timeout`               | Request exceeded configured timeout  | `504`               |
-| `rate_limit`            | Request was rate limited             | `429`               |
-| `model_not_found`       | Requested model is not available     | `404`               |
-| `authentication_failed` | Authentication credentials invalid   | `401`               |
-| `authorization_failed`  | User lacks required permissions      | `403`               |
-| `upstream_error`        | Error from model inference backend   | `502`, `503`        |
-| `invalid_request`       | Malformed request body or parameters | `400`               |
+## Model and routing fields
 
-### AI-Specific Routing Information
+| Field | Type | Presence | Description | Example |
+| --- | --- | --- | --- | --- |
+| `model_name` | String | Always in JSON; may be empty when parsing fails | Model requested by the client | `llama2-7b` |
+| `model_route` | String | When selected | Namespaced ModelRoute | `default/llama2-route-v1` |
+| `model_server` | String | When selected | Namespaced ModelServer | `default/llama2-server` |
+| `selected_pod` | String | When selected | Backend pod name | `llama2-deployment-5f7b8c9d-xk2p4` |
+| `request_id` | String | Normally present | Incoming `x-request-id`, or an ID generated by the access-log middleware | `550e8400-e29b-41d4-a716-446655440000` |
+| `gateway` | String | Gateway API requests | Namespaced Gateway | `default/inference-gateway` |
+| `http_route` | String | HTTPRoute requests | Namespaced HTTPRoute | `default/inference-route` |
+| `inference_pool` | String | Inference Extension requests | Namespaced InferencePool | `default/llama2-pool` |
 
-These fields provide information about how the request was routed through the AI router.
+## Token fields
 
-| Field          | Type     | Description                               | Example                                |
-| -------------- | -------- | ----------------------------------------- | -------------------------------------- |
-| `model_name`   | `string` | Name of the AI model requested            | `llama2-7b`, `gpt-3.5-turbo`           |
-| `model_route`  | `string` | Name of the ModelRoute resource used      | `default/llama2-route-v1`              |
-| `model_server` | `string` | ModelServer that handled the request      | `default/llama2-server`                |
-| `selected_pod` | `string` | Specific pod that processed the inference | `llama2-deployment-5f7b8c9d-xk2p4`     |
-| `request_id`   | `string` | Unique identifier for request tracing     | `550e8400-e29b-41d4-a716-446655440000` |
+| Field | Type | Presence | Description | Example |
+| --- | --- | --- | --- | --- |
+| `input_tokens` | Integer | JSON omits zero | Prompt-token count calculated by the router | `150` |
+| `output_tokens` | Integer | JSON omits zero | Completion-token count parsed from the backend response when available | `75` |
 
-### Token Information
+Text output includes `tokens=input/output` when either count is nonzero.
 
-Token usage metrics for the inference request.
+## Timing fields
 
-| Field           | Type      | Description                            | Example |
-| --------------- | --------- | -------------------------------------- | ------- |
-| `input_tokens`  | `integer` | Number of tokens in the request prompt | `150`   |
-| `output_tokens` | `integer` | Number of tokens generated in response | `75`    |
+All timing values are integer milliseconds.
 
-### Timing Breakdown
+| Field | Type | Description | Example |
+| --- | --- | --- | --- |
+| `duration_total` | Integer | End-to-end time from receipt until access-log finalization | `2350` |
+| `duration_request_processing` | Integer | Initial router parsing and tokenization phase | `45` |
+| `duration_upstream_processing` | Integer | Marked backend-proxy phase | `2180` |
+| `duration_response_processing` | Integer | Marked response-processing phase | `5` |
 
-All timing values are in milliseconds and provide detailed performance metrics.
+There is no `duration_queue` field and no access-log field uses an `_ms`
+suffix. `duration_total` is authoritative. The phase fields are independently
+rounded checkpoints and may not sum to the total, including when rate limiting,
+routing, scheduling, or queue time falls between marked phases.
 
-| Field                          | Type      | Description                                     | Example |
-| ------------------------------ | --------- | ----------------------------------------------- | ------- |
-| `duration_total`               | `integer` | Total end-to-end request processing time (ms)   | `2350`  |
-| `duration_request_processing`  | `integer` | Router request processing overhead (ms)        | `45`    |
-| `duration_upstream_processing` | `integer` | Model inference time on backend pod (ms)        | `2180`  |
-| `duration_response_processing` | `integer` | Response processing and serialization time (ms) | `5`     |
+## Examples
 
-#### Timing Phases
-
-1. **Request Processing**: Time spent parsing the request, authentication, rate limiting, and routing decisions
-2. **Upstream Processing**: Time spent on actual model inference in the backend pod
-3. **Response Processing**: Time spent formatting and serializing the response
-
-## Example Access Logs
-
-### Successful Request (JSON Format)
+### Successful JSON entry
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:45.123Z",
+  "timestamp": "2026-01-09T14:35:22.147Z",
   "method": "POST",
   "path": "/v1/chat/completions",
   "protocol": "HTTP/1.1",
@@ -122,53 +127,70 @@ All timing values are in milliseconds and provide detailed performance metrics.
 }
 ```
 
-### Failed Request with Error (JSON Format)
+### Failed JSON entry
 
 ```json
 {
-  "timestamp": "2024-01-15T10:35:22.456Z",
+  "timestamp": "2026-01-09T14:35:28.456Z",
   "method": "POST",
   "path": "/v1/chat/completions",
   "protocol": "HTTP/1.1",
-  "status_code": 504,
+  "status_code": 503,
   "error": {
-    "type": "timeout",
-    "message": "Model inference timeout after 30s"
+    "type": "pod_discovery",
+    "message": "no available pods for model server: default/llama2-server"
   },
   "model_name": "llama2-7b",
-  "model_route": "default/llama2-route-v1",
-  "model_server": "default/llama2-server",
-  "selected_pod": "llama2-deployment-5f7b8c9d-xk2p4",
   "request_id": "660e8400-e29b-41d4-a716-446655440001",
   "input_tokens": 200,
-  "output_tokens": 0,
-  "duration_total": 30050,
-  "duration_request_processing": 50,
-  "duration_upstream_processing": 30000,
+  "duration_total": 51,
+  "duration_request_processing": 4,
+  "duration_upstream_processing": 47,
   "duration_response_processing": 0
 }
 ```
 
-### Text Format Example
+### Text entry
 
-```
-[2024-01-15T10:30:45.123Z] "POST /v1/chat/completions HTTP/1.1" 200 model_name=llama2-7b model_route=default/llama2-route-v1 model_server=default/llama2-server selected_pod=llama2-deployment-5f7b8c9d-xk2p4 request_id=550e8400-e29b-41d4-a716-446655440000 tokens=150/75 timings=2350ms(45+2180+5)
-```
-
-### Text Format with Error
-
-```
-[2024-01-15T10:35:22.456Z] "POST /v1/chat/completions HTTP/1.1" 504 error=timeout:Model inference timeout after 30s model_name=llama2-7b model_route=default/llama2-route-v1 model_server=default/llama2-server selected_pod=llama2-deployment-5f7b8c9d-xk2p4 request_id=660e8400-e29b-41d4-a716-446655440001 tokens=200/0 timings=30050ms(50+30000+0)
+```text
+[2026-01-09T14:35:22.147Z] "POST /v1/chat/completions HTTP/1.1" 200 model_name=llama2-7b model_route=default/llama2-route-v1 model_server=default/llama2-server selected_pod=llama2-deployment-5f7b8c9d-xk2p4 request_id=550e8400-e29b-41d4-a716-446655440000 tokens=150/75 timings=2350ms(45+2180+5)
 ```
 
-## Configuration
+## Helm configuration
 
-Access logging is configured through environment variables in the kthena router deployment:
+The root chart uses the following values. The defaults shown here preserve the
+current text-format behavior:
 
-### Environment Variables
+```yaml
+networking:
+  kthenaRouter:
+    accessLog:
+      enabled: true
+      format: text
+      output: stdout
+```
 
-| Variable             | Description                      | Default  | Valid Values                     |
-| -------------------- | -------------------------------- | -------- | -------------------------------- |
-| `ACCESS_LOG_ENABLED` | Enable or disable access logging | `true`   | `true`, `false`                  |
-| `ACCESS_LOG_FORMAT`  | Log output format                | `text`   | `json`, `text`                   |
-| `ACCESS_LOG_OUTPUT`  | Where to write logs              | `stdout` | `stdout`, `stderr`, or file path |
+Set `format: json` explicitly when a structured log pipeline requires JSON.
+
+For the standalone networking subchart, omit the `networking` prefix:
+
+```yaml
+kthenaRouter:
+  accessLog:
+    enabled: true
+    format: json
+    output: stdout
+```
+
+## Environment variables
+
+The deployment maps Helm values to these router environment variables:
+
+| Variable | Description | Helm default | Accepted values |
+| --- | --- | --- | --- |
+| `ACCESS_LOG_ENABLED` | Enable access logging | `true` | Values accepted by Go's boolean parser |
+| `ACCESS_LOG_FORMAT` | Output format | `text` | `text`, `json` |
+| `ACCESS_LOG_OUTPUT` | Destination | `stdout` | `stdout`, `stderr`, or a file path |
+
+Prefer `stdout` for Kubernetes workloads. A file path writes inside the router
+container and requires a mounted volume plus a separate collection strategy.

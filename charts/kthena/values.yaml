@@ -54,6 +54,13 @@ networking:
       tag: latest
       # -- Image pull policy for Kthena Router.
       pullPolicy: IfNotPresent
+    accessLog:
+      # -- Enable router access logging.
+      enabled: true
+      # -- Access-log format. Supported values are `text` and `json`.
+      format: "text"
+      # -- Access-log destination: `stdout`, `stderr`, or a file path.
+      output: "stdout"
     tls:
       # -- Enable TLS for Kthena Router server.
       enabled: false

@@ -1,73 +1,147 @@
 # Router Observability
 
-## Overview & Purpose
+The Kthena router exposes three complementary observability surfaces:
 
-The **kthena-router** serves as the central data-plane gateway for all inference traffic in the Kthena LLM inference platform.  
-It is responsible for request routing, load balancing, scheduling, fairness queuing, rate limiting, token accounting, and (when applicable) disaggregated prefill/decode forwarding.
+- Prometheus metrics for alerting, dashboards, and capacity analysis
+- One access-log record for each inference request
+- Loopback-only configuration-dump and pprof endpoints for live diagnosis
 
-Without strong observability, diagnosing issues such as:
+## Endpoint map
 
-- Why is this model slow?
-- Which users are being unfairly delayed?
-- Where are the 5xx errors coming from?
-- Is the scheduler making good pod selections?
-- Are we hitting rate limits or resource exhaustion?
+The current Helm chart serves health and metrics routes on the inference
+listener. The debug listener is a separate loopback-only server inside the
+router pod.
 
-becomes extremely difficult and time-consuming.
+| Listener | Default | Endpoints | Exposure |
+| --- | --- | --- | --- |
+| Router | Container port `8080`; Service port `80` | `/healthz`, `/readyz`, `/metrics`, inference APIs | The `kthena-router` LoadBalancer Service |
+| Debug | `localhost:15000` | `/debug/config_dump/*`, `/debug/pprof/*` | Pod loopback only; no Service port |
 
-This observability framework provides production-grade visibility through three main channels:
+The chart does not currently provide an `observability.metrics` values block.
+The metrics path is fixed at `/metrics`, and its port follows
+`networking.kthenaRouter.port`. Do not set the previously documented
+`observability.metrics` keys; Helm ignores them.
 
-1. **Prometheus metrics** — quantitative signals for dashboards, alerting, and trending
-2. **Structured access logs** — rich per-request forensic details
-3. **Debug endpoints** — instant insight into routing configuration and system state
+To inspect these endpoints without relying on their external exposure:
 
-Together they enable fast root-cause analysis, performance tuning, capacity planning, cost monitoring, and abuse detection.
+```bash
+# The Service listens on 80 and forwards to the router's default port, 8080.
+kubectl port-forward -n kthena-system service/kthena-router 8080:80
+
+# Run separately when debug access is needed. This selects a router pod and
+# reaches the process's loopback-only listener from inside its network namespace.
+kubectl port-forward -n kthena-system deployment/kthena-router 15000:15000
+```
+
+If the release namespace is not `kthena-system`, replace it in the commands.
 
 ## Metrics
 
-### Endpoint
+The tables below list every Kthena-owned router metric family registered by the
+current binary. Histograms additionally expose Prometheus `_bucket`, `_sum`, and
+`_count` series. Standard Go runtime, process, and Prometheus handler metrics are
+also present; those collector-provided families can vary with dependency
+versions.
 
-- **Metrics Port**: `8080` (default)  
-- **Metrics Path**: `/metrics`  
+Some metrics appear only after the corresponding feature or request path has
+been exercised.
 
-**Note:** The Prometheus metrics are exposed on port **8080** by default.  
-The debug endpoints (`/debug/config_dump/*`) are served on port **15000**.
+### Requests, traffic, and rate limiting
 
-### Core Request & Latency Metrics
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `kthena_router_requests_total` | Counter | `model`, `path`, `status_code`, `error_type` | Completed HTTP requests |
+| `kthena_router_request_duration_seconds` | Histogram | `model`, `path`, `status_code` | End-to-end request latency |
+| `kthena_router_request_prefill_duration_seconds` | Histogram | `model`, `path`, `status_code` | Prefill latency for prefill/decode-disaggregated requests |
+| `kthena_router_request_decode_duration_seconds` | Histogram | `model`, `path`, `status_code` | Decode latency for prefill/decode-disaggregated requests |
+| `kthena_router_tokens_total` | Counter | `model`, `path`, `token_type` | Input or output tokens; `token_type` is `input` or `output` |
+| `kthena_router_rate_limit_exceeded_total` | Counter | `model`, `limit_type`, `path` | Requests rejected by input-token, output-token, or request rate limits |
+| `kthena_router_active_requests` | Gauge | none | All requests currently handled by this router process |
+| `kthena_router_active_downstream_requests` | Gauge | `model` | Active client-to-router requests |
+| `kthena_router_active_upstream_requests` | Gauge | `model_server`, `model_route` | Active router-to-backend requests |
 
-| Metric Name                                          | Type      | Description                                                  | Labels                                      | Buckets                                                                 |
-|------------------------------------------------------|-----------|--------------------------------------------------------------|---------------------------------------------|-------------------------------------------------------------------------|
-| `kthena_router_requests_total`                       | Counter   | Total requests processed                                     | `model`, `path`, `status_code`, `error_type` | —                                                                       |
-| `kthena_router_request_duration_seconds`             | Histogram | End-to-end latency (client → response)                       | `model`, `path`, `status_code`              | 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60        |
-| `kthena_router_request_prefill_duration_seconds`     | Histogram | Prefill (prompt processing) phase duration                   | `model`, `path`, `status_code`              | same as above                                                           |
-| `kthena_router_request_decode_duration_seconds`      | Histogram | Decode (token generation) phase duration                     | `model`, `path`, `status_code`              | same as above                                                           |
-| `kthena_router_active_requests`                      | Gauge     | Currently active requests handled by the router              | —                                           | —                                                                       |
-| `kthena_router_active_downstream_requests`           | Gauge     | Currently active client requests                             | `model`                                     | —                                                                       |
-| `kthena_router_active_upstream_requests`             | Gauge     | Currently active requests to inference pods                  | `model_route`, `model_server`               | —                                                                       |
+### Scheduler and user-fairness queue
 
-### Token & Usage Metrics
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `kthena_router_scheduler_plugin_duration_seconds` | Histogram | `model`, `plugin`, `type` | Scheduler plugin execution time; `type` is `filter` or `score` |
+| `kthena_router_fairness_queue_size` | Gauge | `model`, `user_id` | Pending requests in the fairness queue |
+| `kthena_router_fairness_queue_duration_seconds` | Histogram | `model`, `user_id` | Time spent waiting in the fairness queue |
+| `kthena_router_fairness_queue_cancelled_total` | Counter | `model`, `user_id` | Requests cancelled or timed out while queued |
+| `kthena_router_fairness_queue_dequeue_total` | Counter | `model`, `user_id` | Requests successfully dequeued |
+| `kthena_router_fairness_queue_inflight` | Gauge | `model` | Requests admitted through the fairness semaphore |
+| `kthena_router_fairness_queue_priority_refresh_total` | Counter | `model` | Dequeue-time priority refresh and reinsert operations |
+| `kthena_router_fairness_queue_heap_rebuild_total` | Counter | `model` | Full heap rebuilds caused by priority drift |
 
-| Metric Name                            | Type    | Description                                      | Labels                              |
-|----------------------------------------|---------|--------------------------------------------------|-------------------------------------|
-| `kthena_router_tokens_total`           | Counter | Total tokens processed (input + output)          | `model`, `path`, `token_type` (input/output) |
+`user_id` values originate from authenticated request identity. Treat them as
+sensitive, and account for their cardinality when retaining or federating these
+series.
 
-### Scheduler & Fairness Metrics
+### Tokenizer and cache-aware scheduling
 
-| Metric Name                                           | Type      | Description                                            | Labels                        | Buckets                                                                |
-|-------------------------------------------------------|-----------|--------------------------------------------------------|-------------------------------|------------------------------------------------------------------------|
-| `kthena_router_scheduler_plugin_duration_seconds`     | Histogram | Execution time per scheduler plugin                    | `model`, `plugin`, `type`     | 0.001, 0.005, 0.01, 0.05, 0.1, 0.5                                     |
-| `kthena_router_fairness_queue_size`                   | Gauge     | Current queued requests per model/user                 | `model`, `user_id`            | —                                                                      |
-| `kthena_router_fairness_queue_duration_seconds`       | Histogram | Time spent waiting in fairness/priority queue          | `model`, `user_id`            | 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5             |
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `kthena_router_tokenizer_unsupported_engine_total` | Counter | `model`, `engine` | Tokenizer lookups for which no pod used a supported engine |
+| `kthena_router_prefix_cache_match_ratio` | Histogram | `model` | Best prefix-cache match ratio for each scheduling attempt |
+| `kthena_router_prefix_cache_evictions_total` | Counter | `model` | Per-pod prefix-cache entries evicted at capacity |
+| `kthena_router_prefix_cache_entries` | Gauge | none | Current `(prefix block, pod)` entries across all local caches |
+| `kthena_router_kvcache_aware_match_ratio` | Histogram | `model` | Best external KV-cache match ratio for each attempt |
+| `kthena_router_kvcache_aware_redis_duration_seconds` | Histogram | `model` | Batched Redis lookup latency |
+| `kthena_router_kvcache_aware_tokenize_duration_seconds` | Histogram | `model` | Prompt tokenization latency for KV-cache-aware matching |
+| `kthena_router_kvcache_aware_errors_total` | Counter | `model`, `stage` | Aborted KV-cache-aware attempts; `stage` is `tokenize` or `redis` |
 
-### Rate Limiting & Protection
+### Session-boost queue
 
-| Metric Name                                      | Type    | Description                                          | Labels                        |
-|--------------------------------------------------|---------|------------------------------------------------------|-------------------------------|
-| `kthena_router_rate_limit_exceeded_total`        | Counter | Requests rejected due to rate limiting               | `model`, `limit_type`, `path` |
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `kthena_router_session_boost_queue_size` | Gauge | `model` | Pending requests in the session-boost queue |
+| `kthena_router_session_boost_queue_duration_seconds` | Histogram | `model` | Time spent waiting in the session-boost queue |
+| `kthena_router_session_boost_queue_cancelled_total` | Counter | `model` | Requests cancelled or timed out while queued |
+| `kthena_router_session_boost_queue_dequeue_total` | Counter | `model` | Requests successfully dequeued |
+| `kthena_router_session_boost_queue_inflight` | Gauge | `model` | Requests admitted through the session-boost queue |
 
-## Access Logs
+### Histogram buckets
 
-### Recommended Format: Structured JSON
+| Metrics | Buckets |
+| --- | --- |
+| Request, prefill, and decode durations | `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `30`, `60` seconds |
+| Scheduler plugin duration | `0.001`, `0.005`, `0.01`, `0.05`, `0.1`, `0.5` seconds |
+| Fairness and session-boost queue durations | `0.001`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5` seconds |
+| Prefix-cache and KV-cache match ratios | `0`, `0.1`, `0.25`, `0.5`, `0.75`, `0.9`, `0.95`, `0.99`, `1.0` |
+| KV-cache Redis and tokenization durations | `0.0005`, `0.001`, `0.0025`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5` seconds |
+
+## Access logs
+
+Helm enables access logging in `text` format by default. This is the
+compatibility default and is not changed by this documentation update. JSON is
+recommended for structured ingestion, but operators must opt in explicitly.
+
+```yaml
+networking:
+  kthenaRouter:
+    accessLog:
+      enabled: true
+      format: json
+      output: stdout
+```
+
+For a standalone deployment, the equivalent environment variables are:
+
+```yaml
+env:
+  - name: ACCESS_LOG_ENABLED
+    value: "true"
+  - name: ACCESS_LOG_FORMAT
+    value: "json"
+  - name: ACCESS_LOG_OUTPUT
+    value: "stdout"
+```
+
+The valid formats are `text` and `json`. Output can be `stdout`, `stderr`, or a
+file path. Prefer `stdout` in Kubernetes so the container runtime and log agent
+can collect the records; a file path is local to the container filesystem.
+
+The JSON field names below match the emitted contract:
 
 ```json
 {
@@ -83,212 +157,93 @@ The debug endpoints (`/debug/config_dump/*`) are served on port **15000**.
   "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "input_tokens": 412,
   "output_tokens": 189,
-  "duration_total_ms": 3840,
-  "duration_queue_ms": 180,
-  "duration_request_processing_ms": 65,
-  "duration_upstream_ms": 3480,
-  "duration_response_processing_ms": 115,
-  "error": null
+  "duration_total": 3840,
+  "duration_request_processing": 65,
+  "duration_upstream_processing": 3480,
+  "duration_response_processing": 115
 }
 ```
 
-## Configuration
+All duration fields are integer milliseconds. There is no `duration_queue`
+field. `duration_total` is authoritative and can exceed the sum of the marked
+processing phases, including when routing or queue time falls between phase
+checkpoints. See the [access-log field reference](../reference/router-access-log-fields.md)
+for optional routing fields and current error types.
 
-Observability features are configured via the Kthena Router's deployment or ConfigMap.  
-Most settings are controlled through environment variables or the router's configuration file (depending on your deployment method).
+When `ACCESS_LOG_OUTPUT` is `stdout` or `stderr`, `kubectl logs` can contain
+access-log records alongside other process logs. The following examples
+therefore filter JSON lines before invoking `jq`. If access logs are written to
+a file path, they do not appear in `kubectl logs`; inspect the mounted file or
+the configured log collector instead.
 
-### Access Log Configuration
-
-```yaml
-accessLogger:
-  enabled: true
-  format: "json"          # "json" (strongly recommended) or "text"
-  output: "stdout"        # "stdout", "stderr", or file path
+```bash
+kubectl logs -n kthena-system deployment/kthena-router -f \
+  | grep -E '^\{.*\}$' \
+  | jq .
 ```
 
-#### Equivalent environment variables (recommended for most deployments)
+## Health endpoints
 
-```yaml
-env:
-- name: ACCESS_LOG_ENABLED
-  value: "true"
-- name: ACCESS_LOG_FORMAT
-  value: "json"
-- name: ACCESS_LOG_OUTPUT
-  value: "stdout"
-```
+| Endpoint | Successful response | Purpose |
+| --- | --- | --- |
+| `/healthz` | HTTP `200`, `{"message":"ok"}` | Process liveness |
+| `/readyz` | HTTP `200`, `{"message":"router is ready"}` | Controller and datastore readiness; returns HTTP `503` until ready |
 
-#### Metrics Configuration
+## Debug and pprof endpoints
 
-```yaml
-observability:
-  metrics:
-    enabled: true
-    port: 8080           # Default metrics port
-    path: /metrics
-```
+The debug server binds to `localhost:15000` by default. It is intentionally not
+published by the Helm Service. A port-forward grants access to sensitive routing
+state and runtime profiles; keep it open only while diagnosing a trusted cluster.
 
-## Debug Endpoints
-
-All available on the same `:15000` port
+### Configuration dump
 
 | Endpoint | Description |
 | --- | --- |
-| `/debug/config_dump/modelroutes` | All ModelRoute resources |
-| `/debug/config_dump/modelservers` | All ModelServer resources |
-| `/debug/config_dump/pods` | Current view of healthy/ready inference pods |
-| `/debug/config_dump/namespaces/{ns}/modelroutes/{name}` | Detailed single ModelRoute |
-| `/debug/config_dump/namespaces/{ns}/modelservers/{name}` | Detailed single ModelServer |
+| `/debug/config_dump/modelroutes` | All ModelRoute resources known to the router |
+| `/debug/config_dump/modelservers` | All ModelServer resources known to the router |
+| `/debug/config_dump/pods` | All inference pods known to the router |
+| `/debug/config_dump/gateways` | All Gateway resources known to the router |
+| `/debug/config_dump/httproutes` | All HTTPRoute resources known to the router |
+| `/debug/config_dump/inferencepools` | All InferencePool resources known to the router |
+| `/debug/config_dump/namespaces/{namespace}/modelroutes/{name}` | One namespaced ModelRoute |
+| `/debug/config_dump/namespaces/{namespace}/modelservers/{name}` | One namespaced ModelServer |
+| `/debug/config_dump/namespaces/{namespace}/pods/{name}` | One namespaced pod |
+| `/debug/config_dump/namespaces/{namespace}/gateways/{name}` | One namespaced Gateway |
+| `/debug/config_dump/namespaces/{namespace}/httproutes/{name}` | One namespaced HTTPRoute |
+| `/debug/config_dump/namespaces/{namespace}/inferencepools/{name}` | One namespaced InferencePool |
 
-## Quick Start – Observability in Action
+### Runtime profiling
 
-```bash
-# Forward metrics port (8080)
-kubectl port-forward -n kthena-system svc/kthena-router 8080:8080 &
+| Endpoint | Description |
+| --- | --- |
+| `/debug/pprof/` | pprof index |
+| `/debug/pprof/profile` | CPU profile |
+| `/debug/pprof/goroutine` | Goroutine profile |
+| `/debug/pprof/heap` | Heap profile |
+| `/debug/pprof/allocs` | Allocation profile |
+| `/debug/pprof/block` | Blocking profile |
+| `/debug/pprof/mutex` | Mutex-contention profile |
 
-# Forward debug port (15000) when needed
-kubectl port-forward -n kthena-system svc/kthena-router 15000:15000 &
+## Troubleshooting examples
 
-# Watch real-time request rate by model
-watch -n 2 'curl -s http://localhost:8080/metrics | grep kthena_router_requests_total | sort'
-
-# Tail logs and filter access log entries (JSON lines only)
-kubectl logs -n kthena-system deployment/kthena-router -f \
-  | grep -E '^{.*}$' | jq .    # Only process valid JSON lines
-
-# Alternative: look for model-related entries in all logs
-kubectl logs -n kthena-system deployment/kthena-router -f \
-  | grep -E "model_name|request_id|duration_total"
-```
-
-**Important note about logs**  
-
-- Router logs usually contain both regular application logs (plain text) and structured access logs (JSON).  
-- Piping everything directly to `jq` will cause errors on non-JSON lines.  
-- Use `grep` to filter JSON lines first, or use a log processor (like fluentd, vector, or loki) in production.
-
-## Troubleshooting Guide
-
-### Preparation
+After starting both port-forwards from the [endpoint map](#endpoint-map):
 
 ```bash
-# Forward metrics port (8080) for metrics queries
-kubectl port-forward -n kthena-system svc/kthena-router 8080:8080 &
-
-# Forward debug port (15000) for debug endpoints
-kubectl port-forward -n kthena-system svc/kthena-router 15000:15000 &
-
-# Live structured logs (recommended, with filtering)
-kubectl logs -n kthena-system deployment/kthena-router -f \
-  | grep -E '^{.*}$' | jq .
-```
-
-#### 1. High Error Rate (5xx, timeouts, internal server errors)
-
-Count errors by status & model:
-
-```bash
-curl -s http://localhost:8080/metrics | grep 'status_code=5' | sort -nr
-```
-
-Top affected models:
-
-```bash
+# Request counters by model and result.
 curl -s http://localhost:8080/metrics \
-  | grep 'status_code=5' \
-  | grep -o 'model="[^"]*"' | sort | uniq -c | sort -nr
-```
+  | grep '^kthena_router_requests_total'
 
-Inspect recent failed requests:
+# Router configuration and currently known pods.
+curl -s http://localhost:15000/debug/config_dump/modelservers | jq .
+curl -s http://localhost:15000/debug/config_dump/pods | jq .
 
-```bash
+# Recent 5xx access records (requires JSON access-log format).
 kubectl logs -n kthena-system deployment/kthena-router --since=30m \
-  | jq 'select(.status_code >= 500) | {ts: .timestamp, model: .model_name, err: .error, pod: .selected_pod, dur: .duration_total_ms}'
-```
+  | grep -E '^\{.*\}$' \
+  | jq 'select(.status_code >= 500) | {timestamp, model: .model_name, error, pod: .selected_pod, duration: .duration_total}'
 
-Check upstream health:
-
-```bash
-curl http://localhost:15000/debug/config_dump/modelservers | jq .
-curl http://localhost:15000/debug/config_dump/pods | jq .
-```
-
-#### 2. High Latency / Slow TTFT or Generation Speed
-
-Latency percentiles (p50/p95/p99):
-
-```bash
-curl -s http://localhost:8080/metrics \
-  | grep -E 'kthena_router_request_duration_seconds_(bucket|sum|count)'
-```
-
-Find slowest requests:
-
-```bash
+# Requests slower than four seconds (requires JSON access-log format).
 kubectl logs -n kthena-system deployment/kthena-router --since=20m \
-  | jq 'select(.duration_total_ms > 4000) | {model: .model_name, total: .duration_total_ms, upstream: .duration_upstream_ms, pod: .selected_pod}'
-```
-
-Check queue pressure:
-
-```bash
-watch -n 2 'curl -s http://localhost:8080/metrics | grep -E "(active_downstream|fairness_queue_size)"'
-```
-
-#### 3. Queue Buildup / Fairness / Throttling
-
-Live queue monitoring:
-
-```bash
-watch -n 3 'curl -s http://localhost:8080/metrics | grep fairness_queue_size'
-```
-
-Queue wait time distribution:
-
-```bash
-curl -s http://localhost:8080/metrics | grep fairness_queue_duration_seconds
-```
-
-Find throttled/rejected requests:
-
-```bash
-kubectl logs -n kthena-system deployment/kthena-router --since=1h \
-  | jq 'select(.error? | .type? == ("rate_limit","throttled","queue_full"))'
-```
-
-#### 4. Wrong Routing / 404 / Pod Selection Issues
-
-Validate full routing table:
-
-```bash
-curl http://localhost:15000/debug/config_dump/modelroutes | jq .
-```
-
-Check pod readiness:  
-
-```bash
-curl http://localhost:15000/debug/config_dump/pods | jq .
-```
-
-Trace a specific request:
-
-```bash
-# Use request_id from client or error message
-kubectl logs -n kthena-system deployment/kthena-router \
-  | jq 'select(.request_id == "a1b2c3d4-...")'
-```
-
-#### 5. Token Usage / Cost / Abuse Monitoring
-
-Current token consumption rate:
-
-```bash
-curl -s http://localhost:8080/metrics | grep kthena_router_tokens_total
-```
-
-High-token requests:
-
-```bash
-kubectl logs -n kthena-system deployment/kthena-router --since=2h \
-  | jq 'select(.input_tokens > 3000 or .output_tokens > 1500)'
+  | grep -E '^\{.*\}$' \
+  | jq 'select(.duration_total > 4000) | {model: .model_name, total: .duration_total, upstream: .duration_upstream_processing, pod: .selected_pod}'
 ```
