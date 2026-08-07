@@ -80,6 +80,18 @@ type PodGroupManager interface {
 	AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing, groupName, taskName string)
 }
 
+type podGracePeriodKey struct {
+	types.NamespacedName
+	UID types.UID
+}
+
+func getPodGracePeriodKey(pod *corev1.Pod) podGracePeriodKey {
+	return podGracePeriodKey{
+		NamespacedName: utils.GetNamespaceName(pod),
+		UID:            pod.UID,
+	}
+}
+
 type ModelServingController struct {
 	kubeClientSet      kubernetes.Interface
 	modelServingClient clientset.Interface
@@ -96,7 +108,7 @@ type ModelServingController struct {
 	// nolint
 	workqueue       workqueue.RateLimitingInterface
 	store           datastore.Store
-	graceMap        sync.Map // key: errorPod.namespace/errorPod.name, value:time
+	graceMap        sync.Map // key: podGracePeriodKey, value:time
 	initialSync     bool     // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
@@ -1684,7 +1696,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
 	// pod is already in the grace period and does not need to be processed for the time being.
-	key := utils.GetNamespaceName(errPod)
+	key := getPodGracePeriodKey(errPod)
 	now := time.Now()
 	_, loaded := c.graceMap.LoadOrStore(key, now)
 	if loaded {
@@ -1733,7 +1745,7 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 		// Wait for the grace period before making a decision
 		time.Sleep(time.Duration(*ms.Spec.Template.RestartGracePeriodSeconds) * time.Second)
 		klog.V(4).Infof("%s after grace time", errPod.Name)
-		defer c.graceMap.Delete(utils.GetNamespaceName(errPod))
+		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
 
 		newPod, err := c.podsLister.Pods(ms.Namespace).Get(errPod.Name)
 		if err != nil {
@@ -1744,11 +1756,15 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 			}
 			return
 		}
+		if newPod.UID != errPod.UID {
+			klog.V(4).Infof("pod %s has been replaced after grace time", errPod.Name)
+			return
+		}
 
 		if !utils.IsPodRunningAndReady(newPod) {
 			// pod has not recovered after the grace period, needs to be rebuilt
 			// After this pod has been deleted, we will rebuild the ServingGroup in deletePod function
-			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), newPod.Name, metav1.DeleteOptions{})
+			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), newPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
 			if err != nil {
 				klog.Errorf("cannot delete pod %s after grace time, err: %v", newPod.Name, err)
 				return
@@ -1757,9 +1773,9 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 		}
 	} else {
 		// grace period is not set or the grace period is 0, the deletion will be executed immediately.
-		defer c.graceMap.Delete(utils.GetNamespaceName(errPod))
+		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
 
-		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, metav1.DeleteOptions{})
+		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
 		if err != nil {
 			klog.Errorf("cannot delete pod %s when it error, err: %v", errPod.Name, err)
 			return

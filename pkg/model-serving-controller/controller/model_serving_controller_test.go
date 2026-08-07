@@ -5809,10 +5809,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
 
 	// Verify running pod is NOT in graceMap (it's healthy)
-	_, runningInGraceMap := controller.graceMap.Load(types.NamespacedName{
-		Namespace: ns,
-		Name:      runningPod.Name,
-	})
+	_, runningInGraceMap := controller.graceMap.Load(getPodGracePeriodKey(runningPod))
 	assert.False(t, runningInGraceMap, "Running pod should NOT be in graceMap")
 
 	require.Eventually(t, func() bool {
