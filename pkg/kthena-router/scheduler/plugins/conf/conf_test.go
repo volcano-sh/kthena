@@ -17,8 +17,13 @@ limitations under the License.
 package conf
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 )
 
 func TestLoadSchedulerConfig(t *testing.T) {
@@ -58,6 +63,50 @@ func TestLoadSchedulerConfig(t *testing.T) {
 						t.Errorf("expected error %q, got %q", tc.expectErrs, err.Error())
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestParseRouterConfigNonFiniteLeastLatencyWeightUsesDefault(t *testing.T) {
+	tt := []struct {
+		name  string
+		value string
+	}{
+		{name: "not a number", value: ".nan"},
+		{name: "positive infinity", value: ".inf"},
+		{name: "negative infinity", value: "-.inf"},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
+			config := fmt.Sprintf(`scheduler:
+  pluginConfig:
+    - name: least-latency
+      args:
+        TTFTTPOTWeightFactor: %s
+`, tc.value)
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatalf("write router configuration: %v", err)
+			}
+
+			routerConfig, err := ParseRouterConfig(configPath)
+			if err != nil {
+				t.Fatalf("parse router configuration: %v", err)
+			}
+			_, _, pluginArgs, err := LoadSchedulerConfig(&routerConfig.Scheduler)
+			if err != nil {
+				t.Fatalf("load scheduler configuration: %v", err)
+			}
+			args := pluginArgs[plugins.LeastLatencyPluginName]
+			if !strings.Contains(string(args.Raw), tc.value) {
+				t.Fatalf("expected plugin arguments to preserve %q, got %q", tc.value, args.Raw)
+			}
+
+			plugin := plugins.NewLeastLatency(args)
+			if plugin.TTFTTPOTWeightFactor != 0.5 {
+				t.Fatalf("expected non-finite router configuration weight to use default 0.5, got %v", plugin.TTFTTPOTWeightFactor)
 			}
 		})
 	}

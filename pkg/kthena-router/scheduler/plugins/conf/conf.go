@@ -22,7 +22,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/yaml"
+	yaml "sigs.k8s.io/yaml/goyaml.v3"
 )
 
 type RouterConfiguration struct {
@@ -58,6 +58,32 @@ type PluginWithWeight struct {
 type PluginConfig struct {
 	Name string               `yaml:"name"`
 	Args runtime.RawExtension `yaml:"args,omitempty"`
+}
+
+// UnmarshalYAML preserves plugin arguments as YAML. Parsing the outer
+// configuration through JSON rejects valid YAML scalar values such as .nan and
+// .inf before the plugin has a chance to validate or default them.
+func (p *PluginConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("plugin configuration must be a mapping")
+	}
+
+	p.Args = runtime.RawExtension{}
+	for i := 0; i < len(value.Content); i += 2 {
+		key := value.Content[i]
+		field := value.Content[i+1]
+		switch key.Value {
+		case "name":
+			p.Name = field.Value
+		case "args":
+			args, err := yaml.Marshal(field)
+			if err != nil {
+				return fmt.Errorf("marshal plugin arguments: %w", err)
+			}
+			p.Args.Raw = args
+		}
+	}
+	return nil
 }
 
 type AuthenticationConfig struct {
