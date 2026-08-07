@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -364,17 +365,45 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 }
 
 func (c *LWSController) updateLWSStatus(ctx context.Context, lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.ModelServing) error {
-	newStatus := lws.Status.DeepCopy()
-	newStatus.Replicas = ms.Status.Replicas
-	newStatus.ReadyReplicas = ms.Status.AvailableReplicas
+	// Status updates within a single reconcile can happen back to back, and the
+	// informer cache does not always catch up between them. Read from the cache
+	// on the first attempt (cheap, and correct in the common case); if that
+	// attempt conflicts, the cache is known to be stale for this object, so
+	// subsequent attempts read directly from the API server instead of retrying
+	// against the same stale resourceVersion.
+	readFromAPI := false
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latestLWS *lwsv1.LeaderWorkerSet
+		var getErr error
+		if readFromAPI {
+			latestLWS, getErr = c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lws.Namespace).Get(ctx, lws.Name, metav1.GetOptions{})
+		} else {
+			latestLWS, getErr = c.lwsLister.LeaderWorkerSets(lws.Namespace).Get(lws.Name)
+		}
+		if getErr != nil {
+			return getErr
+		}
 
-	if !reflect.DeepEqual(lws.Status, *newStatus) {
-		lwsCopy := lws.DeepCopy()
+		newStatus := latestLWS.Status.DeepCopy()
+		newStatus.Replicas = ms.Status.Replicas
+		newStatus.ReadyReplicas = ms.Status.AvailableReplicas
+
+		if reflect.DeepEqual(latestLWS.Status, *newStatus) {
+			return nil
+		}
+
+		lwsCopy := latestLWS.DeepCopy()
 		lwsCopy.Status = *newStatus
-		_, err := c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lws.Namespace).UpdateStatus(ctx, lwsCopy, metav1.UpdateOptions{})
-		return err
-	}
-	return nil
+		_, err := c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lwsCopy.Namespace).UpdateStatus(ctx, lwsCopy, metav1.UpdateOptions{})
+		if err != nil {
+			if errors.IsConflict(err) {
+				klog.V(4).Infof("LeaderWorkerSet %s/%s status update conflicted (informer cache may be stale), retrying with a fresh read from the API server: %v", lwsCopy.Namespace, lwsCopy.Name, err)
+				readFromAPI = true
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 func ResourceExists(client kubernetes.Interface, groupVersion string, kind string) (bool, error) {
