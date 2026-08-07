@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -2502,4 +2503,94 @@ func TestStoreRunBoundedConcurrency(t *testing.T) {
 	// Verify the bound was respected and parallelism actually occurred
 	assert.Greater(t, maxInFlight.Load(), int32(1), "expected at least some parallelism in scrapes")
 	assert.LessOrEqual(t, maxInFlight.Load(), int32(maxConcurrentPodScrapes), "in-flight requests should never exceed the semaphore cap")
+}
+
+func TestMatchString(t *testing.T) {
+	tests := []struct {
+		name string
+		sm   *aiv1alpha1.StringMatch
+		val  string
+		want bool
+	}{
+		{"exact hit", &aiv1alpha1.StringMatch{Exact: ptr("prod")}, "prod", true},
+		{"exact miss", &aiv1alpha1.StringMatch{Exact: ptr("prod")}, "staging", false},
+		{"prefix hit", &aiv1alpha1.StringMatch{Prefix: ptr("/v1/")}, "/v1/chat/completions", true},
+		{"prefix miss", &aiv1alpha1.StringMatch{Prefix: ptr("/v1/")}, "/v2/chat", false},
+		{"regex hit", &aiv1alpha1.StringMatch{Regex: ptr("^(acme|globex)-prod$")}, "globex-prod", true},
+		{"regex miss", &aiv1alpha1.StringMatch{Regex: ptr("^(acme|globex)-prod$")}, "initech-prod", false},
+		{"invalid regex does not match", &aiv1alpha1.StringMatch{Regex: ptr("^(unclosed")}, "anything", false},
+		{"no matcher set matches everything", &aiv1alpha1.StringMatch{}, "anything", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, matchString(tt.sm, tt.val))
+		})
+	}
+}
+
+func TestCompileRegexReusesCompiledPattern(t *testing.T) {
+	const pattern = "^cache-me-[0-9]+$"
+	regexCache.Delete(pattern)
+
+	first, err := compileRegex(pattern)
+	assert.NoError(t, err)
+	second, err := compileRegex(pattern)
+	assert.NoError(t, err)
+	assert.Same(t, first, second, "the same pattern should not be recompiled")
+
+	const bad = "^(still-unclosed"
+	regexCache.Delete(bad)
+	re, err := compileRegex(bad)
+	assert.Error(t, err)
+	assert.Nil(t, re)
+	// The failure is cached too, so a bad pattern is not recompiled per request.
+	_, err2 := compileRegex(bad)
+	assert.Equal(t, err, err2)
+}
+
+func TestCompileRegexConcurrent(t *testing.T) {
+	const pattern = "^concurrent-[a-z]+$"
+	regexCache.Delete(pattern)
+
+	var wg sync.WaitGroup
+	got := make([]*regexp.Regexp, 32)
+	for i := range got {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			re, err := compileRegex(pattern)
+			assert.NoError(t, err)
+			got[i] = re
+		}(i)
+	}
+	wg.Wait()
+	for i := 1; i < len(got); i++ {
+		assert.Same(t, got[0], got[i], "all goroutines should share one compiled pattern")
+	}
+}
+
+func benchSelectRuleRules() []*aiv1alpha1.Rule {
+	return []*aiv1alpha1.Rule{{
+		ModelMatch: &aiv1alpha1.ModelMatch{
+			Headers: map[string]*aiv1alpha1.StringMatch{
+				"x-tenant": {Regex: ptr("^(acme|globex|initech)-(prod|staging)$")},
+			},
+			Uri: &aiv1alpha1.StringMatch{Regex: ptr("^/v1/(chat/completions|completions)$")},
+		},
+	}}
+}
+
+func BenchmarkSelectRuleRegex(b *testing.B) {
+	s := &store{}
+	rules := benchSelectRuleRules()
+	req, _ := http.NewRequest(http.MethodPost, "http://x/v1/chat/completions", nil)
+	req.Header.Set("x-tenant", "globex-prod")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := s.selectRule("m", req, rules); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
