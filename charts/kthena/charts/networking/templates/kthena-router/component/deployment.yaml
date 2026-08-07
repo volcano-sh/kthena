@@ -24,6 +24,8 @@ spec:
           imagePullPolicy: {{ .Values.kthenaRouter.image.pullPolicy }}
           args:
             - --port={{ .Values.kthenaRouter.port }}
+            - --metrics-port={{ .Values.kthenaRouter.metrics.port }}
+            - --expose-metrics-on-router-port={{ .Values.kthenaRouter.metrics.exposeOnRouterPort }}
             - --debug-port={{ .Values.kthenaRouter.debugPort }}
             - --enable-webhook={{ .Values.kthenaRouter.webhook.enabled }}
             - --enable-gateway-api={{ .Values.kthenaRouter.gatewayAPI.enabled }}
@@ -50,6 +52,9 @@ spec:
           ports:
             - containerPort: {{ .Values.kthenaRouter.port }}
               name: http
+            - containerPort: {{ .Values.kthenaRouter.metrics.port }}
+              name: metrics
+              protocol: TCP
             {{- if .Values.kthenaRouter.webhook.enabled }}
             - containerPort: {{ .Values.kthenaRouter.webhook.port }}
               name: webhook
@@ -139,7 +144,7 @@ spec:
             periodSeconds: 5
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: {{ .Values.kthenaRouter.port }}
               {{- if and (eq .Values.global.certManagementMode "cert-manager") .Values.kthenaRouter.tls.enabled }}
               scheme: HTTPS

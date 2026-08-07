@@ -40,7 +40,8 @@ const (
 	LabelUserID      = "user_id"
 	LabelStage       = "stage"
 
-	UnknownModel = "unknown"
+	UnknownModel            = "unknown"
+	FairnessAggregateUserID = "_all"
 
 	// kvcache-aware error stage values
 	StageTokenize = "tokenize"
@@ -201,7 +202,7 @@ func NewMetrics() *Metrics {
 		FairnessQueueSize: *promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "kthena_router_fairness_queue_size",
-				Help: "Current fairness queue size for pending requests",
+				Help: "Current fairness queue size for pending requests, aggregated across users",
 			},
 			[]string{LabelModel, LabelUserID},
 		),
@@ -209,7 +210,7 @@ func NewMetrics() *Metrics {
 		FairnessQueueDuration: *promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name:    "kthena_router_fairness_queue_duration_seconds",
-				Help:    "Time requests spend in fairness queue before processing",
+				Help:    "Time requests spend in fairness queue before processing, aggregated across users",
 				Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
 			},
 			[]string{LabelModel, LabelUserID},
@@ -218,7 +219,7 @@ func NewMetrics() *Metrics {
 		FairnessQueueCancelledTotal: *promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "kthena_router_fairness_queue_cancelled_total",
-				Help: "Total number of requests cancelled or timed out while in fairness queue",
+				Help: "Total number of requests cancelled or timed out while in fairness queue, aggregated across users",
 			},
 			[]string{LabelModel, LabelUserID},
 		),
@@ -226,7 +227,7 @@ func NewMetrics() *Metrics {
 		FairnessQueueDequeueTotal: *promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "kthena_router_fairness_queue_dequeue_total",
-				Help: "Total number of requests successfully dequeued from fairness queue",
+				Help: "Total number of requests successfully dequeued from fairness queue, aggregated across users",
 			},
 			[]string{LabelModel, LabelUserID},
 		),
@@ -498,34 +499,35 @@ func (m *Metrics) DecActiveUpstreamRequests(modelServer, modelRoute string) {
 	m.ActiveUpstreamRequests.WithLabelValues(modelServer, modelRoute).Dec()
 }
 
-// IncFairnessQueueSize increments the fairness queue size
-func (m *Metrics) IncFairnessQueueSize(model, userID string) {
-	m.FairnessQueueSize.WithLabelValues(model, userID).Inc()
+// IncFairnessQueueSize increments the fairness queue size. Raw user identifiers
+// are deliberately collapsed into one bounded label value.
+func (m *Metrics) IncFairnessQueueSize(model, _ string) {
+	m.FairnessQueueSize.WithLabelValues(model, FairnessAggregateUserID).Inc()
 }
 
 // DecFairnessQueueSize decrements the fairness queue size
-func (m *Metrics) DecFairnessQueueSize(model, userID string) {
-	m.FairnessQueueSize.WithLabelValues(model, userID).Dec()
+func (m *Metrics) DecFairnessQueueSize(model, _ string) {
+	m.FairnessQueueSize.WithLabelValues(model, FairnessAggregateUserID).Dec()
 }
 
 // SetFairnessQueueSize sets the current fairness queue size
-func (m *Metrics) SetFairnessQueueSize(model, userID string, size float64) {
-	m.FairnessQueueSize.WithLabelValues(model, userID).Set(size)
+func (m *Metrics) SetFairnessQueueSize(model, _ string, size float64) {
+	m.FairnessQueueSize.WithLabelValues(model, FairnessAggregateUserID).Set(size)
 }
 
 // RecordFairnessQueueDuration records the time a request spent in fairness queue
-func (m *Metrics) RecordFairnessQueueDuration(model, userID string, duration time.Duration) {
-	m.FairnessQueueDuration.WithLabelValues(model, userID).Observe(duration.Seconds())
+func (m *Metrics) RecordFairnessQueueDuration(model, _ string, duration time.Duration) {
+	m.FairnessQueueDuration.WithLabelValues(model, FairnessAggregateUserID).Observe(duration.Seconds())
 }
 
 // IncFairnessQueueCancelled increments the fairness queue cancelled counter
-func (m *Metrics) IncFairnessQueueCancelled(model, userID string) {
-	m.FairnessQueueCancelledTotal.WithLabelValues(model, userID).Inc()
+func (m *Metrics) IncFairnessQueueCancelled(model, _ string) {
+	m.FairnessQueueCancelledTotal.WithLabelValues(model, FairnessAggregateUserID).Inc()
 }
 
 // IncFairnessQueueDequeue increments the fairness queue dequeue counter
-func (m *Metrics) IncFairnessQueueDequeue(model, userID string) {
-	m.FairnessQueueDequeueTotal.WithLabelValues(model, userID).Inc()
+func (m *Metrics) IncFairnessQueueDequeue(model, _ string) {
+	m.FairnessQueueDequeueTotal.WithLabelValues(model, FairnessAggregateUserID).Inc()
 }
 
 // IncFairnessQueueInflight increments the fairness queue inflight gauge

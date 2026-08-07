@@ -53,7 +53,7 @@ import (
 )
 
 const (
-	defaultMetricsURL     = "http://127.0.0.1:8080/metrics"
+	defaultMetricsURL     = "http://127.0.0.1:9090/metrics"
 	defaultScalingTimeout = 3 * time.Minute
 
 	modelServingVLLMPDDisaggregationFixture   = "ModelServing-ds1.5b-pd-disaggregation.yaml"
@@ -1868,19 +1868,9 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, defaultScalingTimeout)
 	t.Log("Router deployment is ready after restart")
 
-	// Set up port-forward to the restarted router on a dynamically selected local port
-	// to avoid conflicts with the framework port-forward on 8080 and other parallel tests.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "Failed to find an available port")
-	restartedRouterPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	listener.Close()
-
-	pf, err := utils.SetupPortForward(kthenaNamespace, routerDeploymentName, restartedRouterPort, "80")
-	require.NoError(t, err, "Failed to setup port-forward to restarted router")
-	defer pf.Close()
-
-	restartedRouterURL := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", restartedRouterPort)
-	restartedMetricsURL := fmt.Sprintf("http://127.0.0.1:%s/metrics", restartedRouterPort)
+	// Set up independent inference and metrics port-forwards to the restarted router.
+	restartedRouterURL, restartedMetricsURL, closePF := utils.SetupRouterPortForwardAfterRestart(t, kthenaNamespace)
+	defer closePF()
 
 	// Verify routing works after config update and restart.
 	WaitForKthenaRouterValidatingWebhook(t, ctx, testCtx.KthenaClient, kthenaNamespace)

@@ -83,6 +83,54 @@ func counterVal(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float64
 	return m.GetCounter().GetValue()
 }
 
+func TestFairnessMetricsAggregateUserIdentity(t *testing.T) {
+	m := DefaultMetrics
+	const model = "metricstest-fairness-aggregate-user"
+
+	m.IncFairnessQueueSize(model, "alice@example.com")
+	m.IncFairnessQueueSize(model, "bob@example.com")
+	m.RecordFairnessQueueDuration(model, "alice@example.com", time.Millisecond)
+	m.RecordFairnessQueueDuration(model, "bob@example.com", 2*time.Millisecond)
+	m.IncFairnessQueueCancelled(model, "alice@example.com")
+	m.IncFairnessQueueDequeue(model, "bob@example.com")
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+
+	wantFamilies := map[string]bool{
+		"kthena_router_fairness_queue_size":             false,
+		"kthena_router_fairness_queue_duration_seconds": false,
+		"kthena_router_fairness_queue_cancelled_total":  false,
+		"kthena_router_fairness_queue_dequeue_total":    false,
+	}
+	for _, family := range families {
+		if _, ok := wantFamilies[family.GetName()]; !ok {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := make(map[string]string, len(metric.GetLabel()))
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels[LabelModel] != model {
+				continue
+			}
+			if got := labels[LabelUserID]; got != FairnessAggregateUserID {
+				t.Errorf("%s user_id = %q, want %q", family.GetName(), got, FairnessAggregateUserID)
+			}
+			wantFamilies[family.GetName()] = true
+		}
+	}
+
+	for family, found := range wantFamilies {
+		if !found {
+			t.Errorf("did not find %s for model %q", family, model)
+		}
+	}
+}
+
 func TestPrefixCacheMatchRatio(t *testing.T) {
 	m := DefaultMetrics
 	const model = "metricstest-prefix-matchratio"

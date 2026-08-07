@@ -45,6 +45,11 @@ networking:
     replicas: 1
     # -- Container port for Kthena Router.
     port: 8080
+    metrics:
+      # -- Internal Prometheus metrics port for Kthena Router.
+      port: 9090
+      # -- Also expose /metrics on the public inference listener. Enable only for legacy compatibility.
+      exposeOnRouterPort: false
     # -- Debug server port for Kthena Router (localhost only).
     debugPort: 15000
     image:

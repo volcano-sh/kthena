@@ -17,11 +17,41 @@ limitations under the License.
 package app
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	routerpkg "github.com/volcano-sh/kthena/pkg/kthena-router/router"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+func TestInferenceListenerMetricsExposure(t *testing.T) {
+	tests := []struct {
+		name          string
+		exposeMetrics bool
+		wantStatus    int
+	}{
+		{name: "disabled by default", exposeMetrics: false, wantStatus: http.StatusNotFound},
+		{name: "explicit compatibility endpoint", exposeMetrics: true, wantStatus: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := newListenerHandler(listenerConfig{
+				defaultRouter: &routerpkg.Router{},
+				readyCheck:    func() bool { return true },
+				exposeMetrics: tt.exposeMetrics,
+			})
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("GET /metrics status = %d, want %d", recorder.Code, tt.wantStatus)
+			}
+		})
+	}
+}
 
 func TestWildcardHostnameMatch(t *testing.T) {
 	tests := []struct {
