@@ -30,26 +30,31 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	informers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	autoscalerwebhook "github.com/volcano-sh/kthena/pkg/autoscaler/webhook"
 	"github.com/volcano-sh/kthena/pkg/controller"
 	modelboosterwebhook "github.com/volcano-sh/kthena/pkg/model-booster-controller/webhook"
 	modelservingwebhook "github.com/volcano-sh/kthena/pkg/model-serving-controller/webhook"
 	webhookcert "github.com/volcano-sh/kthena/pkg/webhook/cert"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 )
 
 type webhookConfig struct {
-	tlsCertFile    string
-	tlsPrivateKey  string
-	port           int
-	webhookTimeout int
-	certSecretName string
-	serviceName    string
-	kubeAPIQPS     float32
-	kubeAPIBurst   int
+	tlsCertFile        string
+	tlsPrivateKey      string
+	port               int
+	webhookTimeout     int
+	certSecretName     string
+	serviceName        string
+	kubeAPIQPS         float32
+	kubeAPIBurst       int
+	enableEviction     bool
+	evictionTrackerTTL time.Duration
 }
 
 func main() {
@@ -76,6 +81,8 @@ func main() {
 	pflag.IntVar(&wc.webhookTimeout, "webhook-timeout", 30, "Timeout for webhook operations in seconds")
 	pflag.StringVar(&wc.certSecretName, "cert-secret-name", "kthena-controller-manager-webhook-certs", "Name of the secret to store auto-generated certificates")
 	pflag.StringVar(&wc.serviceName, "service-name", "kthena-controller-manager-webhook", "Service name for the webhook server")
+	pflag.BoolVar(&wc.enableEviction, "enable-eviction-webhook", false, "If true, pods/eviction webhook protection will be used. Default is false")
+	pflag.DurationVar(&wc.evictionTrackerTTL, "eviction-tracker-ttl", 60*time.Second, "TTL for in-memory eviction disruption tracker entries")
 	pflag.BoolVar(&cc.EnableLeaderElection, "leader-elect", false, "Enable leader election for controller. "+
 		"Enabling this will ensure there is only one active controller. Default is false.")
 	pflag.IntVar(&cc.Workers, "workers", 5, "number of workers to run. Default is 5")
@@ -148,6 +155,12 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 		return err
 	}
 
+	kthenaClient, err := clientset.NewForConfig(cfg)
+	if err != nil {
+		klog.Fatalf("failed to create kthenaClient: %v", err)
+		return err
+	}
+
 	// Secret -> File -> Generate precedence for CA bundle selection
 	namespace := getNamespace()
 	var caBundle []byte
@@ -181,10 +194,26 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 		}
 	}
 
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informers.NewSharedInformerFactory(kthenaClient, 0)
+
+	podInformer := kubeInformerFactory.Core().V1().Pods()
+	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
+
+	go kubeInformerFactory.Start(ctx.Done())
+	go kthenaInformerFactory.Start(ctx.Done())
+
 	mux := http.NewServeMux()
 
 	modelServingValidator := modelservingwebhook.NewModelServingValidator()
 	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelserving", modelServingValidator.Handle)
+
+	if wc.enableEviction {
+		evictionHandler := modelservingwebhook.NewEvictionHandler(kubeClient, kthenaClient, podInformer.Lister(), msInformer.Lister(), wc.evictionTrackerTTL)
+		mux.HandleFunc("/validate-eviction", evictionHandler.Handle)
+	} else {
+		mux.HandleFunc("/validate-eviction", modelservingwebhook.AllowEviction)
+	}
 
 	modelValidator := modelboosterwebhook.NewModelValidator()
 	modelMutator := modelboosterwebhook.NewModelMutator()

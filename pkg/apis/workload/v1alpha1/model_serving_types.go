@@ -145,6 +145,43 @@ type RolloutStrategy struct {
 	// RollingUpdateConfiguration defines the parameters to be used when type is ServingGroupRollingUpdate.
 	// optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
+
+	// EvictionStrategy defines the protection policy during node eviction.
+	// +optional
+	EvictionStrategy *EvictionStrategySpec `json:"evictionStrategy,omitempty"`
+}
+
+// ProtectionLevelType defines the level of protection during eviction.
+type ProtectionLevelType string
+
+const (
+	// ProtectionLevelServingGroup guarantees that the number of ready ServingGroups is not below the threshold.
+	ProtectionLevelServingGroup ProtectionLevelType = "ServingGroup"
+	// ProtectionLevelRole guarantees that the number of ready instances for each role is not below the threshold.
+	ProtectionLevelRole ProtectionLevelType = "Role"
+)
+
+// EvictionStrategySpec defines the protection policy during node eviction.
+type EvictionStrategySpec struct {
+	// ProtectionLevel defines the protection level: ServingGroup or Role.
+	// - ServingGroup: guarantees that the number of ready ServingGroups is not below the threshold.
+	// - Role: guarantees that the number of ready instances for each role is not below the threshold.
+	//
+	// +kubebuilder:default=ServingGroup
+	// +kubebuilder:validation:Enum={ServingGroup,Role}
+	ProtectionLevel ProtectionLevelType `json:"protectionLevel"`
+
+	// MinAvailable defines the minimum number of available ServingGroup instances.
+	// It is used only when protectionLevel is ServingGroup.
+	// It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// RoleMinAvailable defines role-specific minimum available role instances.
+	// It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
+	// If a role is absent from this map, it is not protected by the eviction budget.
+	// Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
+	// +optional
+	RoleMinAvailable map[string]intstr.IntOrString `json:"roleMinAvailable,omitempty"`
 }
 
 // RolloutStrategyType defines the strategy to use to update replicas.

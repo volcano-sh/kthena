@@ -6,6 +6,13 @@ controllerManager:
       certSecretName: kthena-controller-manager-webhook-certs
       # serviceName is the service name used for certificate DNS names
       serviceName: kthena-controller-manager-webhook
+  evictionWebhook:
+    # enabled controls the pods/eviction protection webhook. It is disabled by default
+    # because it adds admission latency to node drain workflows.
+    enabled: false
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    trackerTTLSeconds: 60
   # replicas is the number of instances to run.
   replicas: 1
   image:
@@ -54,4 +61,3 @@ controllerManager:
     accessKey: ""
     # secretKey is the secret key for the downloader.
     secretKey: ""
-

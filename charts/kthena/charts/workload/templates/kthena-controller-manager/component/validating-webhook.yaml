@@ -71,4 +71,26 @@ webhooks:
         resources: [ "modelservings" ]
         operations: [ "CREATE", "UPDATE" ]
         scope: "Namespaced"
+  {{- if .Values.controllerManager.evictionWebhook.enabled }}
+  - name: eviction.modelserving.volcano.sh
+    admissionReviewVersions: [ "v1" ]
+    sideEffects: None
+    failurePolicy: {{ .Values.controllerManager.evictionWebhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.controllerManager.evictionWebhook.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: kthena-controller-manager-webhook
+        namespace: {{ .Release.Namespace }}
+        path: "/validate-eviction"
+        port: 443
+      {{- if eq .Values.global.certManagementMode "manual" }}
+      caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
+      {{- end }}
+    rules:
+      - apiGroups: [ "" ]
+        apiVersions: [ "v1" ]
+        operations: [ "CREATE" ]
+        resources: [ "pods/eviction" ]
+        scope: "*"
+  {{- end }}
 {{- end }}

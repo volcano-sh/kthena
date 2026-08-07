@@ -53,6 +53,10 @@ A Helm chart for deploying Kthena
 | workload.controllerManager.debugPort | int | `0` | Debug server port for Controller Manager (set 0 to disable). |
 | workload.controllerManager.downloaderImage.repository | string | `"ghcr.io/volcano-sh/downloader"` | Image repository for the Downloader. |
 | workload.controllerManager.downloaderImage.tag | string | `"latest"` | Image tag for the Downloader. |
+| workload.controllerManager.evictionWebhook.enabled | bool | `false` | Enable pods/eviction protection webhook for ModelServing. |
+| workload.controllerManager.evictionWebhook.failurePolicy | string | `"Fail"` | Failure policy for the pods/eviction webhook. |
+| workload.controllerManager.evictionWebhook.timeoutSeconds | int | `5` | Timeout for the pods/eviction webhook. |
+| workload.controllerManager.evictionWebhook.trackerTTLSeconds | int | `60` | ConfigMap-backed disruption tracker TTL in seconds. |
 | workload.controllerManager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the Controller Manager. |
 | workload.controllerManager.image.repository | string | `"ghcr.io/volcano-sh/kthena-controller-manager"` | Image repository for the Controller Manager. |
 | workload.controllerManager.image.tag | string | `"latest"` | Image tag for the Controller Manager. |

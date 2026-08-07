@@ -92,6 +92,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.DisaggregatedScalingStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("DisaggregatedTarget"):
 		return &applyconfigurationworkloadv1alpha1.DisaggregatedTargetApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("EvictionStrategySpec"):
+		return &applyconfigurationworkloadv1alpha1.EvictionStrategySpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("GangPolicy"):
 		return &applyconfigurationworkloadv1alpha1.GangPolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("HeterogeneousTarget"):

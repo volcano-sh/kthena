@@ -121,6 +121,44 @@ spec:
                 description: RolloutStrategy defines the strategy that will be applied
                   to update replicas
                 properties:
+                  evictionStrategy:
+                    description: EvictionStrategy defines the protection policy during
+                      node eviction.
+                    properties:
+                      minAvailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MinAvailable defines the minimum number of available ServingGroup instances.
+                          It is used only when protectionLevel is ServingGroup.
+                          It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
+                        x-kubernetes-int-or-string: true
+                      protectionLevel:
+                        default: ServingGroup
+                        description: |-
+                          ProtectionLevel defines the protection level: ServingGroup or Role.
+                          - ServingGroup: guarantees that the number of ready ServingGroups is not below the threshold.
+                          - Role: guarantees that the number of ready instances for each role is not below the threshold.
+                        enum:
+                        - ServingGroup
+                        - Role
+                        type: string
+                      roleMinAvailable:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          RoleMinAvailable defines role-specific minimum available role instances.
+                          It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
+                          If a role is absent from this map, it is not protected by the eviction budget.
+                          Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
+                        type: object
+                    required:
+                    - protectionLevel
+                    type: object
                   rollingUpdateConfiguration:
                     description: |-
                       RollingUpdateConfiguration defines the parameters to be used when type is ServingGroupRollingUpdate.

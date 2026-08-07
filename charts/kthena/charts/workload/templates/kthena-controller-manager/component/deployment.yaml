@@ -23,6 +23,8 @@ spec:
           image: "{{ .Values.controllerManager.image.repository }}:{{ .Values.controllerManager.image.tag }}"
           args:
             {{- toYaml .Values.controllerManager.image.args | nindent 12 }}
+            - --enable-eviction-webhook={{ .Values.controllerManager.evictionWebhook.enabled }}
+            - --eviction-tracker-ttl={{ .Values.controllerManager.evictionWebhook.trackerTTLSeconds }}s
             - --cert-secret-name={{ .Values.controllerManager.webhook.tls.certSecretName }}
             - --service-name={{ .Values.controllerManager.webhook.tls.serviceName }}
             {{- if .Values.controllerManager.controllers }}
