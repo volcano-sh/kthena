@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	apiextClientSet "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -682,29 +683,28 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 	return nil
 }
 
-// scaleUpServingGroups scales up the ServingGroups to the expected count.
-// When partition is set, it fills missing ordinals in [0, partition) using CurrentRevision.
-// Otherwise, it creates new ServingGroups with increasing indices starting from the current max index + 1.
+// scaleUpServingGroups fills missing ordinals in [0, expectedCount).
+// Missing ordinals below partition use CurrentRevision; the rest use newRevision.
 func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
 	partition, _, _ := c.getPartition(modelServingRolloutConfig(ms), modelServingReplicas(ms))
 	klog.V(4).Infof("scaleUpServingGroups: start for modelServing=%s, existingGroups=%d, expectedCount=%d, partition=%d, newRevision=%s",
 		utils.GetNamespaceName(ms), len(servingGroupList), expectedCount, partition, newRevision)
 
-	// Find the maximum ordinal in existing servingGroups
-	// Since servingGroupList is already sorted in ascending order by ordinal,
-	// we can directly get the maxOrdinal from the last element
-	maxOrdinal := -1
-	existingOrdinals := make(map[int]bool)
+	existingOrdinals := make([]int, 0, len(servingGroupList))
 	for _, group := range servingGroupList {
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
-		existingOrdinals[ordinal] = true
+		if ordinal < 0 {
+			klog.Warningf("scaleUpServingGroups: cannot parse ordinal from ServingGroup %s", group.Name)
+			continue
+		}
+		existingOrdinals = append(existingOrdinals, ordinal)
 	}
-	// Get maxOrdinal from the last element (list is sorted in ascending order)
-	if len(servingGroupList) > 0 {
-		_, maxOrdinal = utils.GetParentNameAndOrdinal(servingGroupList[len(servingGroupList)-1].Name)
-	}
-	klog.V(4).Infof("scaleUpServingGroups: modelServing=%s, existingOrdinals=%v, maxOrdinal=%d",
-		utils.GetNamespaceName(ms), existingOrdinals, maxOrdinal)
+
+	missingOrdinals := findMissingOrdinals(expectedCount, existingOrdinals)
+	toCreate := min(max(0, expectedCount-len(servingGroupList)), len(missingOrdinals))
+	missingOrdinals = missingOrdinals[:toCreate]
+	klog.V(4).Infof("scaleUpServingGroups: modelServing=%s, existingOrdinals=%v, missingOrdinals=%v",
+		utils.GetNamespaceName(ms), existingOrdinals, missingOrdinals)
 
 	// Helper function to create a ServingGroup
 	createServingGroup := func(ordinal int, revision string, roles []workloadv1alpha1.Role) error {
@@ -725,16 +725,14 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		return nil
 	}
 
-	if partition > 0 {
-		klog.V(4).Infof("scaleUpServingGroups: partition=%d set, filling missing ordinals in [0, %d) for modelServing=%s",
-			partition, partition, utils.GetNamespaceName(ms))
-		// When partition is set, fill missing ordinals in [0, partition) using CurrentRevision
-		for ordinal := 0; ordinal < partition && ordinal < expectedCount; ordinal++ {
-			if existingOrdinals[ordinal] {
-				klog.V(4).Infof("scaleUpServingGroups: ordinal %d already exists, skipping", ordinal)
-				continue
-			}
-
+	// Persist the template snapshot before creating a ServingGroup that references
+	// newRevision. ModelServing.Spec.Template is mutable, while ControllerRevision
+	// lets a future partition-protected recovery resolve this revision's template.
+	// Create it lazily because restoring only ordinals below partition uses the
+	// existing CurrentRevision and does not need a new snapshot.
+	newRevisionCreated := false
+	for _, ordinal := range missingOrdinals {
+		if partition > 0 && ordinal < partition {
 			// Use CurrentRevision for partition-protected ordinals
 			revisionToUse := newRevision
 			if ms.Status.CurrentRevision != "" {
@@ -767,38 +765,21 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 			if err := createServingGroup(ordinal, revisionToUse, rolesToUse); err != nil {
 				return err
 			}
-			// Update existingOrdinals and maxOrdinal
-			existingOrdinals[ordinal] = true
-			if ordinal > maxOrdinal {
-				maxOrdinal = ordinal
-			}
-		}
-	}
-
-	// Create new ServingGroups with increasing indices starting from the current max index + 1
-	toCreate := expectedCount - len(existingOrdinals)
-	klog.V(4).Infof("scaleUpServingGroups: toCreate=%d (expectedCount=%d, existingOrdinals=%d), startingIndex=%d, modelServing=%s",
-		toCreate, expectedCount, len(existingOrdinals), maxOrdinal+1, utils.GetNamespaceName(ms))
-
-	if toCreate > 0 {
-		startingIndex := maxOrdinal + 1
-
-		// Create ControllerRevision when scaling up with a new revision
-		// This is done once before the loop since newRevision and templateData are the same for all new groups
-		templateData := ms.Spec.Template.Roles
-		klog.V(4).Infof("scaleUpServingGroups: creating ControllerRevision for newRevision=%s, modelServing=%s", newRevision, utils.GetNamespaceName(ms))
-		_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, newRevision, templateData)
-		if err != nil {
-			klog.Warningf("Failed to create ControllerRevision for new revision %s: %v", newRevision, err)
+			continue
 		}
 
-		// Create new ServingGroups with increasing indices
-		for i := startingIndex; i < startingIndex+toCreate; i++ {
-			klog.V(4).Infof("scaleUpServingGroups: creating new ServingGroup at ordinal=%d with newRevision=%s for modelServing=%s", i, newRevision, utils.GetNamespaceName(ms))
-			// For newly created ServingGroups (ordinal >= partition), always use current template
-			if err := createServingGroup(i, newRevision, ms.Spec.Template.Roles); err != nil {
-				return err
+		if !newRevisionCreated {
+			// All ServingGroups created with newRevision share this snapshot, so create
+			// it only once during this reconciliation.
+			klog.V(4).Infof("scaleUpServingGroups: creating ControllerRevision for newRevision=%s, modelServing=%s", newRevision, utils.GetNamespaceName(ms))
+			if _, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, newRevision, ms.Spec.Template.Roles); err != nil {
+				return fmt.Errorf("failed to create ControllerRevision for new revision %s: %w", newRevision, err)
 			}
+			newRevisionCreated = true
+		}
+		klog.V(4).Infof("scaleUpServingGroups: creating new ServingGroup at ordinal=%d with newRevision=%s for modelServing=%s", ordinal, newRevision, utils.GetNamespaceName(ms))
+		if err := createServingGroup(ordinal, newRevision, ms.Spec.Template.Roles); err != nil {
+			return err
 		}
 	}
 
@@ -889,16 +870,19 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		partition = 0
 	}
 
-	// Split scores by partition.
-	// Align with ServingGroup semantics: partition protects ordinals in [0, partition).
+	// Partition protects the first N records in the ordinal-sorted roleList.
+	protectedRoleNames := sets.New[string]()
+	for i := 0; i < partition && i < len(roleList); i++ {
+		protectedRoleNames.Insert(roleList[i].Name)
+	}
+
 	var protectedScores []RoleWithScore
 	var nonProtectedScores []RoleWithScore
 	if partition > 0 {
 		protectedScores = make([]RoleWithScore, 0, len(allScores))
 		nonProtectedScores = make([]RoleWithScore, 0, len(allScores))
 		for _, score := range allScores {
-			_, ordinal := utils.GetParentNameAndOrdinal(score.Name)
-			if ordinal < partition {
+			if protectedRoleNames.Contains(score.Name) {
 				protectedScores = append(protectedScores, score)
 			} else {
 				nonProtectedScores = append(nonProtectedScores, score)
@@ -963,27 +947,26 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 	}
 }
 
-// scaleUpRoles handles Role scaling up.
-// When partition is set, it fills missing ordinals in [0, partition) using CurrentRevision.
-// Otherwise, it creates new Roles with increasing indices starting from the current max index + 1.
+// scaleUpRoles fills missing Role ordinals in [0, expectedCount).
+// Missing ordinals below partition use CurrentRevision; the rest use newRevision.
 func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
 	partition, partitionConfigured, partitionErr := c.getPartition(&targetRole.RollingUpdateConfiguration, roleReplicas(targetRole))
 	if partitionErr != nil {
 		klog.Errorf("scaleUpRoles: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
 	}
 
-	// Find the maximum ordinal in existing roles.
-	// Since roleList is already sorted in ascending order by ordinal,
-	// we can directly get the maxOrdinal from the last element.
-	maxOrdinal := -1
-	existingOrdinals := make(map[int]bool)
+	existingOrdinals := make([]int, 0, len(roleList))
 	for _, role := range roleList {
 		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-		existingOrdinals[ordinal] = true
+		if ordinal < 0 {
+			klog.Warningf("scaleUpRoles: cannot parse ordinal from Role %s", role.Name)
+			continue
+		}
+		existingOrdinals = append(existingOrdinals, ordinal)
 	}
-	if len(roleList) > 0 {
-		_, maxOrdinal = utils.GetParentNameAndOrdinal(roleList[len(roleList)-1].Name)
-	}
+	missingOrdinals := findMissingOrdinals(expectedCount, existingOrdinals)
+	toCreate := min(max(0, expectedCount-len(roleList)), len(missingOrdinals))
+	missingOrdinals = missingOrdinals[:toCreate]
 
 	// Role needs to scale up, and the ServingGroup status needs to be set to Scaling
 	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupScaling)
@@ -1009,16 +992,8 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 		return nil
 	}
 
-	if partitionConfigured && partition > 0 {
-		klog.V(4).Infof("scaleUpRoles: partition=%d set, filling missing ordinals in [0, %d) for role %s in ServingGroup %s",
-			partition, partition, targetRole.Name, groupName)
-		// When partition is set, fill missing ordinals in [0, partition) using CurrentRevision
-		for ordinal := 0; ordinal < partition && ordinal < expectedCount; ordinal++ {
-			if existingOrdinals[ordinal] {
-				klog.V(4).Infof("scaleUpRoles: ordinal %d already exists, skipping", ordinal)
-				continue
-			}
-
+	for _, ordinal := range missingOrdinals {
+		if partitionConfigured && partition > 0 && ordinal < partition {
 			// Use CurrentRevision for partition-protected ordinals
 			revisionToUse := newRevision
 			if ms.Status.CurrentRevision != "" {
@@ -1072,29 +1047,12 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 			hashToUse := utils.CalRoleTemplateHash(roleToApply)
 			if err := createRole(ordinal, revisionToUse, roleToApply, hashToUse); err != nil {
 				klog.Errorf("scaleUpRoles: failed to create role %s at ordinal %d in ServingGroup %s of ModelServing %s/%s: %v", targetRole.Name, ordinal, groupName, ms.Namespace, ms.Name, err)
-				continue
 			}
-			// Update existingOrdinals and maxOrdinal
-			existingOrdinals[ordinal] = true
-			if ordinal > maxOrdinal {
-				maxOrdinal = ordinal
-			}
+			continue
 		}
-	}
-
-	// Create new Roles with increasing indices starting from the current max index + 1
-	// Calculate how many new Roles we need to create
-	toCreate := expectedCount - len(existingOrdinals)
-	klog.V(2).Infof("scaling up role %s in ServingGroup %s: creating %d new replicas", targetRole.Name, groupName, toCreate)
-	if toCreate > 0 {
-		startingIndex := maxOrdinal + 1
 		roleTemplateHash := utils.CalRoleTemplateHash(targetRole)
-		// Create new Roles with increasing indices
-		for i := 0; i < toCreate; i++ {
-			newIndex := startingIndex + i
-			if err := createRole(newIndex, newRevision, targetRole, roleTemplateHash); err != nil {
-				klog.Errorf("scaleUpRoles: failed to create role %s at ordinal %d in ServingGroup %s of ModelServing %s/%s: %v", targetRole.Name, newIndex, groupName, ms.Namespace, ms.Name, err)
-			}
+		if err := createRole(ordinal, newRevision, targetRole, roleTemplateHash); err != nil {
+			klog.Errorf("scaleUpRoles: failed to create role %s at ordinal %d in ServingGroup %s of ModelServing %s/%s: %v", targetRole.Name, ordinal, groupName, ms.Namespace, ms.Name, err)
 		}
 	}
 }
@@ -1503,17 +1461,16 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 		if partitionErr != nil {
 			return nil, false, fmt.Errorf("failed to parse partition for role %s: %v", roleSpec.Name, partitionErr)
 		}
-		if partitionConfigured && partition > 0 && len(outdatedRoles) > 0 {
-			protected := make(map[string]struct{}, partition)
-			for _, role := range roleList {
-				_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-				if ordinal < partition {
-					protected[role.Name] = struct{}{}
-				}
+		protected := sets.New[string]()
+		if partitionConfigured && partition > 0 {
+			for i := 0; i < partition && i < len(roleList); i++ {
+				protected.Insert(roleList[i].Name)
 			}
+		}
+		if len(protected) > 0 && len(outdatedRoles) > 0 {
 			filtered := outdatedRoles[:0]
 			for _, r := range outdatedRoles {
-				if _, ok := protected[r.Name]; ok {
+				if protected.Contains(r.Name) {
 					continue
 				}
 				filtered = append(filtered, r)
@@ -1521,11 +1478,10 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 			outdatedRoles = filtered
 		}
 		if len(outdatedRoles) == 0 {
-			if partitionConfigured && partition > 0 {
+			if len(protected) > 0 {
 				expectedHash := utils.CalRoleTemplateHash(roleSpec)
 				for _, role := range roleList {
-					_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-					if ordinal >= partition {
+					if !protected.Contains(role.Name) {
 						continue
 					}
 					if role.Status == datastore.RoleDeleting {
@@ -2319,6 +2275,29 @@ func roleReplicas(role workloadv1alpha1.Role) int {
 	return int(*role.Replicas)
 }
 
+// findMissingOrdinals returns the missing ordinals in [0, expectedCount).
+// Invalid, out-of-range, duplicate, and unsorted existing ordinals are tolerated.
+func findMissingOrdinals(expectedCount int, existingOrdinals []int) []int {
+	if expectedCount <= 0 {
+		return nil
+	}
+
+	existing := make([]bool, expectedCount)
+	for _, ordinal := range existingOrdinals {
+		if ordinal >= 0 && ordinal < expectedCount {
+			existing[ordinal] = true
+		}
+	}
+
+	missing := make([]int, 0, expectedCount)
+	for ordinal, found := range existing {
+		if !found {
+			missing = append(missing, ordinal)
+		}
+	}
+	return missing
+}
+
 // scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
 // 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
 // 2. Secondary: Among groups with same status, lower deletion cost = delete first
@@ -2393,7 +2372,6 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 			targetGroup := protectedScores[i]
 			klog.V(2).Infof("Scaling down protected serving group %s (priority: %d, deletion cost: %d, index: %d, partition=%d)",
 				targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index, partition)
-			// Note: ControllerRevision history recording for partition-protected groups is handled in deleteServingGroup
 			if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
 				err = append(err, e)
 			}
@@ -2578,27 +2556,6 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	status := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName)
 	if status == datastore.ServingGroupNotFound {
 		return nil
-	}
-
-	// Record revision history using ControllerRevision before deleting, especially important for partition-protected servingGroups
-	// This ensures that when a partition-protected ServingGroup is deleted (e.g., due to failure),
-	// it can be recreated with its previous revision, following StatefulSet's behavior.
-	if revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroupName); ok {
-		_, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
-		partition, _, _ := c.getPartition(modelServingRolloutConfig(ms), modelServingReplicas(ms))
-		// Record revision history using ControllerRevision for partition-protected servingGroups
-		if partition > 0 && ordinal < partition {
-			// Create ControllerRevision to persist the revision history
-			// Store the template roles data for this revision
-			templateData := ms.Spec.Template.Roles
-			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, revision, templateData)
-			if err != nil {
-				klog.Warningf("Failed to create ControllerRevision for ServingGroup %s (revision=%s): %v", servingGroupName, revision, err)
-				// Note: We don't fallback to in-memory storage as ControllerRevision is the source of truth
-			} else {
-				klog.V(2).Infof("Created ControllerRevision for partition-protected ServingGroup %s (revision=%s, partition=%d)", servingGroupName, revision, partition)
-			}
-		}
 	}
 
 	// update ServingGroup status to Deleting before deleting pods and services.

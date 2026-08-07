@@ -141,7 +141,7 @@ func TestModelServingLifecycle(t *testing.T) {
 
 // TestModelServingScaleUp tests the ability to scale up a ModelServing's ServingGroup
 func TestModelServingScaleUp(t *testing.T) {
-	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 1 replica
 	modelServing := createBasicModelServing("test-scale-up", 1, 0)
@@ -174,6 +174,10 @@ func TestModelServingScaleUp(t *testing.T) {
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get final ModelServing")
 	assert.Equal(t, int32(3), *finalMS.Spec.Replicas, "Final ModelServing should have 3 replicas in spec")
+	ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+	require.NoError(t, err)
+	require.True(t, hasExpectedOrdinalRange(ordinalStates, newReplicas),
+		"Scaled-up ServingGroup ordinals should exactly cover [0, %d), got %v", newReplicas, ordinalStates)
 
 	t.Log("ModelServing scale up test passed successfully")
 }
@@ -324,6 +328,8 @@ func TestModelServingServingGroupRecreate(t *testing.T) {
 		originalUIDs[string(pod.UID)] = true
 		t.Logf("Original pod: %s (UID: %s)", pod.Name, pod.UID)
 	}
+	expectedGroupName := podList.Items[0].Labels[workload.GroupNameLabelKey]
+	require.NotEmpty(t, expectedGroupName, "Original pods should have a ServingGroup name")
 
 	// Delete just one pod (e.g., the first one) to trigger ServingGroupRecreate
 	targetPod := podList.Items[0]
@@ -345,6 +351,10 @@ func TestModelServingServingGroupRecreate(t *testing.T) {
 		for _, pod := range pods.Items {
 			isOriginal := originalUIDs[string(pod.UID)]
 			isNonTerminating := pod.DeletionTimestamp == nil
+			if isNonTerminating && pod.Labels[workload.GroupNameLabelKey] != expectedGroupName {
+				t.Logf("Recreated pod %s belongs to ServingGroup %s, expecting %s", pod.Name, pod.Labels[workload.GroupNameLabelKey], expectedGroupName)
+				return false
+			}
 
 			// Check if any original pod is still non-terminating
 			if isOriginal && isNonTerminating {
@@ -480,6 +490,10 @@ func TestModelServingPodRecovery(t *testing.T) {
 
 	originalPodUID := originalPod.UID
 	originalPodName := originalPod.Name
+	originalGroupName := originalPod.Labels[workload.GroupNameLabelKey]
+	originalRoleID := originalPod.Labels[workload.RoleIDKey]
+	require.NotEmpty(t, originalGroupName, "Original pod should have a ServingGroup name")
+	require.NotEmpty(t, originalRoleID, "Original pod should have a Role ID")
 	t.Logf("Deleting pod %s (UID: %s)", originalPodName, originalPodUID)
 
 	// Delete the pod
@@ -489,19 +503,24 @@ func TestModelServingPodRecovery(t *testing.T) {
 	// Wait until ModelServing is ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// Wait for a new pod with different UID and PodReady condition set to True
-	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	assert.NoError(t, err, "Failed to list pods when modelserving should be ready after pod deletion")
-	for _, pod := range pods.Items {
-		// Check if it's a new pod (different UID from original)
-		if pod.UID != originalPodUID {
-			if utils.IsPodReady(pod) {
-				t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
+	// The recovered pod must reuse the deleted Role and ServingGroup ordinals.
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if pod.UID == originalPodUID || pod.DeletionTimestamp != nil || !utils.IsPodReady(pod) {
+				continue
+			}
+			if pod.Labels[workload.GroupNameLabelKey] == originalGroupName &&
+				pod.Labels[workload.RoleIDKey] == originalRoleID {
+				t.Logf("New pod created at the original ordinals: %s (UID: %s)", pod.Name, pod.UID)
+				return true
 			}
 		}
-	}
+		return false
+	}, 2*time.Minute, 2*time.Second, "Recovered pod should reuse ServingGroup %s and Role ID %s", originalGroupName, originalRoleID)
 
 	t.Log("Pod recovery test passed successfully")
 }
@@ -1433,6 +1452,10 @@ func TestModelServingPartitionScaleUp(t *testing.T) {
 			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), scaledReplicas)
 			return false
 		}
+		if !hasExpectedOrdinalRange(ordinalStates, scaledReplicas) {
+			t.Logf("ServingGroup ordinals do not cover [0, %d): %v", scaledReplicas, ordinalStates)
+			return false
+		}
 		protectedCorrect, updatedCorrect := calculateGroupPartitionState(t, ordinalStates, partition, scaledReplicas, initialRevision, updateRevision)
 		t.Logf("Protected: %d/%d, Updated: %d/%d", protectedCorrect, partition, updatedCorrect, scaledReplicas-partition)
 		return protectedCorrect == int(partition) && updatedCorrect == int(scaledReplicas-partition)
@@ -1602,6 +1625,19 @@ type servingGroupState struct {
 	Image     string
 }
 
+// hasExpectedOrdinalRange reports whether the keys exactly cover [0, replicas).
+func hasExpectedOrdinalRange[T any](states map[int32]T, replicas int32) bool {
+	if len(states) != int(replicas) {
+		return false
+	}
+	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+		if _, ok := states[ordinal]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func collectRunningServingGroupStates(ctx context.Context, kubeClient *kubernetes.Clientset, msName string) (map[int32]servingGroupState, error) {
 	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: modelServingLabelSelector(msName),
@@ -1662,6 +1698,10 @@ func waitForPartitionState(t *testing.T, ctx context.Context, kthenaClient *clie
 			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), replicas)
 			return false
 		}
+		if !hasExpectedOrdinalRange(ordinalStates, replicas) {
+			t.Logf("ServingGroup ordinals do not cover [0, %d): %v", replicas, ordinalStates)
+			return false
+		}
 		protectedCorrect, updatedCorrect := calculateGroupPartitionState(t, ordinalStates, partition, replicas, initialRevision, ms.Status.UpdateRevision)
 		t.Logf("CurrentRevision: %s, UpdateRevision: %s, Protected: %d/%d, Updated: %d/%d",
 			ms.Status.CurrentRevision, ms.Status.UpdateRevision, protectedCorrect, partition, updatedCorrect, replicas-partition)
@@ -1680,10 +1720,8 @@ func waitForPartitionState(t *testing.T, ctx context.Context, kthenaClient *clie
 }
 
 // waitForRollingUpdateConverged polls until a rolling update without partition has fully converged:
-// CurrentRevision has caught up to UpdateRevision, status counters match Spec.Replicas, and every
-// running serving group is on UpdateRevision with the updated image. Ordinals are not checked because
-// ServingGroupRollingUpdate creates new groups at maxOrdinal+1 and deletes old ones, so indices shift
-// during the rollout.
+// CurrentRevision has caught up to UpdateRevision, status counters match Spec.Replicas, and the
+// running ServingGroups exactly cover [0, replicas) on UpdateRevision with the updated image.
 func waitForRollingUpdateConverged(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset,
 	kubeClient *kubernetes.Clientset, msName string, replicas int32, initialRevision, updatedImage string) *workload.ModelServing {
 	t.Helper()
@@ -1715,7 +1753,12 @@ func waitForRollingUpdateConverged(t *testing.T, ctx context.Context, kthenaClie
 			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), replicas)
 			return false
 		}
-		for ordinal, state := range ordinalStates {
+		if !hasExpectedOrdinalRange(ordinalStates, replicas) {
+			t.Logf("ServingGroup ordinals do not cover [0, %d): %v", replicas, ordinalStates)
+			return false
+		}
+		for ordinal := int32(0); ordinal < replicas; ordinal++ {
+			state := ordinalStates[ordinal]
 			if state.Revision != ms.Status.UpdateRevision || state.Image != updatedImage {
 				t.Logf("Ordinal %d not on UpdateRevision yet: revision=%s image=%s", ordinal, state.Revision, state.Image)
 				return false
@@ -2282,6 +2325,10 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			t.Logf("Observed running ordinals=%d, expecting %d", len(imageByOrdinal), initialRoleReplicas)
 			return false
 		}
+		if !hasExpectedOrdinalRange(imageByOrdinal, initialRoleReplicas) {
+			t.Logf("Role ordinals do not cover [0, %d): %v", initialRoleReplicas, imageByOrdinal)
+			return false
+		}
 
 		for ord := int32(0); ord < partition; ord++ {
 			if imageByOrdinal[ord] != nginxImage {
@@ -2310,7 +2357,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 
 // TestModelServingRolePartitionScaleUp verifies that when a partition-protected role replica is
 // deleted under RoleRecreate, scale-up recreates the missing protected ordinal with the historical
-// revision. Non-protected replicas may use non-contiguous ordinals as long as replica count is met.
+// revision and the final Role ordinals exactly cover [0, roleReplicas).
 func TestModelServingRolePartitionScaleUp(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -2392,6 +2439,10 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 		if len(imageByOrdinal) != int(roleReplicas) {
 			return false
 		}
+		if !hasExpectedOrdinalRange(imageByOrdinal, roleReplicas) {
+			t.Logf("Role ordinals do not cover [0, %d): %v", roleReplicas, imageByOrdinal)
+			return false
+		}
 		for ord := int32(0); ord < partition; ord++ {
 			if imageByOrdinal[ord] != nginxImage {
 				t.Logf("Partition state not ready: protected prefill-%d image=%s", ord, imageByOrdinal[ord])
@@ -2468,6 +2519,10 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 		}
 		if len(imageByOrdinal) != int(roleReplicas) {
 			t.Logf("Observed ordinals=%d, expecting %d", len(imageByOrdinal), roleReplicas)
+			return false
+		}
+		if !hasExpectedOrdinalRange(imageByOrdinal, roleReplicas) {
+			t.Logf("Role ordinals do not cover [0, %d): %v", roleReplicas, imageByOrdinal)
 			return false
 		}
 		if imageByOrdinal[0] != nginxImage {
