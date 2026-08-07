@@ -131,7 +131,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 				klog.Fatalf("Error building dynamic client: %s", err.Error())
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
-			inferencePoolController, err = controller.NewInferencePoolController(dynamicInformerFactory, store)
+			inferencePoolController, err = controller.NewInferencePoolController(dynamicInformerFactory, kubeInformerFactory, store)
 			if err != nil {
 				klog.Fatalf("Error creating inferencepool controller: %s", err.Error())
 			}
