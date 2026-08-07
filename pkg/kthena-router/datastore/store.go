@@ -1319,14 +1319,9 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 				// If ModelRoute has parentRefs but gatewayKey is empty, skip it
 				continue // Skip ModelRoute with parentRefs when gatewayKey is not specified
 			}
-		} else {
-			// If gatewayKey is specified, we only match ModelRoute with parentRefs
-			// ModelRoute without parentRefs should not match when gatewayKey is provided
-			if gatewayKey != "" {
-				continue // Skip ModelRoute without parentRefs when gatewayKey is specified
-			}
-			// If gatewayKey is empty, ModelRoute without parentRefs can match
-			// (ModelRoute without parentRefs attaches to all Gateways in the same namespace)
+		} else if gatewayKey != "" && !strings.HasPrefix(gatewayKey, mr.Namespace+"/") {
+			// ModelRoutes without parentRefs only attach to Gateways in the same namespace
+			continue
 		}
 
 		// Try to match rules
