@@ -122,6 +122,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.ModelWorkerApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("NetworkTopology"):
 		return &applyconfigurationworkloadv1alpha1.NetworkTopologyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("NetworkTopologySpec"):
+		return &applyconfigurationworkloadv1alpha1.NetworkTopologySpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PluginScope"):
 		return &applyconfigurationworkloadv1alpha1.PluginScopeApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("PluginSpec"):
@@ -134,6 +136,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.PrometheusMetricSourceApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleGroup"):
+		return &applyconfigurationworkloadv1alpha1.RoleGroupApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioConstraint"):
 		return &applyconfigurationworkloadv1alpha1.RoleRatioConstraintApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioStatus"):

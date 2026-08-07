@@ -82,6 +82,12 @@ func TestWebhook(t *testing.T) {
 			expectError: true,
 			errorMsg:    "should be a non-negative integer",
 		},
+		{
+			name:        "Invalid ModelServing (rolePolicy and role-level networkTopology together)",
+			resource:    createModelServingWithConflictingNetworkTopology(),
+			expectError: true,
+			errorMsg:    "mutually exclusive",
+		},
 	}
 
 	for _, tc := range testCases {

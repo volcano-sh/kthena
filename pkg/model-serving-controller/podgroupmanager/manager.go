@@ -599,11 +599,46 @@ func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
 // syncPodGroupNetworkTopology sets or clears PodGroup group-level NetworkTopology
 // from ModelServing spec.template.networkTopology.groupPolicy.
 func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedulingv1beta1.PodGroupSpec) {
-	if ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
-		spec.NetworkTopology = ms.Spec.Template.NetworkTopology.GroupPolicy
+	if ms != nil && ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
+		spec.NetworkTopology = toSchedulerNetworkTopologySpec(ms.Spec.Template.NetworkTopology.GroupPolicy)
 		return
 	}
 	spec.NetworkTopology = nil
+}
+
+// toSchedulerNetworkTopologySpec converts Kthena's NetworkTopologySpec adapter type to the
+// scheduler-specific PodGroup representation. Isolating the conversion here means future
+// Volcano API changes only need to update this function, not the ModelServing API.
+func toSchedulerNetworkTopologySpec(policy *workloadv1alpha1.NetworkTopologySpec) *schedulingv1beta1.NetworkTopologySpec {
+	if policy == nil {
+		return nil
+	}
+
+	var highestTierAllowed *int
+	if policy.HighestTierAllowed != nil {
+		highestTierAllowed = ptr.To(*policy.HighestTierAllowed)
+	}
+
+	return &schedulingv1beta1.NetworkTopologySpec{
+		Mode:               schedulingv1beta1.NetworkTopologyMode(policy.Mode),
+		HighestTierAllowed: highestTierAllowed,
+		HighestTierName:    policy.HighestTierName,
+	}
+}
+
+// resolveRoleNetworkTopology returns the effective Kthena NetworkTopologySpec for a role:
+// the role's own policy takes precedence; otherwise the legacy ModelServing-level
+// rolePolicy applies (preserved for backward compatibility); otherwise none. ms and
+// ms.Spec.Template.NetworkTopology are both optional and checked explicitly so this
+// function is safe to call on its own, independent of what its current callers guarantee.
+func resolveRoleNetworkTopology(ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role) *workloadv1alpha1.NetworkTopologySpec {
+	if role.NetworkTopology != nil {
+		return role.NetworkTopology
+	}
+	if ms == nil || ms.Spec.Template.NetworkTopology == nil {
+		return nil
+	}
+	return ms.Spec.Template.NetworkTopology.RolePolicy
 }
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
@@ -615,17 +650,18 @@ func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
 }
 
 func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {
+	groupedRoles := roleGroupMembership(ms)
+
 	subGroupPolicy := make([]schedulingv1beta1.SubGroupPolicySpec, 0, len(minRoleMember))
 	for _, role := range ms.Spec.Template.Roles {
-		roleReplicas := int(*role.Replicas)
-		minRoleReplicas := roleReplicas
-
-		if ms.Spec.Template.GangPolicy != nil && ms.Spec.Template.GangPolicy.MinRoleReplicas != nil {
-			if minReplicas, exists := ms.Spec.Template.GangPolicy.MinRoleReplicas[role.Name]; exists {
-				minRoleReplicas = int(minReplicas)
-			}
+		if _, grouped := groupedRoles[role.Name]; grouped {
+			// This role's pods are folded into its role group's single combined
+			// entry below instead of getting their own independent subgroup.
+			continue
 		}
 
+		roleReplicas := int(*role.Replicas)
+		minRoleReplicas := roleReplicaCount(ms, role.Name, roleReplicas)
 		minReplicas := min(minRoleReplicas, roleReplicas)
 		minSubgroupSize := minRoleMember[role.Name]
 		subGroupPolicy = append(subGroupPolicy, schedulingv1beta1.SubGroupPolicySpec{
@@ -636,20 +672,101 @@ func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulin
 					workloadv1alpha1.RoleLabelKey:             role.Name,
 				},
 			},
-			MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
-			SubGroupSize:   &minSubgroupSize,
-			MinSubGroups:   ptr.To(int32(minReplicas)),
+			MatchLabelKeys:  []string{workloadv1alpha1.RoleIDKey},
+			SubGroupSize:    &minSubgroupSize,
+			MinSubGroups:    ptr.To(int32(minReplicas)),
+			NetworkTopology: toSchedulerNetworkTopologySpec(resolveRoleNetworkTopology(ms, role)),
 		})
 	}
 
-	if ms.Spec.Template.NetworkTopology != nil {
-		// set SubGroupPolicy if configured in ModelServing
-		if ms.Spec.Template.NetworkTopology.RolePolicy != nil {
-			for i := range subGroupPolicy {
-				subGroupPolicy[i].NetworkTopology = ms.Spec.Template.NetworkTopology.RolePolicy
-			}
-		}
-	}
+	subGroupPolicy = append(subGroupPolicy, roleGroupSubGroupPolicies(ms)...)
+
 	podGroup.Spec.SubGroupPolicy = subGroupPolicy
 	return podGroup
+}
+
+// roleGroupMembership returns, for every role that belongs to a
+// spec.template.networkTopology.roleGroups entry, the name of that group.
+func roleGroupMembership(ms *workloadv1alpha1.ModelServing) map[string]string {
+	membership := make(map[string]string)
+	if ms == nil || ms.Spec.Template.NetworkTopology == nil {
+		return membership
+	}
+	for _, group := range ms.Spec.Template.NetworkTopology.RoleGroups {
+		for _, roleName := range group.Roles {
+			membership[roleName] = group.Name
+		}
+	}
+	return membership
+}
+
+// roleReplicaCount returns the effective minimum replica count for a role, honoring
+// spec.template.gangPolicy.minRoleReplicas the same way calculateRequirements does.
+func roleReplicaCount(ms *workloadv1alpha1.ModelServing, roleName string, roleReplicas int) int {
+	minRoleReplicas := roleReplicas
+	if ms.Spec.Template.GangPolicy != nil && ms.Spec.Template.GangPolicy.MinRoleReplicas != nil {
+		if minReplicas, exists := ms.Spec.Template.GangPolicy.MinRoleReplicas[roleName]; exists {
+			minRoleReplicas = int(minReplicas)
+		}
+	}
+	return minRoleReplicas
+}
+
+// roleGroupSubGroupPolicies builds one combined SubGroupPolicySpec per configured role
+// group. Every pod belonging to any of the group's roles, across every replica, shares
+// the ModelServing-instance-scoped GroupNameLabelKey value, so using it as the sole
+// MatchLabelKey collapses them all into a single Volcano SubJobInfo: one shared
+// AllocatedHyperNode and one shared NetworkTopology constraint enforced jointly across
+// the whole group, rather than the independent per-role/per-replica subgroups that
+// MatchLabelKeys: [RoleIDKey] produces elsewhere in this file.
+//
+// This grouping applies at ServingGroup-instance granularity: it does not pair specific
+// replica indices across roles, so if a grouped role has multiple replicas, all of them
+// are constrained together with the rest of the group.
+func roleGroupSubGroupPolicies(ms *workloadv1alpha1.ModelServing) []schedulingv1beta1.SubGroupPolicySpec {
+	if ms.Spec.Template.NetworkTopology == nil || len(ms.Spec.Template.NetworkTopology.RoleGroups) == 0 {
+		return nil
+	}
+
+	rolesByName := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		rolesByName[role.Name] = role
+	}
+
+	policies := make([]schedulingv1beta1.SubGroupPolicySpec, 0, len(ms.Spec.Template.NetworkTopology.RoleGroups))
+	for _, group := range ms.Spec.Template.NetworkTopology.RoleGroups {
+		var groupSize int32
+		for _, roleName := range group.Roles {
+			role, ok := rolesByName[roleName]
+			if !ok {
+				// The webhook rejects role groups referencing unknown roles; skip
+				// defensively rather than generating an unschedulable PodGroup.
+				continue
+			}
+			podsPerRole := 1 + role.WorkerReplicas // entry + workers
+			minRoleReplicas := roleReplicaCount(ms, role.Name, int(*role.Replicas))
+			groupSize += podsPerRole * int32(minRoleReplicas)
+		}
+
+		policies = append(policies, schedulingv1beta1.SubGroupPolicySpec{
+			Name: group.Name,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				},
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      workloadv1alpha1.RoleLabelKey,
+						Operator: metav1.LabelSelectorOpIn,
+						Values:   group.Roles,
+					},
+				},
+			},
+			MatchLabelKeys:  []string{workloadv1alpha1.GroupNameLabelKey},
+			SubGroupSize:    ptr.To(groupSize),
+			MinSubGroups:    ptr.To(int32(1)),
+			NetworkTopology: toSchedulerNetworkTopologySpec(group.Policy),
+		})
+	}
+	return policies
 }
