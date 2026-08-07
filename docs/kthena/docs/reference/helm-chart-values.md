@@ -32,6 +32,10 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.image.repository | string | `"ghcr.io/volcano-sh/kthena-router"` | Image repository for Kthena Router. |
 | networking.kthenaRouter.image.tag | string | `"latest"` | Image tag for Kthena Router. |
 | networking.kthenaRouter.port | int | `8080` | Container port for Kthena Router. |
+| networking.kthenaRouter.requestLimits.idleTimeout | string | `"120s"` | Maximum time an idle keep-alive connection is kept open between requests. |
+| networking.kthenaRouter.requestLimits.maxHeaderBytes | int | `1048576` | Largest request header block accepted, in bytes.<br/> A larger header block is rejected with HTTP 431. |
+| networking.kthenaRouter.requestLimits.maxRequestBodyBytes | int | `33554432` | Largest inference request body accepted, in bytes.<br/> A larger request is rejected with HTTP 413 before it is buffered.<br/> Set to `0` to disable the limit. |
+| networking.kthenaRouter.requestLimits.readHeaderTimeout | string | `"10s"` | Maximum time a client may take to send the complete request headers.<br/> Bounds slow-header clients holding connections open. |
 | networking.kthenaRouter.replicas | int | `1` | Number of Kthena Router instances to run. |
 | networking.kthenaRouter.sessionBoost.enabled | bool | `false` | Enable session-boost scheduling. Mutually exclusive with fairness. |
 | networking.kthenaRouter.sessionBoost.gracePeriod | string | `"0s"` | Wait time after a request completes for a same-session follow-up.<br/> Disabled by default (`0s`). |

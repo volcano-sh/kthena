@@ -122,6 +122,22 @@ networking:
     # -- Drain timeout for kthena-router graceful shutdown.
     # -- This should be less than terminationGracePeriodSeconds.
     drainTimeout: 5m
+    # requestLimits bounds the request size and connection lifetime accepted by
+    # the router listeners. No write deadline is applied, so streaming inference
+    # responses are unaffected.
+    requestLimits:
+      # -- Largest inference request body accepted, in bytes.<br/>
+      # A larger request is rejected with HTTP 413 before it is buffered.<br/>
+      # Set to `0` to disable the limit.
+      maxRequestBodyBytes: 33554432
+      # -- Maximum time a client may take to send the complete request headers.<br/>
+      # Bounds slow-header clients holding connections open.
+      readHeaderTimeout: 10s
+      # -- Maximum time an idle keep-alive connection is kept open between requests.
+      idleTimeout: 120s
+      # -- Largest request header block accepted, in bytes.<br/>
+      # A larger header block is rejected with HTTP 431.
+      maxHeaderBytes: 1048576
 
 global:
   # -- Certificate Management Mode.<br/>

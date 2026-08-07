@@ -17,7 +17,13 @@ limitations under the License.
 package app
 
 import (
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -186,5 +192,161 @@ func TestMatchedListenerIsStableAfterGatewayUpdate(t *testing.T) {
 
 	if matched.GatewayKey != target.GatewayKey {
 		t.Fatalf("matched listener changed to %q after update", matched.GatewayKey)
+	}
+}
+
+// serveWithLimits starts a listener-equivalent HTTP server on a random local
+// port and returns its address.
+func serveWithLimits(t *testing.T, limits serverLimits, handler http.Handler) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	srv := newHTTPServer(ln.Addr().String(), handler, limits)
+	go func() {
+		_ = srv.Serve(ln)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+	})
+	return ln.Addr().String()
+}
+
+func TestNewHTTPServerAppliesLimits(t *testing.T) {
+	limits := serverLimits{
+		readHeaderTimeout: 3 * time.Second,
+		idleTimeout:       45 * time.Second,
+		maxHeaderBytes:    8192,
+	}
+
+	srv := newHTTPServer(":8080", http.NotFoundHandler(), limits)
+
+	if srv.ReadHeaderTimeout != limits.readHeaderTimeout {
+		t.Errorf("ReadHeaderTimeout = %v, want %v", srv.ReadHeaderTimeout, limits.readHeaderTimeout)
+	}
+	if srv.IdleTimeout != limits.idleTimeout {
+		t.Errorf("IdleTimeout = %v, want %v", srv.IdleTimeout, limits.idleTimeout)
+	}
+	if srv.MaxHeaderBytes != limits.maxHeaderBytes {
+		t.Errorf("MaxHeaderBytes = %d, want %d", srv.MaxHeaderBytes, limits.maxHeaderBytes)
+	}
+	// A global write deadline would truncate streaming inference responses.
+	if srv.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0 so that streaming responses are not truncated", srv.WriteTimeout)
+	}
+	// ReadTimeout would bound the upload of a large inference request body;
+	// the body size limit handles that instead.
+	if srv.ReadTimeout != 0 {
+		t.Errorf("ReadTimeout = %v, want 0", srv.ReadTimeout)
+	}
+}
+
+func TestNewHTTPServerClosesSlowHeaderConnections(t *testing.T) {
+	const readHeaderTimeout = 200 * time.Millisecond
+
+	addr := serveWithLimits(t, serverLimits{
+		readHeaderTimeout: readHeaderTimeout,
+		idleTimeout:       time.Minute,
+		maxHeaderBytes:    defaultMaxHeaderBytes,
+	}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler must not be reached for an incomplete request")
+	}))
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Send the request line and one header, then stall without the blank line
+	// that terminates the header block.
+	if _, err := conn.Write([]byte("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	start := time.Now()
+	if err := conn.SetReadDeadline(time.Now().Add(10 * readHeaderTimeout)); err != nil {
+		t.Fatalf("set read deadline failed: %v", err)
+	}
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected the server to close the connection, got a response")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("connection still open after %v, want it closed after %v", time.Since(start), readHeaderTimeout)
+	}
+	if elapsed := time.Since(start); elapsed < readHeaderTimeout {
+		t.Errorf("connection closed after %v, want at least %v", elapsed, readHeaderTimeout)
+	}
+}
+
+func TestNewHTTPServerRejectsOversizedHeaders(t *testing.T) {
+	const maxHeaderBytes = 1024
+
+	var handlerCalled atomic.Bool
+	addr := serveWithLimits(t, serverLimits{
+		readHeaderTimeout: 10 * time.Second,
+		idleTimeout:       time.Minute,
+		maxHeaderBytes:    maxHeaderBytes,
+	}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled.Store(true)
+	}))
+
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	// net/http allows a few KiB of slack above MaxHeaderBytes, so overshoot it
+	// by a wide margin.
+	req.Header.Set("X-Oversized", strings.Repeat("a", 16*maxHeaderBytes))
+
+	// The server may reply 431 or close the connection while the client is
+	// still writing; either way the request must not reach the handler.
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusRequestHeaderFieldsTooLarge)
+		}
+	}
+	if handlerCalled.Load() {
+		t.Error("handler was invoked for a request with oversized headers")
+	}
+}
+
+func TestNewHTTPServerAllowsLongStreamingResponses(t *testing.T) {
+	const (
+		chunks        = 5
+		chunkInterval = 100 * time.Millisecond
+	)
+
+	// Both bounds are shorter than the response duration; neither may truncate it.
+	addr := serveWithLimits(t, serverLimits{
+		readHeaderTimeout: 100 * time.Millisecond,
+		idleTimeout:       100 * time.Millisecond,
+		maxHeaderBytes:    defaultMaxHeaderBytes,
+	}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for i := 0; i < chunks; i++ {
+			if _, err := io.WriteString(w, "data: chunk\n\n"); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			time.Sleep(chunkInterval)
+		}
+	}))
+
+	resp, err := http.Get("http://" + addr + "/v1/chat/completions")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the streamed body failed: %v", err)
+	}
+	if got := strings.Count(string(body), "data: chunk"); got != chunks {
+		t.Errorf("received %d chunks, want %d", got, chunks)
 	}
 }

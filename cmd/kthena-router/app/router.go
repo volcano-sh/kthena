@@ -92,6 +92,7 @@ func (s *Server) startRouter(ctx context.Context, router *router.Router, store d
 			readyCheck:       s.HasSynced,
 			activeRequests:   router.ActiveRequestCount,
 			drainTimeout:     s.drainTimeout,
+			limits:           s.limits,
 			startLog:         fmt.Sprintf("Starting default server on port %s", s.Port),
 			shutdownStartLog: "Shutting down default HTTP server ...",
 			shutdownDoneLog:  "Default HTTP server exited",
@@ -205,6 +206,7 @@ type listenerConfig struct {
 	readyCheck     func() bool
 	activeRequests func() int64
 	drainTimeout   time.Duration
+	limits         serverLimits
 	// Gateway mode (non-nil => use gateway branch).
 	gateway          *listenerGatewayConfig
 	startLog         string
@@ -212,6 +214,19 @@ type listenerConfig struct {
 	shutdownDoneLog  string
 	logShutdownErr   func(err error)
 	logListenErr     func(err error)
+}
+
+// newHTTPServer builds a listener HTTP server with the connection-level bounds
+// applied. WriteTimeout is intentionally left unset so that long-running
+// streaming inference responses are not truncated.
+func newHTTPServer(addr string, handler http.Handler, limits serverLimits) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: limits.readHeaderTimeout,
+		IdleTimeout:       limits.idleTimeout,
+		MaxHeaderBytes:    limits.maxHeaderBytes,
+	}
 }
 
 // startListener: build Gin, listen, graceful shutdown on ctx.
@@ -277,10 +292,7 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 	} else {
 		klog.Fatal("startListener: invalid listenerConfig (need gateway or defaultRouter+readyCheck)")
 	}
-	srv := &http.Server{
-		Addr:    cfg.addr,
-		Handler: engine.Handler(),
-	}
+	srv := newHTTPServer(cfg.addr, engine.Handler(), cfg.limits)
 
 	go func() {
 		klog.Info(cfg.startLog)
@@ -525,6 +537,7 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 			gateway:          &listenerGatewayConfig{lm: lm, port: port},
 			activeRequests:   lm.router.ActiveRequestCount,
 			drainTimeout:     lm.server.drainTimeout,
+			limits:           lm.server.limits,
 			startLog:         fmt.Sprintf("Starting Gateway listener server on port %d", port),
 			shutdownStartLog: fmt.Sprintf("Shutting down Gateway listener server on port %d ...", port),
 			shutdownDoneLog:  "",

@@ -127,6 +127,18 @@ spec:
 
             - name: DRAIN_TIMEOUT
               value: {{ .Values.kthenaRouter.drainTimeout | quote }}
+
+            # Request and connection limits
+            {{- with .Values.kthenaRouter.requestLimits }}
+            - name: MAX_REQUEST_BODY_BYTES
+              value: {{ .maxRequestBodyBytes | quote }}
+            - name: READ_HEADER_TIMEOUT
+              value: {{ .readHeaderTimeout | quote }}
+            - name: IDLE_TIMEOUT
+              value: {{ .idleTimeout | quote }}
+            - name: MAX_HEADER_BYTES
+              value: {{ .maxHeaderBytes | quote }}
+            {{- end }}
           resources: {{- toYaml .Values.kthenaRouter.resource | nindent 12 }}
           livenessProbe:
             httpGet:

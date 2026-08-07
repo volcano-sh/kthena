@@ -18,7 +18,9 @@ package app
 
 import (
 	"context"
+	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"k8s.io/client-go/tools/cache"
@@ -29,6 +31,28 @@ import (
 )
 
 const defaultDrainTimeout = 5 * time.Minute
+
+const (
+	// defaultReadHeaderTimeout bounds how long a client may take to send the
+	// complete request headers, so a slow-header client cannot hold a
+	// connection and its goroutine indefinitely.
+	defaultReadHeaderTimeout = 10 * time.Second
+	// defaultIdleTimeout bounds how long an idle keep-alive connection is kept
+	// open between requests.
+	defaultIdleTimeout = 120 * time.Second
+	// defaultMaxHeaderBytes matches net/http's own default, so the limit only
+	// becomes stricter when an operator asks for it.
+	defaultMaxHeaderBytes = http.DefaultMaxHeaderBytes
+)
+
+// serverLimits are the connection-level bounds applied to every router HTTP
+// listener. WriteTimeout is deliberately absent: streaming inference responses
+// are long-lived and a global write deadline would truncate them.
+type serverLimits struct {
+	readHeaderTimeout time.Duration
+	idleTimeout       time.Duration
+	maxHeaderBytes    int
+}
 
 type Server struct {
 	store                              datastore.Store
@@ -45,6 +69,8 @@ type Server struct {
 	KubeAPIBurst                       int
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
+	// limits are the connection-level bounds shared by every HTTP listener.
+	limits serverLimits
 }
 
 func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int, kubeAPIQPS float32, kubeAPIBurst int) *Server {
@@ -60,17 +86,43 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		KubeAPIQPS:                         kubeAPIQPS,
 		KubeAPIBurst:                       kubeAPIBurst,
 		drainTimeout:                       parseDrainTimeout(),
+		limits:                             parseServerLimits(),
 	}
 }
 
 func parseDrainTimeout() time.Duration {
-	if v := os.Getenv("DRAIN_TIMEOUT"); v != "" {
+	return parsePositiveDurationEnv("DRAIN_TIMEOUT", defaultDrainTimeout)
+}
+
+// parseServerLimits reads the listener bounds from READ_HEADER_TIMEOUT,
+// IDLE_TIMEOUT and MAX_HEADER_BYTES. Invalid or non-positive values fall back
+// to the defaults, so a bad value can never leave a listener unbounded.
+func parseServerLimits() serverLimits {
+	return serverLimits{
+		readHeaderTimeout: parsePositiveDurationEnv("READ_HEADER_TIMEOUT", defaultReadHeaderTimeout),
+		idleTimeout:       parsePositiveDurationEnv("IDLE_TIMEOUT", defaultIdleTimeout),
+		maxHeaderBytes:    parseMaxHeaderBytes(),
+	}
+}
+
+func parsePositiveDurationEnv(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
 		}
-		klog.Warningf("Invalid DRAIN_TIMEOUT %q, using default %v", v, defaultDrainTimeout)
+		klog.Warningf("Invalid %s %q, using default %v", key, v, fallback)
 	}
-	return defaultDrainTimeout
+	return fallback
+}
+
+func parseMaxHeaderBytes() int {
+	if v := os.Getenv("MAX_HEADER_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		klog.Warningf("Invalid MAX_HEADER_BYTES %q, using default %v", v, defaultMaxHeaderBytes)
+	}
+	return defaultMaxHeaderBytes
 }
 
 func (s *Server) Run(ctx context.Context) {
