@@ -549,11 +549,84 @@ func TestStoreDeleteModelServer(t *testing.T) {
 	assert.False(t, podExists, "pod should be deleted if no modelServer left")
 }
 
+// TestStoreDeleteModelServerLeavesOnFlightCounterIntact verifies that DeleteModelServer
+// removes the evicted pod from the store's local view but does NOT touch its Redis
+// on-flight counter. The pod may still be running and get reselected by another
+// ModelServer later, so eagerly deleting the shared counter here could race with
+// in-flight requests dispatched before the ModelServer was deleted and corrupt the
+// count once the pod is reassociated. Counter cleanup only happens in DeletePod, once
+// the pod is confirmed gone.
+func TestStoreDeleteModelServerLeavesOnFlightCounterIntact(t *testing.T) {
+	podName := types.NamespacedName{Namespace: "default", Name: "pod-a"}
+
+	// fakeCounter records which pods had their counter deleted.
+	deleted := make(map[types.NamespacedName]bool)
+	fc := &fakeOnFlightCounter{deleted: deleted}
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms1"},
+	}
+	msName := utils.GetNamespaceName(ms)
+
+	modelSrv := newModelServer(ms)
+	modelSrv.addPod(podName)
+
+	s := &store{
+		modelServer:     sync.Map{},
+		pods:            sync.Map{},
+		onFlightCounter: fc,
+	}
+
+	s.modelServer.Store(msName, modelSrv)
+	s.pods.Store(podName, &PodInfo{
+		Pod:         &corev1.Pod{},
+		modelServer: sets.New[types.NamespacedName](msName),
+		models:      sets.New[string](),
+	})
+
+	err := s.DeleteModelServer(msName)
+	assert.NoError(t, err)
+
+	// The pod must have been removed from the store's local view.
+	_, podExists := s.pods.Load(podName)
+	assert.False(t, podExists, "pod should be removed from store after DeleteModelServer")
+
+	// The shared Redis on-flight counter must NOT have been touched.
+	assert.False(t, deleted[podName], "onFlightCounter.Delete must not be called from DeleteModelServer")
+}
+
+// fakeOnFlightCounter is a minimal in-process OnFlightCounter that records
+// which pods had their counter deleted, for use in unit tests.
+type fakeOnFlightCounter struct {
+	mu      sync.Mutex
+	deleted map[types.NamespacedName]bool
+}
+
+func (f *fakeOnFlightCounter) Incr(_ context.Context, pod types.NamespacedName) (int64, error) {
+	return 1, nil
+}
+
+func (f *fakeOnFlightCounter) Decr(_ context.Context, pod types.NamespacedName) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeOnFlightCounter) Delete(_ context.Context, pod types.NamespacedName) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted[pod] = true
+	return nil
+}
+
+func (f *fakeOnFlightCounter) BatchGet(_ context.Context, pods []types.NamespacedName) (map[types.NamespacedName]int64, error) {
+	return nil, nil
+}
+
 func TestStoreGetPodsByModelServer(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
 	}
+
 	ms := &aiv1alpha1.ModelServer{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
