@@ -18,6 +18,7 @@ package cert
 
 import (
 	"context"
+	"crypto/tls"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,9 +32,23 @@ func TestEnsureCertificateCreatesSecret(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	ctx := context.Background()
 
-	caBundle, err := EnsureCertificate(ctx, client, "default", "webhook-certs", []string{"webhook.default.svc"})
+	bundle, err := EnsureCertificate(ctx, client, "default", "webhook-certs", []string{"webhook.default.svc"})
 	assert.NoError(t, err)
-	assert.NotEmpty(t, caBundle)
+	assert.NotEmpty(t, bundle.CertPEM)
+	assert.NotEmpty(t, bundle.KeyPEM)
+	assert.NotEmpty(t, bundle.CAPEM)
+
+	// The returned pair must be directly usable for serving. This is what lets the
+	// webhook server start without waiting for the secret to be projected onto disk.
+	_, err = tls.X509KeyPair(bundle.CertPEM, bundle.KeyPEM)
+	assert.NoError(t, err)
+
+	// What we return must match what we persisted, so every replica serves the same pair.
+	stored, err := client.CoreV1().Secrets("default").Get(ctx, "webhook-certs", metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, stored.Data[TLSCertKey], bundle.CertPEM)
+	assert.Equal(t, stored.Data[TLSKeyKey], bundle.KeyPEM)
+	assert.Equal(t, stored.Data[CAKey], bundle.CAPEM)
 }
 
 func TestEnsureCertificateReusesExistingSecret(t *testing.T) {
@@ -46,15 +61,42 @@ func TestEnsureCertificateReusesExistingSecret(t *testing.T) {
 			Namespace: "default",
 		},
 		Data: map[string][]byte{
-			CAKey: []byte("existing-ca"),
+			TLSCertKey: []byte("existing-cert"),
+			TLSKeyKey:  []byte("existing-key"),
+			CAKey:      []byte("existing-ca"),
 		},
 	}
 	_, err := client.CoreV1().Secrets("default").Create(ctx, existingSecret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	caBundle, err := EnsureCertificate(ctx, client, "default", "webhook-certs", []string{"webhook.default.svc"})
+	bundle, err := EnsureCertificate(ctx, client, "default", "webhook-certs", []string{"webhook.default.svc"})
 	assert.NoError(t, err)
-	assert.Equal(t, []byte("existing-ca"), caBundle)
+	assert.Equal(t, []byte("existing-cert"), bundle.CertPEM)
+	assert.Equal(t, []byte("existing-key"), bundle.KeyPEM)
+	assert.Equal(t, []byte("existing-ca"), bundle.CAPEM)
+}
+
+func TestEnsureCertificateRejectsIncompleteSecret(t *testing.T) {
+	// A secret carrying only the CA cannot be served from, so it must be reported
+	// rather than silently accepted.
+	for _, tt := range []struct {
+		name string
+		data map[string][]byte
+	}{
+		{name: "missing cert", data: map[string][]byte{TLSKeyKey: []byte("k"), CAKey: []byte("ca")}},
+		{name: "missing key", data: map[string][]byte{TLSCertKey: []byte("c"), CAKey: []byte("ca")}},
+		{name: "missing ca", data: map[string][]byte{TLSCertKey: []byte("c"), TLSKeyKey: []byte("k")}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "webhook-certs", Namespace: "default"},
+				Data:       tt.data,
+			})
+
+			_, err := EnsureCertificate(context.Background(), client, "default", "webhook-certs", []string{"webhook.default.svc"})
+			assert.Error(t, err)
+		})
+	}
 }
 
 func TestEnsureCertificateRequiresDNSNames(t *testing.T) {
