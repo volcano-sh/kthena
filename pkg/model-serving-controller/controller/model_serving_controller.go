@@ -279,7 +279,7 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 	// Because minRoleReplicas is not allowed to be updated, so we do not need to check it here.
 	if oldms.Spec.Template.NetworkTopology != nil && curms.Spec.Template.NetworkTopology == nil {
 		if curms.Spec.Template.GangPolicy == nil || len(curms.Spec.Template.GangPolicy.MinRoleReplicas) == 0 {
-			if err := c.podGroupManager.CleanupPodGroups(context.TODO(), curms); err != nil {
+			if err := c.podGroupManager.CleanupPodGroups(context.Background(), curms); err != nil {
 				klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", curms.Namespace, curms.Name, err)
 			}
 		}
@@ -568,7 +568,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	}
 
 	// 5. Calculate and update the overall condition and replica status fields of the ModelServing.
-	if err := c.UpdateModelServingStatus(ms, revision); err != nil {
+	if err := c.UpdateModelServingStatus(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
 	}
 
@@ -1288,7 +1288,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		return
 	}
 	for _, svc := range services {
-		deleteSvcErr := c.kubeClientSet.CoreV1().Services(ms.Namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
+		deleteSvcErr := c.kubeClientSet.CoreV1().Services(ms.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{})
 		if deleteSvcErr != nil {
 			if apierrors.IsNotFound(deleteSvcErr) {
 				klog.V(4).Infof("service %s/%s has been deleted", ms.Namespace, svc.Name)
@@ -1748,7 +1748,7 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 		if !utils.IsPodRunningAndReady(newPod) {
 			// pod has not recovered after the grace period, needs to be rebuilt
 			// After this pod has been deleted, we will rebuild the ServingGroup in deletePod function
-			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), newPod.Name, metav1.DeleteOptions{})
+			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.Background(), newPod.Name, metav1.DeleteOptions{})
 			if err != nil {
 				klog.Errorf("cannot delete pod %s after grace time, err: %v", newPod.Name, err)
 				return
@@ -1759,7 +1759,7 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 		// grace period is not set or the grace period is 0, the deletion will be executed immediately.
 		defer c.graceMap.Delete(utils.GetNamespaceName(errPod))
 
-		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, metav1.DeleteOptions{})
+		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.Background(), errPod.Name, metav1.DeleteOptions{})
 		if err != nil {
 			klog.Errorf("cannot delete pod %s when it error, err: %v", errPod.Name, err)
 			return
@@ -1773,13 +1773,13 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 	switch ms.Spec.RecoveryPolicy {
 	case workloadv1alpha1.ServingGroupRecreate:
 		// Rebuild the entire ServingGroup directly
-		if err := c.deleteServingGroup(context.TODO(), ms, servingGroupName); err != nil {
+		if err := c.deleteServingGroup(context.Background(), ms, servingGroupName); err != nil {
 			klog.Errorf("failed to delete ServingGroup %s: %v", servingGroupName, err)
 		}
 	case workloadv1alpha1.RoleRecreate:
 		// If Rolling update in RoleRecreate mode, requires re-entering the queue during the pod delete event.
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting {
-			if err := c.deleteServingGroup(context.TODO(), ms, servingGroupName); err != nil {
+			if err := c.deleteServingGroup(context.Background(), ms, servingGroupName); err != nil {
 				klog.Errorf("failed to delete ServingGroup %s: %v", servingGroupName, err)
 			}
 			return nil
@@ -2091,7 +2091,7 @@ func (c *ModelServingController) getPodGroupsByIndex(indexName, indexValue strin
 }
 
 // UpdateModelServingStatus update replicas in modelServing status.
-func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.ModelServing, revision string) error {
+func (c *ModelServingController) UpdateModelServingStatus(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get latest modelserving from informer store
 		latestMS, getErr := c.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
@@ -2120,8 +2120,13 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 					copy.Status.CurrentRevision = revision
 					copy.Status.UpdateRevision = revision
 					copy.Status.LabelSelector = selector
-					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
-					return updateErr
+					if !reflect.DeepEqual(copy.Status, latestMS.Status) {
+						_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(ctx, copy, metav1.UpdateOptions{})
+						if updateErr != nil {
+							klog.Warningf("Failed to update ModelServing status: %v", updateErr)
+							return updateErr
+						}
+					}
 				}
 				return nil
 			}
@@ -2267,13 +2272,13 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 		}
 
 		if shouldUpdate {
-			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(ctx, copy, metav1.UpdateOptions{})
 			if err != nil {
 				return err
 			}
 			// Clean up old revisions only after roles have been updated (revision status changed)
 			if revisionUpdated {
-				if cleanupErr := utils.CleanupOldControllerRevisions(context.TODO(), c.kubeClientSet, copy); cleanupErr != nil {
+				if cleanupErr := utils.CleanupOldControllerRevisions(ctx, c.kubeClientSet, copy); cleanupErr != nil {
 					klog.Warningf("Failed to cleanup old ControllerRevisions after updating revision status for ModelServing %s/%s: %v", copy.Namespace, copy.Name, cleanupErr)
 				}
 			}
