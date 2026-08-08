@@ -52,17 +52,17 @@ Gang scheduling ensures atomic scheduling of distributed inference groups like x
 
 ## Architecture
 
-Kthena implements a Kubernetes-native architecture with separate control plane and data plane components, each can be deployed and used alone. The platform manages LLM inference workloads through CRD and provides intelligent request routing through a dedicated router. It contains the following key components:
+Kthena implements a Kubernetes-native architecture with separate control plane and data plane components, each of which can be deployed and used alone. The platform manages LLM inference workloads through CRDs and provides intelligent request routing through a dedicated router. It contains the following key components:
 
 - **Kthena-controller-manager**: 
   The control plane component governing the LLM inference lifecycle. It continuously reconciles Kthena CRDs to deploy, scale, and upgrade inference replicas across the cluster while exposing advanced scheduling policies that integrate directly with the [Volcano scheduler](https://github.com/volcano-sh/volcano/).   
 - **Kthena-router**:
-  The data plane entry point for inference traffic. It classifies each request by model name, custom headers, or URI patterns, then applies load-balancing policies and traffic controls to dispatch request to the right inference instance. Native support for prefill–decode disaggregation routing while keeps high throughput and low latency.
+  The data plane entry point for inference traffic. It classifies each request by model name, custom headers, or URI patterns, then applies load-balancing policies and traffic controls to dispatch requests to the right inference instance. Native support for prefill–decode disaggregation routing while keeping high throughput and low latency.
 
-For more details, please refer to [Kthena Architecture](https://kthena.volcano.sh/docs/architecture)
+For more details, please refer to [Kthena Architecture](https://kthena.volcano.sh/docs/architecture/architecture)
 
 > [!Note]
-> The router component is a reference implementation, because Gateway Inference Extension does not natively support prefill-decode distribution. kthena router is still under active iteration, and it can be deployed behind a standard api gateway.
+> The router component is a reference implementation, because Gateway Inference Extension does not natively support prefill-decode disaggregation. The Kthena router is still under active iteration, and it can be deployed behind a standard API gateway.
 
 
 ## Getting Started
@@ -105,7 +105,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines.
 
 Regular Community Meeting:
 
-- Community biweekly meeting for Asia: 16:00 - 17:00 (UTC+8) .Wednesday [Convert to your timezone](https://dateful.com/time-zone-converter?t=15&tz2=UTC%2B8).
+- Community biweekly meeting for Asia: 16:00 - 17:00 (UTC+8) Wednesday. [Convert to your timezone](https://dateful.com/time-zone-converter?t=16&tz2=UTC%2B8).
 
 Resources:
 - [Meeting notes and agenda](https://docs.google.com/document/d/1bph_MA1UU3tKCV9T8XmJ0cIH3o85uAxExep412fDToE/edit?tab=t.0)

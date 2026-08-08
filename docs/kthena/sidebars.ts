@@ -64,7 +64,7 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: 'category',
-          label: 'workload',
+          label: 'Workload',
           items: [
             'user-guide/binpack-scale-down',
             'user-guide/gang-scheduling',

@@ -1,20 +1,20 @@
 ---
 slug: modelserving-blog-post
-title: A Deep Dive of the Kthena's ModelServing
+title: A Deep Dive into Kthena's ModelServing
 authors: [LiZhenCheng9527]
 tags: []
 date: 2025-10-14
 ---
 
-# A Deep Dive of the Kthena's ModelServing
+# A Deep Dive into Kthena's ModelServing
 
 ## Introduction
 
-As large models continue to grow exponentially in parameter size, the resource limits of a single virtual or physical machine can no longer meet their demands. To address this challenge, the industry has introduced innovative strategies such as PD-diaggregation deployment and hybrid deployment of large and small models. These approaches have transformed inference execution: instead of a single Pod handling an entire inference task, multiple Pods now often collaborate to complete a single prediction. This multi-Pod collaboration has become a key trend in large model inference deployment.
+As large models continue to grow exponentially in parameter size, the resource limits of a single virtual or physical machine can no longer meet their demands. To address this challenge, the industry has introduced innovative strategies such as PD-disaggregation deployment and hybrid deployment of large and small models. These approaches have transformed inference execution: instead of a single Pod handling an entire inference task, multiple Pods now often collaborate to complete a single prediction. This multi-Pod collaboration has become a key trend in large model inference deployment.
 
 In practice, inference models may still run within a single Pod (as in traditional single-node scenarios), across a group of identical Pods (for larger models), or among Pods with specialized roles (as in PD-disaggregation deployments). This flexible deployment not only improves resource utilization but also enables more efficient large model inference.
 
-`ModelServing` is a specialized component of `Kthena` designed to manage and orchestrate the lifecycle of inference model workloads. It can conveniently represent and manage multiple deployment models, such as `PD-disaggregation`, `tensor parallelism`, `pipeline parallelism`, and native model deployment, because its three-tier architecture.
+`ModelServing` is a specialized component of `Kthena` designed to manage and orchestrate the lifecycle of inference model workloads. It can conveniently represent and manage multiple deployment models, such as `PD-disaggregation`, `tensor parallelism`, `pipeline parallelism`, and native model deployment, because of its three-tier architecture.
 
 <!-- truncate -->
 
@@ -25,7 +25,7 @@ In practice, inference models may still run within a single Pod (as in tradition
 ![ModelServing Architecture](images/modelServing_architecture.svg)
 
 - **ModelServing:** The central component responsible for managing the lifecycle of inference model workloads. It offers a unified interface for deploying and managing inference models, as well as querying their statuses.
-- **ServingGroups:** An `ServingGroup` is a collection of Roles. Each group can fulfill the whole inference, it include both Prefill and Decode roles for PD-Disaggregation deployment.
+- **ServingGroups:** A `ServingGroup` is a collection of Roles. Each group can fulfill the whole inference; it includes both Prefill and Decode roles for PD-disaggregation deployment.
 - **Roles:** Each Role within a `ServingGroup` consists of a group of Pods, which are the actual workloads responsible for executing inference tasks. Each role can be assigned different tasks. For example, in a PD-disaggregation scenario, you can configure a `prefill role` and a `decode role`, which is very convenient.
 
 For the definition of `ModelServing`, please refer to the [modelServing CRD reference](https://kthena.volcano.sh/docs/next/reference/crd/workload.serving.volcano.sh#modelserving).

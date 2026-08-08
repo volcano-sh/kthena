@@ -13,11 +13,11 @@ Both modes use the same core autoscaling mechanisms but differ in their resource
 
 The autoscaler is configured through a single custom resource:
 
-- **[`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy)**: Defines the core autoscaling strategy, metrics, behavior parameters, and the scaling target (with its scaling boundaries) in one place
+- **[`AutoscalingPolicy`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy)**: Defines the core autoscaling strategy, metrics, behavior parameters, and the scaling target (with its scaling boundaries) in one place
 
 ### AutoscalingPolicy Configuration
 
-The [`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) resource defines the core autoscaling strategy and behavior parameters.
+The [`AutoscalingPolicy`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) resource defines the core autoscaling strategy and behavior parameters.
 
 #### Metrics Configuration
 - **name**: Name of the metric to monitor (e.g., `kthena:num_requests_waiting`). The values under `metricSources` are keyed by this name.
@@ -260,7 +260,7 @@ Monitor these critical metrics to assess autoscaling effectiveness:
 If your autoscaling configuration doesn't behave as expected:
 
 1. **Verify Metric Availability**: Ensure target metrics are properly collected and exposed
-2. **Check Target Configuration**: Confirm the [`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) correctly references the target resource and that `metricSources` keys match the declared `spec.metrics`
+2. **Check Target Configuration**: Confirm the [`AutoscalingPolicy`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) correctly references the target resource and that `metricSources` keys match the declared `spec.metrics`
 3. **Examine Controller Logs**: Look for error messages or warnings in autoscaler controller logs
 4. **Review Scaling Boundaries**: Ensure `minReplicas` and `maxReplicas` values are appropriately set
 5. **Test Load Patterns**: Gradually increase or decrease load to observe scaling behavior across different conditions

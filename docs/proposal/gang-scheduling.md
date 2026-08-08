@@ -319,7 +319,7 @@ gangPolicy:
 
 #### PodGroup Examples
 
-For detailed YAML examples of PodGroups created from ModelInfer instances, see [podgroup-examples.yaml](./podgroup-examples.yaml).
+For detailed YAML examples of PodGroups created from ModelInfer instances, see the examples in this proposal.
 
 The examples demonstrate:
 
