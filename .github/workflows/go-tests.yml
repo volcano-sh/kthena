@@ -3,42 +3,54 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - '**.go'
-      - "pkg/**"
-      - "cmd/**"
-      - "go.mod"
-      - "go.sum"
+      - "release-*"
 
-  push:
-    branches:
-      - main
-    paths:
-      - '**.go'
-      - "pkg/**"
-      - "cmd/**"
-      - "go.mod"
-      - "go.sum"
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   go_unit_test:
     name: Go tests
     runs-on: ubuntu-latest
     steps:
+      - name: Check Go test related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            go:
+              - "**.go"
+              - "pkg/**"
+              - "cmd/**"
+              - "go.mod"
+              - "go.sum"
+              - ".github/workflows/go-tests.yml"
+
+      - name: Skip Go tests
+        if: steps.filter.outputs.go != 'true'
+        run: echo "No Go test-related files changed; marking required check as passed."
+
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.go == 'true'
       - name: Setup Go
+        if: steps.filter.outputs.go == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod' # Automatically set Go version from go.mod
+          go-version-file: "go.mod" # Automatically set Go version from go.mod
       - name: Run Unit Tests
+        if: steps.filter.outputs.go == 'true'
         run: make test
       - name: Calculate coverage percentage
+        if: steps.filter.outputs.go == 'true'
         id: coverage
         run: |
           COVERAGE=$(go tool cover -func=cover.out | grep total | awk '{print $3}' | sed 's/\%//')
           echo "Current coverage: $COVERAGE%"
           echo "coverage_percentage=$COVERAGE" >> $GITHUB_OUTPUT
       - name: Check coverage threshold
+        if: steps.filter.outputs.go == 'true'
         run: |
           THRESHOLD=10 # Set coverage threshold
           CURRENT_COVERAGE=${{ steps.coverage.outputs.coverage_percentage }}

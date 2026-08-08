@@ -5,13 +5,10 @@ on:
     branches:
       - main
       - release-*
-    paths-ignore:
-      - "docs/**"
-      - "LICENSE"
-      - "OWNERS"
-      - "*.md"
-      - "python/**"
 
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   licenses-lint:
@@ -24,7 +21,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
       - name: generate license mirror
         run: |
           make licenses-check
