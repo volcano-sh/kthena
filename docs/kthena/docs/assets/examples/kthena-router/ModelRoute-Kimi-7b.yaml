@@ -1,0 +1,11 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: kimi-simple
+  namespace: default
+spec:
+  modelName: "Kimi-AI-7B"
+  rules:
+  - name: "default"
+    targetModels:
+    - modelServerName: "kimi-ai-7b"
