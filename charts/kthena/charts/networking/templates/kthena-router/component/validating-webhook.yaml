@@ -51,5 +51,24 @@ webhooks:
         resources: [ "modelservers" ]
         operations: [ "CREATE", "UPDATE" ]
         scope: "Namespaced"
+  - name: validate-externalmodelprovider.volcano.sh
+    admissionReviewVersions: [ "v1" ]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 30
+    clientConfig:
+      service:
+        name: kthena-router-webhook
+        namespace: {{ .Release.Namespace }}
+        path: "/validate/externalmodelprovider"
+        port: {{ .Values.kthenaRouter.webhook.servicePort }}
+      {{- if eq .Values.global.certManagementMode "manual" }}
+      caBundle: {{ required "A caBundle is required for the kthena-router validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
+      {{- end }}
+    rules:
+      - apiGroups: [ "networking.serving.volcano.sh" ]
+        apiVersions: [ "v1alpha1" ]
+        resources: [ "externalmodelproviders" ]
+        operations: [ "CREATE", "UPDATE" ]
+        scope: "Namespaced"
 {{- end }}
-

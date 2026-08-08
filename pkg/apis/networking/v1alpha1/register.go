@@ -29,6 +29,8 @@ const ModelServerKind = "ModelServer"
 
 const ModelRouteKind = "ModelRoute"
 
+const ExternalModelProviderKind = "ExternalModelProvider"
+
 // GroupVersion specifies the group and the version used to register the objects.
 var GroupVersion = v1.GroupVersion{Group: GroupName, Version: "v1alpha1"}
 
@@ -60,6 +62,8 @@ func init() {
 // Adds the list of known types to Scheme.
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
+		&ExternalModelProvider{},
+		&ExternalModelProviderList{},
 		&ModelRoute{},
 		&ModelRouteList{},
 		&ModelServer{},

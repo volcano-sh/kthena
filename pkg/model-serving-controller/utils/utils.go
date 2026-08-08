@@ -93,9 +93,9 @@ func GeneratePodName(groupName, roleName string, podIndex int) string {
 	return groupName + "-" + roleName + "-" + strconv.Itoa(podIndex)
 }
 
-func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName string, roleIndex int, revision, roleTemplateHash string) *corev1.Pod {
-	entryPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), 0)
-	entryPod := createBasePod(role, ms, entryPodName, groupName, revision, roleTemplateHash, roleIndex)
+func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName, roleID, revision, roleTemplateHash string) *corev1.Pod {
+	entryPodName := GeneratePodName(groupName, roleID, 0)
+	entryPod := createBasePod(role, ms, entryPodName, groupName, roleID, revision, roleTemplateHash)
 	entryPod.ObjectMeta.Labels[workloadv1alpha1.EntryLabelKey] = Entry
 	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
 	entryPod.Spec = role.EntryTemplate.Spec
@@ -106,14 +106,14 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 	return entryPod
 }
 
-func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
+func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName, roleID string, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
 	if role.WorkerTemplate == nil {
 		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s", role.Name)
 		return nil
 	}
 
-	workerPodName := GeneratePodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
-	workerPod := createBasePod(role, ms, workerPodName, groupName, revision, roleTemplateHash, roleIndex)
+	workerPodName := GeneratePodName(groupName, roleID, podIndex)
+	workerPod := createBasePod(role, ms, workerPodName, groupName, roleID, revision, roleTemplateHash)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
@@ -122,7 +122,7 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	return workerPod
 }
 
-func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, revision, roleTemplateHash string, roleIndex int) *corev1.Pod {
+func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, roleID, revision, roleTemplateHash string) *corev1.Pod {
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -135,7 +135,7 @@ func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing
 				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 				workloadv1alpha1.GroupNameLabelKey:        groupName,
 				workloadv1alpha1.RoleLabelKey:             role.Name,
-				workloadv1alpha1.RoleIDKey:                GenerateRoleID(role.Name, roleIndex),
+				workloadv1alpha1.RoleIDKey:                roleID,
 				workloadv1alpha1.RevisionLabelKey:         revision,
 				workloadv1alpha1.RoleTemplateHashLabelKey: roleTemplateHash,
 			},

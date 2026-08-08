@@ -230,6 +230,42 @@ func TestValidatePVCURICompatibility(t *testing.T) {
 			expectValid: true,
 		},
 		{
+			name:        "pvc modelURI with trailing slash is valid",
+			modelURI:    "pvc://crater-storage/models/Qwen/",
+			cacheURI:    "pvc://crater-storage",
+			expectValid: true,
+		},
+		{
+			name:        "pvc cacheURI with trailing slash is valid",
+			modelURI:    "pvc:///crater-storage/models/Qwen",
+			cacheURI:    "pvc://crater-storage/",
+			expectValid: true,
+		},
+		{
+			name:        "pvc modelURI with repeated slashes is valid",
+			modelURI:    "pvc://crater-storage//models//Qwen",
+			cacheURI:    "pvc://crater-storage",
+			expectValid: true,
+		},
+		{
+			name:        "s3 modelURI with non-pvc cacheURI is valid",
+			modelURI:    "s3://bucket/models/Qwen",
+			cacheURI:    "hostpath:///tmp/cache",
+			expectValid: true,
+		},
+		{
+			name:        "obs modelURI with non-pvc cacheURI is valid",
+			modelURI:    "obs://bucket/models/Qwen",
+			cacheURI:    "hostpath:///tmp/cache",
+			expectValid: true,
+		},
+		{
+			name:        "ms modelURI with non-pvc cacheURI is valid",
+			modelURI:    "ms://namespace/repo",
+			cacheURI:    "hostpath:///tmp/cache",
+			expectValid: true,
+		},
+		{
 			name:        "pvc modelURI with hostpath cacheURI is invalid",
 			modelURI:    "pvc:///shared/models/Qwen",
 			cacheURI:    "hostpath:///tmp/cache",
@@ -277,6 +313,16 @@ func TestValidatePVCURICompatibility(t *testing.T) {
 			cacheURI:    "pvc://foo/bar",
 			expectValid: false,
 			expectMsg:   "claim names cannot contain '/'",
+		},
+		{
+			// The claim name "foo" must not be treated as a prefix match against a
+			// modelURI whose first path segment is "foobar" - only a full path-segment
+			// match (exact or followed by '/') makes the source reachable through the mount.
+			name:        "pvc modelURI with claim-name-prefix collision is invalid",
+			modelURI:    "pvc:///foobar/models/Qwen",
+			cacheURI:    "pvc://foo",
+			expectValid: false,
+			expectMsg:   "is not reachable via cacheURI mount",
 		},
 	}
 

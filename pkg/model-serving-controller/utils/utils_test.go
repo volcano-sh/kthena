@@ -47,11 +47,14 @@ func TestGenerateEntryPod_WithAnnotations(t *testing.T) {
 		},
 	}
 
+	roleID := "test-role-0"
 	var pod *corev1.Pod
 	assert.NotPanics(t, func() {
-		pod = GenerateEntryPod(role, ms, "test-group", 0, "test-revision", "role-revision")
+		pod = GenerateEntryPod(role, ms, "test-group", roleID, "test-revision", "role-revision")
 	})
 	assert.NotNil(t, pod)
+	assert.Equal(t, "test-group-test-role-0-0", pod.Name)
+	assert.Equal(t, roleID, pod.Labels[workloadv1alpha1.RoleIDKey])
 	assert.Equal(t, annotations, pod.Annotations)
 }
 
@@ -80,11 +83,14 @@ func TestGenerateWorkerPod_WithAnnotations(t *testing.T) {
 			Namespace: "default",
 		},
 	}
+	roleID := "test-role-0"
 	var pod *corev1.Pod
 	assert.NotPanics(t, func() {
-		pod = GenerateWorkerPod(role, ms, entryPod, "test-group", 0, 1, "test-revision", "role-revision")
+		pod = GenerateWorkerPod(role, ms, entryPod, "test-group", roleID, 1, "test-revision", "role-revision")
 	})
 	assert.NotNil(t, pod)
+	assert.Equal(t, "test-group-test-role-0-1", pod.Name)
+	assert.Equal(t, roleID, pod.Labels[workloadv1alpha1.RoleIDKey])
 	assert.Equal(t, annotations, pod.Annotations)
 }
 

@@ -36,6 +36,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 	// Group=networking.serving.volcano.sh, Version=v1alpha1
 	case v1alpha1.SchemeGroupVersion.WithKind("BodyMatch"):
 		return &networkingv1alpha1.BodyMatchApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("ExternalModelProvider"):
+		return &networkingv1alpha1.ExternalModelProviderApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("ExternalModelProviderSpec"):
+		return &networkingv1alpha1.ExternalModelProviderSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("ExternalModelProviderStatus"):
+		return &networkingv1alpha1.ExternalModelProviderStatusApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("GlobalRateLimit"):
 		return &networkingv1alpha1.GlobalRateLimitApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("KVConnectorSpec"):
@@ -52,6 +58,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &networkingv1alpha1.ModelServerSpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("PDGroup"):
 		return &networkingv1alpha1.PDGroupApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("ProviderAuth"):
+		return &networkingv1alpha1.ProviderAuthApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("RateLimit"):
 		return &networkingv1alpha1.RateLimitApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("RedisConfig"):

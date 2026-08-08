@@ -21,8 +21,9 @@ package v1alpha1
 // TargetModelApplyConfiguration represents a declarative configuration of the TargetModel type for use
 // with apply.
 type TargetModelApplyConfiguration struct {
-	ModelServerName *string `json:"modelServerName,omitempty"`
-	Weight          *uint32 `json:"weight,omitempty"`
+	ModelServerName           *string `json:"modelServerName,omitempty"`
+	ExternalModelProviderName *string `json:"externalModelProviderName,omitempty"`
+	Weight                    *uint32 `json:"weight,omitempty"`
 }
 
 // TargetModelApplyConfiguration constructs a declarative configuration of the TargetModel type for use with
@@ -36,6 +37,14 @@ func TargetModel() *TargetModelApplyConfiguration {
 // If called multiple times, the ModelServerName field is set to the value of the last call.
 func (b *TargetModelApplyConfiguration) WithModelServerName(value string) *TargetModelApplyConfiguration {
 	b.ModelServerName = &value
+	return b
+}
+
+// WithExternalModelProviderName sets the ExternalModelProviderName field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ExternalModelProviderName field is set to the value of the last call.
+func (b *TargetModelApplyConfiguration) WithExternalModelProviderName(value string) *TargetModelApplyConfiguration {
+	b.ExternalModelProviderName = &value
 	return b
 }
 

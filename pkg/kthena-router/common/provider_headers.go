@@ -16,23 +16,31 @@ limitations under the License.
 
 package common
 
-const (
-	UserIdKey         = "user_id"
-	TokenUsageKey     = "token_usage"
-	RawRequestBodyKey = "raw_request_body"
-)
+import "strings"
 
-// Message represents a single message in a chat conversation
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+// IsReservedProviderHeader reports whether a static provider header could
+// override credentials, request routing, or HTTP hop-by-hop behavior.
+func IsReservedProviderHeader(header string) bool {
+	for _, reserved := range reservedProviderHeaders {
+		if strings.EqualFold(header, reserved) {
+			return true
+		}
+	}
+	return false
 }
 
-// ChatMessage represents either a direct text prompt or structured chat messages
-type ChatMessage struct {
-	// Text is used for direct prompt input (completion mode)
-	Text string `json:"text,omitempty"`
-
-	// Messages is used for chat conversation input (chat mode)
-	Messages []Message `json:"messages,omitempty"`
+var reservedProviderHeaders = []string{
+	"Authorization",
+	"Proxy-Authorization",
+	"Cookie",
+	"X-API-Key",
+	"Host",
+	"Content-Length",
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Connection",
+	"Transfer-Encoding",
+	"Upgrade",
+	"Trailer",
+	"TE",
 }

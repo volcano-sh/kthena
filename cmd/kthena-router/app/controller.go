@@ -76,10 +76,15 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	}
 
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	externalProviderSecretInformerFactory := controller.NewExternalModelProviderSecretInformerFactory(kubeClient)
 	kthenaInformerFactory := kthenaInformers.NewSharedInformerFactory(kthenaClient, 0)
 	modelRouteController, err := controller.NewModelRouteController(kthenaInformerFactory, store)
 	if err != nil {
 		klog.Fatalf("Error creating model route controller: %s", err.Error())
+	}
+	externalModelProviderController, err := controller.NewExternalModelProviderController(kthenaClient, kthenaInformerFactory, externalProviderSecretInformerFactory, store)
+	if err != nil {
+		klog.Fatalf("Error creating external model provider controller: %s", err.Error())
 	}
 	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
 	if err != nil {
@@ -88,6 +93,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 
 	cacheSyncs := []cache.InformerSynced{
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
+		kthenaInformerFactory.Networking().V1alpha1().ExternalModelProviders().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().HasSynced,
 		kubeInformerFactory.Core().V1().Pods().Informer().HasSynced,
 	}
@@ -147,17 +153,23 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	}
 
 	kubeInformerFactory.Start(stop)
+	externalProviderSecretInformerFactory.Start(stop)
 	kthenaInformerFactory.Start(stop)
 
 	if !cache.WaitForCacheSync(stop, cacheSyncs...) {
 		klog.Fatalf("Failed to sync informer caches")
 	}
 
-	controllers := []Controller{modelRouteController, modelServerController}
+	controllers := []Controller{modelRouteController, externalModelProviderController, modelServerController}
 
 	go func() {
 		if err := modelRouteController.Run(stop); err != nil {
 			klog.Fatalf("Error running model route controller: %s", err.Error())
+		}
+	}()
+	go func() {
+		if err := externalModelProviderController.Run(stop); err != nil {
+			klog.Fatalf("Error running external model provider controller: %s", err.Error())
 		}
 	}()
 	go func() {

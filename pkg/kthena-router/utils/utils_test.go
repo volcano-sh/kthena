@@ -99,6 +99,183 @@ func TestParsePrompt(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "messages content as text blocks",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{
+								"type": "text",
+								"text": "hello",
+							},
+							map[string]interface{}{
+								"type": "text",
+								"text": "world",
+							},
+						},
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "hello\nworld"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "chat mixed text and image extracts only text",
+			body: map[string]interface{}{
+				"messages": []interface{}{map[string]interface{}{
+					"role": "user",
+					"content": []interface{}{
+						map[string]interface{}{"type": "text", "text": "describe"},
+						map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "https://example.com/cat.png"}},
+					},
+				}},
+			},
+			want: &common.ChatMessage{Messages: []common.Message{{Role: "user", Content: "describe"}}},
+		},
+		{
+			name: "chat non-text-only content has an empty schedulable prompt",
+			body: map[string]interface{}{
+				"messages": []interface{}{map[string]interface{}{
+					"role": "user",
+					"content": []interface{}{map[string]interface{}{
+						"type":      "image_url",
+						"image_url": map[string]interface{}{"url": "https://example.com/cat.png"},
+					}},
+				}},
+			},
+			want: &common.ChatMessage{Messages: []common.Message{}},
+		},
+		{
+			name: "assistant tool call without text has an empty schedulable prompt",
+			body: map[string]interface{}{
+				"messages": []interface{}{map[string]interface{}{
+					"role": "assistant",
+					"tool_calls": []interface{}{map[string]interface{}{
+						"id":   "call-1",
+						"type": "function",
+					}},
+				}},
+			},
+			want: &common.ChatMessage{Messages: []common.Message{}},
+		},
+		{
+			name: "anthropic top-level system with messages",
+			body: map[string]interface{}{
+				"system": "You are a helpful assistant.",
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "hello",
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "system", Content: "You are a helpful assistant."},
+					{Role: "user", Content: "hello"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "anthropic top-level system as text blocks",
+			body: map[string]interface{}{
+				"system": []interface{}{
+					map[string]interface{}{
+						"type": "text",
+						"text": "Follow policy.",
+					},
+					map[string]interface{}{
+						"type": "text",
+						"text": "Be concise.",
+					},
+				},
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "hello",
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "system", Content: "Follow policy.\nBe concise."},
+					{Role: "user", Content: "hello"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "responses string input with instructions",
+			body: map[string]interface{}{
+				"instructions": "Be concise.",
+				"input":        "Reply OK",
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "developer", Content: "Be concise."},
+					{Role: "user", Content: "Reply OK"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "responses text message items",
+			body: map[string]interface{}{
+				"input": []interface{}{
+					map[string]interface{}{
+						"type": "message",
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "input_text", "text": "hello"},
+							map[string]interface{}{"type": "input_text", "text": "world"},
+						},
+					},
+					map[string]interface{}{
+						"type":    "message",
+						"role":    "assistant",
+						"content": "previous answer",
+					},
+				},
+			},
+			want: &common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "hello\nworld"},
+					{Role: "assistant", Content: "previous answer"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "responses non-text input has an empty schedulable prompt",
+			body: map[string]interface{}{
+				"input": []interface{}{
+					map[string]interface{}{
+						"type": "message",
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "input_image", "image_url": "https://example.com/image.png"},
+						},
+					},
+				},
+			},
+			want:    &common.ChatMessage{},
+			wantErr: false,
+		},
+		{
+			name: "responses input has unsupported shape",
+			body: map[string]interface{}{
+				"input": 123,
+			},
+			want:    nil,
+			wantErr: true,
+		},
+		{
 			name: "neither prompt nor messages",
 			body: map[string]interface{}{
 				"foo": "bar",

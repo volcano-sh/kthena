@@ -2515,7 +2515,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		return fmt.Errorf("build plugin chain: %w", err)
 	}
 	roleID := utils.GenerateRoleID(role.Name, roleIndex)
-	entryPod := utils.GenerateEntryPod(role, ms, servingGroupName, roleIndex, revision, roleTemplateHash)
+	entryPod := utils.GenerateEntryPod(role, ms, servingGroupName, roleID, revision, roleTemplateHash)
 	taskName := c.podGroupManager.GenerateTaskName(role.Name, roleIndex)
 	c.podGroupManager.AnnotatePodWithPodGroup(entryPod, ms, servingGroupName, taskName)
 	if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, entryPod, true, chain, "entry"); err != nil {
@@ -2527,7 +2527,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	}
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
-		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleIndex, i, revision, roleTemplateHash)
+		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleID, i, revision, roleTemplateHash)
 		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, ms, servingGroupName, taskName)
 		if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, workerPod, false, chain, "worker"); err != nil {
 			return err

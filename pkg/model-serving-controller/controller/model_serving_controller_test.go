@@ -2691,7 +2691,7 @@ func TestManageRoleReplicas(t *testing.T) {
 			}
 
 			if tt.addEntryPod {
-				entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, 0, revision, "test-roleTemplateHash")
+				entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, utils.GenerateRoleID(roleName, 0), revision, "test-roleTemplateHash")
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
 				}

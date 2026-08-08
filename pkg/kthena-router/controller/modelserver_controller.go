@@ -42,20 +42,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
-// ResourceType represents the type of Kubernetes resource
-type ResourceType string
-
-const (
-	ResourceTypeModelServer ResourceType = "ModelServer"
-	ResourceTypePod         ResourceType = "Pod"
-)
-
-// QueueItem represents an item in the work queue
-type QueueItem struct {
-	ResourceType ResourceType
-	Key          string
-}
-
 type ModelServerController struct {
 	modelServerLister listerv1alpha1.ModelServerLister
 	podLister         corelisters.PodLister
