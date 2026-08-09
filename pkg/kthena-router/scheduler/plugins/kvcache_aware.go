@@ -75,6 +75,10 @@ const (
 
 	kvCacheGCInterval = time.Hour
 	kvCacheGCScanSize = int64(100)
+
+	// runtimeContainerName is the runtime sidecar's name in the generated pod templates
+	// and the examples. Its restarts leave the engine's KV cache intact.
+	runtimeContainerName = "runtime"
 )
 
 type KVCacheAwareArgs struct {
@@ -420,19 +424,32 @@ func (t *KVCacheAware) deleteStaleFields(staleFields map[string][]string) {
 }
 
 // podLastContainerStartUnix reports when the pod's containers last started, or 0 if none are
-// running. Readiness is not used: it also flips on a probe failure, which leaves the cache intact.
+// running. The runtime sidecar is excluded: it only relays events, so restarting it says
+// nothing about the cache. Readiness is not used: it also flips on a probe failure, which
+// leaves the cache intact.
 func podLastContainerStartUnix(pod *corev1.Pod) int64 {
 	if pod == nil {
 		return 0
 	}
-	var newest int64
+	var newest, newestAll int64
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Running == nil {
 			continue
 		}
-		if started := cs.State.Running.StartedAt.Unix(); started > newest {
+		started := cs.State.Running.StartedAt.Unix()
+		if started > newestAll {
+			newestAll = started
+		}
+		if cs.Name == runtimeContainerName {
+			continue
+		}
+		if started > newest {
 			newest = started
 		}
+	}
+	if newest == 0 {
+		// No container other than the sidecar is running: keep the previous behavior.
+		return newestAll
 	}
 	return newest
 }
