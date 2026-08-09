@@ -219,7 +219,7 @@ type Store interface {
 	// HasSynced checks if the store has been initialized and synced
 	HasSynced() bool
 
-	// GetPodInfo returns the pod info for a given pod name (for testing)
+	// GetPodInfo returns the pod info for a given pod name, or nil if the pod is not tracked
 	GetPodInfo(podName types.NamespacedName) *PodInfo
 
 	// SyncOnFlightCounts fetches the current on-flight counts for all tracked
