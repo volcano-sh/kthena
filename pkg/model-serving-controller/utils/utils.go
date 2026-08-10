@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -391,6 +392,132 @@ func ContainerRestarted(pod *corev1.Pod) bool {
 	return false
 }
 
+// problematicWaitingReasons are container Waiting reasons reported by kubelet that indicate
+// an actionable failure rather than a normal startup step. Reasons such as "ContainerCreating"
+// or "PodInitializing" are deliberately excluded so ordinary startup is never reported as failed.
+var problematicWaitingReasons = map[string]bool{
+	"ImagePullBackOff":           true,
+	"ErrImagePull":               true,
+	"InvalidImageName":           true,
+	"CreateContainerConfigError": true,
+	"CreateContainerError":       true,
+	"CrashLoopBackOff":           true,
+}
+
+const maxPodFailureMessageLen = 300
+
+// PodFailureDetail describes an actionable Pod-level failure extracted from live Pod status.
+type PodFailureDetail struct {
+	// Reason is a stable, programmatic identifier for the failure: either a well-known
+	// reason reported directly by the scheduler/kubelet (e.g. "Unschedulable",
+	// "ImagePullBackOff", "CrashLoopBackOff", "OOMKilled"), or one of our own stable
+	// fallback identifiers ("PodFailed", "ContainerRestarted") when kubelet hasn't
+	// reported a more specific one.
+	Reason string
+	// Message is a short, human-readable detail: Pod name, container/init-container name,
+	// exit code, and a truncated excerpt of any message kubelet/the scheduler attached.
+	Message string
+}
+
+// ExtractPodFailureDetail inspects a Pod's live status and returns the most actionable
+// failure it can find, if any. It relies only on structured fields that kubelet/the
+// scheduler themselves populate (Pod/container conditions, waiting/terminated reasons) —
+// never on Kubernetes Event text, which is free-form and not a stable API contract.
+//
+// Normal startup states (e.g. Pending while an image is still being pulled for the first
+// time, "ContainerCreating", "PodInitializing") are intentionally not treated as failures.
+func ExtractPodFailureDetail(pod *corev1.Pod) (PodFailureDetail, bool) {
+	// Scheduling failure: the scheduler could not place the Pod at all. This is reported
+	// directly on the Pod via the PodScheduled condition and requires no Events.
+	if pod.Status.Phase == corev1.PodPending {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse {
+				reason := cond.Reason
+				if reason == "" {
+					reason = string(corev1.PodReasonUnschedulable)
+				}
+				return PodFailureDetail{
+					Reason:  reason,
+					Message: truncatePodFailureMessage(fmt.Sprintf("pod %s: %s", pod.Name, cond.Message)),
+				}, true
+			}
+		}
+	}
+
+	// Init container problems (e.g. downloader/model-path/image-pull failures) take
+	// priority over main container problems, since init containers run first and block
+	// the rest of the Pod from starting.
+	if detail, ok := extractContainerFailure(pod.Name, pod.Status.InitContainerStatuses, "init container"); ok {
+		return detail, true
+	}
+
+	// Main container problems.
+	if detail, ok := extractContainerFailure(pod.Name, pod.Status.ContainerStatuses, "container"); ok {
+		return detail, true
+	}
+
+	// Pod already terminated in failure without a more specific per-container signal.
+	if pod.Status.Phase == corev1.PodFailed {
+		reason := pod.Status.Reason
+		if reason == "" {
+			reason = "PodFailed"
+		}
+		return PodFailureDetail{
+			Reason:  reason,
+			Message: truncatePodFailureMessage(fmt.Sprintf("pod %s failed: %s", pod.Name, pod.Status.Message)),
+		}, true
+	}
+
+	return PodFailureDetail{}, false
+}
+
+// extractContainerFailure scans a set of container statuses for a currently-actionable
+// problem: a "problem" Waiting reason, a non-zero-exit Terminated state, or (when the
+// container is currently up again) a Terminated LastTerminationState left by a previous
+// crash. It ignores benign/expected Waiting reasons such as "ContainerCreating".
+func extractContainerFailure(podName string, statuses []corev1.ContainerStatus, kind string) (PodFailureDetail, bool) {
+	for _, status := range statuses {
+		switch {
+		case status.State.Waiting != nil && problematicWaitingReasons[status.State.Waiting.Reason]:
+			return PodFailureDetail{
+				Reason: status.State.Waiting.Reason,
+				Message: truncatePodFailureMessage(fmt.Sprintf("pod %s %s %s: %s", podName, kind, status.Name,
+					status.State.Waiting.Message)),
+			}, true
+		case status.State.Terminated != nil && status.State.Terminated.ExitCode != 0:
+			reason := status.State.Terminated.Reason
+			if reason == "" {
+				reason = "Error"
+			}
+			return PodFailureDetail{
+				Reason: reason,
+				Message: truncatePodFailureMessage(fmt.Sprintf("pod %s %s %s exited with code %d: %s", podName, kind,
+					status.Name, status.State.Terminated.ExitCode, status.State.Terminated.Message)),
+			}, true
+		case status.RestartCount > 0 && status.LastTerminationState.Terminated != nil:
+			last := status.LastTerminationState.Terminated
+			reason := last.Reason
+			if reason == "" {
+				reason = "ContainerRestarted"
+			}
+			return PodFailureDetail{
+				Reason: reason,
+				Message: truncatePodFailureMessage(fmt.Sprintf("pod %s %s %s restarted %d time(s), last exit code %d: %s",
+					podName, kind, status.Name, status.RestartCount, last.ExitCode, last.Message)),
+			}, true
+		}
+	}
+	return PodFailureDetail{}, false
+}
+
+func truncatePodFailureMessage(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxPodFailureMessageLen {
+		return s
+	}
+	return s[:maxPodFailureMessageLen] + "..."
+}
+
 func newCondition(condType workloadv1alpha1.ModelServingConditionType, message string) metav1.Condition {
 	var conditionType, reason string
 	switch condType {
@@ -414,7 +541,14 @@ func newCondition(condType workloadv1alpha1.ModelServingConditionType, message s
 	}
 }
 
-func SetCondition(ms *workloadv1alpha1.ModelServing, progressingGroups, updatedGroups, currentGroups []int) bool {
+// SetCondition computes and applies the ModelServing's Available/Progressing/UpdateInProgress
+// condition from the given ServingGroup index buckets. When failure is non-nil, it describes
+// the most actionable Pod-level failure found among the progressing groups (see
+// ExtractPodFailureDetail): its Reason replaces the generic "GroupProgressing"/"GroupsUpdating"
+// reason, and its Message is appended, so the condition explains *why* the group isn't
+// progressing rather than only *that* it isn't. Pass nil when no such failure is observed
+// (e.g. groups are progressing through a normal startup) to keep the existing generic reason.
+func SetCondition(ms *workloadv1alpha1.ModelServing, progressingGroups, updatedGroups, currentGroups []int, failure *PodFailureDetail) bool {
 	var newCond metav1.Condition
 	found := false
 	shouldUpdate := false
@@ -445,6 +579,9 @@ func SetCondition(ms *workloadv1alpha1.ModelServing, progressingGroups, updatedG
 		newCond = newCondition(workloadv1alpha1.ModelServingAvailable, AllGroupsIsReady)
 	} else {
 		message := SomeGroupsAreProgressing + ": " + fmt.Sprintf("%v", progressingGroups)
+		if failure != nil && failure.Reason != "" {
+			message = message + "; " + failure.Message
+		}
 		// If the number of current groups is greater than the Partition, modelServing is still updating.
 		if len(currentGroups) > partition {
 			message = message + ", " + SomeGroupsAreUpdated + ": " + fmt.Sprintf("%v", updatedGroups)
@@ -452,12 +589,20 @@ func SetCondition(ms *workloadv1alpha1.ModelServing, progressingGroups, updatedG
 		} else {
 			newCond = newCondition(workloadv1alpha1.ModelServingProgressing, message)
 		}
+		if failure != nil && failure.Reason != "" {
+			newCond.Reason = failure.Reason
+		}
 	}
 
 	newCond.LastTransitionTime = metav1.Now()
 	for i, curCondition := range ms.Status.Conditions {
 		if newCond.Type == curCondition.Type {
-			if newCond.Status != curCondition.Status {
+			if newCond.Status == curCondition.Status {
+				// Status unchanged: keep the original transition time, but still pick up
+				// Reason/Message changes (e.g. newly observed or cleared Pod failure detail).
+				newCond.LastTransitionTime = curCondition.LastTransitionTime
+			}
+			if newCond.Status != curCondition.Status || newCond.Reason != curCondition.Reason || newCond.Message != curCondition.Message {
 				ms.Status.Conditions[i] = newCond
 				shouldUpdate = true
 			}

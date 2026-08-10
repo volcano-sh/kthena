@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
@@ -257,6 +258,162 @@ func TestReconcile_ReturnsError(t *testing.T) {
 		assert.Equal(t, true, meta.IsStatusConditionPresentAndEqual(get.Status.Conditions,
 			string(workload.ModelStatusConditionTypeFailed), metav1.ConditionTrue))
 	})
+}
+
+// TestIsModelServingActivePropagatesBlockingCondition verifies that when the generated
+// ModelServing isn't Available, isModelServingActive surfaces its blocking condition's
+// Reason/Message only when that Reason is a specific, actionable one (as opposed to the
+// generic "still starting up" reasons model-serving-controller uses for ordinary progress),
+// so callers can distinguish "still starting" from "stuck due to a Pod-level failure".
+func TestIsModelServingActivePropagatesBlockingCondition(t *testing.T) {
+	tests := []struct {
+		name          string
+		conditions    []metav1.Condition
+		expectActive  bool
+		expectReason  string
+		expectMessage string
+	}{
+		{
+			name:         "available",
+			conditions:   []metav1.Condition{{Type: string(workload.ModelServingAvailable), Status: metav1.ConditionTrue, Reason: "AllGroupsReady"}},
+			expectActive: true,
+		},
+		{
+			name: "generic progressing reason is not treated as a failure",
+			conditions: []metav1.Condition{{
+				Type: string(workload.ModelServingProgressing), Status: metav1.ConditionTrue,
+				Reason: "GroupProgressing", Message: "Some groups is progressing: [0]",
+			}},
+			expectActive: false,
+			expectReason: "GroupProgressing",
+		},
+		{
+			name: "pod-level failure reason is propagated",
+			conditions: []metav1.Condition{{
+				Type: string(workload.ModelServingProgressing), Status: metav1.ConditionTrue,
+				Reason:  "ImagePullBackOff",
+				Message: "Some groups is progressing: [0]; pod p-0 init container downloader: back-off pulling image",
+			}},
+			expectActive:  false,
+			expectReason:  "ImagePullBackOff",
+			expectMessage: "downloader",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := fake.NewClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			controller := NewModelBoosterController(kubeClient, kthenaClient)
+
+			model := &workload.ModelBooster{
+				ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default", UID: "model-uid-1"},
+			}
+			modelServing := &workload.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ms1",
+					Namespace: "default",
+					Labels:    map[string]string{utils.OwnerUIDKey: string(model.UID)},
+				},
+				Status: workload.ModelServingStatus{Conditions: tt.conditions},
+			}
+			assert.NoError(t, controller.modelServingInformer.GetIndexer().Add(modelServing))
+
+			active, reason, message, err := controller.isModelServingActive(model)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectActive, active)
+			assert.Equal(t, tt.expectReason, reason)
+			if tt.expectMessage != "" {
+				assert.Contains(t, message, tt.expectMessage)
+			}
+		})
+	}
+}
+
+// TestReconcileSurfacesModelServingPodFailure verifies the end-to-end propagation: when
+// reconcile finds the ModelServing blocked on an actionable (non-generic) Progressing reason,
+// ModelBooster's Active condition is set to False with that same Reason/Message instead of the
+// generic "ModelBooster not ready yet" message -- and that once the ModelServing recovers to
+// Available, the next reconcile clears it back to Active=True (the condition never sticks).
+func TestReconcileSurfacesModelServingPodFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	kubeClient := fake.NewClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller := NewModelBoosterController(kubeClient, kthenaClient)
+	go controller.Run(ctx, 1)
+	assert.True(t, waitForControllerCacheSync(controller))
+
+	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Let the controller create the real ModelServing itself (correct name/labels/revision),
+	// matching how it would exist in a real cluster.
+	var modelServingName string
+	assert.True(t, waitForCondition(func() bool {
+		list, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil || len(list.Items) != 1 {
+			return false
+		}
+		modelServingName = list.Items[0].Name
+		return true
+	}))
+
+	// Simulate model-serving-controller surfacing a Pod-level failure: patch only the Status
+	// subresource so the Spec/labels the running controller compares against on future passes
+	// are untouched (i.e. it will see nothing to update and leave this Status alone).
+	msToUpdate, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).Get(ctx, modelServingName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	msToUpdate.Status.Conditions = []metav1.Condition{{
+		Type: string(workload.ModelServingProgressing), Status: metav1.ConditionTrue,
+		Reason:  "CrashLoopBackOff",
+		Message: "Some groups is progressing: [0]; pod p-0 container engine: back-off restarting failed container",
+	}}
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).UpdateStatus(ctx, msToUpdate, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+
+	// The ModelServing status update triggers the controller (via triggerModel) to reconcile the
+	// ModelBooster; wait for the propagated Reason/Message to land on its Active condition.
+	assert.True(t, waitForCondition(func() bool {
+		get, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		cond := meta.FindStatusCondition(get.Status.Conditions, string(workload.ModelStatusConditionTypeActive))
+		return cond != nil && cond.Reason == "CrashLoopBackOff"
+	}), "ModelBooster's Active condition should surface the ModelServing's Pod failure reason")
+
+	get, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	activeCond := meta.FindStatusCondition(get.Status.Conditions, string(workload.ModelStatusConditionTypeActive))
+	require.NotNil(t, activeCond)
+	assert.Equal(t, metav1.ConditionFalse, activeCond.Status)
+	assert.Contains(t, activeCond.Message, "back-off restarting")
+
+	// The ModelServing recovers: the controller must clear the propagated failure, not leave it
+	// stale on ModelBooster.
+	msToUpdate, err = kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).Get(ctx, modelServingName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	msToUpdate.Status.Conditions = []metav1.Condition{{Type: string(workload.ModelServingAvailable), Status: metav1.ConditionTrue, Reason: "AllGroupsReady"}}
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).UpdateStatus(ctx, msToUpdate, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+
+	assert.True(t, waitForCondition(func() bool {
+		get, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		cond := meta.FindStatusCondition(get.Status.Conditions, string(workload.ModelStatusConditionTypeActive))
+		return cond != nil && cond.Status == metav1.ConditionTrue
+	}), "the stale failure reason must not survive recovery")
+
+	get, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	activeCond = meta.FindStatusCondition(get.Status.Conditions, string(workload.ModelStatusConditionTypeActive))
+	require.NotNil(t, activeCond)
+	assert.Equal(t, ModelActiveReason, activeCond.Reason)
 }
 
 func TestCreateModel(t *testing.T) {

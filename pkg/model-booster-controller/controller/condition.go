@@ -32,6 +32,17 @@ const (
 	ModelFailedReason     = "ModelAbnormal"
 )
 
+// genericModelServingProgressReasons are the Reason values the model-serving-controller uses
+// on ModelServing's Progressing/UpdateInProgress conditions for ordinary startup/rollout
+// progress (see pkg/model-serving-controller/utils/utils.go's newCondition). Any other Reason
+// on those condition types means model-serving-controller identified a specific, actionable
+// Pod-level failure (e.g. scheduling, image-pull, or crash-loop) that's worth surfacing here
+// instead of the generic "ModelBooster not ready yet" message.
+var genericModelServingProgressReasons = map[string]bool{
+	"GroupProgressing": true,
+	"GroupsUpdating":   true,
+}
+
 // setModelInitCondition sets model condition to initialized
 func (mc *ModelBoosterController) setModelInitCondition(ctx context.Context, model *workloadv1alpha1.ModelBooster) error {
 	meta.SetStatusCondition(&model.Status.Conditions, newCondition(string(workloadv1alpha1.ModelStatusConditionTypeInitialized),
@@ -61,6 +72,24 @@ func (mc *ModelBoosterController) setModelFailedCondition(ctx context.Context, m
 	if err := mc.updateModelBoosterStatus(ctx, model); err != nil {
 		klog.Errorf("update ModelBooster status failed: %v", err)
 	}
+}
+
+// setModelWorkloadDegradedCondition sets ModelBooster's Active condition to False using the
+// Reason/Message propagated from the generated ModelServing's own condition, so a Pod-level
+// failure (scheduling, image pull, crash loop, etc.) is visible on ModelBooster without
+// inspecting the ModelServing separately. It reuses the existing Active condition rather than
+// introducing a new one: the next reconcile naturally supersedes it, either with
+// setModelActiveCondition (True, once the ModelServing recovers) or with a fresh call to this
+// function (updated detail) or setModelProcessingCondition's generic message (once the
+// ModelServing's condition Reason is no longer an actionable failure) — so it never goes stale.
+func (mc *ModelBoosterController) setModelWorkloadDegradedCondition(ctx context.Context, model *workloadv1alpha1.ModelBooster, reason, message string) error {
+	meta.SetStatusCondition(&model.Status.Conditions, newCondition(string(workloadv1alpha1.ModelStatusConditionTypeActive),
+		metav1.ConditionFalse, reason, message))
+	if err := mc.updateModelBoosterStatus(ctx, model); err != nil {
+		klog.Errorf("update ModelBooster status failed: %v", err)
+		return err
+	}
+	return nil
 }
 
 // setModelActiveCondition sets ModelBooster conditions to active

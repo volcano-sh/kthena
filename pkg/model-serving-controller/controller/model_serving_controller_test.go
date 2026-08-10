@@ -5836,6 +5836,202 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	assert.NotEmpty(t, servingGroups, "ServingGroups should exist in store")
 }
 
+// newTestModelServingWithSinglePod builds a minimal single-role, single-replica ModelServing
+// and a matching Pod (owned by it, with the labels the controller uses to map Pods back to
+// their ServingGroup/Role) for use by the Pod-failure-surfacing tests below.
+func newTestModelServingWithSinglePod(ns, msName, groupName, roleName, roleID, revision, podName string) (*workloadv1alpha1.ModelServing, *corev1.Pod) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      msName,
+			UID:       "test-ms-uid-123",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
+						},
+					},
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      podName,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+				workloadv1alpha1.RevisionLabelKey:         revision,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: workloadv1alpha1.GroupVersion.String(), Kind: "ModelServing", Name: msName, UID: ms.UID},
+			},
+		},
+	}
+	return ms, pod
+}
+
+// TestUpdatePodSchedulingFailureRecordedWithoutDeletion verifies that a Pod which can't be
+// scheduled at all (PodScheduled condition False) has its failure surfaced into the datastore
+// (for later propagation onto ModelServing's status) without going through the aggressive
+// delete-and-recreate path used for Failed/crash-looping pods: recreating an unschedulable Pod
+// would not fix the underlying scheduling problem and would just add churn.
+func TestUpdatePodSchedulingFailureRecordedWithoutDeletion(t *testing.T) {
+	ns, msName, groupName, roleName, roleID, revision := "default", "test-ms", "test-ms-0", "prefill", "prefill-0", "hash123"
+
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	ms, pod := newTestModelServingWithSinglePod(ns, msName, groupName, roleName, roleID, revision, "test-pod-pending")
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodPending,
+		Conditions: []corev1.PodCondition{
+			{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: "0/3 nodes are available: insufficient cpu"},
+		},
+	}
+
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+
+	startActions := len(kubeClient.Actions())
+	controller.addPod(pod)
+
+	for _, action := range kubeClient.Actions()[startActions:] {
+		assert.False(t, action.Matches("delete", "pods"), "an unschedulable pod must not be deleted/recreated")
+	}
+
+	roles, err := controller.store.GetRoleList(types.NamespacedName{Namespace: ns, Name: msName}, groupName, roleName)
+	assert.NoError(t, err)
+	require.Len(t, roles, 1)
+	assert.Equal(t, "Unschedulable", roles[0].FailureReason)
+	assert.Contains(t, roles[0].FailureMessage, "insufficient cpu")
+}
+
+// TestUpdatePodCrashLoopFailureRecordedAndClearedOnRecovery verifies that a crash-looping Pod's
+// failure is recorded in the datastore, and that once the (replacement) Pod for the same Role
+// becomes ready, the previously recorded failure is cleared rather than lingering forever.
+func TestUpdatePodCrashLoopFailureRecordedAndClearedOnRecovery(t *testing.T) {
+	ns, msName, groupName, roleName, roleID, revision := "default", "test-ms", "test-ms-0", "prefill", "prefill-0", "hash123"
+
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	ms, crashingPod := newTestModelServingWithSinglePod(ns, msName, groupName, roleName, roleID, revision, "test-pod-crash")
+	crashingPod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{
+			{
+				Name:         "main",
+				RestartCount: 3,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "CrashLoopBackOff", Message: "back-off restarting failed container",
+				}},
+			},
+		},
+	}
+
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), crashingPod.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Prime the store as if the Pod had already gone through its normal Pending/Creating
+	// startup (as real Pod events would have done before it started crashing).
+	nsName := types.NamespacedName{Namespace: ns, Name: msName}
+	controller.store.AddServingGroupAndRole(nsName, groupName, revision, "role-hash", roleName, roleID)
+
+	// The crashing pod is recorded as an error pod: this triggers the existing delete-and-recreate
+	// recovery flow (grace period, then deletion) in addition to recording the failure detail.
+	controller.addPod(crashingPod)
+
+	roles, err := controller.store.GetRoleList(nsName, groupName, roleName)
+	assert.NoError(t, err)
+	require.Len(t, roles, 1)
+	assert.Equal(t, "CrashLoopBackOff", roles[0].FailureReason)
+	assert.Contains(t, roles[0].FailureMessage, "back-off restarting")
+
+	// The replacement pod (same deterministic name/labels) comes up healthy.
+	_, healthyPod := newTestModelServingWithSinglePod(ns, msName, groupName, roleName, roleID, revision, "test-pod-crash")
+	healthyPod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		Conditions: []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+		},
+		ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "main", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		},
+	}
+	controller.addPod(healthyPod)
+
+	roles, err = controller.store.GetRoleList(nsName, groupName, roleName)
+	assert.NoError(t, err)
+	require.Len(t, roles, 1)
+	assert.Empty(t, roles[0].FailureReason, "recorded failure must be cleared once the role's pod is ready again")
+	assert.Empty(t, roles[0].FailureMessage)
+}
+
+// TestUpdateModelServingStatusSurfacesPodFailureReason verifies that once a Pod failure has been
+// recorded for a progressing ServingGroup, UpdateModelServingStatus propagates it onto the
+// Progressing condition's Reason/Message instead of the generic "GroupProgressing" reason.
+func TestUpdateModelServingStatusSurfacesPodFailureReason(t *testing.T) {
+	ns, msName, groupName, roleName, roleID, revision := "default", "test-ms", "test-ms-0", "prefill", "prefill-0", "hash123"
+
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	ms, _ := newTestModelServingWithSinglePod(ns, msName, groupName, roleName, roleID, revision, "test-pod")
+	created, err := kthenaClient.WorkloadV1alpha1().ModelServings(ns).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(created))
+
+	nsName := types.NamespacedName{Namespace: ns, Name: msName}
+	controller.store.AddServingGroupAndRole(nsName, groupName, revision, "role-hash", roleName, roleID)
+	controller.store.SetRoleFailure(nsName, groupName, roleName, roleID, "ImagePullBackOff",
+		"pod test-pod init container downloader: back-off pulling image")
+
+	err = controller.UpdateModelServingStatus(created, revision)
+	assert.NoError(t, err)
+
+	updated, err := kthenaClient.WorkloadV1alpha1().ModelServings(ns).Get(context.Background(), msName, metav1.GetOptions{})
+	require.NoError(t, err)
+	cond := findCondition(updated.Status.Conditions, string(workloadv1alpha1.ModelServingProgressing))
+	require.NotNil(t, cond, "expected a Progressing condition")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "ImagePullBackOff", cond.Reason)
+	assert.Contains(t, cond.Message, "downloader")
+}
+
+func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == condType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
 // TestSyncAllBeforeFixBehavior documents the previous buggy behavior where
 // failed pods at startup were silently ignored when initialSync was false.
 // This test verifies that the fix properly addresses this issue.
