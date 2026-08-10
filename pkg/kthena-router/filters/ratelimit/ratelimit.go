@@ -179,13 +179,10 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	}
 
 	oldConfig := r.limiterConfigs[model]
-	if !configChanged(oldConfig, newConfig) {
+	if oldConfig != nil && *oldConfig == *newConfig {
 		// Preserve existing limiter state if config is unchanged
 		return nil
 	}
-
-	// Save new config
-	r.limiterConfigs[model] = newConfig
 
 	if useGlobal {
 		// Initialize Redis client if not already done
@@ -243,6 +240,7 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 		}
 	}
 
+	r.limiterConfigs[model] = newConfig
 	return nil
 }
 
@@ -254,16 +252,6 @@ func (r *TokenRateLimiter) DeleteLimiter(model string) {
 	delete(r.inputLimiter, model)
 	delete(r.outputLimiter, model)
 	delete(r.limiterConfigs, model)
-}
-
-func configChanged(oldConfig, newConfig *LimiterConfig) bool {
-	if oldConfig == nil {
-		return true
-	}
-	return oldConfig.InputTokensPerUnit != newConfig.InputTokensPerUnit ||
-		oldConfig.OutputTokensPerUnit != newConfig.OutputTokensPerUnit ||
-		oldConfig.Unit != newConfig.Unit ||
-		oldConfig.RedisAddress != newConfig.RedisAddress
 }
 
 func getTimeUnitDuration(unit networkingv1alpha1.RateLimitUnit) time.Duration {
