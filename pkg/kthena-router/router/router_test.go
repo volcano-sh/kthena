@@ -312,6 +312,47 @@ func TestRouter_HandleHTTPRoute_PathPrefix(t *testing.T) {
 	}
 }
 
+func TestRouter_HandleHTTPRoute_RejectsCrossNamespaceBackend(t *testing.T) {
+	store := datastore.New()
+	router := &Router{store: store}
+	gatewayKind := gatewayv1.Kind("Gateway")
+	poolGroup := inferencePoolBackendGroup
+	poolKind := inferencePoolBackendKind
+	poolNamespace := gatewayv1.Namespace("other")
+
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "route", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &gatewayKind}},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				BackendRefs: []gatewayv1.HTTPBackendRef{{
+					BackendRef: gatewayv1.BackendRef{
+						BackendObjectReference: gatewayv1.BackendObjectReference{
+							Group:     &poolGroup,
+							Kind:      &poolKind,
+							Name:      "pool",
+							Namespace: &poolNamespace,
+						},
+					},
+				}},
+			}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/custom", nil)
+
+	matched, pool, err := router.handleHTTPRoute(c, "default/gw")
+
+	assert.True(t, matched)
+	assert.Equal(t, types.NamespacedName{}, pool)
+	assert.EqualError(t, err, "matched HTTPRoute default/route has no eligible InferencePool backend")
+}
+
 func TestRouter_HandleHTTPRoute_UsesMatchedRuleBackend(t *testing.T) {
 	pathType := gatewayv1.PathMatchPathPrefix
 	kind := gatewayv1.Kind("Gateway")

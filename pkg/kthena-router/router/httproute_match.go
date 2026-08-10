@@ -221,6 +221,9 @@ func inferencePoolFromHTTPRouteRule(route *gatewayv1.HTTPRoute, rule *gatewayv1.
 	for _, backendRef := range rule.BackendRefs {
 		if backendRef.Group != nil && *backendRef.Group == inferencePoolBackendGroup &&
 			backendRef.Kind != nil && *backendRef.Kind == inferencePoolBackendKind {
+			if backendRef.Namespace != nil && string(*backendRef.Namespace) != route.Namespace {
+				continue
+			}
 			weight := 1
 			if backendRef.Weight != nil {
 				weight = int(*backendRef.Weight)

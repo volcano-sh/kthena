@@ -363,19 +363,22 @@ func TestMatchHTTPRouteHostname(t *testing.T) {
 	}
 }
 
-func TestInferencePoolFromHTTPRouteRuleWeights(t *testing.T) {
+func TestInferencePoolFromHTTPRouteRule(t *testing.T) {
 	group := inferencePoolBackendGroup
 	kind := inferencePoolBackendKind
+	defaultNamespace := gatewayv1.Namespace("default")
+	otherNamespace := gatewayv1.Namespace("other")
 	zero := int32(0)
 	one := int32(1)
 
-	backendRef := func(name string, weight *int32) gatewayv1.HTTPBackendRef {
+	backendRef := func(name string, namespace *gatewayv1.Namespace, weight *int32) gatewayv1.HTTPBackendRef {
 		return gatewayv1.HTTPBackendRef{
 			BackendRef: gatewayv1.BackendRef{
 				BackendObjectReference: gatewayv1.BackendObjectReference{
-					Group: &group,
-					Kind:  &kind,
-					Name:  gatewayv1.ObjectName(name),
+					Group:     &group,
+					Kind:      &kind,
+					Name:      gatewayv1.ObjectName(name),
+					Namespace: namespace,
 				},
 				Weight: weight,
 			},
@@ -391,8 +394,8 @@ func TestInferencePoolFromHTTPRouteRuleWeights(t *testing.T) {
 		{
 			name: "skips a zero-weight backend",
 			backendRefs: []gatewayv1.HTTPBackendRef{
-				backendRef("pool-zero", &zero),
-				backendRef("pool-live", &one),
+				backendRef("pool-zero", nil, &zero),
+				backendRef("pool-live", nil, &one),
 			},
 			expected: types.NamespacedName{Namespace: "default", Name: "pool-live"},
 			found:    true,
@@ -400,7 +403,7 @@ func TestInferencePoolFromHTTPRouteRuleWeights(t *testing.T) {
 		{
 			name: "uses the default weight when omitted",
 			backendRefs: []gatewayv1.HTTPBackendRef{
-				backendRef("pool-default", nil),
+				backendRef("pool-default", nil, nil),
 			},
 			expected: types.NamespacedName{Namespace: "default", Name: "pool-default"},
 			found:    true,
@@ -408,9 +411,33 @@ func TestInferencePoolFromHTTPRouteRuleWeights(t *testing.T) {
 		{
 			name: "returns no backend when all weights are zero",
 			backendRefs: []gatewayv1.HTTPBackendRef{
-				backendRef("pool-zero", &zero),
+				backendRef("pool-zero", nil, &zero),
 			},
 			found: false,
+		},
+		{
+			name: "allows an explicit route namespace",
+			backendRefs: []gatewayv1.HTTPBackendRef{
+				backendRef("pool-default", &defaultNamespace, nil),
+			},
+			expected: types.NamespacedName{Namespace: "default", Name: "pool-default"},
+			found:    true,
+		},
+		{
+			name: "rejects a cross-namespace backend",
+			backendRefs: []gatewayv1.HTTPBackendRef{
+				backendRef("pool-other", &otherNamespace, nil),
+			},
+			found: false,
+		},
+		{
+			name: "skips a cross-namespace backend",
+			backendRefs: []gatewayv1.HTTPBackendRef{
+				backendRef("pool-other", &otherNamespace, nil),
+				backendRef("pool-default", nil, nil),
+			},
+			expected: types.NamespacedName{Namespace: "default", Name: "pool-default"},
+			found:    true,
 		},
 	}
 
