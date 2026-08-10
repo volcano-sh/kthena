@@ -121,11 +121,12 @@ func (l *LeastLatency) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	for _, info := range pods {
 		ttft := info.GetTTFT()
 		tpot := info.GetTPOT()
-		// Pods with no observed latency yet (zero default) are uninitialized — assign a
-		// neutral mid-range score so they receive some traffic via other plugins without
-		// monopolizing dispatch ahead of warm, measured replicas.
+		// Pods with no observed latency yet (zero default) are uninitialized — assign
+		// MaxScore so they share the top rank with the best-performing warm pods.
+		// This ensures they receive a fair share of traffic via tie-breaking plugins
+		// (e.g., LeastRequest) instead of being starved by existing warm pods.
 		if ttft <= 0 || tpot <= 0 {
-			scoreResults[info] = int(MaxScore / 2)
+			scoreResults[info] = int(MaxScore)
 			continue
 		}
 		scoreTTFT := MaxScore
