@@ -119,7 +119,7 @@ See `pkg/model-serving-controller/plugins/demo_plugin.go` for a reference implem
 
 Kthena ships with a built-in demo plugin `demo-pod-tweaks` that can set `runtimeClassName`, add annotations, and inject environment variables. Use it to validate the plugin flow before developing your own.
 
-Kthena also ships with `headless-service`. It creates one Headless Service for each in-scope Role replica that has a `workerTemplate`. No Services are created by default:
+Kthena also ships with `headless-service`. It injects `ENTRY_ADDRESS` into the in-scope Entry and Worker Pods and creates one Headless Service for each Role replica that has a `workerTemplate`. Without the plugin, neither the generated Service nor `ENTRY_ADDRESS` is added:
 
 ```yaml
 plugins:

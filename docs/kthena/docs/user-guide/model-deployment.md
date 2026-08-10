@@ -264,7 +264,8 @@ spec:
 
 Without the plugin, no new Headless Services are created or recovered. Removing
 the plugin does not immediately delete existing Services; they are deleted when
-their corresponding Roles are deleted.
+their corresponding Roles are deleted. `ENTRY_ADDRESS` is injected into new
+Entry and Worker Pods only when this plugin runs.
 
 ### GPU PD Disaggregation
 

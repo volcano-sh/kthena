@@ -54,7 +54,15 @@ func NewHeadlessServicePlugin(spec workloadv1alpha1.PluginSpec) (Plugin, error) 
 func (p *HeadlessServicePlugin) Name() string { return p.name }
 
 func (p *HeadlessServicePlugin) OnPodCreate(ctx context.Context, req *HookRequest) error {
-	if req == nil || !req.IsEntry || !requiresHeadlessService(req.Role) {
+	if req == nil || req.ModelServing == nil || req.Pod == nil || !requiresHeadlessService(req.Role) {
+		return nil
+	}
+	entryServiceName := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
+	utils.AddPodEnvVars(req.Pod, corev1.EnvVar{
+		Name:  workloadv1alpha1.EntryAddressEnv,
+		Value: entryServiceName + "." + req.ModelServing.Namespace,
+	})
+	if !req.IsEntry {
 		return nil
 	}
 	_, roleIndex := utils.GetParentNameAndOrdinal(req.RoleID)

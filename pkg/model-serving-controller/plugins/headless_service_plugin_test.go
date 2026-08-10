@@ -56,17 +56,36 @@ func TestHeadlessServicePluginLifecycle(t *testing.T) {
 	require.NoError(t, err)
 
 	req := &HookRequest{
-		ModelServing:  ms,
-		ServingGroup:  "test-ms-0",
-		RoleName:      role.Name,
-		RoleID:        "prefill-0",
-		Role:          role,
-		IsEntry:       true,
-		Pod:           &corev1.Pod{},
+		ModelServing: ms,
+		ServingGroup: "test-ms-0",
+		RoleName:     role.Name,
+		RoleID:       "prefill-0",
+		Role:         role,
+		IsEntry:      true,
+		Pod: &corev1.Pod{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "entry", Env: []corev1.EnvVar{{
+				Name: workloadv1alpha1.EntryAddressEnv, Value: "user-value",
+			}}}},
+			InitContainers: []corev1.Container{{Name: "entry-init"}},
+		}},
 		KubeClient:    kubeClient,
 		ServiceLister: serviceInformer.Lister(),
 	}
 	require.NoError(t, plugin.OnPodCreate(ctx, req))
+	entryAddress := "test-ms-0-prefill-0-0.default"
+	assert.Equal(t, entryAddress, envMap(req.Pod.Spec.Containers[0].Env)[workloadv1alpha1.EntryAddressEnv])
+	assert.Equal(t, entryAddress, envMap(req.Pod.Spec.InitContainers[0].Env)[workloadv1alpha1.EntryAddressEnv])
+
+	workerPod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}}}
+	require.NoError(t, plugin.OnPodCreate(ctx, &HookRequest{
+		ModelServing: ms,
+		ServingGroup: req.ServingGroup,
+		RoleName:     req.RoleName,
+		RoleID:       req.RoleID,
+		Role:         role,
+		Pod:          workerPod,
+	}))
+	assert.Equal(t, entryAddress, envMap(workerPod.Spec.Containers[0].Env)[workloadv1alpha1.EntryAddressEnv])
 
 	serviceName := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
 	service, err := kubeClient.CoreV1().Services(ms.Namespace).Get(ctx, serviceName, metav1.GetOptions{})
@@ -101,6 +120,14 @@ func TestHeadlessServicePluginLifecycle(t *testing.T) {
 	}))
 	_, err = kubeClient.CoreV1().Services(ms.Namespace).Get(ctx, serviceName, metav1.GetOptions{})
 	assert.Error(t, err)
+}
+
+func envMap(envVars []corev1.EnvVar) map[string]string {
+	env := make(map[string]string, len(envVars))
+	for _, item := range envVars {
+		env[item.Name] = item.Value
+	}
+	return env
 }
 
 func TestHeadlessServicePluginSkipsUnsupportedRoles(t *testing.T) {

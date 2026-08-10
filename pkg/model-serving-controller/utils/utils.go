@@ -104,12 +104,12 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 	entryPod.Spec = role.EntryTemplate.Spec
 	entryPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	// Build environment variables into each container of all pod
-	envVars := createCommonEnvVars(role, entryPod, 0)
-	addPodEnvVars(entryPod, envVars...)
+	envVars := createCommonEnvVars(role, 0)
+	AddPodEnvVars(entryPod, envVars...)
 	return entryPod
 }
 
-func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName, roleID string, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
+func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName, roleID string, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
 	if role.WorkerTemplate == nil {
 		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s", role.Name)
 		return nil
@@ -120,8 +120,8 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
-	envVars := createCommonEnvVars(role, entryPod, podIndex)
-	addPodEnvVars(workerPod, envVars...)
+	envVars := createCommonEnvVars(role, podIndex)
+	AddPodEnvVars(workerPod, envVars...)
 	return workerPod
 }
 
@@ -171,16 +171,11 @@ func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metada
 	}
 }
 
-func createCommonEnvVars(role workloadv1alpha1.Role, entryPod *corev1.Pod, workerIndex int) []corev1.EnvVar {
+func createCommonEnvVars(role workloadv1alpha1.Role, workerIndex int) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{
 			Name:  workloadv1alpha1.GroupSizeEnv,
 			Value: strconv.Itoa(int(role.WorkerReplicas) + 1),
-		},
-		{
-			Name: workloadv1alpha1.EntryAddressEnv,
-			// entryPod name as same as headless service name
-			Value: entryPod.GetName() + "." + entryPod.Namespace,
 		},
 		{
 			Name:  workloadv1alpha1.WorkerIndexEnv,
@@ -189,8 +184,9 @@ func createCommonEnvVars(role workloadv1alpha1.Role, entryPod *corev1.Pod, worke
 	}
 }
 
-// addPodEnvVars adds new env vars to the container.
-func addPodEnvVars(pod *corev1.Pod, newEnvVars ...corev1.EnvVar) {
+// AddPodEnvVars adds or replaces environment variables in every container and
+// init container of a Pod.
+func AddPodEnvVars(pod *corev1.Pod, newEnvVars ...corev1.EnvVar) {
 	if pod == nil {
 		return
 	}

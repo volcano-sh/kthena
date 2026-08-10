@@ -239,7 +239,7 @@ type Plugin interface {
 
 A small plugin manager composes plugins and runs them in order. Every lifecycle hook shares the same request and interface so additional hook points do not require parallel capability types. Fields that do not apply to a hook are nil or zero-valued. Following the `pod-ranktable-plugin` pattern, Kubernetes clients and cache-backed listers needed by built-in plugins are supplied through `HookRequest`; plugin factories receive only `PluginSpec`.
 
-The built-in `headless-service` plugin uses `OnPodCreate` for initial creation, `OnRoleSync` for recovery, and `OnRoleDelete` for cleanup. The Service is optional auxiliary state and is not used to decide whether a Role or ServingGroup exists.
+The built-in `headless-service` plugin uses `OnPodCreate` to inject `ENTRY_ADDRESS` into Entry and Worker Pods and to create the initial Service, `OnRoleSync` for recovery, and `OnRoleDelete` for cleanup. Without the plugin, neither the Service nor its DNS environment variable is generated. The Service is optional auxiliary state and is not used to decide whether a Role or ServingGroup exists.
 
 #### Test Plan
 

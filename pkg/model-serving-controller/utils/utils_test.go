@@ -77,21 +77,49 @@ func TestGenerateWorkerPod_WithAnnotations(t *testing.T) {
 		},
 	}
 
-	entryPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-entry",
-			Namespace: "default",
-		},
-	}
 	roleID := "test-role-0"
 	var pod *corev1.Pod
 	assert.NotPanics(t, func() {
-		pod = GenerateWorkerPod(role, ms, entryPod, "test-group", roleID, 1, "test-revision", "role-revision")
+		pod = GenerateWorkerPod(role, ms, "test-group", roleID, 1, "test-revision", "role-revision")
 	})
 	assert.NotNil(t, pod)
 	assert.Equal(t, "test-group-test-role-0-1", pod.Name)
 	assert.Equal(t, roleID, pod.Labels[workloadv1alpha1.RoleIDKey])
 	assert.Equal(t, annotations, pod.Annotations)
+}
+
+func TestGeneratePodsDoNotInjectEntryAddress(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+	}
+	role := workloadv1alpha1.Role{
+		Name:           "test-role",
+		WorkerReplicas: 1,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "entry"}},
+		}},
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "worker"}},
+		}},
+	}
+
+	entryPod := GenerateEntryPod(role, ms, "test-ms-0", "test-role-0", "revision", "role-revision")
+	workerPod := GenerateWorkerPod(role, ms, "test-ms-0", "test-role-0", 1, "revision", "role-revision")
+
+	for _, pod := range []*corev1.Pod{entryPod, workerPod} {
+		assert.NotContains(t, envMap(pod.Spec.Containers[0].Env), workloadv1alpha1.EntryAddressEnv)
+		assert.Equal(t, "2", envMap(pod.Spec.Containers[0].Env)[workloadv1alpha1.GroupSizeEnv])
+	}
+	assert.Equal(t, "0", envMap(entryPod.Spec.Containers[0].Env)[workloadv1alpha1.WorkerIndexEnv])
+	assert.Equal(t, "1", envMap(workerPod.Spec.Containers[0].Env)[workloadv1alpha1.WorkerIndexEnv])
+}
+
+func envMap(envVars []corev1.EnvVar) map[string]string {
+	env := make(map[string]string, len(envVars))
+	for _, item := range envVars {
+		env[item.Name] = item.Value
+	}
+	return env
 }
 
 func TestSetCondition(t *testing.T) {
