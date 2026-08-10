@@ -19,15 +19,19 @@ package controller
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/yaml"
 )
 
@@ -237,6 +241,124 @@ func waitForControllerCacheSync(controller *ModelBoosterController) bool {
 			controller.modelServersInformer.HasSynced() &&
 			controller.modelRoutesInformer.HasSynced()
 	})
+}
+
+// TestReconcile_DoesNotSurfaceWarningDuringOrdinaryStartup verifies that a child
+// ModelServing which is merely not-yet-Available (the normal state throughout startup,
+// before any pod has failed) does NOT cause the ModelBooster controller to emit a
+// ModelServingNotReady Warning Event. isModelServingActive alone (Available != True)
+// is not a failure signal — routine reconciles during startup must stay quiet.
+func TestReconcile_DoesNotSurfaceWarningDuringOrdinaryStartup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	kubeClient := fake.NewClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller := NewModelBoosterController(kubeClient, kthenaClient)
+	assert.NotNil(t, controller)
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	controller.recorder = fakeRecorder
+
+	go controller.Run(ctx, 1)
+	assert.True(t, waitForControllerCacheSync(controller), "controller informers did not sync")
+
+	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Wait for the child ModelServing to be created (proves reconcile ran and reached
+	// the not-yet-active branch at least once), then confirm no Warning event follows.
+	require.Eventually(t, func() bool {
+		list, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
+		return err == nil && len(list.Items) == 1
+	}, 5*time.Second, 10*time.Millisecond, "child ModelServing was never created")
+
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case event := <-fakeRecorder.Events:
+			if strings.Contains(event, "ModelServingNotReady") {
+				t.Fatalf("unexpected ModelServingNotReady event during ordinary startup: %s", event)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// TestReconcile_SurfacesModelServingNotReadyEventOnBlockingFailure verifies that once the
+// child ModelServing itself carries a Warning Event (i.e. ModelServingController has
+// detected an actual blocking pod failure), the ModelBooster controller emits its own
+// ModelServingNotReady Warning Event directing users to the ModelServing.
+func TestReconcile_SurfacesModelServingNotReadyEventOnBlockingFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	kubeClient := fake.NewClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller := NewModelBoosterController(kubeClient, kthenaClient)
+	assert.NotNil(t, controller)
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	controller.recorder = fakeRecorder
+
+	go controller.Run(ctx, 1)
+	assert.True(t, waitForControllerCacheSync(controller), "controller informers did not sync")
+
+	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(model.Namespace).Create(ctx, model, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	var modelServing workload.ModelServing
+	require.Eventually(t, func() bool {
+		list, err := kthenaClient.WorkloadV1alpha1().ModelServings(model.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil || len(list.Items) != 1 {
+			return false
+		}
+		modelServing = list.Items[0]
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "child ModelServing was never created")
+
+	// Simulate ModelServingController recording a blocking-failure Warning Event on the
+	// child, e.g. via emitRoleStatusEvent after getBlockingPodFailure detects a failure.
+	blockingEvent := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "modelserving-blocking-failure-",
+			Namespace:    modelServing.Namespace,
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      "ModelServing",
+			Name:      modelServing.Name,
+			Namespace: modelServing.Namespace,
+		},
+		Type:   corev1.EventTypeWarning,
+		Reason: "PodSchedulingFailed",
+	}
+	_, err = kubeClient.CoreV1().Events(modelServing.Namespace).Create(ctx, blockingEvent, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Events aren't watched by the ModelBooster controller; touch the ModelServing so its
+	// UpdateFunc (triggerModel) re-enqueues the ModelBooster and reconcile runs again.
+	toUpdate := modelServing.DeepCopy()
+	if toUpdate.Annotations == nil {
+		toUpdate.Annotations = map[string]string{}
+	}
+	toUpdate.Annotations["test.kthena.io/resync"] = "1"
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(modelServing.Namespace).Update(ctx, toUpdate, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case event := <-fakeRecorder.Events:
+			if strings.Contains(event, "ModelServingNotReady") && strings.Contains(event, "Warning") {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for ModelServingNotReady Warning event on ModelBooster")
+		}
+	}
 }
 
 // waitForCondition repeatedly checks a condition function until it returns true or a timeout occurs.
