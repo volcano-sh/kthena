@@ -2,46 +2,53 @@ name: Router Benchmark
 
 on:
   workflow_dispatch:
-
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "benchmark/router-benchmark/**"
-      - "pkg/kthena-router/**"
-      - "charts/kthena/**"
-      - ".github/workflows/benchmark.yml"
+    inputs:
+      scenario:
+        description: "Benchmark scenario (smoke-test-s1 ~ smoke-test-s8)"
+        required: true
+        type: choice
+        options:
+          - smoke-test-s1
+          - smoke-test-s2
+          - smoke-test-s3
+          - smoke-test-s4
+          - smoke-test-s5
+          - smoke-test-s6
+          - smoke-test-s7
+          - smoke-test-s8
+      router-config-a:
+        description: "Router config A (plugins/<name>.yaml)"
+        required: true
+        type: choice
+        options:
+          - router-config-random
+          - router-config-least-latency
+          - router-config-least-request
+      router-config-b:
+        description: "Router config B (must differ from A)"
+        required: true
+        type: choice
+        options:
+          - router-config-random
+          - router-config-least-latency
+          - router-config-least-request
 
 jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check router-config-a != router-config-b
+        if: inputs['router-config-a'] == inputs['router-config-b']
+        run: |
+          echo "router-config-a and router-config-b must be different, both are '${{ inputs['router-config-a'] }}'"
+          exit 1
+
   benchmark:
-    name: ${{ matrix.scenario }} (${{ matrix.router-config-a }} vs ${{ matrix.router-config-b }})
+    name: ${{ inputs.scenario }} (${{ inputs['router-config-a'] }} vs ${{ inputs['router-config-b'] }})
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - scenario: smoke-test-s2
-            router-config-a: router-config-random
-            router-config-b: router-config-least-latency
-#          - scenario: smoke-test-s2
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-request
-
-#          - scenario: smoke-test-s3
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-request
-
-#          - scenario: smoke-test-s8
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-latency
-#          - scenario: smoke-test-s8
-#            router-config-a: router-config-random
-#            router-config-b: router-config-least-request
-#          - scenario: smoke-test-s8
-#            router-config-a: router-config-least-latency
-#            router-config-b: router-config-least-request
-
     steps:
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@v1.3.1
@@ -101,9 +108,9 @@ jobs:
         working-directory: benchmark/router-benchmark
         run: |
           python scripts/ab_test.py \
-            --scenario "scenarios/${{ matrix.scenario }}.yaml" \
-            --router-config-a "plugins/${{ matrix.router-config-a }}.yaml" \
-            --router-config-b "plugins/${{ matrix.router-config-b }}.yaml" \
+            --scenario "scenarios/${{ inputs.scenario }}.yaml" \
+            --router-config-a "plugins/${{ inputs['router-config-a'] }}.yaml" \
+            --router-config-b "plugins/${{ inputs['router-config-b'] }}.yaml" \
             --output results/
 
       - name: Collect Results
