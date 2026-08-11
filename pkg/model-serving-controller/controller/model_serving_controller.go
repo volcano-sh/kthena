@@ -559,8 +559,10 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// Clean up outdated PodGroups if network topology or gang policy was removed
 	if ms.Spec.Template.NetworkTopology == nil {
 		if ms.Spec.Template.GangPolicy == nil || len(ms.Spec.Template.GangPolicy.MinRoleReplicas) == 0 {
-			if err := c.podGroupManager.CleanupPodGroups(ctx, ms); err != nil {
-				klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", ms.Namespace, ms.Name, err)
+			if c.podGroupManager != nil {
+				if err := c.podGroupManager.CleanupPodGroups(ctx, ms); err != nil {
+					klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", ms.Namespace, ms.Name, err)
+				}
 			}
 		}
 	}
