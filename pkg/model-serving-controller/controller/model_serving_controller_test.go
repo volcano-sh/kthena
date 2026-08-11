@@ -6016,6 +6016,121 @@ func newGracePeriodTestController(t *testing.T, pod *corev1.Pod) (*ModelServingC
 	return controller, kubeClient
 }
 
+// failUpdateServingGroupStore injects UpdateServingGroupStatus failures while
+// delegating all other Store methods to an inner implementation.
+type failUpdateServingGroupStore struct {
+	datastore.Store
+	fail bool
+}
+
+func (s *failUpdateServingGroupStore) UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, status datastore.ServingGroupStatus) error {
+	if s.fail {
+		return fmt.Errorf("injected UpdateServingGroupStatus failure")
+	}
+	return s.Store.UpdateServingGroupStatus(modelServingName, groupName, status)
+}
+
+// TestHandleErrorPodClearsGraceMapOnStatusUpdateFailure ensures a failed
+// UpdateServingGroupStatus does not permanently block failed-pod recovery.
+func TestHandleErrorPodClearsGraceMapOnStatusUpdateFailure(t *testing.T) {
+	const (
+		namespace = "default"
+		msName    = "test-model"
+		groupName = "test-model-0"
+		podName   = "test-model-0-prefill-0-0"
+	)
+
+	failedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      podName,
+			UID:       types.UID("failed-pod-uid"),
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: msName,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             "prefill",
+				workloadv1alpha1.RoleIDKey:                "prefill-0",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      msName,
+		},
+	}
+
+	controller, kubeClient := newGracePeriodTestController(t, failedPod)
+	inner := datastore.New()
+	nsn := types.NamespacedName{Namespace: namespace, Name: msName}
+	inner.AddServingGroup(nsn, 0, "rev")
+	require.NoError(t, inner.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupRunning))
+
+	store := &failUpdateServingGroupStore{Store: inner, fail: true}
+	controller.store = store
+	controller.workqueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()) //nolint:staticcheck
+	t.Cleanup(controller.workqueue.ShutDown)
+
+	err := controller.handleErrorPod(ms, groupName, failedPod)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "update ServingGroup status failed")
+
+	_, stuck := controller.graceMap.Load(getPodGracePeriodKey(failedPod))
+	require.False(t, stuck, "graceMap key must be cleared when status update fails so recovery can retry")
+
+	store.fail = false
+	require.NoError(t, controller.handleErrorPod(ms, groupName, failedPod))
+
+	require.Eventually(t, func() bool {
+		for _, action := range kubeClient.Actions() {
+			if action.Matches("delete", "pods") {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "retry after status-update recovery should delete the failed pod")
+}
+
+// TestUpdateServingGroupStatusCanFailAfterRunningRead shows the real store
+// race that makes the stuck-graceMap path reachable: GetServingGroupStatus and
+// UpdateServingGroupStatus are not atomic, so a concurrent DeleteServingGroup
+// can make Update fail after Get observed ServingGroupRunning.
+func TestUpdateServingGroupStatusCanFailAfterRunningRead(t *testing.T) {
+	store := datastore.New()
+	nsn := types.NamespacedName{Namespace: "default", Name: "test-model"}
+	groupName := "test-model-0"
+	store.AddServingGroup(nsn, 0, "rev")
+	require.NoError(t, store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupRunning))
+
+	sawRunningThenFail := false
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 10000; i++ {
+			if store.GetServingGroupStatus(nsn, groupName) == datastore.ServingGroupRunning {
+				if err := store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupCreating); err != nil {
+					sawRunningThenFail = true
+					return
+				}
+			}
+			// Re-create so the race window stays open.
+			store.AddServingGroup(nsn, 0, "rev")
+			_ = store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupRunning)
+		}
+	}()
+
+	for i := 0; i < 10000; i++ {
+		store.DeleteServingGroup(nsn, groupName)
+		store.AddServingGroup(nsn, 0, "rev")
+		_ = store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupRunning)
+	}
+	<-done
+
+	require.True(t, sawRunningThenFail,
+		"expected at least one Get(Running) followed by Update failure due to concurrent delete")
+}
+
 // TestSyncAllBeforeFixBehavior documents the previous buggy behavior where
 // failed pods at startup were silently ignored when initialSync was false.
 // This test verifies that the fix properly addresses this issue.
