@@ -21,6 +21,7 @@ import (
 
 	"istio.io/istio/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
@@ -173,7 +174,8 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 		shard.mu.RLock()
 		podSet, exists := shard.hashes[hash]
 		if exists {
-			// Note: we are iterating over a copy of the set, so we don't need to hold the lock.
+			// The set is the live map, not a copy; iteration is safe because the shard
+			// read lock is held until the loop ends.
 			for pod := range podSet {
 				// Skip if pod is not in the candidate set or already matched
 				if !candidatePods.Contains(pod) {
@@ -208,7 +210,9 @@ func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.Pod
 	podLRU, exists := s.podHashes[nsName]
 	if !exists {
 		// Add runs after the proxied request completes, possibly long after the pod is
-		// gone. Re-registering it then would leave entries nothing can evict.
+		// gone. Re-registering it then would leave entries nothing can evict. The gate is
+		// sound because the store removes a pod before dispatching its delete event: a miss
+		// here means the purge has fired or will fire.
 		if s.store.GetPodInfo(nsName) == nil {
 			s.podHashesMu.Unlock()
 			return
@@ -223,6 +227,9 @@ func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.Pod
 			s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
 		})
 		if err != nil {
+			// Only reachable with a non-positive capacity; without the log this would
+			// silently disable caching.
+			klog.Errorf("ModelPrefixStore: failed to create pod LRU (capacity %d): %v", s.hashCapacity, err)
 			s.podHashesMu.Unlock()
 			return
 		}
