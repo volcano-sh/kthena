@@ -288,16 +288,7 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 	}
 
 	// If network topology is removed, we need to clean up the PodGroups.
-	// Because minRoleReplicas is not allowed to be updated, so we do not need to check it here.
-	if oldms.Spec.Template.NetworkTopology != nil && curms.Spec.Template.NetworkTopology == nil {
-		if curms.Spec.Template.GangPolicy == nil || len(curms.Spec.Template.GangPolicy.MinRoleReplicas) == 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := c.podGroupManager.CleanupPodGroups(ctx, curms); err != nil {
-				klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", curms.Namespace, curms.Name, err)
-			}
-		}
-	}
+	// We handle the cleanup in syncModelServing to inherit the parent context.
 
 	c.enqueueModelServing(curms)
 }
@@ -564,6 +555,13 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
+	}
+
+	// Cleanup PodGroups if Gang scheduling is disabled (e.g. NetworkTopology and GangPolicy are removed)
+	if ms.Spec.Template.NetworkTopology == nil && (ms.Spec.Template.GangPolicy == nil || len(ms.Spec.Template.GangPolicy.MinRoleReplicas) == 0) {
+		if err := c.podGroupManager.CleanupPodGroups(ctx, ms); err != nil {
+			klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", ms.Namespace, ms.Name, err)
+		}
 	}
 
 	// 2. Sync the roles and their replicas within each ServingGroup, handling partitioned scaling and revisions.
