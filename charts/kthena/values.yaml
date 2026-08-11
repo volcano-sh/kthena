@@ -111,6 +111,17 @@ networking:
       # rejected with HTTP 504. Defaults to `30s`; set a non-positive duration<br/>
       # (e.g. `0s`) to disable it (bounded only by client disconnect).
       timeout: "30s"
+    # batchFiles configures the OpenAI-compatible /v1/files API for Batch workloads.
+    # Local metadata is process-local; prefer a single router replica until shared storage lands.
+    batchFiles:
+      # -- Enable batch files storage mount and set KTHENA_BATCH_FILES_DIR.
+      enabled: false
+      # -- Container path used as KTHENA_BATCH_FILES_DIR.
+      mountPath: /var/lib/kthena/batch-files
+      # -- Optional max upload size in bytes; empty uses router default (200MiB).
+      maxFileBytes: ""
+      # -- Optional TTL Go duration (e.g. "720h"); empty uses router default (30d).
+      ttl: ""
     gatewayAPI:
       # -- Enable Gateway API related features.
       enabled: false
