@@ -3651,7 +3651,7 @@ func TestModelServingVersionControl(t *testing.T) {
 			}
 
 			// Verify status revisions
-			err = controller.UpdateModelServingStatus(ms, newRevision)
+			err = controller.UpdateModelServingStatus(context.TODO(), ms, newRevision)
 			assert.NoError(t, err)
 
 			// Get updated ModelServing to check status
@@ -3959,7 +3959,7 @@ func TestUpdateModelServingStatusLabelSelector(t *testing.T) {
 				}
 			}
 
-			err = controller.UpdateModelServingStatus(ms, tt.revision)
+			err = controller.UpdateModelServingStatus(context.TODO(), ms, tt.revision)
 			assert.NoError(t, err, "case %d: UpdateModelServingStatus should not error", idx)
 
 			updated, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), tt.msName, metav1.GetOptions{})
@@ -4113,7 +4113,7 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			}
 
 			// Call UpdateModelServingStatus
-			err = controller.UpdateModelServingStatus(ms, tt.newRevision)
+			err = controller.UpdateModelServingStatus(context.TODO(), ms, tt.newRevision)
 			assert.NoError(t, err)
 
 			// Get updated ModelServing to check status
