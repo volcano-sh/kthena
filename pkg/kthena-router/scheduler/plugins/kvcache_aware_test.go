@@ -2330,7 +2330,7 @@ func TestPodLastContainerStartUnix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := podLastContainerStartUnix(tt.pod); got != tt.want {
+			if got := podLastContainerStartUnix(tt.pod, "runtime"); got != tt.want {
 				t.Errorf("podLastContainerStartUnix() = %d, want %d", got, tt.want)
 			}
 		})
@@ -2400,7 +2400,7 @@ func TestPodLastContainerStartUnixIgnoresRuntimeSidecar(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := podLastContainerStartUnix(tt.pod); got != tt.want {
+			if got := podLastContainerStartUnix(tt.pod, "runtime"); got != tt.want {
 				t.Errorf("podLastContainerStartUnix() = %d, want %d", got, tt.want)
 			}
 		})
@@ -2420,8 +2420,48 @@ func TestPodLastContainerStartUnixIgnoresReadinessFlap(t *testing.T) {
 		LastTransitionTime: metav1.NewTime(flapped),
 	}}
 
-	if got := podLastContainerStartUnix(pod); got != started.Unix() {
+	if got := podLastContainerStartUnix(pod, "runtime"); got != started.Unix() {
 		t.Errorf("readiness transition leaked into the restart signal: got %d, want %d", got, started.Unix())
+	}
+}
+
+// The arg default must stay "runtime"; an explicit value, including "", wins.
+func TestNewKVCacheAwareRuntimeContainerName(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "unset defaults to runtime", raw: `{}`, want: "runtime"},
+		{name: "explicit name wins", raw: `{"runtimeContainerName":"agent"}`, want: "agent"},
+		{name: "explicit empty disables", raw: `{"runtimeContainerName":""}`, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin := NewKVCacheAware(runtime.RawExtension{Raw: []byte(tt.raw)})
+			if plugin.runtimeContainerName != tt.want {
+				t.Errorf("runtimeContainerName = %q, want %q", plugin.runtimeContainerName, tt.want)
+			}
+		})
+	}
+}
+
+// A pod whose engine container happens to be named runtime can point the exclusion at its
+// real sidecar name, or disable it with "".
+func TestPodLastContainerStartUnixCustomSidecarName(t *testing.T) {
+	sidecarStart := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	engineRestart := time.Now().Add(-time.Minute).Truncate(time.Second)
+
+	pod := startedPodContainers("p", "ns",
+		containerStart{name: "runtime", at: &engineRestart},
+		containerStart{name: "agent", at: &sidecarStart},
+	).Pod
+
+	if got := podLastContainerStartUnix(pod, "agent"); got != engineRestart.Unix() {
+		t.Errorf("custom sidecar name missed the engine restart: got %d, want %d", got, engineRestart.Unix())
+	}
+	if got := podLastContainerStartUnix(pod, ""); got != engineRestart.Unix() {
+		t.Errorf("empty sidecar name must count every container: got %d, want %d", got, engineRestart.Unix())
 	}
 }
 
@@ -2434,7 +2474,7 @@ func TestOwnerStartTimes(t *testing.T) {
 		startedPod("pod-1", "ns-a", &at),
 		startedPod("pod-1", "ns-b", &other),
 		startedPod("pod-2", "ns-a", nil),
-	})
+	}, "runtime")
 
 	want := map[string]int64{
 		"pod-1.ns-a": at.Unix(),
@@ -2539,7 +2579,7 @@ func TestKVCacheAware_QueryRedisForBlocks_DropsOwnershipFromBeforeRestart(t *tes
 	owners := ownerStartTimes([]*datastore.PodInfo{
 		startedPod("restarted", "default", &restartedAt),
 		startedPod("stable", "default", &longRunning),
-	})
+	}, "runtime")
 
 	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
 	if err != nil {
@@ -2578,7 +2618,7 @@ func TestKVCacheAware_QueryRedisForBlocks_DropsOldOwnershipAfterLongAgoRestart(t
 		t.Fatalf("failed to seed redis: %v", err)
 	}
 
-	owners := ownerStartTimes([]*datastore.PodInfo{startedPod("restarted", "default", &restartedAt)})
+	owners := ownerStartTimes([]*datastore.PodInfo{startedPod("restarted", "default", &restartedAt)}, "runtime")
 
 	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
 	if err != nil {
@@ -2620,7 +2660,7 @@ func TestKVCacheAware_QueryRedisForBlocks_SidecarRestart(t *testing.T) {
 	owners := ownerStartTimes([]*datastore.PodInfo{startedPodContainers("warm", "default",
 		containerStart{name: "server", at: &engineStart},
 		containerStart{name: "runtime", at: &sidecarRestart},
-	)})
+	)}, "runtime")
 
 	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
 	if err != nil {
@@ -2635,7 +2675,7 @@ func TestKVCacheAware_QueryRedisForBlocks_SidecarRestart(t *testing.T) {
 	owners = ownerStartTimes([]*datastore.PodInfo{startedPodContainers("warm", "default",
 		containerStart{name: "server", at: &engineRestart},
 		containerStart{name: "runtime", at: &sidecarRestart},
-	)})
+	)}, "runtime")
 
 	result, err = plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
 	if err != nil {
