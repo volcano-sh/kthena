@@ -89,12 +89,22 @@ test-docs: ## Run documentation tests (type check and build)
 	cd docs/kthena && npm run typecheck
 	cd docs/kthena && npm run build
 
-.PHONY: test-e2e
-test-e2e: ## Run all e2e tests sequentially (legacy).
-	@command -v kind >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
+.PHONY: e2e-preflight
+e2e-preflight: ## Verify the host tools the e2e setup and suites need.
+	@missing=""; \
+	for tool in kind kubectl docker helm; do \
+		command -v $$tool >/dev/null 2>&1 || missing="$$missing $$tool"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "Missing required tools:$$missing"; \
+		echo ""; \
+		echo "  kind, kubectl, docker   create the cluster and load images"; \
+		echo "  helm                    the e2e harness installs kthena with helm"; \
 		exit 1; \
-	}
+	fi
+
+.PHONY: test-e2e
+test-e2e: e2e-preflight ## Run all e2e tests sequentially (legacy).
 	@echo "Setting up Kind cluster for E2E tests..."
 	@./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
@@ -102,26 +112,22 @@ test-e2e: ## Run all e2e tests sequentially (legacy).
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-controller-manager
-test-e2e-controller-manager: ## Run controller-manager e2e tests.
-	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
+test-e2e-controller-manager: e2e-preflight ## Run controller-manager e2e tests.
 	@TEST_CATEGORY=controller-manager ./test/e2e/setup.sh
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=20m ./test/e2e/controller-manager/...
 
 .PHONY: test-e2e-router
-test-e2e-router: ## Run router e2e tests.
-	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
+test-e2e-router: e2e-preflight ## Run router e2e tests.
 	@TEST_CATEGORY=router ./test/e2e/setup.sh
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
 
 .PHONY: test-e2e-gateway-api
-test-e2e-gateway-api: ## Run gateway-api e2e tests.
-	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
+test-e2e-gateway-api: e2e-preflight ## Run gateway-api e2e tests.
 	@TEST_CATEGORY=gateway-api ./test/e2e/setup.sh
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-api/...
 
 .PHONY: test-e2e-gateway-inference-extension
-test-e2e-gateway-inference-extension: ## Run gateway-inference-extension e2e tests.
-	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
+test-e2e-gateway-inference-extension: e2e-preflight ## Run gateway-inference-extension e2e tests.
 	@TEST_CATEGORY=gateway-inference-extension ./test/e2e/setup.sh
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-inference-extension/...
 
