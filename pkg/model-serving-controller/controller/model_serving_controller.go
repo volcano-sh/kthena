@@ -293,11 +293,6 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 	// Note: We no longer clean up PodGroups here. This is an informer event handler
 	// and making synchronous API calls blocks the informer. PodGroup cleanup logic
 	// is now handled inside syncModelServing where the context is properly threaded.
-	if oldms.Spec.Template.NetworkTopology != nil && curms.Spec.Template.NetworkTopology == nil {
-		if curms.Spec.Template.GangPolicy == nil || len(curms.Spec.Template.GangPolicy.MinRoleReplicas) == 0 {
-			// PodGroups will be cleaned up in syncModelServing
-		}
-	}
 
 	c.enqueueModelServing(curms)
 }
