@@ -281,6 +281,10 @@ data:
         args:
           blockSizeToHash: 16
           maxBlocksToMatch: 128
+          tierWeights:
+            gpu: 1.0
+            cpu: 0.8
+            cpu_pinned: 0.8
       plugins:
         Filter:
           enabled:
@@ -299,6 +303,9 @@ data:
 | ------------------ | ------- | -------------------------------------------------------------------------------- |
 | `blockSizeToHash`  | 16      | Number of tokens per block. Must match the vLLM block size for optimal matching. |
 | `maxBlocksToMatch` | 128     | Maximum number of blocks to process per request. Limits Redis queries.           |
+| `tierWeights`      | gpu: 1.0<br />cpu: 0.8<br />cpu_pinned: 0.8 | Optional weights for reported KV cache storage medium. Missing or unknown medium values use weight `1.0`. |
+
+The runtime sidecar records a block's storage medium when the inference engine reports it. vLLM reports `GPU`, `CPU`, `FS`, and `OBJ`. SGLang reports `GPU`, `CPU_PINNED`, `DISK`, and `EXTERNAL`. Use lower-case names in `tierWeights`, for example `cpu` for vLLM and `cpu_pinned` for SGLang. Timestamp-only Redis entries, missing media, and unconfigured media are scored with weight `1.0`; configure any reported tier that should be discounted. Configured weights must be between `0.0` and `1.0`.
 
 **Helm values:**
 
