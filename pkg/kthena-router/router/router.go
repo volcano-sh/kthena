@@ -267,6 +267,17 @@ func (r *Router) calculateRequestPriority(userID, modelName string) float64 {
 
 type ModelRequest map[string]interface{}
 
+type resolvedBackend struct {
+	pods                  []*datastore.PodInfo
+	port                  int32
+	modelServerName       types.NamespacedName
+	inferencePoolFullName string
+	modelRoute            *v1alpha1.ModelRoute
+	modelServer           *v1alpha1.ModelServer
+	provider              *v1alpha1.ExternalModelProvider
+	isLora                bool
+}
+
 func (r *Router) HandlerFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		r.metrics.IncActiveRequests()
@@ -342,6 +353,30 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
+		requestID := uuid.New().String()
+		if c.Request.Header.Get("x-request-id") == "" {
+			c.Request.Header.Set("x-request-id", requestID)
+		}
+
+		// Store metrics recorder in context for use in other functions
+		c.Set("metricsRecorder", metricsRecorder)
+
+		// Reject models with no registered ModelRoute before queueing. Queue
+		// cleanup is tied to the ModelRoute lifecycle, and fairness priority is
+		// computed from ModelRoute-level rate-limit configuration. The direct
+		// path still allows models routed through InferencePool/HTTPRoute.
+		if (EnableFairnessScheduling || EnableSessionBoost) && !hasModel {
+			accesslog.SetError(c, "route_not_found", "route not found")
+			c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
+			c.Set("finishReason", "route_not_found")
+			return
+		}
+
+		backend, err := r.resolveBackend(c, modelRequest)
+		if err != nil {
+			return
+		}
+
 		// Apply rate limiting using the unified rate limiter
 		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
 			var errorMsg string
@@ -370,45 +405,18 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			return
 		}
 
-		requestID := uuid.New().String()
-		if c.Request.Header.Get("x-request-id") == "" {
-			c.Request.Header.Set("x-request-id", requestID)
-		}
-
-		// Store metrics recorder in context for use in other functions
-		c.Set("metricsRecorder", metricsRecorder)
-
 		// step 3.1: direct load balancing when neither fairness scheduling nor
 		// session boost is enabled. doLoadbalance validates the route itself
 		// (a model may be routable via InferencePool/HTTPRoute even without a
 		// registered ModelRoute), so HasModel is not checked here.
 		if !EnableFairnessScheduling && !EnableSessionBoost {
-			_ = r.doLoadbalance(c, modelRequest)
+			_ = r.doLoadbalance(c, modelRequest, backend)
 			return
 		}
 
 		// step 3.2: queue scheduling. The queue orders requests by the active
 		// strategy: per-user fairness or session boost (mutually exclusive).
-		//
-		// Reject models with no registered ModelRoute here, before
-		// handleFairnessScheduling, so store.Enqueue can never be reached for
-		// an unregistered model name — which would otherwise leak a
-		// model-specific queue and goroutine forever, since queue cleanup is
-		// tied to the ModelRoute lifecycle. Fairness/session-boost priority is
-		// computed from ModelRoute-level rate-limit configuration, so (unlike
-		// the direct load-balancing path above) an InferencePool-only route
-		// cannot be scheduled through this path anyway. Using the same
-		// response and route_not_found observability labeling as the
-		// equivalent unregistered-model case in doLoadbalance keeps both
-		// paths consistent for callers and metrics/logging.
-		if !hasModel {
-			accesslog.SetError(c, "route_not_found", "route not found")
-			c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
-			c.Set("finishReason", "route_not_found")
-			return
-		}
-
-		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName); err != nil {
+		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName, backend); err != nil {
 			accesslog.SetError(c, "scheduling", err.Error())
 			c.Set("finishReason", "scheduling")
 			return
@@ -416,7 +424,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 	}
 }
 
-func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error {
+func (r *Router) resolveBackend(c *gin.Context, modelRequest ModelRequest) (*resolvedBackend, error) {
 	modelName := modelRequest["model"].(string)
 
 	// Check if this is an InferencePool request from HTTPRoute
@@ -456,38 +464,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 				accesslog.SetErrorOrigin(c, "router")
 				c.Set("finishReason", "provider_discovery")
 				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
-				return nil
+				return nil, fmt.Errorf("can't find external model provider: %v", modelTarget.Name)
 			}
-
-			modelRouteName := ""
-			if modelRoute != nil {
-				modelRouteName = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
-				c.Set("modelRouteName", modelRouteName)
-			}
-			accesslog.SetRequestRouting(c, modelRouteName, "", "")
-			if err := r.proxyExternalProvider(c, c.Request, provider, modelRequest, modelName); err != nil {
-				klog.Errorf("external provider request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
-				var proxyErr *externalProxyError
-				if errors.As(err, &proxyErr) {
-					accesslog.SetError(c, proxyErr.reason, proxyErr.message)
-					if proxyErr.origin != "" {
-						accesslog.SetErrorOrigin(c, proxyErr.origin)
-					}
-					c.Set("finishReason", proxyErr.reason)
-					if !c.Writer.Written() {
-						c.AbortWithStatusJSON(proxyErr.statusCode, proxyErr.message)
-					}
-					return nil
-				}
-
-				accesslog.SetError(c, "external_provider_proxy", "external provider request processing failed")
-				accesslog.SetErrorOrigin(c, "router")
-				c.Set("finishReason", "external_provider_proxy")
-				if !c.Writer.Written() {
-					c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
-				}
-			}
-			return nil
+			return &resolvedBackend{modelRoute: modelRoute, provider: provider}, nil
 		}
 
 		modelServerName = modelTarget.Name
@@ -503,18 +482,13 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find model server: %v", modelServerName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find model server: %v", modelServerName))
 			c.Set("finishReason", "pod_discovery")
-			return fmt.Errorf("can't find model server: %v", modelServerName)
+			return nil, fmt.Errorf("can't find model server: %v", modelServerName)
 		}
 		if len(pods) == 0 {
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("no available pods for model server: %v", modelServerName))
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("no available pods for model server: %v", modelServerName))
 			c.Set("finishReason", "pod_discovery")
-			return fmt.Errorf("no available pods for model server: %v", modelServerName)
-		}
-
-		model := modelServer.Spec.Model
-		if model != nil && !isLora {
-			modelRequest["model"] = *model
+			return nil, fmt.Errorf("no available pods for model server: %v", modelServerName)
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
@@ -523,7 +497,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		accesslog.SetError(c, "inference_pool_selection", httpRouteErr.Error())
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, httpRouteErr.Error())
 		c.Set("finishReason", "inference_pool_selection")
-		return httpRouteErr
+		return nil, httpRouteErr
 	} else if matched {
 		// If ModelRoute is not matched, try to match HTTPRoute
 
@@ -536,7 +510,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
 			c.Set("finishReason", "inference_pool_discovery")
-			return fmt.Errorf("can't find inference pool: %v", inferencePoolName)
+			return nil, fmt.Errorf("can't find inference pool: %v", inferencePoolName)
 		}
 
 		// Get pods from InferencePool
@@ -547,19 +521,19 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 				accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
 				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
 				c.Set("finishReason", "inference_pool_discovery")
-				return fmt.Errorf("can't find inference pool %v: %w", inferencePoolName, err)
+				return nil, fmt.Errorf("can't find inference pool %v: %w", inferencePoolName, err)
 			}
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("failed to get pods for inference pool: %v", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to get pods for inference pool: %v", inferencePoolName))
 			c.Set("finishReason", "pod_discovery")
-			return fmt.Errorf("failed to get pods for inference pool %v: %w", inferencePoolName, err)
+			return nil, fmt.Errorf("failed to get pods for inference pool %v: %w", inferencePoolName, err)
 		}
 		if len(pods) == 0 {
 			klog.Errorf("no available pods for inference pool: %v", inferencePoolName)
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("no available pods for inference pool: %v", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("no available pods for inference pool: %v", inferencePoolName))
 			c.Set("finishReason", "pod_discovery")
-			return fmt.Errorf("no available pods for inference pool: %v", inferencePoolName)
+			return nil, fmt.Errorf("no available pods for inference pool: %v", inferencePoolName)
 		}
 
 		// Get target port from InferencePool
@@ -568,7 +542,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			accesslog.SetError(c, "port_discovery", fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
 			c.Set("finishReason", "port_discovery")
-			return fmt.Errorf("inference pool %v has no target ports", inferencePoolName)
+			return nil, fmt.Errorf("inference pool %v has no target ports", inferencePoolName)
 		}
 		// Use the first target port
 		port = int32(inferencePool.Spec.TargetPorts[0].Number)
@@ -578,7 +552,63 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		accesslog.SetError(c, "route_not_found", "route not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
 		c.Set("finishReason", "route_not_found")
-		return fmt.Errorf("route not found")
+		return nil, fmt.Errorf("route not found")
+	}
+
+	return &resolvedBackend{
+		pods:                  pods,
+		port:                  port,
+		modelServerName:       modelServerName,
+		inferencePoolFullName: inferencePoolFullName,
+		modelRoute:            modelRoute,
+		modelServer:           modelServer,
+		isLora:                isLora,
+	}, nil
+}
+
+func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest, backend *resolvedBackend) error {
+	modelName := modelRequest["model"].(string)
+	if backend.provider != nil {
+		modelRouteName := ""
+		if backend.modelRoute != nil {
+			modelRouteName = fmt.Sprintf("%s/%s", backend.modelRoute.Namespace, backend.modelRoute.Name)
+			c.Set("modelRouteName", modelRouteName)
+		}
+		accesslog.SetRequestRouting(c, modelRouteName, "", "")
+		if err := r.proxyExternalProvider(c, c.Request, backend.provider, modelRequest, modelName); err != nil {
+			klog.Errorf("external provider request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
+			var proxyErr *externalProxyError
+			if errors.As(err, &proxyErr) {
+				accesslog.SetError(c, proxyErr.reason, proxyErr.message)
+				if proxyErr.origin != "" {
+					accesslog.SetErrorOrigin(c, proxyErr.origin)
+				}
+				c.Set("finishReason", proxyErr.reason)
+				if !c.Writer.Written() {
+					c.AbortWithStatusJSON(proxyErr.statusCode, proxyErr.message)
+				}
+				return nil
+			}
+
+			accesslog.SetError(c, "external_provider_proxy", "external provider request processing failed")
+			accesslog.SetErrorOrigin(c, "router")
+			c.Set("finishReason", "external_provider_proxy")
+			if !c.Writer.Written() {
+				c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+			}
+		}
+		return nil
+	}
+
+	pods := backend.pods
+	port := backend.port
+	modelServerName := backend.modelServerName
+	inferencePoolFullName := backend.inferencePoolFullName
+	modelRoute := backend.modelRoute
+	modelServer := backend.modelServer
+	isLora := backend.isLora
+	if modelServer != nil && modelServer.Spec.Model != nil && !isLora {
+		modelRequest["model"] = *modelServer.Spec.Model
 	}
 
 	// Common scheduling logic for both ModelServer and InferencePool
@@ -631,7 +661,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		MetricsRecorder: metricsRecorder,
 	}
 
-	err = r.scheduler.Schedule(ctx, pods)
+	err := r.scheduler.Schedule(ctx, pods)
 	if err != nil {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
@@ -1482,7 +1512,7 @@ func (r *Router) proxyToPDDisaggregated(
 // The caller (HandlerFunc) validates that modelName has a registered
 // ModelRoute before invoking this function, so Enqueue can never be reached
 // for an unregistered model name.
-func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequest, requestID string, modelName string) error {
+func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequest, requestID string, modelName string, backend *resolvedBackend) error {
 	// Extract session ID from HTTP header for multi-turn conversation tracking.
 	sessionHeader := r.store.GetSessionIDHeader()
 	var sessionID string
@@ -1572,7 +1602,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		klog.V(4).Infof("%s request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
 			logPrefix, requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
-		lbErr := r.doLoadbalance(c, modelRequest)
+		lbErr := r.doLoadbalance(c, modelRequest, backend)
 
 		// After a successful proxy, mark the session request as completed so follow-up
 		// requests from the same session get priority boost for prefix cache. Skip on
