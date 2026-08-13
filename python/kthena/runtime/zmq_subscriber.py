@@ -38,17 +38,17 @@ class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
 
 
 class KVCacheEvent(
-    msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True
+    msgspec.Struct, omit_defaults=True, gc=False, tag=True
 ):
     pass
 
 
 class BlockStored(KVCacheEvent):
     block_hashes: list[int]
-    parent_block_hash: Optional[int]
     token_ids: list[int]
-    block_size: int
-    lora_id: Optional[int]
+    parent_block_hash: Optional[int] = None
+    block_size: Optional[int] = None
+    lora_id: Optional[int] = None
 
 
 class BlockRemoved(KVCacheEvent):
@@ -63,6 +63,54 @@ class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
 
+# Legacy positional-array event schema, still emitted by older vLLM and by
+# llm-d-inference-sim with use-vllm-map-event-format=false (its default). The
+# trailing fields after lora_id are omitempty on the wire, so a short array is
+# valid. Kept so the subscriber stays backward compatible with array producers.
+class _LegacyBlockStored(
+    msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag="BlockStored"
+):
+    block_hashes: list[int]
+    parent_block_hash: Optional[int]
+    token_ids: list[int]
+    block_size: int
+    lora_id: Optional[int] = None
+
+
+class _LegacyBlockRemoved(
+    msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag="BlockRemoved"
+):
+    block_hashes: list[int]
+
+
+class _LegacyAllBlocksCleared(
+    msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag="AllBlocksCleared"
+):
+    pass
+
+
+class _LegacyKVEventBatch(EventBatch):
+    events: list[Union[_LegacyBlockStored, _LegacyBlockRemoved, _LegacyAllBlocksCleared]]
+
+
+def _legacy_to_current(event: Any) -> Any:
+    """Normalize a legacy array-shaped event into the current map struct so the
+    rest of the pipeline sees a single representation."""
+    if isinstance(event, _LegacyBlockStored):
+        return BlockStored(
+            block_hashes=event.block_hashes,
+            token_ids=event.token_ids,
+            parent_block_hash=event.parent_block_hash,
+            block_size=event.block_size,
+            lora_id=event.lora_id,
+        )
+    if isinstance(event, _LegacyBlockRemoved):
+        return BlockRemoved(block_hashes=event.block_hashes)
+    if isinstance(event, _LegacyAllBlocksCleared):
+        return AllBlocksCleared()
+    return event
+
+
 class VLLMZMQSubscriber:
 
     def __init__(self, pod_identifier: str, model_name: str):
@@ -72,6 +120,7 @@ class VLLMZMQSubscriber:
         self.running = False
         self.event_publisher = get_event_publisher()
         self.decoder = Decoder(type=KVEventBatch)
+        self._legacy_decoder = Decoder(type=_LegacyKVEventBatch)
         self._connection_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
 
@@ -190,13 +239,33 @@ class VLLMZMQSubscriber:
             logger.warning(f"Error extracting message data: {e}")
             return None, None
 
+    def _decode_legacy(self, payload: bytes) -> KVEventBatch:
+        legacy = self._legacy_decoder.decode(payload)
+        return KVEventBatch(
+            ts=legacy.ts,
+            events=[_legacy_to_current(e) for e in legacy.events],
+            data_parallel_rank=legacy.data_parallel_rank,
+        )
+
+    def _decode_batch(self, payload: bytes) -> KVEventBatch:
+        """Decode a KV-event batch, accepting both the current vLLM map-shaped
+        events and the legacy positional-array events still emitted by older
+        vLLM and by llm-d-inference-sim (use-vllm-map-event-format=false). The
+        outer EventBatch is unchanged; legacy events are normalized to the same
+        structs. Kthena-required block_hashes/token_ids stay required, so a
+        payload missing them is rejected in either shape."""
+        try:
+            return self.decoder.decode(payload)
+        except msgspec.ValidationError:
+            return self._decode_legacy(payload)
+
     async def _process_message(self, payload: bytes, pod_identifier: str, model_name: str) -> None:
         if not payload:
             logger.warning("Empty payload received")
             return
 
         try:
-            event_batch = self.decoder.decode(payload)
+            event_batch = self._decode_batch(payload)
 
             if not event_batch or not hasattr(event_batch, 'events'):
                 logger.warning("Invalid event batch structure")
