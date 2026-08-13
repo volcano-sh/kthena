@@ -18,7 +18,6 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	volcanoV1Beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 // GangPolicy defines the gang scheduling configuration.
@@ -42,13 +41,75 @@ type GangPolicy struct {
 	MinRoleReplicas map[string]int32 `json:"minRoleReplicas,omitempty"`
 }
 
-// NetworkTopologySpec defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
+// NetworkTopologySpec defines the network topology scheduling policy exposed by Kthena.
+// It is converted to the scheduler-specific representation by the controller, keeping
+// the Kthena workload API stable if the underlying scheduler API changes incompatibly.
+// +kubebuilder:validation:XValidation:rule="!(has(self.highestTierAllowed) && has(self.highestTierName))", message="highestTierAllowed and highestTierName cannot be set simultaneously"
+type NetworkTopologySpec struct {
+	// Mode specifies the mode of the network topology constraint.
+	// +kubebuilder:validation:Enum=hard;soft
+	// +kubebuilder:default=hard
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// HighestTierAllowed specifies the highest tier that a job is allowed to cross when scheduling.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	HighestTierAllowed *int `json:"highestTierAllowed,omitempty"`
+
+	// HighestTierName specifies the highest tier name that a job is allowed to cross when scheduling.
+	// HighestTierName and HighestTierAllowed cannot be set simultaneously.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	HighestTierName string `json:"highestTierName,omitempty"`
+}
+
+// NetworkTopology defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
 type NetworkTopology struct {
 	// GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`.
-	GroupPolicy *volcanoV1Beta1.NetworkTopologySpec `json:"groupPolicy,omitempty"`
+	GroupPolicy *NetworkTopologySpec `json:"groupPolicy,omitempty"`
 
-	// RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`.
-	RolePolicy *volcanoV1Beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
+	// RolePolicy defines the default network topology scheduling requirement for roles.
+	// Deprecated: use roles[*].networkTopology instead. This field is retained for backward
+	// compatibility only and must not be configured together with any role-level networkTopology.
+	RolePolicy *NetworkTopologySpec `json:"rolePolicy,omitempty"`
+
+	// RoleGroups defines sets of roles whose pods are scheduled as a single unit onto the
+	// same network topology domain, e.g. so a `prefill` role and a `decode` role share a
+	// HyperNode while an unrelated `lb` role is left unconstrained. Each named role must be
+	// unique across all groups and must not also configure spec.template.roles[*].networkTopology.
+	//
+	// The generated constraint applies at ServingGroup-instance granularity: every pod across
+	// every replica of the grouped roles within one ServingGroup instance is scheduled as a
+	// single subgroup. It does not pair specific replica indices across roles (e.g. the first
+	// `prefill` replica with the first `decode` replica specifically, letting other replica
+	// pairs land elsewhere) -- if a grouped role has multiple replicas, all of them are
+	// constrained together with the rest of the group.
+	// +optional
+	// +kubebuilder:validation:MaxItems=4
+	RoleGroups []RoleGroup `json:"roleGroups,omitempty"`
+}
+
+// RoleGroup defines a named set of roles that must be scheduled onto the same network
+// topology domain as a single scheduling unit. Name uniqueness across roleGroups and role
+// uniqueness within a single group's roles are enforced by the validating webhook rather
+// than a CEL XValidation rule here: a quadratic uniqueness check nested inside this list
+// pushes the CRD's estimated CEL rule cost over the API server's per-rule budget.
+type RoleGroup struct {
+	// Name identifies this role group. Must be unique within networkTopology.roleGroups.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// Roles lists the role names that belong to this group. Every name must reference a role
+	// defined in spec.template.roles, and a role may belong to at most one group.
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=4
+	Roles []string `json:"roles"`
+
+	// Policy defines the network topology scheduling requirement applied jointly to all pods
+	// across the grouped roles.
+	Policy *NetworkTopologySpec `json:"policy"`
 }
 
 // Role defines the specific pod instance role that performs the inference task.
@@ -83,6 +144,14 @@ type Role struct {
 	// For `partition`, the first N role replicas sorted by ordinal are protected from updates.
 	// +optional
 	RollingUpdateConfiguration `json:",inline,omitempty"`
+
+	// NetworkTopology defines the network topology scheduling requirement for this role.
+	// When set, it takes precedence over spec.template.networkTopology.rolePolicy for this
+	// role. It must not be configured together with spec.template.networkTopology.rolePolicy,
+	// and must not be set on a role that is also a member of a
+	// spec.template.networkTopology.roleGroups entry.
+	// +optional
+	NetworkTopology *NetworkTopologySpec `json:"networkTopology,omitempty"`
 }
 
 // PodTemplateSpec describes the data a pod should have when created from a template

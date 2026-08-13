@@ -21,12 +21,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
@@ -922,7 +924,7 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 							},
 						},
 						NetworkTopology: &workloadv1alpha1.NetworkTopology{
-							RolePolicy: &schedulingv1beta1.NetworkTopologySpec{
+							RolePolicy: &workloadv1alpha1.NetworkTopologySpec{
 								Mode:               "soft",
 								HighestTierAllowed: ptr.To(2),
 							},
@@ -1068,6 +1070,210 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 				},
 			},
 		},
+		{
+			// Reproduces the PD-disaggregated "lb" scenario from issue #1278: prefill/decode
+			// define their own role-level policy, lb defines none and there is no legacy
+			// rolePolicy fallback, so lb's SubGroupPolicy must have no NetworkTopology.
+			name: "Role-level policy applies only to selected roles",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-model-serving",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To(int32(2)),
+								NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{
+									Mode:               "hard",
+									HighestTierAllowed: ptr.To(1),
+								},
+							},
+							{
+								Name:     "decode",
+								Replicas: ptr.To(int32(2)),
+								NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{
+									Mode:               "hard",
+									HighestTierAllowed: ptr.To(1),
+								},
+							},
+							{
+								Name:     "lb",
+								Replicas: ptr.To(int32(2)),
+							},
+						},
+					},
+				},
+			},
+			podGroup: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{},
+			},
+			minRoleMember: map[string]int32{
+				"prefill": 2,
+				"decode":  2,
+				"lb":      2,
+			},
+			expectedResult: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{
+					SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{
+						{
+							Name: "prefill",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "prefill",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+							NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+								Mode:               "hard",
+								HighestTierAllowed: ptr.To(1),
+							},
+						},
+						{
+							Name: "decode",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "decode",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+							NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+								Mode:               "hard",
+								HighestTierAllowed: ptr.To(1),
+							},
+						},
+						{
+							Name: "lb",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "lb",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+						},
+					},
+				},
+			},
+		},
+		{
+			// Defense in depth: even if a role-level policy and the legacy rolePolicy are both
+			// present (which the webhook should reject), the role-level policy must win.
+			name: "Role-level policy takes precedence over legacy rolePolicy",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-model-serving",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "role1",
+								Replicas: ptr.To(int32(2)),
+								NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{
+									Mode:               "hard",
+									HighestTierAllowed: ptr.To(1),
+								},
+							},
+						},
+						NetworkTopology: &workloadv1alpha1.NetworkTopology{
+							RolePolicy: &workloadv1alpha1.NetworkTopologySpec{
+								Mode:               "soft",
+								HighestTierAllowed: ptr.To(3),
+							},
+						},
+					},
+				},
+			},
+			podGroup: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{},
+			},
+			minRoleMember: map[string]int32{
+				"role1": 2,
+			},
+			expectedResult: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{
+					SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{
+						{
+							Name: "role1",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "role1",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+							NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+								Mode:               "hard",
+								HighestTierAllowed: ptr.To(1),
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			// HighestTierName must survive the Kthena adapter -> Volcano conversion boundary.
+			name: "Role-level policy preserves HighestTierName",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-model-serving",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "role1",
+								Replicas: ptr.To(int32(2)),
+								NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{
+									Mode:            "hard",
+									HighestTierName: "tier-1",
+								},
+							},
+						},
+					},
+				},
+			},
+			podGroup: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{},
+			},
+			minRoleMember: map[string]int32{
+				"role1": 2,
+			},
+			expectedResult: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{
+					SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{
+						{
+							Name: "role1",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "role1",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+							NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+								Mode:            "hard",
+								HighestTierName: "tier-1",
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1087,6 +1293,252 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 				assert.Equal(t, expectedSubGroup.MinSubGroups, actualSubGroup.MinSubGroups)
 				assert.Equal(t, expectedSubGroup.NetworkTopology, actualSubGroup.NetworkTopology)
 			}
+		})
+	}
+}
+
+// TestAppendSubGroupPolicyWithRoleGroups proves the actual scheduler-facing mechanism behind
+// cross-role topology grouping, not just that two roles share equal NetworkTopology field
+// values: prefill and decode must collapse into a single SubGroupPolicy entry whose
+// LabelSelector spans both roles and whose MatchLabelKeys is GroupNameLabelKey (not the
+// per-role RoleIDKey used elsewhere in this file). Per Volcano's SubJobInfo construction
+// (getOrCreateSubJob/getSubJobID), pods sharing one SubGroupPolicy entry's LabelSelector and
+// MatchLabelKeys values collapse into one SubJobInfo with one shared AllocatedHyperNode --
+// that shared identity, not merely equal field values, is what the grouping guarantee rests on.
+func TestAppendSubGroupPolicyWithRoleGroups(t *testing.T) {
+	groupPolicy := &schedulingv1beta1.NetworkTopologySpec{
+		Mode:               "hard",
+		HighestTierAllowed: ptr.To(1),
+	}
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-model-serving",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{Name: "prefill", Replicas: ptr.To(int32(2)), WorkerReplicas: 0},
+					{Name: "decode", Replicas: ptr.To(int32(1)), WorkerReplicas: 1},
+					// lb is ungrouped but keeps its own independent role-level policy,
+					// proving that roleGroups elsewhere does not disturb a role's own
+					// Role.NetworkTopology when that role isn't part of any group.
+					{Name: "lb", Replicas: ptr.To(int32(2)), WorkerReplicas: 0, NetworkTopology: &workloadv1alpha1.NetworkTopologySpec{Mode: "soft"}},
+				},
+				NetworkTopology: &workloadv1alpha1.NetworkTopology{
+					RoleGroups: []workloadv1alpha1.RoleGroup{
+						{
+							Name:   "prefill-decode",
+							Roles:  []string{"prefill", "decode"},
+							Policy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard", HighestTierAllowed: ptr.To(1)},
+						},
+					},
+				},
+			},
+		},
+	}
+	minRoleMember := map[string]int32{
+		"prefill": 1,
+		"decode":  2,
+		"lb":      1,
+	}
+	podGroup := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{}}
+
+	result := appendSubGroupPolicy(ms, podGroup, minRoleMember)
+
+	// Exactly two entries: one merged prefill+decode group, one independent lb entry.
+	// Neither prefill nor decode may appear as their own independent entry.
+	require.Len(t, result.Spec.SubGroupPolicy, 2)
+
+	var group, lbEntry *schedulingv1beta1.SubGroupPolicySpec
+	for i := range result.Spec.SubGroupPolicy {
+		entry := &result.Spec.SubGroupPolicy[i]
+		switch entry.Name {
+		case "prefill-decode":
+			group = entry
+		case "lb":
+			lbEntry = entry
+		case "prefill", "decode":
+			t.Fatalf("grouped role %q must not have its own independent SubGroupPolicy entry", entry.Name)
+		}
+	}
+	require.NotNil(t, group, "expected a merged prefill-decode SubGroupPolicy entry")
+	require.NotNil(t, lbEntry, "expected lb to keep its own independent SubGroupPolicy entry")
+
+	// This is the actual coupling mechanism: one LabelSelector spanning both role names,
+	// keyed by the ServingGroup-instance-scoped GroupNameLabelKey rather than the per-role
+	// RoleIDKey, so prefill and decode pods resolve to the same Volcano SubJobInfo.
+	assert.Equal(t, &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+		},
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{
+				Key:      workloadv1alpha1.RoleLabelKey,
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"prefill", "decode"},
+			},
+		},
+	}, group.LabelSelector)
+	assert.Equal(t, []string{workloadv1alpha1.GroupNameLabelKey}, group.MatchLabelKeys)
+	assert.NotEqual(t, []string{workloadv1alpha1.RoleIDKey}, group.MatchLabelKeys,
+		"grouping must not use the per-role RoleIDKey, which would keep prefill and decode independent")
+	// prefill: (1 entry + 0 workers) * 2 replicas = 2; decode: (1 entry + 1 worker) * 1 replica = 2; total 4.
+	assert.Equal(t, ptr.To(int32(4)), group.SubGroupSize)
+	assert.Equal(t, ptr.To(int32(1)), group.MinSubGroups)
+	assert.Equal(t, groupPolicy, group.NetworkTopology)
+
+	// lb is untouched by the group and keeps the ordinary per-role, per-replica-instance shape,
+	// including its own independent role-level policy (roleGroups elsewhere must not disturb it).
+	assert.Equal(t, &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+			workloadv1alpha1.RoleLabelKey:             "lb",
+		},
+	}, lbEntry.LabelSelector)
+	assert.Equal(t, []string{workloadv1alpha1.RoleIDKey}, lbEntry.MatchLabelKeys)
+	assert.Equal(t, &schedulingv1beta1.NetworkTopologySpec{Mode: "soft"}, lbEntry.NetworkTopology)
+}
+
+// TestAppendSubGroupPolicyWithMultipleRoleGroups proves two independent role groups in the
+// same ServingGroup do not collide: each group's LabelSelector only spans its own roles, so
+// keeping role names disjoint across groups (enforced by the webhook) keeps every pod
+// matching exactly one group's SubGroupPolicy entry.
+func TestAppendSubGroupPolicyWithMultipleRoleGroups(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-model-serving",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{Name: "prefill", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+					{Name: "decode", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+					{Name: "worker-a", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+					{Name: "worker-b", Replicas: ptr.To(int32(1)), WorkerReplicas: 0},
+				},
+				NetworkTopology: &workloadv1alpha1.NetworkTopology{
+					RoleGroups: []workloadv1alpha1.RoleGroup{
+						{
+							Name:   "prefill-decode",
+							Roles:  []string{"prefill", "decode"},
+							Policy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard", HighestTierAllowed: ptr.To(1)},
+						},
+						{
+							Name:   "worker-pair",
+							Roles:  []string{"worker-a", "worker-b"},
+							Policy: &workloadv1alpha1.NetworkTopologySpec{Mode: "hard", HighestTierAllowed: ptr.To(2)},
+						},
+					},
+				},
+			},
+		},
+	}
+	minRoleMember := map[string]int32{"prefill": 1, "decode": 1, "worker-a": 1, "worker-b": 1}
+	podGroup := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{}}
+
+	result := appendSubGroupPolicy(ms, podGroup, minRoleMember)
+
+	// No independent per-role entries at all: every role belongs to exactly one of the two
+	// groups, and exactly two merged entries must be produced.
+	require.Len(t, result.Spec.SubGroupPolicy, 2)
+
+	byName := make(map[string]*schedulingv1beta1.SubGroupPolicySpec, 2)
+	for i := range result.Spec.SubGroupPolicy {
+		entry := &result.Spec.SubGroupPolicy[i]
+		byName[entry.Name] = entry
+	}
+
+	pd := byName["prefill-decode"]
+	wp := byName["worker-pair"]
+	require.NotNil(t, pd)
+	require.NotNil(t, wp)
+
+	assert.ElementsMatch(t, []string{"prefill", "decode"}, pd.LabelSelector.MatchExpressions[0].Values)
+	assert.ElementsMatch(t, []string{"worker-a", "worker-b"}, wp.LabelSelector.MatchExpressions[0].Values)
+	assert.Equal(t, ptr.To(1), pd.NetworkTopology.HighestTierAllowed)
+	assert.Equal(t, ptr.To(2), wp.NetworkTopology.HighestTierAllowed)
+
+	// Each group's selector must only ever match its own roles, never the other group's.
+	pdSelector, err := metav1.LabelSelectorAsSelector(pd.LabelSelector)
+	require.NoError(t, err)
+	assert.False(t, pdSelector.Matches(labels.Set{
+		workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+		workloadv1alpha1.RoleLabelKey:             "worker-a",
+	}), "prefill-decode group selector must not match worker-a")
+
+	wpSelector, err := metav1.LabelSelectorAsSelector(wp.LabelSelector)
+	require.NoError(t, err)
+	assert.False(t, wpSelector.Matches(labels.Set{
+		workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+		workloadv1alpha1.RoleLabelKey:             "prefill",
+	}), "worker-pair group selector must not match prefill")
+}
+
+// TestResolveRoleNetworkTopology directly exercises resolveRoleNetworkTopology's nil-safety:
+// a nil ModelServing and a nil spec.template.networkTopology must not panic, and precedence
+// (role-level policy, then legacy rolePolicy, then none) must hold independent of how
+// appendSubGroupPolicy happens to call it today.
+func TestResolveRoleNetworkTopology(t *testing.T) {
+	rolePolicy := &workloadv1alpha1.NetworkTopologySpec{Mode: "soft"}
+	roleLevel := &workloadv1alpha1.NetworkTopologySpec{Mode: "hard"}
+
+	tests := []struct {
+		name string
+		ms   *workloadv1alpha1.ModelServing
+		role workloadv1alpha1.Role
+		want *workloadv1alpha1.NetworkTopologySpec
+	}{
+		{
+			name: "nil ModelServing and no role-level policy returns nil",
+			ms:   nil,
+			role: workloadv1alpha1.Role{Name: "role1"},
+			want: nil,
+		},
+		{
+			name: "nil ModelServing with role-level policy returns role policy",
+			ms:   nil,
+			role: workloadv1alpha1.Role{Name: "role1", NetworkTopology: roleLevel},
+			want: roleLevel,
+		},
+		{
+			name: "nil spec.template.networkTopology and no role-level policy returns nil",
+			ms:   &workloadv1alpha1.ModelServing{},
+			role: workloadv1alpha1.Role{Name: "role1"},
+			want: nil,
+		},
+		{
+			name: "role-level policy takes precedence over legacy rolePolicy",
+			ms: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						NetworkTopology: &workloadv1alpha1.NetworkTopology{RolePolicy: rolePolicy},
+					},
+				},
+			},
+			role: workloadv1alpha1.Role{Name: "role1", NetworkTopology: roleLevel},
+			want: roleLevel,
+		},
+		{
+			name: "falls back to legacy rolePolicy when role has none",
+			ms: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						NetworkTopology: &workloadv1alpha1.NetworkTopology{RolePolicy: rolePolicy},
+					},
+				},
+			},
+			role: workloadv1alpha1.Role{Name: "role1"},
+			want: rolePolicy,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotPanics(t, func() {
+				got := resolveRoleNetworkTopology(tt.ms, tt.role)
+				assert.Same(t, tt.want, got)
+			})
 		})
 	}
 }
@@ -1469,11 +1921,10 @@ func newMinimalMSWithGroupTopology(mode string) *workloadv1alpha1.ModelServing {
 	if mode == "" {
 		return ms
 	}
-	tier := 3
 	ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{
-		GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               schedulingv1beta1.NetworkTopologyMode(mode),
-			HighestTierAllowed: &tier,
+		GroupPolicy: &workloadv1alpha1.NetworkTopologySpec{
+			Mode:               mode,
+			HighestTierAllowed: ptr.To(3),
 		},
 	}
 	return ms

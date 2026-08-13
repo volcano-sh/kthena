@@ -91,6 +91,8 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
+	allErrs = append(allErrs, validateNetworkTopologyPolicy(modelServing)...)
+	allErrs = append(allErrs, validateRoleGroups(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -309,6 +311,125 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 				minRoleReplicasPath.Key(roleName),
 				minReplicas,
 				fmt.Sprintf("minRoleReplicas for role %s must be non-negative", roleName),
+			))
+		}
+	}
+
+	return allErrs
+}
+
+// validateNetworkTopologyPolicy rejects manifests that configure both the compatibility
+// spec.template.networkTopology.rolePolicy field and a role-level networkTopology policy,
+// or both rolePolicy and roleGroups, since each style is mutually exclusive with the
+// others per the accepted role-scoped network topology design: exactly one style governs
+// a given ServingGroup's roles, so there is never any ambiguous precedence to resolve.
+func validateNetworkTopologyPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+
+	rolePolicyConfigured := ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.RolePolicy != nil
+	if !rolePolicyConfigured {
+		return allErrs
+	}
+
+	templatePath := field.NewPath("spec").Child("template")
+	for i, role := range ms.Spec.Template.Roles {
+		if role.NetworkTopology == nil {
+			continue
+		}
+
+		allErrs = append(allErrs, field.Forbidden(
+			templatePath.Child("roles").Index(i).Child("networkTopology"),
+			"spec.template.networkTopology.rolePolicy and spec.template.roles[*].networkTopology are mutually exclusive",
+		))
+	}
+
+	if len(ms.Spec.Template.NetworkTopology.RoleGroups) > 0 {
+		allErrs = append(allErrs, field.Forbidden(
+			templatePath.Child("networkTopology").Child("roleGroups"),
+			"spec.template.networkTopology.rolePolicy and spec.template.networkTopology.roleGroups are mutually exclusive",
+		))
+	}
+
+	return allErrs
+}
+
+// validateRoleGroups validates spec.template.networkTopology.roleGroups:
+//   - group names must be unique,
+//   - every referenced role name must exist in spec.template.roles,
+//   - a role may belong to at most one group (this also rejects a role name repeated
+//     within a single group's own roles list, since that role would already be
+//     recorded as a member of that same group),
+//   - a role that belongs to a group must not also configure its own
+//     spec.template.roles[*].networkTopology, since the group's policy governs it instead
+//     and mixing the two would create ambiguous precedence.
+//
+// Name and role-list uniqueness are checked here in Go rather than via a CEL
+// XValidation rule on the CRD: a quadratic uniqueness check nested inside the
+// roleGroups list pushes the CRD's estimated CEL rule cost over the API server's
+// per-rule budget, so the CRD itself is rejected at install time.
+func validateRoleGroups(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if ms.Spec.Template.NetworkTopology == nil || len(ms.Spec.Template.NetworkTopology.RoleGroups) == 0 {
+		return allErrs
+	}
+
+	roleGroupsPath := field.NewPath("spec").Child("template").Child("networkTopology").Child("roleGroups")
+
+	roleNames := make(map[string]bool, len(ms.Spec.Template.Roles))
+	roleHasOwnTopology := make(map[string]bool, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		roleNames[role.Name] = true
+		roleHasOwnTopology[role.Name] = role.NetworkTopology != nil
+	}
+
+	groupNames := make(map[string]bool, len(ms.Spec.Template.NetworkTopology.RoleGroups))
+	roleGroupOf := make(map[string]string)
+	for i, group := range ms.Spec.Template.NetworkTopology.RoleGroups {
+		groupPath := roleGroupsPath.Index(i)
+
+		if groupNames[group.Name] {
+			allErrs = append(allErrs, field.Duplicate(
+				groupPath.Child("name"),
+				group.Name,
+			))
+		}
+		groupNames[group.Name] = true
+
+		for j, roleName := range group.Roles {
+			rolePath := groupPath.Child("roles").Index(j)
+
+			if !roleNames[roleName] {
+				allErrs = append(allErrs, field.Invalid(
+					rolePath,
+					roleName,
+					fmt.Sprintf("role %q does not exist in spec.template.roles", roleName),
+				))
+				continue
+			}
+
+			if existingGroup, exists := roleGroupOf[roleName]; exists {
+				allErrs = append(allErrs, field.Invalid(
+					rolePath,
+					roleName,
+					fmt.Sprintf("role %q is already a member of roleGroup %q; a role may belong to at most one group", roleName, existingGroup),
+				))
+				continue
+			}
+			roleGroupOf[roleName] = group.Name
+
+			if roleHasOwnTopology[roleName] {
+				allErrs = append(allErrs, field.Forbidden(
+					rolePath,
+					fmt.Sprintf("role %q configures its own spec.template.roles[*].networkTopology and cannot also be a member of roleGroup %q", roleName, group.Name),
+				))
+			}
+		}
+
+		if group.Policy == nil {
+			allErrs = append(allErrs, field.Required(
+				groupPath.Child("policy"),
+				"policy is required for a roleGroup",
 			))
 		}
 	}

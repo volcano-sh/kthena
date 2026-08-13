@@ -51,6 +51,41 @@ spec:
         highestTierAllowed: 2
 ```
 
+### Role-Scoped Network Topology Policies
+
+`spec.template.networkTopology.rolePolicy` applies the same topology constraint to every role in the ServingGroup. This is too coarse for heterogeneous roles: for example, a PD-disaggregated ModelServing where `prefill` and `decode` require topology-aware placement but an `lb` role is CPU-only and should be free to run on general-purpose nodes.
+
+To support this, each role can define its own `networkTopology` policy under `spec.template.roles[*]`:
+
+```yaml
+spec:
+  replicas: 1
+  template:
+    roles:
+    - name: prefill
+      networkTopology:
+        mode: hard
+        highestTierAllowed: 1
+      # ...
+    - name: decode
+      networkTopology:
+        mode: hard
+        highestTierAllowed: 1
+      # ...
+    - name: lb
+      # no networkTopology: lb receives no topology constraint in its generated SubGroupPolicy
+      # ...
+```
+
+**Precedence rules:**
+
+1. If a role defines its own `networkTopology`, that role-level policy is used.
+2. If no role defines a role-level policy and `spec.template.networkTopology.rolePolicy` is set, the legacy behavior applies: every role inherits `rolePolicy` (this keeps existing manifests working unchanged).
+3. `spec.template.networkTopology.rolePolicy` and `spec.template.roles[*].networkTopology` are **mutually exclusive** — configuring both in the same ServingGroup is rejected by the ModelServing validating webhook.
+4. If neither a role-level policy nor `rolePolicy` is set, the role's generated `SubGroupPolicy` has no `networkTopology` at all.
+
+`rolePolicy` is retained only for backward compatibility and is deprecated in favor of `roles[*].networkTopology`. New manifests should configure `networkTopology` on the roles that need it and omit `rolePolicy`.
+
 ### SubGroup
 
 Starting with kthena version 0.3.0, kthena utilizes `subGroupPolicy` within `podGroup` for multidimensional network topology aware scheduling.
