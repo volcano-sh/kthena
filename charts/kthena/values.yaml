@@ -34,6 +34,15 @@ workload:
         certSecretName: kthena-controller-manager-webhook-certs
         # -- Service name for the webhook.
         serviceName: kthena-controller-manager-webhook
+    evictionWebhook:
+      # -- Enable pods/eviction protection webhook for ModelServing.
+      enabled: false
+      # -- Failure policy for the pods/eviction webhook.
+      failurePolicy: Fail
+      # -- Timeout for the pods/eviction webhook.
+      timeoutSeconds: 5
+      # -- ConfigMap-backed disruption tracker TTL in seconds.
+      trackerTTLSeconds: 60
 
 networking:
   # -- Enable the networking subchart.
