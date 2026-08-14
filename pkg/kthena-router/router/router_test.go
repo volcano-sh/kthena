@@ -2034,6 +2034,104 @@ func TestRouter_HandlerFunc_ScheduleFailure(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "can't schedule to target pod")
 }
 
+func TestRouter_HandlerFunc_DoesNotRateLimitFailedPodDiscovery(t *testing.T) {
+	tests := []struct {
+		name                     string
+		enableFairnessScheduling bool
+	}{
+		{name: "direct"},
+		{name: "fairness scheduling", enableFairnessScheduling: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previousFairnessScheduling := EnableFairnessScheduling
+			previousSessionBoost := EnableSessionBoost
+			EnableFairnessScheduling = tt.enableFairnessScheduling
+			EnableSessionBoost = false
+			defer func() {
+				EnableFairnessScheduling = previousFairnessScheduling
+				EnableSessionBoost = previousSessionBoost
+			}()
+
+			router, store, backend := setupTestRouter(t, nil)
+			defer backend.Close()
+
+			modelRoute := &aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-rate-limit", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: "rate-limited-model",
+					Rules: []*aiv1alpha1.Rule{{
+						TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "missing-backend"}},
+					}},
+				},
+			}
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: v1.ObjectMeta{Name: "missing-backend", Namespace: "default"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					WorkloadPort:    aiv1alpha1.WorkloadPort{Port: 8080},
+					InferenceEngine: "vLLM",
+				},
+			}
+
+			if tt.enableFairnessScheduling {
+				router.store = &failingEnqueueStore{Store: store}
+			}
+
+			assert.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+			assert.NoError(t, store.AddOrUpdateModelServer(modelServer, sets.New[types.NamespacedName]()))
+			inputLimit := uint32(10)
+			assert.NoError(t, router.loadRateLimiter.AddOrUpdateLimiter("rate-limited-model", &aiv1alpha1.RateLimit{
+				InputTokensPerUnit: &inputLimit,
+				Unit:               aiv1alpha1.Second,
+			}))
+
+			requestBody := `{"model":"rate-limited-model","prompt":"1234567890123456789012345678901234567890"}`
+			for i := 0; i < 2; i++ {
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(requestBody))
+				c.Request.Header.Set("Content-Type", "application/json")
+
+				router.HandlerFunc()(c)
+
+				assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			}
+		})
+	}
+}
+
+func TestRouter_HandlerFunc_RateLimitsBeforeFairnessQueue(t *testing.T) {
+	previousFairnessScheduling := EnableFairnessScheduling
+	previousSessionBoost := EnableSessionBoost
+	EnableFairnessScheduling = true
+	EnableSessionBoost = false
+	defer func() {
+		EnableFairnessScheduling = previousFairnessScheduling
+		EnableSessionBoost = previousSessionBoost
+	}()
+
+	router, store, backend := setupFairnessTestRouter(t, nil)
+	defer backend.Close()
+	router.store = &failingEnqueueStore{Store: store}
+
+	inputLimit := uint32(1)
+	assert.NoError(t, router.loadRateLimiter.AddOrUpdateLimiter("fair-model", &aiv1alpha1.RateLimit{
+		InputTokensPerUnit: &inputLimit,
+		Unit:               aiv1alpha1.Second,
+	}))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	requestBody := `{"model":"fair-model","prompt":"this request exceeds the configured limit"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(requestBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
 func TestParseModelRequestValidatesModelName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -2642,6 +2740,8 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			prompt, perr := utils.ParsePrompt(modelRequest)
 			assert.NoError(t, perr)
 			c.Set(PromptKey, prompt)
+			resolvedBackend, err := router.resolveBackend(c, modelRequest)
+			assert.NoError(t, err)
 			if tt.setUserID {
 				c.Set(common.UserIdKey, "user-test")
 			}
@@ -2651,7 +2751,7 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			// client cancellation mid-flight when needed.
 			done := make(chan error, 1)
 			go func() {
-				done <- router.handleFairnessScheduling(c, modelRequest, "req-test", "fair-model")
+				done <- router.handleFairnessScheduling(c, modelRequest, "req-test", "fair-model", resolvedBackend)
 			}()
 
 			if clientCancel != nil {
@@ -2695,4 +2795,49 @@ type failingEnqueueStore struct {
 
 func (s *failingEnqueueStore) Enqueue(req *datastore.Request) error {
 	return fmt.Errorf("injected enqueue failure")
+}
+
+type immediateFairnessStore struct {
+	datastore.Store
+	matchCalls atomic.Int32
+}
+
+func (s *immediateFairnessStore) MatchModelTarget(model string, req *http.Request, gatewayKey string) (datastore.ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
+	s.matchCalls.Add(1)
+	return s.Store.MatchModelTarget(model, req, gatewayKey)
+}
+
+func (s *immediateFairnessStore) Enqueue(req *datastore.Request) error {
+	close(req.NotifyChan)
+	return nil
+}
+
+func TestRouter_HandlerFunc_FairnessResolvesModelTargetOnce(t *testing.T) {
+	previousFairnessScheduling := EnableFairnessScheduling
+	previousSessionBoost := EnableSessionBoost
+	EnableFairnessScheduling = true
+	EnableSessionBoost = false
+	defer func() {
+		EnableFairnessScheduling = previousFairnessScheduling
+		EnableSessionBoost = previousSessionBoost
+	}()
+
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"fair-ok"}`)
+	})
+	router, store, backend := setupFairnessTestRouter(t, backendHandler)
+	defer backend.Close()
+	fairnessStore := &immediateFairnessStore{Store: store}
+	router.store = fairnessStore
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"fair-model","prompt":"hello fairness"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, int32(1), fairnessStore.matchCalls.Load())
 }
