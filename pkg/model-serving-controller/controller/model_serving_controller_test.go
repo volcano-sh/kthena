@@ -2671,16 +2671,17 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 
 func TestManageRoleReplicas(t *testing.T) {
 	tests := []struct {
-		name             string
-		roleReplicas     int32
-		workerReplicas   int32
-		initialRoleIDs   []int
-		addEntryPod      bool
-		mismatchOwnerUID bool
-		noOwnerRef       bool
-		expectedRoleSize int
-		expectedPodCount int
-		expectRequeue    bool
+		name              string
+		roleReplicas      int32
+		workerReplicas    int32
+		initialRoleIDs    []int
+		addEntryPod       bool
+		mismatchOwnerUID  bool
+		noOwnerRef        bool
+		addOwnedWorkerPod bool
+		expectedRoleSize  int
+		expectedPodCount  int
+		expectRequeue     bool
 	}{
 		{
 			name:             "recreate missing pods when role count matches",
@@ -2733,6 +2734,18 @@ func TestManageRoleReplicas(t *testing.T) {
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
+		},
+		{
+			name:              "ownerless pod does not block processing of a validly owned sibling pod",
+			roleReplicas:      1,
+			workerReplicas:    1,
+			initialRoleIDs:    []int{0},
+			addEntryPod:       true,
+			noOwnerRef:        true,
+			addOwnedWorkerPod: true,
+			expectedRoleSize:  1,
+			expectedPodCount:  2,
+			expectRequeue:     true,
 		},
 	}
 
@@ -2804,6 +2817,15 @@ func TestManageRoleReplicas(t *testing.T) {
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
+
+				if tt.addOwnedWorkerPod {
+					// Sibling pod for the same role instance, validly owned by ms, placed
+					// after the ownerless entry pod to prove it is still processed.
+					workerPod := utils.GenerateWorkerPod(ms.Spec.Template.Roles[0], ms, entryPod, groupName, utils.GenerateRoleID(roleName, 0), 1, revision, "test-roleTemplateHash")
+					_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), workerPod, metav1.CreateOptions{})
+					assert.NoError(t, err)
+					assert.NoError(t, controller.podsInformer.GetIndexer().Add(workerPod))
+				}
 			}
 
 			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
