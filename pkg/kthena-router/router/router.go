@@ -41,6 +41,7 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/batch"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
@@ -105,6 +106,12 @@ type Router struct {
 
 	// KV Connector management
 	connectorFactory *connectors.Factory
+
+	// OpenAI-compatible Files + Batches APIs (control plane + worker).
+	filesHandler   *batch.Handler
+	batchesHandler *batch.BatchesHandler
+	batchWorker    *batch.Worker
+	batchCancel    context.CancelFunc
 
 	// Priority queue configuration
 	queueTimeout     time.Duration
@@ -194,7 +201,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
 
-	return &Router{
+	r := &Router{
 		store:            store,
 		scheduler:        scheduler.NewScheduler(store, routerConfig),
 		authenticator:    auth.NewJWTAuthenticator(routerConfig),
@@ -209,6 +216,49 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 
 		sessionBoostTimeout: parseSessionBoostTimeout(),
 	}
+
+	filesHandler, batchesHandler, batchWorker, batchCancel, err := initBatchWithRouter(r)
+	if err != nil {
+		klog.Fatalf("failed to initialize batch subsystem: %v", err)
+	}
+	r.filesHandler = filesHandler
+	r.batchesHandler = batchesHandler
+	r.batchWorker = batchWorker
+	r.batchCancel = batchCancel
+
+	return r
+}
+
+// Close stops the batch worker if running.
+func (r *Router) Close() {
+	if r.batchCancel != nil {
+		r.batchCancel()
+		r.batchCancel = nil
+	}
+	if r.batchWorker != nil {
+		r.batchWorker.Stop()
+	}
+}
+
+func initBatchWithRouter(r *Router) (*batch.Handler, *batch.BatchesHandler, *batch.Worker, context.CancelFunc, error) {
+	cfg := batch.LoadConfigFromEnv()
+	fileStore, err := batch.NewFileStoreFromConfig(cfg)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if fileStore == nil {
+		return batch.NewHandler(nil), batch.NewBatchesHandler(nil, nil, nil), nil, nil, nil
+	}
+
+	jobStore := batch.NewBatchStore()
+	worker := batch.NewWorker(fileStore, jobStore, r.ExecuteBatchLine, r.ActiveRequestCount, batch.WorkerConfig{
+		Concurrency:              cfg.MaxConcurrency,
+		InteractiveBusyThreshold: cfg.InteractiveBusyThreshold,
+	})
+	batchesHandler := batch.NewBatchesHandler(fileStore, jobStore, worker.Enqueue)
+	ctx, cancel := context.WithCancel(context.Background())
+	worker.Start(ctx)
+	return batch.NewHandlerWithLimits(fileStore, cfg.MaxFileBytes), batchesHandler, worker, cancel, nil
 }
 
 const defaultQueueTimeout = 60 * time.Second
@@ -276,6 +326,19 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		if c.Request.Method == http.MethodGet &&
 			(c.Request.URL.Path == "/v1/models" || c.Request.URL.Path == "/models") {
 			r.ListModels(c)
+			return
+		}
+
+		// Handle /v1/files (OpenAI-compatible Files API for batch jobs).
+		// Must run before ParseModelRequest: uploads are multipart and have no "model" field.
+		if batch.IsFilesPath(c.Request.URL.Path) {
+			r.HandleFiles(c)
+			return
+		}
+
+		// Handle /v1/batches (OpenAI-compatible Batches API).
+		if batch.IsBatchesPath(c.Request.URL.Path) {
+			r.HandleBatches(c)
 			return
 		}
 
@@ -1023,6 +1086,37 @@ func (r *Router) ListModels(c *gin.Context) {
 		Object: "list",
 		Data:   data,
 	})
+}
+
+// HandleFiles implements the OpenAI-compatible /v1/files endpoints.
+// Like ListModels, this is control-plane traffic and never enters doLoadbalance.
+func (r *Router) HandleFiles(c *gin.Context) {
+	if r.filesHandler == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, batch.ErrorBody{
+			Error: batch.ErrorDetail{
+				Message: fmt.Sprintf("batch files API is disabled; set %s to enable", batch.EnvFilesDir),
+				Type:    "server_error",
+				Code:    "files_disabled",
+			},
+		})
+		return
+	}
+	r.filesHandler.ServeHTTP(c)
+}
+
+// HandleBatches implements the OpenAI-compatible /v1/batches endpoints.
+func (r *Router) HandleBatches(c *gin.Context) {
+	if r.batchesHandler == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, batch.ErrorBody{
+			Error: batch.ErrorDetail{
+				Message: fmt.Sprintf("batch API is disabled; set %s to enable", batch.EnvFilesDir),
+				Type:    "server_error",
+				Code:    "batch_disabled",
+			},
+		})
+		return
+	}
+	r.batchesHandler.ServeHTTP(c)
 }
 
 func (r *Router) Auth() gin.HandlerFunc {
