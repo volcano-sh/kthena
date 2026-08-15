@@ -2696,3 +2696,90 @@ type failingEnqueueStore struct {
 func (s *failingEnqueueStore) Enqueue(req *datastore.Request) error {
 	return fmt.Errorf("injected enqueue failure")
 }
+
+func TestRouter_RateLimit_ReconciliationIdempotency(t *testing.T) {
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"resp"}`)
+	})
+	router, store, backend := setupTestRouter(t, backendHandler)
+	defer backend.Close()
+
+	modelName := "rate-limited-model"
+	tokens := uint32(10)
+	unit := aiv1alpha1.Second
+
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-ratelimit", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: modelName,
+			RateLimit: &aiv1alpha1.RateLimit{
+				InputTokensPerUnit: &tokens,
+				Unit:               unit,
+			},
+			Rules: []*aiv1alpha1.Rule{
+				{
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ModelServerName: "ms-1"},
+					},
+				},
+			},
+		},
+	}
+
+	err := store.AddOrUpdateModelRoute(modelRoute)
+	assert.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		applied := router.loadRateLimiter.GetAppliedLimiter(modelName)
+		return applied != nil && *applied.InputTokensPerUnit == 10
+	}, 1*time.Second, 10*time.Millisecond)
+
+	prompt := "hello world"
+	for i := 0; i < 3; i++ {
+		err := router.loadRateLimiter.RateLimit(modelName, prompt)
+		assert.NoError(t, err)
+	}
+
+	err = router.loadRateLimiter.RateLimit(modelName, prompt)
+	assert.Error(t, err)
+
+	sameRoute := modelRoute.DeepCopy()
+	sameRoute.Labels = map[string]string{"reconciled": "true"}
+
+	err = store.AddOrUpdateModelRoute(sameRoute)
+	assert.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	err = router.loadRateLimiter.RateLimit(modelName, prompt)
+	assert.Error(t, err, "rate limit state should be preserved across non-config updates")
+
+	newTokens := uint32(50)
+	updatedRoute := modelRoute.DeepCopy()
+	updatedRoute.Spec.RateLimit = &aiv1alpha1.RateLimit{
+		InputTokensPerUnit: &newTokens,
+		Unit:               unit,
+	}
+
+	err = store.AddOrUpdateModelRoute(updatedRoute)
+	assert.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		applied := router.loadRateLimiter.GetAppliedLimiter(modelName)
+		return applied != nil && *applied.InputTokensPerUnit == 50
+	}, 1*time.Second, 10*time.Millisecond)
+
+	err = router.loadRateLimiter.RateLimit(modelName, prompt)
+	assert.NoError(t, err, "limiter should be updated when rate limit config changes")
+
+	noLimitRoute := modelRoute.DeepCopy()
+	noLimitRoute.Spec.RateLimit = nil
+
+	err = store.AddOrUpdateModelRoute(noLimitRoute)
+	assert.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		return router.loadRateLimiter.GetAppliedLimiter(modelName) == nil
+	}, 1*time.Second, 10*time.Millisecond)
+}
