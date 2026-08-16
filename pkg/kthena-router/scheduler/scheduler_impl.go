@@ -130,7 +130,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		// Get decode pods directly from store (O(1) lookup)
 		decodePods, err := s.store.GetDecodePods(ctx.ModelServerName)
 		if err != nil {
-			return fmt.Errorf("failed to get decode pods: %v", err)
+			return fmt.Errorf("failed to get decode pods: %w", err)
 		}
 
 		if len(decodePods) == 0 {

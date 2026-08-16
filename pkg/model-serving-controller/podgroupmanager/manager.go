@@ -206,7 +206,7 @@ func (m *Manager) initPodGroupInformer() error {
 	if err := pgInformer.Informer().AddIndexers(cache.Indexers{
 		groupNameKey: utils.GroupNameIndexFunc,
 	}); err != nil {
-		return fmt.Errorf("cannot create podGroup Informer Index, err: %v", err)
+		return fmt.Errorf("cannot create podGroup Informer Index, err: %w", err)
 	}
 	m.PodGroupInformer = pgInformer.Informer()
 	m.PodGroupLister = pgInformer.Lister()
@@ -252,7 +252,7 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 	podGroup, err := podGroupLister.PodGroups(ms.Namespace).Get(pgName)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to get PodGroup %s: %v", pgName, err), 0
+			return fmt.Errorf("failed to get PodGroup %s: %w", pgName, err), 0
 		}
 		return m.createPodGroup(ctx, ms, pgName), 0
 	}
@@ -502,13 +502,13 @@ func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
 	existingPodGroups, err := m.getExistingPodGroups(ctx, ms)
 	if err != nil {
-		return fmt.Errorf("failed to get existing PodGroups for cleanup: %v", err)
+		return fmt.Errorf("failed to get existing PodGroups for cleanup: %w", err)
 	}
 
 	for _, podGroup := range existingPodGroups {
 		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
+			return fmt.Errorf("failed to delete PodGroup %s: %w", podGroup.Name, err)
 		}
 		klog.V(2).Infof("Deleted PodGroup %s (gang scheduling disabled)", podGroup.Name)
 	}

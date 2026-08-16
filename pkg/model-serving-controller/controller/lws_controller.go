@@ -51,7 +51,7 @@ func InitializeLWSController(
 ) (*LWSController, error) {
 	exists, err := ResourceExists(kubeClient, "leaderworkerset.x-k8s.io/v1", "LeaderWorkerSet")
 	if err != nil {
-		return nil, fmt.Errorf("failed to check LWS CRD existence: %v", err)
+		return nil, fmt.Errorf("failed to check LWS CRD existence: %w", err)
 	}
 	if !exists {
 		return nil, nil
@@ -59,7 +59,7 @@ func InitializeLWSController(
 
 	lwsClient, err := lwsclientset.NewForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create lws client: %v", err)
+		return nil, fmt.Errorf("failed to create lws client: %w", err)
 	}
 
 	lwsInformerFactory := lwsinformers.NewSharedInformerFactory(lwsClient, 0)
@@ -67,7 +67,7 @@ func InitializeLWSController(
 
 	controller, err := NewLWSController(kubeClient, kthenaClient, lwsClient, lwsInformerFactory, kthenaInformerFactory)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create LWS controller: %v", err)
+		return nil, fmt.Errorf("failed to create LWS controller: %w", err)
 	}
 
 	return controller, nil

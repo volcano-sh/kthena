@@ -90,7 +90,7 @@ func InstallKthena(cfg *KthenaConfig) error {
 	cmd.Stderr = os.Stderr
 	fmt.Printf("Installing kthena: %s\n", strings.Join(cmd.Args, " "))
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to install kthena: %v", err)
+		return fmt.Errorf("failed to install kthena: %w", err)
 	}
 
 	// Wait for pods to be ready
@@ -99,7 +99,7 @@ func InstallKthena(cfg *KthenaConfig) error {
 	waitCmd.Stdout = os.Stdout
 	waitCmd.Stderr = os.Stderr
 	if err := waitCmd.Run(); err != nil {
-		return fmt.Errorf("failed to wait for kthena pods: %v", err)
+		return fmt.Errorf("failed to wait for kthena pods: %w", err)
 	}
 
 	// Wait for auto-generated Gateway if Gateway API is enabled
@@ -127,13 +127,13 @@ func InstallKthena(cfg *KthenaConfig) error {
 		var err error
 		pfForwarder, err = utils.SetupPortForward(cfg.Namespace, "kthena-router", "8080", "80")
 		if err != nil {
-			return fmt.Errorf("failed to setup port-forward: %v", err)
+			return fmt.Errorf("failed to setup port-forward: %w", err)
 		}
 		metricsPFForwarder, err = utils.SetupPortForward(cfg.Namespace, utils.RouterMetricsService, utils.RouterMetricsPort, utils.RouterMetricsPort)
 		if err != nil {
 			pfForwarder.Close()
 			pfForwarder = nil
-			return fmt.Errorf("failed to setup metrics port-forward: %v", err)
+			return fmt.Errorf("failed to setup metrics port-forward: %w", err)
 		}
 		// Note: SetupPortForward already waits for the port-forward to be ready.
 		// Cleanup is handled by UninstallKthena via the global pfForwarder.

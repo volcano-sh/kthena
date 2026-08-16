@@ -97,13 +97,13 @@ func runCreateManifest(cmd *cobra.Command, args []string) error {
 	// Load template values
 	values, err := loadTemplateValues()
 	if err != nil {
-		return fmt.Errorf("failed to load template values: %v", err)
+		return fmt.Errorf("failed to load template values: %w", err)
 	}
 
 	// Render template
 	renderedYAML, err := renderTemplate(templateName, values)
 	if err != nil {
-		return fmt.Errorf("failed to render template: %v", err)
+		return fmt.Errorf("failed to render template: %w", err)
 	}
 
 	// Show rendered YAML
@@ -134,11 +134,11 @@ func loadTemplateValues() (map[string]interface{}, error) {
 	if valuesFile != "" {
 		data, err := os.ReadFile(valuesFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read values file: %v", err)
+			return nil, fmt.Errorf("failed to read values file: %w", err)
 		}
 
 		if err := yaml.Unmarshal(data, &values); err != nil {
-			return nil, fmt.Errorf("failed to parse values file: %v", err)
+			return nil, fmt.Errorf("failed to parse values file: %w", err)
 		}
 	}
 
@@ -169,7 +169,7 @@ func renderTemplate(templateName string, values map[string]interface{}) (string,
 	// Get template content from embedded files
 	templateData, err := GetTemplateContent(templateName)
 	if err != nil {
-		return "", fmt.Errorf("failed to read template: %v", err)
+		return "", fmt.Errorf("failed to read template: %w", err)
 	}
 
 	// Create Helm template engine
@@ -199,7 +199,7 @@ func renderTemplate(templateName string, values map[string]interface{}) (string,
 	// Render template using Helm engine
 	rendered, err := helmEngine.Render(helmChart, helmValues)
 	if err != nil {
-		return "", fmt.Errorf("failed to render template: %v", err)
+		return "", fmt.Errorf("failed to render template: %w", err)
 	}
 
 	// Get rendered content for our template
@@ -228,13 +228,13 @@ func applyResources(yamlContent string) error {
 	// Load kubeconfig
 	config, err := clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 	if err != nil {
-		return fmt.Errorf("failed to load kubeconfig: %v", err)
+		return fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
 	// Create kthena client
 	client, err := versioned.NewForConfig(config)
 	if err != nil {
-		return fmt.Errorf("failed to create kthena client: %v", err)
+		return fmt.Errorf("failed to create kthena client: %w", err)
 	}
 
 	ctx := context.Background()
@@ -248,7 +248,7 @@ func applyResources(yamlContent string) error {
 			if err.Error() == "EOF" {
 				break
 			}
-			return fmt.Errorf("failed to decode YAML: %v", err)
+			return fmt.Errorf("failed to decode YAML: %w", err)
 		}
 
 		if rawObj == nil {
@@ -270,7 +270,7 @@ func applyResources(yamlContent string) error {
 
 		// Apply based on resource type
 		if err := applyKthenaResource(ctx, client, obj); err != nil {
-			return fmt.Errorf("failed to apply %s %s: %v", gvk.Kind, resourceName, err)
+			return fmt.Errorf("failed to apply %s %s: %w", gvk.Kind, resourceName, err)
 		}
 
 		fmt.Printf("  ✓ Applied successfully\n")
@@ -292,12 +292,12 @@ func applyKthenaResource(ctx context.Context, client versioned.Interface, obj *u
 		modelServing := &workloadv1alpha1.ModelServing{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelServing)
 		if err != nil {
-			return fmt.Errorf("failed to convert unstructured object to ModelServing: %v", err)
+			return fmt.Errorf("failed to convert unstructured object to ModelServing: %w", err)
 		}
 
 		_, err = client.WorkloadV1alpha1().ModelServings(resourceNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create ModelServing: %v", err)
+			return fmt.Errorf("failed to create ModelServing: %w", err)
 		}
 
 	case "ModelBooster":
@@ -305,12 +305,12 @@ func applyKthenaResource(ctx context.Context, client versioned.Interface, obj *u
 		model := &workloadv1alpha1.ModelBooster{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, model)
 		if err != nil {
-			return fmt.Errorf("failed to convert unstructured object to ModelBooster: %v", err)
+			return fmt.Errorf("failed to convert unstructured object to ModelBooster: %w", err)
 		}
 
 		_, err = client.WorkloadV1alpha1().ModelBoosters(resourceNamespace).Create(ctx, model, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create ModelBooster: %v", err)
+			return fmt.Errorf("failed to create ModelBooster: %w", err)
 		}
 
 	case "AutoscalingPolicy":
@@ -318,12 +318,12 @@ func applyKthenaResource(ctx context.Context, client versioned.Interface, obj *u
 		policy := &workloadv1alpha1.AutoscalingPolicy{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, policy)
 		if err != nil {
-			return fmt.Errorf("failed to convert unstructured object to AutoscalingPolicy: %v", err)
+			return fmt.Errorf("failed to convert unstructured object to AutoscalingPolicy: %w", err)
 		}
 
 		_, err = client.WorkloadV1alpha1().AutoscalingPolicies(resourceNamespace).Create(ctx, policy, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create AutoscalingPolicy: %v", err)
+			return fmt.Errorf("failed to create AutoscalingPolicy: %w", err)
 		}
 
 	case "ModelRoute":
@@ -331,12 +331,12 @@ func applyKthenaResource(ctx context.Context, client versioned.Interface, obj *u
 		modelRoute := &networkingv1alpha1.ModelRoute{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelRoute)
 		if err != nil {
-			return fmt.Errorf("failed to convert unstructured object to ModelRoute: %v", err)
+			return fmt.Errorf("failed to convert unstructured object to ModelRoute: %w", err)
 		}
 
 		_, err = client.NetworkingV1alpha1().ModelRoutes(resourceNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create ModelRoute: %v", err)
+			return fmt.Errorf("failed to create ModelRoute: %w", err)
 		}
 
 	case "ModelServer":
@@ -344,12 +344,12 @@ func applyKthenaResource(ctx context.Context, client versioned.Interface, obj *u
 		modelServer := &networkingv1alpha1.ModelServer{}
 		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelServer)
 		if err != nil {
-			return fmt.Errorf("failed to convert unstructured object to ModelServer: %v", err)
+			return fmt.Errorf("failed to convert unstructured object to ModelServer: %w", err)
 		}
 
 		_, err = client.NetworkingV1alpha1().ModelServers(resourceNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create ModelServer: %v", err)
+			return fmt.Errorf("failed to create ModelServer: %w", err)
 		}
 
 	default:

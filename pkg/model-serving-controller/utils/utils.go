@@ -263,7 +263,7 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 
 	if err != nil {
 		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create headless service failed: %v", err)
+			return fmt.Errorf("create headless service failed: %w", err)
 		}
 	}
 	return nil
@@ -507,7 +507,7 @@ func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview
 		defer r.Body.Close()
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read request body: %v", err)
+			return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 		}
 		body = data
 	}
@@ -515,12 +515,12 @@ func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview
 	// Parse the AdmissionReview request
 	var admissionReview admissionv1.AdmissionReview
 	if err := json.Unmarshal(body, &admissionReview); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode body: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode body: %w", err)
 	}
 
 	var ms workloadv1alpha1.ModelServing
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &ms); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode modelServing: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode modelServing: %w", err)
 	}
 
 	return &admissionReview, &ms, nil
@@ -531,13 +531,13 @@ func SendAdmissionResponse(w http.ResponseWriter, admissionReview *admissionv1.A
 	// Send the response
 	resp, err := json.Marshal(admissionReview)
 	if err != nil {
-		return fmt.Errorf("failed to encode response: %v", err)
+		return fmt.Errorf("failed to encode response: %w", err)
 	}
 
 	klog.V(4).Infof("Sending response: %s", string(resp))
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write(resp); err != nil {
-		return fmt.Errorf("failed to write response: %v", err)
+		return fmt.Errorf("failed to write response: %w", err)
 	}
 
 	return nil

@@ -185,7 +185,7 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 
 	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: ms.Spec.WorkloadSelector.MatchLabels})
 	if err != nil {
-		return fmt.Errorf("invalid selector: %v", err)
+		return fmt.Errorf("invalid selector: %w", err)
 	}
 
 	podList, err := c.podLister.Pods(ms.Namespace).List(selector)
@@ -260,7 +260,7 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 	modelServers, err := c.modelServerLister.ModelServers(pod.Namespace).List(labels.Everything())
 	if err != nil {
-		return fmt.Errorf("failed to list ModelServers for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		return fmt.Errorf("failed to list ModelServers for pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
 	servers := []*aiv1alpha1.ModelServer{}
@@ -274,7 +274,7 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 
 	if len(servers) > 0 {
 		if err := c.store.AddOrUpdatePod(pod, servers); err != nil {
-			return fmt.Errorf("failed to add or update pod %s/%s in data store: %v", pod.Namespace, pod.Name, err)
+			return fmt.Errorf("failed to add or update pod %s/%s in data store: %w", pod.Namespace, pod.Name, err)
 		}
 	}
 
