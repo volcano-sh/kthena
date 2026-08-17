@@ -2310,7 +2310,8 @@ func TestPodLastContainerStartUnix(t *testing.T) {
 			want: older.Unix(),
 		},
 		{
-			// A sidecar restart moves this forward even though the engine did not restart.
+			// Unnamed containers are all counted; pods without the runtime naming
+			// convention keep this behavior.
 			name: "newest start across containers wins",
 			pod:  startedPod("p", "ns", &older, &newer).Pod,
 			want: newer.Unix(),
@@ -2329,7 +2330,77 @@ func TestPodLastContainerStartUnix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := podLastContainerStartUnix(tt.pod); got != tt.want {
+			if got := podLastContainerStartUnix(tt.pod, "runtime"); got != tt.want {
+				t.Errorf("podLastContainerStartUnix() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// containerStart names a container and its running start time; nil means not running.
+type containerStart struct {
+	name string
+	at   *time.Time
+}
+
+// startedPodContainers builds a candidate with named container statuses.
+func startedPodContainers(name, namespace string, containers ...containerStart) *datastore.PodInfo {
+	statuses := make([]v1.ContainerStatus, 0, len(containers))
+	for _, c := range containers {
+		cs := v1.ContainerStatus{Name: c.name}
+		if c.at != nil {
+			cs.State.Running = &v1.ContainerStateRunning{StartedAt: metav1.NewTime(*c.at)}
+		}
+		statuses = append(statuses, cs)
+	}
+	return &datastore.PodInfo{
+		Pod: &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Status:     v1.PodStatus{ContainerStatuses: statuses},
+		},
+	}
+}
+
+// The runtime sidecar only relays events; restarting it must not move the restart signal,
+// while an engine restart still must.
+func TestPodLastContainerStartUnixIgnoresRuntimeSidecar(t *testing.T) {
+	engineStart := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	sidecarRestart := time.Now().Add(-time.Minute).Truncate(time.Second)
+
+	tests := []struct {
+		name string
+		pod  *v1.Pod
+		want int64
+	}{
+		{
+			name: "runtime sidecar restart is ignored",
+			pod: startedPodContainers("p", "ns",
+				containerStart{name: "server", at: &engineStart},
+				containerStart{name: "runtime", at: &sidecarRestart},
+			).Pod,
+			want: engineStart.Unix(),
+		},
+		{
+			name: "engine restart is still detected",
+			pod: startedPodContainers("p", "ns",
+				containerStart{name: "server", at: &sidecarRestart},
+				containerStart{name: "runtime", at: &engineStart},
+			).Pod,
+			want: sidecarRestart.Unix(),
+		},
+		{
+			name: "only the runtime sidecar is running falls back to it",
+			pod: startedPodContainers("p", "ns",
+				containerStart{name: "server", at: nil},
+				containerStart{name: "runtime", at: &sidecarRestart},
+			).Pod,
+			want: sidecarRestart.Unix(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podLastContainerStartUnix(tt.pod, "runtime"); got != tt.want {
 				t.Errorf("podLastContainerStartUnix() = %d, want %d", got, tt.want)
 			}
 		})
@@ -2349,8 +2420,48 @@ func TestPodLastContainerStartUnixIgnoresReadinessFlap(t *testing.T) {
 		LastTransitionTime: metav1.NewTime(flapped),
 	}}
 
-	if got := podLastContainerStartUnix(pod); got != started.Unix() {
+	if got := podLastContainerStartUnix(pod, "runtime"); got != started.Unix() {
 		t.Errorf("readiness transition leaked into the restart signal: got %d, want %d", got, started.Unix())
+	}
+}
+
+// The arg default must stay "runtime"; an explicit value, including "", wins.
+func TestNewKVCacheAwareRuntimeContainerName(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "unset defaults to runtime", raw: `{}`, want: "runtime"},
+		{name: "explicit name wins", raw: `{"runtimeContainerName":"agent"}`, want: "agent"},
+		{name: "explicit empty disables", raw: `{"runtimeContainerName":""}`, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin := NewKVCacheAware(runtime.RawExtension{Raw: []byte(tt.raw)})
+			if plugin.runtimeContainerName != tt.want {
+				t.Errorf("runtimeContainerName = %q, want %q", plugin.runtimeContainerName, tt.want)
+			}
+		})
+	}
+}
+
+// A pod whose engine container happens to be named runtime can point the exclusion at its
+// real sidecar name, or disable it with "".
+func TestPodLastContainerStartUnixCustomSidecarName(t *testing.T) {
+	sidecarStart := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	engineRestart := time.Now().Add(-time.Minute).Truncate(time.Second)
+
+	pod := startedPodContainers("p", "ns",
+		containerStart{name: "runtime", at: &engineRestart},
+		containerStart{name: "agent", at: &sidecarStart},
+	).Pod
+
+	if got := podLastContainerStartUnix(pod, "agent"); got != engineRestart.Unix() {
+		t.Errorf("custom sidecar name missed the engine restart: got %d, want %d", got, engineRestart.Unix())
+	}
+	if got := podLastContainerStartUnix(pod, ""); got != engineRestart.Unix() {
+		t.Errorf("empty sidecar name must count every container: got %d, want %d", got, engineRestart.Unix())
 	}
 }
 
@@ -2363,7 +2474,7 @@ func TestOwnerStartTimes(t *testing.T) {
 		startedPod("pod-1", "ns-a", &at),
 		startedPod("pod-1", "ns-b", &other),
 		startedPod("pod-2", "ns-a", nil),
-	})
+	}, "runtime")
 
 	want := map[string]int64{
 		"pod-1.ns-a": at.Unix(),
@@ -2468,7 +2579,7 @@ func TestKVCacheAware_QueryRedisForBlocks_DropsOwnershipFromBeforeRestart(t *tes
 	owners := ownerStartTimes([]*datastore.PodInfo{
 		startedPod("restarted", "default", &restartedAt),
 		startedPod("stable", "default", &longRunning),
-	})
+	}, "runtime")
 
 	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
 	if err != nil {
@@ -2507,7 +2618,7 @@ func TestKVCacheAware_QueryRedisForBlocks_DropsOldOwnershipAfterLongAgoRestart(t
 		t.Fatalf("failed to seed redis: %v", err)
 	}
 
-	owners := ownerStartTimes([]*datastore.PodInfo{startedPod("restarted", "default", &restartedAt)})
+	owners := ownerStartTimes([]*datastore.PodInfo{startedPod("restarted", "default", &restartedAt)}, "runtime")
 
 	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
 	if err != nil {
@@ -2516,5 +2627,61 @@ func TestKVCacheAware_QueryRedisForBlocks_DropsOldOwnershipAfterLongAgoRestart(t
 
 	if len(result[hash]) != 0 {
 		t.Errorf("stale ownership survived a long-ago restart: got %v, want none", result[hash])
+	}
+}
+
+// A runtime sidecar restart leaves the engine's cache intact, so ownership written while
+// the engine was up must survive it. An engine restart must still drop it.
+func TestKVCacheAware_QueryRedisForBlocks_SidecarRestart(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{keyPrefix: kvCacheKeyPrefix, redisClient: client}
+
+	ctx := context.Background()
+	hash := uint64(444)
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: hash}.String(kvCacheKeyPrefix)
+
+	now := time.Now()
+	engineStart := now.Add(-2 * time.Hour)
+	writtenAt := now.Add(-time.Hour)
+	sidecarRestart := now.Add(-5 * time.Minute)
+
+	if err := client.HSet(ctx, key, "warm.default", fmt.Sprintf("%d", writtenAt.Unix())).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	owners := ownerStartTimes([]*datastore.PodInfo{startedPodContainers("warm", "default",
+		containerStart{name: "server", at: &engineStart},
+		containerStart{name: "runtime", at: &sidecarRestart},
+	)}, "runtime")
+
+	result, err := plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
+	if err != nil {
+		t.Fatalf("queryRedisForBlocks returned error: %v", err)
+	}
+	if want := []string{"warm.default"}; !reflect.DeepEqual(result[hash], want) {
+		t.Errorf("sidecar restart dropped valid ownership: got %v, want %v", result[hash], want)
+	}
+
+	// Engine restart after the write: ownership must be dropped.
+	engineRestart := now.Add(-30 * time.Minute)
+	owners = ownerStartTimes([]*datastore.PodInfo{startedPodContainers("warm", "default",
+		containerStart{name: "server", at: &engineRestart},
+		containerStart{name: "runtime", at: &sidecarRestart},
+	)}, "runtime")
+
+	result, err = plugin.queryRedisForBlocks([]uint64{hash}, "qwen", owners)
+	if err != nil {
+		t.Fatalf("queryRedisForBlocks returned error: %v", err)
+	}
+	if len(result[hash]) != 0 {
+		t.Errorf("ownership survived an engine restart: got %v, want none", result[hash])
 	}
 }

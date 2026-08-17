@@ -75,6 +75,10 @@ const (
 
 	kvCacheGCInterval = time.Hour
 	kvCacheGCScanSize = int64(100)
+
+	// defaultRuntimeContainerName is the runtime sidecar's name in the generated pod
+	// templates and the examples. Its restarts leave the engine's KV cache intact.
+	defaultRuntimeContainerName = "runtime"
 )
 
 type KVCacheAwareArgs struct {
@@ -84,16 +88,21 @@ type KVCacheAwareArgs struct {
 	VLLMTokenizerPort int `yaml:"vllmTokenizerPort,omitempty"`
 	// SGLangTokenizerPort overrides the default SGLang tokenizer port (30000).
 	SGLangTokenizerPort int `yaml:"sglangTokenizerPort,omitempty"`
+	// RuntimeContainerName is the sidecar container excluded from the restart signal,
+	// one value for the whole router. Defaults to "runtime", the name used by the
+	// generated pod templates; "" counts every container.
+	RuntimeContainerName *string `yaml:"runtimeContainerName,omitempty"`
 }
 
 type KVCacheAware struct {
-	name             string
-	maxBlocksToMatch int
-	keyPrefix        string
-	redisClient      *redis.Client
-	processor        *TokenBlockProcessor
-	tokenizerManager *tokenization.TokenizerManager
-	gcCursor         uint64
+	name                 string
+	maxBlocksToMatch     int
+	keyPrefix            string
+	redisClient          *redis.Client
+	processor            *TokenBlockProcessor
+	tokenizerManager     *tokenization.TokenizerManager
+	runtimeContainerName string
+	gcCursor             uint64
 }
 
 var _ framework.ScorePlugin = &KVCacheAware{}
@@ -150,9 +159,13 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 	if sglangPort <= 0 {
 		sglangPort = defaultSGLangTokenizerPort
 	}
+	runtimeName := defaultRuntimeContainerName
+	if args.RuntimeContainerName != nil {
+		runtimeName = *args.RuntimeContainerName
+	}
 
-	klog.Infof("KVCacheAware: config blockSizeToHash=%d, maxBlocksToMatch=%d, vllmTokenizerPort=%d, sglangTokenizerPort=%d",
-		blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort)
+	klog.Infof("KVCacheAware: config blockSizeToHash=%d, maxBlocksToMatch=%d, vllmTokenizerPort=%d, sglangTokenizerPort=%d, runtimeContainerName=%q",
+		blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort, runtimeName)
 
 	managerConfig := tokenization.TokenizerManagerConfig{
 		EndpointPorts: map[string]int{
@@ -170,12 +183,13 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 	}
 
 	plugin := &KVCacheAware{
-		name:             KVCacheAwarePluginName,
-		maxBlocksToMatch: maxBlocksToMatch,
-		keyPrefix:        kvCacheKeyPrefix,
-		redisClient:      redisClient,
-		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
-		tokenizerManager: manager,
+		name:                 KVCacheAwarePluginName,
+		maxBlocksToMatch:     maxBlocksToMatch,
+		keyPrefix:            kvCacheKeyPrefix,
+		redisClient:          redisClient,
+		processor:            &TokenBlockProcessor{blockSize: blockSizeToHash},
+		tokenizerManager:     manager,
+		runtimeContainerName: runtimeName,
 	}
 	plugin.startGC()
 	return plugin
@@ -243,7 +257,7 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	}
 
 	redisStart := time.Now()
-	blockToPods, err := t.queryRedisForBlocks(blockHashes, ctx.Model, ownerStartTimes(pods))
+	blockToPods, err := t.queryRedisForBlocks(blockHashes, ctx.Model, ownerStartTimes(pods, t.runtimeContainerName))
 	redisDuration := time.Since(redisStart)
 	if err != nil {
 		if ctx.MetricsRecorder != nil {
@@ -422,29 +436,42 @@ func (t *KVCacheAware) deleteStaleFields(staleFields map[string][]string) {
 }
 
 // podLastContainerStartUnix reports when the pod's containers last started, or 0 if none are
-// running. Readiness is not used: it also flips on a probe failure, which leaves the cache intact.
-func podLastContainerStartUnix(pod *corev1.Pod) int64 {
+// running. The sidecar named sidecarName is excluded: it only relays events, so restarting
+// it says nothing about the cache; an empty name excludes nothing. Readiness is not used:
+// it also flips on a probe failure, which leaves the cache intact.
+func podLastContainerStartUnix(pod *corev1.Pod, sidecarName string) int64 {
 	if pod == nil {
 		return 0
 	}
-	var newest int64
+	var newest, newestAll int64
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Running == nil {
 			continue
 		}
-		if started := cs.State.Running.StartedAt.Unix(); started > newest {
+		started := cs.State.Running.StartedAt.Unix()
+		if started > newestAll {
+			newestAll = started
+		}
+		if sidecarName != "" && cs.Name == sidecarName {
+			continue
+		}
+		if started > newest {
 			newest = started
 		}
+	}
+	if newest == 0 {
+		// No container other than the sidecar is running: keep the previous behavior.
+		return newestAll
 	}
 	return newest
 }
 
 // ownerStartTimes maps each candidate's cache-owner identifier to its container start time.
 // Keyed on the full name.namespace form so pods sharing a name across namespaces stay distinct.
-func ownerStartTimes(pods []*datastore.PodInfo) map[string]int64 {
+func ownerStartTimes(pods []*datastore.PodInfo, sidecarName string) map[string]int64 {
 	owners := make(map[string]int64, len(pods))
 	for _, p := range pods {
-		if started := podLastContainerStartUnix(p.GetPod()); started > 0 {
+		if started := podLastContainerStartUnix(p.GetPod(), sidecarName); started > 0 {
 			owners[podCacheOwnerIdentifier(p)] = started
 		}
 	}
