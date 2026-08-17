@@ -30,7 +30,7 @@ import (
 func parseAdmissionRequest[T any](r *http.Request) (*admissionv1.AdmissionReview, *T, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read request body: %v", err)
+		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 
 	// Verify the content type is accurate
@@ -41,7 +41,7 @@ func parseAdmissionRequest[T any](r *http.Request) (*admissionv1.AdmissionReview
 	// Parse the AdmissionReview request
 	var admissionReview admissionv1.AdmissionReview
 	if err := json.Unmarshal(body, &admissionReview); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode body: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode body: %w", err)
 	}
 
 	if admissionReview.Request == nil {
@@ -54,7 +54,7 @@ func parseAdmissionRequest[T any](r *http.Request) (*admissionv1.AdmissionReview
 	// Get the object from the request
 	var obj T
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &obj); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode object: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode object: %w", err)
 	}
 
 	return &admissionReview, &obj, nil
@@ -65,13 +65,13 @@ func sendAdmissionResponse(w http.ResponseWriter, admissionReview *admissionv1.A
 	// Send the response
 	resp, err := json.Marshal(admissionReview)
 	if err != nil {
-		return fmt.Errorf("failed to encode response: %v", err)
+		return fmt.Errorf("failed to encode response: %w", err)
 	}
 
 	klog.V(4).Infof("Sending response: %s", string(resp))
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write(resp); err != nil {
-		return fmt.Errorf("failed to write response: %v", err)
+		return fmt.Errorf("failed to write response: %w", err)
 	}
 
 	return nil

@@ -49,7 +49,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	}
 	data, err := json.Marshal(wrappedData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal template data: %v", err)
+		return nil, fmt.Errorf("failed to marshal template data: %w", err)
 	}
 
 	// Check if ControllerRevision already exists
@@ -71,7 +71,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		}
 		return existing, nil
 	} else if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("failed to get ControllerRevision: %v", err)
+		return nil, fmt.Errorf("failed to get ControllerRevision: %w", err)
 	}
 
 	// Create ControllerRevision
@@ -96,7 +96,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	// Create ControllerRevision
 	created, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, cr, metav1.CreateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ControllerRevision: %v", err)
+		return nil, fmt.Errorf("failed to create ControllerRevision: %w", err)
 	}
 
 	klog.V(4).Infof("Created ControllerRevision %s/%s with revision %s", ms.Namespace, controllerRevisionName, revision)
@@ -134,7 +134,7 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 		if rawData, ok := wrapper["data"]; ok {
 			var roles []workloadv1alpha1.Role
 			if err := json.Unmarshal(rawData, &roles); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal roles from wrapped data: %v", err)
+				return nil, fmt.Errorf("failed to unmarshal roles from wrapped data: %w", err)
 			}
 			return roles, nil
 		}
@@ -143,7 +143,7 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 	// Fallback: try to unmarshal directly (for backward compatibility or if not wrapped)
 	var roles []workloadv1alpha1.Role
 	if err := json.Unmarshal(cr.Data.Raw, &roles); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal roles from ControllerRevision: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal roles from ControllerRevision: %w", err)
 	}
 
 	return roles, nil
@@ -166,7 +166,7 @@ func CleanupOldControllerRevisions(
 		LabelSelector: selector.String(),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list ControllerRevisions: %v", err)
+		return fmt.Errorf("failed to list ControllerRevisions: %w", err)
 	}
 
 	// Get the revision names that must be preserved (CurrentRevision and UpdateRevision)

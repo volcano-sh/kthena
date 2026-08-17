@@ -40,7 +40,7 @@ func parseAdmissionReviewFromRequest(r *http.Request) (*admissionv1.AdmissionRev
 		defer r.Body.Close()
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read request body: %v", err)
+			return nil, fmt.Errorf("failed to read request body: %w", err)
 		}
 		body = data
 	}
@@ -48,7 +48,7 @@ func parseAdmissionReviewFromRequest(r *http.Request) (*admissionv1.AdmissionRev
 	// Parse the AdmissionReview request
 	var admissionReview admissionv1.AdmissionReview
 	if err := json.Unmarshal(body, &admissionReview); err != nil {
-		return nil, fmt.Errorf("failed to decode body: %v", err)
+		return nil, fmt.Errorf("failed to decode body: %w", err)
 	}
 
 	return &admissionReview, nil
@@ -63,7 +63,7 @@ func ParseModelRouteFromRequest(r *http.Request) (*admissionv1.AdmissionReview, 
 
 	var mr networkingv1alpha1.ModelRoute
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &mr); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode modelRoute: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode modelRoute: %w", err)
 	}
 
 	return admissionReview, &mr, nil
@@ -78,7 +78,7 @@ func ParseModelServerFromRequest(r *http.Request) (*admissionv1.AdmissionReview,
 
 	var ms networkingv1alpha1.ModelServer
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &ms); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode modelServer: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode modelServer: %w", err)
 	}
 
 	return admissionReview, &ms, nil
@@ -93,7 +93,7 @@ func ParseExternalModelProviderFromRequest(r *http.Request) (*admissionv1.Admiss
 
 	var provider networkingv1alpha1.ExternalModelProvider
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &provider); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode externalModelProvider: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode externalModelProvider: %w", err)
 	}
 
 	return admissionReview, &provider, nil
@@ -104,13 +104,13 @@ func SendAdmissionResponse(w http.ResponseWriter, admissionReview *admissionv1.A
 	// Send the response
 	resp, err := json.Marshal(admissionReview)
 	if err != nil {
-		return fmt.Errorf("failed to encode response: %v", err)
+		return fmt.Errorf("failed to encode response: %w", err)
 	}
 
 	klog.V(4).Infof("Sending response: %s", string(resp))
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write(resp); err != nil {
-		return fmt.Errorf("failed to write response: %v", err)
+		return fmt.Errorf("failed to write response: %w", err)
 	}
 
 	return nil

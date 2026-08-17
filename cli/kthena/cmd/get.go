@@ -128,7 +128,7 @@ func init() {
 func runGetTemplates(cmd *cobra.Command, args []string) error {
 	templateNames, err := ListTemplates()
 	if err != nil {
-		return fmt.Errorf("failed to read templates: %v", err)
+		return fmt.Errorf("failed to read templates: %w", err)
 	}
 
 	if len(templateNames) == 0 {
@@ -152,7 +152,7 @@ func runGetTemplates(cmd *cobra.Command, args []string) error {
 
 		data, err := yaml.Marshal(templates)
 		if err != nil {
-			return fmt.Errorf("failed to marshal to YAML: %v", err)
+			return fmt.Errorf("failed to marshal to YAML: %w", err)
 		}
 		fmt.Print(string(data))
 		return nil
@@ -192,7 +192,7 @@ func runGetTemplate(cmd *cobra.Command, args []string) error {
 	if outputFormat == "yaml" || outputFormat == "" {
 		content, err := GetTemplateContent(templateName)
 		if err != nil {
-			return fmt.Errorf("failed to read template: %v", err)
+			return fmt.Errorf("failed to read template: %w", err)
 		}
 		fmt.Print(content)
 		return nil
@@ -201,7 +201,7 @@ func runGetTemplate(cmd *cobra.Command, args []string) error {
 	// For other output formats, show template info
 	manifestInfo, err := GetTemplateInfo(templateName)
 	if err != nil {
-		return fmt.Errorf("failed to get template info: %v", err)
+		return fmt.Errorf("failed to get template info: %w", err)
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
@@ -213,12 +213,12 @@ func runGetTemplate(cmd *cobra.Command, args []string) error {
 func getKthenaClient() (*versioned.Clientset, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load kubeconfig: %v", err)
+		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
 	client, err := versioned.NewForConfig(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create kthena client: %v", err)
+		return nil, fmt.Errorf("failed to create kthena client: %w", err)
 	}
 
 	return client, nil
@@ -285,7 +285,7 @@ func runGetModelBoosters(cmd *cobra.Command, args []string) error {
 
 	models, err := client.WorkloadV1alpha1().ModelBoosters(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list Models: %v", err)
+		return fmt.Errorf("failed to list Models: %w", err)
 	}
 
 	// Get name filter if provided
@@ -350,7 +350,7 @@ func runGetModelServings(cmd *cobra.Command, args []string) error {
 
 	modelServingList, err := client.WorkloadV1alpha1().ModelServings(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list ModelServings: %v", err)
+		return fmt.Errorf("failed to list ModelServings: %w", err)
 	}
 
 	if len(modelServingList.Items) == 0 {
@@ -395,7 +395,7 @@ func runGetAutoscalingPolicies(cmd *cobra.Command, args []string) error {
 
 	policies, err := client.WorkloadV1alpha1().AutoscalingPolicies(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list AutoscalingPolicies: %v", err)
+		return fmt.Errorf("failed to list AutoscalingPolicies: %w", err)
 	}
 
 	if len(policies.Items) == 0 {
@@ -455,7 +455,7 @@ func runGetModelRoutes(cmd *cobra.Command, args []string) error {
 
 	routes, err := client.NetworkingV1alpha1().ModelRoutes(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list ModelRoutes: %v", err)
+		return fmt.Errorf("failed to list ModelRoutes: %w", err)
 	}
 
 	if len(routes.Items) == 0 {
@@ -506,7 +506,7 @@ func runGetModelServers(cmd *cobra.Command, args []string) error {
 
 	servers, err := client.NetworkingV1alpha1().ModelServers(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list ModelServers: %v", err)
+		return fmt.Errorf("failed to list ModelServers: %w", err)
 	}
 
 	if len(servers.Items) == 0 {

@@ -125,7 +125,7 @@ func (mc *ModelBoosterController) processNextWorkItem(ctx context.Context) bool 
 		mc.workQueue.Forget(key)
 		return true
 	}
-	utilruntime.HandleError(fmt.Errorf("sync %q failed with %v", key, err))
+	utilruntime.HandleError(fmt.Errorf("sync %q failed with %w", key, err))
 	mc.workQueue.AddRateLimited(key)
 	return true
 }

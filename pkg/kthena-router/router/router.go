@@ -613,7 +613,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	if err != nil {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
-		return fmt.Errorf("can't schedule to target pod: %v", err)
+		return fmt.Errorf("can't schedule to target pod: %w", err)
 	}
 
 	// Set complete request routing information in access log
@@ -1493,7 +1493,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		klog.Errorf("%s failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
 			logPrefix, requestID, sessionID, userId, modelName, err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to enqueue request: %v", err))
-		return fmt.Errorf("failed to enqueue request: %v", err)
+		return fmt.Errorf("failed to enqueue request: %w", err)
 	}
 
 	select {

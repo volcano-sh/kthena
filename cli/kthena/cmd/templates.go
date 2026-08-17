@@ -50,7 +50,7 @@ func findTemplatePath(templateName string) (string, error) {
 	// Fallback: search through all vendor directories (for backward compatibility)
 	vendors, err := templatesFS.ReadDir("helm/templates")
 	if err != nil {
-		return "", fmt.Errorf("failed to read templates directory: %v", err)
+		return "", fmt.Errorf("failed to read templates directory: %w", err)
 	}
 
 	for _, vendor := range vendors {
@@ -75,7 +75,7 @@ func GetTemplateContent(templateName string) (string, error) {
 
 	content, err := templatesFS.ReadFile(templatePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read template '%s': %v", templateName, err)
+		return "", fmt.Errorf("failed to read template '%s': %w", templateName, err)
 	}
 
 	return string(content), nil
@@ -85,7 +85,7 @@ func GetTemplateContent(templateName string) (string, error) {
 func ListTemplates() ([]string, error) {
 	vendors, err := templatesFS.ReadDir("helm/templates")
 	if err != nil {
-		return nil, fmt.Errorf("failed to read templates directory: %v", err)
+		return nil, fmt.Errorf("failed to read templates directory: %w", err)
 	}
 
 	var templates []string

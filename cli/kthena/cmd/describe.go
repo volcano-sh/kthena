@@ -133,7 +133,7 @@ func runDescribeTemplate(cmd *cobra.Command, args []string) error {
 	// Read template content from embedded files
 	content, err := GetTemplateContent(templateName)
 	if err != nil {
-		return fmt.Errorf("failed to read template: %v", err)
+		return fmt.Errorf("failed to read template: %w", err)
 	}
 	fmt.Println("=================")
 	fmt.Println("Template Content:")
@@ -159,7 +159,7 @@ func runDescribeModelBooster(cmd *cobra.Command, args []string) error {
 
 	model, err := client.WorkloadV1alpha1().ModelBoosters(namespace).Get(ctx, modelName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get Model '%s': %v", modelName, err)
+		return fmt.Errorf("failed to get Model '%s': %w", modelName, err)
 	}
 
 	fmt.Printf("Model: %s\n", model.Name)
@@ -171,7 +171,7 @@ func runDescribeModelBooster(cmd *cobra.Command, args []string) error {
 	// Output the full resource as YAML
 	data, err := yaml.Marshal(model)
 	if err != nil {
-		return fmt.Errorf("failed to marshal Model to YAML: %v", err)
+		return fmt.Errorf("failed to marshal Model to YAML: %w", err)
 	}
 
 	fmt.Println("Resource Details:")
@@ -197,7 +197,7 @@ func runDescribeModelServing(cmd *cobra.Command, args []string) error {
 
 	modelServing, err := client.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, modelServingName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get ModelServing '%s': %v", modelServingName, err)
+		return fmt.Errorf("failed to get ModelServing '%s': %w", modelServingName, err)
 	}
 
 	fmt.Printf("ModelServing: %s\n", modelServing.Name)
@@ -209,7 +209,7 @@ func runDescribeModelServing(cmd *cobra.Command, args []string) error {
 	// Output the full resource as YAML
 	data, err := yaml.Marshal(modelServing)
 	if err != nil {
-		return fmt.Errorf("failed to marshal ModelServing to YAML: %v", err)
+		return fmt.Errorf("failed to marshal ModelServing to YAML: %w", err)
 	}
 
 	fmt.Println("Resource Details:")
@@ -235,7 +235,7 @@ func runDescribeAutoscalingPolicy(cmd *cobra.Command, args []string) error {
 
 	policy, err := client.WorkloadV1alpha1().AutoscalingPolicies(namespace).Get(ctx, policyName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get AutoscalingPolicy '%s': %v", policyName, err)
+		return fmt.Errorf("failed to get AutoscalingPolicy '%s': %w", policyName, err)
 	}
 
 	fmt.Printf("AutoscalingPolicy: %s\n", policy.Name)
@@ -247,7 +247,7 @@ func runDescribeAutoscalingPolicy(cmd *cobra.Command, args []string) error {
 	// Output the full resource as YAML
 	data, err := yaml.Marshal(policy)
 	if err != nil {
-		return fmt.Errorf("failed to marshal AutoscalingPolicy to YAML: %v", err)
+		return fmt.Errorf("failed to marshal AutoscalingPolicy to YAML: %w", err)
 	}
 
 	fmt.Println("Resource Details:")
@@ -272,7 +272,7 @@ func runDescribeModelRoute(cmd *cobra.Command, args []string) error {
 
 	route, err := client.NetworkingV1alpha1().ModelRoutes(namespace).Get(ctx, routeName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get ModelRoute '%s': %v", routeName, err)
+		return fmt.Errorf("failed to get ModelRoute '%s': %w", routeName, err)
 	}
 
 	fmt.Printf("ModelRoute: %s\n", route.Name)
@@ -283,7 +283,7 @@ func runDescribeModelRoute(cmd *cobra.Command, args []string) error {
 
 	data, err := yaml.Marshal(route)
 	if err != nil {
-		return fmt.Errorf("failed to marshal ModelRoute to YAML: %v", err)
+		return fmt.Errorf("failed to marshal ModelRoute to YAML: %w", err)
 	}
 
 	fmt.Println("Resource Details:")
@@ -309,7 +309,7 @@ func runDescribeModelServer(cmd *cobra.Command, args []string) error {
 
 	server, err := client.NetworkingV1alpha1().ModelServers(namespace).Get(ctx, serverName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get ModelServer '%s': %v", serverName, err)
+		return fmt.Errorf("failed to get ModelServer '%s': %w", serverName, err)
 	}
 
 	fmt.Printf("ModelServer: %s\n", server.Name)
@@ -320,7 +320,7 @@ func runDescribeModelServer(cmd *cobra.Command, args []string) error {
 
 	data, err := yaml.Marshal(server)
 	if err != nil {
-		return fmt.Errorf("failed to marshal ModelServer to YAML: %v", err)
+		return fmt.Errorf("failed to marshal ModelServer to YAML: %w", err)
 	}
 
 	fmt.Println("Resource Details:")

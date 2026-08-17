@@ -146,7 +146,7 @@ func createPolicyBatch(policy *registryv1.AutoscalingPolicy) []jsonpatch.Operati
 func createPolicyPatchBytes(patch []jsonpatch.Operation) ([]byte, error) {
 	patchBytes, err := json.Marshal(patch)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal patch: %v", err)
+		return nil, fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
 	return patchBytes, nil

@@ -45,7 +45,7 @@ func PodEndpointURL(podIP string, port uint32, path string) string {
 func ParseMetricsURL(url string) (map[string]*dto.MetricFamily, error) {
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch metrics from %s: %v", url, err)
+		return nil, fmt.Errorf("failed to fetch metrics from %s: %w", url, err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -60,7 +60,7 @@ func ParseMetricsURL(url string) (map[string]*dto.MetricFamily, error) {
 	parser := expfmt.NewTextParser(model.UTF8Validation)
 	allMetrics, err := parser.TextToMetricFamilies(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing metric families: %v", err)
+		return nil, fmt.Errorf("error parsing metric families: %w", err)
 	}
 	return allMetrics, nil
 }

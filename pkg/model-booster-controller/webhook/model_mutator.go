@@ -90,24 +90,24 @@ func createPatch(original, mutated *registryv1alpha1.ModelBooster) ([]byte, erro
 	// Convert both objects to JSON
 	originalJSON, err := json.Marshal(original)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal original: %v", err)
+		return nil, fmt.Errorf("failed to marshal original: %w", err)
 	}
 
 	mutatedJSON, err := json.Marshal(mutated)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal mutated: %v", err)
+		return nil, fmt.Errorf("failed to marshal mutated: %w", err)
 	}
 
 	// Create a JSON patch using the jsonpatch library
 	patch, err := jsonpatch.CreatePatch(originalJSON, mutatedJSON)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create patch: %v", err)
+		return nil, fmt.Errorf("failed to create patch: %w", err)
 	}
 
 	// Marshal the patch
 	patchBytes, err := json.Marshal(patch)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal patch: %v", err)
+		return nil, fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
 	return patchBytes, nil

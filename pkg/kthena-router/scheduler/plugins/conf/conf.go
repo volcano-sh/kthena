@@ -104,7 +104,7 @@ func ParseRouterConfig(configMapPath string) (*RouterConfiguration, error) {
 	var routerConfig RouterConfiguration
 	if err := yaml.Unmarshal(data, &routerConfig); err != nil {
 		klog.Errorf("failed to Unmarshal routerConfiguration: %v", err)
-		return nil, fmt.Errorf("failed to Unmarshal routerConfiguration: %v", err)
+		return nil, fmt.Errorf("failed to Unmarshal routerConfiguration: %w", err)
 	}
 	return &routerConfig, nil
 }
@@ -117,7 +117,7 @@ func LoadSchedulerConfig(schedulerConfig *SchedulerConfiguration) (map[string]in
 	scorePluginMap, filterPlugins, err := unmarshalPlugins(schedulerConfig)
 	if err != nil {
 		klog.Errorf("failed to Unmarshal Plugins: %v", err)
-		return nil, nil, nil, fmt.Errorf("failed to Unmarshal Plugins: %v", err)
+		return nil, nil, nil, fmt.Errorf("failed to Unmarshal Plugins: %w", err)
 	}
 
 	// Check for random plugin conflicts and remove random plugin if needed
@@ -126,7 +126,7 @@ func LoadSchedulerConfig(schedulerConfig *SchedulerConfiguration) (map[string]in
 	pluginsArgMap, err := unmarshalPluginsConfig(schedulerConfig)
 	if err != nil {
 		klog.Errorf("failed to Unmarshal PluginsConfig: %v", err)
-		return nil, nil, nil, fmt.Errorf("failed to Unmarshal PluginsConfig: %v", err)
+		return nil, nil, nil, fmt.Errorf("failed to Unmarshal PluginsConfig: %w", err)
 	}
 
 	return scorePluginMap, filterPlugins, pluginsArgMap, nil
