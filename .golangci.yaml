@@ -38,6 +38,7 @@ linters:
     - unused
     - misspell
     - whitespace
+    - errorlint
     #- gosec
     #- revive
 
