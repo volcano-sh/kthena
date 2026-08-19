@@ -33,9 +33,7 @@ import (
 
 // NIXLConnector implements high-performance distributed in-memory KV cache using NIXL
 type NIXLConnector struct {
-	name              string
-	prefillRequest    *http.Request
-	decodeRequestBody map[string]interface{}
+	name string
 }
 
 // NewNIXLConnector creates a new NIXL connector
@@ -62,9 +60,9 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 
 	req := c.Request
 	prefillBody := cloneReqBody(reqBody)
-	n.prefillRequest = n.buildPrefillRequest(req, prefillBody)
+	prefillRequest := n.buildPrefillRequest(req, prefillBody)
 	decodeBody := cloneReqBody(reqBody)
-	n.decodeRequestBody = AddTokenUsage(c, decodeBody)
+	decodeRequestBody := AddTokenUsage(c, decodeBody)
 
 	// --- Prefill phase ---
 	if metricsRecorder != nil {
@@ -76,7 +74,7 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	// 1. send prefill request
-	kvTransferParams, err := n.prefill(n.prefillRequest, prefillAddr)
+	kvTransferParams, err := n.prefill(prefillRequest, prefillAddr)
 
 	if hooks != nil && hooks.DecrPrefill != nil {
 		hooks.DecrPrefill()
@@ -104,7 +102,7 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	// 2. send decode request
-	decodeReq := n.buildDecodeRequest(c, n.decodeRequestBody, kvTransferParams)
+	decodeReq := n.buildDecodeRequest(c, decodeRequestBody, kvTransferParams)
 	result, decodeErr := n.decode(c, decodeReq, decodeAddr)
 
 	if hooks != nil && hooks.DecrDecode != nil {
