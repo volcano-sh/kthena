@@ -32,7 +32,7 @@ import (
 )
 
 func prefillerProxy(_ *gin.Context, req *http.Request) error {
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := upstreamTransport.RoundTrip(req)
 	if err != nil {
 		return fmt.Errorf("prefill request failed: %w", err)
 	}
@@ -47,7 +47,7 @@ func prefillerProxy(_ *gin.Context, req *http.Request) error {
 }
 
 func decoderProxy(c *gin.Context, req *http.Request) (int, error) {
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := upstreamTransport.RoundTrip(req)
 	if err != nil {
 		return 0, fmt.Errorf("decode request failed: %w", err)
 	}

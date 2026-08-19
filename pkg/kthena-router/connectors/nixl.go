@@ -129,7 +129,7 @@ func (n *NIXLConnector) prefill(req *http.Request, prefillAddr string) (interfac
 	klog.V(4).Infof("%s prefill: sending to %s", n.name, req.URL.String())
 
 	// Send prefill request
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := upstreamTransport.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
