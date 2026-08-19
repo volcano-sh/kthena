@@ -4,7 +4,7 @@ description: "P1.5: maxNumSeqs variance across backends"
 load:
   schedule:
     mode: "rate"
-    rate: 50
+    rate: 0.5
   traffic:
     burstiness: 1.0
     ramp:
@@ -23,11 +23,25 @@ backends:
     model: "Qwen/Qwen3-0.6B"
   profiles:
     - name: "high"
-      count: 2
+      count: 4
       maxNumSeqs: 512
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
     - name: "low"
-      count: 2
+      count: 4
       maxNumSeqs: 64
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
 
 metrics:
   prometheus: true

@@ -4,7 +4,7 @@ description: "P1.6: composite latency variance (speedup + maxNumSeqs)"
 load:
   schedule:
     mode: "rate"
-    rate: 75
+    rate: 0.5
   traffic:
     burstiness: 1.0
     ramp:
@@ -23,17 +23,38 @@ backends:
     model: "Qwen/Qwen3-0.6B"
   profiles:
     - name: "fast"
-      count: 1
+      count: 2
       speedupRatio: 10.0
       maxNumSeqs: 256
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
     - name: "normal"
-      count: 1
+      count: 2
       speedupRatio: 1.0
       maxNumSeqs: 128
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
     - name: "slow"
-      count: 1
+      count: 2
       speedupRatio: 0.2
       maxNumSeqs: 32
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
 
 metrics:
   prometheus: true
