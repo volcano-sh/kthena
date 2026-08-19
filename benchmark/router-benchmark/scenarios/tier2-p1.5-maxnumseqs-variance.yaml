@@ -1,0 +1,39 @@
+name: "tier2-p1.5-maxnumseqs-variance"
+description: "P1.5: maxNumSeqs variance across backends"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 50
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "high"
+      count: 2
+      maxNumSeqs: 512
+    - name: "low"
+      count: 2
+      maxNumSeqs: 64
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"

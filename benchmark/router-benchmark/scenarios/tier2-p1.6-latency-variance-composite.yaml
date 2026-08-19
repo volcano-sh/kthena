@@ -1,0 +1,45 @@
+name: "tier2-p1.6-latency-variance-composite"
+description: "P1.6: composite latency variance (speedup + maxNumSeqs)"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 75
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "fast"
+      count: 1
+      speedupRatio: 10.0
+      maxNumSeqs: 256
+    - name: "normal"
+      count: 1
+      speedupRatio: 1.0
+      maxNumSeqs: 128
+    - name: "slow"
+      count: 1
+      speedupRatio: 0.2
+      maxNumSeqs: 32
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"

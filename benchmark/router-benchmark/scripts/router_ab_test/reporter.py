@@ -626,6 +626,220 @@ class ResultReporter:
             return ((config_b_value - config_a_value) / config_a_value) * 100
         return ((config_a_value - config_b_value) / config_a_value) * 100
 
+    def build_matrix_report(
+        self,
+        run_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build a matrix report across scenarios and chains.
+
+        Input: ``run_results`` is a list of dicts with keys:
+            ``scenario`` (str), ``chain`` (str), ``result`` (BenchmarkResult).
+
+        Returns a dict with ``timestamp``, ``matrix``, and ``comparisons``.
+        """
+        # Index by scenario name.
+        matrix: dict[str, dict[str, dict[str, Any]]] = {}
+        results_by_scenario: dict[str, list[dict[str, Any]]] = {}
+        for entry in run_results:
+            sc_name = entry["scenario"]
+            chain_name = entry["chain"]
+            result = entry["result"]
+            analysis = self._router_analysis_for(result)
+
+            note = None
+            # For kvcache-aware chains, check if router analysis has nil scores.
+            if "kvcache-aware" in chain_name:
+                scheduler_plugins = (analysis or {}).get("scheduler_plugins")
+                if not scheduler_plugins:
+                    note = "nil_scores"
+
+            cell = {
+                "verdict": result.verdict,
+                "metrics": result.metrics or None,
+                "router_analysis": analysis or None,
+                "_note": note,
+            }
+            matrix.setdefault(sc_name, {})[chain_name] = cell
+            results_by_scenario.setdefault(sc_name, []).append(entry)
+
+        # Build comparisons.vs_least_latency
+        vs_least_latency: dict[str, dict[str, dict[str, Any]]] = {}
+        for sc_name, entries in results_by_scenario.items():
+            # Find baseline (chain stem contains "router-config-least-latency").
+            baseline_entry = None
+            for e in entries:
+                if "router-config-least-latency" in e["chain"]:
+                    baseline_entry = e
+                    break
+
+            vs_least_latency[sc_name] = {}
+            if baseline_entry is None:
+                continue
+
+            baseline_result = baseline_entry["result"]
+            baseline_analysis = self._router_analysis_for(baseline_result)
+
+            for e in entries:
+                if e["chain"] == baseline_entry["chain"]:
+                    continue
+                other_result = e["result"]
+                other_analysis = self._router_analysis_for(other_result)
+
+                baseline_valid = (
+                    baseline_result.verdict.get("status") == VERDICT_VALID
+                )
+                other_valid = other_result.verdict.get("status") == VERDICT_VALID
+
+                end_to_end: dict[str, Any] = {}
+                router_comparison: dict[str, Any] = {}
+
+                if baseline_valid and other_valid:
+                    end_to_end = self.compare(baseline_result, other_result)
+                    router_comparison = self.compare_router(
+                        baseline_analysis or {}, other_analysis or {}
+                    )
+                    # Check if compare_router found any plugin intersection.
+                    if not router_comparison:
+                        plugins_a = (baseline_analysis or {}).get("scheduler_plugins", {})
+                        plugins_b = (other_analysis or {}).get("scheduler_plugins", {})
+                        if not (set(plugins_a) & set(plugins_b)):
+                            router_comparison = {
+                                "_skipped": True,
+                                "reason": "cross_chain_plugin_name_mismatch",
+                            }
+
+                vs_least_latency[sc_name][e["chain"]] = {
+                    "end_to_end": end_to_end,
+                    "router": router_comparison,
+                }
+
+        # Build comparisons.cross_scenario
+        cross_scenario: dict[str, dict[str, dict[str, Any]]] = {}
+        # Reference scenario is the one whose name contains "p0.1".
+        ref_sc_name = None
+        for sc_name in results_by_scenario:
+            if "p0.1" in sc_name:
+                ref_sc_name = sc_name
+                break
+
+        if ref_sc_name is not None:
+            ref_entries = results_by_scenario[ref_sc_name]
+            ref_by_chain: dict[str, dict[str, Any]] = {
+                e["chain"]: e for e in ref_entries
+            }
+
+            for chain_name, ref_entry in ref_by_chain.items():
+                ref_result = ref_entry["result"]
+                ref_analysis = self._router_analysis_for(ref_result)
+                ref_valid = ref_result.verdict.get("status") == VERDICT_VALID
+
+                chain_cross: dict[str, Any] = {}
+                for sc_name, entries in results_by_scenario.items():
+                    if sc_name == ref_sc_name:
+                        continue
+                    other_entry = None
+                    for e in entries:
+                        if e["chain"] == chain_name:
+                            other_entry = e
+                            break
+                    if other_entry is None:
+                        continue
+                    other_result = other_entry["result"]
+                    other_analysis = self._router_analysis_for(other_result)
+                    other_valid = other_result.verdict.get("status") == VERDICT_VALID
+
+                    if ref_valid and other_valid and ref_analysis and other_analysis:
+                        router_comparison = self.compare_router(
+                            ref_analysis, other_analysis
+                        )
+                    else:
+                        router_comparison = {
+                            "_skipped": True,
+                            "reason": "nil_scores",
+                        }
+                    chain_cross[sc_name] = router_comparison
+
+                cross_scenario[chain_name] = chain_cross
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "matrix": matrix,
+            "comparisons": {
+                "vs_least_latency": vs_least_latency,
+                "cross_scenario": cross_scenario,
+            },
+        }
+
+    def print_matrix_report(self, report: dict[str, Any]) -> None:
+        """Print a summary table of the Tier 2 matrix report."""
+        print("\n" + "=" * 70)
+        print("Tier 2 Matrix Report")
+        print("=" * 70)
+
+        matrix = report.get("matrix", {})
+        vs_least_latency = (
+            report.get("comparisons", {}).get("vs_least_latency", {})
+        )
+
+        # Collect all chain names and scenario names.
+        all_chains = sorted(
+            {
+                chain for chains in matrix.values() for chain in chains.keys()
+            }
+        )
+        all_scenarios = sorted(matrix.keys())
+
+        # Header row.
+        header = f"{'Scenario':<25}"
+        for chain in all_chains:
+            stem = chain.replace("router-config-", "")[:15]
+            header += f" | {stem:<15}"
+        print(header)
+        print("-" * len(header))
+
+        # Data rows.
+        for sc_name in all_scenarios:
+            row = f"{sc_name[:24]:<25}"
+            for chain in all_chains:
+                cell = matrix.get(sc_name, {}).get(chain, {})
+                verdict_status = (cell.get("verdict") or {}).get("status", "<unknown>")
+
+                if "least-latency" in chain and "-latency" in chain:
+                    # Check if this is the baseline chain.
+                    if "router-config-least-latency" in chain:
+                        status_display = "VALID (base)" if verdict_status == VERDICT_VALID else f"{verdict_status} (base)"
+                        row += f" | {status_display:<15}"
+                        continue
+
+                # Look up TTFT delta from vs_least_latency comparisons.
+                sc_comparisons = vs_least_latency.get(sc_name, {}).get(chain, {})
+                ttft_delta = None
+                if sc_comparisons and not sc_comparisons.get("end_to_end", {}).get("_skipped"):
+                    e2e = sc_comparisons.get("end_to_end", {})
+                    ttft_data = e2e.get("ttft_avg_ms")
+                    if ttft_data:
+                        ttft_delta = ttft_data.get("delta_pct")
+
+                if verdict_status != VERDICT_VALID:
+                    status_display = verdict_status.upper()
+                elif ttft_delta is not None:
+                    status_display = f"VALID {ttft_delta:+.1f}%"
+                elif sc_comparisons and sc_comparisons.get("end_to_end", {}).get("_skipped"):
+                    status_display = "N/A"
+                else:
+                    status_display = "VALID"
+
+                row += f" | {status_display:<15}"
+            print(row)
+
+        print("=" * 70)
+
+    def write_matrix_report(self, report: dict[str, Any], output_dir: str) -> None:
+        """Write the matrix report JSON to ``output_dir/tier2_matrix_report.json``."""
+        output_path = Path(output_dir) / "tier2_matrix_report.json"
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(report, file, indent=2)
+
 
 def main(argv: list[str] | None = None) -> int:
     """Offline analysis of collected router_metrics.prom files.

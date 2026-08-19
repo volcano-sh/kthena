@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from router_ab_test.dependency import cleanup_redis, deploy_redis, wait_for_redis_ready
 from router_ab_test.kubernetes import EndpointMode, K8sManager, MockerDeploymentBuilder
 from router_ab_test.load_generator import AIPerfRunner
 from router_ab_test.metrics_collector import MetricsCollector, PprofCollection
@@ -24,11 +25,12 @@ from router_ab_test.models import (
     ScenarioConfig,
     compute_run_verdict,
 )
-from router_ab_test.orchestrator import ABTestOrchestrator
+from router_ab_test.orchestrator import ABTestOrchestrator, MatrixOrchestrator
 from router_ab_test.reporter import ResultReporter, analyze_router_metrics, format_router_analysis
 
 __all__ = [
     "ABTestOrchestrator",
+    "MatrixOrchestrator",
     "AIPerfRunner",
     "BackendProfile",
     "BackendsConfig",
@@ -44,6 +46,9 @@ __all__ = [
     "VERDICT_INVALID",
     "VERDICT_VALID",
     "analyze_router_metrics",
+    "cleanup_redis",
     "compute_run_verdict",
+    "deploy_redis",
     "format_router_analysis",
+    "wait_for_redis_ready",
 ]

@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from router_ab_test.dependency import cleanup_redis, deploy_redis, wait_for_redis_ready
 from router_ab_test.kubernetes import EndpointMode, K8sManager
 from router_ab_test.load_generator import AIPerfRunner
 from router_ab_test.metrics_collector import MetricsCollector
@@ -138,3 +139,124 @@ class ABTestOrchestrator:
         self.reporter.write_report(report_path, report)
         self.reporter.print_report(report)
         return report
+
+
+class MatrixOrchestrator:
+    """Orchestrate N-way matrix tests across scenarios x plugin chains."""
+
+    def __init__(
+        self,
+        scenario_paths: list[str],
+        chain_paths: list[str],
+        output_dir: str,
+        local_port: int = K8sManager.DEFAULT_LOCAL_PORT,
+        endpoint_mode: str = EndpointMode.PORT_FORWARD,
+    ):
+        self.scenario_paths = scenario_paths
+        self.chain_paths = chain_paths
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.k8s = K8sManager(local_port=local_port, endpoint_mode=endpoint_mode)
+        self.runner = AIPerfRunner(self.output_dir / "runs")
+        self.collector = MetricsCollector(self.output_dir / "artifacts")
+        self.reporter = ResultReporter()
+
+    def run_single_config(self, scenario: ScenarioConfig, config_path: str, config_name: str) -> BenchmarkResult:
+        self.k8s.cleanup_port_forward()
+
+        # Tear down and re-deploy backends for a cold-start baseline
+        self.k8s.cleanup_backends()
+        self.k8s.deploy_backends(scenario.backends)
+
+        self.k8s.apply_router_config(config_path)
+        router_endpoint = self.k8s.get_router_endpoint()
+        router_debug_endpoint = self.k8s.get_router_debug_endpoint()
+
+        self.k8s.wait_for_router_ready(scenario.backends.default_model, router_endpoint, timeout=300)
+
+        # Start async pprof collection after the router is confirmed ready,
+        # so the CPU profile covers the router under load (not just idle).
+        metrics_config = getattr(scenario, "metrics", {}) or {}
+        pprof_handle = None
+        if metrics_config.get("pprof", False):
+            pprof_handle = self.collector.start_pprof_collection(
+                config_name, router_debug_endpoint, metrics_config,
+            )
+        try:
+            result = self.runner.run(
+                config_name=config_name,
+                scenario=scenario,
+                router_endpoint=router_endpoint,
+                extra_args=scenario.aiperf.get("extraArgs"),
+            )
+        except subprocess.CalledProcessError as exc:
+            # Benchmark tooling itself failed — the run is not a measurement
+            # and must not be judged against backend stability signals.
+            if pprof_handle is not None:
+                pprof_handle.abandon()
+            result = BenchmarkResult(
+                config_name=config_name,
+                scenario=scenario.name,
+                timestamp="",
+                metrics={},
+                raw_output=f"aiperf exited with code {exc.returncode}",
+                artifacts={},
+                verdict={
+                    "status": VERDICT_FRAMEWORK_ERROR,
+                    "reasons": [f"aiperf exited with code {exc.returncode}"],
+                    "offenders": [],
+                    "restart_stats": {},
+                },
+            )
+            return result
+
+        # Steady-state validity check (post-traffic only): query mocker pods
+        # for restarts / OOMKilled / CrashLoopBackOff that happened during
+        # the measurement window. See issue #1271.
+        restart_stats = self.k8s.get_mocker_pod_restart_stats()
+        result.verdict = compute_run_verdict(restart_stats)
+        print(f"  Run verdict for {config_name}: {result.verdict['status']}")
+        for reason in result.verdict.get("reasons", []):
+            print(f"    - {reason}")
+
+        result.artifacts = self.collector.collect_artifacts(
+            config_name=config_name,
+            scenario=scenario,
+            router_metrics_endpoint=router_endpoint,
+            pprof_handle=pprof_handle,
+        )
+        return result
+
+    def run_matrix(self) -> dict[str, Any]:
+        results_grid: list[dict] = []
+        try:
+            # Deploy Redis once before the matrix
+            deploy_redis()
+            wait_for_redis_ready()
+
+            run_idx = 0
+            total = len(self.scenario_paths) * len(self.chain_paths)
+            for scenario_path in self.scenario_paths:
+                scenario = ScenarioConfig.from_yaml(scenario_path)
+                for chain_path in self.chain_paths:
+                    chain_stem = Path(chain_path).stem
+                    config_name = f"{scenario.name}__{chain_stem}"
+                    run_idx += 1
+                    print(f"[{run_idx}/{total}] scenario={scenario.name} chain={chain_stem}")
+                    result = self.run_single_config(scenario, chain_path, config_name)
+                    results_grid.append({
+                        "scenario": scenario.name,
+                        "chain": chain_stem,
+                        "result": result,
+                    })
+        finally:
+            self.k8s.cleanup_port_forward()
+            self.k8s.cleanup_backends()
+            cleanup_redis()
+
+        report = self.reporter.build_matrix_report(results_grid)
+        report_path = self.output_dir / "tier2_matrix_report.json"
+        self.reporter.write_matrix_report(report, str(self.output_dir))
+        self.reporter.print_matrix_report(report)
+        return report
+

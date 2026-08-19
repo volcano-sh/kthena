@@ -1,0 +1,42 @@
+name: "tier2-p0.1-burstiness"
+description: "P0.1: gamma arrival burstiness pattern"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 50
+  traffic:
+    burstiness: 0.3
+    ramp:
+      strategy: "none"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 4
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"

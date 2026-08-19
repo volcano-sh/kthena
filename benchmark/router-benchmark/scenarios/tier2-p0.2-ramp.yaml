@@ -1,0 +1,43 @@
+name: "tier2-p0.2-ramp"
+description: "P0.2: linear ramp strategy"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 50
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "linear"
+      duration: "20s"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 4
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
