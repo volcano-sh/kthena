@@ -4,42 +4,60 @@ on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - "**.md"
-      - "**.svg"
-      - "**.png"
-      - "docs/**"
-      - ".github/**"
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - "docs/**"
-      - ".github/**"
+      - "release-*"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Check Go check related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          predicate-quantifier: every
+          filters: |
+            go_check:
+              - "**"
+              - "!**.md"
+              - "!**.svg"
+              - "!**.png"
+              - "!docs/**"
+              - "!.github/**"
+
+      - name: Skip Go check
+        if: steps.filter.outputs.go_check != 'true'
+        run: echo "No Go check-related files changed; marking required check as passed."
+
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.go_check == 'true'
       - name: install helm
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
       - name: helm lint
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           helm lint charts/kthena
       - name: Setup Go
+        if: steps.filter.outputs.go_check == 'true'
         uses: actions/setup-go@v6
         with:
           go-version-file: "go.mod"
       - name: Build Kthena
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           make gen-check
       - name: golangci-lint
+        if: steps.filter.outputs.go_check == 'true'
         shell: bash
         run: |
           make lint

@@ -8,35 +8,55 @@ on:
       - "v*.*.*"
       - "v*.*.*-*" # Support for pre-release tags like v1.2.3-alpha
     paths:
-      - 'charts/kthena/**'
-      - 'python/**'
-      - 'docker/**'
-      - '**.go'
-      - 'pkg/**'
-      - 'cmd/**'
-      - 'go.mod'
-      - 'go.sum'
+      - "charts/kthena/**"
+      - "python/**"
+      - "docker/**"
+      - "**.go"
+      - "pkg/**"
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
   pull_request:
     branches:
       - main
-    paths:
-      - "docker/**"
-      - 'python/Dockerfile'
+      - "release-*"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
+      release_build: ${{ steps.filter.outputs.release_build }}
       version: ${{ steps.version.outputs.version }}
       is_tag: ${{ steps.version.outputs.is_tag }}
       prerelease: ${{ steps.is_prerelease.outputs.prerelease }}
     steps:
+      - name: Check build related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            release_build:
+              - "docker/**"
+              - "python/Dockerfile"
+              - ".github/workflows/build-push-release.yml"
+
+      - name: Skip build
+        if: github.event_name == 'pull_request' && steps.filter.outputs.release_build != 'true'
+        run: echo "No release build-related files changed; marking required check as passed."
+
       - name: Checkout
+        if: github.event_name != 'pull_request' || steps.filter.outputs.release_build == 'true'
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Determine Version
+        if: github.event_name != 'pull_request' || steps.filter.outputs.release_build == 'true'
         id: version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -49,7 +69,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Check for Prerelease
-        if: steps.version.outputs.is_tag == 'true'
+        if: steps.version.outputs.is_tag == 'true' && (github.event_name != 'pull_request' || steps.filter.outputs.release_build == 'true')
         id: is_prerelease
         run: |
           if [[ "${{ steps.version.outputs.version }}" == *-* ]]; then
@@ -61,6 +81,9 @@ jobs:
   build_images:
     needs: setup
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         include:
@@ -114,6 +137,7 @@ jobs:
             platform: linux/arm64
     steps:
       - name: Checkout
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: actions/checkout@v5
 
       - name: Login to GitHub Container Registry
@@ -125,6 +149,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker Image Metadata
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -134,9 +159,11 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Docker Buildx
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and Push Docker Images
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: docker/build-push-action@v6
         id: build
         with:
@@ -165,9 +192,12 @@ jobs:
 
   # merge images: Create Multi-Arch Manifests
   merge_images:
-    needs: [ setup, build_images ]
+    needs: [setup, build_images]
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'pull_request' }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         include:
@@ -247,14 +277,17 @@ jobs:
             ext: ".exe"
     steps:
       - name: Checkout
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: actions/checkout@v5
 
       - name: Set up Go
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
 
       - name: Build binary
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -263,6 +296,7 @@ jobs:
           go build -o kthena${{ matrix.ext }} ./cli/kthena
 
       - name: Package binary
+        if: github.event_name != 'pull_request' || needs.setup.outputs.release_build == 'true'
         run: |
           VERSION="${{ needs.setup.outputs.version }}"
           OS="${{ matrix.os }}"
@@ -286,9 +320,10 @@ jobs:
           retention-days: 1
 
   push_helm_chart:
-    needs: [ setup, merge_images ]
+    needs: [setup, merge_images]
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     steps:
       - name: Checkout
@@ -347,7 +382,7 @@ jobs:
             ./kthena-install.yaml
 
   create_github_release:
-    needs: [ setup, push_helm_chart, build_cli ]
+    needs: [setup, push_helm_chart, build_cli]
     if: needs.setup.outputs.is_tag == 'true'
     permissions:
       contents: write
@@ -377,7 +412,7 @@ jobs:
             - **CLI Binaries**: Pre-built binaries for Linux (amd64/arm64), macOS (amd64/arm64), and Windows (amd64)
 
             ### Documentation
-            
+
             - [Installation](https://kthena.volcano.sh/docs/getting-started/installation)
             - [Quick Start](https://kthena.volcano.sh/docs/getting-started/quick-start)
             - [Helm Chart Values](https://kthena.volcano.sh/docs/reference/helm-chart-values)
