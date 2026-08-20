@@ -61,6 +61,7 @@ const (
 	GatewayListenerNameKey = "gatewayListenerName"
 	GatewayListenerPortKey = "gatewayListenerPort"
 	PromptKey              = "promptKey" // store parsed ChatMessage, which will be reused
+	httpRouteMatchKey      = "httpRouteMatch"
 
 	successfulRequestFinishReason = "successful_request"
 	failedRequestFinishReason     = "request_failed"
@@ -276,6 +277,9 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		if c.Request.Method == http.MethodGet &&
 			(c.Request.URL.Path == "/v1/models" || c.Request.URL.Path == "/models") {
 			r.ListModels(c)
+			return
+		}
+		if !strings.HasPrefix(c.Request.URL.Path, "/v1/") && r.handleHTTPRouteRedirect(c) {
 			return
 		}
 
@@ -745,7 +749,7 @@ func (r *Router) getPodsAndServer(modelServerName types.NamespacedName) ([]*data
 // It returns whether a route matched, the selected InferencePool, and an error
 // when a matched rule has no eligible InferencePool backend.
 func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName, error) {
-	matchResult, matched := r.findHTTPRouteMatch(c, gatewayKey)
+	matchResult, matched := r.getHTTPRouteMatch(c, gatewayKey)
 	if !matched {
 		return false, types.NamespacedName{}, nil
 	}
@@ -768,16 +772,125 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	inferencePoolKey := fmt.Sprintf("%s/%s", inferencePoolName.Namespace, inferencePoolName.Name)
 	accesslog.SetGatewayAPIInfo(c, "", "", inferencePoolKey)
 
-	// Apply HTTPURLRewriteFilter from the same rule that matched the request.
-	if matchResult.rule.Filters != nil {
-		for _, filter := range matchResult.rule.Filters {
-			if filter.Type == gatewayv1.HTTPRouteFilterURLRewrite && filter.URLRewrite != nil {
+	for _, filter := range matchResult.rule.Filters {
+		switch filter.Type {
+		case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+			if filter.RequestHeaderModifier != nil {
+				applyRequestHeaderModifier(c.Request, filter.RequestHeaderModifier)
+			}
+		case gatewayv1.HTTPRouteFilterURLRewrite:
+			if filter.URLRewrite != nil {
 				r.applyURLRewrite(c, filter.URLRewrite)
 			}
 		}
 	}
 
 	return true, inferencePoolName, nil
+}
+
+func (r *Router) getHTTPRouteMatch(c *gin.Context, gatewayKey string) (httpRouteMatchResult, bool) {
+	if value, exists := c.Get(httpRouteMatchKey); exists {
+		matchResult, ok := value.(httpRouteMatchResult)
+		return matchResult, ok
+	}
+	matchResult, matched := r.findHTTPRouteMatch(c, gatewayKey)
+	if matched {
+		c.Set(httpRouteMatchKey, matchResult)
+	}
+	return matchResult, matched
+}
+
+func (r *Router) handleHTTPRouteRedirect(c *gin.Context) bool {
+	gatewayKey := c.GetString(GatewayKey)
+	if gatewayKey == "" {
+		return false
+	}
+	matchResult, matched := r.getHTTPRouteMatch(c, gatewayKey)
+	if !matched {
+		return false
+	}
+	for _, filter := range matchResult.rule.Filters {
+		if filter.Type != gatewayv1.HTTPRouteFilterRequestRedirect || filter.RequestRedirect == nil {
+			continue
+		}
+		httpRouteKey := fmt.Sprintf("%s/%s", matchResult.route.Namespace, matchResult.route.Name)
+		accesslog.SetGatewayAPIInfo(c, gatewayKey, httpRouteKey, "")
+		r.applyRequestRedirect(c, matchResult.matchedPrefix, filter.RequestRedirect)
+		return true
+	}
+	return false
+}
+
+func applyRequestHeaderModifier(request *http.Request, modifier *gatewayv1.HTTPHeaderFilter) {
+	for _, header := range modifier.Set {
+		request.Header.Set(string(header.Name), header.Value)
+	}
+	for _, header := range modifier.Add {
+		request.Header.Add(string(header.Name), header.Value)
+	}
+	for _, name := range modifier.Remove {
+		request.Header.Del(string(name))
+	}
+}
+
+func (r *Router) applyRequestRedirect(c *gin.Context, matchedPrefix string, redirect *gatewayv1.HTTPRequestRedirectFilter) {
+	redirectURL := *c.Request.URL
+	scheme := "http"
+	if c.Request.TLS != nil {
+		scheme = "https"
+	}
+	if redirect.Scheme != nil {
+		scheme = string(*redirect.Scheme)
+	}
+
+	hostname := normalizeHTTPRouteHost(c.Request.Host)
+	if redirect.Hostname != nil {
+		hostname = string(*redirect.Hostname)
+	}
+
+	port := c.GetInt(GatewayListenerPortKey)
+	if redirect.Scheme != nil {
+		port = 80
+		if scheme == "https" {
+			port = 443
+		}
+	}
+	if redirect.Port != nil {
+		port = int(*redirect.Port)
+	}
+	if port == 0 {
+		if _, value, err := net.SplitHostPort(c.Request.Host); err == nil {
+			port, _ = strconv.Atoi(value)
+		}
+	}
+
+	redirectURL.Scheme = scheme
+	redirectURL.Host = hostname
+	if (scheme == "http" && port != 0 && port != 80) || (scheme == "https" && port != 0 && port != 443) {
+		redirectURL.Host = net.JoinHostPort(hostname, strconv.Itoa(port))
+	} else if strings.Contains(hostname, ":") {
+		redirectURL.Host = "[" + hostname + "]"
+	}
+	if redirect.Path != nil {
+		switch redirect.Path.Type {
+		case gatewayv1.FullPathHTTPPathModifier:
+			if redirect.Path.ReplaceFullPath != nil {
+				redirectURL.Path = *redirect.Path.ReplaceFullPath
+			}
+		case gatewayv1.PrefixMatchHTTPPathModifier:
+			if redirect.Path.ReplacePrefixMatch != nil {
+				redirectURL.Path = *redirect.Path.ReplacePrefixMatch + strings.TrimPrefix(redirectURL.Path, matchedPrefix)
+			}
+		}
+		redirectURL.RawPath = ""
+	}
+
+	statusCode := http.StatusFound
+	if redirect.StatusCode != nil {
+		statusCode = int(*redirect.StatusCode)
+	}
+	c.Redirect(statusCode, redirectURL.String())
+	c.Abort()
 }
 
 // applyURLRewrite applies HTTPURLRewriteFilter to the request

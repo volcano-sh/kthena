@@ -576,6 +576,142 @@ func TestRouter_HandleHTTPRoute_UsesMatchedRuleURLRewrite(t *testing.T) {
 	assert.Equal(t, "/right/chat", c.Request.URL.Path)
 }
 
+func TestRouter_HandleHTTPRoute_RequestHeaderModifier(t *testing.T) {
+	pathType := gatewayv1.PathMatchPathPrefix
+	pathValue := "/chat"
+	gatewayKind := gatewayv1.Kind("Gateway")
+	poolGroup := inferencePoolBackendGroup
+	poolKind := inferencePoolBackendKind
+	store := datastore.New()
+	router := &Router{store: store}
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "route", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &gatewayKind}},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{
+					Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &pathValue},
+				}},
+				Filters: []gatewayv1.HTTPRouteFilter{{
+					Type: gatewayv1.HTTPRouteFilterRequestHeaderModifier,
+					RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+						Set: []gatewayv1.HTTPHeader{{
+							Name:  "X-Set",
+							Value: "new",
+						}},
+						Add: []gatewayv1.HTTPHeader{{
+							Name:  "X-Add",
+							Value: "second",
+						}},
+						Remove: []string{"X-Remove"},
+					},
+				}},
+				BackendRefs: []gatewayv1.HTTPBackendRef{{
+					BackendRef: gatewayv1.BackendRef{
+						BackendObjectReference: gatewayv1.BackendObjectReference{
+							Group: &poolGroup,
+							Kind:  &poolKind,
+							Name:  "pool",
+						},
+					},
+				}},
+			}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/chat/completions", nil)
+	c.Request.Header.Set("X-Set", "old")
+	c.Request.Header.Set("X-Add", "first")
+	c.Request.Header.Set("X-Remove", "value")
+
+	matched, pool, err := router.handleHTTPRoute(c, "default/gw")
+	assert.NoError(t, err)
+	assert.True(t, matched)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "pool"}, pool)
+	assert.Equal(t, "new", c.Request.Header.Get("X-Set"))
+	assert.Equal(t, []string{"first", "second"}, c.Request.Header.Values("X-Add"))
+	assert.Empty(t, c.Request.Header.Get("X-Remove"))
+}
+
+func TestRouter_HandlerFunc_HTTPRouteRequestRedirect(t *testing.T) {
+	router, store, backend := setupTestRouter(t, nil)
+	defer backend.Close()
+
+	pathType := gatewayv1.PathMatchPathPrefix
+	pathValue := "/old"
+	redirectPathType := gatewayv1.FullPathHTTPPathModifier
+	replacement := "/new"
+	gatewayKind := gatewayv1.Kind("Gateway")
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "redirect", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &gatewayKind}},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{
+					Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &pathValue},
+				}},
+				Filters: []gatewayv1.HTTPRouteFilter{{
+					Type: gatewayv1.HTTPRouteFilterRequestRedirect,
+					RequestRedirect: &gatewayv1.HTTPRequestRedirectFilter{
+						Path: &gatewayv1.HTTPPathModifier{
+							Type:            redirectPathType,
+							ReplaceFullPath: &replacement,
+						},
+					},
+				}},
+			}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(GatewayKey, "default/gw")
+	c.Set(GatewayListenerPortKey, 80)
+	c.Request, _ = http.NewRequest(http.MethodGet, "http://old.example.com/old?stream=true", nil)
+
+	router.HandlerFunc()(c)
+
+	assert.True(t, c.IsAborted())
+	assert.Equal(t, http.StatusFound, w.Code)
+	assert.Equal(t, "http://old.example.com/new?stream=true", w.Header().Get("Location"))
+
+	scheme := "https"
+	hostname := gatewayv1.PreciseHostname("new.example.com")
+	port := gatewayv1.PortNumber(8443)
+	statusCode := http.StatusMovedPermanently
+	redirectPathType = gatewayv1.PrefixMatchHTTPPathModifier
+	configuredRedirect := route.Spec.Rules[0].Filters[0].RequestRedirect
+	configuredRedirect.Scheme = &scheme
+	configuredRedirect.Hostname = &hostname
+	configuredRedirect.Port = &port
+	configuredRedirect.StatusCode = &statusCode
+	configuredRedirect.Path = &gatewayv1.HTTPPathModifier{
+		Type:               redirectPathType,
+		ReplacePrefixMatch: &replacement,
+	}
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	c.Set(GatewayKey, "default/gw")
+	c.Set(GatewayListenerPortKey, 80)
+	c.Request, _ = http.NewRequest(http.MethodGet, "http://old.example.com/old/chat?stream=true", nil)
+
+	router.HandlerFunc()(c)
+
+	assert.True(t, c.IsAborted())
+	assert.Equal(t, http.StatusMovedPermanently, w.Code)
+	assert.Equal(t, "https://new.example.com:8443/new/chat?stream=true", w.Header().Get("Location"))
+}
+
 func TestRouter_HandleHTTPRoute_HostnameMatch(t *testing.T) {
 	pathType := gatewayv1.PathMatchPathPrefix
 	kind := gatewayv1.Kind("Gateway")
