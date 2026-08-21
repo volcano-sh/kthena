@@ -2051,6 +2051,40 @@ func createStandardModelServing(name string, replicas int32, roleReplicas int32)
 	}
 }
 
+// TestHandleDeletedPodNoneEnqueues verifies the RecoveryPolicy=None branch of
+// handleDeletedPod: a deleted pod must re-enqueue the ModelServing so the
+// reconcile loop refills it (deployment-style), and must NOT delete the whole
+// role/serving group.
+func TestHandleDeletedPodNoneEnqueues(t *testing.T) {
+	ms := createStandardModelServing("ms-none-recovery", 1, 1)
+	ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	require.Eventually(t, func() bool {
+		_, err := controller.modelServingLister.ModelServings("default").Get(ms.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	drainWorkqueue(t, controller.workqueue)
+	assertQueueEmpty(t, controller.workqueue)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ms.Namespace,
+			Name:      ms.Name + "-0-prefill-0-0",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        ms.Name + "-0",
+			},
+		},
+	}
+
+	// None must enqueue the ModelServing for reconcile; the other policies
+	// delete the role/serving group here, None must not.
+	require.NoError(t, controller.handleDeletedPod(ms, ms.Name+"-0", pod))
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+}
+
 // createGangModelServing creates a ModelServing with gang policy
 func createGangModelServing(name string, replicas int32, roleReplicas int32) *workloadv1alpha1.ModelServing {
 	ms := createStandardModelServing(name, replicas, roleReplicas)
@@ -6092,6 +6126,45 @@ func TestHandleErrorPodTracksReplacementByUID(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, 10*time.Millisecond)
+}
+
+// TestHandleErrorPodNoneLeavesRestartedPod verifies that under RecoveryPolicy=None,
+// a pod whose container the kubelet has restarted (pod still alive, not PodFailed)
+// is NOT deleted by handleErrorPod — it is left to the pod's own restartPolicy,
+// avoiding the pod churn the Recreate policies cause. A terminal PodFailed pod
+// still falls through to deletion + refill (handled by handleDeletedPod None case).
+func TestHandleErrorPodNoneLeavesRestartedPod(t *testing.T) {
+	const (
+		namespace = "default"
+		podName   = "test-none-0-prefill-0-0"
+	)
+	restartedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      podName,
+			UID:       types.UID("restarted-pod"),
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{RestartCount: 1},
+			},
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "test-none"},
+		Spec:       workloadv1alpha1.ModelServingSpec{RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy},
+	}
+	controller, kubeClient := newGracePeriodTestController(t, restartedPod)
+
+	// None must early-return before touching the store/graceMap or deleting the pod.
+	require.NoError(t, controller.handleErrorPod(ms, "test-none-0", restartedPod))
+
+	// No pod delete was issued — the pod is left to kubelet's restartPolicy.
+	for _, action := range kubeClient.Actions() {
+		require.Falsef(t, action.Matches("delete", "pods"),
+			"None must not delete a restarted pod; got unexpected action %v", action)
+	}
 }
 
 func newGracePeriodTestController(t *testing.T, pod *corev1.Pod) (*ModelServingController, *kubefake.Clientset) {
