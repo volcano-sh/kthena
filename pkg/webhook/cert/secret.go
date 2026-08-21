@@ -40,8 +40,11 @@ const (
 // EnsureCertificate ensures that a certificate exists for the webhook server.
 // If the secret doesn't exist, it generates a new certificate and creates the secret.
 // If the secret already exists, it returns without error (reusing existing certificate).
-// Returns the CA bundle bytes that can be used to update webhook configurations.
-func EnsureCertificate(ctx context.Context, kubeClient kubernetes.Interface, namespace, secretName string, dnsNames []string) ([]byte, error) {
+//
+// The full bundle is returned - not just the CA - so that callers can serve TLS
+// straight from memory instead of waiting for kubelet to project the freshly
+// created secret onto disk.
+func EnsureCertificate(ctx context.Context, kubeClient kubernetes.Interface, namespace, secretName string, dnsNames []string) (*CertBundle, error) {
 	if len(dnsNames) == 0 {
 		return nil, fmt.Errorf("dnsNames cannot be empty")
 	}
@@ -51,13 +54,9 @@ func EnsureCertificate(ctx context.Context, kubeClient kubernetes.Interface, nam
 	// Try to get the existing secret
 	secret, err := kubeClient.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err == nil {
-		// Secret exists, use it and return the CA bundle
+		// Secret exists, reuse the certificate it already holds
 		klog.Infof("Found existing secret %s/%s, using existing certificate", namespace, secretName)
-		caBundle, ok := secret.Data[CAKey]
-		if !ok {
-			return nil, fmt.Errorf("secret %s/%s does not contain %s", namespace, secretName, CAKey)
-		}
-		return caBundle, nil
+		return bundleFromSecret(secret)
 	}
 
 	if !apierrors.IsNotFound(err) {
@@ -88,23 +87,41 @@ func EnsureCertificate(ctx context.Context, kubeClient kubernetes.Interface, nam
 	_, err = kubeClient.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Another pod created the secret concurrently, fetch it to get the CA bundle
-			klog.Infof("Secret %s/%s was created by another pod, fetching CA bundle", namespace, secretName)
+			// Another pod created the secret concurrently. Its certificate wins, so that
+			// every replica serves the same key pair.
+			klog.Infof("Secret %s/%s was created by another pod, fetching its certificate", namespace, secretName)
 			secret, err = kubeClient.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("failed to get secret after concurrent creation: %w", err)
 			}
-			caBundle, ok := secret.Data[CAKey]
-			if !ok {
-				return nil, fmt.Errorf("secret %s/%s does not contain %s", namespace, secretName, CAKey)
-			}
-			return caBundle, nil
+			return bundleFromSecret(secret)
 		}
 		return nil, fmt.Errorf("failed to create secret %s/%s: %w", namespace, secretName, err)
 	}
 
 	klog.Infof("Successfully created secret %s/%s with generated certificate", namespace, secretName)
-	return certBundle.CAPEM, nil
+	return certBundle, nil
+}
+
+// bundleFromSecret extracts a complete serving bundle from a TLS secret. The
+// certificate and key are required because the caller serves TLS with them; the
+// CA is required because it is what gets published to the webhook configurations.
+func bundleFromSecret(secret *corev1.Secret) (*CertBundle, error) {
+	bundle := &CertBundle{
+		CertPEM: secret.Data[TLSCertKey],
+		KeyPEM:  secret.Data[TLSKeyKey],
+		CAPEM:   secret.Data[CAKey],
+	}
+	for key, value := range map[string][]byte{
+		TLSCertKey: bundle.CertPEM,
+		TLSKeyKey:  bundle.KeyPEM,
+		CAKey:      bundle.CAPEM,
+	} {
+		if len(value) == 0 {
+			return nil, fmt.Errorf("secret %s/%s does not contain %s", secret.Namespace, secret.Name, key)
+		}
+	}
+	return bundle, nil
 }
 
 // UpdateValidatingWebhookCABundle updates the ValidatingWebhookConfiguration with the provided CA bundle

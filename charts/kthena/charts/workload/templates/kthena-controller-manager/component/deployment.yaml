@@ -58,20 +58,24 @@ spec:
             - name: webhook-certs
               mountPath: /etc/tls
               readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+              scheme: HTTPS
+            {{- toYaml .Values.controllerManager.probes.startup | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8443
               scheme: HTTPS
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml .Values.controllerManager.probes.liveness | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /healthz
               port: 8443
               scheme: HTTPS
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml .Values.controllerManager.probes.readiness | nindent 12 }}
       volumes:
         - name: webhook-certs
           secret:
