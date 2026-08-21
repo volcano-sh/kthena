@@ -37,10 +37,17 @@ const (
 	ControllerRevisionLabelKey = workloadv1alpha1.ModelServingNameLabelKey
 	// ControllerRevisionRevisionLabelKey is the label key for revision
 	ControllerRevisionRevisionLabelKey = workloadv1alpha1.RevisionLabelKey
+	// ControllerRevisionDataVersionAnnotation identifies the canonical revision
+	// data format introduced for stable revision history and rollback.
+	ControllerRevisionDataVersionAnnotation = "modelserving.volcano.sh/revision-data-version"
+	// ControllerRevisionDataVersionV1 is the current revision data format.
+	ControllerRevisionDataVersionV1 = "v1"
 )
 
-// CreateControllerRevision creates or retrieves a ControllerRevision for a specific revision.
-// In ModelServing, we typically have at most two revisions: CurrentRevision and UpdateRevision.
+// CreateControllerRevision maintains the legacy wrapped Role revision format
+// used by the current controller integration. New v1 revision paths must use
+// BuildRevisionData and RecordModelServingRevision so revision data remains
+// immutable.
 func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, revision string, templateData interface{}) (*appsv1.ControllerRevision, error) {
 	// Serialize template data
 	// Wrap data in a map to ensure it's a valid JSON object (Kubernetes requirement for RawExtension)
@@ -128,7 +135,7 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 		return nil, fmt.Errorf("ControllerRevision or its data is nil")
 	}
 
-	// Try to unmarshal as wrapped data first
+	// Try to unmarshal as wrapped data first.
 	var wrapper map[string]json.RawMessage
 	if err := json.Unmarshal(cr.Data.Raw, &wrapper); err == nil {
 		if rawData, ok := wrapper["data"]; ok {

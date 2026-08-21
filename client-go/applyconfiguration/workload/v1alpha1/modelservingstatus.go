@@ -32,6 +32,7 @@ type ModelServingStatusApplyConfiguration struct {
 	AvailableReplicas  *int32                           `json:"availableReplicas,omitempty"`
 	CurrentRevision    *string                          `json:"currentRevision,omitempty"`
 	UpdateRevision     *string                          `json:"updateRevision,omitempty"`
+	CollisionCount     *int32                           `json:"collisionCount,omitempty"`
 	Conditions         []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	LabelSelector      *string                          `json:"labelSelector,omitempty"`
 }
@@ -95,6 +96,14 @@ func (b *ModelServingStatusApplyConfiguration) WithCurrentRevision(value string)
 // If called multiple times, the UpdateRevision field is set to the value of the last call.
 func (b *ModelServingStatusApplyConfiguration) WithUpdateRevision(value string) *ModelServingStatusApplyConfiguration {
 	b.UpdateRevision = &value
+	return b
+}
+
+// WithCollisionCount sets the CollisionCount field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the CollisionCount field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithCollisionCount(value int32) *ModelServingStatusApplyConfiguration {
+	b.CollisionCount = &value
 	return b
 }
 

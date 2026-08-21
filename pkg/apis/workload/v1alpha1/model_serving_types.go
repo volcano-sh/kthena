@@ -63,6 +63,14 @@ type ModelServingSpec struct {
 	// +kubebuilder:validation:Enum={ServingGroupRecreate,RoleRecreate,None}
 	// +optional
 	RecoveryPolicy RecoveryPolicy `json:"recoveryPolicy,omitempty"`
+
+	// RevisionHistoryLimit is the maximum number of non-live revisions to retain.
+	// Revisions still referenced by the ModelServing or its workloads do not count
+	// toward this limit.
+	// +optional
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=0
+	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 }
 
 type RecoveryPolicy string
@@ -241,6 +249,10 @@ type ModelServingStatus struct {
 	// the current ModelServing spec.
 	// +optional
 	UpdateRevision string `json:"updateRevision,omitempty"`
+
+	// CollisionCount tracks hash collisions for ControllerRevision names.
+	// +optional
+	CollisionCount *int32 `json:"collisionCount,omitempty"`
 
 	// Conditions track the condition of the ModelServing.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

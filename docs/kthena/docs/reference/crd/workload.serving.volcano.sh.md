@@ -557,6 +557,7 @@ _Appears in:_
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
+| `revisionHistoryLimit` _integer_ | RevisionHistoryLimit is the maximum number of non-live revisions to retain.<br />Revisions still referenced by the ModelServing or its workloads do not count<br />toward this limit. | 10 | Minimum: 0 <br /> |
 
 
 #### ModelServingStatus
@@ -579,6 +580,7 @@ _Appears in:_
 | `availableReplicas` _integer_ | AvailableReplicas track the number of ServingGroup that are in ready state (updated or not). |  |  |
 | `currentRevision` _string_ | CurrentRevision, if not empty, indicates the ControllerRevision version preserved by<br />ServingGroups that have not been updated. |  |  |
 | `updateRevision` _string_ | UpdateRevision, if not empty, indicates the ControllerRevision version targeted by<br />the current ModelServing spec. |  |  |
+| `collisionCount` _integer_ | CollisionCount tracks hash collisions for ControllerRevision names. |  |  |
 | `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
 
 

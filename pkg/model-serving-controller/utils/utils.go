@@ -84,6 +84,10 @@ func GenerateRoleID(roleName string, idx int) string {
 }
 
 func GenerateControllerRevisionName(msName, revision string) string {
+	// Match the prefix bound used by Kubernetes controller history.
+	if len(msName) > 223 {
+		msName = msName[:223]
+	}
 	return msName + "-" + revision
 }
 

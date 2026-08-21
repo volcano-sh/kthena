@@ -117,6 +117,15 @@ spec:
                   Default to 1.
                 format: int32
                 type: integer
+              revisionHistoryLimit:
+                default: 10
+                description: |-
+                  RevisionHistoryLimit is the maximum number of non-live revisions to retain.
+                  Revisions still referenced by the ModelServing or its workloads do not count
+                  toward this limit.
+                format: int32
+                minimum: 0
+                type: integer
               rolloutStrategy:
                 description: RolloutStrategy defines the strategy that will be applied
                   to update replicas
@@ -17601,6 +17610,11 @@ spec:
               availableReplicas:
                 description: AvailableReplicas track the number of ServingGroup that
                   are in ready state (updated or not).
+                format: int32
+                type: integer
+              collisionCount:
+                description: CollisionCount tracks hash collisions for ControllerRevision
+                  names.
                 format: int32
                 type: integer
               conditions:
