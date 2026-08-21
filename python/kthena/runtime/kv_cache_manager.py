@@ -51,7 +51,8 @@ def compute_standardized_hash(token_ids: List[int]) -> int:
     hash_obj = hashlib.sha256(token_bytes)
     full_hash = int.from_bytes(hash_obj.digest()[:8], byteorder='big')
     result = full_hash & 0x7FFFFFFFFFFFFFFF
-    logger.info(f"KVCacheManager: compute standardized hash={result}, token_ids={token_ids}")
+    # Token ids are detokenizable prompt content, so they must never reach the logs.
+    logger.debug(f"KVCacheManager: compute standardized hash={result}, tokens={len(token_ids)}")
     return result
 
 
@@ -94,7 +95,7 @@ class VLLMKVCacheRedisManager:
 
             logger.info(
                 f"Runtime Redis Write - Model: {model_name}, Pod: {pod_identifier}, "
-                f"BlockHashes: {block_hashes}, Count: {len(block_hashes)}")
+                f"Count: {len(block_hashes)}")
             return True
 
         except Exception as e:

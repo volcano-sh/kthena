@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -280,3 +281,19 @@ async def test_scan_keys_handles_empty_round_before_cursor_returns_to_zero():
         "matrix:kv:block:qwen@1"
     ]
     assert client._client.cursors == [0, 9]
+
+
+def test_standardized_hash_keeps_token_ids_out_of_info_logs(caplog):
+    """Token ids detokenize back to prompt text, so INFO must never carry them."""
+    with caplog.at_level(logging.INFO, logger="kthena.runtime.kv_cache_manager"):
+        compute_standardized_hash([101, 202, 303])
+    assert caplog.records == []
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="kthena.runtime.kv_cache_manager"):
+        compute_standardized_hash([101, 202, 303])
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "tokens=3" in message
+    assert "token_ids" not in message
+    assert "101" not in message
