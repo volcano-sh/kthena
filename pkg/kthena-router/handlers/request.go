@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 )
 
 // OpenAI-compatible APIs can use different request body shapes.
@@ -33,8 +35,8 @@ type OpenAIRequestBody struct {
 
 // Function to parse the OpenAI request body
 func ParseOpenAIRequestBody(r *http.Request) (string, error) {
-	// Read the request body
-	body, err := io.ReadAll(r.Body)
+	// Read the request body with size limit to prevent OOM
+	body, err := io.ReadAll(io.LimitReader(r.Body, common.MaxRequestBodyBytes))
 	if err != nil {
 		return "", err
 	}

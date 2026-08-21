@@ -23,6 +23,7 @@ import (
 	"net/http"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/klog/v2"
 )
@@ -38,7 +39,7 @@ func parseAdmissionReviewFromRequest(r *http.Request) (*admissionv1.AdmissionRev
 	var body []byte
 	if r.Body != nil {
 		defer r.Body.Close()
-		data, err := io.ReadAll(r.Body)
+		data, err := io.ReadAll(io.LimitReader(r.Body, common.MaxRequestBodyBytes))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read request body: %v", err)
 		}

@@ -20,6 +20,9 @@ const (
 	UserIdKey         = "user_id"
 	TokenUsageKey     = "token_usage"
 	RawRequestBodyKey = "raw_request_body"
+
+	// MaxRequestBodyBytes is the maximum allowed size (10MB) for incoming HTTP requests
+	MaxRequestBodyBytes = int64(10 * 1024 * 1024)
 )
 
 // Message represents a single message in a chat conversation
