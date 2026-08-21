@@ -35,6 +35,10 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: "go.mod"
+      - name: Verify Kustomize
+        shell: bash
+        run: |
+          make kustomize
       - name: Build Kthena
         shell: bash
         run: |

@@ -89,6 +89,10 @@ test-docs: ## Run documentation tests (type check and build)
 	cd docs/kthena && npm run typecheck
 	cd docs/kthena && npm run build
 
+.PHONY: kustomize
+kustomize: $(KUSTOMIZE) ## Render every Kustomize example.
+	@hack/kustomize.sh "$(abspath $(KUSTOMIZE))"
+
 .PHONY: test-e2e
 test-e2e: ## Run all e2e tests sequentially (legacy).
 	@command -v kind >/dev/null 2>&1 || { \
@@ -222,12 +226,14 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 HELM_DOCS ?= $(LOCALBIN)/helm-docs
+KUSTOMIZE ?= $(LOCALBIN)/kustomize
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.17.2
 GOLANGCI_LINT_VERSION ?= v1.64.8
 CRD_REF_DOCS_VERSION ?= v0.2.0
 HELM_DOCS_VERSION ?= v1.14.2
+KUSTOMIZE_VERSION ?= v5.8.1
 
 
 
@@ -250,6 +256,10 @@ $(CRD_REF_DOCS): $(LOCALBIN)
 helm-docs: $(HELM_DOCS) ## Download helm-docs locally if necessary.
 $(HELM_DOCS): $(LOCALBIN)
 	$(call go-install-tool,$(HELM_DOCS),github.com/norwoodj/helm-docs/cmd/helm-docs,$(HELM_DOCS_VERSION))
+
+kustomize: $(KUSTOMIZE)
+$(KUSTOMIZE): $(LOCALBIN)
+	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
 
 .PHONY: gen-copyright
 gen-copyright:
