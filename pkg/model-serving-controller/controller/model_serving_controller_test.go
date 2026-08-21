@@ -2877,6 +2877,100 @@ func TestWorkerRecoversFromPanic(t *testing.T) {
 	assert.True(t, processed, "worker should keep processing items after recovering from a panic")
 }
 
+// TestWorkerSurvivesOwnerlessPodThroughRealReconcile reproduces the reported panic through
+// the actual production path rather than calling manageRoleReplicasPerGroup directly.
+//
+// The pods informer only filters on the presence of the GroupNameLabelKey label
+// (see NewModelServingController); it has no relationship to OwnerReferences.
+// RoleIDIndexFunc, which manageRoleReplicasPerGroup queries via getPodsByIndex,
+// also indexes purely on labels. Nothing in the informer/index layer requires a
+// pod to be owned by the ModelServing it is labeled for, so any pod created (by a
+// person, another controller, or a stale leftover) with the right role labels but
+// no OwnerReferences reaches the same reconcile path as a legitimate pod.
+//
+// This test creates such a pod directly through the fake clientset that the
+// controller's real informer watches, waits for it to land in the actual
+// RoleIDKey index, and then drives the real worker entrypoint
+// (processNextWorkItem, exactly what the worker goroutine calls) to reconcile
+// the owning ModelServing -- reproducing pod event/informer -> worker ->
+// processNextWorkItem -> syncHandler -> syncModelServing -> syncRoleReplicas ->
+// manageRoleReplicasPerGroup end to end, and confirming the controller keeps
+// reconciling afterward.
+func TestWorkerSurvivesOwnerlessPodThroughRealReconcile(t *testing.T) {
+	roleName := "default"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "owner-check-ms",
+			UID:       types.UID("ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "entry-container", Image: "test-image:latest"}},
+							},
+						},
+					},
+				},
+			},
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+		},
+	}
+
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	revision := "rev-1"
+	roleID := utils.GenerateRoleID(roleName, 0)
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
+	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, roleID, revision, "test-hash")
+
+	foreignPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foreign-pod-no-owner",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+			},
+			// Deliberately no OwnerReferences: nothing in the informer/index
+			// layer requires one, so this state is reachable by any client
+			// with pod-create permission in the namespace.
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "test-image:latest"}}},
+	}
+	_, err := h.kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), foreignPod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID)
+	require.Eventually(t, func() bool {
+		pods, err := controller.getPodsByIndex(RoleIDKey, roleIDValue)
+		return err == nil && len(pods) == 1
+	}, 2*time.Second, 10*time.Millisecond, "owner-less pod never reached the real pods informer index")
+
+	key := namespacedKey(ms.Namespace, ms.Name)
+	controller.workqueue.Add(key)
+	require.NotPanics(t, func() {
+		controller.processNextWorkItem(context.Background())
+	}, "reconciling a ModelServing with an owner-less same-labeled pod must not panic the worker")
+
+	// The controller must still be able to reconcile afterward, proving the
+	// worker goroutine (and process) survived the owner-less pod.
+	controller.workqueue.Add(key)
+	require.NotPanics(t, func() {
+		controller.processNextWorkItem(context.Background())
+	}, "worker should keep reconciling after encountering an owner-less pod")
+}
+
 // TestScaleDownServingGroups tests the scaleDownServingGroups function with various scenarios
 func TestScaleDownServingGroups(t *testing.T) {
 	tests := []struct {
