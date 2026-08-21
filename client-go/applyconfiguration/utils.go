@@ -146,6 +146,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.RoleRatioConstraintApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioStatus"):
 		return &applyconfigurationworkloadv1alpha1.RoleRatioStatusApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRollingUpdateConfiguration"):
+		return &applyconfigurationworkloadv1alpha1.RoleRollingUpdateConfigurationApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRollingUpdateCoordination"):
+		return &applyconfigurationworkloadv1alpha1.RoleRollingUpdateCoordinationApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRolloutDependency"):
+		return &applyconfigurationworkloadv1alpha1.RoleRolloutDependencyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleScalingParam"):
 		return &applyconfigurationworkloadv1alpha1.RoleScalingParamApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RollingUpdateConfiguration"):

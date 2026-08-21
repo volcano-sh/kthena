@@ -905,6 +905,57 @@ _Appears in:_
 | `currentRatio` _string_ |  |  |  |
 
 
+#### RoleRollingUpdateConfiguration
+
+
+
+
+
+
+
+_Appears in:_
+- [RolloutStrategy](#rolloutstrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `coordination` _[RoleRollingUpdateCoordination](#rolerollingupdatecoordination)_ | Coordination enables proportional rolling updates across selected Roles in<br />each ServingGroup. When omitted, Roles continue to roll independently. |  |  |
+
+
+#### RoleRollingUpdateCoordination
+
+
+
+
+
+
+
+_Appears in:_
+- [RoleRollingUpdateConfiguration](#rolerollingupdateconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `roles` _string array_ | Roles selects the Roles participating in coordinated rolling update. An<br />empty list selects every Role in spec.template.roles. |  |  |
+| `maxSkew` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSkew is the maximum percentage-point difference allowed between the<br />normalized rolling progress of participating Roles. Only percentage values,<br />for example "10%", are accepted. |  | XIntOrString: \{\} <br /> |
+| `dependencies` _[RoleRolloutDependency](#rolerolloutdependency) array_ | Dependencies defines rollout startup dependencies. If Role A depends on B,<br />compatible target-version dependencies must be Ready before A first starts. |  |  |
+
+
+#### RoleRolloutDependency
+
+
+
+
+
+
+
+_Appears in:_
+- [RoleRollingUpdateCoordination](#rolerollingupdatecoordination)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `role` _string_ | Role is the dependent Role. |  |  |
+| `dependsOn` _string array_ | DependsOn lists the downstream Roles required by Role. |  |  |
+
+
 #### RoleScalingParam
 
 
@@ -959,6 +1010,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles do not take effect.<br />RoleRollingUpdate uses the rolling update configuration on each Role;<br />rolloutStrategy.rollingUpdateConfiguration must not be set.<br />Kthena performs RoleRollingUpdate across all ServingGroups at the same time.<br />Therefore, we recommend using it only in scenarios with a single ServingGroup. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
 | `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set when type is RoleRollingUpdate; configure maxUnavailable<br />and partition on each Role instead. |  |  |
+| `roleRollingUpdateConfiguration` _[RoleRollingUpdateConfiguration](#rolerollingupdateconfiguration)_ | RoleRollingUpdateConfiguration defines the cross-Role coordination parameters<br />to be used when type is RoleRollingUpdate. |  |  |
 
 
 #### RolloutStrategyType
