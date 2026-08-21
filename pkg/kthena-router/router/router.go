@@ -1342,7 +1342,7 @@ func doRequest(
 		req = req.WithContext(ctx)
 	}
 
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := proxyTransport.RoundTrip(req)
 	if err != nil {
 		cancel()
 		return nil, err
