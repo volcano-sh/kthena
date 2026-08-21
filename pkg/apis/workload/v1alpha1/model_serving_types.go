@@ -92,8 +92,8 @@ type PluginScope struct {
 	// +optional
 	Roles []string `json:"roles,omitempty"`
 	// Target limits the plugin to specific pod target (Entry/Worker/All).
-	// kubebuilder:default=All
-	// kubebuilder:validation:Enum={All,Entry,Worker}
+	// +kubebuilder:default=All
+	// +kubebuilder:validation:Enum={All,Entry,Worker}
 	Target PluginTarget `json:"target,omitempty"`
 }
 
