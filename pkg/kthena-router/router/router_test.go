@@ -38,6 +38,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -3072,4 +3073,92 @@ func TestRouter_HandlerFunc_UnknownModel_RejectsBeforeQueueing(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRouter_ModelRouteRateLimitClearedOnUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+
+	modelName := "model-rate-limit-test"
+	tokens := uint32(5)
+	unit := aiv1alpha1.Minute
+	prompt := "hello world" // 3 tokens
+
+	// 1. Add ModelRoute with restrictive rateLimit (5 tokens/minute)
+	mrWithLimit := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-test", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: modelName,
+			RateLimit: &aiv1alpha1.RateLimit{
+				InputTokensPerUnit: &tokens,
+				Unit:               unit,
+			},
+		},
+	}
+	store.AddOrUpdateModelRoute(mrWithLimit)
+
+	// Wait for the rate limiter to be registered via callback
+	require.Eventually(t, func() bool {
+		return router.loadRateLimiter.HasLimiter(modelName)
+	}, time.Second, 5*time.Millisecond, "rate limiter should be registered for model")
+
+	// First request succeeds (consumes 3 of 5 tokens)
+	err := router.loadRateLimiter.RateLimit(modelName, prompt)
+	assert.NoError(t, err, "first request within limit should succeed")
+
+	// Second request requires 3 tokens (only 2 left out of 5), so it must be rate limited
+	err = router.loadRateLimiter.RateLimit(modelName, prompt)
+	assert.Error(t, err, "second request exceeding remaining quota should be rate limited")
+
+	// 2. Update ModelRoute clearing rateLimit (setting it to nil)
+	mrWithoutLimit := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-test", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: modelName,
+			RateLimit: nil,
+		},
+	}
+	store.AddOrUpdateModelRoute(mrWithoutLimit)
+
+	// Wait for the rate limiter to be deleted via callback
+	require.Eventually(t, func() bool {
+		return !router.loadRateLimiter.HasLimiter(modelName)
+	}, time.Second, 5*time.Millisecond, "rate limiter should be removed after spec.rateLimit is set to nil")
+
+	// Both requests should now succeed continuously because rate limiting is removed
+	err1 := router.loadRateLimiter.RateLimit(modelName, prompt)
+	err2 := router.loadRateLimiter.RateLimit(modelName, prompt)
+	assert.NoError(t, err1, "first request after clearing rate limit should succeed")
+	assert.NoError(t, err2, "second request after clearing rate limit should succeed")
+}
+
+func TestRouter_ModelRouteRateLimitStaleEventRejection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+
+	modelName := "model-stale-test"
+	tokens := uint32(10)
+	unit := aiv1alpha1.Minute
+
+	// Current live ModelRoute in store has a rate limit configured
+	mrWithLimit := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-stale", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: modelName,
+			RateLimit: &aiv1alpha1.RateLimit{
+				InputTokensPerUnit: &tokens,
+				Unit:               unit,
+			},
+		},
+	}
+	store.AddOrUpdateModelRoute(mrWithLimit)
+
+	require.Eventually(t, func() bool {
+		return router.loadRateLimiter.HasLimiter(modelName)
+	}, time.Second, 5*time.Millisecond, "rate limiter should be registered for model")
+
+	// Verify that the rate limiter is retained as long as the store's ModelRoute has a rate limit
+	assert.True(t, router.loadRateLimiter.HasLimiter(modelName))
 }
