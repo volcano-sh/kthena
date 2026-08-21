@@ -13,6 +13,8 @@ spec:
     roles:
       - name: prefill
         replicas: 1       # role replicas, for example, 1P1D
+        maxUnavailable: 0
+        maxSurge: 1
         entryTemplate:
           spec:
             containers:
@@ -30,6 +32,8 @@ spec:
                   - containerPort: 8080
       - name: decode
         replicas: 1  # role replicas, for example, 1P1D
+        maxUnavailable: 0
+        maxSurge: 1
         entryTemplate:
           spec:
             containers:

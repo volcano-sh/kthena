@@ -63,6 +63,16 @@ func TestCreateControllerRevision(t *testing.T) {
 	assert.Equal(t, "default", cr.Namespace)
 	assert.Equal(t, "test-ms", cr.Labels[ControllerRevisionLabelKey])
 	assert.Equal(t, "revision-v1", cr.Labels[ControllerRevisionRevisionLabelKey])
+
+	// A hash collision or corrupted historical snapshot must never be repaired
+	// by overwriting data referenced by live stable or surge resources.
+	_, err = CreateControllerRevision(ctx, client, ms, "revision-v1", []workloadv1alpha1.Role{{Name: "decode"}})
+	assert.ErrorContains(t, err, "already exists with different template data")
+	persisted, err := GetControllerRevision(ctx, client, ms, "revision-v1")
+	assert.NoError(t, err)
+	roles, err := GetRolesFromControllerRevision(persisted)
+	assert.NoError(t, err)
+	assert.Equal(t, "prefill", roles[0].Name)
 }
 
 func TestGetControllerRevision(t *testing.T) {

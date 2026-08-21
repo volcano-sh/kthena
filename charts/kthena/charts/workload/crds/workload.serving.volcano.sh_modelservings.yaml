@@ -125,8 +125,20 @@ spec:
                     description: |-
                       RollingUpdateConfiguration configures ServingGroupRollingUpdate.
                       It must not be set when type is RoleRollingUpdate; configure maxUnavailable
-                      and partition on each Role instead.
+                      maxSurge, and partition on each Role instead.
                     properties:
+                      maxSurge:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxSurge is the maximum number of resources that may be created above
+                          the desired replica count during an update. It can be an absolute number
+                          (for example, 1) or a percentage (for example, 25%). A percentage is
+                          calculated from ModelServing replicas for ServingGroupRollingUpdate and
+                          from the corresponding Role's replicas for RoleRollingUpdate, then rounded
+                          up. It defaults to 0.
+                        x-kubernetes-int-or-string: true
                       maxUnavailable:
                         anyOf:
                         - type: integer
@@ -138,7 +150,7 @@ spec:
                           5) or a percentage (for example, 10%). A percentage is calculated from
                           ModelServing replicas for ServingGroupRollingUpdate and from the
                           corresponding Role's replicas for RoleRollingUpdate, then rounded down.
-                          The value must not resolve to 0. Defaults to 1.
+                          It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
                         x-kubernetes-int-or-string: true
                       partition:
                         anyOf:
@@ -8902,6 +8914,18 @@ spec:
                               - containers
                               type: object
                           type: object
+                        maxSurge:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: |-
+                            MaxSurge is the maximum number of resources that may be created above
+                            the desired replica count during an update. It can be an absolute number
+                            (for example, 1) or a percentage (for example, 25%). A percentage is
+                            calculated from ModelServing replicas for ServingGroupRollingUpdate and
+                            from the corresponding Role's replicas for RoleRollingUpdate, then rounded
+                            up. It defaults to 0.
+                          x-kubernetes-int-or-string: true
                         maxUnavailable:
                           anyOf:
                           - type: integer
@@ -8913,7 +8937,7 @@ spec:
                             5) or a percentage (for example, 10%). A percentage is calculated from
                             ModelServing replicas for ServingGroupRollingUpdate and from the
                             corresponding Role's replicas for RoleRollingUpdate, then rounded down.
-                            The value must not resolve to 0. Defaults to 1.
+                            It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
                           x-kubernetes-int-or-string: true
                         name:
                           description: The name of a role. Name must be unique within

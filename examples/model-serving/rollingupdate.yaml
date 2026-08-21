@@ -9,7 +9,8 @@ spec:
   rolloutStrategy:
     type: ServingGroupRollingUpdate
     rollingUpdateConfiguration:
-      maxUnavailable: 2
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     restartGracePeriodSeconds: 60
     roles:

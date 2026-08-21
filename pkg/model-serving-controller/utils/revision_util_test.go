@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -169,6 +170,22 @@ func TestModelServingRevision(t *testing.T) {
 				t.Errorf("ModelServingRevision() equality = %v, want %v (a=%s, b=%s)", gotA == gotB, tt.wantEqual, gotA, gotB)
 			}
 		})
+	}
+}
+
+func TestMaxSurgeDoesNotChangeRevisionOrRoleTemplateHash(t *testing.T) {
+	withoutSurge := newRole("decode", int32Ptr(2), 0)
+	withSurge := *withoutSurge.DeepCopy()
+	withSurge.MaxUnavailable = func() *intstr.IntOrString { value := intstr.FromInt(0); return &value }()
+	withSurge.MaxSurge = func() *intstr.IntOrString { value := intstr.FromString("25%"); return &value }()
+	withSurge.Partition = func() *intstr.IntOrString { value := intstr.FromInt(1); return &value }()
+
+	if CalRoleTemplateHash(withoutSurge) != CalRoleTemplateHash(withSurge) {
+		t.Fatal("rolling update policy must not change Role template hash")
+	}
+	if ModelServingRevision(newModelServing([]workloadv1alpha1.Role{withoutSurge})) !=
+		ModelServingRevision(newModelServing([]workloadv1alpha1.Role{withSurge})) {
+		t.Fatal("rolling update policy must not change ModelServing revision")
 	}
 }
 

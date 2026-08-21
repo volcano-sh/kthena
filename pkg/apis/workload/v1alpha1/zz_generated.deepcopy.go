@@ -991,6 +991,11 @@ func (in *RollingUpdateConfiguration) DeepCopyInto(out *RollingUpdateConfigurati
 		*out = new(intstr.IntOrString)
 		**out = **in
 	}
+	if in.MaxSurge != nil {
+		in, out := &in.MaxSurge, &out.MaxSurge
+		*out = new(intstr.IntOrString)
+		**out = **in
+	}
 	if in.Partition != nil {
 		in, out := &in.Partition, &out.Partition
 		*out = new(intstr.IntOrString)

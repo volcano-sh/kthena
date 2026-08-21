@@ -4,12 +4,14 @@ Rolling updates represent a critical operational strategy for online services ai
 
 `ModelServing` supports rolling updates at either the `ServingGroup` or `Role` level. Select exactly one granularity with `spec.rolloutStrategy.type`:
 
-- `ServingGroupRollingUpdate` uses `spec.rolloutStrategy.rollingUpdateConfiguration`. Its `maxUnavailable` limits unavailable `ServingGroups`, and its `partition` protects existing `ServingGroups` from updates.
-- `RoleRollingUpdate` uses the inline `maxUnavailable` and `partition` fields on each entry in `spec.template.roles`. The settings are applied independently to each `Role` in every `ServingGroup`. The ModelServing-level `rollingUpdateConfiguration` must not be set and does not participate in the Role availability budget.
+- `ServingGroupRollingUpdate` uses `spec.rolloutStrategy.rollingUpdateConfiguration`. Its `maxUnavailable` limits unavailable `ServingGroups`, `maxSurge` limits temporary additional `ServingGroups`, and `partition` protects stable `ServingGroups` from updates.
+- `RoleRollingUpdate` uses the inline `maxUnavailable`, `maxSurge`, and `partition` fields on each entry in `spec.template.roles`. The settings are applied independently to each `Role` in every `ServingGroup`. The ModelServing-level `rollingUpdateConfiguration` must not be set and does not participate in the Role availability budget.
 
 Configure rolling update settings only at the selected granularity. `maxUnavailable` accepts an absolute number or a percentage and defaults to `1`. A percentage is calculated from `spec.replicas` for `ServingGroupRollingUpdate` and from the corresponding Role's `replicas` for `RoleRollingUpdate`.
 
-`partition` protects the first N existing replicas in ascending ordinal order. The remaining replicas are eligible for rolling update. With a normal contiguous ordinal set, this is equivalent to protecting ordinals in `[0, partition)`. Defining protection by list position also gives deterministic behavior for legacy or temporarily non-contiguous sets.
+`maxSurge` accepts a non-negative absolute number or percentage, defaults to `0`, and rounds percentages up. It is calculated from `spec.replicas` for `ServingGroupRollingUpdate` and from the corresponding Role's `replicas` for `RoleRollingUpdate`. `maxUnavailable` and `maxSurge` cannot both resolve to zero when the partition leaves replicas eligible for update.
+
+`partition` protects ServingGroups whose ordinals are in `[0, partition)`. The remaining ServingGroups are eligible for rolling update. This definition remains deterministic when binpack scale-down leaves a sparse ordinal set.
 
 ## ServingGroup rolling update
 
@@ -22,9 +24,26 @@ spec:
   rolloutStrategy:
     type: ServingGroupRollingUpdate
     rollingUpdateConfiguration:
-      maxUnavailable: 1
+      maxUnavailable: 0
+      maxSurge: 1
       partition: 0
 ```
+
+    With `replicas: 4` and `maxSurge: 1`, the controller temporarily changes the expected ServingGroup count from four to five while an updateable outdated ServingGroup exists. Normal replica synchronization creates or removes the required capacity; rolling-update reconciliation only selects outdated groups within the availability budget.
+
+    The controller always enforces these bounds:
+
+    $$
+    N_{live} \leq replicas + maxSurge
+    $$
+
+    $$
+    N_{available} \geq replicas - maxUnavailable
+    $$
+
+    An unready additional ServingGroup counts toward the replica ceiling but does not contribute to availability. If it cannot be scheduled, the rollout waits without deleting available capacity. No rollout lifecycle label or status journal is required because the expected count is derived from the observed revisions on every reconciliation.
+
+    Ordinal values do not identify surge capacity. Binpack scale-down can leave sparse ordinals or an ordinal greater than `replicas`, and that ServingGroup remains a normal replica. When the update finishes, the expected count returns to `replicas` and the regular ModelServing binpack scale-down policy selects excess groups using readiness and deletion cost. Changing `replicas` or `maxSurge` during rollout therefore changes only the target count; it does not force deletion of high ordinals. Partition protection remains ordinal-based and independent of the current replica count.
 
 In the following we'll show how rolling update processes for a `ModelServing` with four replicas. Three Replica status are simulated here:
 
@@ -55,16 +74,22 @@ spec:
     roles:
       - name: prefill
         replicas: 4
-        maxUnavailable: 1
+        maxUnavailable: 0
+        maxSurge: 1
         partition: 0
         # entryTemplate and other Role fields are omitted
       - name: decode
         replicas: 2
         maxUnavailable: 1
+        maxSurge: 1
         partition: 0
         # entryTemplate and other Role fields are omitted
 ```
 
 Kthena evaluates Role updates across all `ServingGroups`. Because each `ServingGroup` applies the per-Role availability budget independently, `RoleRollingUpdate` is recommended for a ModelServing with a single `ServingGroup`.
+
+While an updateable outdated Role replica exists, the controller temporarily changes that Role's expected replica count from `replicas` to `replicas + maxSurge`. Normal Role replica synchronization creates and later removes the additional capacity, while rolling-update reconciliation only selects outdated replicas within the `maxUnavailable` budget. An unready new replica consumes availability budget and can naturally block further deletion.
+
+Role ordinals do not identify surge capacity. Binpack scale-down may retain sparse or high Role ordinals as normal replicas. When the update finishes, the expected count returns to `replicas`, and the existing Role scale-down policy selects excess replicas using readiness and deletion cost.
 
 If `recoveryPolicy` is `ServingGroupRecreate`, deleting an outdated Role triggers recreation of its entire `ServingGroup`, which removes the resource-saving benefit of `RoleRollingUpdate`. Use `RoleRecreate` when only the outdated Role should be rebuilt.

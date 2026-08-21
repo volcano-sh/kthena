@@ -285,7 +285,7 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 	}
 
 	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
-	assert.NoError(t, err)
+	assert.ErrorContains(t, err, "does not match expected identity")
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
@@ -1788,8 +1788,9 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		err = controller.syncModelServing(context.Background(), "default/test-binpack-scale")
 		assert.NoError(t, err)
 
-		// Identify ServingGroups to be deleted (with lower deletion cost)
-		// Based on our cost assignment: Group 0 (cost 0) Group 1 (cost 30) and Group 2 (cost 60) should be deleted first
+		// Binpack scale-down is based on deletion cost rather than ordinal. Group
+		// 3 has the highest cost and remains even though its ordinal is greater
+		// than the new replica count.
 		requirement, err := labels.NewRequirement(
 			workloadv1alpha1.GroupNameLabelKey,
 			selection.In,
@@ -2189,14 +2190,14 @@ func TestScaleUpServingGroups(t *testing.T) {
 			expectNoCreation:   false,
 		},
 		{
-			name:               "scale up fills gaps within replicas",
+			name:               "scale up counts high ordinal as existing replica",
 			existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing
 			expectedCount:      4,
 			expectedNewIndices: []int{1, 2},
 			expectNoCreation:   false,
 		},
 		{
-			name:               "scale up with only high index existing",
+			name:               "scale up with only high ordinal existing",
 			existingIndices:    []int{10},
 			expectedCount:      3,
 			expectedNewIndices: []int{0, 1},
@@ -2769,13 +2770,14 @@ func TestManageRoleReplicas(t *testing.T) {
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
 			revision := "rev-1"
+			roleTemplateHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
 			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
 			for _, roleID := range tt.initialRoleIDs {
-				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, roleID), revision, "test-")
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, roleID), revision, roleTemplateHash)
 			}
 
 			if tt.addEntryPod {
-				entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, utils.GenerateRoleID(roleName, 0), revision, "test-roleTemplateHash")
+				entryPod := utils.GenerateEntryPod(*ms.Spec.Template.Roles[0].DeepCopy(), ms, groupName, utils.GenerateRoleID(roleName, 0), revision, roleTemplateHash)
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
 				}
@@ -2812,6 +2814,122 @@ func TestManageRoleReplicas(t *testing.T) {
 				})
 				assert.True(t, requeued, "model serving should be requeued for owner UID mismatch")
 			}
+		})
+	}
+}
+
+func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	maxUnavailable := intstr.FromInt(0)
+	maxSurge := intstr.FromInt(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "role-surge", UID: types.UID("role-surge-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:        ptr.To[int32](1),
+			RecoveryPolicy:  workloadv1alpha1.RoleRecreate,
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name:           "decode",
+				Replicas:       ptr.To[int32](2),
+				WorkerReplicas: 0,
+				RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: &maxUnavailable,
+					MaxSurge:       &maxSurge,
+				},
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "entry", Image: "new-image"}}},
+				},
+			}}},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	controller.store.AddServingGroup(key, 0, "old-revision")
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", ordinal), "old-revision", "old-hash")
+	}
+
+	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision")
+
+	roles, err := controller.store.GetRoleList(key, groupName, "decode")
+	require.NoError(t, err)
+	require.Len(t, roles, 3)
+	assert.Equal(t, "decode-2", roles[2].Name)
+	assert.Equal(t, "new-revision", roles[2].Revision)
+	assert.Equal(t, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), roles[2].RoleTemplateHash)
+
+	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, pods.Items, 3)
+}
+
+func TestHasUpdateableOutdatedRole(t *testing.T) {
+	controller := &ModelServingController{}
+	partition := intstr.FromInt(1)
+	targetRole := workloadv1alpha1.Role{
+		Name:     "decode",
+		Replicas: ptr.To[int32](2),
+		RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+			Partition: &partition,
+		},
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "entry", Image: "new-image"}}},
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		Spec: workloadv1alpha1.ModelServingSpec{
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+		},
+	}
+	newHash := utils.CalRoleTemplateHash(targetRole)
+
+	tests := []struct {
+		name  string
+		roles []datastore.Role
+		want  bool
+	}{
+		{
+			name: "outdated replica after partition enables surge",
+			roles: []datastore.Role{
+				{Name: "decode-0", RoleTemplateHash: "old-hash", Status: datastore.RoleRunning},
+				{Name: "decode-4", RoleTemplateHash: "old-hash", Status: datastore.RoleRunning},
+			},
+			want: true,
+		},
+		{
+			name: "partition-protected outdated replica does not enable surge",
+			roles: []datastore.Role{
+				{Name: "decode-0", RoleTemplateHash: "old-hash", Status: datastore.RoleRunning},
+				{Name: "decode-4", RoleTemplateHash: newHash, Status: datastore.RoleRunning},
+			},
+		},
+		{
+			name: "all replicas updated",
+			roles: []datastore.Role{
+				{Name: "decode-0", RoleTemplateHash: newHash, Status: datastore.RoleRunning},
+				{Name: "decode-4", RoleTemplateHash: newHash, Status: datastore.RoleRunning},
+			},
+		},
+		{
+			name: "deleting outdated replica does not enable surge",
+			roles: []datastore.Role{
+				{Name: "decode-0", RoleTemplateHash: newHash, Status: datastore.RoleRunning},
+				{Name: "decode-4", RoleTemplateHash: "old-hash", Status: datastore.RoleDeleting},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, controller.hasUpdateableOutdatedRole(ms, "test-0", targetRole, tt.roles))
 		})
 	}
 }
@@ -3275,7 +3393,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			description:            "Without partition, all replicas are candidates for deletion based on binpack scoring",
 		},
 		{
-			name:            "partition=5, all replicas protected",
+			name:            "partition=5 protects ordinals independently of replica count",
 			partition:       ptr.To(intstr.FromInt32(5)),
 			existingIndices: []int{0, 1, 2, 3},
 			expectedCount:   2, // Scale down to trigger deletion of protected replicas
@@ -3291,8 +3409,8 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				2: datastore.ServingGroupRunning,
 				3: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "3"}, // R-2 (lowest cost) and R-1 (medium cost) deleted based on binpack scoring
-			description:            "When partition exceeds all replica indices, all replicas are classified as protected and deletion is based on binpack scoring within protected list",
+			expectedRemainingNames: []string{"0", "3"}, // All groups are protected equally; binpack cost decides which remain
+			description:            "Partition does not reclassify high ordinals after replica count changes",
 		},
 		{
 			name:            "partition=3, scale down below partition - delete protected after non-protected",
@@ -3671,7 +3789,7 @@ func TestModelServingVersionControl(t *testing.T) {
 
 // TestScaleUpServingGroups_TemplateRecovery tests that for ordinal < partition:
 // 1. Priority: use template from ControllerRevision (recovery scenario)
-// 2. Fallback: use ms.Spec.Template.Roles if ControllerRevision doesn't exist (first startup scenario)
+// 2. Fail safely when a historical ControllerRevision no longer exists.
 func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 	ctx := context.Background()
 
@@ -3685,6 +3803,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 		initialTemplateRoles   []workloadv1alpha1.Role
 		recoveryTemplateRoles  []workloadv1alpha1.Role // Template stored in ControllerRevision
 		currentTemplateRoles   []workloadv1alpha1.Role // Current ms.Spec.Template.Roles
+		wantError              bool
 	}{
 		{
 			name:                   "recovery_with_controller_revision",
@@ -3717,7 +3836,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 			},
 		},
 		{
-			name:                   "first_startup_without_controller_revision",
+			name:                   "missing_historical_controller_revision_fails_safely",
 			partition:              3,
 			ordinal:                1,
 			hasControllerRevision:  false,
@@ -3735,6 +3854,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 					Replicas: ptr.To[int32](2),
 				},
 			},
+			wantError: true,
 		},
 	}
 
@@ -3811,6 +3931,10 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 
 			newRevision := "revision-v2"
 			err = controller.scaleUpServingGroups(ctx, ms, existingGroups, int(tt.partition), newRevision)
+			if tt.wantError {
+				assert.ErrorContains(t, err, "was not found")
+				return
+			}
 			assert.NoError(t, err)
 
 			// Verify the group was created with correct revision
@@ -3976,6 +4100,45 @@ func TestUpdateModelServingStatusLabelSelector(t *testing.T) {
 				"case %d: status.labelSelector must be %q", idx, expectedSelector)
 		})
 	}
+}
+
+func TestUpdateModelServingStatusCountsAllServingGroups(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller, err := NewModelServingController(kubeClient, kthenaClient, nil, apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "status-surge"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name: "decode", Replicas: ptr.To[int32](1),
+			}}},
+		},
+		Status: workloadv1alpha1.ModelServingStatus{CurrentRevision: "old-revision"},
+	}
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+
+	key := utils.GetNamespaceName(ms)
+	for ordinal := 0; ordinal < 3; ordinal++ {
+		controller.store.AddServingGroup(key, ordinal, "new-revision")
+		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
+	}
+
+	require.NoError(t, controller.UpdateModelServingStatus(ms, "new-revision"))
+	updated, err := kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), updated.Status.Replicas)
+	assert.Equal(t, int32(3), updated.Status.AvailableReplicas)
+	assert.Equal(t, int32(3), updated.Status.UpdatedReplicas)
+	assert.Equal(t, int32(0), updated.Status.CurrentReplicas)
+	assert.Equal(t, "old-revision", updated.Status.CurrentRevision)
+	assert.Equal(t, "new-revision", updated.Status.UpdateRevision)
+	require.NotEmpty(t, updated.Status.Conditions)
+	assert.Equal(t, string(workloadv1alpha1.ModelServingUpdateInProgress), updated.Status.Conditions[len(updated.Status.Conditions)-1].Type)
 }
 
 func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
@@ -6544,6 +6707,8 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 		newPodWorkerID     int
 		initialRoleStatus  datastore.RoleStatus
 		expectedRoleStatus datastore.RoleStatus
+		specRoleReplicas   int32
+		expectEnqueued     bool
 	}{
 		{
 			description:    "single entry pod becomes ready - role should transition to Running",
@@ -6558,6 +6723,16 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			newPodWorkerID:     0,
 			initialRoleStatus:  datastore.RoleCreating,
 			expectedRoleStatus: datastore.RoleRunning,
+		},
+		{
+			description:        "ready role is enqueued when ServingGroup replica count has not converged",
+			workerReplicas:     0,
+			newPodIsEntry:      true,
+			newPodWorkerID:     0,
+			initialRoleStatus:  datastore.RoleCreating,
+			expectedRoleStatus: datastore.RoleRunning,
+			specRoleReplicas:   2,
+			expectEnqueued:     true,
 		},
 		{
 			description:    "entry pod ready but workers not ready - role should stay Creating",
@@ -6682,6 +6857,11 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			// Create store and add initial role status
 			store := datastore.New()
 
+			roleReplicas := tt.specRoleReplicas
+			if roleReplicas == 0 {
+				roleReplicas = 1
+			}
+
 			// Create ModelServing
 			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
@@ -6695,7 +6875,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           roleName,
-								Replicas:       ptr.To[int32](1),
+								Replicas:       ptr.To(roleReplicas),
 								WorkerReplicas: tt.workerReplicas,
 								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
 									Spec: corev1.PodSpec{
@@ -6841,6 +7021,9 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			)
 			assert.Equal(t, tt.expectedRoleStatus, actualRoleStatus,
 				"Role status mismatch: expected %s, got %s", tt.expectedRoleStatus, actualRoleStatus)
+			if tt.expectEnqueued {
+				assert.Positive(t, controller.workqueue.Len(), "ModelServing should be enqueued when a Role becomes ready")
+			}
 		})
 	}
 }
@@ -7169,6 +7352,457 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 	}
 }
 
+func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
+	controller, err := NewModelServingController(
+		kubefake.NewSimpleClientset(),
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	maxUnavailable := intstr.FromInt(0)
+	maxSurge := intstr.FromInt(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "surge-test", Namespace: "default", UID: types.UID("surge-test-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: &maxUnavailable,
+					MaxSurge:       &maxSurge,
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name:     "decode",
+				Replicas: ptr.To[int32](1),
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "decode", Image: "new-image"}},
+				}},
+			}}},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		controller.store.AddServingGroup(key, ordinal, "old-revision")
+		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
+	}
+
+	groups, err := controller.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.Len(t, groups, 2, "rolling update waits for replica sync to create surge capacity")
+
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+
+	groups, err = controller.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.Len(t, groups, 3)
+	surgeName := utils.GenerateServingGroupName(ms.Name, 2)
+	assert.Equal(t, surgeName, groups[2].Name)
+	assert.Equal(t, "new-revision", groups[2].Revision)
+
+	// An unready surge consumes its slot but cannot authorize deletion when
+	// maxUnavailable is zero.
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal)))
+	}
+
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, surgeName, datastore.ServingGroupRunning))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+
+	// The highest outdated group is replaced first while the temporary capacity
+	// remains available.
+	groups, err = controller.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	assert.Len(t, groups, 2)
+	assert.Equal(t, surgeName, groups[1].Name)
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 1), datastore.ServingGroupRunning))
+
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+
+	// Once all remaining groups use the new revision, replica synchronization
+	// derives the normal desired count. The high ordinal remains a normal replica
+	// rather than being identified and removed as a surge group.
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	groups, err = controller.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.Len(t, groups, 2)
+	for _, group := range groups {
+		assert.Equal(t, "new-revision", group.Revision)
+	}
+	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 1), groups[0].Name)
+	assert.Equal(t, surgeName, groups[1].Name)
+}
+
+func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {
+	tests := []struct {
+		name             string
+		maxSurge         *intstr.IntOrString
+		maxUnavailable   intstr.IntOrString
+		groups           []datastore.ServingGroup
+		wantOutdatedLeft int
+	}{
+		{
+			name:             "without maxSurge preserves original behavior",
+			maxUnavailable:   intstr.FromInt(1),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}},
+			wantOutdatedLeft: 1,
+		},
+		{
+			name:             "no additional capacity yields zero budget",
+			maxSurge:         ptr.To(intstr.FromInt(1)),
+			maxUnavailable:   intstr.FromInt(0),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "new", Status: datastore.ServingGroupRunning}},
+			wantOutdatedLeft: 1,
+		},
+		{
+			name:             "does not gate on new revision group count",
+			maxSurge:         ptr.To(intstr.FromInt(1)),
+			maxUnavailable:   intstr.FromInt(0),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-2", Revision: "old", Status: datastore.ServingGroupRunning}},
+			wantOutdatedLeft: 2,
+		},
+		{
+			name:             "unready new revision group does not add availability",
+			maxSurge:         ptr.To(intstr.FromInt(1)),
+			maxUnavailable:   intstr.FromInt(0),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-2", Revision: "new", Status: datastore.ServingGroupCreating}},
+			wantOutdatedLeft: 2,
+		},
+		{
+			name:             "maxUnavailable permits progress with unready new revision group",
+			maxSurge:         ptr.To(intstr.FromInt(1)),
+			maxUnavailable:   intstr.FromInt(1),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-2", Revision: "new", Status: datastore.ServingGroupCreating}},
+			wantOutdatedLeft: 1,
+		},
+		{
+			name:             "ready maxSurge capacity contributes to maxScaleDown",
+			maxSurge:         ptr.To(intstr.FromInt(1)),
+			maxUnavailable:   intstr.FromInt(0),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-2", Revision: "new", Status: datastore.ServingGroupRunning}},
+			wantOutdatedLeft: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, err := NewModelServingController(
+				kubefake.NewSimpleClientset(),
+				kthenafake.NewSimpleClientset(),
+				nil,
+				apiextfake.NewSimpleClientset(),
+			)
+			require.NoError(t, err)
+
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{Name: "rollout", Namespace: "default"},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](2),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.ServingGroupRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: &tt.maxUnavailable,
+							MaxSurge:       tt.maxSurge,
+						},
+					},
+				},
+			}
+			key := utils.GetNamespaceName(ms)
+			for _, group := range tt.groups {
+				_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+				controller.store.AddServingGroup(key, ordinal, group.Revision)
+				require.NoError(t, controller.store.UpdateServingGroupStatus(key, group.Name, group.Status))
+			}
+
+			require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new"))
+			groups, err := controller.store.GetServingGroupByModelServing(key)
+			require.NoError(t, err)
+			outdatedLeft := 0
+			for _, group := range groups {
+				if group.Revision != "new" {
+					outdatedLeft++
+				}
+			}
+			assert.Equal(t, tt.wantOutdatedLeft, outdatedLeft)
+		})
+	}
+}
+
+func TestHasUpdateableOutdatedServingGroup(t *testing.T) {
+	tests := []struct {
+		name      string
+		groups    []datastore.ServingGroup
+		partition int
+		want      bool
+	}{
+		{
+			name: "outdated stable groups require surge",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-0", Revision: "old", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-1", Revision: "old", Status: datastore.ServingGroupRunning},
+			},
+			want: true,
+		},
+		{
+			name: "sparse high ordinal is not treated as surge",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-0", Revision: "new", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-2", Revision: "new", Status: datastore.ServingGroupRunning},
+			},
+			want: false,
+		},
+		{
+			name: "ready state does not define surge capacity",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-0", Revision: "new", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-1", Revision: "new", Status: datastore.ServingGroupCreating},
+				{Name: "recovery-2", Revision: "new", Status: datastore.ServingGroupRunning},
+			},
+			want: false,
+		},
+		{
+			name: "existing surge is retained while old stable group is deleting",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-0", Revision: "new", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-1", Revision: "old", Status: datastore.ServingGroupDeleting},
+				{Name: "recovery-2", Revision: "new", Status: datastore.ServingGroupRunning},
+			},
+			want: true,
+		},
+		{
+			name: "surge is released after stable completion",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-0", Revision: "new", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-1", Revision: "new", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-2", Revision: "new", Status: datastore.ServingGroupRunning},
+			},
+			want: false,
+		},
+		{
+			name: "partition protected old revisions do not start rollout",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-0", Revision: "old", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-1", Revision: "old", Status: datastore.ServingGroupRunning},
+			},
+			partition: 2,
+			want:      false,
+		},
+		{
+			name: "partition protects first existing group with sparse ordinals",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-5", Revision: "new", Status: datastore.ServingGroupRunning},
+			},
+			partition: 1,
+			want:      false,
+		},
+		{
+			name: "outdated group after sparse partition prefix requires surge",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-5", Revision: "old", Status: datastore.ServingGroupRunning},
+			},
+			partition: 1,
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasUpdateableOutdatedServingGroup(tt.groups, "new", tt.partition))
+		})
+	}
+}
+
+func TestSyncServingGroupReplicasPreservesSparseOrdinals(t *testing.T) {
+	controller, err := NewModelServingController(
+		kubefake.NewSimpleClientset(),
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "gap-test", Namespace: "default", UID: types.UID("gap-test-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+			},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(key, 0, "new")
+	controller.store.AddServingGroup(key, 2, "new")
+	for _, ordinal := range []int{0, 2} {
+		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
+	}
+	// Binpack scale-down can leave sparse ordinals. Replica synchronization is
+	// count based and must not delete or replace the high ordinal.
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new"))
+	groups, err := controller.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.Len(t, groups, 2)
+	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 0), groups[0].Name)
+	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 2), groups[1].Name)
+}
+
+func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
+	controller, err := NewModelServingController(
+		kubefake.NewSimpleClientset(),
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	maxSurge := intstr.FromInt(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "scale-down-update", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: &maxSurge},
+			},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		controller.store.AddServingGroup(key, ordinal, "old")
+		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
+	}
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new"))
+	groups, err := controller.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.Len(t, groups, 3)
+	assert.Equal(t, "new", groups[2].Revision)
+}
+
+func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T) {
+	controller, err := NewModelServingController(
+		kubefake.NewSimpleClientset(),
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	maxUnavailable := intstr.FromInt(0)
+	maxSurge := intstr.FromInt(1)
+	partition := intstr.FromInt(2)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "unavailable-protected", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: &maxUnavailable,
+					MaxSurge:       &maxSurge,
+					Partition:      &partition,
+				},
+			},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	groups := []struct {
+		ordinal  int
+		revision string
+		status   datastore.ServingGroupStatus
+	}{
+		{ordinal: 0, revision: "old", status: datastore.ServingGroupCreating},
+		{ordinal: 1, revision: "old", status: datastore.ServingGroupRunning},
+		{ordinal: 2, revision: "old", status: datastore.ServingGroupRunning},
+		{ordinal: 3, revision: "new", status: datastore.ServingGroupRunning},
+	}
+	for _, group := range groups {
+		controller.store.AddServingGroup(key, group.ordinal, group.revision)
+		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, group.ordinal), group.status))
+	}
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new"))
+	assert.Equal(t, datastore.ServingGroupNotFound, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
+}
+
+func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
+	controller, err := NewModelServingController(
+		kubefake.NewSimpleClientset(),
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	maxSurge := intstr.FromInt(0)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "surge-budget", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: &maxSurge},
+			},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	for ordinal := 0; ordinal < 3; ordinal++ {
+		revision := "old"
+		if ordinal == 2 {
+			revision = "new"
+		}
+		controller.store.AddServingGroup(key, ordinal, revision)
+		status := datastore.ServingGroupRunning
+		if ordinal == 1 {
+			status = datastore.ServingGroupCreating
+		}
+		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), status))
+	}
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new"))
+	groups, err := controller.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.Len(t, groups, 2)
+	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 0), groups[0].Name)
+	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 2), groups[1].Name)
+}
+
+func TestPartitionProtectedServingGroupReadinessUsesHistoricalTemplate(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+
+	partition := intstr.FromInt(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "partition-ready", Namespace: "default", UID: types.UID("partition-ready-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: &partition},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: ptr.To[int32](2)}}},
+		},
+	}
+	oldRoles := []workloadv1alpha1.Role{{Name: "decode", Replicas: ptr.To[int32](1)}}
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old-revision", oldRoles)
+	require.NoError(t, err)
+
+	key := utils.GetNamespaceName(ms)
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	controller.store.AddServingGroup(key, 0, "old-revision")
+	controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", 0), "old-revision", utils.CalRoleTemplateHash(oldRoles[0]))
+	require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, "decode", utils.GenerateRoleID("decode", 0), datastore.RoleRunning))
+
+	ready, err := controller.checkServingGroupReady(ms, groupName)
+	require.NoError(t, err)
+	assert.True(t, ready, "protected group should be ready according to its historical revision")
+}
+
 func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
@@ -7372,6 +8006,43 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			},
 			expected: []roleToDelete{
 				{roleName: "prefill", roleID: "prefill-1"},
+			},
+			expectedOutdated: true,
+		},
+		{
+			name: "ready surge role increases deletion budget",
+			roles: []workloadv1alpha1.Role{func() workloadv1alpha1.Role {
+				role := newRole("prefill", "nginx:latest", 2, ptr.To(intstr.FromInt(0)))
+				role.MaxSurge = ptr.To(intstr.FromInt(1))
+				return role
+			}()},
+			setupStore: func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing) {
+				t.Helper()
+				store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
+				hash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+				addRole(t, store, ms, "prefill", "prefill-0", "old-hash", datastore.RoleRunning)
+				addRole(t, store, ms, "prefill", "prefill-1", "old-hash", datastore.RoleRunning)
+				addRole(t, store, ms, "prefill", "prefill-2", hash, datastore.RoleRunning)
+			},
+			expected: []roleToDelete{
+				{roleName: "prefill", roleID: "prefill-1"},
+			},
+			expectedOutdated: true,
+		},
+		{
+			name: "unready surge role blocks deletion with zero maxUnavailable",
+			roles: []workloadv1alpha1.Role{func() workloadv1alpha1.Role {
+				role := newRole("prefill", "nginx:latest", 2, ptr.To(intstr.FromInt(0)))
+				role.MaxSurge = ptr.To(intstr.FromInt(1))
+				return role
+			}()},
+			setupStore: func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing) {
+				t.Helper()
+				store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
+				hash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+				addRole(t, store, ms, "prefill", "prefill-0", "old-hash", datastore.RoleRunning)
+				addRole(t, store, ms, "prefill", "prefill-1", "old-hash", datastore.RoleRunning)
+				addRole(t, store, ms, "prefill", "prefill-2", hash, datastore.RoleCreating)
 			},
 			expectedOutdated: true,
 		},
