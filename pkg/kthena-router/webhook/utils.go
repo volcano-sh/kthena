@@ -35,10 +35,11 @@ func parseAdmissionReviewFromRequest(r *http.Request) (*admissionv1.AdmissionRev
 		return nil, fmt.Errorf("invalid Content-Type, expected application/json, got %s", contentType)
 	}
 
+	const maxBodyBytes = int64(10 * 1024 * 1024) // 10 MB limit
 	var body []byte
 	if r.Body != nil {
 		defer r.Body.Close()
-		data, err := io.ReadAll(r.Body)
+		data, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read request body: %v", err)
 		}

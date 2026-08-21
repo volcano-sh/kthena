@@ -31,10 +31,13 @@ type OpenAIRequestBody struct {
 	_     interface{}
 }
 
+// MaxRequestBodyBytes is the maximum allowed size (10MB) for incoming HTTP requests
+const MaxRequestBodyBytes = int64(10 * 1024 * 1024)
+
 // Function to parse the OpenAI request body
 func ParseOpenAIRequestBody(r *http.Request) (string, error) {
-	// Read the request body
-	body, err := io.ReadAll(r.Body)
+	// Read the request body with size limit to prevent OOM
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBodyBytes))
 	if err != nil {
 		return "", err
 	}
