@@ -7592,6 +7592,24 @@ func TestHasUpdateableOutdatedServingGroup(t *testing.T) {
 			partition: 2,
 			want:      false,
 		},
+		{
+			name: "partition protects first existing group with sparse ordinals",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-5", Revision: "new", Status: datastore.ServingGroupRunning},
+			},
+			partition: 1,
+			want:      false,
+		},
+		{
+			name: "outdated group after sparse partition prefix requires surge",
+			groups: []datastore.ServingGroup{
+				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
+				{Name: "recovery-5", Revision: "old", Status: datastore.ServingGroupRunning},
+			},
+			partition: 1,
+			want:      true,
+		},
 	}
 
 	for _, tt := range tests {

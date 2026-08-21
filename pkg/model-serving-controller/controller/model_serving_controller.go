@@ -708,12 +708,11 @@ func hasUpdateableOutdatedServingGroup(
 	revision string,
 	partition int,
 ) bool {
-	for _, group := range groups {
-		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
-		if ordinal < 0 {
-			continue
-		}
-		if ordinal >= partition && group.Revision != revision {
+	// GetServingGroupByModelServing returns groups in ascending ordinal order.
+	// Partition protects the first N existing groups, including when binpack
+	// scale-down has left a sparse ordinal set.
+	for index, group := range groups {
+		if index >= partition && group.Revision != revision {
 			return true
 		}
 	}
@@ -2289,7 +2288,7 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 				currentGroups = append(currentGroups, ordinal)
 				// Count revisions for non-updated groups to find the most common one
 				revisionCount[group.Revision]++
-				if ordinal >= partition {
+				if index >= partition {
 					rolloutActive = true
 				}
 			}
