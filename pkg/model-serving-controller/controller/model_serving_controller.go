@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -530,7 +532,7 @@ func (c *ModelServingController) processNextWorkItem(ctx context.Context) bool {
 	}
 	defer c.workqueue.Done(key)
 
-	err := c.syncHandler(ctx, key.(string))
+	err := c.safeSync(ctx, key.(string))
 	if err == nil {
 		c.workqueue.Forget(key)
 		return true
@@ -540,6 +542,19 @@ func (c *ModelServingController) processNextWorkItem(ctx context.Context) bool {
 	c.workqueue.AddRateLimited(key)
 
 	return true
+}
+
+// safeSync invokes syncHandler and recovers from any panic raised while processing
+// a single item, so that one malformed/unexpected object cannot crash the worker
+// goroutine (and with it the whole ModelServing controller process). The panic is
+// converted into an error, which is handled the same way as any other sync failure.
+func (c *ModelServingController) safeSync(ctx context.Context, key string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic while syncing %q: %v\n%s", key, r, debug.Stack())
+		}
+	}()
+	return c.syncHandler(ctx, key)
 }
 
 func (c *ModelServingController) syncModelServing(ctx context.Context, key string) error {
@@ -613,7 +628,7 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 
 	klog.Info("start modelServing controller")
 	for i := 0; i < workers; i++ {
-		go c.worker(ctx)
+		go wait.UntilWithContext(ctx, c.worker, time.Second)
 	}
 	<-ctx.Done()
 	klog.Info("shut down modelServing controller")
@@ -1104,8 +1119,12 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 		for _, pod := range pods {
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 				// If the pod is not owned by the ModelServing, we do not need to handle it.
+				gotUID := types.UID("<none>")
+				if len(pod.OwnerReferences) > 0 {
+					gotUID = pod.OwnerReferences[0].UID
+				}
 				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, gotUID)
 				c.enqueueModelServingAfter(ms, 1*time.Second)
 				break
 			}

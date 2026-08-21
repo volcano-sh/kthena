@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -2664,15 +2666,16 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 
 func TestManageRoleReplicas(t *testing.T) {
 	tests := []struct {
-		name             string
-		roleReplicas     int32
-		workerReplicas   int32
-		initialRoleIDs   []int
-		addEntryPod      bool
-		mismatchOwnerUID bool
-		expectedRoleSize int
-		expectedPodCount int
-		expectRequeue    bool
+		name              string
+		roleReplicas      int32
+		workerReplicas    int32
+		initialRoleIDs    []int
+		addEntryPod       bool
+		mismatchOwnerUID  bool
+		noOwnerReferences bool
+		expectedRoleSize  int
+		expectedPodCount  int
+		expectRequeue     bool
 	}{
 		{
 			name:             "recreate missing pods when role count matches",
@@ -2714,6 +2717,20 @@ func TestManageRoleReplicas(t *testing.T) {
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
+		},
+		{
+			// Regression test: a pod with no OwnerReferences must not panic
+			// when manageRoleReplicasPerGroup logs the mismatch (previously
+			// indexed pod.OwnerReferences[0] unconditionally).
+			name:              "reenqueue when pod has no owner references",
+			roleReplicas:      1,
+			workerReplicas:    0,
+			initialRoleIDs:    []int{0},
+			addEntryPod:       true,
+			noOwnerReferences: true,
+			expectedRoleSize:  1,
+			expectedPodCount:  1,
+			expectRequeue:     true,
 		},
 	}
 
@@ -2779,12 +2796,17 @@ func TestManageRoleReplicas(t *testing.T) {
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
 				}
+				if tt.noOwnerReferences {
+					entryPod.OwnerReferences = nil
+				}
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			assert.NotPanics(t, func() {
+				controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			})
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -2814,6 +2836,45 @@ func TestManageRoleReplicas(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWorkerRecoversFromPanic verifies that a panic raised while processing one
+// work item does not terminate the worker goroutine or the controller process.
+// processNextWorkItem calls syncHandler through safeSync, which recovers any
+// panic and turns it into a regular sync error (handled via the existing
+// rate-limited requeue path). This test drives c.worker the same way Run does,
+// so a regression here would either crash the test binary or leave the
+// "safe-key" item unprocessed.
+func TestWorkerRecoversFromPanic(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	var safeKeyProcessed atomic.Bool
+	controller.syncHandler = func(_ context.Context, key string) error {
+		if key == "default/panic-key" {
+			panic("simulated unexpected panic during pod processing")
+		}
+		if key == "default/safe-key" {
+			safeKeyProcessed.Store(true)
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go wait.UntilWithContext(ctx, controller.worker, time.Millisecond)
+
+	controller.workqueue.Add("default/panic-key")
+	controller.workqueue.Add("default/safe-key")
+
+	processed := waitForObjectInCache(t, 2*time.Second, safeKeyProcessed.Load)
+	assert.True(t, processed, "worker should keep processing items after recovering from a panic")
 }
 
 // TestScaleDownServingGroups tests the scaleDownServingGroups function with various scenarios
