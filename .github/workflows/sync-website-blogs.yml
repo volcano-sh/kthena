@@ -1,0 +1,100 @@
+name: Sync Blogs to Website
+
+on:
+  pull_request:
+    paths:
+      - 'docs/kthena/blog/**'
+      - '.github/scripts/sync-blogs-to-website.py'
+      - '.github/workflows/sync-website-blogs.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/kthena/blog/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kthena repo
+        uses: actions/checkout@v4
+        with:
+          path: kthena
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install pyyaml
+
+      - name: Generate website blog preview
+        run: |
+          mkdir -p website-preview/content/en/blog
+          cd kthena
+          python .github/scripts/sync-blogs-to-website.py --source docs/kthena/blog --target ../website-preview/content/en/blog
+
+      - name: Upload generated blog preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: kthena-website-blog-preview
+          path: website-preview/content/en/blog
+          if-no-files-found: error
+
+  sync:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kthena repo
+        uses: actions/checkout@v4
+        with:
+          path: kthena
+
+      - name: Checkout website repo
+        uses: actions/checkout@v4
+        with:
+          repository: volcano-sh/website
+          path: website
+          # Requires an org-managed token with write access to volcano-sh/website.
+          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install pyyaml
+
+      - name: Run sync script
+        run: |
+          cd kthena
+          python .github/scripts/sync-blogs-to-website.py --source docs/kthena/blog --target ../website/content/en/blog
+
+      - name: Create Pull Request in website repo
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: website
+          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          commit-message: "docs: sync kthena blogs to website"
+          title: "docs: sync kthena blogs"
+          body: |
+            This syncs the latest Kthena blog updates into the Volcano website.
+
+            Source path: `volcano-sh/kthena/docs/kthena/blog`
+            Target path: `volcano-sh/website/content/en/blog`
+            Source commit: https://github.com/volcano-sh/kthena/commit/${{ github.sha }}
+
+            This PR was opened by the Kthena blog sync workflow.
+          branch: "sync-kthena-blogs"
+          base: master
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          signoff: true
