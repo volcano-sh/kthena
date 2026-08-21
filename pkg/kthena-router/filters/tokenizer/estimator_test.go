@@ -18,7 +18,7 @@ package tokenizer
 
 import "testing"
 
-func TestSimpleEstimateTokenizerCalculateTokenNum(t *testing.T) {
+func TestSimpleEstimateTokenizerCountTokens(t *testing.T) {
 	tests := []struct {
 		name      string
 		tokenizer *SimpleEstimateTokenizer
@@ -63,18 +63,18 @@ func TestSimpleEstimateTokenizerCalculateTokenNum(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.tokenizer.CalculateTokenNum(tt.prompt)
+			_, got, err := tt.tokenizer.Encode("", tt.prompt)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("CalculateTokenNum() error = nil, want non-nil")
+					t.Fatalf("CountTokens() error = nil, want non-nil")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("CalculateTokenNum() error = %v, want nil", err)
+				t.Fatalf("CountTokens() error = %v, want nil", err)
 			}
 			if got != tt.want {
-				t.Fatalf("CalculateTokenNum() = %d, want %d", got, tt.want)
+				t.Fatalf("CountTokens() = %d, want %d", got, tt.want)
 			}
 		})
 	}
