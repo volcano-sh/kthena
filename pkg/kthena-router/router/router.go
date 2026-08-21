@@ -56,6 +56,9 @@ import (
 )
 
 const (
+	// MaxRequestBodyBytes is the maximum allowed size (10MB) for incoming HTTP requests
+	MaxRequestBodyBytes = int64(10 * 1024 * 1024)
+
 	// Context keys for gin context
 	GatewayKey             = "gatewayKey"
 	GatewayListenerNameKey = "gatewayListenerName"
@@ -699,7 +702,7 @@ func upstreamTimeoutFor(ms *v1alpha1.ModelServer) time.Duration {
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, MaxRequestBodyBytes))
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 		return nil, err
@@ -844,7 +847,7 @@ func (r *Router) proxy(
 	// request across loop iterations sends an empty body to subsequent pods.
 	var bodyBytes []byte
 	if req.Body != nil {
-		b, err := io.ReadAll(req.Body)
+		b, err := io.ReadAll(io.LimitReader(req.Body, MaxRequestBodyBytes))
 		req.Body.Close()
 		if err != nil {
 			return fmt.Errorf("failed to read request body: %w", err)
