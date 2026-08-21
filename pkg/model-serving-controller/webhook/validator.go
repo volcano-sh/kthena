@@ -88,6 +88,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validatorReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateMaxUnavailableForRoles(modelServing)...)
+	allErrs = append(allErrs, validateRoleRollingUpdateCoordination(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
@@ -224,6 +225,144 @@ func validateMaxUnavailableForRoles(ms *workloadv1alpha1.ModelServing) field.Err
 		}
 	}
 	return allErrs
+}
+
+func validateRoleRollingUpdateCoordination(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration == nil ||
+		ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination == nil {
+		return allErrs
+	}
+
+	coordination := ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination
+	coordinationPath := field.NewPath("spec", "rolloutStrategy", "roleRollingUpdateConfiguration", "coordination")
+	if ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate {
+		allErrs = append(allErrs, field.Forbidden(coordinationPath,
+			"coordination is only valid when rolloutStrategy.type is RoleRollingUpdate"))
+	}
+
+	maxSkewPath := coordinationPath.Child("maxSkew")
+	if coordination.MaxSkew == nil {
+		allErrs = append(allErrs, field.Required(maxSkewPath, "maxSkew is required"))
+	} else if coordination.MaxSkew.Type != intstr.String {
+		allErrs = append(allErrs, field.Invalid(maxSkewPath, coordination.MaxSkew, "must be a percentage string, for example 10%"))
+	} else {
+		for _, msg := range validation.IsValidPercent(coordination.MaxSkew.StrVal) {
+			allErrs = append(allErrs, field.Invalid(maxSkewPath, coordination.MaxSkew, msg))
+		}
+		if len(validation.IsValidPercent(coordination.MaxSkew.StrVal)) == 0 {
+			percent, err := strconv.Atoi(strings.TrimSuffix(coordination.MaxSkew.StrVal, "%"))
+			if err != nil || percent <= 0 || percent > 100 {
+				allErrs = append(allErrs, field.Invalid(maxSkewPath, coordination.MaxSkew, "must be greater than 0% and no greater than 100%"))
+			}
+		}
+	}
+
+	roleByName := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		roleByName[role.Name] = role
+	}
+
+	selectedRoles := make(map[string]struct{}, len(roleByName))
+	rolesPath := coordinationPath.Child("roles")
+	if len(coordination.Roles) == 0 {
+		for roleName := range roleByName {
+			selectedRoles[roleName] = struct{}{}
+		}
+	} else {
+		for i, roleName := range coordination.Roles {
+			rolePath := rolesPath.Index(i)
+			if _, exists := selectedRoles[roleName]; exists {
+				allErrs = append(allErrs, field.Duplicate(rolePath, roleName))
+				continue
+			}
+			if _, exists := roleByName[roleName]; !exists {
+				allErrs = append(allErrs, field.NotFound(rolePath, roleName))
+				continue
+			}
+			selectedRoles[roleName] = struct{}{}
+		}
+	}
+	if len(selectedRoles) < 2 {
+		allErrs = append(allErrs, field.Invalid(rolesPath, coordination.Roles, "at least two Roles must participate in coordination"))
+	}
+
+	graph := make(map[string][]string, len(selectedRoles))
+	dependencyOwnerSeen := make(map[string]struct{}, len(coordination.Dependencies))
+	dependenciesPath := coordinationPath.Child("dependencies")
+	for i, dependency := range coordination.Dependencies {
+		dependencyPath := dependenciesPath.Index(i)
+		if _, exists := dependencyOwnerSeen[dependency.Role]; exists {
+			allErrs = append(allErrs, field.Duplicate(dependencyPath.Child("role"), dependency.Role))
+		} else {
+			dependencyOwnerSeen[dependency.Role] = struct{}{}
+		}
+		if _, exists := roleByName[dependency.Role]; !exists {
+			allErrs = append(allErrs, field.NotFound(dependencyPath.Child("role"), dependency.Role))
+		} else if _, selected := selectedRoles[dependency.Role]; !selected {
+			allErrs = append(allErrs, field.Invalid(dependencyPath.Child("role"), dependency.Role, "must belong to the coordinated Role set"))
+		}
+
+		dependsOnSeen := make(map[string]struct{}, len(dependency.DependsOn))
+		for j, dependencyRole := range dependency.DependsOn {
+			dependsOnPath := dependencyPath.Child("dependsOn").Index(j)
+			if _, exists := dependsOnSeen[dependencyRole]; exists {
+				allErrs = append(allErrs, field.Duplicate(dependsOnPath, dependencyRole))
+				continue
+			}
+			dependsOnSeen[dependencyRole] = struct{}{}
+			if dependencyRole == dependency.Role {
+				allErrs = append(allErrs, field.Invalid(dependsOnPath, dependencyRole, "a Role cannot depend on itself"))
+				continue
+			}
+			if _, exists := roleByName[dependencyRole]; !exists {
+				allErrs = append(allErrs, field.NotFound(dependsOnPath, dependencyRole))
+				continue
+			}
+			if _, selected := selectedRoles[dependencyRole]; !selected {
+				allErrs = append(allErrs, field.Invalid(dependsOnPath, dependencyRole, "must belong to the coordinated Role set"))
+				continue
+			}
+			graph[dependency.Role] = append(graph[dependency.Role], dependencyRole)
+		}
+	}
+	if roleDependencyGraphHasCycle(graph, selectedRoles) {
+		allErrs = append(allErrs, field.Invalid(dependenciesPath, coordination.Dependencies, "dependency graph must be acyclic"))
+	}
+
+	return allErrs
+}
+
+func roleDependencyGraphHasCycle(graph map[string][]string, roles map[string]struct{}) bool {
+	const (
+		unvisited = iota
+		visiting
+		visited
+	)
+	state := make(map[string]int, len(roles))
+	var visit func(string) bool
+	visit = func(roleName string) bool {
+		switch state[roleName] {
+		case visiting:
+			return true
+		case visited:
+			return false
+		}
+		state[roleName] = visiting
+		for _, dependency := range graph[roleName] {
+			if visit(dependency) {
+				return true
+			}
+		}
+		state[roleName] = visited
+		return false
+	}
+	for roleName := range roles {
+		if visit(roleName) {
+			return true
+		}
+	}
+	return false
 }
 
 func validatorReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {

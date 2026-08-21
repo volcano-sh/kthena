@@ -121,6 +121,61 @@ spec:
                 description: RolloutStrategy defines the strategy that will be applied
                   to update replicas
                 properties:
+                  roleRollingUpdateConfiguration:
+                    description: |-
+                      RoleRollingUpdateConfiguration defines the cross-Role coordination parameters
+                      to be used when type is RoleRollingUpdate.
+                    properties:
+                      coordination:
+                        description: |-
+                          Coordination enables proportional rolling updates across selected Roles in
+                          each ServingGroup. When omitted, Roles continue to roll independently.
+                        properties:
+                          dependencies:
+                            description: |-
+                              Dependencies defines rollout startup dependencies. If Role A depends on B,
+                              compatible target-version dependencies must be Ready before A first starts.
+                            items:
+                              properties:
+                                dependsOn:
+                                  description: DependsOn lists the downstream Roles
+                                    required by Role.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                role:
+                                  description: Role is the dependent Role.
+                                  type: string
+                              required:
+                              - dependsOn
+                              - role
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - role
+                            x-kubernetes-list-type: map
+                          maxSkew:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: |-
+                              MaxSkew is the maximum percentage-point difference allowed between the
+                              normalized rolling progress of participating Roles. Only percentage values,
+                              for example "10%", are accepted.
+                            x-kubernetes-int-or-string: true
+                          roles:
+                            description: |-
+                              Roles selects the Roles participating in coordinated rolling update. An
+                              empty list selects every Role in spec.template.roles.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: set
+                        required:
+                        - maxSkew
+                        type: object
+                    type: object
                   rollingUpdateConfiguration:
                     description: |-
                       RollingUpdateConfiguration configures ServingGroupRollingUpdate.

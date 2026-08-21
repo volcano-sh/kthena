@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -100,6 +101,127 @@ func TestValidPodNameLength(t *testing.T) {
 			} else {
 				assert.Equal(t, tt.want, got)
 			}
+		})
+	}
+}
+
+func TestValidateRoleRollingUpdateCoordination(t *testing.T) {
+	validSkew := intstr.FromString("10%")
+	integerSkew := intstr.FromInt(10)
+	zeroSkew := intstr.FromString("0%")
+
+	tests := []struct {
+		name              string
+		mutate            func(*workloadv1alpha1.ModelServing)
+		expectedSubstring string
+	}{
+		{name: "valid dependency DAG"},
+		{
+			name: "coordination requires RoleRollingUpdate",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.Type = workloadv1alpha1.ServingGroupRollingUpdate
+			},
+			expectedSubstring: "only valid when rolloutStrategy.type is RoleRollingUpdate",
+		},
+		{
+			name: "maxSkew is required",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.MaxSkew = nil
+			},
+			expectedSubstring: "maxSkew is required",
+		},
+		{
+			name: "integer maxSkew is rejected",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.MaxSkew = &integerSkew
+			},
+			expectedSubstring: "must be a percentage string",
+		},
+		{
+			name: "zero maxSkew is rejected",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.MaxSkew = &zeroSkew
+			},
+			expectedSubstring: "must be greater than 0%",
+		},
+		{
+			name: "unknown selected Role is rejected",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.Roles = []string{"a", "unknown"}
+			},
+			expectedSubstring: "Not found",
+		},
+		{
+			name: "dependency endpoint must be coordinated",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				coordination := ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination
+				coordination.Roles = []string{"a", "b"}
+			},
+			expectedSubstring: "must belong to the coordinated Role set",
+		},
+		{
+			name: "self dependency is rejected",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.Dependencies = []workloadv1alpha1.RoleRolloutDependency{
+					{Role: "a", DependsOn: []string{"a"}},
+				}
+			},
+			expectedSubstring: "cannot depend on itself",
+		},
+		{
+			name: "dependency cycle is rejected",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.Dependencies = []workloadv1alpha1.RoleRolloutDependency{
+					{Role: "a", DependsOn: []string{"b"}},
+					{Role: "b", DependsOn: []string{"a"}},
+				}
+			},
+			expectedSubstring: "dependency graph must be acyclic",
+		},
+		{
+			name: "at least two Roles are required",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.Roles = []string{"a"}
+				ms.Spec.RolloutStrategy.RoleRollingUpdateConfiguration.Coordination.Dependencies = nil
+			},
+			expectedSubstring: "at least two Roles",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.RoleRollingUpdate,
+						RoleRollingUpdateConfiguration: &workloadv1alpha1.RoleRollingUpdateConfiguration{
+							Coordination: &workloadv1alpha1.RoleRollingUpdateCoordination{
+								MaxSkew: &validSkew,
+								Dependencies: []workloadv1alpha1.RoleRolloutDependency{
+									{Role: "a", DependsOn: []string{"b"}},
+									{Role: "b", DependsOn: []string{"c"}},
+								},
+							},
+						},
+					},
+					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+						{Name: "a", Replicas: ptr.To[int32](10)},
+						{Name: "b", Replicas: ptr.To[int32](10)},
+						{Name: "c", Replicas: ptr.To[int32](10)},
+					}},
+				},
+			}
+			if tt.mutate != nil {
+				tt.mutate(ms)
+			}
+
+			errs := validateRoleRollingUpdateCoordination(ms)
+			if tt.expectedSubstring == "" {
+				assert.Empty(t, errs)
+				return
+			}
+			require.NotEmpty(t, errs)
+			assert.Contains(t, errs.ToAggregate().Error(), tt.expectedSubstring)
 		})
 	}
 }

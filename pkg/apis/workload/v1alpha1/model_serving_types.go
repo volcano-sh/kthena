@@ -153,6 +153,11 @@ type RolloutStrategy struct {
 	// and partition on each Role instead.
 	// +optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
+
+	// RoleRollingUpdateConfiguration defines the cross-Role coordination parameters
+	// to be used when type is RoleRollingUpdate.
+	// +optional
+	RoleRollingUpdateConfiguration *RoleRollingUpdateConfiguration `json:"roleRollingUpdateConfiguration,omitempty"`
 }
 
 // RolloutStrategyType defines the strategy to use to update replicas.
@@ -191,6 +196,43 @@ type RollingUpdateConfiguration struct {
 	// +kubebuilder:validation:XIntOrString
 	// +optional
 	Partition *intstr.IntOrString `json:"partition,omitempty"`
+}
+
+type RoleRollingUpdateConfiguration struct {
+	// Coordination enables proportional rolling updates across selected Roles in
+	// each ServingGroup. When omitted, Roles continue to roll independently.
+	// +optional
+	Coordination *RoleRollingUpdateCoordination `json:"coordination,omitempty"`
+}
+
+type RoleRollingUpdateCoordination struct {
+	// Roles selects the Roles participating in coordinated rolling update. An
+	// empty list selects every Role in spec.template.roles.
+	// +optional
+	// +listType=set
+	Roles []string `json:"roles,omitempty"`
+
+	// MaxSkew is the maximum percentage-point difference allowed between the
+	// normalized rolling progress of participating Roles. Only percentage values,
+	// for example "10%", are accepted.
+	// +kubebuilder:validation:XIntOrString
+	MaxSkew *intstr.IntOrString `json:"maxSkew"`
+
+	// Dependencies defines rollout startup dependencies. If Role A depends on B,
+	// compatible target-version dependencies must be Ready before A first starts.
+	// +optional
+	// +listType=map
+	// +listMapKey=role
+	Dependencies []RoleRolloutDependency `json:"dependencies,omitempty"`
+}
+
+type RoleRolloutDependency struct {
+	// Role is the dependent Role.
+	Role string `json:"role"`
+
+	// DependsOn lists the downstream Roles required by Role.
+	// +listType=set
+	DependsOn []string `json:"dependsOn"`
 }
 
 type ModelServingConditionType string

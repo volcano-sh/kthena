@@ -1465,6 +1465,13 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 	for _, role := range ms.Spec.Template.Roles {
 		roleSpecByName[role.Name] = role
 	}
+	coordination := roleRollingUpdateCoordination(ms)
+	coordinatedNames := coordinatedRoleNames(ms, coordination)
+	var changedRoles map[string]bool
+	changedRolesResolved := false
+	if coordination != nil {
+		changedRoles, changedRolesResolved = c.changedRolesFromRevision(ms, sg.Revision)
+	}
 
 	allRoles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), sg.Name)
 	if err != nil {
@@ -1472,8 +1479,9 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 	}
 
 	var rolesToDelete []roleToDelete
+	coordinatedStates := make([]coordinatedRoleState, 0, len(coordinatedNames))
 	hasOutdatedRoles := false
-	for _, roleSpec := range ms.Spec.Template.Roles {
+	for specIndex, roleSpec := range ms.Spec.Template.Roles {
 		roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleSpec.Name)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleSpec.Name, err)
@@ -1500,6 +1508,10 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 			}
 			outdatedRoles = filtered
 		}
+
+		// Keep the existing ServingGroup revision semantics: protected outdated
+		// replicas still mean this ServingGroup has not fully reached the revision,
+		// even though they are not rolling candidates.
 		if len(outdatedRoles) == 0 {
 			if len(protected) > 0 {
 				expectedHash := utils.CalRoleTemplateHash(roleSpec)
@@ -1517,17 +1529,40 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 					}
 				}
 			}
-			continue
-		}
-		hasOutdatedRoles = true
-		maxScaleDown, err := calMaxScaleDown(roleSpec, outdatedRoles, len(roleList), newUnavailable)
-		if err != nil {
-			klog.Errorf("failed to calculate maxScaleDown for role %s in ServingGroup %s: %v", roleSpec.Name, sg.Name, err)
 		}
 
-		selectedRoles, err := selectOutdatedRolesToDelete(roleSpec.Name, outdatedRoles, maxScaleDown)
+		var localCandidates []roleToDelete
+		if len(outdatedRoles) > 0 {
+			hasOutdatedRoles = true
+			maxScaleDown, err := calMaxScaleDown(roleSpec, outdatedRoles, len(roleList), newUnavailable)
+			if err != nil {
+				klog.Errorf("failed to calculate maxScaleDown for role %s in ServingGroup %s: %v", roleSpec.Name, sg.Name, err)
+			}
+
+			localCandidates, err = selectOutdatedRolesToDelete(roleSpec.Name, outdatedRoles, maxScaleDown)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+
+		if _, coordinated := coordinatedNames[roleSpec.Name]; coordinated {
+			state := c.buildCoordinatedRoleState(ms, sg, roleSpec, roleList, partition, specIndex, len(outdatedRoles) > 0, localCandidates)
+			// Keep a Role in the active progress set while admitted target-version
+			// work is still waiting for Ready, even when no old candidate remains.
+			state.active = state.active || (state.inFlight > 0 && state.ready < state.target)
+			if changedRolesResolved {
+				state.active = changedRoles[roleSpec.Name] && state.active
+			}
+			coordinatedStates = append(coordinatedStates, state)
+		} else {
+			rolesToDelete = append(rolesToDelete, localCandidates...)
+		}
+	}
+
+	if coordination != nil {
+		selectedRoles, err := selectCoordinatedRoleCandidates(coordinatedStates, coordination)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("failed to coordinate Role rolling update in ServingGroup %s: %w", sg.Name, err)
 		}
 		rolesToDelete = append(rolesToDelete, selectedRoles...)
 	}
@@ -1638,6 +1673,11 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 				// Emit event for role transitioning to Running
 				message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Running", roleName, roleID, servingGroupName)
 				c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleRunning", message)
+				// A single Role becoming Ready may release proportional or dependency
+				// budget before the whole ServingGroup is Ready.
+				if isCoordinatedRole(ms, roleName) {
+					c.enqueueModelServing(ms)
+				}
 			}
 		}
 	}
