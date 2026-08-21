@@ -110,6 +110,7 @@ type ModelServingController struct {
 	workqueue       workqueue.RateLimitingInterface
 	store           datastore.Store
 	graceMap        sync.Map // key: podGracePeriodKey, value:time
+	podGroupCleanup sync.Map // key: namespace/name, value: struct{}
 	initialSync     bool     // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
@@ -288,11 +289,13 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 		return
 	}
 
-	// If network topology is removed, we need to clean up the PodGroups.
-	// Because minRoleReplicas is not allowed to be updated, so we do not need to check it here.
-	// Note: We no longer clean up PodGroups here. This is an informer event handler
-	// and making synchronous API calls blocks the informer. PodGroup cleanup logic
-	// is now handled inside syncModelServing where the context is properly threaded.
+	// If network topology or gang policy is removed, we need to clean up the PodGroups.
+	// We mark the transition here so that the blocking API call can be deferred to the
+	// worker loop (syncModelServing).
+	if (oldms.Spec.Template.NetworkTopology != nil && curms.Spec.Template.NetworkTopology == nil) ||
+		(oldms.Spec.Template.GangPolicy != nil && curms.Spec.Template.GangPolicy == nil) {
+		c.podGroupCleanup.Store(utils.GetNamespaceName(curms).String(), struct{}{})
+	}
 
 	c.enqueueModelServing(curms)
 }
@@ -539,6 +542,9 @@ func (c *ModelServingController) processNextWorkItem(ctx context.Context) bool {
 }
 
 func (c *ModelServingController) syncModelServing(ctx context.Context, key string) error {
+	syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	klog.V(4).InfoS("Started syncing ModelServing", "key", key)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -557,38 +563,41 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	revision := utils.ModelServingRevision(ms)
 
 	// Clean up outdated PodGroups if network topology or gang policy was removed
-	if ms.Spec.Template.NetworkTopology == nil {
-		if ms.Spec.Template.GangPolicy == nil || len(ms.Spec.Template.GangPolicy.MinRoleReplicas) == 0 {
-			if c.podGroupManager != nil {
-				if err := c.podGroupManager.CleanupPodGroups(ctx, ms); err != nil {
+	if ms.Spec.Template.NetworkTopology == nil && (ms.Spec.Template.GangPolicy == nil || len(ms.Spec.Template.GangPolicy.MinRoleReplicas) == 0) {
+		if c.podGroupManager != nil {
+			keyStr := utils.GetNamespaceName(ms).String()
+			if _, needsCleanup := c.podGroupCleanup.Load(keyStr); needsCleanup {
+				if err := c.podGroupManager.CleanupPodGroups(syncCtx, ms); err != nil {
 					klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", ms.Namespace, ms.Name, err)
+				} else {
+					c.podGroupCleanup.Delete(keyStr)
 				}
 			}
 		}
 	}
 
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
-	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
+	if err := c.syncServingGroupReplicas(syncCtx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
 	}
 
 	// 2. Sync the roles and their replicas within each ServingGroup, handling partitioned scaling and revisions.
-	if err := c.syncRoleReplicas(ctx, ms, revision); err != nil {
+	if err := c.syncRoleReplicas(syncCtx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync role replicas: %v", err)
 	}
 
 	// 3. Handle the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
-	if err := c.manageRollingUpdate(ctx, ms, revision); err != nil {
+	if err := c.manageRollingUpdate(syncCtx, ms, revision); err != nil {
 		return fmt.Errorf("failed to handle rollingUpdate: %v", err)
 	}
 
 	// 4. Create and update Headless Services for internal networking between entry and worker pods.
-	if err := c.syncHeadlessServices(ctx, ms); err != nil {
+	if err := c.syncHeadlessServices(syncCtx, ms); err != nil {
 		return fmt.Errorf("failed to sync headless services: %v", err)
 	}
 
 	// 5. Calculate and update the overall condition and replica status fields of the ModelServing.
-	if err := c.UpdateModelServingStatus(ctx, ms, revision); err != nil {
+	if err := c.UpdateModelServingStatus(syncCtx, ms, revision); err != nil {
 		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
 	}
 
