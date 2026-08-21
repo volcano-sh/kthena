@@ -307,6 +307,9 @@ type Store interface {
 	GetHTTPRoute(key string) *gatewayv1.HTTPRoute
 	GetAllHTTPRoutes() []*gatewayv1.HTTPRoute
 	GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
+	// CompileHTTPRouteRegex compiles an HTTPRoute regex path pattern, reusing
+	// the compiled result on subsequent calls for the same pattern.
+	CompileHTTPRouteRegex(pattern string) (*regexp.Regexp, error)
 
 	// GetModelNames returns all model names registered via ModelRoutes,
 	// including both base model names and LoRA adapter names.
@@ -417,9 +420,10 @@ type store struct {
 	inferencePools     map[string]*inferencev1.InferencePool // key: namespace/name, value: *inferencev1.InferencePool
 
 	// HTTPRoute fields (using standard Gateway API)
-	httpRouteMutex sync.RWMutex
-	httpRoutes     map[string]*gatewayv1.HTTPRoute // key: namespace/name, value: *gatewayv1.HTTPRoute
-	gatewayRoutes  map[string]sets.Set[string]     // key: gateway key (namespace/name), value: set of HTTPRoute keys
+	httpRouteMutex      sync.RWMutex
+	httpRoutes          map[string]*gatewayv1.HTTPRoute // key: namespace/name, value: *gatewayv1.HTTPRoute
+	gatewayRoutes       map[string]sets.Set[string]     // key: gateway key (namespace/name), value: set of HTTPRoute keys
+	httpRouteRegexCache sync.Map                        // key: regex pattern, value: *compiledPattern
 	// New fields for callback management
 	callbacks map[string][]CallbackFunc
 
@@ -2418,6 +2422,8 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 
 	s.httpRouteMutex.Unlock()
 
+	s.gcHTTPRouteRegexCache()
+
 	klog.V(4).Infof("Added or updated HTTPRoute: %s", key)
 	return nil
 }
@@ -2443,6 +2449,8 @@ func (s *store) DeleteHTTPRoute(key string) error {
 		delete(s.httpRoutes, key)
 	}
 	s.httpRouteMutex.Unlock()
+
+	s.gcHTTPRouteRegexCache()
 
 	if exists {
 		klog.V(4).Infof("Deleted HTTPRoute: %s", key)
@@ -2481,4 +2489,56 @@ func (s *store) GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
 		}
 	}
 	return result
+}
+
+// CompileHTTPRouteRegex returns the compiled HTTPRoute regex path pattern,
+// compiling it on first use. Compile failures are cached too, so an invalid
+// pattern is not retried on every request.
+func (s *store) CompileHTTPRouteRegex(pattern string) (*regexp.Regexp, error) {
+	if v, ok := s.httpRouteRegexCache.Load(pattern); ok {
+		cp := v.(*compiledPattern)
+		return cp.re, cp.err
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		klog.Warningf("invalid regex %q in HTTPRoute match, treating as no match: %v", pattern, err)
+	}
+	v, _ := s.httpRouteRegexCache.LoadOrStore(pattern, &compiledPattern{re: re, err: err})
+	cp := v.(*compiledPattern)
+	return cp.re, cp.err
+}
+
+// collectHTTPRouteRegexes adds every regex path pattern referenced by route to out
+func collectHTTPRouteRegexes(route *gatewayv1.HTTPRoute, out map[string]struct{}) {
+	for _, rule := range route.Spec.Rules {
+		for _, match := range rule.Matches {
+			if match.Path == nil || match.Path.Type == nil || *match.Path.Type != gatewayv1.PathMatchRegularExpression {
+				continue
+			}
+			value := "/"
+			if match.Path.Value != nil {
+				value = *match.Path.Value
+			}
+			out[value] = struct{}{}
+		}
+	}
+}
+
+// gcHTTPRouteRegexCache drops compiled patterns that no HTTPRoute references any more
+func (s *store) gcHTTPRouteRegexCache() {
+	live := make(map[string]struct{})
+	s.httpRouteMutex.RLock()
+	for _, route := range s.httpRoutes {
+		if route != nil {
+			collectHTTPRouteRegexes(route, live)
+		}
+	}
+	s.httpRouteMutex.RUnlock()
+
+	s.httpRouteRegexCache.Range(func(key, _ any) bool {
+		if _, ok := live[key.(string)]; !ok {
+			s.httpRouteRegexCache.Delete(key)
+		}
+		return true
+	})
 }
