@@ -174,6 +174,89 @@ func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 	assert.Empty(t, errorMsg)
 }
 
+func TestValidateAutoscalingPolicy_HomogeneousTarget(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+
+	basePolicy := &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "homogeneous-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []registryv1.AutoscalingPolicyMetric{
+				{Name: "cpu", TargetValue: resource.MustParse("80")},
+			},
+			HomogeneousTarget: &registryv1.HomogeneousTarget{
+				Target: registryv1.Target{
+					TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "test-target"},
+				},
+				MinReplicas: 1,
+				MaxReplicas: 8,
+			},
+		},
+	}
+
+	minLessThanMax := basePolicy.DeepCopy()
+	allowed, msg := validator.validateAutoscalingPolicy(minLessThanMax)
+	assert.True(t, allowed, msg)
+
+	minEqualsMax := basePolicy.DeepCopy()
+	minEqualsMax.Spec.HomogeneousTarget.MinReplicas = 4
+	minEqualsMax.Spec.HomogeneousTarget.MaxReplicas = 4
+	allowed, msg = validator.validateAutoscalingPolicy(minEqualsMax)
+	assert.True(t, allowed, msg)
+
+	minGreaterThanMax := basePolicy.DeepCopy()
+	minGreaterThanMax.Spec.HomogeneousTarget.MinReplicas = 5
+	minGreaterThanMax.Spec.HomogeneousTarget.MaxReplicas = 2
+	allowed, msg = validator.validateAutoscalingPolicy(minGreaterThanMax)
+	assert.False(t, allowed)
+	assert.Contains(t, msg, "minReplicas must be <= maxReplicas")
+}
+
+func TestValidateAutoscalingPolicy_HeterogeneousTarget(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+
+	basePolicy := &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "heterogeneous-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []registryv1.AutoscalingPolicyMetric{
+				{Name: "cpu", TargetValue: resource.MustParse("80")},
+			},
+			HeterogeneousTarget: &registryv1.HeterogeneousTarget{
+				Params: []registryv1.HeterogeneousTargetParam{
+					{
+						Target:      registryv1.Target{TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "h100-target"}},
+						MinReplicas: 0,
+						MaxReplicas: 4,
+					},
+					{
+						Target:      registryv1.Target{TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "a100-target"}},
+						MinReplicas: 1,
+						MaxReplicas: 8,
+					},
+				},
+			},
+		},
+	}
+
+	minLessThanMax := basePolicy.DeepCopy()
+	allowed, msg := validator.validateAutoscalingPolicy(minLessThanMax)
+	assert.True(t, allowed, msg)
+
+	minEqualsMax := basePolicy.DeepCopy()
+	minEqualsMax.Spec.HeterogeneousTarget.Params[1].MinReplicas = 8
+	minEqualsMax.Spec.HeterogeneousTarget.Params[1].MaxReplicas = 8
+	allowed, msg = validator.validateAutoscalingPolicy(minEqualsMax)
+	assert.True(t, allowed, msg)
+
+	minGreaterThanMax := basePolicy.DeepCopy()
+	minGreaterThanMax.Spec.HeterogeneousTarget.Params[1].MinReplicas = 5
+	minGreaterThanMax.Spec.HeterogeneousTarget.Params[1].MaxReplicas = 2
+	allowed, msg = validator.validateAutoscalingPolicy(minGreaterThanMax)
+	assert.False(t, allowed)
+	assert.Contains(t, msg, "minReplicas must be <= maxReplicas")
+}
+
 func TestValidateAutoscalingPolicy_DisaggregatedTarget(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
 
