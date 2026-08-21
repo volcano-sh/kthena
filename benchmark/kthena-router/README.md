@@ -1,7 +1,44 @@
 # Benchmark for kthena-router
 
-
 This tool is based on [`sglang/bench_serving.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/bench_serving.py). We have packaged it as a Docker image and made it runnable as a Kubernetes Job for easy benchmarking in a cluster environment.
+
+## Router-only benchmarking (no GPU)
+
+To measure **kthena-router** (scheduling, routing, filters) without a real LLM engine, use the existing mock vLLM image and example manifests:
+
+- Image: `ghcr.io/faust-benchou/dynamo-mocker-vllm:latest` (`docker pull ghcr.io/faust-benchou/dynamo-mocker-vllm:latest`)
+- Manifests: [`examples/kthena-router/LLM-Mock.yaml`](../../examples/kthena-router/LLM-Mock.yaml) (Deployment + ModelServer + ModelRoute)
+
+### Cluster smoke run
+
+1. Install kthena-router (Helm chart or `hack/local-up-kthena.sh`).
+2. Deploy the mock backend and CRDs:
+
+   ```bash
+   kubectl apply -f examples/kthena-router/LLM-Mock.yaml
+   ```
+
+3. Run a short load test through the router:
+
+   ```bash
+   kubectl apply -f benchmark/kthena-router/job-mock-smoke.yaml
+   kubectl logs -f job/benchmark-mock-smoke
+   ```
+
+   `job-mock-smoke.yaml` uses the `random` dataset with low QPS so it finishes quickly. Adjust `--host`, namespace, or `--model` if your ModelRoute name differs.
+
+The full end-to-end path in `job.yaml` still targets a real inference stack; use the mock path above when you only care about router behaviour.
+
+### Metrics to watch
+
+While traffic goes through the router, scrape or query Prometheus metrics such as:
+
+- `kthena_router_requests_total`
+- `kthena_router_request_duration_seconds`
+- `kthena_router_request_prefill_duration_seconds` / `kthena_router_request_decode_duration_seconds` (when emitted for your path)
+- `kthena_router_scheduler_plugin_duration_seconds`
+
+Definitions live in `pkg/kthena-router/metrics`.
 
 ### Usage Notes
 
