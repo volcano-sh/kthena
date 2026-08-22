@@ -33,6 +33,50 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 )
 
+// seedPod registers the pod in the datastore so Add's liveness gate accepts it.
+func seedPod(t testing.TB, ds datastore.Store, pod *datastore.PodInfo) {
+	t.Helper()
+	if err := ds.AddOrUpdatePod(pod.Pod, nil); err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+}
+
+// orphanReport lists shard entries no LRU can evict: pod in a shard set but not in
+// podHashes, or its LRU not tracking the key. The other direction is evictable and fine.
+func orphanReport(store *ModelPrefixStore) []string {
+	var orphans []string
+	store.podHashesMu.RLock()
+	defer store.podHashesMu.RUnlock()
+	store.entriesMu.RLock()
+	defer store.entriesMu.RUnlock()
+	for model, mh := range store.entries {
+		for _, shard := range mh.shards {
+			shard.mu.RLock()
+			for hash, podSet := range shard.hashes {
+				for nsName := range podSet {
+					lru, ok := store.podHashes[nsName]
+					if !ok {
+						orphans = append(orphans, fmt.Sprintf("model %s hash %d pod %s in shard but not in podHashes", model, hash, nsName))
+						continue
+					}
+					if !lru.Contains(hashModelKey{hash: hash, model: model}) {
+						orphans = append(orphans, fmt.Sprintf("model %s hash %d pod %s not tracked by its LRU", model, hash, nsName))
+					}
+				}
+			}
+			shard.mu.RUnlock()
+		}
+	}
+	return orphans
+}
+
+func checkNoOrphans(t *testing.T, store *ModelPrefixStore) {
+	t.Helper()
+	for _, o := range orphanReport(store) {
+		t.Errorf("orphan: %s", o)
+	}
+}
+
 func TestModelPrefixStore(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -136,6 +180,10 @@ func TestModelPrefixStore(t *testing.T) {
 			mockStore := datastore.New()
 			store := NewModelPrefixStore(mockStore, tt.maxHashes, tt.topK)
 
+			for _, pod := range tt.pods {
+				seedPod(t, mockStore, pod)
+			}
+
 			// Add pods to cache
 			for i, pod := range tt.pods {
 				if i < len(tt.addHashes) {
@@ -182,6 +230,8 @@ func TestModelPrefixStore(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"},
 			},
 		}
+		seedPod(t, mockStore, pod1)
+		seedPod(t, mockStore, pod2)
 
 		// Add same hash for different models
 		store.Add("model-a", []uint64{100, 200}, pod1)
@@ -215,6 +265,7 @@ func TestModelPrefixStore(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "callback-pod", Namespace: "test"},
 			},
 		}
+		seedPod(t, mockStore, pod)
 
 		// Add 2 hashes for model-1 (LRU: [m1:1, m1:2])
 		store.Add("callback-model-1", []uint64{1, 2}, pod)
@@ -253,6 +304,7 @@ func TestModelPrefixStore(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace},
 			},
 		}
+		seedPod(t, mockStore, pod)
 
 		// Add hashes for multiple models
 		store.Add("deletion-model-1", []uint64{100, 200}, pod)
@@ -291,6 +343,8 @@ func TestModelPrefixStore(t *testing.T) {
 		pod2 := &datastore.PodInfo{
 			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"}},
 		}
+		seedPod(t, mockStore, pod1)
+		seedPod(t, mockStore, pod2)
 
 		// Both pods are added to the cache with the same hashes.
 		store.Add("filter-model", []uint64{1, 2, 3}, pod1)
@@ -320,6 +374,7 @@ func TestModelPrefixStore(t *testing.T) {
 		pod := &datastore.PodInfo{
 			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}},
 		}
+		seedPod(t, mockStore, pod)
 		store.Add("filter-model", []uint64{1, 2, 3}, pod)
 
 		// Even though pod is cached, an empty candidates list must return nothing.
@@ -349,6 +404,7 @@ func TestModelPrefixStoreEvictionMetric(t *testing.T) {
 		pod := &datastore.PodInfo{
 			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "evict-pod", Namespace: "test"}},
 		}
+		seedPod(t, mockStore, pod)
 
 		const model = "evictmetric-capacity-model"
 		before := prefixEvictionCount(t, model)
@@ -370,6 +426,7 @@ func TestModelPrefixStoreEvictionMetric(t *testing.T) {
 		pod := &datastore.PodInfo{
 			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace}},
 		}
+		seedPod(t, mockStore, pod)
 
 		const model = "evictmetric-deletion-model"
 		before := prefixEvictionCount(t, model)
@@ -403,6 +460,7 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 					},
 				},
 			}
+			seedPod(t, mockStore, pods[i])
 		}
 
 		// Concurrently add hashes
@@ -449,6 +507,7 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 					},
 				},
 			}
+			seedPod(t, mockStore, pods[i])
 		}
 
 		var wg sync.WaitGroup
@@ -509,6 +568,7 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 					},
 				},
 			}
+			seedPod(t, mockStore, pods[i])
 		}
 
 		var wg sync.WaitGroup
@@ -530,7 +590,8 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 
 		time.Sleep(10 * time.Millisecond) // Let some adds happen first
 
-		// Pod deletion operations
+		// Delete through the datastore so the callback dispatch and the liveness
+		// gate are exercised the way production does it.
 		for i := range numPods / 2 {
 			wg.Add(1)
 			go func(podIndex int) {
@@ -540,21 +601,28 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 					Namespace: pods[podIndex].Pod.Namespace,
 					Name:      pods[podIndex].Pod.Name,
 				}
-
-				// Simulate pod deletion event
-				store.onPodDeleted(datastore.EventData{
-					EventType: datastore.EventDelete,
-					Pod:       nsName,
-				})
+				assert.NoError(t, mockStore.DeletePod(nsName))
 			}(i)
 		}
 
 		wg.Wait()
-		time.Sleep(10 * time.Millisecond)
 
-		queryHashes := []uint64{1, 2, 3}
-		matches := store.FindTopMatches("deletion-model", queryHashes, pods)
-		assert.Equal(t, 0, len(matches))
+		// The callback purges shards after removing the registration, so poll until
+		// deleted pods are unregistered and nothing is left mid-purge.
+		assert.Eventually(t, func() bool {
+			store.podHashesMu.RLock()
+			for i := range numPods / 2 {
+				nsName := types.NamespacedName{Namespace: "test", Name: fmt.Sprintf("deletion-pod%d", i)}
+				if _, ok := store.podHashes[nsName]; ok {
+					store.podHashesMu.RUnlock()
+					return false
+				}
+			}
+			store.podHashesMu.RUnlock()
+			return len(orphanReport(store)) == 0
+		}, 2*time.Second, 5*time.Millisecond)
+
+		checkNoOrphans(t, store)
 	})
 
 	t.Run("LRU Eviction Under Concurrency", func(t *testing.T) {
@@ -576,6 +644,7 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 					},
 				},
 			}
+			seedPod(t, mockStore, pods[i])
 		}
 
 		var wg sync.WaitGroup
@@ -643,6 +712,7 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 						},
 					},
 				}
+				seedPod(t, mockStore, allPods[m][p])
 			}
 		}
 
@@ -719,6 +789,126 @@ func TestModelPrefixStoreConcurrency(t *testing.T) {
 			matches := store.FindTopMatches(modelName, queryHashes, allPods[m])
 			t.Logf("Model %s: found %d matches after stress test", modelName, len(matches))
 		}
+
+		checkNoOrphans(t, store)
+	})
+
+	t.Run("Add racing pod deletion leaves no orphans", func(t *testing.T) {
+		const iters = 300
+		hashes := []uint64{1, 2, 3, 4, 5, 6, 7, 8}
+		for range iters {
+			mockStore := datastore.New()
+			store := NewModelPrefixStore(mockStore, 128, 5)
+			pod := &datastore.PodInfo{
+				Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "race-pod", Namespace: "test"}},
+			}
+			seedPod(t, mockStore, pod)
+			nsName := types.NamespacedName{Namespace: "test", Name: "race-pod"}
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				store.Add("race-model", hashes, pod)
+			}()
+			go func() {
+				defer wg.Done()
+				store.onPodDeleted(datastore.EventData{EventType: datastore.EventDelete, Pod: nsName})
+			}()
+			wg.Wait()
+
+			checkNoOrphans(t, store)
+		}
+	})
+}
+
+func TestModelPrefixStoreDeletedPod(t *testing.T) {
+	t.Run("Stale Add after completed deletion does not resurrect the pod", func(t *testing.T) {
+		mockStore := datastore.New()
+		store := NewModelPrefixStore(mockStore, 10, 5)
+
+		nsName := types.NamespacedName{Namespace: "test", Name: "stale-pod"}
+		pod := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: nsName.Name, Namespace: nsName.Namespace}},
+		}
+		seedPod(t, mockStore, pod)
+
+		store.Add("stale-model", []uint64{1, 2, 3}, pod)
+		assert.Equal(t, float64(3), store.EntryCount())
+
+		// Delete the pod; the direct onPodDeleted call makes the purge deterministic,
+		// the callback DeletePod dispatches is an idempotent no-op.
+		assert.NoError(t, mockStore.DeletePod(nsName))
+		store.onPodDeleted(datastore.EventData{EventType: datastore.EventDelete, Pod: nsName})
+		assert.Eventually(t, func() bool { return store.EntryCount() == 0 }, time.Second, 5*time.Millisecond)
+
+		// The Add for a request that was still in flight when the pod went away.
+		store.Add("stale-model", []uint64{1, 2, 3}, pod)
+
+		store.podHashesMu.RLock()
+		_, registered := store.podHashes[nsName]
+		store.podHashesMu.RUnlock()
+		assert.False(t, registered, "stale Add must not re-register a deleted pod")
+		assert.Equal(t, float64(0), store.EntryCount())
+		store.entriesMu.RLock()
+		assert.Equal(t, 0, len(store.entries), "stale Add must not recreate the model entry")
+		store.entriesMu.RUnlock()
+		checkNoOrphans(t, store)
+	})
+
+	t.Run("Readiness flap does not permanently suppress caching", func(t *testing.T) {
+		mockStore := datastore.New()
+		store := NewModelPrefixStore(mockStore, 10, 5)
+
+		nsName := types.NamespacedName{Namespace: "test", Name: "flap-pod"}
+		pod := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: nsName.Name, Namespace: nsName.Namespace}},
+		}
+		seedPod(t, mockStore, pod)
+		store.Add("flap-model", []uint64{1, 2}, pod)
+
+		// Pod goes NotReady: removed from the datastore, delete event fires. The purge
+		// drops the model entry last, so entries emptying means the callback finished.
+		assert.NoError(t, mockStore.DeletePod(nsName))
+		assert.Eventually(t, func() bool {
+			store.entriesMu.RLock()
+			defer store.entriesMu.RUnlock()
+			return len(store.entries) == 0
+		}, 2*time.Second, 5*time.Millisecond)
+
+		// Pod becomes Ready again and caches normally.
+		seedPod(t, mockStore, pod)
+		store.Add("flap-model", []uint64{1, 2}, pod)
+
+		matches := store.FindTopMatches("flap-model", []uint64{1, 2}, []*datastore.PodInfo{pod})
+		assert.Equal(t, 1, len(matches))
+		assert.Equal(t, 2, matches[nsName])
+		assert.Equal(t, float64(2), store.EntryCount())
+	})
+
+	t.Run("Undo path does not count as eviction", func(t *testing.T) {
+		mockStore := datastore.New()
+		store := NewModelPrefixStore(mockStore, 10, 5)
+
+		nsName := types.NamespacedName{Namespace: "test", Name: "undo-pod"}
+		pod := &datastore.PodInfo{
+			Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: nsName.Name, Namespace: nsName.Namespace}},
+		}
+		seedPod(t, mockStore, pod)
+
+		const model = "evictmetric-undo-model"
+		before := prefixEvictionCount(t, model)
+
+		store.Add(model, []uint64{1, 2, 3}, pod)
+		// The path Add takes when its verify step finds the registration gone.
+		store.purgeModelHashes(model, []uint64{1, 2, 3}, nsName)
+
+		if got := prefixEvictionCount(t, model) - before; got != 0 {
+			t.Errorf("evictions delta on undo = %v, want 0", got)
+		}
+		store.entriesMu.RLock()
+		assert.Equal(t, 0, len(store.entries))
+		store.entriesMu.RUnlock()
 	})
 }
 
@@ -743,6 +933,7 @@ func BenchmarkModelPrefixStore_FindAndAdd(b *testing.B) {
 				},
 			},
 		}
+		seedPod(b, mockStore, pods[i])
 	}
 
 	for m := 0; m < numModels; m++ {
