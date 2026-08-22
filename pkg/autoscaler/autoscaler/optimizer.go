@@ -165,6 +165,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
+	readyInstancesCounts := make([]int32, 0, size)
 	// externalSamples accumulates per-backend (value, replicas) pairs for each
 	// external metric so that the correct aggregation can be applied afterwards.
 	externalSamples := make(map[string][]backendExternalSample)
@@ -187,6 +188,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		}
 		unreadyInstancesCount += currentUnreadyInstancesCount
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
+		readyInstancesCounts = append(readyInstancesCounts, max(backendReplicas-currentUnreadyInstancesCount, 0))
 		for metricName, metricValue := range currentExternalMetrics {
 			externalSamples[metricName] = append(externalSamples[metricName], backendExternalSample{
 				value:    metricValue,
@@ -211,6 +213,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		MetricTargets:         optimizer.Meta.MetricTargets,
 		UnreadyInstancesCount: unreadyInstancesCount,
 		ReadyInstancesMetrics: readyInstancesMetrics,
+		ReadyInstancesCounts:  readyInstancesCounts,
 		ExternalMetrics:       externalMetrics,
 	}
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
