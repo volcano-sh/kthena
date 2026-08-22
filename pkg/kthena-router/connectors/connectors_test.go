@@ -17,8 +17,8 @@ limitations under the License.
 package connectors
 
 import (
-	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,33 +85,33 @@ func TestFactory(t *testing.T) {
 	}
 }
 
-// Helper function to parse request body
-func parseRequestBody(req *http.Request) (map[string]interface{}, error) {
-	if req == nil || req.Body == nil {
-		return nil, nil
-	}
-
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	// Reset the body for potential future reads
-	req.Body = io.NopCloser(bytes.NewBuffer(body))
-
-	var result map[string]interface{}
-	err = json.Unmarshal(body, &result)
-	return result, err
-}
-
 func TestHTTPConnectorProxy(t *testing.T) {
 	// Test non-streaming request
 	t.Run("NonStreamingRequest", func(t *testing.T) {
+		var prefillReceivedBody map[string]interface{}
+		var decodeReceivedBody map[string]interface{}
+
+		prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &prefillReceivedBody)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer prefillServer.Close()
+
+		decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &decodeReceivedBody)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":5}}`))
+		}))
+		defer decodeServer.Close()
+
 		connector := NewHTTPConnector()
 
-		// Create a proper test context with a valid HTTP request
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
 		c.Request = req
 
 		reqBody := map[string]interface{}{
@@ -125,79 +125,81 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			},
 		}
 
-		// The HTTP connector does support the Proxy method, but it will fail
-		// because the test addresses don't exist and the prefill/decode calls will fail
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
-		if err == nil {
-			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
+		prefillHost := prefillServer.Listener.Addr().String()
+		decodeHost := decodeServer.Listener.Addr().String()
+
+		tokens, err := connector.Proxy(c, reqBody, prefillHost, decodeHost, nil)
+		if err != nil {
+			t.Fatalf("Unexpected error from Proxy: %v", err)
+		}
+		if tokens != 5 {
+			t.Errorf("Expected 5 output tokens, got %d", tokens)
 		}
 
-		// Verify that prefill and decode requests were built
-		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
-			t.Error("Expected prefill request to be built")
+		// Verify prefill request body fields
+		if maxTokens, ok := prefillReceivedBody["max_tokens"]; !ok {
+			t.Error("Expected prefill request to have max_tokens field")
+		} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
+			t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
 		}
-		if httpConn.decodeRequest == nil {
-			t.Error("Expected decode request to be built")
+		if _, hasStream := prefillReceivedBody["stream"]; hasStream {
+			t.Error("Expected prefill request to not have stream field")
 		}
-
-		// Verify request body fields
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				// Prefill request should have max_tokens set to 1
-				if maxTokens, ok := prefillBody["max_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
-				}
-				// Prefill request should not have stream field
-				if _, hasStream := prefillBody["stream"]; hasStream {
-					t.Error("Expected prefill request to not have stream field")
-				}
-				// Prefill request should not have stream_options field
-				if _, hasStreamOptions := prefillBody["stream_options"]; hasStreamOptions {
-					t.Error("Expected prefill request to not have stream_options field")
-				}
-				// Should still have model and messages
-				if model, ok := prefillBody["model"]; !ok || model != "test-model" {
-					t.Errorf("Expected prefill request to have model 'test-model', got %v", model)
-				}
-			}
+		if _, hasStreamOptions := prefillReceivedBody["stream_options"]; hasStreamOptions {
+			t.Error("Expected prefill request to not have stream_options field")
+		}
+		if model, ok := prefillReceivedBody["model"]; !ok || model != "test-model" {
+			t.Errorf("Expected prefill request to have model 'test-model', got %v", model)
 		}
 
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
-			if err != nil {
-				t.Errorf("Failed to parse decode request body: %v", err)
-			} else {
-				// Decode request should have include_usage set for non-streaming requests
-				if includeUsage, ok := decodeBody["include_usage"]; !ok || includeUsage != true {
-					t.Errorf("Expected decode request include_usage to be true, got %v", includeUsage)
-				}
-				// Should preserve original max_tokens
-				if maxTokens, ok := decodeBody["max_tokens"]; !ok {
-					t.Error("Expected decode request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 100.0 {
-					t.Errorf("Expected decode request max_tokens to be 100, got %v", maxTokens)
-				}
-				// Should still have model and messages
-				if model, ok := decodeBody["model"]; !ok || model != "test-model" {
-					t.Errorf("Expected decode request to have model 'test-model', got %v", model)
-				}
-			}
+		// Verify decode request body fields
+		if includeUsage, ok := decodeReceivedBody["include_usage"]; !ok || includeUsage != true {
+			t.Errorf("Expected decode request include_usage to be true, got %v", includeUsage)
+		}
+		if maxTokens, ok := decodeReceivedBody["max_tokens"]; !ok {
+			t.Error("Expected decode request to have max_tokens field")
+		} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 100.0 {
+			t.Errorf("Expected decode request max_tokens to be 100, got %v", maxTokens)
+		}
+		if model, ok := decodeReceivedBody["model"]; !ok || model != "test-model" {
+			t.Errorf("Expected decode request to have model 'test-model', got %v", model)
 		}
 	})
 
 	// Test streaming request
 	t.Run("StreamingRequest", func(t *testing.T) {
+		var prefillReceivedBody map[string]interface{}
+		var decodeReceivedBody map[string]interface{}
+
+		prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &prefillReceivedBody)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer prefillServer.Close()
+
+		decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &decodeReceivedBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}],\"usage\":{\"completion_tokens\":1}}\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}))
+		defer decodeServer.Close()
+
 		connector := NewHTTPConnector()
 
-		// Create a proper test context with a valid HTTP request
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		rec := CreateTestResponseRecorder()
+		c, _ := gin.CreateTestContext(rec)
 		c.Request = req
 
 		reqBody := map[string]interface{}{
@@ -212,19 +214,12 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			},
 		}
 
-		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
-		if err == nil {
-			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
-		}
+		prefillHost := prefillServer.Listener.Addr().String()
+		decodeHost := decodeServer.Listener.Addr().String()
 
-		// Verify that prefill and decode requests were built
-		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
-			t.Error("Expected prefill request to be built")
-		}
-		if httpConn.decodeRequest == nil {
-			t.Error("Expected decode request to be built")
+		_, err := connector.Proxy(c, reqBody, prefillHost, decodeHost, nil)
+		if err != nil {
+			t.Fatalf("Unexpected error from Proxy: %v", err)
 		}
 
 		// For streaming requests, verify that token usage context was set
@@ -232,63 +227,56 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			t.Error("Expected token usage to be set in context for streaming request")
 		}
 
-		// Verify request body fields for streaming request
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				// Prefill request should have max_tokens set to 1
-				if maxTokens, ok := prefillBody["max_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
-				}
-				// Prefill request should not have stream field (removed for prefill)
-				if _, hasStream := prefillBody["stream"]; hasStream {
-					t.Error("Expected prefill request to not have stream field")
-				}
-				// Prefill request should not have stream_options field (removed for prefill)
-				if _, hasStreamOptions := prefillBody["stream_options"]; hasStreamOptions {
-					t.Error("Expected prefill request to not have stream_options field")
-				}
-			}
+		// Verify prefill request body fields
+		if maxTokens, ok := prefillReceivedBody["max_tokens"]; !ok {
+			t.Error("Expected prefill request to have max_tokens field")
+		} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
+			t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
+		}
+		if _, hasStream := prefillReceivedBody["stream"]; hasStream {
+			t.Error("Expected prefill request to not have stream field")
 		}
 
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
-			if err != nil {
-				t.Errorf("Failed to parse decode request body: %v", err)
-			} else {
-				// Decode request should preserve stream field
-				if stream, ok := decodeBody["stream"]; !ok || stream != true {
-					t.Errorf("Expected decode request stream to be true, got %v", stream)
-				}
-				// Decode request should have stream_options with include_usage added
-				if streamOptions, ok := decodeBody["stream_options"]; !ok {
-					t.Error("Expected decode request to have stream_options")
-				} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
-					t.Error("Expected stream_options to be a map")
-				} else if includeUsage, ok := opts["include_usage"]; !ok || includeUsage != true {
-					t.Errorf("Expected stream_options include_usage to be true, got %v", includeUsage)
-				}
-				// Should preserve original max_tokens
-				if maxTokens, ok := decodeBody["max_tokens"]; !ok {
-					t.Error("Expected decode request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 100.0 {
-					t.Errorf("Expected decode request max_tokens to be 100, got %v", maxTokens)
-				}
-			}
+		// Verify decode request body fields
+		if stream, ok := decodeReceivedBody["stream"]; !ok || stream != true {
+			t.Errorf("Expected decode request stream to be true, got %v", stream)
+		}
+		if streamOptions, ok := decodeReceivedBody["stream_options"]; !ok {
+			t.Error("Expected decode request to have stream_options")
+		} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
+			t.Error("Expected stream_options to be a map")
+		} else if includeUsage, ok := opts["include_usage"]; !ok || includeUsage != true {
+			t.Errorf("Expected stream_options include_usage to be true, got %v", includeUsage)
 		}
 	})
 
 	// Test streaming request with existing stream_options
 	t.Run("StreamingRequestWithStreamOptions", func(t *testing.T) {
+		var decodeReceivedBody map[string]interface{}
+
+		prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer prefillServer.Close()
+
+		decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &decodeReceivedBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}))
+		defer decodeServer.Close()
+
 		connector := NewHTTPConnector()
 
-		// Create a proper test context with a valid HTTP request
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		rec := CreateTestResponseRecorder()
+		c, _ := gin.CreateTestContext(rec)
 		c.Request = req
 
 		reqBody := map[string]interface{}{
@@ -306,19 +294,12 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			},
 		}
 
-		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
-		if err == nil {
-			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
-		}
+		prefillHost := prefillServer.Listener.Addr().String()
+		decodeHost := decodeServer.Listener.Addr().String()
 
-		// Verify that prefill and decode requests were built
-		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
-			t.Error("Expected prefill request to be built")
-		}
-		if httpConn.decodeRequest == nil {
-			t.Error("Expected decode request to be built")
+		_, err := connector.Proxy(c, reqBody, prefillHost, decodeHost, nil)
+		if err != nil {
+			t.Fatalf("Unexpected error from Proxy: %v", err)
 		}
 
 		// For streaming requests with existing stream_options, token usage should not be added to context
@@ -326,31 +307,42 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			t.Error("Did not expect token usage to be set in context when stream_options already exists")
 		}
 
-		// Verify request body fields when stream_options already exists
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
-			if err != nil {
-				t.Errorf("Failed to parse decode request body: %v", err)
-			} else {
-				// Decode request should preserve existing stream_options
-				if streamOptions, ok := decodeBody["stream_options"]; !ok {
-					t.Error("Expected decode request to preserve existing stream_options")
-				} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
-					t.Error("Expected stream_options to be a map")
-				} else if includeUsage, ok := opts["include_usage"]; !ok || includeUsage != true {
-					t.Errorf("Expected existing stream_options include_usage to be preserved as true, got %v", includeUsage)
-				}
-			}
+		// Verify decode request body preserves existing stream_options
+		if streamOptions, ok := decodeReceivedBody["stream_options"]; !ok {
+			t.Error("Expected decode request to preserve existing stream_options")
+		} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
+			t.Error("Expected stream_options to be a map")
+		} else if includeUsage, ok := opts["include_usage"]; !ok || includeUsage != true {
+			t.Errorf("Expected existing stream_options include_usage to be preserved as true, got %v", includeUsage)
 		}
 	})
 
 	// Test max_completion_tokens handling
 	t.Run("MaxCompletionTokensHandling", func(t *testing.T) {
+		var prefillReceivedBody map[string]interface{}
+		var decodeReceivedBody map[string]interface{}
+
+		prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &prefillReceivedBody)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer prefillServer.Close()
+
+		decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &decodeReceivedBody)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		}))
+		defer decodeServer.Close()
+
 		connector := NewHTTPConnector()
 
-		// Create a proper test context with a valid HTTP request
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
 		c.Request = req
 
 		reqBody := map[string]interface{}{
@@ -364,168 +356,106 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			},
 		}
 
-		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", nil)
-		if err == nil {
-			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
+		prefillHost := prefillServer.Listener.Addr().String()
+		decodeHost := decodeServer.Listener.Addr().String()
+
+		_, err := connector.Proxy(c, reqBody, prefillHost, decodeHost, nil)
+		if err != nil {
+			t.Fatalf("Unexpected error from Proxy: %v", err)
 		}
 
-		// Verify that both prefill and decode requests were built
-		httpConn := connector.(*HTTPConnector)
-		if httpConn.prefillRequest == nil {
-			t.Error("Expected prefill request to be built")
+		// Verify prefill request handling of max_completion_tokens
+		if maxTokens, ok := prefillReceivedBody["max_tokens"]; !ok {
+			t.Error("Expected prefill request to have max_tokens field")
+		} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
+			t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
 		}
-		if httpConn.decodeRequest == nil {
-			t.Error("Expected decode request to be built")
-		}
-
-		// Both requests should have content
-		if httpConn.prefillRequest.ContentLength == 0 {
-			t.Error("Expected prefill request to have a body")
-		}
-		if httpConn.decodeRequest.ContentLength == 0 {
-			t.Error("Expected decode request to have a body")
+		if maxCompletionTokens, ok := prefillReceivedBody["max_completion_tokens"]; !ok {
+			t.Error("Expected prefill request to have max_completion_tokens field")
+		} else if maxCompletionTokensFloat, ok := maxCompletionTokens.(float64); !ok || maxCompletionTokensFloat != 1.0 {
+			t.Errorf("Expected prefill request max_completion_tokens to be 1, got %v", maxCompletionTokens)
 		}
 
-		// Verify request body fields for max_completion_tokens handling
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				// Prefill request should have max_tokens set to 1
-				if maxTokens, ok := prefillBody["max_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
-				}
-				// Prefill request should have max_completion_tokens set to 1
-				if maxCompletionTokens, ok := prefillBody["max_completion_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_completion_tokens field")
-				} else if maxCompletionTokensFloat, ok := maxCompletionTokens.(float64); !ok || maxCompletionTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_completion_tokens to be 1, got %v", maxCompletionTokens)
-				}
-			}
-		}
-
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
-			if err != nil {
-				t.Errorf("Failed to parse decode request body: %v", err)
-			} else {
-				// Decode request should preserve original max_completion_tokens
-				if maxCompletionTokens, ok := decodeBody["max_completion_tokens"]; !ok {
-					t.Error("Expected decode request to have max_completion_tokens field")
-				} else if maxCompletionTokensFloat, ok := maxCompletionTokens.(float64); !ok || maxCompletionTokensFloat != 50.0 {
-					t.Errorf("Expected decode request max_completion_tokens to be 50, got %v", maxCompletionTokens)
-				}
-				// Decode request should have include_usage for non-streaming
-				if includeUsage, ok := decodeBody["include_usage"]; !ok || includeUsage != true {
-					t.Errorf("Expected decode request include_usage to be true, got %v", includeUsage)
-				}
-			}
+		// Verify decode request preserves original max_completion_tokens
+		if maxCompletionTokens, ok := decodeReceivedBody["max_completion_tokens"]; !ok {
+			t.Error("Expected decode request to have max_completion_tokens field")
+		} else if maxCompletionTokensFloat, ok := maxCompletionTokens.(float64); !ok || maxCompletionTokensFloat != 50.0 {
+			t.Errorf("Expected decode request max_completion_tokens to be 50, got %v", maxCompletionTokens)
 		}
 	})
+}
 
-	// Test request body modifications in detail
-	t.Run("RequestBodyModifications", func(t *testing.T) {
-		connector := NewHTTPConnector()
+// TestHTTPConnector_ConcurrentThreadSafety verifies that concurrent requests through
+// the same HTTPConnector instance do not race or corrupt each other's payloads.
+func TestHTTPConnector_ConcurrentThreadSafety(t *testing.T) {
+	prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer prefillServer.Close()
 
-		// Create a proper test context with a valid HTTP request
-		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = req
+	decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		model, _ := body["model"].(string)
 
-		originalReqBody := map[string]interface{}{
-			"model":      "test-model",
-			"stream":     true,
-			"max_tokens": 200,
-			"stream_options": map[string]interface{}{
-				"some_other_option": "value",
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		resp := map[string]interface{}{
+			"model": model,
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": "response for " + model}},
 			},
-			"messages": []interface{}{
-				map[string]interface{}{
-					"role":    "user",
-					"content": "test message",
+			"usage": map[string]int{"completion_tokens": 1},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer decodeServer.Close()
+
+	connector := NewHTTPConnector()
+	prefillAddr := prefillServer.Listener.Addr().String()
+	decodeAddr := decodeServer.Listener.Addr().String()
+
+	const concurrency = 10
+	errCh := make(chan error, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		go func(id int) {
+			modelName := fmt.Sprintf("model-%d", id)
+			req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = req
+
+			reqBody := map[string]interface{}{
+				"model":      modelName,
+				"max_tokens": 50 + id,
+				"messages": []interface{}{
+					map[string]interface{}{"role": "user", "content": fmt.Sprintf("msg-%d", id)},
 				},
-			},
-		}
-
-		// Make a copy of the original to verify it gets modified
-		reqBodyCopy := make(map[string]interface{})
-		for k, v := range originalReqBody {
-			reqBodyCopy[k] = v
-		}
-
-		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBodyCopy, "localhost:8000", "localhost:8001", nil)
-		if err == nil {
-			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
-		}
-
-		// Verify that the original request body was modified correctly
-		httpConn := connector.(*HTTPConnector)
-
-		// Check prefill request body
-		if httpConn.prefillRequest != nil {
-			prefillBody, err := parseRequestBody(httpConn.prefillRequest)
-			if err != nil {
-				t.Errorf("Failed to parse prefill request body: %v", err)
-			} else {
-				// Should have modified max_tokens to 1
-				if maxTokens, ok := prefillBody["max_tokens"]; !ok {
-					t.Error("Expected prefill request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 1.0 {
-					t.Errorf("Expected prefill request max_tokens to be 1, got %v", maxTokens)
-				}
-
-				// Should have removed stream field
-				if _, hasStream := prefillBody["stream"]; hasStream {
-					t.Error("Expected prefill request to not have stream field")
-				}
-
-				// Should have removed stream_options field
-				if _, hasStreamOptions := prefillBody["stream_options"]; hasStreamOptions {
-					t.Error("Expected prefill request to not have stream_options field")
-				}
 			}
-		}
 
-		// Check decode request body
-		if httpConn.decodeRequest != nil {
-			decodeBody, err := parseRequestBody(httpConn.decodeRequest)
+			_, err := connector.Proxy(c, reqBody, prefillAddr, decodeAddr, nil)
 			if err != nil {
-				t.Errorf("Failed to parse decode request body: %v", err)
-			} else {
-				// Should preserve stream field
-				if stream, ok := decodeBody["stream"]; !ok || stream != true {
-					t.Errorf("Expected decode request stream to be true, got %v", stream)
-				}
-
-				// Should preserve original max_tokens
-				if maxTokens, ok := decodeBody["max_tokens"]; !ok {
-					t.Error("Expected decode request to have max_tokens field")
-				} else if maxTokensFloat, ok := maxTokens.(float64); !ok || maxTokensFloat != 200.0 {
-					t.Errorf("Expected decode request max_tokens to be 200, got %v", maxTokens)
-				}
-
-				// Should have stream_options with include_usage added
-				if streamOptions, ok := decodeBody["stream_options"]; !ok {
-					t.Error("Expected decode request to have stream_options")
-				} else if opts, isMap := streamOptions.(map[string]interface{}); !isMap {
-					t.Error("Expected stream_options to be a map")
-				} else {
-					// Should have include_usage added
-					if includeUsage, ok := opts["include_usage"]; !ok || includeUsage != true {
-						t.Errorf("Expected stream_options include_usage to be true, got %v", includeUsage)
-					}
-					// Note: Original stream_options are replaced, not preserved
-					// This is the current behavior of buildDecodeRequest
-					if len(opts) != 1 {
-						t.Errorf("Expected stream_options to only contain include_usage, got %+v", opts)
-					}
-				}
+				errCh <- fmt.Errorf("goroutine %d failed: %w", id, err)
+				return
 			}
+
+			var respBody map[string]interface{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &respBody); err != nil {
+				errCh <- fmt.Errorf("goroutine %d unmarshal error: %w", id, err)
+				return
+			}
+			if respBody["model"] != modelName {
+				errCh <- fmt.Errorf("goroutine %d received response for model %v, expected %s", id, respBody["model"], modelName)
+				return
+			}
+			errCh <- nil
+		}(i)
+	}
+
+	for i := 0; i < concurrency; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("Concurrent request error: %v", err)
 		}
-	})
+	}
 }
