@@ -29,7 +29,7 @@ To simplify deployment and reduce the requirements for demonstration environment
 
 ### Getting Started
 
-1. Deploy mock LLM inference engine if you do not have a real GPU/NPU environment at the moment. [mock deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/LLM-Mock-ds1.5b.yaml) and [mock deepseek-ai/DeepSeek-R1-Distill-Qwen-7B](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/LLM-Mock-ds7b.yaml)
+1. Deploy mock LLM inference engine if you do not have a real GPU/NPU environment at the moment. [mock deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/bases/deepseek-1.5b/LLM-Mock-ds1.5b.yaml) and [mock deepseek-ai/DeepSeek-R1-Distill-Qwen-7B](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/bases/deepseek-7b/LLM-Mock-ds7b.yaml)
 
 2. Deploy all kinds of ModelServer, such as `deepseek-r1-1-5b`, `deepseek-r1-7b`, etc., as backends of different routing strategies.
 
@@ -151,7 +151,7 @@ spec:
 4. 30% of requests → `deepseek-r1-1-5b-v2` (new version being tested)
 5. This enables controlled testing of new model versions
 
-**NOTE**: This scenario need to deploy canary version of [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServer-ds1.5b-Canary.yaml) and [mock deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/LLM-Mock-ds1.5b-Canary.yaml) to test.
+**NOTE**: This scenario need to deploy canary version of [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/bases/deepseek-1.5b-canary/ModelServer-ds1.5b-Canary.yaml) and [mock deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/bases/deepseek-1.5b-canary/LLM-Mock-ds1.5b-Canary.yaml) to test.
 
 **Try it out**:
 ```bash
@@ -293,7 +293,7 @@ spec:
 4. Prefill runs on prefill instance; decode runs on decode instance, with KV state exchanged between them (configure `kvConnector` for nixl/mooncake when needed)
 5. Response returned to client
 
-**NOTE**: Deploy [ModelServing](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServing-ds1.5b-pd-disaggregation.yaml) with PD roles first, then apply [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServer-ds1.5b-pd-disaggregation.yaml) and [ModelRoute](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRoute-ds1.5b-pd-disaggregation.yaml).
+**NOTE**: Deploy [ModelServing](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/scenarios/mock-pd-disaggregation/ModelServing-ds1.5b-pd-disaggregation.yaml) with PD roles first, then apply [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/scenarios/mock-pd-disaggregation/ModelServer-ds1.5b-pd-disaggregation.yaml) and [ModelRoute](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/scenarios/mock-pd-disaggregation/ModelRoute-ds1.5b-pd-disaggregation.yaml).
 
 ---
 

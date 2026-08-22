@@ -120,16 +120,16 @@ Deploy mock LLM services and their corresponding ModelServer resources:
 
 ```bash
 # Deploy DeepSeek 1.5B mock service
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/LLM-Mock-ds1.5b.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/bases/deepseek-1.5b/LLM-Mock-ds1.5b.yaml
 
 # Deploy DeepSeek 7B mock service
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/LLM-Mock-ds7b.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/bases/deepseek-7b/LLM-Mock-ds7b.yaml
 
 # Create ModelServer for DeepSeek 1.5B
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelServer-ds1.5b.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/bases/deepseek-1.5b/ModelServer-ds1.5b.yaml
 
 # Create ModelServer for DeepSeek 7B
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelServer-ds7b.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/bases/deepseek-7b/ModelServer-ds7b.yaml
 ```
 
 Wait for the pods to be ready:
