@@ -33,3 +33,20 @@ const (
 	// RoleTemplateHashLabelKey is the revision label for the role, used for RoleRollingUpdate strategy.
 	RoleTemplateHashLabelKey = "modelserving.volcano.sh/role-template-hash"
 )
+
+// IsControllerReservedPodLabel reports whether a label is managed by the
+// ModelServing controller.
+func IsControllerReservedPodLabel(key string) bool {
+	switch key {
+	case ModelServingNameLabelKey,
+		GroupNameLabelKey,
+		RoleLabelKey,
+		RoleIDKey,
+		EntryLabelKey,
+		RevisionLabelKey,
+		RoleTemplateHashLabelKey:
+		return true
+	default:
+		return false
+	}
+}
