@@ -32,6 +32,7 @@ type RecommendedInstancesAlgorithm struct {
 	MetricTargets         Metrics
 	UnreadyInstancesCount int32
 	ReadyInstancesMetrics []Metrics
+	ReadyInstancesCounts  []int32
 	ExternalMetrics       Metrics
 }
 
@@ -63,6 +64,7 @@ func (alg *RecommendedInstancesAlgorithm) GetRecommendedInstances() (recommended
 				target,
 				alg.UnreadyInstancesCount,
 				alg.ReadyInstancesMetrics,
+				alg.ReadyInstancesCounts,
 			); ok {
 				updateRecommendation(&recommendedInstances, &skip, desired)
 			}
@@ -104,17 +106,22 @@ func getDesiredInstancesForSingleInstanceMetric(
 	target float64,
 	unreadyCount int32,
 	readyMetrics []Metrics,
+	readyCounts []int32,
 ) (desired int32, ok bool) {
 	currentMetricSum := 0.0
 	missingCount := int32(0)
 	metricsCount := int32(0)
-	for _, readyInstance := range readyMetrics {
+	for index, readyInstance := range readyMetrics {
+		count := int32(1)
+		if index < len(readyCounts) {
+			count = readyCounts[index]
+		}
 		metric, ok := readyInstance[name]
 		if ok {
-			metricsCount++
+			metricsCount += count
 			currentMetricSum += metric
 		} else {
-			missingCount++
+			missingCount += count
 		}
 	}
 	if metricsCount == 0 {
