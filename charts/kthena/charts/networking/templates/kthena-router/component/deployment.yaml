@@ -85,7 +85,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: redis-secret
-                  key: password
+                  key: REDIS_PASSWORD
                   optional: true
             # Scheduling strategy: user fairness and session boost are mutually exclusive
             {{- if .Values.kthenaRouter.fairness.enabled }}
