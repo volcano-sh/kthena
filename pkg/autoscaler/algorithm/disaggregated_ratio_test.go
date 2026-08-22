@@ -64,6 +64,23 @@ func TestEnforceRoleRatio(t *testing.T) {
 			wantRatio:    "0.25",
 		},
 		{
+			name:     "rounding repair remains inside both ratio bounds",
+			replicas: map[string]int32{"prefill": 1, "decode": 3},
+			bounds: map[string]ReplicaBounds{
+				"prefill": {Min: 1, Max: 10},
+				"decode":  {Min: 1, Max: 10},
+			},
+			constraint: &workload.RoleRatioConstraint{
+				NumeratorRole:   "prefill",
+				DenominatorRole: "decode",
+				MinRatio:        resource.MustParse("0.5"),
+				MaxRatio:        resource.MustParse("0.5"),
+			},
+			wantReplicas: map[string]int32{"prefill": 2, "decode": 4},
+			wantAdjusted: true,
+			wantRatio:    "0.5",
+		},
+		{
 			name:         "above max raises denominator first",
 			replicas:     map[string]int32{"prefill": 6, "decode": 2},
 			bounds:       bounds,
@@ -138,5 +155,27 @@ func TestEnforceRoleRatio(t *testing.T) {
 				t.Fatalf("ratio = %q, want %q", gotRatio, tt.wantRatio)
 			}
 		})
+	}
+}
+
+func TestEnforceRoleRatioReturnsErrorWhenNoIntegerPairSatisfiesConstraint(t *testing.T) {
+	constraint := &workload.RoleRatioConstraint{
+		NumeratorRole:   "prefill",
+		DenominatorRole: "decode",
+		MinRatio:        resource.MustParse("0.55"),
+		MaxRatio:        resource.MustParse("0.55"),
+	}
+	bounds := map[string]ReplicaBounds{
+		"prefill": {Min: 1, Max: 2},
+		"decode":  {Min: 2, Max: 3},
+	}
+
+	_, _, _, err := EnforceRoleRatio(
+		map[string]int32{"prefill": 1, "decode": 2},
+		bounds,
+		constraint,
+	)
+	if err == nil {
+		t.Fatal("expected an error when no integer replica pair satisfies the ratio constraint")
 	}
 }
