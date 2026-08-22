@@ -503,6 +503,72 @@ func TestKVCacheAware_GCStaleFields(t *testing.T) {
 	}
 }
 
+func TestKVCacheAware_GCStaleFields_FullPassInOneTick(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	plugin := &KVCacheAware{
+		keyPrefix:   kvCacheKeyPrefix,
+		redisClient: client,
+	}
+
+	// Seed well over kvCacheGCScanSize keys so a pass needs multiple SCAN batches.
+	// Each key keeps a fresh owner alongside the stale one so keys survive the pass
+	// (miniredis cursors are list indexes; deleting keys mid-scan would shift them).
+	ctx := context.Background()
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	stale := fmt.Sprintf("%d", time.Now().Add(-25*time.Hour).Unix())
+	total := int(kvCacheGCScanSize)*2 + 50
+	for i := 0; i < total; i++ {
+		key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: uint64(i)}.String(kvCacheKeyPrefix)
+		if err := client.HSet(ctx, key, "live-pod.default", now, "gone-pod.default", stale).Err(); err != nil {
+			t.Fatalf("failed to seed redis: %v", err)
+		}
+	}
+
+	countStale := func() int {
+		staleLeft := 0
+		for i := 0; i < total; i++ {
+			key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: uint64(i)}.String(kvCacheKeyPrefix)
+			staleExists, err := client.HExists(ctx, key, "gone-pod.default").Result()
+			if err != nil {
+				t.Fatalf("failed to check %s: %v", key, err)
+			}
+			if staleExists {
+				staleLeft++
+			}
+			liveExists, err := client.HExists(ctx, key, "live-pod.default").Result()
+			if err != nil {
+				t.Fatalf("failed to check %s: %v", key, err)
+			}
+			if !liveExists {
+				t.Errorf("expected the fresh owner on %s to survive GC", key)
+			}
+		}
+		return staleLeft
+	}
+
+	plugin.gcStaleFields()
+
+	// A transient client fault aborts a pass mid-way by design (the cursor resumes next
+	// tick), so allow one healing rerun before asserting. The rerun cannot mask the
+	// one-batch pacing this test pins: two one-batch ticks clear at most 200 of 250 keys.
+	staleLeft := countStale()
+	if staleLeft != 0 {
+		plugin.gcStaleFields()
+		staleLeft = countStale()
+	}
+	if staleLeft != 0 {
+		t.Errorf("expected a tick to complete a full GC pass, %d of %d keys still hold stale fields", staleLeft, total)
+	}
+}
+
 // Helper function to create test pods
 func createTestPods(names ...string) []*datastore.PodInfo {
 	pods := make([]*datastore.PodInfo, len(names))
@@ -2504,8 +2570,8 @@ func TestKVCacheAware_QueryRedisForBlocks_DropsOwnershipFromBeforeRestart(t *tes
 }
 
 // The restart happened well beyond the GC freshness window, so no timing shortcut can be used
-// to skip the check: gcStaleFields scans a bounded slice of the keyspace per tick and may not
-// have reached this entry yet.
+// to skip the check: gcStaleFields runs hourly and a pass can span ticks when its budget is
+// exhausted, so it may not have collected this entry yet.
 func TestKVCacheAware_QueryRedisForBlocks_DropsOldOwnershipAfterLongAgoRestart(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
