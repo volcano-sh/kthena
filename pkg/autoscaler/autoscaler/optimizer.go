@@ -165,7 +165,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
-	readyInstancesCounts := make([]int32, 0, size)
+	metricReporterCounts := make(algorithm.ReporterCounts)
 	// externalSamples accumulates per-backend (value, replicas) pairs for each
 	// external metric so that the correct aggregation can be applied afterwards.
 	externalSamples := make(map[string][]backendExternalSample)
@@ -181,14 +181,16 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 
 		backendReplicas := currentInstancesCounts[targetKey]
 		instancesCountSum += backendReplicas
-		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
+		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentMetricReporterCounts, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
 			continue
 		}
 		unreadyInstancesCount += currentUnreadyInstancesCount
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
-		readyInstancesCounts = append(readyInstancesCounts, max(backendReplicas-currentUnreadyInstancesCount, 0))
+		for metricName, count := range currentMetricReporterCounts {
+			metricReporterCounts[metricName] += count
+		}
 		for metricName, metricValue := range currentExternalMetrics {
 			externalSamples[metricName] = append(externalSamples[metricName], backendExternalSample{
 				value:    metricValue,
@@ -213,7 +215,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		MetricTargets:         optimizer.Meta.MetricTargets,
 		UnreadyInstancesCount: unreadyInstancesCount,
 		ReadyInstancesMetrics: readyInstancesMetrics,
-		ReadyInstancesCounts:  readyInstancesCounts,
+		MetricReporterCounts:  metricReporterCounts,
 		ExternalMetrics:       externalMetrics,
 	}
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()

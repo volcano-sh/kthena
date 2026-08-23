@@ -166,7 +166,7 @@ func (autoscaler *DisaggregatedAutoscaler) Scale(ctx context.Context, podLister 
 
 		// Metric sources are role-scoped before each collection so pod scraping is
 		// automatically filtered to pods carrying the current role label.
-		unreadyInstancesCount, readyInstancesMetrics, externalMetrics, err := collector.UpdateMetrics(ctx, podLister, metricSourcesForRole(roleName, roleParam.MetricSources))
+		unreadyInstancesCount, readyInstancesMetrics, metricReporterCounts, externalMetrics, err := collector.UpdateMetrics(ctx, podLister, metricSourcesForRole(roleName, roleParam.MetricSources))
 		if err != nil {
 			return nil, fmt.Errorf("update metrics for role %s: %w", roleName, err)
 		}
@@ -181,6 +181,7 @@ func (autoscaler *DisaggregatedAutoscaler) Scale(ctx context.Context, podLister 
 			MetricTargets:         collector.MetricTargets,
 			UnreadyInstancesCount: unreadyInstancesCount,
 			ReadyInstancesMetrics: readyInstancesMetrics,
+			MetricReporterCounts:  metricReporterCounts,
 			ExternalMetrics:       externalMetrics,
 		})
 		if scaleResult.Skip {

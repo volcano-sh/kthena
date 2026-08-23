@@ -23,6 +23,7 @@ import (
 )
 
 type Metrics = map[string]float64
+type ReporterCounts = map[string]int32
 
 type RecommendedInstancesAlgorithm struct {
 	MinInstances          int32
@@ -32,7 +33,7 @@ type RecommendedInstancesAlgorithm struct {
 	MetricTargets         Metrics
 	UnreadyInstancesCount int32
 	ReadyInstancesMetrics []Metrics
-	ReadyInstancesCounts  []int32
+	MetricReporterCounts  ReporterCounts
 	ExternalMetrics       Metrics
 }
 
@@ -64,7 +65,7 @@ func (alg *RecommendedInstancesAlgorithm) GetRecommendedInstances() (recommended
 				target,
 				alg.UnreadyInstancesCount,
 				alg.ReadyInstancesMetrics,
-				alg.ReadyInstancesCounts,
+				alg.MetricReporterCounts,
 			); ok {
 				updateRecommendation(&recommendedInstances, &skip, desired)
 			}
@@ -106,23 +107,23 @@ func getDesiredInstancesForSingleInstanceMetric(
 	target float64,
 	unreadyCount int32,
 	readyMetrics []Metrics,
-	readyCounts []int32,
+	reporterCounts ReporterCounts,
 ) (desired int32, ok bool) {
 	currentMetricSum := 0.0
 	missingCount := int32(0)
 	metricsCount := int32(0)
-	for index, readyInstance := range readyMetrics {
-		count := int32(1)
-		if index < len(readyCounts) {
-			count = readyCounts[index]
-		}
+	for _, readyInstance := range readyMetrics {
 		metric, ok := readyInstance[name]
 		if ok {
-			metricsCount += count
+			metricsCount++
 			currentMetricSum += metric
 		} else {
-			missingCount += count
+			missingCount++
 		}
+	}
+	if count, exists := reporterCounts[name]; exists {
+		metricsCount = count
+		missingCount = max(currentCount-unreadyCount-count, 0)
 	}
 	if metricsCount == 0 {
 		return 0, false

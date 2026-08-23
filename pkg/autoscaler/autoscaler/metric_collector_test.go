@@ -411,11 +411,12 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 	collector := NewMetricCollector(
 		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
 		policy,
-		algorithm.Metrics{"queue_depth": 10, "queue_depth_alt": 10},
+		algorithm.Metrics{"queue_depth": 10, "queue_depth_alt": 10, "missing": 10},
 	)
 
-	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+	unreadyCount, readyMetrics, reporterCounts, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
 		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
+		"missing":     {Pod: &workload.PodMetricSource{Name: "missing", Port: int32(port)}},
 		// This creates a second metric group selecting the same pods.
 		"queue_depth_alt": {Pod: &workload.PodMetricSource{Name: "queue_depth_alt", Uri: "/metrics-alt", Port: int32(port)}},
 	})
@@ -424,4 +425,6 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 	// Expected behavior: scrape the ready pod even though another matching pod is unready.
 	require.Equal(t, float64(40), readyMetrics["queue_depth"])
 	require.Equal(t, float64(40), readyMetrics["queue_depth_alt"])
+	require.NotContains(t, readyMetrics, "missing")
+	require.Equal(t, algorithm.ReporterCounts{"queue_depth": 1, "queue_depth_alt": 1}, reporterCounts)
 }

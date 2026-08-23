@@ -287,7 +287,7 @@ func TestGetRecommendedInstances(t *testing.T) {
 			expectedSkip:        false,
 		},
 		{
-			name: "givenAggregatedMetrics_whenBackendMetricMissing_thenWeightByReplicaCount",
+			name: "givenAggregatedMetrics_whenSomeInstancesDoNotReport_thenWeightMissingInstances",
 			args: RecommendedInstancesAlgorithm{
 				MinInstances:          int32(2),
 				MaxInstances:          int32(20),
@@ -295,8 +295,8 @@ func TestGetRecommendedInstances(t *testing.T) {
 				Tolerance:             0.0,
 				MetricTargets:         Metrics{"a": 10.0},
 				UnreadyInstancesCount: int32(0),
-				ReadyInstancesMetrics: []Metrics{{}, {"a": 1.0}},
-				ReadyInstancesCounts:  []int32{5, 5},
+				ReadyInstancesMetrics: []Metrics{{"a": 1.0}},
+				MetricReporterCounts:  ReporterCounts{"a": 5},
 				ExternalMetrics:       Metrics{},
 			},
 			expectedRecommended: int32(6),
