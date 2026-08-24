@@ -1,0 +1,101 @@
+# ModelBooster example: prefill-decode disaggregation with the LMCache KV connector.
+#
+# vLLM's `LMCacheConnectorV1` is mapped by Kthena to the `lmcache` KV connector type,
+# which the router serves through the generic HTTP connector. In this mode KV reuse
+# happens BELOW the request layer: the prefill and decode workers exchange KV cache
+# through a shared LMCache backend (here a standalone Redis), NOT through in-band
+# `kv_transfer_params` handshakes like the NIXL connector.
+#
+# Because of this, a shared LMCache backend MUST be configured (LMCACHE_REMOTE_URL);
+# without it every worker only writes to its own local CPU memory and no cross-pod
+# KV reuse is possible.
+#
+# Prerequisites:
+#   1. A running Redis reachable from the cluster. You can deploy one with
+#      examples/redis/redis-standalone.yaml, or use the manifest referenced in the
+#      user guide. Update LMCACHE_REMOTE_URL below to match its address.
+#   2. A vLLM image that bundles LMCache (the image below already includes it).
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: qwen-lmcache-pd
+  namespace: default
+spec:
+  backend:
+    name: qwen-lmcache
+    type: vLLMDisaggregated
+    modelURI: "hf://Qwen/Qwen2.5-0.5B-Instruct"
+    cacheURI: "hostpath://tmp/cache"
+    replicas: 1
+    env:
+      # --- LMCache shared-store configuration (applied to prefill and decode) ---
+      # Chunk size used by LMCache. Prompts shorter than this never reach the
+      # shared backend, so keep test prompts longer than LMCACHE_CHUNK_SIZE tokens.
+      - name: LMCACHE_CHUNK_SIZE
+        value: "256"
+      # LocalCPUBackend is hard-required by LMCache even when relying on a remote
+      # backend. Setting LOCAL_CPU=False with MAX_LOCAL_CPU_SIZE=0 triggers
+      # `KeyError: 'LocalCPUBackend'`. Keep it enabled with a small size.
+      - name: LMCACHE_LOCAL_CPU
+        value: "True"
+      - name: LMCACHE_MAX_LOCAL_CPU_SIZE
+        value: "1"
+      # Shared backend that both prefill and decode use to exchange KV cache.
+      # Update the host to match your Redis Service.
+      - name: LMCACHE_REMOTE_URL
+        value: "redis://redis-server.default.svc.cluster.local:6379"
+      - name: LMCACHE_REMOTE_SERDE
+        value: "naive"
+    workers:
+      - type: prefill
+        image: lmcache/vllm-openai:latest
+        replicas: 1
+        pods: 1
+        resources:
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+            nvidia.com/gpu: "1"
+        config:
+          served-model-name: "Qwen2.5-0.5B-Instruct"
+          tensor-parallel-size: 1
+          max-model-len: 32768
+          gpu-memory-utilization: 0.90
+          kv-transfer-config: |
+            {"kv_connector": "LMCacheConnectorV1",
+              "kv_role": "kv_producer",
+              "kv_connector_extra_config": {
+                "discard_partial_chunks": true,
+                "lmcache_rpc_port": "10086"
+              }
+            }
+      - type: decode
+        image: lmcache/vllm-openai:latest
+        replicas: 1
+        pods: 1
+        resources:
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+            nvidia.com/gpu: "1"
+        config:
+          served-model-name: "Qwen2.5-0.5B-Instruct"
+          tensor-parallel-size: 1
+          max-model-len: 32768
+          gpu-memory-utilization: 0.90
+          kv-transfer-config: |
+            {"kv_connector": "LMCacheConnectorV1",
+              "kv_role": "kv_consumer",
+              "kv_connector_extra_config": {
+                "discard_partial_chunks": true,
+                "lmcache_rpc_port": "10086"
+              }
+            }

@@ -14,7 +14,7 @@ Notes:
 
 ## Installation
 
-- Runtime does not support separate installation.  it will be automatically deployed alongside the inference container as a sidecar when you are using `ModelBooster` to deploy llm.
+- Runtime does not support separate installation. It will be automatically deployed alongside the inference container as a sidecar when you are using `ModelBooster` to deploy an LLM.
 - When deploying via the ModelBooster CR (one-stop deployment), no additional configuration is needed; ModelServing will automatically enable the runtime feature.
 - For standalone deployment using ModelServing YAML, you can add the following configuration to start Runtime as sidecar container:
 
@@ -105,7 +105,7 @@ spec:
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest
-        replicase: 1
+        replicas: 1
         pods: 1
         resources:
           limits:
@@ -166,7 +166,7 @@ spec:
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest
-        replicase: 1
+        replicas: 1
         pods: 1
 ```
 

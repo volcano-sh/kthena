@@ -5,7 +5,7 @@ import modelBoosterControllerArchitecture from '../assets/diagrams/architecture/
 
 ## Overview
 
-As an optional component of the Kthena project, the Model Booster Controller primarily provides users with a convenient deployment form - `Model`. Based on the `Model CR` (Model Custom Resource) information provided by users, this component can automatically configure and deploy the components required for inference services, such as router routing rules, inference engine instances, and dynamic scaling configurations.
+As an optional component of the Kthena project, the Model Booster Controller primarily provides users with a convenient deployment form - `ModelBooster`. Based on the `ModelBooster CR` (ModelBooster Custom Resource) information provided by users, this component can automatically configure and deploy the components required for inference services, such as router routing rules, inference engine instances, and dynamic scaling configurations.
 
 ## Feature Description
 
@@ -39,13 +39,13 @@ Read the [Model Booster CR Examples](https://github.com/volcano-sh/kthena/tree/m
 
 ## Limitations
 
-The `Model` can only cover most inference service scenarios and will be continuously updated. Some scenarios are not yet supported and require manual configuration of relevant CRDs. 
+The `ModelBooster` can only cover most inference service scenarios and will be continuously updated. Some scenarios are not yet supported and require manual configuration of relevant CRDs. 
 
 Please note the following limitations when using the Model Booster:
-- Each `Model` can create only one `Model Route`.
-- Rate limiting for `Model Route` is not supported.
-- Topology configuration for `Model Infer` is not supported.
+- Each `ModelBooster` can create only one `ModelRoute`.
+- Rate limiting for `ModelRoute` is not supported.
+- Topology configuration for `ModelServing` is not supported.
 - The `panicPolicy` configuration for `AutoscalingPolicy` is not supported.
 - Behavior configuration for `AutoscalingPolicy` is not supported.
 
-In these cases, you can manually create `Model Infer`, `Model Server`, `Model Route`, `AutoscalingPolicy`, `AutoscalingPolicyBinding` resources as needed.
+In these cases, you can manually create `ModelServing`, `ModelServer`, `ModelRoute`, `AutoscalingPolicy`, `AutoscalingPolicyBinding` resources as needed.

@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -90,6 +91,82 @@ func TestTryGetField(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expected, result)
 			}
+		})
+	}
+}
+
+func TestGetEnginePort(t *testing.T) {
+	tests := []struct {
+		name         string
+		workers      []workloadv1alpha1.ModelWorker
+		expected     int32
+		expectErrMsg string
+	}{
+		{
+			name: "default port",
+			workers: []workloadv1alpha1.ModelWorker{{
+				Type: workloadv1alpha1.ModelWorkerTypeServer,
+			}},
+			expected: 8000,
+		},
+		{
+			name: "numeric port",
+			workers: []workloadv1alpha1.ModelWorker{{
+				Type: workloadv1alpha1.ModelWorkerTypeServer,
+				Config: apiextensionsv1.JSON{
+					Raw: []byte(`{"port":9000}`),
+				},
+			}},
+			expected: 9000,
+		},
+		{
+			name: "string port",
+			workers: []workloadv1alpha1.ModelWorker{{
+				Type: workloadv1alpha1.ModelWorkerTypeServer,
+				Config: apiextensionsv1.JSON{
+					Raw: []byte(`{"port":"9000"}`),
+				},
+			}},
+			expected: 9000,
+		},
+		{
+			name: "null port",
+			workers: []workloadv1alpha1.ModelWorker{{
+				Type: workloadv1alpha1.ModelWorkerTypeServer,
+				Config: apiextensionsv1.JSON{
+					Raw: []byte(`{"port":null}`),
+				},
+			}},
+			expectErrMsg: `invalid port "<nil>"`,
+		},
+		{
+			name: "different PD ports",
+			workers: []workloadv1alpha1.ModelWorker{
+				{
+					Type: workloadv1alpha1.ModelWorkerTypePrefill,
+					Config: apiextensionsv1.JSON{
+						Raw: []byte(`{"port":9000}`),
+					},
+				},
+				{
+					Type: workloadv1alpha1.ModelWorkerTypeDecode,
+				},
+			},
+			expectErrMsg: "workers use different engine ports",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetEnginePort(&workloadv1alpha1.ModelBackend{Workers: tt.workers})
+			if tt.expectErrMsg != "" {
+				if assert.Error(t, err) {
+					assert.Contains(t, err.Error(), tt.expectErrMsg)
+				}
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }

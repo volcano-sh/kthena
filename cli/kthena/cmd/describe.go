@@ -146,15 +146,12 @@ func runDescribeTemplate(cmd *cobra.Command, args []string) error {
 func runDescribeModelBooster(cmd *cobra.Command, args []string) error {
 	modelName := args[0]
 
-	client, err := getKthenaClient()
+	client, contextNamespace, err := getKthenaClient()
 	if err != nil {
 		return err
 	}
 
-	namespace := getNamespace
-	if namespace == "" {
-		namespace = "default"
-	}
+	namespace := resolveGetNamespace(contextNamespace)
 	ctx := context.Background()
 
 	model, err := client.WorkloadV1alpha1().ModelBoosters(namespace).Get(ctx, modelName, metav1.GetOptions{})
@@ -184,15 +181,12 @@ func runDescribeModelBooster(cmd *cobra.Command, args []string) error {
 func runDescribeModelServing(cmd *cobra.Command, args []string) error {
 	modelServingName := args[0]
 
-	client, err := getKthenaClient()
+	client, contextNamespace, err := getKthenaClient()
 	if err != nil {
 		return err
 	}
 
-	namespace := getNamespace
-	if namespace == "" {
-		namespace = "default"
-	}
+	namespace := resolveGetNamespace(contextNamespace)
 	ctx := context.Background()
 
 	modelServing, err := client.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, modelServingName, metav1.GetOptions{})
@@ -222,15 +216,12 @@ func runDescribeModelServing(cmd *cobra.Command, args []string) error {
 func runDescribeAutoscalingPolicy(cmd *cobra.Command, args []string) error {
 	policyName := args[0]
 
-	client, err := getKthenaClient()
+	client, contextNamespace, err := getKthenaClient()
 	if err != nil {
 		return err
 	}
 
-	namespace := getNamespace
-	if namespace == "" {
-		namespace = "default"
-	}
+	namespace := resolveGetNamespace(contextNamespace)
 	ctx := context.Background()
 
 	policy, err := client.WorkloadV1alpha1().AutoscalingPolicies(namespace).Get(ctx, policyName, metav1.GetOptions{})
@@ -259,15 +250,12 @@ func runDescribeAutoscalingPolicy(cmd *cobra.Command, args []string) error {
 func runDescribeModelRoute(cmd *cobra.Command, args []string) error {
 	routeName := args[0]
 
-	client, err := getKthenaClient()
+	client, contextNamespace, err := getKthenaClient()
 	if err != nil {
 		return err
 	}
 
-	namespace := getNamespace
-	if namespace == "" {
-		namespace = "default"
-	}
+	namespace := resolveGetNamespace(contextNamespace)
 	ctx := context.Background()
 
 	route, err := client.NetworkingV1alpha1().ModelRoutes(namespace).Get(ctx, routeName, metav1.GetOptions{})
@@ -296,15 +284,12 @@ func runDescribeModelRoute(cmd *cobra.Command, args []string) error {
 func runDescribeModelServer(cmd *cobra.Command, args []string) error {
 	serverName := args[0]
 
-	client, err := getKthenaClient()
+	client, contextNamespace, err := getKthenaClient()
 	if err != nil {
 		return err
 	}
 
-	namespace := getNamespace
-	if namespace == "" {
-		namespace = "default"
-	}
+	namespace := resolveGetNamespace(contextNamespace)
 	ctx := context.Background()
 
 	server, err := client.NetworkingV1alpha1().ModelServers(namespace).Get(ctx, serverName, metav1.GetOptions{})

@@ -14,7 +14,23 @@ spec:
     singular: modelserver
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: Inference engine used to serve the model
+      jsonPath: .spec.inferenceEngine
+      name: Engine
+      type: string
+    - description: Model server port
+      jsonPath: .spec.workloadPort.port
+      name: Port
+      type: integer
+    - description: Model server protocol
+      jsonPath: .spec.workloadPort.protocol
+      name: Protocol
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: ModelServer is the Schema for the modelservers API.
@@ -87,8 +103,10 @@ spec:
                     type: object
                   timeout:
                     description: |-
-                      The request timeout for the inference request.
-                      By default, there is no timeout.
+                      Timeout bounds how long the router waits for the backend to start responding,
+                      covering connection setup, sending the request and waiting for the response
+                      headers. It does not bound the response body, so a streamed response may run
+                      longer. By default, there is no timeout.
                     type: string
                 type: object
               workloadPort:
@@ -155,6 +173,7 @@ spec:
                 type: object
             required:
             - inferenceEngine
+            - workloadPort
             - workloadSelector
             type: object
           status:

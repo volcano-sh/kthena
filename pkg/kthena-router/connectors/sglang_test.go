@@ -17,6 +17,7 @@ limitations under the License.
 package connectors
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,20 +27,28 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// TestSGLangConnectorRetryBodyNotDrained checks that calling Proxy() twice on
-// the same connector instance — as proxyToPDDisaggregated does during PD
-// retries when the scheduler reselects the same prefill pod for a different
-// decode pod — sends a non-empty body to both backends on both attempts.
-func TestSGLangConnectorRetryBodyNotDrained(t *testing.T) {
+// TestSGLangConnectorRetryIsolation checks that calling Proxy() twice on the
+// same connector instance rebuilds both request bodies and assigns a fresh
+// bootstrap room to each PD attempt.
+func TestSGLangConnectorRetryIsolation(t *testing.T) {
 	var prefillCalls, decodeCalls int32
 	var prefillBodyLens [2]int64
 	var decodeBodyLens [2]int64
+	var prefillRooms [2]int64
+	var decodeRooms [2]int64
 
 	prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		idx := atomic.AddInt32(&prefillCalls, 1) - 1
 		body, _ := io.ReadAll(r.Body)
 		if idx < 2 {
 			prefillBodyLens[idx] = int64(len(body))
+			var payload struct {
+				BootstrapRoom int64 `json:"bootstrap_room"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Errorf("failed to decode prefill request: %v", err)
+			}
+			prefillRooms[idx] = payload.BootstrapRoom
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -50,6 +59,13 @@ func TestSGLangConnectorRetryBodyNotDrained(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		if idx < 2 {
 			decodeBodyLens[idx] = int64(len(body))
+			var payload struct {
+				BootstrapRoom int64 `json:"bootstrap_room"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Errorf("failed to decode decode request: %v", err)
+			}
+			decodeRooms[idx] = payload.BootstrapRoom
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -57,7 +73,11 @@ func TestSGLangConnectorRetryBodyNotDrained(t *testing.T) {
 	}))
 	defer decodeServer.Close()
 
-	connector := NewSGLangConnector()
+	connector := NewSGLangConnector().(*SGLangConnector)
+	var nextRoom int64
+	connector.newBootstrapRoom = func() int64 {
+		return atomic.AddInt64(&nextRoom, 1)
+	}
 
 	reqBody := map[string]interface{}{
 		"model":      "test-model",
@@ -77,13 +97,11 @@ func TestSGLangConnectorRetryBodyNotDrained(t *testing.T) {
 	prefillAddr := prefillServer.Listener.Addr().String()
 	decodeAddr := decodeServer.Listener.Addr().String()
 
-	// First call — simulates retry iteration 0.
+	// First call simulates the initial PD attempt.
 	if _, err := connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr, nil); err != nil {
 		t.Fatalf("first Proxy call failed: %v", err)
 	}
-	// Second call with the SAME prefill addr — simulates the scheduler reselecting
-	// the same prefill pod for a different decode pod on retry. This is the path
-	// where the previous (cached) request would have a drained body.
+	// The second call simulates another attempt on the same connector.
 	if _, err := connector.Proxy(makeCtx(), reqBody, prefillAddr, decodeAddr, nil); err != nil {
 		t.Fatalf("second Proxy call failed: %v", err)
 	}
@@ -99,6 +117,14 @@ func TestSGLangConnectorRetryBodyNotDrained(t *testing.T) {
 	}
 	if decodeBodyLens[1] == 0 {
 		t.Error("second Proxy call sent empty body to decode backend — request body was drained and reused")
+	}
+	for i := range prefillRooms {
+		if prefillRooms[i] != decodeRooms[i] {
+			t.Errorf("attempt %d used different bootstrap rooms: prefill=%d decode=%d", i, prefillRooms[i], decodeRooms[i])
+		}
+	}
+	if prefillRooms[0] == prefillRooms[1] {
+		t.Errorf("retry reused bootstrap room %d", prefillRooms[0])
 	}
 }
 

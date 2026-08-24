@@ -26,7 +26,7 @@ Kthena enables you to deploy, manage, and scale AI models in Kubernetes environm
 ### **Cost-Driven Autoscaling**
 -   **Multi-Metric Scaling**: Autoscaling based on custom metrics, CPU, memory, GPU utilization, and budget constraints
 -   **Flexible Policies**: Flexible scaling behaviors with panic mode, stable scaling policies, and configurable scaling behaviors
--   **Policy Binding**: Granular autoscaling policy assignment to specific model deployments not limited to `ModelInfer`
+-   **Policy Binding**: Granular autoscaling policy assignment to specific model deployments not limited to `ModelServing`
 
 ### **Observability & Monitoring**
 -   **Prometheus Metrics**: Built-in metrics collection for router performance and model serving

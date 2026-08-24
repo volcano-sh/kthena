@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
@@ -35,7 +36,8 @@ func TestModelRouteController_Lifecycle(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller := NewModelRouteController(kthenaInformerFactory, store)
+	controller, err := NewModelRouteController(kthenaInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -146,7 +148,8 @@ func TestModelRouteController_ErrorHandling(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller := NewModelRouteController(kthenaInformerFactory, store)
+	controller, err := NewModelRouteController(kthenaInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -171,7 +174,8 @@ func TestModelRouteController_WorkQueueProcessing(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := datastore.New()
 
-	controller := NewModelRouteController(kthenaInformerFactory, store)
+	controller, err := NewModelRouteController(kthenaInformerFactory, store)
+	require.NoError(t, err)
 
 	stop := make(chan struct{})
 	defer close(stop)

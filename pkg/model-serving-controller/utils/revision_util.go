@@ -44,7 +44,7 @@ func removeRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv
 	copy := ms.DeepCopy()
 	for i := range copy.Spec.Template.Roles {
 		copy.Spec.Template.Roles[i].Replicas = nil
-		copy.Spec.Template.Roles[i].MaxUnavailable = nil
+		copy.Spec.Template.Roles[i].RollingUpdateConfiguration = workloadv1alpha1.RollingUpdateConfiguration{}
 	}
 
 	return copy
@@ -60,7 +60,7 @@ func ModelServingRevision(ms *workloadv1alpha1.ModelServing) string {
 func removeRoleReplicasForRoleTemplateHash(role workloadv1alpha1.Role) workloadv1alpha1.Role {
 	copy := role
 	copy.Replicas = nil
-	copy.MaxUnavailable = nil
+	copy.RollingUpdateConfiguration = workloadv1alpha1.RollingUpdateConfiguration{}
 	return copy
 }
 

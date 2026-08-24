@@ -6,6 +6,8 @@ import requestPipeline from '../assets/diagrams/architecture/request_pipeline.sv
 
 Kthena follows a **two-plane architecture** that cleanly separates *what you declare* from *how requests flow*. The **Control Plane** reconciles your CRDs into a running system; the **Data Plane** routes every inference request through a model-aware pipeline to the right pod at the right time.
 
+The two planes are **independently deployable**. They share no in-process state and never call each other — both interact only with the Kubernetes API. Each plane is a single self-contained Go binary packaged as its own Helm subchart with its own CRD group, so you can run either one alone. See [Modular Deployment](#modular-deployment) below.
+
 <LightboxImage src={architectureOverview} alt="Architecture Overview"/>
 
 ---
@@ -91,6 +93,25 @@ The scheduler at Stage 5 is the heart of Kthena's intelligent routing. It mirror
 | **GPU Cache** | Considers GPU memory utilization to avoid requests preemption. |
 
 **PD-Aware Scheduling:** When the request targets a disaggregated PD group, the scheduler first scores decode pods, then pairs each with a compatible prefill pod in the same group — ensuring KV-cache locality and minimal data transfer.
+
+---
+
+## Modular Deployment
+
+Kthena is intentionally lightweight: the whole platform is two self-contained Go binaries with a minimal dependency surface, packaged as two Helm subcharts that map one-to-one onto the two planes.
+
+| Subchart | Binary | CRD group | Owns |
+|---|---|---|---|
+| `workload` | `kthena-controller-manager` | `workload.serving.volcano.sh` | `ModelServing`, `ModelBooster`, `AutoscalingPolicy` |
+| `networking` | `kthena-router` | `networking.serving.volcano.sh` | `ModelRoute`, `ModelServer`, `ExternalModelProvider` |
+
+Because the planes are decoupled, three deployment shapes are supported:
+
+- **Control plane only** (`--set networking.enabled=false`) — Use Kthena purely as a workload manager. Declare `ModelServing` for role-based, gang-scheduled, topology-aware replicas and let autoscaling policies drive capacity, while traffic keeps flowing through your existing gateway or a plain `Service`.
+- **Data plane only** (`--set workload.enabled=false`) — Use the router as a standalone, model-aware LLM gateway. `ModelServer` discovers backends via a label `workloadSelector`, so the pods behind it can come from a Deployment, a StatefulSet, another operator, or an external provider such as OpenAI. No Kthena workload CRDs required.
+- **Full platform** (default) — Both subcharts installed. This is required for the one-stop `ModelBooster` API, which cascades into both CRD groups, and for end-to-end features that span planes such as PD-aware routing driven by `ModelServing` roles.
+
+Each subchart installs only its own CRDs, RBAC, and webhooks, so a component-scoped installation leaves no unused resources behind. See the [installation guide](../getting-started/installation.md#component-scoped-installation) for the exact commands.
 
 ---
 

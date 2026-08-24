@@ -17,6 +17,9 @@ limitations under the License.
 package conf
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -33,33 +36,99 @@ func TestLoadSchedulerConfig(t *testing.T) {
 			expectErrs: "",
 		},
 		{
-			name:       "empty plugins config",
+			name:       "missing config file",
 			configFile: "non-existent-file.yaml",
 			expectErrs: "failed to read config file",
 		},
 		{
 			name:       "invalid YAML syntax",
+			configFile: "../../../utils/testdata/configmap-malformed.yaml",
+			expectErrs: "failed to Unmarshal routerConfiguration",
+		},
+		{
+			name:       "plugin entry is not a mapping",
 			configFile: "../../../utils/testdata/configmap-invalid.yaml",
-			expectErrs: "failed to Unmarshal schedulerConfiguration",
+			expectErrs: "plugin configuration must be a mapping",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			routerConf, err := ParseRouterConfig(tc.configFile)
-			if err != nil {
-				if !strings.Contains(err.Error(), tc.expectErrs) {
-					t.Errorf("expected error %q, got %q", tc.expectErrs, err.Error())
-				}
-			} else {
+			if err == nil {
 				_, _, _, err = LoadSchedulerConfig(&routerConf.Scheduler)
+			}
+			if tc.expectErrs == "" {
 				if err != nil {
-					if !strings.Contains(err.Error(), tc.expectErrs) {
-						t.Errorf("expected error %q, got %q", tc.expectErrs, err.Error())
-					}
+					t.Errorf("expected no error, got %q", err.Error())
 				}
+				return
+			}
+			if err == nil {
+				t.Errorf("expected error %q, got none", tc.expectErrs)
+				return
+			}
+			if !strings.Contains(err.Error(), tc.expectErrs) {
+				t.Errorf("expected error %q, got %q", tc.expectErrs, err.Error())
 			}
 		})
+	}
+}
+
+func TestLoadSchedulerConfigRejectsInvalidLeastLatencyWeight(t *testing.T) {
+	tt := []struct {
+		name  string
+		value string
+	}{
+		{name: "not a number", value: ".nan"},
+		{name: "positive infinity", value: ".inf"},
+		{name: "negative infinity", value: "-.inf"},
+		{name: "below minimum", value: "-0.1"},
+		{name: "above maximum", value: "1.1"},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
+			config := fmt.Sprintf(`scheduler:
+  pluginConfig:
+    - name: least-latency
+      args:
+        TTFTTPOTWeightFactor: %s
+`, tc.value)
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatalf("write router configuration: %v", err)
+			}
+
+			routerConfig, err := ParseRouterConfig(configPath)
+			if err != nil {
+				t.Fatalf("parse router configuration: %v", err)
+			}
+			_, _, _, err = LoadSchedulerConfig(&routerConfig.Scheduler)
+			if err == nil {
+				t.Fatalf("expected invalid weight %q to be rejected", tc.value)
+			}
+		})
+	}
+}
+
+func TestParseRouterConfigRejectsNonScalarPluginName(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
+	config := `scheduler:
+  pluginConfig:
+    - name:
+        nested: least-latency
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("write router configuration: %v", err)
+	}
+
+	_, err := ParseRouterConfig(configPath)
+	if err == nil {
+		t.Fatal("expected a non-scalar plugin name to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cannot unmarshal") {
+		t.Fatalf("expected a plugin name type error, got %v", err)
 	}
 }
 

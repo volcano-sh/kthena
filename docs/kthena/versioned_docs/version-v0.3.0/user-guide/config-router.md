@@ -58,42 +58,38 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: kthena-router-config
-  namespace: default
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kthena-router-config
-  namespace: default
+  namespace: <namespace>
 data:
-  schedulerConfiguration: |-
-    pluginConfig:
-    - name: least-request
-      args: 
-        maxWaitingRequests: 10
-    - name: least-latency
-      args:
-        TTFTTPOTWeightFactor: 0.5
-    - name: prefix-cache
-      args:
-        blockSizeToHash: 64
-        maxBlocksToMatch: 128
-        maxHashCacheSize: 50000
-    plugins:
-      Filter:
-        enabled:
-          - least-request
-        disabled:
-          - lora-affinity
-      Score:
-        enabled:
-          - name: least-request
-            weight: 1
-          - name: kv-cache
-            weight: 1
-          - name: least-latency
-            weight: 1
-          - name: prefix-cache
-            weight: 1
+  routerConfiguration: |-
+    scheduler:
+      pluginConfig:
+      - name: least-request
+        args: 
+          maxWaitingRequests: 10
+      - name: least-latency
+        args:
+          TTFTTPOTWeightFactor: 0.5
+      - name: prefix-cache
+        args:
+          blockSizeToHash: 64
+          maxBlocksToMatch: 128
+          maxHashCacheSize: 50000
+      plugins:
+        Filter:
+          enabled:
+            - least-request
+          disabled:
+            - lora-affinity
+        Score:
+          enabled:
+            - name: least-request
+              weight: 1
+            - name: kv-cache
+              weight: 1
+            - name: least-latency
+              weight: 1
+            - name: prefix-cache
+              weight: 1
 ```
 
 If you want to use Authentication feature of router. Here is an example:

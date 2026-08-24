@@ -83,6 +83,67 @@ func counterVal(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float64
 	return m.GetCounter().GetValue()
 }
 
+func gaugeVal(t *testing.T, vec *prometheus.GaugeVec, lvs ...string) float64 {
+	t.Helper()
+	g, err := vec.GetMetricWithLabelValues(lvs...)
+	if err != nil {
+		t.Fatalf("GetMetricWithLabelValues: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := g.Write(m); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
+
+func TestFairnessMetricsAggregateUserIdentity(t *testing.T) {
+	m := DefaultMetrics
+	const model = "metricstest-fairness-aggregate-user"
+
+	m.IncFairnessQueueSize(model, "alice@example.com")
+	m.IncFairnessQueueSize(model, "bob@example.com")
+	m.RecordFairnessQueueDuration(model, "alice@example.com", time.Millisecond)
+	m.RecordFairnessQueueDuration(model, "bob@example.com", 2*time.Millisecond)
+	m.IncFairnessQueueCancelled(model, "alice@example.com")
+	m.IncFairnessQueueDequeue(model, "bob@example.com")
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+
+	wantFamilies := map[string]bool{
+		"kthena_router_fairness_queue_size":             false,
+		"kthena_router_fairness_queue_duration_seconds": false,
+		"kthena_router_fairness_queue_cancelled_total":  false,
+		"kthena_router_fairness_queue_dequeue_total":    false,
+	}
+	for _, family := range families {
+		if _, ok := wantFamilies[family.GetName()]; !ok {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := make(map[string]string, len(metric.GetLabel()))
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels[LabelModel] != model {
+				continue
+			}
+			if got := labels[LabelUserID]; got != FairnessAggregateUserID {
+				t.Errorf("%s user_id = %q, want %q", family.GetName(), got, FairnessAggregateUserID)
+			}
+			wantFamilies[family.GetName()] = true
+		}
+	}
+
+	for family, found := range wantFamilies {
+		if !found {
+			t.Errorf("did not find %s for model %q", family, model)
+		}
+	}
+}
+
 func TestPrefixCacheMatchRatio(t *testing.T) {
 	m := DefaultMetrics
 	const model = "metricstest-prefix-matchratio"
@@ -187,5 +248,86 @@ func TestRequestRecorderDelegation(t *testing.T) {
 	}
 	if got := histCount(t, &m.KVCacheMatchRatio, model) - kvBefore; got != 1 {
 		t.Errorf("recorder kvcache match_ratio delta = %d, want 1", got)
+	}
+}
+
+func TestRequestRecorderBindsDestinationLabels(t *testing.T) {
+	m := DefaultMetrics
+	const model = "metricstest-recorder-destination"
+	const path = "/v1/chat/completions"
+	const modelRoute = "default/mr-external"
+	const backendName = "default/openai-provider"
+	const upstreamModel = "gpt-4o-mini"
+	destination := DestinationLabels{
+		ModelRoute:    modelRoute,
+		BackendType:   BackendTypeExternalProvider,
+		BackendName:   backendName,
+		UpstreamModel: upstreamModel,
+	}
+	r := NewRequestMetricsRecorder(m, model, path)
+
+	inputBefore := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	outputBefore := counterVal(t, &m.TokensTotal, model, path, TokenTypeOutput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	requestBefore := counterVal(t, &m.RequestsTotal, model, path, "200", "successful_request", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	durationBefore := histCount(t, &m.RequestDuration, model, path, "200", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+
+	r.RecordInputTokens(5)
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - inputBefore; got != 0 {
+		t.Errorf("input token delta before destination bind = %v, want 0", got)
+	}
+
+	r.BindDestination(destination)
+	r.RecordOutputTokens(3)
+	r.Finish("200", "successful_request")
+
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - inputBefore; got != 5 {
+		t.Errorf("input token delta after destination bind = %v, want 5", got)
+	}
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeOutput, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - outputBefore; got != 3 {
+		t.Errorf("output token delta = %v, want 3", got)
+	}
+	if got := counterVal(t, &m.RequestsTotal, model, path, "200", "successful_request", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - requestBefore; got != 1 {
+		t.Errorf("request delta = %v, want 1", got)
+	}
+	if got := histCount(t, &m.RequestDuration, model, path, "200", modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - durationBefore; got != 1 {
+		t.Errorf("request duration sample count delta = %d, want 1", got)
+	}
+}
+
+func TestRequestRecorderFlushesInputTokensAsUnresolved(t *testing.T) {
+	m := DefaultMetrics
+	const model = "metricstest-recorder-unresolved"
+	const path = "/v1/chat/completions"
+	r := NewRequestMetricsRecorder(m, model, path)
+
+	before := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone)
+	r.RecordInputTokens(7)
+	r.Finish("404", "model_server_matching")
+
+	if got := counterVal(t, &m.TokensTotal, model, path, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone) - before; got != 7 {
+		t.Errorf("unresolved input token delta = %v, want 7", got)
+	}
+}
+
+func TestActiveUpstreamRequestsKeepModelServerCompatibilityLabel(t *testing.T) {
+	m := DefaultMetrics
+	const modelRoute = "default/mr-external"
+	const backendName = "default/openai-provider"
+	const upstreamModel = "gpt-4o-mini"
+	destination := DestinationLabels{
+		ModelRoute:    modelRoute,
+		BackendType:   BackendTypeExternalProvider,
+		BackendName:   backendName,
+		UpstreamModel: upstreamModel,
+	}
+
+	before := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel)
+	m.IncActiveUpstreamRequestsForDestination(destination)
+	if got := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - before; got != 1 {
+		t.Errorf("external active upstream delta = %v, want 1", got)
+	}
+	m.DecActiveUpstreamRequestsForDestination(destination)
+	if got := gaugeVal(t, &m.ActiveUpstreamRequests, DestinationLabelValueNone, modelRoute, BackendTypeExternalProvider, backendName, upstreamModel) - before; got != 0 {
+		t.Errorf("external active upstream delta after decrement = %v, want 0", got)
 	}
 }

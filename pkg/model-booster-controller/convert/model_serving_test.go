@@ -17,6 +17,8 @@ limitations under the License.
 package convert
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -96,6 +98,11 @@ func TestGetCachePath(t *testing.T) {
 			input:    "pvc://path/with/multiple/separators",
 			expected: "/path/with/multiple/separators",
 		},
+		{
+			name:     "path containing separator",
+			input:    "pvc://path/with://separator",
+			expected: "/path/with://separator",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,6 +111,17 @@ func TestGetCachePath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildCacheVolumeRejectsMalformedCacheURI(t *testing.T) {
+	backend := &workload.ModelBackend{
+		Name:     "backend1",
+		CacheURI: "pvc://",
+	}
+
+	_, err := buildCacheVolume(backend)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid cacheURI")
 }
 
 func TestGetPVCClaimName(t *testing.T) {
@@ -356,6 +374,169 @@ func TestCreateModelServingResources(t *testing.T) {
 	}
 }
 
+// TestBuildModelServingWorkerPodsOmitted covers the regression from #1612 using a fixture
+// whose worker block has no `pods` key at all, so YAML unmarshalling naturally zeroes the
+// field (rather than a test setting Workers[0].Pods = 0 directly on an already-loaded
+// object). This is the actual shape of the reported bug: a ModelBooster manifest that never
+// mentions pods must still produce a valid (non-negative) workerReplicas.
+func TestBuildModelServingWorkerPodsOmitted(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/model-with-pods-omitted.yaml")
+	require.Equal(t, int32(0), model.Spec.Backend.Workers[0].Pods,
+		"fixture must omit pods so unmarshalling produces the zero value naturally")
+
+	got, err := BuildModelServing(model)
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Roles, 1)
+
+	workerReplicas := got.Spec.Template.Roles[0].WorkerReplicas
+	assert.GreaterOrEqual(t, workerReplicas, int32(0), "workerReplicas must never be negative")
+	assert.Equal(t, int32(0), workerReplicas)
+}
+
+// TestBuildModelServingWorkerPodsToWorkerReplicas covers the workerReplicas calculation for
+// explicit pods values: an explicit zero (distinct from the omitted-field fixture above,
+// which exercises the same zero value reached through YAML unmarshalling instead of direct
+// assignment), the single-pod baseline, and a multi-node value. It also asserts that
+// buildCommands' Ray-leader command generation, which is derived from the same Pods field
+// as WORKER_REPLICAS, keeps its existing "> 1" behavior for every case.
+func TestBuildModelServingWorkerPodsToWorkerReplicas(t *testing.T) {
+	tests := []struct {
+		name               string
+		pods               int32
+		wantWorkerReplicas int32
+		wantRayLeaderCmd   bool
+	}{
+		{name: "pods: 0 explicit", pods: 0, wantWorkerReplicas: 0, wantRayLeaderCmd: false},
+		{name: "pods: 1 is a single pod with no extra workers", pods: 1, wantWorkerReplicas: 0, wantRayLeaderCmd: false},
+		{name: "pods > 1 adds Ray workers", pods: 3, wantWorkerReplicas: 2, wantRayLeaderCmd: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+			model.Spec.Backend.Workers[0].Pods = tt.pods
+
+			got, err := BuildModelServing(model)
+			require.NoError(t, err)
+			require.Len(t, got.Spec.Template.Roles, 1)
+
+			workerReplicas := got.Spec.Template.Roles[0].WorkerReplicas
+			assert.GreaterOrEqual(t, workerReplicas, int32(0), "workerReplicas must never be negative")
+			assert.Equal(t, tt.wantWorkerReplicas, workerReplicas)
+
+			var engine *corev1.Container
+			for i := range got.Spec.Template.Roles[0].EntryTemplate.Spec.Containers {
+				container := &got.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[i]
+				if container.Name == "engine" {
+					engine = container
+					break
+				}
+			}
+			require.NotNil(t, engine)
+			command := strings.Join(engine.Command, " ")
+			if tt.wantRayLeaderCmd {
+				assert.Contains(t, command, fmt.Sprintf("leader --ray_cluster_size=%d", tt.wantWorkerReplicas+1))
+				assert.Contains(t, command, "--distributed_executor_backend ray")
+			} else {
+				assert.NotContains(t, command, "leader --ray_cluster_size")
+				assert.NotContains(t, command, "--distributed_executor_backend")
+			}
+		})
+	}
+}
+
+func TestBuildModelServingVLLMPreStopHandlesUnavailableMetrics(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+	serving, err := BuildModelServing(model)
+	require.NoError(t, err)
+	require.NotEmpty(t, serving.Spec.Template.Roles)
+
+	var engine *corev1.Container
+	for roleIndex := range serving.Spec.Template.Roles {
+		for containerIndex := range serving.Spec.Template.Roles[roleIndex].EntryTemplate.Spec.Containers {
+			container := &serving.Spec.Template.Roles[roleIndex].EntryTemplate.Spec.Containers[containerIndex]
+			if container.Name == "engine" {
+				engine = container
+				break
+			}
+		}
+		if engine != nil {
+			break
+		}
+	}
+	require.NotNil(t, engine)
+	require.NotNil(t, engine.Lifecycle)
+	require.NotNil(t, engine.Lifecycle.PreStop)
+	require.NotNil(t, engine.Lifecycle.PreStop.Exec)
+	require.Len(t, engine.Lifecycle.PreStop.Exec.Command, 3)
+
+	script := engine.Lifecycle.PreStop.Exec.Command[2]
+	assert.Contains(t, script, "curl -s --max-time 2 http://localhost:8000/metrics")
+	assert.Contains(t, script, `if [ -z "$RUNNING" ]; then`)
+	assert.Contains(t, script, "Metrics endpoint unavailable, exiting preStop")
+	assert.NotContains(t, script, "$ERR")
+}
+
+func TestBuildModelServingCustomEnginePort(t *testing.T) {
+	t.Run("aggregated", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+		model.Spec.Backend.Workers[0].Config.Raw = []byte(`{"port":9000}`)
+
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		var runtime, engine *corev1.Container
+		for i := range serving.Spec.Template.Roles[0].EntryTemplate.Spec.Containers {
+			container := &serving.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[i]
+			switch container.Name {
+			case "runtime":
+				runtime = container
+			case "engine":
+				engine = container
+			}
+		}
+		require.NotNil(t, runtime)
+		require.NotNil(t, engine)
+		assert.Contains(t, runtime.Args, "http://localhost:9000")
+		assert.Contains(t, strings.Join(engine.Command, " "), "--port 9000")
+		assert.Equal(t, int32(9000), engine.ReadinessProbe.HTTPGet.Port.IntVal)
+		assert.Contains(t, engine.Lifecycle.PreStop.Exec.Command[2], "http://localhost:9000/metrics")
+	})
+
+	t.Run("disaggregated", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/pd-disaggregated-model-npu.yaml")
+		for i := range model.Spec.Backend.Workers {
+			worker := &model.Spec.Backend.Workers[i]
+			if worker.Type == workload.ModelWorkerTypePrefill || worker.Type == workload.ModelWorkerTypeDecode {
+				worker.Config.Raw = []byte(`{"port":9000}`)
+			}
+		}
+
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		for i := range serving.Spec.Template.Roles {
+			var runtime, engine *corev1.Container
+			for j := range serving.Spec.Template.Roles[i].EntryTemplate.Spec.Containers {
+				container := &serving.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[j]
+				switch container.Name {
+				case "runtime":
+					runtime = container
+				case "vllm":
+					engine = container
+				}
+			}
+			require.NotNil(t, runtime)
+			require.NotNil(t, engine)
+			assert.Contains(t, runtime.Args, "http://localhost:9000")
+			assert.Contains(t, engine.Command, "--port")
+			assert.Contains(t, engine.Command, "9000")
+			assert.Equal(t, int32(9000), engine.Ports[0].ContainerPort)
+			assert.Equal(t, int32(9000), engine.ReadinessProbe.HTTPGet.Port.IntVal)
+			assert.Equal(t, int32(9000), engine.LivenessProbe.HTTPGet.Port.IntVal)
+		}
+	})
+}
+
 func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -406,6 +587,30 @@ func TestBuildModelServingSkipEngineDependencyInstall(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildModelServingSchedulerNameSerialization(t *testing.T) {
+	t.Run("omits empty schedulerName", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		data, err := json.Marshal(serving)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), `"schedulerName"`)
+	})
+
+	t.Run("keeps explicit schedulerName", func(t *testing.T) {
+		model := loadYaml[workload.ModelBooster](t, "testdata/input/model.yaml")
+		model.Spec.Backend.SchedulerName = "volcano"
+
+		serving, err := BuildModelServing(model)
+		require.NoError(t, err)
+
+		data, err := json.Marshal(serving)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"schedulerName":"volcano"`)
+	})
 }
 
 func TestBuildCacheVolume(t *testing.T) {

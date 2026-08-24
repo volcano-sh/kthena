@@ -125,6 +125,12 @@ func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
 	TestModelRoutePrefillDecodeDisaggregationShared(t, testCtx, testNamespace, false, "")
 }
 
+// TestModelRoutePrefillDecodeMultinode tests PD disaggregation with a multi-node ModelServing.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestModelRoutePrefillDecodeMultinode(t *testing.T) {
+	TestModelRoutePrefillDecodeMultinodeShared(t, testCtx, testNamespace, false, "")
+}
+
 // TestModelRouteSglangPrefillDecodeDisaggregation tests SGLang PD disaggregation with ModelServing, ModelServer, and ModelRoute.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteSglangPrefillDecodeDisaggregation(t *testing.T) {

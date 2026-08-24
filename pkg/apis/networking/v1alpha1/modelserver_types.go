@@ -38,7 +38,8 @@ type ModelServerSpec struct {
 	WorkloadSelector *WorkloadSelector `json:"workloadSelector"`
 
 	// WorkloadPort defines the port and protocol configuration for the model server.
-	WorkloadPort WorkloadPort `json:"workloadPort,omitempty"`
+	// +kubebuilder:validation:Required
+	WorkloadPort WorkloadPort `json:"workloadPort"`
 
 	// Traffic Policy for accessing the model server instance.
 	// +optional
@@ -120,8 +121,10 @@ type KVConnectorSpec struct {
 }
 
 type TrafficPolicy struct {
-	// The request timeout for the inference request.
-	// By default, there is no timeout.
+	// Timeout bounds how long the router waits for the backend to start responding,
+	// covering connection setup, sending the request and waiting for the response
+	// headers. It does not bound the response body, so a streamed response may run
+	// longer. By default, there is no timeout.
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 	// The retry policy for the inference request.
@@ -151,6 +154,10 @@ type ModelServerStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +genclient
+// +kubebuilder:printcolumn:name="Engine",type="string",JSONPath=".spec.inferenceEngine",description="Inference engine used to serve the model"
+// +kubebuilder:printcolumn:name="Port",type="integer",JSONPath=".spec.workloadPort.port",description="Model server port"
+// +kubebuilder:printcolumn:name="Protocol",type="string",JSONPath=".spec.workloadPort.protocol",description="Model server protocol"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 //
 // ModelServer is the Schema for the modelservers API.
 type ModelServer struct {

@@ -17,8 +17,9 @@ limitations under the License.
 package common
 
 const (
-	UserIdKey     = "user_id"
-	TokenUsageKey = "token_usage"
+	UserIdKey         = "user_id"
+	TokenUsageKey     = "token_usage"
+	RawRequestBodyKey = "raw_request_body"
 )
 
 // Message represents a single message in a chat conversation

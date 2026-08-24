@@ -29,7 +29,6 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -40,6 +39,7 @@ import (
 	kthenaInformers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/controller"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kube"
 )
 
 type Controller interface {
@@ -53,7 +53,7 @@ type aggregatedController struct {
 var _ Controller = &aggregatedController{}
 
 func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int) Controller {
-	cfg, err := clientcmd.BuildConfigFromFlags("", "")
+	cfg, err := kube.BuildConfig("", "")
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
 	}
@@ -76,13 +76,24 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	}
 
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	externalProviderSecretInformerFactory := controller.NewExternalModelProviderSecretInformerFactory(kubeClient)
 	kthenaInformerFactory := kthenaInformers.NewSharedInformerFactory(kthenaClient, 0)
-
-	modelRouteController := controller.NewModelRouteController(kthenaInformerFactory, store)
-	modelServerController := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+	modelRouteController, err := controller.NewModelRouteController(kthenaInformerFactory, store)
+	if err != nil {
+		klog.Fatalf("Error creating model route controller: %s", err.Error())
+	}
+	externalModelProviderController, err := controller.NewExternalModelProviderController(kthenaClient, kthenaInformerFactory, externalProviderSecretInformerFactory, store)
+	if err != nil {
+		klog.Fatalf("Error creating external model provider controller: %s", err.Error())
+	}
+	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store)
+	if err != nil {
+		klog.Fatalf("Error creating model server controller: %s", err.Error())
+	}
 
 	cacheSyncs := []cache.InformerSynced{
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
+		kthenaInformerFactory.Networking().V1alpha1().ExternalModelProviders().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().HasSynced,
 		kubeInformerFactory.Core().V1().Pods().Informer().HasSynced,
 	}
@@ -107,22 +118,29 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		if err := ensureDefaultGateway(gatewayClient, defaultPort); err != nil {
 			klog.Fatalf("Failed to ensure default Gateway: %s", err.Error())
 		}
-
 		gatewayInformerFactory = gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
-		gatewayController = controller.NewGatewayController(gatewayInformerFactory, store)
+		gatewayController, err = controller.NewGatewayController(gatewayInformerFactory, store)
+		if err != nil {
+			klog.Fatalf("Error creating gateway controller: %s", err.Error())
+		}
 		cacheSyncs = append(cacheSyncs,
 			gatewayInformerFactory.Gateway().V1().Gateways().Informer().HasSynced,
 			gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced,
 		)
-
 		if enableGatewayAPIInferenceExtension {
-			httpRouteController = controller.NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+			httpRouteController, err = controller.NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+			if err != nil {
+				klog.Fatalf("Error creating httproute controller: %s", err.Error())
+			}
 			dynamicClient, err := dynamic.NewForConfig(cfg)
 			if err != nil {
 				klog.Fatalf("Error building dynamic client: %s", err.Error())
 			}
 			dynamicInformerFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynamicClient, 0)
-			inferencePoolController = controller.NewInferencePoolController(dynamicInformerFactory, store)
+			inferencePoolController, err = controller.NewInferencePoolController(dynamicInformerFactory, store)
+			if err != nil {
+				klog.Fatalf("Error creating inferencepool controller: %s", err.Error())
+			}
 			cacheSyncs = append(cacheSyncs,
 				kubeInformerFactory.Core().V1().Namespaces().Informer().HasSynced,
 				dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced,
@@ -135,17 +153,23 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	}
 
 	kubeInformerFactory.Start(stop)
+	externalProviderSecretInformerFactory.Start(stop)
 	kthenaInformerFactory.Start(stop)
 
 	if !cache.WaitForCacheSync(stop, cacheSyncs...) {
 		klog.Fatalf("Failed to sync informer caches")
 	}
 
-	controllers := []Controller{modelRouteController, modelServerController}
+	controllers := []Controller{modelRouteController, externalModelProviderController, modelServerController}
 
 	go func() {
 		if err := modelRouteController.Run(stop); err != nil {
 			klog.Fatalf("Error running model route controller: %s", err.Error())
+		}
+	}()
+	go func() {
+		if err := externalModelProviderController.Run(stop); err != nil {
+			klog.Fatalf("Error running external model provider controller: %s", err.Error())
 		}
 	}()
 	go func() {

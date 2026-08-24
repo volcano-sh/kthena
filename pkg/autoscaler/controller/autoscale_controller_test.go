@@ -33,10 +33,12 @@ import (
 	workloadLister "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	corev1 "k8s.io/api/core/v1"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
@@ -104,6 +106,29 @@ func newModelServingIndexer(objs ...interface{}) cache.Indexer {
 		_ = idx.Add(o)
 	}
 	return idx
+}
+
+func TestNewAutoscaleControllerSyncPeriodFallback(t *testing.T) {
+	kubeClient := k8sfake.NewSimpleClientset()
+	client := clientfake.NewSimpleClientset()
+
+	// 0 falls back to the compiled default (15s).
+	ac := NewAutoscaleController(kubeClient, client, 0)
+	if ac == nil {
+		t.Fatal("expected non-nil controller for zero period")
+	}
+	if ac.syncPeriodSeconds != util.AutoscalingSyncPeriodSeconds {
+		t.Errorf("expected fallback syncPeriodSeconds=%d, got %d", util.AutoscalingSyncPeriodSeconds, ac.syncPeriodSeconds)
+	}
+
+	// Explicit positive value is respected.
+	ac2 := NewAutoscaleController(kubeClient, client, 5)
+	if ac2 == nil {
+		t.Fatal("expected non-nil controller for explicit period")
+	}
+	if ac2.syncPeriodSeconds != 5 {
+		t.Errorf("expected syncPeriodSeconds=5, got %d", ac2.syncPeriodSeconds)
+	}
 }
 
 func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
@@ -237,6 +262,100 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	}
 	if *updatedA.Spec.Replicas != 5 || *updatedB.Spec.Replicas != 4 {
 		t.Fatalf("expected distribution ms-a2=5 ms-b2=4, got a=%d b=%d", *updatedA.Spec.Replicas, *updatedB.Spec.Replicas)
+	}
+}
+
+func TestHeterogeneousSameNameTargetsAcrossNamespaces(t *testing.T) {
+	const (
+		policyNamespace = "policy-ns"
+		teamANamespace  = "team-a"
+		teamBNamespace  = "team-b"
+		modelName       = "llama"
+	)
+
+	msA := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: modelName, Namespace: teamANamespace},
+		Spec:       workload.ModelServingSpec{Replicas: ptrInt32(1)},
+	}
+	msB := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: modelName, Namespace: teamBNamespace},
+		Spec:       workload.ModelServingSpec{Replicas: ptrInt32(2)},
+	}
+	client := clientfake.NewSimpleClientset(msA, msB)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+
+	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 100\n"))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, portStr, _ := net.SplitHostPort(u.Host)
+	port := toInt32(portStr)
+
+	newTarget := func(namespace string) workload.Target {
+		return workload.Target{
+			TargetRef: corev1.ObjectReference{
+				Kind:      workload.ModelServingKind.Kind,
+				Namespace: namespace,
+				Name:      modelName,
+			},
+			MetricSources: map[string]workload.MetricSource{
+				"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}},
+			},
+		}
+	}
+
+	panicThreshold := int32(200)
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "same-name-targets", Namespace: policyNamespace},
+		Spec: workload.AutoscalingPolicySpec{
+			TolerancePercent: 0,
+			Metrics: []workload.AutoscalingPolicyMetric{
+				{Name: "load", TargetValue: resource.MustParse("1")},
+			},
+			Behavior: workload.AutoscalingPolicyBehavior{
+				ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{
+					PanicPolicy: workload.AutoscalingPolicyPanicPolicy{
+						Period:                metav1.Duration{Duration: time.Second},
+						PanicThresholdPercent: &panicThreshold,
+					},
+				},
+			},
+			HeterogeneousTarget: &workload.HeterogeneousTarget{
+				CostExpansionRatePercent: 100,
+				Params: []workload.HeterogeneousTargetParam{
+					{Target: newTarget(teamANamespace), Cost: 100, MinReplicas: 1, MaxReplicas: 3},
+					{Target: newTarget(teamBNamespace), Cost: 60, MinReplicas: 2, MaxReplicas: 5},
+				},
+			},
+		},
+	}
+
+	ac := &AutoscaleController{
+		client:             client,
+		modelServingLister: msLister,
+		podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{
+			teamANamespace: {readyPod(teamANamespace, "llama-a", host, nil)},
+			teamBNamespace: {readyPod(teamBNamespace, "llama-b", host, nil)},
+		}},
+		optimizerMap: map[string]*autoscalerOptimizer{},
+	}
+
+	if err := ac.schedule(context.Background(), policy); err != nil {
+		t.Fatalf("schedule error: %v", err)
+	}
+
+	updatedA, err := client.WorkloadV1alpha1().ModelServings(teamANamespace).Get(context.Background(), modelName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated team-a target: %v", err)
+	}
+	updatedB, err := client.WorkloadV1alpha1().ModelServings(teamBNamespace).Get(context.Background(), modelName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated team-b target: %v", err)
+	}
+
+	// A total recommendation of eight replicas should respect each target's
+	// independent bounds: team-a/llama=3 and team-b/llama=5.
+	if *updatedA.Spec.Replicas != 3 || *updatedB.Spec.Replicas != 5 {
+		t.Fatalf("expected team-a/llama=3 and team-b/llama=5, got team-a/llama=%d and team-b/llama=%d", *updatedA.Spec.Replicas, *updatedB.Spec.Replicas)
 	}
 }
 

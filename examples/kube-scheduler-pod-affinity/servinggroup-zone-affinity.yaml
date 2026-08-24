@@ -1,0 +1,162 @@
+# ServingGroup scoped zone co-location.
+#
+# Topology key: topology.kubernetes.io/zone
+# Effect: pods in the same generated ServingGroup prefer the same zone, but may
+# run on different nodes in that zone.
+# This case also requires nodes to have topology.kubernetes.io/zone so pods are
+# not placed on unlabeled nodes.
+#
+# ModelServing: servinggroup-zone-affinity
+# |
+# +-- ServingGroup-0
+# |   +-- prefill: [entry, worker] -> zone-a / node-a
+# |   +-- decode:  [entry, worker] -> zone-a / node-b
+# |
+# +-- ServingGroup-1
+#     +-- prefill: [entry, worker] -> zone-b / node-c
+#     +-- decode:  [entry, worker] -> zone-b / node-d
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: servinggroup-zone-affinity
+  namespace: default
+spec:
+  schedulerName: default-scheduler
+  replicas: 2
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: Exists
+              podAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      topologyKey: topology.kubernetes.io/zone
+                      labelSelector:
+                        matchLabels:
+                          modelserving.volcano.sh/name: servinggroup-zone-affinity
+                      matchLabelKeys:
+                        - modelserving.volcano.sh/group-name
+            containers:
+              - name: leader
+                image: ghcr.io/llm-d/llm-d-inference-sim:latest
+                imagePullPolicy: IfNotPresent
+                args:
+                  - --model=kthena-pod-affinity-sim
+                  - --served-model-name=kthena-pod-affinity-sim
+                  - --port=8000
+                  - --mode=echo
+                  - --time-to-first-token=0
+                  - --inter-token-latency=0
+                ports:
+                  - containerPort: 8000
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: Exists
+              podAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      topologyKey: topology.kubernetes.io/zone
+                      labelSelector:
+                        matchLabels:
+                          modelserving.volcano.sh/name: servinggroup-zone-affinity
+                      matchLabelKeys:
+                        - modelserving.volcano.sh/group-name
+            containers:
+              - name: worker
+                image: ghcr.io/llm-d/llm-d-inference-sim:latest
+                imagePullPolicy: IfNotPresent
+                args:
+                  - --model=kthena-pod-affinity-sim
+                  - --served-model-name=kthena-pod-affinity-sim
+                  - --port=8000
+                  - --mode=echo
+                  - --time-to-first-token=0
+                  - --inter-token-latency=0
+                ports:
+                  - containerPort: 8000
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: Exists
+              podAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      topologyKey: topology.kubernetes.io/zone
+                      labelSelector:
+                        matchLabels:
+                          modelserving.volcano.sh/name: servinggroup-zone-affinity
+                      matchLabelKeys:
+                        - modelserving.volcano.sh/group-name
+            containers:
+              - name: leader
+                image: ghcr.io/llm-d/llm-d-inference-sim:latest
+                imagePullPolicy: IfNotPresent
+                args:
+                  - --model=kthena-pod-affinity-sim
+                  - --served-model-name=kthena-pod-affinity-sim
+                  - --port=8000
+                  - --mode=echo
+                  - --time-to-first-token=0
+                  - --inter-token-latency=0
+                ports:
+                  - containerPort: 8000
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: topology.kubernetes.io/zone
+                          operator: Exists
+              podAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      topologyKey: topology.kubernetes.io/zone
+                      labelSelector:
+                        matchLabels:
+                          modelserving.volcano.sh/name: servinggroup-zone-affinity
+                      matchLabelKeys:
+                        - modelserving.volcano.sh/group-name
+            containers:
+              - name: worker
+                image: ghcr.io/llm-d/llm-d-inference-sim:latest
+                imagePullPolicy: IfNotPresent
+                args:
+                  - --model=kthena-pod-affinity-sim
+                  - --served-model-name=kthena-pod-affinity-sim
+                  - --port=8000
+                  - --mode=echo
+                  - --time-to-first-token=0
+                  - --inter-token-latency=0
+                ports:
+                  - containerPort: 8000

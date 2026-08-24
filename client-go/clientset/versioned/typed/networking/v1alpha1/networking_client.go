@@ -28,6 +28,7 @@ import (
 
 type NetworkingV1alpha1Interface interface {
 	RESTClient() rest.Interface
+	ExternalModelProvidersGetter
 	ModelRoutesGetter
 	ModelServersGetter
 }
@@ -35,6 +36,10 @@ type NetworkingV1alpha1Interface interface {
 // NetworkingV1alpha1Client is used to interact with features provided by the networking.serving.volcano.sh group.
 type NetworkingV1alpha1Client struct {
 	restClient rest.Interface
+}
+
+func (c *NetworkingV1alpha1Client) ExternalModelProviders(namespace string) ExternalModelProviderInterface {
+	return newExternalModelProviders(c, namespace)
 }
 
 func (c *NetworkingV1alpha1Client) ModelRoutes(namespace string) ModelRouteInterface {

@@ -22,21 +22,23 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestNewServerDebugPortDefault tests that NewServer accepts different debug port values
-func TestNewServerDebugPortDefault(t *testing.T) {
+func TestNewServerManagementConfiguration(t *testing.T) {
 	testCases := []struct {
-		name      string
-		debugPort int
+		name               string
+		debugPort          int
+		metricsPort        int
+		exposeOnRouterPort bool
 	}{
-		{"default port", 15000},
-		{"custom port", 16000},
-		{"another custom port", 17000},
+		{"default ports", 15000, 9090, false},
+		{"custom ports with compatibility endpoint", 16000, 9191, true},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			server := NewServer("8080", false, "", "", false, false, tc.debugPort, 0, 0)
+			server := NewServer("8080", false, "", "", false, false, tc.debugPort, tc.metricsPort, tc.exposeOnRouterPort, 0, 0)
 			assert.Equal(t, tc.debugPort, server.DebugPort, "DebugPort should match the provided value")
+			assert.Equal(t, tc.metricsPort, server.MetricsPort, "MetricsPort should match the provided value")
+			assert.Equal(t, tc.exposeOnRouterPort, server.ExposeMetricsOnRouterPort)
 		})
 	}
 }

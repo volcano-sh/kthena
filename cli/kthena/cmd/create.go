@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/engine"
@@ -32,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 )
 
@@ -224,8 +224,8 @@ func askForConfirmation(question string) bool {
 }
 
 func applyResources(yamlContent string) error {
-	// Load kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+	// Load kubeconfig with kubectl's precedence: KUBECONFIG first, then ~/.kube/config.
+	config, err := newKubeConfig().ClientConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load kubeconfig: %v", err)
 	}
@@ -279,7 +279,7 @@ func applyResources(yamlContent string) error {
 	return nil
 }
 
-func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *unstructured.Unstructured) error {
+func applyKthenaResource(ctx context.Context, client versioned.Interface, obj *unstructured.Unstructured) error {
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	resourceName := obj.GetName()
 	resourceNamespace := obj.GetNamespace()
@@ -288,13 +288,13 @@ func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *
 	switch gvk.Kind {
 	case "ModelServing":
 		fmt.Printf("  Creating ModelServing: %s in namespace %s\n", resourceName, resourceNamespace)
-		modelInfer := &workloadv1alpha1.ModelServing{}
-		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelInfer)
+		modelServing := &workloadv1alpha1.ModelServing{}
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelServing)
 		if err != nil {
 			return fmt.Errorf("failed to convert unstructured object to ModelServing: %v", err)
 		}
 
-		_, err = client.WorkloadV1alpha1().ModelServings(resourceNamespace).Create(ctx, modelInfer, metav1.CreateOptions{})
+		_, err = client.WorkloadV1alpha1().ModelServings(resourceNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create ModelServing: %v", err)
 		}
@@ -323,6 +323,32 @@ func applyKthenaResource(ctx context.Context, client *versioned.Clientset, obj *
 		_, err = client.WorkloadV1alpha1().AutoscalingPolicies(resourceNamespace).Create(ctx, policy, metav1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create AutoscalingPolicy: %v", err)
+		}
+
+	case "ModelRoute":
+		fmt.Printf("  Creating ModelRoute: %s in namespace %s\n", resourceName, resourceNamespace)
+		modelRoute := &networkingv1alpha1.ModelRoute{}
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelRoute)
+		if err != nil {
+			return fmt.Errorf("failed to convert unstructured object to ModelRoute: %v", err)
+		}
+
+		_, err = client.NetworkingV1alpha1().ModelRoutes(resourceNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create ModelRoute: %v", err)
+		}
+
+	case "ModelServer":
+		fmt.Printf("  Creating ModelServer: %s in namespace %s\n", resourceName, resourceNamespace)
+		modelServer := &networkingv1alpha1.ModelServer{}
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, modelServer)
+		if err != nil {
+			return fmt.Errorf("failed to convert unstructured object to ModelServer: %v", err)
+		}
+
+		_, err = client.NetworkingV1alpha1().ModelServers(resourceNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create ModelServer: %v", err)
 		}
 
 	default:

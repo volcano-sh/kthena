@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>The Enterprise-Grade LLM Serving Platform That Makes AI Infrastructure Simple, Scalable, and Cost-Efficient</strong>
+  <strong>The Lightweight, Modular, Enterprise-Grade LLM Serving Platform That Makes AI Infrastructure Simple, Scalable, and Cost-Efficient</strong>
 </p>
 
 <p align="center">
@@ -23,11 +23,20 @@
 
 ## Overview
 
-**Kthena** is a Kubernetes-native LLM inference platform that transforms how organizations deploy and manage Large Language Models in production. Built with declarative model lifecycle management and intelligent request routing, it provides high performance and enterprise-grade scalability for LLM inference workloads.
+**Kthena** is a lightweight, Kubernetes-native LLM inference platform that transforms how organizations deploy and manage Large Language Models in production. Built with declarative model lifecycle management and intelligent request routing, it provides high performance and enterprise-grade scalability for LLM inference workloads.
 
 The platform extends Kubernetes with purpose-built Custom Resource Definitions (CRDs) for managing LLM workloads, supporting multiple inference engines (vLLM, SGLang, Triton) and advanced serving patterns like prefill-decode disaggregation. Kthena's architecture separates control plane operations (model lifecycle, autoscaling policies) from data plane traffic routing through an intelligent router, enabling teams to manage complex LLM deployments with familiar cloud-native patterns while delivering cost-driven autoscaling, heterogeneous accelerators support, and multi-backend inference engines.
 
+Kthena is deliberately **lightweight and composable**. The entire platform is two self-contained Go binaries with a small dependency surface, and its two planes are fully decoupled: install the **workload controllers** to manage the model lifecycle, install the **router** to handle inference traffic, or install both. Each side stands on its own and neither depends on the other at runtime — adopt just the piece you need today, and add the other whenever you're ready.
+
 ## Key Features
+
+### **Lightweight & Modular**
+- **Small footprint**: Two self-contained Go binaries with a minimal dependency surface — quick to install, cheap to run, and simple to upgrade.
+- **Independently deployable planes**: The controller manager (workload) and the router (networking) are separate Helm subcharts with separate CRD groups and release lifecycles. Deploy either one alone, or both together.
+- **No runtime coupling**: Each component talks only to the Kubernetes API, never to the other, so a partial install is a first-class scenario, not a degraded mode.
+- **Bring your own stack**: Keep your existing API gateway, ingress, and observability tooling — Kthena plugs into them instead of replacing them.
+- **Opt-in capabilities**: Gang scheduling (Volcano), webhooks, Gateway API support, and TLS are all optional, so a minimal install stays minimal.
 
 ### **Production-Ready LLM Serving**
 Deploy and scale Large Language Models with enterprise-grade reliability, supporting vLLM, SGLang, Triton, and TorchServe inference engines through consistent Kubernetes-native APIs.
@@ -52,22 +61,44 @@ Gang scheduling ensures atomic scheduling of distributed inference groups like x
 
 ## Architecture
 
-Kthena implements a Kubernetes-native architecture with separate control plane and data plane components, each can be deployed and used alone. The platform manages LLM inference workloads through CRD and provides intelligent request routing through a dedicated router. It contains the following key components:
+Kthena implements a Kubernetes-native architecture with a clear split between the control plane and the data plane. Each plane is an independent component with its own CRD group, its own Helm subchart, and its own release lifecycle — **either one can be deployed and used on its own**. It contains the following key components:
 
 - **Kthena-controller-manager**: 
   The control plane component governing the LLM inference lifecycle. It continuously reconciles Kthena CRDs to deploy, scale, and upgrade inference replicas across the cluster while exposing advanced scheduling policies that integrate directly with the [Volcano scheduler](https://github.com/volcano-sh/volcano/).   
 - **Kthena-router**:
-  The data plane entry point for inference traffic. It classifies each request by model name, custom headers, or URI patterns, then applies load-balancing policies and traffic controls to dispatch request to the right inference instance. Native support for prefill–decode disaggregation routing while keeps high throughput and low latency.
+  The data plane entry point for inference traffic. It classifies each request by model name, custom headers, or URI patterns, then applies load-balancing policies and traffic controls to dispatch requests to the right inference instance. Native support for prefill–decode disaggregation routing while keeping high throughput and low latency.
 
-For more details, please refer to [Kthena Architecture](https://kthena.volcano.sh/docs/architecture)
+### Modular Deployment
+
+The two components talk to Kubernetes, not to each other, so you can mix and match:
+
+| You want to...               | Install               | Notes                                                                                                  |
+| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
+| Manage model workloads only  | `workload` subchart   | Use `ModelServing` / `AutoscalingPolicy` and expose pods with your own gateway or `Service`.           |
+| Route inference traffic only | `networking` subchart | Point `ModelServer` at any pods — Deployments, StatefulSets, or workloads managed by another operator. |
+| Full platform                | Both subcharts        | Required for the one-stop `ModelBooster` API, which cascades into both CRD groups.                     |
+
+```bash
+# Workload controllers only (no router)
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena \
+  --namespace kthena-system --create-namespace \
+  --set networking.enabled=false
+
+# Router only (no workload controllers)
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena \
+  --namespace kthena-system --create-namespace \
+  --set workload.enabled=false
+```
+
+For more details, please refer to [Kthena Architecture](https://kthena.volcano.sh/docs/architecture/architecture)
 
 > [!Note]
-> The router component is a reference implementation, because Gateway Inference Extension does not natively support prefill-decode distribution. kthena router is still under active iteration, and it can be deployed behind a standard api gateway.
+> The router component is a reference implementation, because Gateway Inference Extension does not natively support prefill-decode disaggregation. The Kthena router is still under active iteration, and it can be deployed behind a standard API gateway.
 
 
 ## Getting Started
 
-Get up and running with Kthena in minutes. This [guide](docs/kthena/docs/getting-started/quick-start.md) will walk you through installing the platform and deploying your first LLM model.
+Get up and running with Kthena in minutes. This [guide](docs/kthena/docs/getting-started/quick-start.md) will walk you through installing the platform and deploying your first LLM model. You can install the full platform, or only the component you need — see [Modular Deployment](#modular-deployment) and the [installation guide](docs/kthena/docs/getting-started/installation.md).
 
 ### Install from code
 
@@ -100,6 +131,17 @@ Contributions are welcome! Here's how to get started:
 - **Pull Requests**: Ensure CI passes and include clear descriptions
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines.
+
+## Meeting
+
+Regular Community Meeting:
+
+- Community weekly meeting for Asia: 16:00 - 17:00 (UTC+8) Wednesday. [Convert to your timezone](https://dateful.com/time-zone-converter?t=16&tz2=UTC%2B8).
+
+Resources:
+- [Meeting notes and agenda](https://docs.google.com/document/d/1bph_MA1UU3tKCV9T8XmJ0cIH3o85uAxExep412fDToE/edit?tab=t.0)
+- [Meeting link](https://zoom-lfx.platform.linuxfoundation.org/meeting/99772189625?password=c4530aed-d08f-4871-9477-091980f37d50)
+- [Meeting Calendar](https://calendar.google.com/calendar/u/0/newembed?src=volcano.sh.bot@gmail.com&csspa=1)
 
 ## License
 

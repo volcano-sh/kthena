@@ -54,8 +54,8 @@ func WaitForModelServingReady(t *testing.T, ctx context.Context, kthenaClient *c
 			expectedReplicas = *ms.Spec.Replicas
 		}
 		return ms.Status.ObservedGeneration == ms.Generation &&
-			ms.Status.Replicas >= expectedReplicas &&
-			ms.Status.AvailableReplicas >= expectedReplicas, nil
+			ms.Status.Replicas == expectedReplicas &&
+			ms.Status.AvailableReplicas == expectedReplicas, nil
 	})
 	require.NoError(t, err, "ModelServing did not become ready")
 }

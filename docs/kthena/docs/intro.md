@@ -4,7 +4,9 @@ sidebar_position: 1
 
 # Kthena
 
-**Kthena** is a Kubernetes-native AI serving platform that turns a cluster into a production-grade inference cloud. Instead of stitching together load balancers, autoscalers, and model servers by hand, you declare *what* you want — models, traffic rules, scaling targets — and Kthena's control plane reconciles the rest.
+**Kthena** is a lightweight, Kubernetes-native AI serving platform that turns a cluster into an enterprise-grade inference cloud. Instead of stitching together load balancers, autoscalers, and model servers by hand, you declare *what* you want — models, traffic rules, scaling targets — and Kthena's control plane reconciles the rest.
+
+Kthena ships as **two independent, self-contained components** — workload controllers and a router. Install one, the other, or both; each is useful on its own.
 
 > **Declarative CRDs. Any engine. Every scale.**
 > Deploy with a single `ModelBooster` for a one-stop experience, or compose fine-grained primitives — `ModelRoute`, `ModelServer`, `ModelServing`, `AutoScalingPolicy`, and `AutoScalingPolicyBinding` — for full control. From a single-GPU/NPU prototype to a multi-node, prefill/decode disaggregated fleet.
@@ -13,16 +15,29 @@ sidebar_position: 1
 
 ## Why Kthena?
 
-| Challenge                             | Kthena's Answer                                                                                                                         |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Managing multiple inference engines   | Unified CRD layer that abstracts vLLM, SGLang, Triton, and TorchServe behind a consistent API                                           |
-| Balancing latency vs. throughput      | Request-level scheduler with pluggable scoring — KV-cache awareness, prefix-cache matching, LoRA affinity, least-request, least-latency |
-| Scaling large models cost-effectively | Prefill/Decode disaggregation with independent scaling ratios and cost-aware autoscaling                                                |
-| Safe model updates in production      | Rolling upgrades with partition control, canary releases, and automated failover                                                        |
+| Challenge                                   | Kthena's Answer                                                                                                                         |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Heavy platforms with sprawling dependencies | Two self-contained Go binaries with a minimal dependency surface — fast to install, cheap to run, simple to upgrade                     |
+| Adopting only part of a platform            | Fully decoupled planes: deploy the workload controllers, the router, or both — neither depends on the other at runtime                  |
+| Managing multiple inference engines         | Unified CRD layer that abstracts vLLM, SGLang, Triton, and TorchServe behind a consistent API                                           |
+| Balancing latency vs. throughput            | Request-level scheduler with pluggable scoring — KV-cache awareness, prefix-cache matching, LoRA affinity, least-request, least-latency |
+| Scaling large models cost-effectively       | Prefill/Decode disaggregation with independent scaling ratios and cost-aware autoscaling                                                |
+| Safe model updates in production            | Rolling upgrades with partition control, canary releases, and automated failover                                                        |
 
 ---
 
 ## Key Features
+
+### Lightweight & Modular
+
+Kthena is built to be adopted incrementally and to stay out of your way.
+
+- **Small footprint** — Two self-contained Go binaries with a minimal dependency surface, quick to install and simple to upgrade.
+- **Independently deployable planes** — The **workload** controllers (`ModelServing`, `AutoscalingPolicy`) and the **networking** router (`ModelRoute`, `ModelServer`) are separate Helm subcharts with separate CRD groups and separate release lifecycles.
+- **No cross-plane runtime coupling** — Each component talks only to the Kubernetes API, never to the other. Run the router in front of workloads managed by Deployments or another operator; or run the controllers and expose pods through your own gateway.
+- **Opt-in extras** — Gang scheduling (Volcano), webhooks, Gateway API support, and TLS are all optional, so a minimal install stays minimal.
+
+See [Installation](./getting-started/installation.md#component-scoped-installation) for component-scoped install commands.
 
 ### Multi-Backend Inference Engine
 

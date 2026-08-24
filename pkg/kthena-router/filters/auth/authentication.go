@@ -100,7 +100,10 @@ func (j *JWTAuthenticator) authenticate(tokenStr string) (string, error) {
 		return "", fmt.Errorf("failed to validate claims: %w", err)
 	}
 
-	sub, _ := token.Subject()
+	sub, ok := token.Subject()
+	if !ok {
+		return "", fmt.Errorf("token has no subject claim")
+	}
 	return sub, nil
 }
 

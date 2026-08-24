@@ -122,6 +122,20 @@ class TestDownloadModel(unittest.TestCase):
         )
         mock_popen.assert_called_once()
 
+    def test_s3_download_missing_credentials(self):
+        for access_key, secret_key in [(None, "fake_sk"), ("fake_ak", None)]:
+            downloader = S3Downloader(
+                model_uri=self.source,
+                access_key=access_key,
+                secret_key=secret_key,
+                endpoint=None,
+            )
+
+            with self.assertRaises(ValueError) as context:
+                downloader.download(self.output_dir)
+
+            self.assertIn("Missing credentials", str(context.exception))
+
     def test_get_s3_downloader(self):
         downloader = get_downloader(self.source, self.credentials)
         self.assertIsInstance(

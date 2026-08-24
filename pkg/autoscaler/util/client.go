@@ -33,9 +33,9 @@ import (
 )
 
 const (
-	ModelInferEntryPodLabel = "leader"
-	ModelServingRoleKind    = "Role"
-	Entry                   = "true"
+	ModelServingEntryPodLabel = "leader"
+	ModelServingRoleKind      = "Role"
+	Entry                     = "true"
 )
 
 func GetModelServingTarget(lister workloadLister.ModelServingLister, namespace string, name string) (*workload.ModelServing, error) {
@@ -61,17 +61,17 @@ func GetMetricPods(lister listerv1.PodLister, namespace string, target *workload
 	}
 }
 
-func UpdateModelServing(ctx context.Context, client clientset.Interface, modelInfer *workload.ModelServing) error {
-	modelInferCtx, cancel := context.WithTimeout(ctx, AutoscaleCtxTimeoutSeconds*time.Second)
+func UpdateModelServing(ctx context.Context, client clientset.Interface, modelServing *workload.ModelServing) error {
+	modelServingCtx, cancel := context.WithTimeout(ctx, AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
-	if oldModelInfer, err := client.WorkloadV1alpha1().ModelServings(modelInfer.Namespace).Get(modelInferCtx, modelInfer.Name, metav1.GetOptions{}); err == nil {
-		modelInfer.ResourceVersion = oldModelInfer.ResourceVersion
-		if _, updateErr := client.WorkloadV1alpha1().ModelServings(modelInfer.Namespace).Update(modelInferCtx, modelInfer, metav1.UpdateOptions{}); updateErr != nil {
-			klog.Errorf("failed to update modelInfer,err: %v", updateErr)
+	if oldModelServing, err := client.WorkloadV1alpha1().ModelServings(modelServing.Namespace).Get(modelServingCtx, modelServing.Name, metav1.GetOptions{}); err == nil {
+		modelServing.ResourceVersion = oldModelServing.ResourceVersion
+		if _, updateErr := client.WorkloadV1alpha1().ModelServings(modelServing.Namespace).Update(modelServingCtx, modelServing, metav1.UpdateOptions{}); updateErr != nil {
+			klog.Errorf("failed to update ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, updateErr)
 			return updateErr
 		}
 	} else {
-		klog.Errorf("failed to get old modelInfer,err: %v", err)
+		klog.Errorf("failed to get old ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
 		return err
 	}
 	return nil

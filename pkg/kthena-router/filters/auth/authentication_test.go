@@ -533,3 +533,10 @@ func TestValidateIssuedAt(t *testing.T) {
 		assert.Contains(t, err.Error(), "unsupported iat type")
 	})
 }
+
+func TestAuthenticateTokenWithoutSubject(t *testing.T) {
+	token := jwt.New()
+	sub, ok := token.Subject()
+	assert.False(t, ok, "a token created with jwt.New() has no subject claim")
+	assert.Empty(t, sub, "subject should be empty when not present")
+}

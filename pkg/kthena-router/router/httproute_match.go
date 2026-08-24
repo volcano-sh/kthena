@@ -17,6 +17,7 @@ limitations under the License.
 package router
 
 import (
+	"math/rand"
 	"net"
 	"regexp"
 	"strings"
@@ -44,10 +45,28 @@ type httpRouteMatchResult struct {
 	// stored in gin.Context so ReplacePrefixMatch URLRewrite can replace exactly
 	// the prefix that made this rule match.
 	matchedPrefix string
-	// path stores the path specificity used only to choose the best rule within
-	// this HTTPRoute.
+	// path stores the path specificity used to choose the best rule within one
+	// HTTPRoute and then the best match across all applicable HTTPRoutes.
 	path httpRoutePathPrecedence
+	// hostname stores the matching hostname specificity used to choose between
+	// HTTPRoutes before applying path precedence.
+	hostname httpRouteHostnamePrecedence
 }
+
+type httpRouteHostnamePrecedence struct {
+	// matchType ranks hostname matches. Exact hostnames are more specific than
+	// wildcard hostnames, which are more specific than routes without hostnames.
+	matchType int
+	// characters is the length of the matching hostname pattern. It resolves
+	// ties between wildcard hostnames with different suffix lengths.
+	characters int
+}
+
+const (
+	httpRouteHostnameAnyPrecedence = iota
+	httpRouteHostnameWildcardPrecedence
+	httpRouteHostnameExactPrecedence
+)
 
 type httpRoutePathPrecedence struct {
 	// matchType ranks path match kinds. Higher values are more specific:
@@ -65,29 +84,76 @@ type httpRoutePathPrecedence struct {
 }
 
 // findHTTPRouteMatch keeps Kthena's lightweight HTTPRoute matching model. It
-// checks hostnames at the route level, then picks the best path match within the
-// first matching HTTPRoute and preserves that rule for backend/filter lookup. It
-// intentionally does not implement full Gateway API method/header/query matching
-// or cross-route precedence.
+// checks hostnames at the route level, finds the best path match in every
+// applicable HTTPRoute, then applies cross-route precedence. It intentionally
+// does not implement full Gateway API method/header/query matching.
 func (r *Router) findHTTPRouteMatch(c *gin.Context, gatewayKey string) (httpRouteMatchResult, bool) {
 	httpRoutes := r.store.GetHTTPRoutesByGateway(gatewayKey)
 	if len(httpRoutes) == 0 {
 		return httpRouteMatchResult{}, false
 	}
+	listenerName := c.GetString(GatewayListenerNameKey)
+	listenerPort := c.GetInt(GatewayListenerPortKey)
 
+	var best httpRouteMatchResult
+	found := false
 	for _, route := range httpRoutes {
 		if route == nil {
 			continue
 		}
-		if !matchHTTPRouteHostnames(route.Spec.Hostnames, c.Request.Host) {
+		if !httpRouteMatchesGatewayListener(route, gatewayKey, listenerName, listenerPort) {
+			continue
+		}
+		hostnamePrecedence, hostnameMatched := matchHTTPRouteHostnamePrecedence(route.Spec.Hostnames, c.Request.Host)
+		if !hostnameMatched {
 			continue
 		}
 		result, matched := findBestHTTPRouteRuleMatch(route, c.Request.URL.Path)
 		if matched {
-			return result, true
+			result.hostname = hostnamePrecedence
+			if !found || compareHTTPRouteMatchPrecedence(result, best) < 0 {
+				best = result
+				found = true
+			}
 		}
 	}
-	return httpRouteMatchResult{}, false
+	return best, found
+}
+
+func httpRouteMatchesGatewayListener(route *gatewayv1.HTTPRoute, gatewayKey, listenerName string, listenerPort int) bool {
+	for _, parentRef := range route.Spec.ParentRefs {
+		if !isGatewayParentRef(parentRef) {
+			continue
+		}
+		gatewayNamespace := route.Namespace
+		if parentRef.Namespace != nil {
+			gatewayNamespace = string(*parentRef.Namespace)
+		}
+		if gatewayNamespace+"/"+string(parentRef.Name) != gatewayKey {
+			continue
+		}
+		if listenerName == "" && listenerPort == 0 {
+			if parentRef.SectionName == nil && parentRef.Port == nil {
+				return true
+			}
+			continue
+		}
+		if parentRef.SectionName != nil && string(*parentRef.SectionName) != listenerName {
+			continue
+		}
+		if parentRef.Port != nil && int(*parentRef.Port) != listenerPort {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
+	if parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName {
+		return false
+	}
+	return parentRef.Kind == nil || *parentRef.Kind == "Gateway"
 }
 
 func findBestHTTPRouteRuleMatch(route *gatewayv1.HTTPRoute, requestPath string) (httpRouteMatchResult, bool) {
@@ -148,17 +214,8 @@ func hasUnsupportedHTTPRouteMatchPredicates(match gatewayv1.HTTPRouteMatch) bool
 }
 
 func compareHTTPRoutePathPrecedence(a, b httpRoutePathPrecedence) int {
-	if a.matchType != b.matchType {
-		if a.matchType > b.matchType {
-			return -1
-		}
-		return 1
-	}
-	if a.characters != b.characters {
-		if a.characters > b.characters {
-			return -1
-		}
-		return 1
+	if result := compareHTTPRoutePathSpecificity(a, b); result != 0 {
+		return result
 	}
 	if a.ruleIndex != b.ruleIndex {
 		// When path specificity is equal, keep the HTTPRoute's rule order.
@@ -176,20 +233,115 @@ func compareHTTPRoutePathPrecedence(a, b httpRoutePathPrecedence) int {
 	return 0
 }
 
+func compareHTTPRoutePathSpecificity(a, b httpRoutePathPrecedence) int {
+	if a.matchType != b.matchType {
+		if a.matchType > b.matchType {
+			return -1
+		}
+		return 1
+	}
+	if a.characters != b.characters {
+		if a.characters > b.characters {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// compareHTTPRouteMatchPrecedence compares the best matches from two different
+// HTTPRoutes. Gateway API ranks hostname specificity before path specificity,
+// then resolves ties using the oldest route creation timestamp and lexical
+// namespace/name order.
+func compareHTTPRouteMatchPrecedence(a, b httpRouteMatchResult) int {
+	if result := compareHTTPRouteHostnamePrecedence(a.hostname, b.hostname); result != 0 {
+		return result
+	}
+	if result := compareHTTPRoutePathSpecificity(a.path, b.path); result != 0 {
+		return result
+	}
+	if !a.route.CreationTimestamp.Equal(&b.route.CreationTimestamp) {
+		if a.route.CreationTimestamp.Before(&b.route.CreationTimestamp) {
+			return -1
+		}
+		return 1
+	}
+	if a.route.Namespace != b.route.Namespace {
+		if a.route.Namespace < b.route.Namespace {
+			return -1
+		}
+		return 1
+	}
+	if a.route.Name < b.route.Name {
+		return -1
+	}
+	if a.route.Name > b.route.Name {
+		return 1
+	}
+	return 0
+}
+
+func compareHTTPRouteHostnamePrecedence(a, b httpRouteHostnamePrecedence) int {
+	if a.matchType != b.matchType {
+		if a.matchType > b.matchType {
+			return -1
+		}
+		return 1
+	}
+	if a.characters != b.characters {
+		if a.characters > b.characters {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
 // inferencePoolFromHTTPRouteRule extracts the InferencePool backend from the
 // already matched rule. Other Gateway API backend kinds are ignored because this
 // router currently forwards only through InferencePool.
 func inferencePoolFromHTTPRouteRule(route *gatewayv1.HTTPRoute, rule *gatewayv1.HTTPRouteRule) (types.NamespacedName, bool) {
-	var inferencePoolName types.NamespacedName
+	pools := make([]weightedInferencePool, 0, len(rule.BackendRefs))
+	totalWeight := 0
 	for _, backendRef := range rule.BackendRefs {
 		if backendRef.Group != nil && *backendRef.Group == inferencePoolBackendGroup &&
 			backendRef.Kind != nil && *backendRef.Kind == inferencePoolBackendKind {
-			inferencePoolName.Namespace = route.Namespace
+			weight := 1
+			if backendRef.Weight != nil {
+				weight = int(*backendRef.Weight)
+			}
+			// Gateway API defines an omitted weight as 1 and a zero weight as
+			// receiving no traffic.
+			if weight <= 0 {
+				continue
+			}
+
+			inferencePoolName := types.NamespacedName{Namespace: route.Namespace}
 			if backendRef.Namespace != nil {
 				inferencePoolName.Namespace = string(*backendRef.Namespace)
 			}
 			inferencePoolName.Name = string(backendRef.Name)
-			return inferencePoolName, true
+			pools = append(pools, weightedInferencePool{name: inferencePoolName, weight: weight})
+			totalWeight += weight
+		}
+	}
+	if totalWeight == 0 {
+		return types.NamespacedName{}, false
+	}
+
+	return selectWeightedInferencePool(pools, rand.Intn(totalWeight))
+}
+
+type weightedInferencePool struct {
+	name   types.NamespacedName
+	weight int
+}
+
+func selectWeightedInferencePool(pools []weightedInferencePool, selection int) (types.NamespacedName, bool) {
+	for _, pool := range pools {
+		selection -= pool.weight
+		if selection < 0 {
+			return pool.name, true
 		}
 	}
 	return types.NamespacedName{}, false
@@ -264,22 +416,27 @@ func matchHTTPPathPrefix(path, prefix string) (bool, string) {
 	return path == normalizedPrefix || strings.HasPrefix(path, normalizedPrefix+"/"), normalizedPrefix
 }
 
-// matchHTTPRouteHostnames matches the request Host header against route
-// hostnames. Empty hostnames means the route matches all hosts.
-func matchHTTPRouteHostnames(hostnames []gatewayv1.Hostname, requestHost string) bool {
+// matchHTTPRouteHostnamePrecedence returns the most specific hostname pattern
+// matched by the route. Empty hostnames match every host with the lowest
+// specificity.
+func matchHTTPRouteHostnamePrecedence(hostnames []gatewayv1.Hostname, requestHost string) (httpRouteHostnamePrecedence, bool) {
 	if len(hostnames) == 0 {
-		return true
+		return httpRouteHostnamePrecedence{matchType: httpRouteHostnameAnyPrecedence}, true
 	}
 	normalizedHost := normalizeHTTPRouteHost(requestHost)
 	if normalizedHost == "" {
-		return false
+		return httpRouteHostnamePrecedence{}, false
 	}
+	var best httpRouteHostnamePrecedence
+	found := false
 	for _, hostname := range hostnames {
-		if matchHTTPRouteHostname(string(hostname), normalizedHost) {
-			return true
+		precedence, matched := matchHTTPRouteHostnamePattern(string(hostname), normalizedHost)
+		if matched && (!found || compareHTTPRouteHostnamePrecedence(precedence, best) < 0) {
+			best = precedence
+			found = true
 		}
 	}
-	return false
+	return best, found
 }
 
 // normalizeHTTPRouteHost removes the optional Host header port and normalizes
@@ -304,17 +461,31 @@ func normalizeHTTPRouteHost(host string) string {
 // suffix hostnames. A wildcard such as "*.example.com" matches
 // "api.example.com" and "v1.api.example.com", but not "example.com".
 func matchHTTPRouteHostname(pattern, host string) bool {
+	_, matched := matchHTTPRouteHostnamePattern(pattern, host)
+	return matched
+}
+
+func matchHTTPRouteHostnamePattern(pattern, host string) (httpRouteHostnamePrecedence, bool) {
 	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
 	if pattern == host {
-		return true
+		return httpRouteHostnamePrecedence{
+			matchType:  httpRouteHostnameExactPrecedence,
+			characters: len(pattern),
+		}, true
 	}
 	if !strings.HasPrefix(pattern, "*.") {
-		return false
+		return httpRouteHostnamePrecedence{}, false
 	}
 	suffix := strings.TrimPrefix(pattern, "*")
 	if !strings.HasSuffix(host, suffix) {
-		return false
+		return httpRouteHostnamePrecedence{}, false
 	}
 	prefix := strings.TrimSuffix(host, suffix)
-	return prefix != ""
+	if prefix == "" {
+		return httpRouteHostnamePrecedence{}, false
+	}
+	return httpRouteHostnamePrecedence{
+		matchType:  httpRouteHostnameWildcardPrecedence,
+		characters: len(suffix),
+	}, true
 }

@@ -148,10 +148,66 @@ type Request struct {
 	SessionID    string  // Session identifier for multi-turn conversations
 	Priority     float64 // Priority (lower value means higher priority)
 	SessionBoost bool    // Whether this request has session priority boost (recently completed session)
-	RequestTime  time.Time
-	NotifyChan   chan struct{}
-	CancelCh     <-chan struct{} // Request-scoped cancellation signal
-	Release      func()          // Set by the queue when a permit is acquired
+	// LastTurnCompletedAt is the time the session's previous turn completed, captured
+	// when the request is boosted. Boosted requests are ordered by this timestamp
+	// (most recent first) so the session with the warmest prefix cache runs first.
+	LastTurnCompletedAt time.Time
+	RequestTime         time.Time
+	NotifyChan          chan struct{}
+	CancelCh            <-chan struct{} // Request-scoped cancellation signal
+	Cancel              func()          // Cancels the request when the queue is shut down
+	Release             func()          // Set by the queue when a permit is acquired
+
+	// admitMu serializes admission (by the dequeue loop) against abandonment (by
+	// the waiting caller on timeout/cancel), closing the race where the loop has
+	// popped the request and passed its cancellation check but has not yet
+	// installed Release / closed NotifyChan. Guards admitted and abandoned.
+	admitMu   sync.Mutex
+	admitted  bool // admission committed: Release is set and about to be signalled
+	abandoned bool // caller gave up before admission; the loop must not admit
+}
+
+var errRequestQueueClosed = errors.New("request queue is closed")
+
+// commitAdmission runs fn under the request lock, but only if the caller has not
+// already abandoned the request. fn performs the admission side effects that must
+// be fully visible before the request is considered admitted: acquiring the
+// inflight permit, installing Release, and incrementing the inflight metric.
+// It returns true if admission was committed. When it returns false the request
+// was abandoned first, so the dequeue loop must not mark it inflight or signal it.
+//
+// Because fn (including installing Release) completes before admitted is set, any
+// caller that observes admitted via abandon() is guaranteed to see a non-nil
+// Release, so the permit can always be returned.
+func (r *Request) commitAdmission(fn func()) bool {
+	r.admitMu.Lock()
+	defer r.admitMu.Unlock()
+	if r.abandoned {
+		return false
+	}
+	fn()
+	r.admitted = true
+	return true
+}
+
+// Abandon marks the request as given up by the waiting caller (queue timeout,
+// wait-reject, or client cancellation). If the request had already been admitted,
+// the caller owned the inflight permit, so Abandon releases it to avoid leaking
+// capacity. Otherwise it marks the request abandoned so admission is guaranteed
+// not to proceed (commitAdmission observes abandoned and skips) and no permit can
+// leak.
+func (r *Request) Abandon() {
+	r.admitMu.Lock()
+	if !r.admitted {
+		r.abandoned = true
+		r.admitMu.Unlock()
+		return
+	}
+	r.admitMu.Unlock()
+	// Admission raced in first, so we own the inflight permit; release it here.
+	// Release is guaranteed non-nil once admitted is set (installed by fn before
+	// commitAdmission sets admitted).
+	r.Release()
 }
 
 // RequestPriorityQueue implements the heap.Interface
@@ -224,10 +280,19 @@ func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg Fai
 func (pq *RequestPriorityQueue) Len() int { return len(pq.heap) }
 
 func (pq *RequestPriorityQueue) Less(i, j int) bool {
-	// Session-boost mode: boosted requests outrank others; ties broken FIFO.
+	// Session-boost mode: boosted requests outrank others. Among boosted requests,
+	// the session whose previous turn completed most recently wins, because its
+	// prefix cache is the most likely to still be warm on the backend; ties are
+	// broken FIFO by arrival time. Non-boosted requests keep FIFO ordering.
 	if pq.sessionBoost {
 		if pq.heap[i].SessionBoost != pq.heap[j].SessionBoost {
 			return pq.heap[i].SessionBoost
+		}
+		if pq.heap[i].SessionBoost {
+			if !pq.heap[i].LastTurnCompletedAt.Equal(pq.heap[j].LastTurnCompletedAt) {
+				return pq.heap[i].LastTurnCompletedAt.After(pq.heap[j].LastTurnCompletedAt)
+			}
+			return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
 		}
 		return pq.heap[i].RequestTime.Before(pq.heap[j].RequestTime)
 	}
@@ -267,10 +332,20 @@ func (pq *RequestPriorityQueue) PushRequest(r *Request) error {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
+	select {
+	case <-pq.stopCh:
+		return errRequestQueueClosed
+	default:
+	}
+
 	// In session-boost mode, promote requests whose session recently completed.
-	if pq.sessionBoost && pq.sessionTracker != nil && r.SessionID != "" &&
-		pq.sessionTracker.HasRecentCompletion(r.SessionID) {
-		r.SessionBoost = true
+	// Capture the session's completion time so boosted requests can be ordered by
+	// prefix-cache warmth (most recently completed first).
+	if pq.sessionBoost && pq.sessionTracker != nil && r.SessionID != "" {
+		if completedAt, ok := pq.sessionTracker.CompletionTime(r.SessionID); ok {
+			r.SessionBoost = true
+			r.LastTurnCompletedAt = completedAt
+		}
 	}
 
 	heap.Push(pq, r)
@@ -410,7 +485,17 @@ func (pq *RequestPriorityQueue) requeueRequest(req *Request) {
 		return
 	}
 	pq.mu.Lock()
+	select {
+	case <-pq.stopCh:
+		pq.mu.Unlock()
+		if req.Cancel != nil {
+			req.Cancel()
+		}
+		return
+	default:
+	}
 	heap.Push(pq, req)
+	pq.metricIncSize(req.ModelName, req.UserID)
 	pq.mu.Unlock()
 	select {
 	case pq.notifyCh <- struct{}{}:
@@ -485,42 +570,58 @@ func (pq *RequestPriorityQueue) runSemaphoreMode(ctx context.Context) {
 			// Permit acquired
 		}
 
-		releaseOnce := sync.Once{}
-		trackedInflight := false
-		req.Release = func() {
-			releaseOnce.Do(func() {
-				<-pq.sem
-				if trackedInflight && pq.metrics != nil {
-					pq.metrics.DecFairnessQueueInflight(req.ModelName)
-				}
-			})
+		// Commit admission atomically with respect to a concurrent Abandon(): install
+		// Release and increment the inflight metric under the request lock so the
+		// waiting caller either observes the admission (and releases the permit on
+		// timeout) or blocks admission entirely. Increment the metric inside the
+		// committed section so a racing Release always has a matching increment.
+		admitted := req.commitAdmission(func() {
+			releaseOnce := sync.Once{}
+			req.Release = func() {
+				releaseOnce.Do(func() {
+					<-pq.sem
+					pq.metricDecInflight(req.ModelName)
+				})
+			}
+			pq.metricIncInflight(req.ModelName)
+		})
+		if !admitted {
+			// Caller abandoned before admission; return the just-acquired permit and
+			// drop the request without signalling it.
+			<-pq.sem
+			continue
 		}
-
-		if pq.metrics != nil {
-			pq.metrics.IncFairnessQueueInflight(req.ModelName)
-		}
-		trackedInflight = true
 		close(req.NotifyChan)
 	}
 }
 
-// Close stops the dequeue loop and drains pending items from the heap.
-// Callers waiting on NotifyChan will detect cancellation via their request-scoped signal.
+// Close stops the dequeue loop, cancels pending requests, and drains the heap.
 func (pq *RequestPriorityQueue) Close() {
 	pq.mu.Lock()
-	defer pq.mu.Unlock()
 	select {
 	case <-pq.stopCh:
 		// already closed
+		pq.mu.Unlock()
 		return
 	default:
 		close(pq.stopCh)
 	}
 
-	// Drain pending items: clear metrics for each remaining request
-	for len(pq.heap) > 0 {
-		req := heap.Pop(pq).(*Request)
+	// Drain pending items and clear their metrics while holding the queue lock so
+	// concurrent PushRequest calls cannot add work after shutdown begins.
+	pending := pq.heap
+	pq.heap = nil
+	for _, req := range pending {
 		pq.metricDecSize(req.ModelName, req.UserID)
+	}
+	pq.mu.Unlock()
+
+	// Cancel outside the queue lock. Context cancellation can synchronously run
+	// callbacks, and those callbacks must not be able to deadlock queue shutdown.
+	for _, req := range pending {
+		if req.Cancel != nil {
+			req.Cancel()
+		}
 	}
 	klog.V(4).Info("fairness queue closed and drained")
 }

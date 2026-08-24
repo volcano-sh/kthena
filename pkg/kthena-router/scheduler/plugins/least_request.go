@@ -76,7 +76,7 @@ func (l *LeastRequest) Filter(ctx *framework.Context, pods []*datastore.PodInfo)
 }
 
 func (l *LeastRequest) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
-	scoreResults := make(map[*datastore.PodInfo]int)
+	scoreResults := make(map[*datastore.PodInfo]int, len(pods))
 	if len(pods) == 0 {
 		return scoreResults
 	}
@@ -90,24 +90,24 @@ func (l *LeastRequest) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	//     router has dispatched but the engine has not yet started executing
 	//     (i.e. likely queued inside the engine). Weighted ×100 to strongly
 	//     penalise pods whose queue is building up.
-	baseScores := make(map[*datastore.PodInfo]float64)
+	baseScores := make([]float64, len(pods))
 	maxScore := 0.0
-	for _, info := range pods {
+	for i, info := range pods {
 		// Estimate queued requests as max(onFlight - running, 0). The engine-reported
 		// running count has a poll lag (~1 s), so this may briefly over-count, but
 		// it provides a leading indicator of queue build-up at the pod.
 		base := float64(info.GetOnFlightRequestNum()) + 100*math.Max(float64(info.GetOnFlightRequestNum())-float64(info.GetRequestRunningNum()), 0)
-		baseScores[info] = base
+		baseScores[i] = base
 		if base > maxScore {
 			maxScore = base
 		}
 	}
 
 	// Normalise to [0, 100]: the least-loaded pod gets 100.
-	for _, info := range pods {
+	for i, info := range pods {
 		score := 100.0
 		if maxScore > 0 {
-			score = ((maxScore - baseScores[info]) / maxScore) * 100
+			score = ((maxScore - baseScores[i]) / maxScore) * 100
 		}
 		scoreResults[info] = int(score)
 	}

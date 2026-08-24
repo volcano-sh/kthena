@@ -32,6 +32,8 @@ const (
 	RouterConfigMapName  = "kthena-router-config"
 	RouterConfigKey      = "routerConfiguration"
 	RouterDeploymentName = "kthena-router"
+	RouterMetricsService = "kthena-router-metrics"
+	RouterMetricsPort    = "9090"
 	RouterRolloutTimeout = 3 * time.Minute
 	RouterDebugPort      = "15000"
 )
@@ -40,12 +42,23 @@ const (
 // break the framework TestMain port-forward on :8080.
 func SetupRouterPortForwardAfterRestart(t *testing.T, kthenaNamespace string) (chatURL, metricsURL string, closePF func()) {
 	t.Helper()
-	localPort := AllocateLocalPort(t)
-	pf, err := SetupPortForward(kthenaNamespace, RouterDeploymentName, localPort, "80")
+	chatLocalPort := AllocateLocalPort(t)
+	chatPF, err := SetupPortForward(kthenaNamespace, RouterDeploymentName, chatLocalPort, "80")
 	require.NoError(t, err, "failed to setup port-forward to restarted router")
-	chatURL = fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", localPort)
-	metricsURL = fmt.Sprintf("http://127.0.0.1:%s/metrics", localPort)
-	return chatURL, metricsURL, func() { pf.Close() }
+
+	metricsLocalPort := AllocateLocalPort(t)
+	metricsPF, err := SetupPortForward(kthenaNamespace, RouterMetricsService, metricsLocalPort, RouterMetricsPort)
+	if err != nil {
+		chatPF.Close()
+	}
+	require.NoError(t, err, "failed to setup port-forward to restarted router metrics")
+
+	chatURL = fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", chatLocalPort)
+	metricsURL = fmt.Sprintf("http://127.0.0.1:%s/metrics", metricsLocalPort)
+	return chatURL, metricsURL, func() {
+		metricsPF.Close()
+		chatPF.Close()
+	}
 }
 
 // ApplySchedulerConfig patches router scheduler config, restarts the router, and returns URLs plus a restore func.

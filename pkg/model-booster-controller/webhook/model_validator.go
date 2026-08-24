@@ -19,9 +19,14 @@ package webhook
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
+	"unicode"
 
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
+	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -80,6 +85,9 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 	allErrs = append(allErrs, validateBackendReplicaBounds(model)...)
 	allErrs = append(allErrs, validateWorkerImages(model)...)
 	allErrs = append(allErrs, validateBackendWorkerTypes(model)...)
+	allErrs = append(allErrs, validateEnginePorts(model)...)
+	allErrs = append(allErrs, validatePVCURICompatibility(model)...)
+	allErrs = append(allErrs, validateKvConnectorConfig(model)...)
 
 	if len(allErrs) > 0 {
 		// Convert field errors to a formatted multi-line error message
@@ -149,6 +157,48 @@ func validateBackendWorkerTypes(model *registryv1alpha1.ModelBooster) field.Erro
 	return allErrs
 }
 
+// validateKvConnectorConfig rejects PD backends whose prefill/decode workers specify
+// inconsistent kv-transfer-config (e.g. different kv_connector values, or a kv_role that
+// doesn't match the worker's role), reusing convert.GetKvConnectorSpec so admission uses
+// the exact same rules as the ModelServer converter.
+func validateKvConnectorConfig(model *registryv1alpha1.ModelBooster) field.ErrorList {
+	var allErrs field.ErrorList
+	backend := model.Spec.Backend
+	if _, err := convert.GetKvConnectorSpec(backend); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec").Child("backend").Child("workers"),
+			backend.Name,
+			fmt.Sprintf("invalid kv connector configuration: %v", err),
+		))
+	}
+	return allErrs
+}
+
+func validateEnginePorts(model *registryv1alpha1.ModelBooster) field.ErrorList {
+	backend := &model.Spec.Backend
+	if backend.Type != registryv1alpha1.ModelBackendTypeVLLM &&
+		backend.Type != registryv1alpha1.ModelBackendTypeVLLMDisaggregated {
+		return nil
+	}
+
+	if _, err := utils.GetEnginePort(backend); err != nil {
+		portPath := field.NewPath("spec").Child("backend").Child("workers")
+		var badValue any
+		if portErr, ok := err.(*utils.EnginePortError); ok {
+			portPath = portPath.Index(portErr.WorkerIndex).Child("config").Child("port")
+			badValue = portErr.BadValue
+		}
+		return field.ErrorList{
+			field.Invalid(
+				portPath,
+				badValue,
+				err.Error(),
+			),
+		}
+	}
+	return nil
+}
+
 func validateBackendReplicaBounds(model *registryv1alpha1.ModelBooster) field.ErrorList {
 	var allErrs field.ErrorList
 	path := field.NewPath("spec").Child("backend")
@@ -181,6 +231,120 @@ func validateWorkerImages(model *registryv1alpha1.ModelBooster) field.ErrorList 
 	return allErrs
 }
 
+// validatePVCURICompatibility ensures that when modelURI uses the pvc:// scheme, the
+// cacheURI also uses pvc:// and that the model source path falls within the cache
+// volume mount point.
+//
+// Background: the downloader init container mounts only the volume specified by
+// cacheURI.  When modelURI is pvc://, the downloader reads a filesystem path derived
+// from that URI.  If that path is not under the cacheURI mount, the file is invisible
+// to the downloader and the pod fails at runtime.
+func validatePVCURICompatibility(model *registryv1alpha1.ModelBooster) field.ErrorList {
+	var allErrs field.ErrorList
+	backend := model.Spec.Backend
+	backendPath := field.NewPath("spec").Child("backend")
+
+	if !strings.HasPrefix(backend.ModelURI, "pvc://") {
+		return nil
+	}
+
+	// cacheURI must also be pvc:// so the same PVC is mounted inside the container.
+	if !strings.HasPrefix(backend.CacheURI, "pvc://") {
+		allErrs = append(allErrs, field.Invalid(
+			backendPath.Child("cacheURI"),
+			backend.CacheURI,
+			"when modelURI uses pvc://, cacheURI must also use pvc://. "+
+				"The downloader only has access to the volume mounted via cacheURI. "+
+				"Set cacheURI to the PVC that holds the model (e.g. pvc://<claimName>) "+
+				"and set modelURI to the path within that PVC "+
+				"(e.g. pvc:///<claimName>/<path-to-model>)",
+		))
+		return allErrs
+	}
+
+	// Reject any ".." segment at any position in the raw modelURI path.
+	// Checking each segment (rather than specific substrings) catches leading ".."
+	// e.g. pvc://../other, which has no "/../" substring but still escapes the mount.
+	rawPVCPath := strings.TrimPrefix(backend.ModelURI, "pvc://")
+	for _, seg := range strings.Split(rawPVCPath, "/") {
+		if seg == ".." {
+			allErrs = append(allErrs, field.Invalid(
+				backendPath.Child("modelURI"),
+				backend.ModelURI,
+				"pvc:// modelURI must not contain '..' path segments",
+			))
+			return allErrs
+		}
+	}
+
+	// Validate that cacheURI contains exactly a PVC claim name with no slashes.
+	// PVC names are Kubernetes DNS labels and cannot contain '/'.  A slashed claim
+	// name (e.g. pvc://foo/bar) would pass the mount-path prefix check but make
+	// buildCacheVolume set ClaimName to "foo/bar", causing pod creation to fail.
+	claimName := strings.Trim(strings.TrimPrefix(backend.CacheURI, "pvc://"), "/")
+	if claimName == "" || strings.Contains(claimName, "/") {
+		allErrs = append(allErrs, field.Invalid(
+			backendPath.Child("cacheURI"),
+			backend.CacheURI,
+			"pvc:// cacheURI must contain a single PVC claim name with no path separator "+
+				"(e.g. pvc://<claimName>); claim names cannot contain '/'",
+		))
+		return allErrs
+	}
+
+	// Verify the source path is reachable through the cache volume mount point.
+	// pvcModelSourcePath applies path.Clean so the normalized paths are canonical
+	// before the prefix check.
+	sourcePath := pvcModelSourcePath(backend.ModelURI)
+	mountPath := "/" + claimName
+	if sourcePath != mountPath && !strings.HasPrefix(sourcePath, mountPath+"/") {
+		allErrs = append(allErrs, field.Invalid(
+			backendPath.Child("modelURI"),
+			backend.ModelURI,
+			fmt.Sprintf(
+				"PVC source path %q is not reachable via cacheURI mount %q. "+
+					"The downloader only has access to PVCs mounted via cacheURI. "+
+					"If the source model and the cache are on the same PVC, set cacheURI to the PVC name "+
+					"and include that name as the first path segment of modelURI. "+
+					"Example: cacheURI: pvc://<claimName>, modelURI: pvc:///<claimName>/<path-to-model>",
+				sourcePath, mountPath,
+			),
+		))
+	}
+
+	return allErrs
+}
+
+// pvcModelSourcePath returns the cleaned absolute filesystem path that the PVC downloader
+// will attempt to read.  It mirrors the logic of PVCDownloader._parse_pvc_path() in
+// python/kthena/downloader/pvc.py: strip the pvc:// prefix, ensure a leading slash, and
+// normalize with path.Clean to collapse ".." and repeated slashes so that path-traversal
+// sequences cannot bypass the reachability check.
+func pvcModelSourcePath(modelURI string) string {
+	p := strings.TrimPrefix(modelURI, "pvc://")
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return path.Clean(p)
+}
+
+// cacheVolumeMountPath returns the cleaned absolute in-container path at which the cache
+// volume is mounted.  It mirrors the logic of convert.GetCachePath: take the part after
+// ://, trim surrounding slashes, and prepend /.  path.Clean is applied so that the result
+// is always a canonical path, matching the normalization done in pvcModelSourcePath.
+func cacheVolumeMountPath(cacheURI string) string {
+	u, err := url.ParseRequestURI(cacheURI)
+	if err != nil || u.Scheme == "" {
+		return ""
+	}
+
+	s := strings.Trim(u.Host+u.Path, "/")
+	if s == "" {
+		return ""
+	}
+	return path.Clean("/" + s)
+}
+
 // validateImageField checks if a container image string is a valid Docker reference.
 func validateImageField(image string) error {
 	if image == "" {
@@ -188,18 +352,13 @@ func validateImageField(image string) error {
 		return nil
 	}
 
-	// Simple validation: check if image contains at least one character and no spaces
+	// Reject empty or whitespace-only values and any whitespace anywhere in the image reference.
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("image cannot be empty or whitespace only")
 	}
 
-	if strings.Contains(image, " ") {
-		return fmt.Errorf("image cannot contain spaces")
-	}
-
-	// Basic format check: should contain at least one character
-	if len(strings.TrimSpace(image)) == 0 {
-		return fmt.Errorf("invalid image format")
+	if strings.IndexFunc(image, unicode.IsSpace) != -1 {
+		return fmt.Errorf("image cannot contain whitespace")
 	}
 
 	return nil

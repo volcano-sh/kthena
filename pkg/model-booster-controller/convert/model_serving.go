@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/env"
@@ -81,6 +82,10 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 	}
 	if workersMap[workload.ModelWorkerTypeDecode] == nil {
 		return nil, fmt.Errorf("decode worker not found in backend")
+	}
+	enginePort, err := utils.GetEnginePort(backend)
+	if err != nil {
+		return nil, err
 	}
 	cacheVolume, err := buildCacheVolume(backend)
 	if err != nil {
@@ -188,8 +193,9 @@ func buildVllmDisaggregatedModelServing(model *workload.ModelBooster) (*workload
 		},
 		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
 		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
-		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:8000"),
+		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, fmt.Sprintf("http://localhost:%d", enginePort)),
 		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
+		"ENGINE_PORT":                        enginePort,
 		"ENGINE_PREFILL_ENV":                 prefillEngineEnv,
 		"ENGINE_DECODE_ENV":                  decodeEngineEnv,
 		"MODEL_SERVING_RUNTIME_ENGINE":       strings.ToLower(string(backend.Type)),
@@ -216,6 +222,10 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	workersMap := mapWorkers(backend.Workers)
 	if workersMap[workload.ModelWorkerTypeServer] == nil {
 		return nil, fmt.Errorf("server worker not found in backend: %s", backend.Name)
+	}
+	enginePort, err := utils.GetEnginePort(backend)
+	if err != nil {
+		return nil, err
 	}
 	cacheVolume, err := buildCacheVolume(backend)
 	if err != nil {
@@ -272,6 +282,13 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	}
 
 	engineEnv := buildEngineEnvVars(backend)
+	// Pods has no schema default (Minimum is 0), so an omitted or explicit-zero value
+	// decodes to 0. A role can never meaningfully have zero pods, so treat that as the
+	// single-pod baseline (no extra Ray workers) instead of computing a negative replicas.
+	workerReplicas := workersMap[workload.ModelWorkerTypeServer].Pods - 1
+	if workersMap[workload.ModelWorkerTypeServer].Pods <= 1 {
+		workerReplicas = 0
+	}
 	data := map[string]interface{}{
 		"MODEL_SERVING_TEMPLATE_METADATA": &metav1.ObjectMeta{
 			Name:      utils.GetBackendResourceName(model.Name, backend.Name),
@@ -316,14 +333,15 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 		"MODEL_DOWNLOAD_ENVFROM":             backend.EnvFrom,
 		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
 		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
-		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:8000"),
+		"MODEL_SERVING_RUNTIME_URL":          env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, fmt.Sprintf("http://localhost:%d", enginePort)),
 		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
 		"MODEL_SERVING_RUNTIME_ENGINE":       strings.ToLower(string(backend.Type)),
 		"MODEL_SERVING_RUNTIME_POD":          "$(POD_NAME).$(NAMESPACE)",
+		"ENGINE_PORT":                        enginePort,
 		"ENGINE_SERVER_RESOURCES":            workersMap[workload.ModelWorkerTypeServer].Resources,
 		"ENGINE_SERVER_IMAGE":                workersMap[workload.ModelWorkerTypeServer].Image,
 		"ENGINE_SERVER_COMMAND":              commands,
-		"WORKER_REPLICAS":                    workersMap[workload.ModelWorkerTypeServer].Pods - 1,
+		"WORKER_REPLICAS":                    workerReplicas,
 		"SCHEDULER_NAME":                     backend.SchedulerName,
 		"RUNTIME_CLASS_NAME":                 backend.RuntimeClassName,
 		"SERVER_AFFINITY":                    workersMap[workload.ModelWorkerTypeServer].Affinity,
@@ -406,7 +424,12 @@ func getKvConnectorFromConfig(config *apiextensionsv1.JSON) string {
 	return ""
 }
 
-// GetMountPath returns the mount path for the given ModelBackend in the format "/<backend.Name>".
+// GetMountPath returns the hashed sub-directory appended to the cache mount point where
+// the downloader writes—and the inference engine reads—the model files.
+//
+// The sub-directory is the MD5 hex digest of modelURI, which keeps downloads from
+// different sources isolated and avoids filename collisions inside the cache volume.
+// The full model path inside every container is: GetCachePath(cacheURI) + GetMountPath(modelURI).
 func GetMountPath(modelURI string) string {
 	h := md5.New()
 	h.Write([]byte(modelURI))
@@ -426,20 +449,28 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 			},
 		}, nil
 	case strings.HasPrefix(backend.CacheURI, CacheURIPrefixPVC):
+		claimName := GetPVCClaimName(backend.CacheURI)
+		if claimName == "" {
+			return nil, fmt.Errorf("invalid cacheURI %q: must include a PVC claim name", backend.CacheURI)
+		}
 		return &corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: GetPVCClaimName(backend.CacheURI),
+					ClaimName: claimName,
 				},
 			},
 		}, nil
 	case strings.HasPrefix(backend.CacheURI, CacheURIPrefixHostPath):
+		cachePath := GetCachePath(backend.CacheURI)
+		if cachePath == "" {
+			return nil, fmt.Errorf("invalid cacheURI %q: must include a host path", backend.CacheURI)
+		}
 		return &corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
-					Path: GetCachePath(backend.CacheURI),
+					Path: cachePath,
 					Type: ptr.To(corev1.HostPathDirectoryOrCreate),
 				},
 			},
@@ -448,21 +479,37 @@ func buildCacheVolume(backend *workload.ModelBackend) (*corev1.Volume, error) {
 	return nil, fmt.Errorf("not support prefix in CacheURI: %s", backend.CacheURI)
 }
 
-// GetCachePath returns the in-container mount path derived from a cache URI.
-// It takes the substring after "://", trims surrounding slashes, and prepends a
-// single "/" so the result is a valid absolute path suitable for a container's
-// VolumeMount.MountPath or HostPath.Path. For example, for "pvc://my-pvc" it
-// returns "/my-pvc". It is NOT a PVC ClaimName; use GetPVCClaimName for that.
+// GetCachePath returns the absolute in-container path at which the cache volume
+// is mounted. It is derived from the cache URI by taking the part after "://",
+// trimming surrounding slashes, and prepending "/".
+//
+// Examples:
+//
+//	"pvc://model-cache"          → "/model-cache"
+//	"pvc:///model-cache"         → "/model-cache"
+//	"hostpath:///tmp/cache"      → "/tmp/cache"
+//
+// This path is used as VolumeMount.MountPath for both the downloader init
+// container and the inference engine containers.  It is NOT the PVC claim name;
+// use GetPVCClaimName for that.
 func GetCachePath(path string) string {
-	if path == "" || !strings.Contains(path, URIPrefixSeparator) {
+	if path == "" {
 		return ""
 	}
-	s := strings.Split(path, URIPrefixSeparator)[1]
-	s = strings.Trim(s, "/")
-	builder := strings.Builder{}
-	builder.WriteString("/")
-	builder.WriteString(s)
-	return builder.String()
+
+	// Parse the URI robustly rather than using manual string splitting
+	u, err := url.ParseRequestURI(path)
+	if err != nil || u.Scheme == "" {
+		return ""
+	}
+
+	// Reconstruct the path after the scheme (e.g. for pvc://my-cache/path -> my-cache/path)
+	s := strings.Trim(u.Host+u.Path, "/")
+	if s == "" {
+		return ""
+	}
+
+	return "/" + s
 }
 
 // GetPVCClaimName extracts the bare PVC name from a "pvc://" cache URI, trimming

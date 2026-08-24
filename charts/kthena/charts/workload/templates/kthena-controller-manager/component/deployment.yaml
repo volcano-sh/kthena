@@ -23,6 +23,7 @@ spec:
           image: "{{ .Values.controllerManager.image.repository }}:{{ .Values.controllerManager.image.tag }}"
           args:
             {{- toYaml .Values.controllerManager.image.args | nindent 12 }}
+            - --enable-webhook={{ .Values.controllerManager.webhook.enabled }}
             - --cert-secret-name={{ .Values.controllerManager.webhook.tls.certSecretName }}
             - --service-name={{ .Values.controllerManager.webhook.tls.serviceName }}
             {{- if .Values.controllerManager.controllers }}
@@ -41,6 +42,9 @@ spec:
             {{- if .Values.controllerManager.debugPort }}
             - --debug-port={{ .Values.controllerManager.debugPort }}
             {{- end }}
+            {{- if .Values.controllerManager.autoscalingSyncPeriodSeconds }}
+            - --autoscaling-sync-period-seconds={{ .Values.controllerManager.autoscalingSyncPeriodSeconds }}
+            {{- end }}
           imagePullPolicy: {{ .Values.controllerManager.image.pullPolicy }}
           resources:
             {{- toYaml .Values.controllerManager.resource | nindent 12 }}
@@ -55,6 +59,7 @@ spec:
             - name: webhook-certs
               mountPath: /etc/tls
               readOnly: true
+          {{- if .Values.controllerManager.webhook.enabled }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -69,6 +74,7 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
+          {{- end }}
       volumes:
         - name: webhook-certs
           secret:

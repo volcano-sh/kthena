@@ -61,11 +61,15 @@ type AutoscaleController struct {
 	scalerMap                   map[string]*autoscaler.Autoscaler
 	optimizerMap                map[string]*autoscaler.Optimizer
 	disaggregatedScalerMap      map[string]*autoscaler.DisaggregatedAutoscaler
+	syncPeriodSeconds           int
 }
 
-func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface) *AutoscaleController {
+func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface, syncPeriodSeconds int) *AutoscaleController {
+	if syncPeriodSeconds <= 0 {
+		syncPeriodSeconds = util.AutoscalingSyncPeriodSeconds
+	}
 	informerFactory := informersv1alpha1.NewSharedInformerFactory(client, 0)
-	modelInferInformer := informerFactory.Workload().V1alpha1().ModelServings()
+	modelServings := informerFactory.Workload().V1alpha1().ModelServings()
 	autoscalingPoliciesInformer := informerFactory.Workload().V1alpha1().AutoscalingPolicies()
 
 	selector, err := labels.NewRequirement(workload.GroupNameLabelKey, selection.Exists, nil)
@@ -84,13 +88,14 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 		client:                      client,
 		autoscalingPoliciesLister:   autoscalingPoliciesInformer.Lister(),
 		autoscalingPoliciesInformer: autoscalingPoliciesInformer.Informer(),
-		modelServingLister:          modelInferInformer.Lister(),
-		modelServingInformer:        modelInferInformer.Informer(),
+		modelServingLister:          modelServings.Lister(),
+		modelServingInformer:        modelServings.Informer(),
 		podsLister:                  podsInformer.Lister(),
 		podsInformer:                podsInformer.Informer(),
 		scalerMap:                   make(map[string]*autoscaler.Autoscaler),
 		optimizerMap:                make(map[string]*autoscaler.Optimizer),
 		disaggregatedScalerMap:      make(map[string]*autoscaler.DisaggregatedAutoscaler),
+		syncPeriodSeconds:           syncPeriodSeconds,
 	}
 	return ac
 }
@@ -111,7 +116,7 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 	klog.Info("start autoscale controller")
 	go wait.Until(func() {
 		ac.Reconcile(ctx)
-	}, util.AutoscalingSyncPeriodSeconds*time.Second, nil)
+	}, time.Duration(ac.syncPeriodSeconds)*time.Second, nil)
 
 	<-ctx.Done()
 	klog.Info("shut down autoscale controller")
@@ -166,7 +171,7 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	for _, policy := range policies {
 		err := ac.schedule(ctx, policy)
 		if err != nil {
-			klog.Errorf("failed to process autoscale,err: %v", err)
+			klog.Errorf("failed to process autoscale for policy %s: %v", klog.KObj(policy), err)
 			continue
 		}
 	}
@@ -222,17 +227,17 @@ func (ac *AutoscaleController) schedule(ctx context.Context, autoscalePolicy *wo
 	klog.V(2).Infof("start to process autoscaling policy %s", klog.KObj(autoscalePolicy))
 	if autoscalePolicy.Spec.HeterogeneousTarget != nil {
 		if err := ac.doOptimize(ctx, autoscalePolicy); err != nil {
-			klog.Errorf("failed to do optimize, err: %v", err)
+			klog.Errorf("failed to do optimize for autoscaling policy %s: %v", klog.KObj(autoscalePolicy), err)
 			return err
 		}
 	} else if autoscalePolicy.Spec.HomogeneousTarget != nil {
 		if err := ac.doScale(ctx, autoscalePolicy); err != nil {
-			klog.Errorf("failed to do scale, err: %v", err)
+			klog.Errorf("failed to do scale for autoscaling policy %s: %v", klog.KObj(autoscalePolicy), err)
 			return err
 		}
 	} else if autoscalePolicy.Spec.DisaggregatedTarget != nil {
 		if err := ac.doDisaggregatedScale(ctx, autoscalePolicy); err != nil {
-			klog.Errorf("failed to do disaggregated scale, err: %v", err)
+			klog.Errorf("failed to do disaggregated scale for autoscaling policy %s: %v", klog.KObj(autoscalePolicy), err)
 			return err
 		}
 	} else {
@@ -258,7 +263,8 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 			klog.Errorf("failed to get current replicas, err: %v", err)
 			return err
 		}
-		replicasMap[param.Target.TargetRef.Name] = currentInstancesCount
+		targetKey := autoscaler.HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		replicasMap[targetKey] = currentInstancesCount
 	}
 
 	// Get recommended replicas
@@ -269,9 +275,10 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 	}
 	// Do update replicas
 	for _, param := range optimizer.Meta.Config.Params {
-		instancesCount, exists := recommendedInstances[param.Target.TargetRef.Name]
+		targetKey := autoscaler.HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
+		instancesCount, exists := recommendedInstances[targetKey]
 		if !exists {
-			klog.Warningf("recommended instances not exists, target ref name: %s", param.Target.TargetRef.Name)
+			klog.Warningf("recommended instances not exists, target: %s", targetKey)
 			continue
 		}
 		if err := ac.updateTargetReplicas(ctx, &param.Target, autoscalePolicy.Namespace, instancesCount); err != nil {

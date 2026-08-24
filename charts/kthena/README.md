@@ -248,7 +248,7 @@ metadata:
   namespace: kthena-system
 type: Opaque
 data:
-  password: "base64-encoded-password"
+  REDIS_PASSWORD: "base64-encoded-password"
 ```
 
 For detailed information about when Redis is required and deployment instructions, see [examples/redis/README.md](../../examples/redis/README.md).

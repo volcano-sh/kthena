@@ -12,7 +12,11 @@ When scaling is triggered, the status of the entire `ServingGroup` is set to `Cr
 
 After the `replicas` of `ServingGroups` meets expectations. Then update the status of the ServingGroup based on the status of all the pods in the ServingGroup.
 
-Because `ServingGroups` are ordered in modelServing similar to statefulSet. Therefore, the expansion and contraction of the `ServingGroup level` are processed from the last ServingGroup. For example, when `replicas` increase from 2 to 4, first create `G-2`, then create `G-3`. When `replicas` reduces from 4 to 2, `G-3` is deleted first, followed by `G-2`.
+`ServingGroups` use deterministic ordinal-based identities similar to StatefulSet Pods. When scaling up, the controller creates only missing ordinals in `[0, replicas)`, in ascending order. For example, scaling from the contiguous set `G-0`, `G-1` to four replicas creates `G-2` and `G-3`. If the existing set is `G-0`, `G-2`, and `G-3`, scaling to four replicas recreates `G-1` instead of appending `G-4`.
+
+A `ServingGroup` that is being deleted continues to reserve its ordinal in the controller datastore until all of its resources are gone. This prevents a replacement with the same deterministic name from being created too early. After deletion is observed and the datastore entry is removed, a later reconciliation can reuse that ordinal. Existing out-of-range ordinals from an older controller version are not proactively renumbered; the invariant applies to newly created `ServingGroups`.
+
+Scale-down selection continues to consider readiness and deletion cost, with the ordinal used as a tie-breaker. It therefore does not always remove the highest ordinal first.
 
 ### ServingGroup Scaling Process
 
@@ -25,19 +29,19 @@ In the following we'll show how scaling processes for a `ServingGroup` with four
 
 **Scaling up:**
 
-|        | G-0 | G-1 | G-2 | G-3 | Note                                                                          |
-|--------|-----|-----|-----|-----|-------------------------------------------------------------------------------|
-| Stage1 | ✅  | ✅   | ✅   | | Before Scaling up |
-| Stage2 | ✅  | ✅   | ✅   | ⏳   | Scaling up started, The replica with the highest ordinal (G-3) is creating |
-| Stage3 | ✅   | ✅   | ✅   | ✅   | After Scaling update |
+| | G-0 | G-1 | G-2 | G-3 | Note |
+| --- | --- | --- | --- | --- | --- |
+| Stage1 | ✅ | ✅ | ✅ | | Before scaling up |
+| Stage2 | ✅ | ✅ | ✅ | ⏳ | Scaling up started; the missing ordinal G-3 is being created |
+| Stage3 | ✅ | ✅ | ✅ | ✅ | After scaling up |
 
 **Scaling Down:**
 
-|        | G-0 | G-1 | G-2 | G-3 | Note                                                                          |
-|--------|-----|-----|-----|-----|-------------------------------------------------------------------------------|
-| Stage1 | ✅   | ✅   | ✅   | ✅   | Before Scaling update |
-| Stage2 | ✅   | ✅   | ✅   | ⏳   | Scaling down started, The replica with the highest ordinal (G-3) is deleting |
-| Stage3 | ✅   | ✅   | ✅   | | After Scaling down |
+| | G-0 | G-1 | G-2 | G-3 | Note |
+| --- | --- | --- | --- | --- | --- |
+| Stage1 | ✅ | ✅ | ✅ | ✅ | Before scaling down |
+| Stage2 | ✅ | ✅ | ✅ | ⏳ | Scaling down started; G-3 is selected for deletion in this example |
+| Stage3 | ✅ | ✅ | ✅ | | After scaling down |
 
 ## Role Scaling
 
@@ -53,17 +57,17 @@ When scaling is triggered, the status of the entire `ServingGroup` is set to sca
 
 After the replicas of pods meets expectations. Then update the status of the ServingGroup based on the status of all the pods in the `ServingGroup`.
 
-And because the pods in the role are carrying sequential and labeled. All scaling is processed from the last pod.
+Role instances also use deterministic ordinals. Within each `ServingGroup`, scale-up fills missing Role ordinals in `[0, role.replicas)` instead of appending after the maximum ordinal. A deleting Role reserves its ordinal until its Pods and Services are fully deleted, after which the ordinal can be reused. Scale-down uses readiness and deletion cost before the ordinal tie-breaker.
 
 ## Role Scaling Process
 
 Symbol meaning identical to [ServingGroup Scaling Process](#servinggroup-scaling-process)
 
-|        | G-0 | G-1 | G-2 | G-3 | Note                                                                          |
-|--------|-----|-----|-----|-----|-------------------------------------------------------------------------------|
-| Stage1 | ✅   | ✅   | ✅   | ✅   | Before scaling up/down                                                         |
-| Stage2 | ❎   | ❎   | ❎   | ⏳   | Scaling up/down started, The replica with the highest ordinal (G-3) is start. Creating/Deleting roles in the (G-3) |
-| Stage3 | ❎   | ❎   | ⏳   | ✅   | G-3 is scaled. The roles in next replica (G-2) is now scaling                    |
-| Stage4 | ❎   | ⏳   | ✅   | ✅   | G-2 is scaled. The roles in next replica (G-1) is now scaling                   |
-| Stage5 | ⏳   | ✅   | ✅   | ✅   | G-1 is scaled. The roles in last replica (G-0) is now scaling                   |
-| Stage6 | ✅   | ✅   | ✅   | ✅   | Scale completed.                         |
+| | G-0 | G-1 | G-2 | G-3 | Note |
+| --- | --- | --- | --- | --- | --- |
+| Stage1 | ✅ | ✅ | ✅ | ✅ | Before scaling up/down |
+| Stage2 | ⏳ | ❎ | ❎ | ❎ | Scaling has started for one ServingGroup |
+| Stage3 | ✅ | ⏳ | ❎ | ❎ | The next ServingGroup is scaling |
+| Stage4 | ✅ | ✅ | ⏳ | ❎ | Role replicas in the next ServingGroup are scaling |
+| Stage5 | ✅ | ✅ | ✅ | ⏳ | Role replicas in the final ServingGroup are scaling |
+| Stage6 | ✅ | ✅ | ✅ | ✅ | Scale completed |

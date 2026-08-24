@@ -18,7 +18,6 @@ package plugins
 
 import (
 	"math/rand"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -36,18 +35,11 @@ var _ framework.ScorePlugin = &Random{}
 // It is primarily intended for testing purposes to validate scheduler behavior with random pod selection.
 type Random struct {
 	name string
-	rng  *rand.Rand
 }
 
 func NewRandom(pluginArg runtime.RawExtension) *Random {
-	// Create a new random number generator with a time-based seed
-	// to ensure different random sequences across different instances
-	source := rand.NewSource(time.Now().UnixNano())
-	rng := rand.New(source)
-
 	return &Random{
 		name: RandomPluginName,
-		rng:  rng,
 	}
 }
 
@@ -57,15 +49,17 @@ func (r *Random) Name() string {
 
 // Score assigns random scores to pods within the range [0, 100]
 func (r *Random) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
-	scoreResults := make(map[*datastore.PodInfo]int)
+	scoreResults := make(map[*datastore.PodInfo]int, len(pods))
 
 	if len(pods) == 0 {
 		return scoreResults
 	}
 
-	// Assign random scores between 0 and 100 to each pod
+	// Assign random scores between 0 and 100 to each pod. The top-level rand
+	// functions are safe for concurrent use, unlike a shared *rand.Rand: the
+	// single plugin instance serves every request goroutine.
 	for _, pod := range pods {
-		score := r.rng.Intn(101) // Generate random number between 0-100 (inclusive)
+		score := rand.Intn(101) // Generate random number between 0-100 (inclusive)
 		scoreResults[pod] = score
 	}
 

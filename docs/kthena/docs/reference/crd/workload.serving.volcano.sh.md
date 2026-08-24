@@ -412,10 +412,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the name of the backend. Can't duplicate with other ModelBackend name in the same ModelBooster CR.<br />Note: update name will cause the old modelInfer deletion and a new modelInfer creation. |  | Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `name` _string_ | Name is the name of the backend. Can't duplicate with other ModelBackend name in the same ModelBooster CR.<br />Note: update name will cause the old ModelServing deletion and a new ModelServing creation. |  | Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
 | `type` _[ModelBackendType](#modelbackendtype)_ | Type is the type of the backend. |  | Enum: [vLLM vLLMDisaggregated] <br /> |
-| `modelURI` _string_ | ModelURI is the URI where you download the model. Support hf://, s3://, pvc://, ms://. |  | Pattern: `^(hf://\|s3://\|pvc://\|ms://).+` <br /> |
-| `cacheURI` _string_ | CacheURI is the URI where the downloaded model stored. Support hostpath://, pvc://. |  | Pattern: `^(hostpath://\|pvc://).+` <br /> |
+| `modelURI` _string_ | ModelURI is the source from which the model is fetched by the downloader init container.<br />Supported schemes:<br />  hf://NAMESPACE/REPO         — Hugging Face Hub repository<br />  ms://NAMESPACE/REPO         — ModelScope repository<br />  s3://BUCKET/PATH            — S3-compatible object storage<br />  obs://BUCKET/PATH           — Huawei Object Storage Service (OBS)<br />  pvc:///CLAIM_NAME/PATH      — path inside a PVC already mounted via CacheURI<br />When using pvc://, the downloader reads the given path from the container filesystem.<br />The downloader init container only mounts the volume specified by CacheURI, so the<br />modelURI path must be reachable through that mount.  Both CacheURI and modelURI must<br />reference the same PVC, and the modelURI path must start with the CacheURI mount point.<br />Example: CacheURI: pvc://model-storage, ModelURI: pvc:///model-storage/models/Qwen |  | Pattern: `^(hf://\|s3://\|obs://\|pvc://\|ms://).+` <br /> |
+| `cacheURI` _string_ | CacheURI specifies where the downloaded model is stored and how the storage volume is<br />mounted inside every pod (both the downloader init container and the inference engine).<br />Supported schemes:<br />  pvc://CLAIM_NAME    — PersistentVolumeClaim; the PVC is mounted at /CLAIM_NAME<br />  hostpath://PATH     — host-local directory; mounted at /PATH<br />  (empty)             — an ephemeral EmptyDir volume is used (no persistence)<br />The downloader writes model files under a hashed sub-directory of this mount path.<br />The inference engine reads from the same path.  When ModelURI uses pvc://, CacheURI<br />must also use pvc:// and reference the same PVC so the source path is visible. |  | Pattern: `^(hostpath://\|pvc://).+` <br /> |
 | `envFrom` _[EnvFromSource](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#envfromsource-v1-core) array_ | List of sources to populate environment variables in the container.<br />The keys defined within a source must be a C_IDENTIFIER. All invalid keys<br />will be reported as an event when the container is starting. When a key exists in multiple<br />sources, the value associated with the last source will take precedence.<br />Values defined by an Env with a duplicate key will take precedence.<br />Cannot be updated. |  |  |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#envvar-v1-core) array_ | List of environment variables to set in the container.<br />Supported names:<br />"ENDPOINT": When you download model from s3, you have to specify it.<br />"RUNTIME_URL": default is http://localhost:8000<br />"RUNTIME_PORT": default is 8100<br />"RUNTIME_METRICS_PATH": default is /metrics<br />"HF_ENDPOINT":The url of hugging face. Default is https://huggingface.co/<br />"KTHENA_SKIP_ENGINE_DEPENDENCY_INSTALL": default is false. When set to true, skip startup-time pip install of engine connector dependencies.<br />Cannot be updated. |  |  |
 | `replicas` _integer_ | Replicas is the fixed number of replicas for the backend. |  | Maximum: 1e+06 <br />Minimum: 0 <br /> |
@@ -577,8 +577,8 @@ _Appears in:_
 | `currentReplicas` _integer_ | CurrentReplicas is the number of ServingGroup created by the ModelServing controller from the ModelServing version |  |  |
 | `updatedReplicas` _integer_ | UpdatedReplicas track the number of ServingGroup that have been updated (ready or not). |  |  |
 | `availableReplicas` _integer_ | AvailableReplicas track the number of ServingGroup that are in ready state (updated or not). |  |  |
-| `currentRevision` _string_ | CurrentRevision, if not empty, indicates the ControllerRevision version used to generate<br />ServingGroups in the sequence [0,currentReplicas). |  |  |
-| `updateRevision` _string_ | UpdateRevision, if not empty, indicates the ControllerRevision version used to generate<br />ServingGroups in the sequence [replicas-updatedReplicas,replicas). |  |  |
+| `currentRevision` _string_ | CurrentRevision, if not empty, indicates the ControllerRevision version preserved by<br />ServingGroups that have not been updated. |  |  |
+| `updateRevision` _string_ | UpdateRevision, if not empty, indicates the ControllerRevision version targeted by<br />the current ModelServing spec. |  |  |
 | `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
 
 
@@ -763,8 +763,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the Prometheus metric name matched against labels in the pod's scraped output.<br />Defaults to the policy metric key when omitted.<br />For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series. |  |  |
-| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics |  |
-| `port` _integer_ | Port defines the network port where metrics are exposed by the pods (e.g., 8000). | 8100 |  |
+| `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics | Pattern: `^/` <br /> |
+| `port` _integer_ | Port defines the network port where metrics are exposed by the pods (e.g., 8000). | 8100 | Maximum: 65535 <br />Minimum: 1 <br /> |
 
 
 #### PodTemplateSpec
@@ -864,7 +864,8 @@ _Appears in:_
 | `entryTemplate` _[PodTemplateSpec](#podtemplatespec)_ | EntryTemplate defines the template for the entry pod of a role.<br />Required: Currently, a role must have only one entry-pod. |  |  |
 | `workerReplicas` _integer_ | WorkerReplicas defines the number for the worker pod of a role.<br />Required: Need to set the number of worker-pod replicas. |  |  |
 | `workerTemplate` _[PodTemplateSpec](#podtemplatespec)_ | WorkerTemplate defines the template for the worker pod of a role. |  |  |
-| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of replicas of this Role that can be<br />unavailable during a RoleRollingUpdate. Value can be an absolute number (ex: 2)<br />or a percentage of this Role's replicas (ex: 50%). Percentages are rounded down.<br />This field is only valid when rolloutStrategy.type is RoleRollingUpdate.<br />When unset, all outdated replicas of this Role are recreated at once. |  | XIntOrString: \{\} <br /> |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage (for example, 10%). A percentage is calculated from<br />ModelServing replicas for ServingGroupRollingUpdate and from the<br />corresponding Role's replicas for RoleRollingUpdate, then rounded down.<br />The value must not resolve to 0. Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
+| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition protects the first N existing replicas in ascending ordinal order<br />from updates. The remaining replicas are eligible for rolling update.<br />For a contiguous ordinal set, this is equivalent to protecting [0, Partition).<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
 #### RoleRatioConstraint
@@ -927,17 +928,19 @@ _Appears in:_
 
 
 
-RollingUpdateConfiguration defines the parameters to be used for ServingGroupRollingUpdate.
+RollingUpdateConfiguration defines availability and partition settings for
+the rollout granularity where it is configured.
 
 
 
 _Appears in:_
+- [Role](#role)
 - [RolloutStrategy](#rolloutstrategy)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | The maximum number of replicas that can be unavailable during the update.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).<br />Absolute number is calculated from percentage by rounding down.<br />This can not be 0.<br />By default, a fixed value of 1 is used. | 1 | XIntOrString: \{\} <br /> |
-| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition indicates the ordinal at which the ModelServing should be partitioned<br />for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to<br />Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage (for example, 10%). A percentage is calculated from<br />ModelServing replicas for ServingGroupRollingUpdate and from the<br />corresponding Role's replicas for RoleRollingUpdate, then rounded down.<br />The value must not resolve to 0. Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
+| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition protects the first N existing replicas in ascending ordinal order<br />from updates. The remaining replicas are eligible for rolling update.<br />For a contiguous ordinal set, this is equivalent to protecting [0, Partition).<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
 #### RolloutStrategy
@@ -954,8 +957,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type defines the rollout strategy. Supported values are<br />"ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,<br />it defaults to "ServingGroupRollingUpdate".<br />For `RoleRollingUpdate`, the `maxUnavailable` field in each Role will be used to determine the maximum number of role instances that can be unavailable during the update. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
-| `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration defines the parameters to be used when type is ServingGroupRollingUpdate.<br />optional |  |  |
+| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles do not take effect.<br />RoleRollingUpdate uses the rolling update configuration on each Role;<br />rolloutStrategy.rollingUpdateConfiguration must not be set.<br />Kthena performs RoleRollingUpdate across all ServingGroups at the same time.<br />Therefore, we recommend using it only in scenarios with a single ServingGroup. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
+| `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set when type is RoleRollingUpdate; configure maxUnavailable<br />and partition on each Role instead. |  |  |
 
 
 #### RolloutStrategyType
@@ -963,8 +966,9 @@ _Appears in:_
 _Underlying type:_ _string_
 
 RolloutStrategyType defines the strategy to use to update replicas.
-Note that if `recoveryPolicy` is set to `ServingGroupRecreate` and `rolloutStrategyType` is set to `RoleRollingUpdate`,
-the entire servingGroup will be deleted during a rolling update because the outdated role is removed.
+Note that if recoveryPolicy is ServingGroupRecreate and the rollout strategy
+is RoleRollingUpdate, deleting an outdated Role causes its entire ServingGroup
+to be recreated.
 
 
 

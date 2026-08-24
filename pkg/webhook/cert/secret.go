@@ -17,6 +17,7 @@ limitations under the License.
 package cert
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -121,8 +122,8 @@ func UpdateValidatingWebhookCABundle(ctx context.Context, kubeClient kubernetes.
 	// Update all webhooks with the CA bundle
 	updated := false
 	for i := range webhook.Webhooks {
-		// Only update if caBundle is empty (meaning it's using auto-generated certs)
-		if len(webhook.Webhooks[i].ClientConfig.CABundle) == 0 {
+		// Update if caBundle differs from desired CA (reconcile)
+		if !bytes.Equal(webhook.Webhooks[i].ClientConfig.CABundle, caBundle) {
 			webhook.Webhooks[i].ClientConfig.CABundle = caBundle
 			updated = true
 		}
@@ -158,8 +159,8 @@ func UpdateMutatingWebhookCABundle(ctx context.Context, kubeClient kubernetes.In
 	// Update all webhooks with the CA bundle
 	updated := false
 	for i := range webhook.Webhooks {
-		// Only update if caBundle is empty (meaning it's using auto-generated certs)
-		if len(webhook.Webhooks[i].ClientConfig.CABundle) == 0 {
+		// Update if caBundle differs from desired CA (reconcile)
+		if !bytes.Equal(webhook.Webhooks[i].ClientConfig.CABundle, caBundle) {
 			webhook.Webhooks[i].ClientConfig.CABundle = caBundle
 			updated = true
 		}

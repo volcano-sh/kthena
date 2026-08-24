@@ -17,3 +17,8 @@ hola:
   label: Hola
   permalink: /hola
   description: Hola tag description
+
+release:
+  label: Release
+  permalink: /release
+  description: Kthena release announcements

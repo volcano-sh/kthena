@@ -7,6 +7,7 @@ rules:
       - networking.serving.volcano.sh
     resources:
       - modelroutes
+      - externalmodelproviders
       - modelservers
     verbs:
       - create
@@ -20,6 +21,7 @@ rules:
       - networking.serving.volcano.sh
     resources:
       - modelroutes/status
+      - externalmodelproviders/status
       - modelservers/status
     verbs:
       - get
@@ -38,8 +40,6 @@ rules:
     resources:
       - secrets
     verbs:
-      - create
-      - get
       - list
       - watch
   - apiGroups:

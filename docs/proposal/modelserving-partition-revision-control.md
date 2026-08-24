@@ -28,12 +28,14 @@ documentation such as release notes or a development roadmap.
 A good summary is probably at least a paragraph in length.
 -->
 
-This proposal introduces partition-aware revision control for `ModelServing` scaling and rolling update operations. When a `partition` is configured in the rollout strategy, the system will intelligently fill missing ordinals within the partition range during scale-up operations and respect partition boundaries during rolling updates. This ensures that partition-protected replicas maintain their current revision while allowing controlled updates to replicas outside the partition range.
+This proposal introduces partition-aware revision control for `ModelServing` scaling and rolling update operations. Scale-up fills missing ordinals in `[0, replicas)` rather than appending after the maximum ordinal. During rolling updates, `partition` protects the first N existing replicas in ascending ordinal order. This ensures that protected replicas retain their current revision while allowing controlled updates to the remaining replicas.
 
 Key improvements:
-- **Scale-up with partition**: When partition is set, missing ordinals in `[0, partition)` are filled using `CurrentRevision` instead of always creating new replicas at the end.
-- **Rolling update with partition**: When partition is set, only replicas with `ordinal >= partition` are updated, protecting lower-ordinal replicas from updates.
-- **Revision management**: Proper creation of `ControllerRevision` and status updates (`UpdateRevision`) when scaling up with new revisions.
+
+- **Bounded ordinal allocation**: Newly created `ServingGroups` and Roles fill missing ordinals in `[0, replicas)`.
+- **Scale-up with partition**: A missing ordinal below `partition` is recreated using `CurrentRevision`; other missing ordinals use the new revision.
+- **Rolling update with partition**: The first N existing replicas in ascending ordinal order are protected, and the remaining replicas are eligible for update.
+- **Revision management**: A new `ControllerRevision` must be persisted before any `ServingGroup` is created with that revision.
 
 ### Motivation
 
@@ -44,9 +46,9 @@ this proposal.  Describe why the change is important and the benefits to users.
 
 In production environments, users often need to maintain a subset of replicas at a stable version while gradually rolling out updates to other replicas. The current implementation has limitations:
 
-1. **Scale-up gap issue**: When scaling up with partition set, if some replicas in `[0, partition)` are missing (e.g., due to deletion or failure), the system would create new replicas at the end (maxOrdinal + 1) instead of filling the gaps, breaking the partition semantics.
+1. **Scale-up gap issue**: Creating replicas at `maxOrdinal + 1` can leave gaps and create ordinals outside `[0, replicas)`, breaking deterministic recovery and partition semantics.
 
-2. **Rolling update boundary**: The rolling update logic needs to respect partition boundaries to ensure that replicas below the partition threshold are not updated.
+2. **Rolling update boundary**: The rolling update logic needs to protect the first N existing replicas even when a legacy or transient ordinal set is non-contiguous.
 
 3. **Revision tracking**: When scaling up with new revisions, proper `ControllerRevision` creation and status updates are needed to track the update state correctly.
 
@@ -57,10 +59,11 @@ List the specific goals of the proposal. What is it trying to achieve? How will 
 know that this has succeeded?
 -->
 
-- Support partition-aware scale-up that fills missing ordinals in `[0, partition)` using `CurrentRevision`.
-- Ensure rolling updates respect partition boundaries by only updating replicas with `ordinal >= partition`.
-- Properly create `ControllerRevision` and update `status.UpdateRevision` when scaling up with new revisions.
-- Maintain backward compatibility: when partition is not set, fall back to existing behavior.
+- Fill missing ServingGroup and Role ordinals in `[0, replicas)` during scale-up.
+- Recreate missing ordinals below `partition` using `CurrentRevision` and its historical template.
+- Ensure rolling updates protect the first N existing replicas in ascending ordinal order.
+- Persist `ControllerRevision` before creating resources that reference a new revision.
+- Keep deleting datastore records reserved until deletion is fully observed, then allow their ordinals to be reused.
 
 #### Non-Goals
 
@@ -69,7 +72,7 @@ What is out of scope for this proposal? Listing non-goals helps to focus discuss
 and make progress.
 -->
 
-- This proposal does not change the partition semantics itself, only how scaling and rolling updates interact with partitions.
+- This proposal does not proactively renumber legacy resources whose ordinals are already outside the desired range.
 
 ### Proposal
 
@@ -93,8 +96,9 @@ bogged down.
 
 ##### Story 1: Scale-up with Partition Gap Filling
 
-A user has a `ModelServing` with `partition=3` and `replicas=5`. Initially, replicas R-0, R-1, R-2 exist. After R-1 is deleted (e.g., due to node failure), the user scales up to `replicas=5`. With this proposal, the system will:
-1. Detect that R-1 is missing in `[0, 3)`
+A user has a `ModelServing` with `partition=3` and `replicas=5`. Initially, replicas R-0, R-1, R-2 exist. After deletion of R-1 and all of its resources is observed, the user scales up to `replicas=5`. With this proposal, the system will:
+
+1. Detect that R-1 is missing in `[0, 5)`
 2. Recreate R-1 using `CurrentRevision` (not the new revision)
 3. Then create R-3 and R-4 using the new revision
 
@@ -103,8 +107,9 @@ This ensures partition semantics are maintained: R-0, R-1, R-2 remain on the old
 ##### Story 2: Rolling Update with Partition Protection
 
 A user has a `ModelServing` with `partition=2` and 5 replicas (R-0 to R-4). When a rolling update is triggered:
-- R-0 and R-1 (ordinal < partition) are protected and remain on `CurrentRevision`
-- R-2, R-3, R-4 (ordinal >= partition) are updated to the new revision
+
+- R-0 and R-1, the first two existing replicas in ordinal order, are protected and remain on `CurrentRevision`
+- R-2, R-3, and R-4 are eligible for update to the new revision
 
 This allows gradual rollout while keeping critical low-ordinal replicas stable.
 
@@ -116,7 +121,6 @@ What are some important details that didn't come across above?
 Go in to as much detail as necessary here.
 This might be a good place to talk about core concepts and how they relate.
 -->
-
 
 #### Risks and Mitigations
 
@@ -145,36 +149,28 @@ In `scaleUpServingGroups`, the logic is enhanced as follows:
 
 1. **Detect partition value**: Read from `ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition`.
 
-2. **Fill missing ordinals in partition range**: If `partition > 0`, iterate through `[0, partition)` and create missing `ServingGroups` using `CurrentRevision`:
-   - Use `CurrentRevision` from `ms.Status.CurrentRevision` if available
-   - Retrieve template from `ControllerRevision` if it exists, otherwise use `ms.Spec.Template.Roles`
-   - This ensures partition-protected replicas maintain their revision even when recreated
+2. **Find bounded missing ordinals**: Read all datastore records, including records in `Deleting`, and find the ordinals missing from `[0, expectedCount)` in ascending order. A deleting record continues to reserve its ordinal until all child resources are gone and its datastore entry is removed.
 
-3. **Create new replicas beyond partition**: After filling partition gaps, create additional replicas starting from `maxOrdinal + 1` using the new revision:
-   - Create `ControllerRevision` for the new revision
-   - Update `status.UpdateRevision` to track the new revision being applied
+3. **Select revision and template**: For each missing ordinal:
+    - If `ordinal < partition`, use `CurrentRevision` from `ms.Status.CurrentRevision` when available and retrieve its template from `ControllerRevision`
+    - Otherwise, use the new revision and the current template
+    - This ensures a protected identity maintains its revision when recreated
 
-4. **Fallback behavior**: If `partition` is not set or `partition=0`, use the original logic (create replicas from `maxOrdinal + 1`).
+4. **Persist the new template snapshot**: Before creating the first `ServingGroup` that references the new revision, create its `ControllerRevision`. If this fails, stop reconciliation before creating Pods or datastore state and let the workqueue retry. The snapshot is created lazily because a reconciliation that only restores protected ordinals does not need a new one.
+
+5. **Do not rewrite history during deletion**: Deleting a `ServingGroup` must not create or overwrite a `ControllerRevision` with the current mutable template.
 
 ```go
-if partition > 0 {
-    // Fill missing ordinals in [0, partition) using CurrentRevision
-    for ordinal := 0; ordinal < partition && ordinal < expectedCount; ordinal++ {
-        if !existingOrdinals[ordinal] {
-            revisionToUse := ms.Status.CurrentRevision
-            // Create ServingGroup with CurrentRevision
-            createServingGroup(ordinal, revisionToUse, rolesFromRevision)
-        }
+forEachMissingOrdinal(expectedCount, existingOrdinals, toCreate, func(ordinal int) bool {
+    if ordinal < partition {
+        return createServingGroup(ordinal, currentRevision, rolesFromRevision) == nil
     }
-}
 
-// Create new ServingGroups beyond partition with newRevision
-if toCreate > 0 {
-    createControllerRevision(newRevision)
-    for i := maxOrdinal + 1; i < maxOrdinal + 1 + toCreate; i++ {
-        createServingGroup(i, newRevision, ms.Spec.Template.Roles)
+    if err := ensureControllerRevision(newRevision); err != nil {
+        return false
     }
-}
+    return createServingGroup(ordinal, newRevision, ms.Spec.Template.Roles) == nil
+})
 ```
 
 #### Rolling Update Logic with Partition Support
@@ -184,29 +180,17 @@ In `manageServingGroupRollingUpdate`, the logic is enhanced as follows:
 1. **Detect partition value**: Read from `ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition`.
 
 2. **Partition-aware deletion**: If `partition > 0`:
-   - Iterate through `servingGroupList` in reverse order (highest ordinal first)
-   - Skip replicas with `ordinal < partition` (protected)
-   - Delete replicas with `ordinal >= partition` that are outdated
-   - Stop when reaching protected replicas (`ordinal < partition`)
+    - Treat the first `partition` entries in the ordinal-sorted datastore list as protected
+    - Consider outdated replicas after that protected prefix for deletion
+    - Apply readiness and availability budgets before selecting a replica
 
-3. **Fallback behavior**: If `partition` is not set, use the original logic (update from highest ordinal downward).
+3. **Fallback behavior**: If `partition` is not set, no existing replica is protected by partition.
 
 ```go
-if partition > 0 {
-    // Delete ServingGroups with ordinal >= partition
-    for i := len(servingGroupList) - 1; i >= 0; i-- {
-        _, ordinal := getOrdinal(servingGroupList[i].Name)
-        if ordinal < partition {
-            break // Skip partition-protected ServingGroups
-        }
-        if isOutdated(servingGroupList[i], revision) {
-            deleteServingGroup(servingGroupList[i].Name)
-            return
-        }
-    }
-} else {
-    // Original behavior: update from highest ordinal
-    // ...
+protected := servingGroupList[:min(partition, len(servingGroupList))]
+eligible := servingGroupList[len(protected):]
+for _, group := range selectOutdatedWithinBudget(eligible) {
+    deleteServingGroup(group.Name)
 }
 ```
 
@@ -217,33 +201,36 @@ The following example demonstrates how partition gap filling works during scale-
 **Scenario**: `ModelServing` with `partition=3`, `replicas=5`. Initially, R-0, R-1, R-2 exist. R-1 is deleted, then scale-up to `replicas=5` is triggered.
 
 **Before modification (original behavior)**:
+
 - Missing ordinals in `[0, partition)` are not filled
 - New replicas are created at the end (maxOrdinal + 1)
 - Partition semantics are broken
 
-|        | R-0 | R-1 | R-2 | R-3 | R-4 | Note                                                                          |
-|--------|-----|-----|-----|-----|-----|-------------------------------------------------------------------------------|
-| Stage1 | ✅   | ✅   | ✅   | | | Initial state (partition=3) |
-| Stage2 | ✅   | | ✅   | | | R-1 deleted (e.g., node failure) |
-| Stage3 | ✅   | | ✅   | ⏳ | | Scale up to 5 replicas. R-3 created (maxOrdinal + 1) |
-| Stage4 | ✅   | | ✅   | ✅   | ⏳ | R-4 created |
-| Stage5 | ✅   | | ✅   | ✅   | ✅ | Scale-up complete, but R-1 gap remains |
+| | R-0 | R-1 | R-2 | R-3 | R-4 | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| Stage1 | ✅ | ✅ | ✅ | | | Initial state (partition=3) |
+| Stage2 | ✅ | | ✅ | | | R-1 deleted (e.g., node failure) |
+| Stage3 | ✅ | | ✅ | ⏳ | | Scale up to 5 replicas. R-3 created (maxOrdinal + 1) |
+| Stage4 | ✅ | | ✅ | ✅ | ⏳ | R-4 created |
+| Stage5 | ✅ | | ✅ | ✅ | ✅ | Scale-up complete, but R-1 gap remains |
 
 **After modification (partition-aware)**:
-- Missing ordinals in `[0, partition)` are filled first using `CurrentRevision`
-- Then new replicas are created beyond partition using new revision
+
+- Missing ordinals are selected in ascending order from `[0, replicas)`
+- A selected ordinal below `partition` uses `CurrentRevision`; a selected ordinal at or above `partition` uses the new revision
 - Partition semantics are maintained
 
-|        | R-0 | R-1 | R-2 | R-3 | R-4 | Note                                                                          |
-|--------|-----|-----|-----|-----|-----|-------------------------------------------------------------------------------|
-| Stage1 | ✅   | ✅   | ✅   | | | Initial state (partition=3) |
-| Stage2 | ✅   | | ✅   | | | R-1 deleted (e.g., node failure) |
-| Stage3 | ✅   | ⏳   | ✅   | | | Scale up to 5 replicas. First fill gap: R-1 recreated with CurrentRevision |
-| Stage4 | ✅   | ✅   | ✅   | ⏳ | | After R-1 recreated. Now create R-3 with new revision |
-| Stage5 | ✅   | ✅   | ✅   | ✅   | ⏳ | After R-3 created. Now create R-4 with new revision |
-| Stage6 | ✅   | ✅   | ✅   | ✅   | ✅ | Scale-up complete. R-0, R-1, R-2 on CurrentRevision; R-3, R-4 on new revision |
+| | R-0 | R-1 | R-2 | R-3 | R-4 | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| Stage1 | ✅ | ✅ | ✅ | | | Initial state (partition=3) |
+| Stage2 | ✅ | | ✅ | | | R-1 deleted (e.g., node failure) |
+| Stage3 | ✅ | ⏳ | ✅ | | | Scale up to 5 replicas. First fill gap: R-1 recreated with CurrentRevision |
+| Stage4 | ✅ | ✅ | ✅ | ⏳ | | After R-1 recreated. Now create R-3 with new revision |
+| Stage5 | ✅ | ✅ | ✅ | ✅ | ⏳ | After R-3 created. Now create R-4 with new revision |
+| Stage6 | ✅ | ✅ | ✅ | ✅ | ✅ | Scale-up complete. R-0, R-1, R-2 on CurrentRevision; R-3, R-4 on new revision |
 
 **Legend**:
+
 - ✅ Replica exists and running
 - ⏳ Replica is being created
 - (empty) Replica does not exist
@@ -263,7 +250,6 @@ challenging to test, should be called out.
 
 -->
 
-
 ### Alternatives
 
 <!--
@@ -271,7 +257,6 @@ What other approaches did you consider, and why did you rule them out? These do
 not need to be as detailed as the proposal, but should include enough
 information to express the idea and why it was not acceptable.
 -->
-
 
 <!--
 Note: This is a simplified version of kubernetes enhancement proposal template.

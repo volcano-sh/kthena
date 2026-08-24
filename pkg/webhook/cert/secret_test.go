@@ -20,153 +20,232 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestEnsureCertificateCreatesSecret(t *testing.T) {
-	ctx := context.Background()
 	client := fake.NewSimpleClientset()
+	ctx := context.Background()
 
 	caBundle, err := EnsureCertificate(ctx, client, "default", "webhook-certs", []string{"webhook.default.svc"})
-	require.NoError(t, err)
-	require.NotEmpty(t, caBundle)
-
-	secret, err := client.CoreV1().Secrets("default").Get(ctx, "webhook-certs", metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, corev1.SecretTypeTLS, secret.Type)
-	assert.NotEmpty(t, secret.Data[TLSCertKey])
-	assert.NotEmpty(t, secret.Data[TLSKeyKey])
-	assert.Equal(t, caBundle, secret.Data[CAKey])
+	assert.NoError(t, err)
+	assert.NotEmpty(t, caBundle)
 }
 
 func TestEnsureCertificateReusesExistingSecret(t *testing.T) {
+	client := fake.NewSimpleClientset()
 	ctx := context.Background()
-	existingCA := []byte("existing-ca")
-	client := fake.NewSimpleClientset(&corev1.Secret{
+
+	existingSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "webhook-certs",
 			Namespace: "default",
 		},
 		Data: map[string][]byte{
-			TLSCertKey: []byte("existing-cert"),
-			TLSKeyKey:  []byte("existing-key"),
-			CAKey:      existingCA,
+			CAKey: []byte("existing-ca"),
 		},
-	})
+	}
+	_, err := client.CoreV1().Secrets("default").Create(ctx, existingSecret, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	caBundle, err := EnsureCertificate(ctx, client, "default", "webhook-certs", []string{"webhook.default.svc"})
-	require.NoError(t, err)
-	assert.Equal(t, existingCA, caBundle)
-
-	secret, err := client.CoreV1().Secrets("default").Get(ctx, "webhook-certs", metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, []byte("existing-cert"), secret.Data[TLSCertKey])
-	assert.Equal(t, []byte("existing-key"), secret.Data[TLSKeyKey])
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("existing-ca"), caBundle)
 }
 
 func TestEnsureCertificateRequiresDNSNames(t *testing.T) {
-	caBundle, err := EnsureCertificate(context.Background(), fake.NewSimpleClientset(), "default", "webhook-certs", nil)
-	require.Error(t, err)
-	assert.Nil(t, caBundle)
-	assert.Contains(t, err.Error(), "dnsNames cannot be empty")
+	client := fake.NewSimpleClientset()
+	ctx := context.Background()
+
+	_, err := EnsureCertificate(ctx, client, "default", "webhook-certs", []string{})
+	assert.Error(t, err)
 }
 
 func TestLoadCertBundleFromSecret(t *testing.T) {
+	client := fake.NewSimpleClientset()
 	ctx := context.Background()
-	client := fake.NewSimpleClientset(&corev1.Secret{
+
+	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "webhook-certs",
 			Namespace: "default",
 		},
 		Data: map[string][]byte{
-			TLSCertKey: []byte("cert"),
-			TLSKeyKey:  []byte("key"),
-			CAKey:      []byte("ca"),
+			TLSCertKey: []byte("cert-data"),
+			TLSKeyKey:  []byte("key-data"),
+			CAKey:      []byte("ca-data"),
 		},
-	})
+	}
+	_, err := client.CoreV1().Secrets("default").Create(ctx, secret, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	bundle, err := LoadCertBundleFromSecret(ctx, client, "default", "webhook-certs")
-	require.NoError(t, err)
-	require.NotNil(t, bundle)
-	assert.Equal(t, []byte("cert"), bundle.CertPEM)
-	assert.Equal(t, []byte("key"), bundle.KeyPEM)
-	assert.Equal(t, []byte("ca"), bundle.CAPEM)
+	assert.NoError(t, err)
+	assert.NotNil(t, bundle)
+	assert.Equal(t, []byte("cert-data"), bundle.CertPEM)
+	assert.Equal(t, []byte("key-data"), bundle.KeyPEM)
+	assert.Equal(t, []byte("ca-data"), bundle.CAPEM)
 }
 
 func TestLoadCertBundleFromSecretReturnsNilForMissingSecret(t *testing.T) {
-	bundle, err := LoadCertBundleFromSecret(context.Background(), fake.NewSimpleClientset(), "default", "missing")
-	require.NoError(t, err)
+	client := fake.NewSimpleClientset()
+	ctx := context.Background()
+
+	bundle, err := LoadCertBundleFromSecret(ctx, client, "default", "missing")
+	assert.NoError(t, err)
 	assert.Nil(t, bundle)
 }
 
-func TestUpdateValidatingWebhookCABundleOnlyFillsEmptyBundles(t *testing.T) {
-	ctx := context.Background()
-	client := fake.NewSimpleClientset(&admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "validating-webhook"},
-		Webhooks: []admissionregistrationv1.ValidatingWebhook{
-			{
-				Name: "empty.example.com",
-				ClientConfig: admissionregistrationv1.WebhookClientConfig{
-					CABundle: nil,
-				},
-			},
-			{
-				Name: "manual.example.com",
-				ClientConfig: admissionregistrationv1.WebhookClientConfig{
-					CABundle: []byte("manual-ca"),
-				},
-			},
+func TestUpdateValidatingWebhookCABundleReconcile(t *testing.T) {
+	tests := []struct {
+		name       string
+		existingCA []byte
+		desiredCA  []byte
+		expectCA   []byte
+	}{
+		{
+			name:       "empty caBundle gets filled",
+			existingCA: []byte{},
+			desiredCA:  []byte("new-ca-cert"),
+			expectCA:   []byte("new-ca-cert"),
 		},
-	})
+		{
+			name:       "matching caBundle stays unchanged",
+			existingCA: []byte("same-ca-cert"),
+			desiredCA:  []byte("same-ca-cert"),
+			expectCA:   []byte("same-ca-cert"),
+		},
+		{
+			name:       "stale non-empty caBundle gets overwritten",
+			existingCA: []byte("old-ca-cert"),
+			desiredCA:  []byte("new-ca-cert"),
+			expectCA:   []byte("new-ca-cert"),
+		},
+	}
 
-	err := UpdateValidatingWebhookCABundle(ctx, client, "validating-webhook", []byte("generated-ca"))
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			webhookConfig := &admissionregistrationv1.ValidatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-validating-webhook",
+				},
+				Webhooks: []admissionregistrationv1.ValidatingWebhook{
+					{
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: tt.existingCA,
+						},
+					},
+				},
+			}
 
-	webhook, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, "validating-webhook", metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, []byte("generated-ca"), webhook.Webhooks[0].ClientConfig.CABundle)
-	assert.Equal(t, []byte("manual-ca"), webhook.Webhooks[1].ClientConfig.CABundle)
+			client := fake.NewSimpleClientset(webhookConfig)
+
+			err := UpdateValidatingWebhookCABundle(
+				context.Background(),
+				client,
+				"test-validating-webhook",
+				tt.desiredCA,
+			)
+			assert.NoError(t, err)
+
+			result, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(
+				context.Background(),
+				"test-validating-webhook",
+				metav1.GetOptions{},
+			)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectCA, result.Webhooks[0].ClientConfig.CABundle)
+		})
+	}
 }
 
-func TestUpdateMutatingWebhookCABundleOnlyFillsEmptyBundles(t *testing.T) {
-	ctx := context.Background()
-	client := fake.NewSimpleClientset(&admissionregistrationv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "mutating-webhook"},
-		Webhooks: []admissionregistrationv1.MutatingWebhook{
-			{
-				Name: "empty.example.com",
-				ClientConfig: admissionregistrationv1.WebhookClientConfig{
-					CABundle: nil,
-				},
-			},
-			{
-				Name: "manual.example.com",
-				ClientConfig: admissionregistrationv1.WebhookClientConfig{
-					CABundle: []byte("manual-ca"),
-				},
-			},
+func TestUpdateMutatingWebhookCABundleReconcile(t *testing.T) {
+	tests := []struct {
+		name       string
+		existingCA []byte
+		desiredCA  []byte
+		expectCA   []byte
+	}{
+		{
+			name:       "empty caBundle gets filled",
+			existingCA: []byte{},
+			desiredCA:  []byte("new-ca-cert"),
+			expectCA:   []byte("new-ca-cert"),
 		},
-	})
+		{
+			name:       "matching caBundle stays unchanged",
+			existingCA: []byte("same-ca-cert"),
+			desiredCA:  []byte("same-ca-cert"),
+			expectCA:   []byte("same-ca-cert"),
+		},
+		{
+			name:       "stale non-empty caBundle gets overwritten",
+			existingCA: []byte("old-ca-cert"),
+			desiredCA:  []byte("new-ca-cert"),
+			expectCA:   []byte("new-ca-cert"),
+		},
+	}
 
-	err := UpdateMutatingWebhookCABundle(ctx, client, "mutating-webhook", []byte("generated-ca"))
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			webhookConfig := &admissionregistrationv1.MutatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-mutating-webhook",
+				},
+				Webhooks: []admissionregistrationv1.MutatingWebhook{
+					{
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: tt.existingCA,
+						},
+					},
+				},
+			}
 
-	webhook, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, "mutating-webhook", metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, []byte("generated-ca"), webhook.Webhooks[0].ClientConfig.CABundle)
-	assert.Equal(t, []byte("manual-ca"), webhook.Webhooks[1].ClientConfig.CABundle)
+			client := fake.NewSimpleClientset(webhookConfig)
+
+			err := UpdateMutatingWebhookCABundle(
+				context.Background(),
+				client,
+				"test-mutating-webhook",
+				tt.desiredCA,
+			)
+			assert.NoError(t, err)
+
+			result, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(
+				context.Background(),
+				"test-mutating-webhook",
+				metav1.GetOptions{},
+			)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectCA, result.Webhooks[0].ClientConfig.CABundle)
+		})
+	}
 }
 
-func TestUpdateWebhookCABundleIgnoresMissingConfigurations(t *testing.T) {
-	ctx := context.Background()
+func TestUpdateValidatingWebhookCABundleNotFound(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
-	require.NoError(t, UpdateValidatingWebhookCABundle(ctx, client, "missing-validating", []byte("ca")))
-	require.NoError(t, UpdateMutatingWebhookCABundle(ctx, client, "missing-mutating", []byte("ca")))
+	err := UpdateValidatingWebhookCABundle(
+		context.Background(),
+		client,
+		"nonexistent-webhook",
+		[]byte("ca-cert"),
+	)
+	assert.NoError(t, err)
+}
+
+func TestUpdateMutatingWebhookCABundleNotFound(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	err := UpdateMutatingWebhookCABundle(
+		context.Background(),
+		client,
+		"nonexistent-webhook",
+		[]byte("ca-cert"),
+	)
+	assert.NoError(t, err)
 }

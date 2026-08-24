@@ -19,7 +19,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Getting Started',
-      items: ['getting-started/installation', 'getting-started/quick-start'],
+      items: ['getting-started/installation', 'getting-started/quick-start', 'getting-started/gpu-free-quick-start'],
     },
     {
       type: 'category',
@@ -57,7 +57,6 @@ const sidebars: SidebarsConfig = {
           ],
         },
         'user-guide/multi-node-inference',
-        'user-guide/network-topology',
         {
           type: 'doc',
           label: 'Autoscaler',
@@ -65,7 +64,7 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: 'category',
-          label: 'workload',
+          label: 'Workload',
           items: [
             'user-guide/binpack-scale-down',
             'user-guide/gang-scheduling',
@@ -94,7 +93,6 @@ const sidebars: SidebarsConfig = {
           ],
         },
         'user-guide/runtime',
-        'user-guide/binpack-scale-down',
         {
           type: 'category',
           label: 'Prefill Decode Disaggregation',
@@ -105,7 +103,8 @@ const sidebars: SidebarsConfig = {
           items: [
             'user-guide/prefill-decode-disaggregation/vllm-ascend-mooncake',
             'user-guide/prefill-decode-disaggregation/sglang-pd-disaggregation',
-            'user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation',
+            'user-guide/prefill-decode-disaggregation/modelserving-vllm-pd-disaggregation',
+            'user-guide/prefill-decode-disaggregation/modelbooster-vllm-pd-disaggregation',
           ],
         },
       ],

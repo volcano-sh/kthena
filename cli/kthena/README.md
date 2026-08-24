@@ -24,7 +24,7 @@ package "kthena CLI" {
     
     rectangle "Kubernetes Resources" as KubernetesResources {
        usecase "Model(s)" as ModelResource
-       usecase "ModelInfer(s)" as ModelInferResource
+       usecase "ModelServing(s)" as ModelServingResource
        usecase "Policy(s)" as PolicyResource
        usecase "PolicyBinding(s)" as PolicyBindingResource
     }
@@ -60,7 +60,7 @@ end note
 
 ' layout
 GetVerb -[hidden]-> ModelResource
-GetVerb -[hidden]-> ModelInferResource
+GetVerb -[hidden]-> ModelServingResource
 GetVerb -[hidden]-> PolicyResource
 GetVerb -[hidden]-> PolicyBindingResource
 
@@ -167,7 +167,7 @@ The CLI uses your local kubectl configuration. Ensure you have:
 
 To add new manifest templates:
 
-1. Create a new `.yaml` file in the `templates/` directory
+1. Create a new `.yaml` file under `helm/templates/<vendor>/` (templates are embedded into the binary at build time, so rebuild the CLI to pick it up)
 2. Use Go template syntax with variables: `{{.variable_name}}`
 3. Add a description comment at the top: `# Description: Your template description`
 4. Test with `kthena describe template your-template`
@@ -178,7 +178,7 @@ Example template structure:
 # Variables: var1, var2, var3
 ---
 apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ModelInfer
+kind: ModelServing
 metadata:
   name: {{.name}}
   namespace: {{.namespace}}

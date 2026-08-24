@@ -55,7 +55,7 @@ func NewHTTPRouteController(
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
-) *HTTPRouteController {
+) (*HTTPRouteController, error) {
 	httpRouteInformer := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
 	namespaceInformer := kubeInformerFactory.Core().V1().Namespaces()
@@ -71,11 +71,15 @@ func NewHTTPRouteController(
 		store:           store,
 	}
 
-	controller.registration, _ = httpRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	var err error
+	controller.registration, err = httpRouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueHTTPRoute,
 		UpdateFunc: func(old, new interface{}) { controller.enqueueHTTPRoute(new) },
 		DeleteFunc: controller.enqueueHTTPRoute,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add event handler for httproute controller: %w", err)
+	}
 
 	gatewayFilter := &cache.FilteringResourceEventHandler{
 		FilterFunc: func(obj interface{}) bool {
@@ -93,15 +97,19 @@ func NewHTTPRouteController(
 			},
 		},
 	}
-	_, _ = gatewayInformer.Informer().AddEventHandler(gatewayFilter)
+	if _, err = gatewayInformer.Informer().AddEventHandler(gatewayFilter); err != nil {
+		return nil, fmt.Errorf("failed to add gateway event handler for httproute controller: %w", err)
+	}
 
-	_, _ = namespaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err = namespaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueHTTPRoutesForNamespace,
 		UpdateFunc: func(_, new interface{}) { controller.enqueueHTTPRoutesForNamespace(new) },
 		DeleteFunc: controller.enqueueHTTPRoutesForNamespace,
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("failed to add namespace event handler for httproute controller: %w", err)
+	}
 
-	return controller
+	return controller, nil
 }
 
 func (c *HTTPRouteController) Run(stopCh <-chan struct{}) error {
@@ -179,8 +187,9 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	}
 
 	// Only process HTTPRoutes that reference kthena-router GatewayClass
-	// Check all parentRefs - process immediately if any matches, retry only if no match and a Gateway is pending
+	// Check all parentRefs and keep the listeners that accept the route
 	var gatewayPending bool
+	var acceptedParentRefs []gatewayv1.ParentReference
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
 		if !isGatewayParentRef(parentRef) {
 			continue
@@ -192,20 +201,25 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 		gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, string(parentRef.Name))
 		gw := c.store.GetGateway(gatewayKey)
 		if gw == nil {
-			if _, err := c.gatewayLister.Gateways(gatewayNamespace).Get(string(parentRef.Name)); err == nil {
+			informerGateway, err := c.gatewayLister.Gateways(gatewayNamespace).Get(string(parentRef.Name))
+			if err != nil {
 				gatewayPending = true
+				continue
 			}
-			continue
+			gw = informerGateway
 		}
 		if string(gw.Spec.GatewayClassName) == DefaultGatewayClassName {
-			allowed, err := c.gatewayAllowsHTTPRoute(gw, httpRoute, parentRef)
+			parentRefs, err := c.acceptedGatewayParentRefs(gw, httpRoute, parentRef)
 			if err != nil {
 				return err
 			}
-			if allowed {
-				return c.store.AddOrUpdateHTTPRoute(httpRoute)
-			}
+			acceptedParentRefs = append(acceptedParentRefs, parentRefs...)
 		}
+	}
+	if len(acceptedParentRefs) > 0 {
+		storedRoute := httpRoute.DeepCopy()
+		storedRoute.Spec.ParentRefs = acceptedParentRefs
+		return c.store.AddOrUpdateHTTPRoute(storedRoute)
 	}
 	if gatewayPending {
 		return fmt.Errorf("gateway not synced yet")
@@ -258,7 +272,8 @@ func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
 	return parentRef.Kind == nil || *parentRef.Kind == "Gateway"
 }
 
-func (c *HTTPRouteController) gatewayAllowsHTTPRoute(gw *gatewayv1.Gateway, httpRoute *gatewayv1.HTTPRoute, parentRef gatewayv1.ParentReference) (bool, error) {
+func (c *HTTPRouteController) acceptedGatewayParentRefs(gw *gatewayv1.Gateway, httpRoute *gatewayv1.HTTPRoute, parentRef gatewayv1.ParentReference) ([]gatewayv1.ParentReference, error) {
+	var acceptedParentRefs []gatewayv1.ParentReference
 	for _, listener := range gw.Spec.Listeners {
 		if !parentRefSelectsListener(parentRef, listener) {
 			continue
@@ -268,13 +283,18 @@ func (c *HTTPRouteController) gatewayAllowsHTTPRoute(gw *gatewayv1.Gateway, http
 		}
 		allowed, err := c.listenerAllowsRouteNamespace(listener, gw.Namespace, httpRoute.Namespace)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		if allowed {
-			return true, nil
+			acceptedParentRef := parentRef
+			sectionName := listener.Name
+			port := listener.Port
+			acceptedParentRef.SectionName = &sectionName
+			acceptedParentRef.Port = &port
+			acceptedParentRefs = append(acceptedParentRefs, acceptedParentRef)
 		}
 	}
-	return false, nil
+	return acceptedParentRefs, nil
 }
 
 func parentRefSelectsListener(parentRef gatewayv1.ParentReference, listener gatewayv1.Listener) bool {

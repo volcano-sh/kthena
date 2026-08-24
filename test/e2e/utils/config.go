@@ -25,25 +25,19 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/volcano-sh/kthena/pkg/kube"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	lwsclientset "sigs.k8s.io/lws/client-go/clientset/versioned"
 )
 
 // GetKubeConfig returns a Kubernetes REST config.
-// It tries in-cluster config first, then falls back to kubeconfig file.
+// It tries in-cluster config first, then falls back to the kubeconfig
+// chain: the KUBECONFIG path list first, then ~/.kube/config.
 func GetKubeConfig() (*rest.Config, error) {
-	// Try in-cluster config first
-	config, err := rest.InClusterConfig()
-	if err == nil {
-		return config, nil
-	}
-
-	// Fall back to kubeconfig
-	return clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+	return kube.BuildConfig("", "")
 }
 
 // GetKubeClient returns a Kubernetes clientset.

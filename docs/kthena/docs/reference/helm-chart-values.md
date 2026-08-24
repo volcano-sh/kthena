@@ -18,6 +18,9 @@ A Helm chart for deploying Kthena
 | global.certManagementMode | string | `"auto"` | Certificate Management Mode.<br/>  Three mutually exclusive options for managing TLS certificates:<br/>  - `auto`: Webhook servers generate self-signed certificates automatically.<br/>  - `cert-manager`: Use cert-manager to generate and manage certificates (requires cert-manager installation).<br/>  - `manual`: Provide your own certificates via caBundle. |
 | global.webhook.caBundle | string | `""` | CA bundle for webhook server certificates (base64-encoded).<br/> This is ONLY required when `certManagementMode` is set to "manual".<br/> You can generate it with: `cat /path/to/your/ca.crt | base64 | tr -d '\n'`<br/> |
 | networking.enabled | bool | `true` | Enable the networking subchart. |
+| networking.kthenaRouter.accessLog.enabled | bool | `true` | Enable router access logging. |
+| networking.kthenaRouter.accessLog.format | string | `"text"` | Access-log format. Supported values are `text` and `json`. |
+| networking.kthenaRouter.accessLog.output | string | `"stdout"` | Access-log destination: `stdout`, `stderr`, or a file path. |
 | networking.kthenaRouter.debugPort | int | `15000` | Debug server port for Kthena Router (localhost only). |
 | networking.kthenaRouter.drainTimeout | string | `"5m"` | This should be less than terminationGracePeriodSeconds. |
 | networking.kthenaRouter.enabled | bool | `true` | Enable Kthena Router. |
@@ -31,12 +34,17 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for Kthena Router. |
 | networking.kthenaRouter.image.repository | string | `"ghcr.io/volcano-sh/kthena-router"` | Image repository for Kthena Router. |
 | networking.kthenaRouter.image.tag | string | `"latest"` | Image tag for Kthena Router. |
+| networking.kthenaRouter.metrics.exposeOnRouterPort | bool | `false` | Also expose /metrics on the public inference listener. Enable only for legacy compatibility. |
+| networking.kthenaRouter.metrics.port | int | `9090` | Internal Prometheus metrics port for Kthena Router. |
 | networking.kthenaRouter.port | int | `8080` | Container port for Kthena Router. |
+| networking.kthenaRouter.replicas | int | `1` | Number of Kthena Router instances to run. |
+| networking.kthenaRouter.service.type | string | `"LoadBalancer"` | Kubernetes Service type used to expose Kthena Router. |
 | networking.kthenaRouter.sessionBoost.enabled | bool | `false` | Enable session-boost scheduling. Mutually exclusive with fairness. |
 | networking.kthenaRouter.sessionBoost.gracePeriod | string | `"0s"` | Wait time after a request completes for a same-session follow-up.<br/> Disabled by default (`0s`). |
 | networking.kthenaRouter.sessionBoost.header | string | `"X-Session-ID"` | HTTP header used to identify conversation sessions. |
 | networking.kthenaRouter.sessionBoost.inflightPerPod | int | `16` | Maximum inflight requests admitted per backend pod.<br/> Total inflight limit is this value times the number of backend pods.<br/> `0` or unset uses the router default (16). |
 | networking.kthenaRouter.sessionBoost.maxSessions | int | `4096` | Maximum number of recently-completed sessions kept warm for boosting.<br/> Bounds an LRU cache; the least-recently-used session is evicted automatically.<br/> Size it by the number of concurrent conversations to keep boosted. |
+| networking.kthenaRouter.sessionBoost.timeout | string | `"30s"` | Maximum time a request may wait in the session-boost queue before it is<br/> rejected with HTTP 504. Defaults to `30s`; set a non-positive duration<br/> (e.g. `0s`) to disable it (bounded only by client disconnect). |
 | networking.kthenaRouter.terminationGracePeriodSeconds | int | `330` | The router will drain all in-flight requests before forcefully closing connections. |
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |
@@ -47,12 +55,14 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.webhook.tls.certFile | string | `"/etc/tls/tls.crt"` | Certificate file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.keyFile | string | `"/etc/tls/tls.key"` | Key file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.secretName | string | `"kthena-router-webhook-certs"` | Secret name for storing webhook certificates. |
+| workload.controllerManager.autoscalingSyncPeriodSeconds | int | `0` | Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 uses the binary default (15). |
 | workload.controllerManager.debugPort | int | `0` | Debug server port for Controller Manager (set 0 to disable). |
 | workload.controllerManager.downloaderImage.repository | string | `"ghcr.io/volcano-sh/downloader"` | Image repository for the Downloader. |
 | workload.controllerManager.downloaderImage.tag | string | `"latest"` | Image tag for the Downloader. |
 | workload.controllerManager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the Controller Manager. |
 | workload.controllerManager.image.repository | string | `"ghcr.io/volcano-sh/kthena-controller-manager"` | Image repository for the Controller Manager. |
 | workload.controllerManager.image.tag | string | `"latest"` | Image tag for the Controller Manager. |
+| workload.controllerManager.replicas | int | `1` | Number of Controller Manager instances to run. |
 | workload.controllerManager.runtimeImage.repository | string | `"ghcr.io/volcano-sh/runtime"` | Image repository for the Runtime. |
 | workload.controllerManager.runtimeImage.tag | string | `"latest"` | Image tag for the Runtime. |
 | workload.controllerManager.webhook.enabled | bool | `true` | Enable webhook for the Controller Manager. |

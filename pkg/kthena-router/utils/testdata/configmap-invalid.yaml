@@ -1,2 +1,3 @@
-pluginConfig:
-- invalid
+scheduler:
+  pluginConfig:
+  - invalid

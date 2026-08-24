@@ -35,10 +35,16 @@ class PVCDownloader(ModelDownloader):
         output_dir_obj = Path(output_dir).resolve()
 
         if not pvc_path_obj.exists():
-            raise FileNotFoundError(f"PVC path does not exist: {pvc_path}")
+            raise FileNotFoundError(
+                f"PVC source path '{pvc_path}' is not visible to the downloader.\n"
+                "The downloader init container only has access to volumes mounted via cacheURI.\n"
+                "If the source model and the cache reside on the same PVC, set cacheURI to that\n"
+                "PVC name and ensure the modelURI path starts with the cacheURI mount point.\n"
+                "Example: cacheURI: pvc://<claimName>, modelURI: pvc:///<claimName>/<path-to-model>"
+            )
 
         if not pvc_path_obj.is_dir():
-            raise FileNotFoundError(f"PVC path is not a directory: {pvc_path}")
+            raise FileNotFoundError(f"PVC source path '{pvc_path}' exists but is not a directory")
 
         output_dir_obj.mkdir(parents=True, exist_ok=True)
 

@@ -34,6 +34,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -46,8 +47,8 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/auth"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/ratelimit"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/handlers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
@@ -56,9 +57,26 @@ import (
 
 const (
 	// Context keys for gin context
-	GatewayKey = "gatewayKey"
-	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
+	GatewayKey             = "gatewayKey"
+	GatewayListenerNameKey = "gatewayListenerName"
+	GatewayListenerPortKey = "gatewayListenerPort"
+	PromptKey              = "promptKey" // store parsed ChatMessage, which will be reused
+
+	successfulRequestFinishReason = "successful_request"
+	failedRequestFinishReason     = "request_failed"
 )
+
+func requestFinishReason(c *gin.Context) string {
+	if reason, exists := c.Get("finishReason"); exists {
+		if value, ok := reason.(string); ok && value != "" {
+			return value
+		}
+	}
+	if c.Writer.Status() >= http.StatusBadRequest {
+		return failedRequestFinishReason
+	}
+	return successfulRequestFinishReason
+}
 
 func getEnvBool(key string, fallback bool) bool {
 	if value, ok := os.LookupEnv(key); ok {
@@ -92,6 +110,12 @@ type Router struct {
 	queueTimeout     time.Duration
 	tokenWeight      float64 // Weight for token-based priority in the fairness strategy (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority in the fairness strategy (default 0.0)
+
+	// Session-boost queue-wait timeout. A request that waits in the session-boost
+	// queue longer than sessionBoostTimeout is rejected with HTTP 504 instead of
+	// waiting indefinitely for backend capacity. It defaults to 30s; a non-positive
+	// value disables the timeout (the request is bounded only by client disconnect).
+	sessionBoostTimeout time.Duration
 }
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
@@ -182,6 +206,8 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		queueTimeout:     parseQueueTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+
+		sessionBoostTimeout: parseSessionBoostTimeout(),
 	}
 }
 
@@ -195,6 +221,29 @@ func parseQueueTimeout() time.Duration {
 		klog.Warningf("Invalid FAIRNESS_QUEUE_TIMEOUT %q, using default %v", s, defaultQueueTimeout)
 	}
 	return defaultQueueTimeout
+}
+
+// defaultSessionBoostTimeout is the session-boost queue-wait timeout applied
+// when SESSION_BOOST_TIMEOUT is not set. It is enabled by default so that a
+// session-boost request does not wait indefinitely for backend capacity.
+const defaultSessionBoostTimeout = 30 * time.Second
+
+// parseSessionBoostTimeout reads the session-boost queue-wait timeout from the
+// SESSION_BOOST_TIMEOUT environment variable. A request that waits in the
+// session-boost queue longer than the timeout is rejected with HTTP 504. The
+// timeout defaults to defaultSessionBoostTimeout (30s) when the variable is
+// unset. Setting it to a non-positive duration (e.g. "0s") disables the timeout,
+// in which case a session-boost request is bounded only by client disconnect. An
+// invalid value falls back to the default.
+func parseSessionBoostTimeout() time.Duration {
+	if s, ok := os.LookupEnv("SESSION_BOOST_TIMEOUT"); ok {
+		if d, err := time.ParseDuration(s); err == nil {
+			// A non-positive duration explicitly disables the timeout.
+			return d
+		}
+		klog.Warningf("Invalid SESSION_BOOST_TIMEOUT %q, using default %v", s, defaultSessionBoostTimeout)
+	}
+	return defaultSessionBoostTimeout
 }
 
 func parseEnvFloat(key string, fallback float64) float64 {
@@ -248,20 +297,21 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Create metrics recorder for this request
 		path := c.Request.URL.Path
-		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, modelName, path)
+		hasModel := r.store.HasModel(modelName)
+		metricsModel := metrics.UnknownModel
+		if hasModel {
+			metricsModel = modelName
+		}
+		metricsRecorder := metrics.NewRequestMetricsRecorder(r.metrics, metricsModel, path)
 
 		// Increment downstream request count at request start
-		r.metrics.IncActiveDownstreamRequests(modelName)
+		r.metrics.IncActiveDownstreamRequests(metricsModel)
 		defer func() {
 			// Decrement downstream request count when request completes
-			r.metrics.DecActiveDownstreamRequests(modelName)
+			r.metrics.DecActiveDownstreamRequests(metricsModel)
 			if metricsRecorder != nil {
 				statusCode := strconv.Itoa(c.Writer.Status())
-				reason := "successful_request"
-				if r, exists := c.Get("finishReason"); exists {
-					reason = r.(string)
-				}
-				metricsRecorder.Finish(statusCode, reason)
+				metricsRecorder.Finish(statusCode, requestFinishReason(c))
 			}
 		}()
 
@@ -329,7 +379,9 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		c.Set("metricsRecorder", metricsRecorder)
 
 		// step 3.1: direct load balancing when neither fairness scheduling nor
-		// session boost is enabled.
+		// session boost is enabled. doLoadbalance validates the route itself
+		// (a model may be routable via InferencePool/HTTPRoute even without a
+		// registered ModelRoute), so HasModel is not checked here.
 		if !EnableFairnessScheduling && !EnableSessionBoost {
 			_ = r.doLoadbalance(c, modelRequest)
 			return
@@ -337,6 +389,25 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// step 3.2: queue scheduling. The queue orders requests by the active
 		// strategy: per-user fairness or session boost (mutually exclusive).
+		//
+		// Reject models with no registered ModelRoute here, before
+		// handleFairnessScheduling, so store.Enqueue can never be reached for
+		// an unregistered model name — which would otherwise leak a
+		// model-specific queue and goroutine forever, since queue cleanup is
+		// tied to the ModelRoute lifecycle. Fairness/session-boost priority is
+		// computed from ModelRoute-level rate-limit configuration, so (unlike
+		// the direct load-balancing path above) an InferencePool-only route
+		// cannot be scheduled through this path anyway. Using the same
+		// response and route_not_found observability labeling as the
+		// equivalent unregistered-model case in doLoadbalance keeps both
+		// paths consistent for callers and metrics/logging.
+		if !hasModel {
+			accesslog.SetError(c, "route_not_found", "route not found")
+			c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
+			c.Set("finishReason", "route_not_found")
+			return
+		}
+
 		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName); err != nil {
 			accesslog.SetError(c, "scheduling", err.Error())
 			c.Set("finishReason", "scheduling")
@@ -352,8 +423,10 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var pods []*datastore.PodInfo
 	var port int32
 	var modelServerName types.NamespacedName
+	var modelTarget datastore.ModelTarget
 	var modelRoute *v1alpha1.ModelRoute
 	var modelServer *v1alpha1.ModelServer
+	var inferencePoolFullName string
 
 	// Get gateway key from context if available (set by Gateway listener)
 	var gatewayKey string
@@ -369,22 +442,74 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var isLora bool
 	var err error
 	// Try to match ModelRoute first
-	modelServerName, isLora, modelRoute, err = r.store.MatchModelServer(modelName, c.Request, gatewayKey)
+	modelTarget, isLora, modelRoute, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey)
 	if err != nil {
-		accesslog.SetError(c, "model_server_matching", fmt.Sprintf("can't find corresponding model server: %v", err))
+		accesslog.SetError(c, "model_route_matching", fmt.Sprintf("failed to match model route target: %v", err))
 	}
 
 	if err == nil && strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+		if modelTarget.Kind == datastore.ModelTargetKindExternalModelProvider {
+			provider := r.store.GetExternalModelProvider(modelTarget.Name)
+			if provider == nil {
+				klog.Errorf("failed to get external model provider: %v", modelTarget.Name)
+				accesslog.SetError(c, "provider_discovery", fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
+				accesslog.SetErrorOrigin(c, "router")
+				c.Set("finishReason", "provider_discovery")
+				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
+				return nil
+			}
+
+			modelRouteName := ""
+			if modelRoute != nil {
+				modelRouteName = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
+				c.Set("modelRouteName", modelRouteName)
+			}
+			accesslog.SetRequestRouting(c, modelRouteName, "", "")
+			if err := r.proxyExternalProvider(c, c.Request, provider, modelRequest, modelName); err != nil {
+				klog.Errorf("external provider request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
+				var proxyErr *externalProxyError
+				if errors.As(err, &proxyErr) {
+					accesslog.SetError(c, proxyErr.reason, proxyErr.message)
+					if proxyErr.origin != "" {
+						accesslog.SetErrorOrigin(c, proxyErr.origin)
+					}
+					c.Set("finishReason", proxyErr.reason)
+					if !c.Writer.Written() {
+						c.AbortWithStatusJSON(proxyErr.statusCode, proxyErr.message)
+					}
+					return nil
+				}
+
+				accesslog.SetError(c, "external_provider_proxy", "external provider request processing failed")
+				accesslog.SetErrorOrigin(c, "router")
+				c.Set("finishReason", "external_provider_proxy")
+				if !c.Writer.Written() {
+					c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+				}
+			}
+			return nil
+		}
+
+		modelServerName = modelTarget.Name
 		// Regular ModelServer request
 		// step 3: Find pods and model server details
 		klog.V(4).Infof("modelServer is %v, is_lora: %v", modelServerName, isLora)
 
 		pods, modelServer, err = r.getPodsAndServer(modelServerName)
-		if err != nil || len(pods) == 0 {
+		if err != nil {
 			klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
+		}
+		if modelServer == nil {
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find model server: %v", modelServerName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find model server: %v", modelServerName))
+			c.Set("finishReason", "pod_discovery")
 			return fmt.Errorf("can't find model server: %v", modelServerName)
+		}
+		if len(pods) == 0 {
+			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("no available pods for model server: %v", modelServerName))
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("no available pods for model server: %v", modelServerName))
+			c.Set("finishReason", "pod_discovery")
+			return fmt.Errorf("no available pods for model server: %v", modelServerName)
 		}
 
 		model := modelServer.Spec.Model
@@ -393,26 +518,48 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
-	} else if matched, inferencePoolName := r.handleHTTPRoute(c, gatewayKey); matched {
+	} else if matched, inferencePoolName, httpRouteErr := r.handleHTTPRoute(c, gatewayKey); httpRouteErr != nil {
+		klog.Errorf("failed to select InferencePool for matched HTTPRoute: %v", httpRouteErr)
+		accesslog.SetError(c, "inference_pool_selection", httpRouteErr.Error())
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, httpRouteErr.Error())
+		c.Set("finishReason", "inference_pool_selection")
+		return httpRouteErr
+	} else if matched {
 		// If ModelRoute is not matched, try to match HTTPRoute
 
 		// Get InferencePool from store
 		inferencePoolKey := fmt.Sprintf("%s/%s", inferencePoolName.Namespace, inferencePoolName.Name)
+		inferencePoolFullName = inferencePoolKey
 		inferencePool := r.store.GetInferencePool(inferencePoolKey)
 		if inferencePool == nil {
 			klog.Errorf("failed to get inference pool: %v", inferencePoolName)
 			accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
+			c.Set("finishReason", "inference_pool_discovery")
 			return fmt.Errorf("can't find inference pool: %v", inferencePoolName)
 		}
 
 		// Get pods from InferencePool
 		pods, err = r.store.GetPodsByInferencePool(inferencePoolName)
-		if err != nil || len(pods) == 0 {
+		if err != nil {
 			klog.Errorf("failed to get pods for inference pool: %v, %v", inferencePoolName, err)
-			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
-			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
-			return fmt.Errorf("can't find pods for inference pool: %v", inferencePoolName)
+			if r.store.GetInferencePool(inferencePoolKey) == nil {
+				accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
+				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
+				c.Set("finishReason", "inference_pool_discovery")
+				return fmt.Errorf("can't find inference pool %v: %w", inferencePoolName, err)
+			}
+			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("failed to get pods for inference pool: %v", inferencePoolName))
+			c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to get pods for inference pool: %v", inferencePoolName))
+			c.Set("finishReason", "pod_discovery")
+			return fmt.Errorf("failed to get pods for inference pool %v: %w", inferencePoolName, err)
+		}
+		if len(pods) == 0 {
+			klog.Errorf("no available pods for inference pool: %v", inferencePoolName)
+			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("no available pods for inference pool: %v", inferencePoolName))
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("no available pods for inference pool: %v", inferencePoolName))
+			c.Set("finishReason", "pod_discovery")
+			return fmt.Errorf("no available pods for inference pool: %v", inferencePoolName)
 		}
 
 		// Get target port from InferencePool
@@ -420,6 +567,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			klog.Errorf("inference pool %v has no target ports", inferencePoolName)
 			accesslog.SetError(c, "port_discovery", fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
+			c.Set("finishReason", "port_discovery")
 			return fmt.Errorf("inference pool %v has no target ports", inferencePoolName)
 		}
 		// Use the first target port
@@ -429,6 +577,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	} else {
 		accesslog.SetError(c, "route_not_found", "route not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
+		c.Set("finishReason", "route_not_found")
 		return fmt.Errorf("route not found")
 	}
 
@@ -467,11 +616,17 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		sessionID = c.Request.Header.Get(sessionHeader)
 	}
 
+	upstreamModelForMetrics := modelName
+	if modelServer != nil && modelServer.Spec.Model != nil && !isLora {
+		upstreamModelForMetrics = *modelServer.Spec.Model
+	}
+
 	ctx := &framework.Context{
 		Model:           modelName,
 		Prompt:          prompt,
 		SessionID:       sessionID,
 		ModelServerName: modelServerName,
+		UpstreamModel:   upstreamModelForMetrics,
 		PDGroup:         pdGroup,
 		MetricsRecorder: metricsRecorder,
 	}
@@ -484,7 +639,10 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	}
 
 	// Set complete request routing information in access log
-	modelServerFullName := fmt.Sprintf("%s/%s", modelServerName.Namespace, modelServerName.Name)
+	modelServerFullName := ""
+	if modelServer != nil {
+		modelServerFullName = fmt.Sprintf("%s/%s", modelServerName.Namespace, modelServerName.Name)
+	}
 	modelRouteName := ""
 	if modelRoute != nil {
 		modelRouteName = fmt.Sprintf("%s/%s", modelRoute.Namespace, modelRoute.Name)
@@ -499,28 +657,66 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		// Set routing info even if no pod is selected (for error cases)
 		accesslog.SetRequestRouting(c, modelRouteName, modelServerFullName, "")
 	}
+	backendType := metrics.BackendTypeModelServer
+	backendName := modelServerFullName
+	upstreamModel := ctx.UpstreamModel
+	if modelServer == nil {
+		backendType = metrics.BackendTypeInferencePool
+		backendName = inferencePoolFullName
+	}
+	accesslog.SetBackendInfo(c, backendType, backendName, upstreamModel)
+	destination := metrics.DestinationLabels{
+		ModelRoute:    modelRouteName,
+		BackendType:   backendType,
+		BackendName:   backendName,
+		UpstreamModel: upstreamModel,
+	}
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			rec.BindDestination(destination)
+		}
+	}
 
 	req := c.Request
-	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port); err != nil {
+	upstreamTimeout := upstreamTimeoutFor(modelServer)
+	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port, upstreamTimeout); err != nil {
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
-		c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+		if !c.Writer.Written() {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+		}
 		return err
 	}
 	return nil
 }
 
+// upstreamTimeoutFor returns the timeout configured on the ModelServer, or zero
+func upstreamTimeoutFor(ms *v1alpha1.ModelServer) time.Duration {
+	if ms == nil || ms.Spec.TrafficPolicy == nil || ms.Spec.TrafficPolicy.Timeout == nil {
+		return 0
+	}
+	return ms.Spec.TrafficPolicy.Timeout.Duration
+}
+
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 		return nil, err
 	}
 	var modelRequest ModelRequest
-	if err := json.Unmarshal(bodyBytes, &modelRequest); err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, err)
+	decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
+	decoder.UseNumber()
+	if err := decoder.Decode(&modelRequest); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, err.Error())
 		return nil, err
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		c.AbortWithStatusJSON(http.StatusBadRequest, "invalid request body")
+		return nil, fmt.Errorf("invalid request body")
+	}
+	c.Set(common.RawRequestBodyKey, bodyBytes)
+	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	modelName, ok := modelRequest["model"].(string)
 	if !ok || strings.TrimSpace(modelName) == "" {
@@ -533,24 +729,25 @@ func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
 }
 
 func (r *Router) getPodsAndServer(modelServerName types.NamespacedName) ([]*datastore.PodInfo, *v1alpha1.ModelServer, error) {
-	pods, err := r.store.GetPodsByModelServer(modelServerName)
-	if err != nil || len(pods) == 0 {
-		return nil, nil, fmt.Errorf("can't find target pods of model server: %v, err: %v", modelServerName, err)
-	}
 	modelServer := r.store.GetModelServer(modelServerName)
 	if modelServer == nil {
 		return nil, nil, fmt.Errorf("can't find model server: %v", modelServerName)
 	}
+
+	pods, err := r.store.GetPodsByModelServer(modelServerName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("can't find target pods of model server: %v, err: %w", modelServerName, err)
+	}
 	return pods, modelServer, nil
 }
 
-// handleHTTPRoute handles HTTPRoute matching for non-/v1/ paths
-// Returns true if HTTPRoute was matched and request is being handled, false otherwise
-// Also returns the InferencePool NamespacedName if found
-func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName) {
+// handleHTTPRoute handles HTTPRoute matching for non-/v1/ paths.
+// It returns whether a route matched, the selected InferencePool, and an error
+// when a matched rule has no eligible InferencePool backend.
+func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types.NamespacedName, error) {
 	matchResult, matched := r.findHTTPRouteMatch(c, gatewayKey)
 	if !matched {
-		return false, types.NamespacedName{}
+		return false, types.NamespacedName{}, nil
 	}
 
 	// Record Gateway API match into access log (gatewayKey is already "namespace/name").
@@ -564,7 +761,7 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 
 	inferencePoolName, found := inferencePoolFromHTTPRouteRule(matchResult.route, matchResult.rule)
 	if !found {
-		return false, types.NamespacedName{}
+		return true, types.NamespacedName{}, fmt.Errorf("matched HTTPRoute %s/%s has no eligible InferencePool backend", matchResult.route.Namespace, matchResult.route.Name)
 	}
 
 	// Record InferencePool match into access log.
@@ -580,7 +777,7 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 		}
 	}
 
-	return true, inferencePoolName
+	return true, inferencePoolName, nil
 }
 
 // applyURLRewrite applies HTTPURLRewriteFilter to the request
@@ -639,18 +836,9 @@ func (r *Router) proxy(
 	ctx *framework.Context,
 	stream bool,
 	port int32,
-	onUsage func(u handlers.OpenAIResponse),
+	timeout time.Duration,
+	onUsage func(u providers.TokenUsage),
 ) error {
-	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
-
-	// Get model route name from context
-	var modelRouteName string
-	if routeName, exists := c.Get("modelRouteName"); exists {
-		if name, ok := routeName.(string); ok {
-			modelRouteName = name
-		}
-	}
-
 	// Capture body bytes once so each retry attempt gets a fresh reader.
 	// transport.RoundTrip drains req.Body on every call, so reusing the same
 	// request across loop iterations sends an empty body to subsequent pods.
@@ -666,6 +854,7 @@ func (r *Router) proxy(
 
 	for i := 0; i < len(ctx.BestPods); i++ {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		accesslog.SetUpstreamInfo(c, 0, i+1)
 		pod := ctx.BestPods[i]
 		podObj := pod.GetPod()
 		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
@@ -673,14 +862,16 @@ func (r *Router) proxy(
 		// Track this request as in-flight to the chosen pod.
 		r.store.IncrPodOnFlightRequests(podName)
 
-		// Increment upstream request count with both modelServer and modelRoute
-		r.metrics.IncActiveUpstreamRequests(modelServerName, modelRouteName)
+		if ctx.MetricsRecorder != nil {
+			ctx.MetricsRecorder.IncActiveUpstreamRequests()
+		}
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, onUsage)
+		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, timeout, onUsage)
 
-		// Decrement upstream request count when request completes
-		r.metrics.DecActiveUpstreamRequests(modelServerName, modelRouteName)
+		if ctx.MetricsRecorder != nil {
+			ctx.MetricsRecorder.DecActiveUpstreamRequests()
+		}
 
 		// Request is complete (success or failure) — decrement on-flight counter.
 		r.store.DecrPodOnFlightRequests(podName)
@@ -696,7 +887,8 @@ func (r *Router) proxy(
 		r.scheduler.RunPostHooks(ctx, i)
 		return nil
 	}
-	c.AbortWithStatusJSON(http.StatusNotFound, "request to all pods failed")
+	c.AbortWithStatusJSON(http.StatusServiceUnavailable, "request to all pods failed")
+	c.Set("finishReason", "proxy")
 	return fmt.Errorf("request to all pods failed")
 }
 
@@ -706,6 +898,7 @@ func (r *Router) proxyModelEndpoint(
 	ctx *framework.Context,
 	modelRequest ModelRequest,
 	port int32,
+	timeout time.Duration,
 ) error {
 	// Mark start of upstream processing
 	accesslog.MarkUpstreamStart(c)
@@ -725,28 +918,28 @@ func (r *Router) proxyModelEndpoint(
 		stream := isStreaming(modelRequest)
 		modelName := ctx.Model
 		userID := c.GetString(common.UserIdKey)
-		err := r.proxy(c, decodeRequest, ctx, stream, port, func(resp handlers.OpenAIResponse) {
-			if resp.Usage.TotalTokens <= 0 {
+		err := r.proxy(c, decodeRequest, ctx, stream, port, timeout, func(usage providers.TokenUsage) {
+			if usage.TotalTokens <= 0 {
 				return
 			}
 			// Record output tokens for rate limiting
 			if r.loadRateLimiter != nil {
-				r.loadRateLimiter.RecordOutputTokens(modelName, resp.Usage.CompletionTokens)
+				r.loadRateLimiter.RecordOutputTokens(modelName, usage.CompletionTokens)
 			}
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
-				accessCtx.SetTokenCounts(accessCtx.InputTokens, resp.Usage.CompletionTokens)
+				accessCtx.SetTokenCounts(accessCtx.InputTokens, usage.CompletionTokens)
 			}
 
 			// Record output token metrics
 			if metricsRecorder != nil {
 				// Record output tokens
-				metricsRecorder.RecordOutputTokens(resp.Usage.CompletionTokens)
+				metricsRecorder.RecordOutputTokens(usage.CompletionTokens)
 			}
 			if userID == "" || modelName == "" {
 				return
 			}
-			_ = r.store.UpdateTokenCount(userID, modelName, float64(resp.Usage.PromptTokens), float64(resp.Usage.CompletionTokens))
+			_ = r.store.UpdateTokenCount(userID, modelName, float64(usage.PromptTokens), float64(usage.CompletionTokens))
 		})
 
 		// Mark end of upstream processing
@@ -765,20 +958,126 @@ func (r *Router) proxyModelEndpoint(
 	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port)
 }
 
-func (r *Router) GetModelServer(modelName string, req *http.Request) (*v1alpha1.ModelServer, error) {
-	modelServerName, isLora, _, err := r.store.MatchModelServer(modelName, req, "")
+func (r *Router) proxyExternalProvider(
+	c *gin.Context,
+	req *http.Request,
+	provider *v1alpha1.ExternalModelProvider,
+	modelRequest ModelRequest,
+	modelName string,
+) error {
+	accesslog.MarkUpstreamStart(c)
+	defer accesslog.MarkUpstreamEnd(c)
+
+	providerName := fmt.Sprintf("%s/%s", provider.Namespace, provider.Name)
+	upstreamModel := providers.UpstreamModelName(provider, modelName)
+	accesslog.SetBackendInfo(c, metrics.BackendTypeExternalProvider, providerName, upstreamModel)
+
+	modelRouteName := ""
+	if routeName, exists := c.Get("modelRouteName"); exists {
+		if name, ok := routeName.(string); ok {
+			modelRouteName = name
+		}
+	}
+	var metricsRecorder *metrics.RequestMetricsRecorder
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			metricsRecorder = rec
+			rec.BindDestination(metrics.DestinationLabels{
+				ModelRoute:    modelRouteName,
+				BackendType:   metrics.BackendTypeExternalProvider,
+				BackendName:   providerName,
+				UpstreamModel: upstreamModel,
+			})
+		}
+	}
+
+	secret, err := r.getProviderSecret(provider)
 	if err != nil {
-		return nil, fmt.Errorf("can't find corresponding model server: %v", err)
-	}
-	klog.V(4).Infof("modelServer is %v, is_lora: %v", modelServerName, isLora)
-
-	pods, modelServer, err := r.getPodsAndServer(modelServerName)
-	if err != nil || len(pods) == 0 {
-		klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
-		return nil, fmt.Errorf("can't find model server: %v", modelServerName)
+		klog.Errorf("failed to get credentials for external provider %s: %v", providerName, err)
+		return newExternalProxyError(http.StatusServiceUnavailable, "provider_config", fmt.Sprintf("external provider %s is not ready", providerName))
 	}
 
-	return modelServer, nil
+	adapter, err := providers.NewAdapter(provider.Spec.ProviderType)
+	if err != nil {
+		klog.Errorf("failed to create adapter for external provider %s: %v", providerName, err)
+		var configurationError *providers.ConfigurationError
+		if errors.As(err, &configurationError) {
+			return newExternalProxyError(http.StatusServiceUnavailable, "provider_config", fmt.Sprintf("external provider %s is not ready", providerName))
+		}
+		return newExternalProxyError(http.StatusInternalServerError, "provider_request_build", "failed to build external provider request")
+	}
+	upstreamRequest, err := adapter.BuildRequest(c, req, provider, secret, modelRequest)
+	if err != nil {
+		klog.Errorf("failed to build request for external provider %s: %v", providerName, err)
+		var unsupportedPath *providers.UnsupportedPathError
+		if errors.As(err, &unsupportedPath) {
+			return newExternalProxyError(http.StatusBadRequest, "request_protocol", unsupportedPath.Error())
+		}
+		var configurationError *providers.ConfigurationError
+		if errors.As(err, &configurationError) {
+			return newExternalProxyError(http.StatusServiceUnavailable, "provider_config", fmt.Sprintf("external provider %s is not ready", providerName))
+		}
+		return newExternalProxyError(http.StatusInternalServerError, "provider_request_build", "failed to build external provider request")
+	}
+
+	userID := c.GetString(common.UserIdKey)
+	responseParser := adapter.ResponseParser(c, req.URL.Path)
+
+	accesslog.SetUpstreamInfo(c, 0, 1)
+	if metricsRecorder != nil {
+		metricsRecorder.IncActiveUpstreamRequests()
+		defer metricsRecorder.DecActiveUpstreamRequests()
+	}
+
+	return proxyExternalRequest(c, upstreamRequest, responseParser, provider.Spec.InsecureSkipVerify, isStreaming(modelRequest), providerName, func(usage providers.TokenUsage) {
+		if usage.TotalTokens <= 0 {
+			return
+		}
+		if r.loadRateLimiter != nil {
+			r.loadRateLimiter.RecordOutputTokens(modelName, usage.CompletionTokens)
+		}
+		if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
+			accessCtx.SetTokenCounts(accessCtx.InputTokens, usage.CompletionTokens)
+		}
+		if metricsRecorder != nil {
+			metricsRecorder.RecordOutputTokens(usage.CompletionTokens)
+		}
+		if userID == "" || modelName == "" {
+			return
+		}
+		_ = r.store.UpdateTokenCount(userID, modelName, float64(usage.PromptTokens), float64(usage.CompletionTokens))
+	})
+}
+
+func (r *Router) getProviderSecret(provider *v1alpha1.ExternalModelProvider) (*corev1.Secret, error) {
+	if provider.Spec.Auth == nil {
+		return nil, nil
+	}
+	secretName := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Spec.Auth.SecretRef.Name}
+	secret := r.store.GetSecret(secretName)
+	if secret == nil {
+		return nil, fmt.Errorf("secret %s not found", secretName)
+	}
+	return secret, nil
+}
+
+type externalProxyError struct {
+	statusCode int
+	reason     string
+	message    string
+	origin     string
+}
+
+func newExternalProxyError(statusCode int, reason, message string) *externalProxyError {
+	origin := "router"
+	if reason == "upstream_response" {
+		origin = "upstream"
+	}
+	return &externalProxyError{statusCode: statusCode, reason: reason, message: message, origin: origin}
+}
+
+func (e *externalProxyError) Error() string {
+	return e.message
 }
 
 type modelObject struct {
@@ -829,99 +1128,230 @@ func proxyRequest(
 	podIP string,
 	port int32,
 	stream bool,
-	onUsage func(u handlers.OpenAIResponse),
+	timeout time.Duration,
+	onUsage func(u providers.TokenUsage),
 ) error {
-	resp, err := doRequest(req, podIP, port)
+	resp, err := doRequest(req, podIP, port, timeout)
+	if resp != nil {
+		defer resp.Body.Close()
+		accesslog.SetUpstreamInfo(c, resp.StatusCode, 0)
+	}
 	if err != nil {
 		return fmt.Errorf("decode request error: %w", err)
 	}
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			c.Header(k, v)
+	parser := providers.DefaultAdapter().ResponseParser(c, req.URL.Path)
+	return forwardResponseWithUsageParser(c, resp, stream, parser, onUsage)
+}
+
+func proxyExternalRequest(
+	c *gin.Context,
+	req *http.Request,
+	parser providers.ResponseUsageParser,
+	insecureSkipVerify bool,
+	stream bool,
+	providerName string,
+	onUsage func(u providers.TokenUsage),
+) error {
+	resp, err := providers.Do(req, insecureSkipVerify)
+	if err != nil {
+		klog.Errorf("external provider %s transport request failed: %v", providerName, err)
+		statusCode := http.StatusBadGateway
+		if isTimeoutError(err) {
+			statusCode = http.StatusGatewayTimeout
 		}
+		return newExternalProxyError(statusCode, "upstream_transport", fmt.Sprintf("external provider %s request failed", providerName))
 	}
 	defer resp.Body.Close()
 
+	accesslog.SetUpstreamInfo(c, resp.StatusCode, 1)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		accesslog.SetError(c, "upstream_response", fmt.Sprintf("provider %s returned HTTP %d", providerName, resp.StatusCode))
+		accesslog.SetErrorOrigin(c, "upstream")
+		c.Set("finishReason", "upstream_response")
+	}
+
+	if err := forwardResponseWithUsageParser(c, resp, stream, parser, onUsage); err != nil {
+		return newExternalProxyError(http.StatusBadGateway, "response_forwarding", fmt.Sprintf("failed to forward response from external provider %s", providerName))
+	}
+	return nil
+}
+
+func forwardResponseWithUsageParser(
+	c *gin.Context,
+	resp *http.Response,
+	stream bool,
+	parser providers.ResponseUsageParser,
+	onUsage func(providers.TokenUsage),
+) error {
+	copyResponseHeaders(c, resp.Header, stream)
 	c.Status(resp.StatusCode)
 
 	if stream {
-		// If the request is a streaming request, we need to stream the response body.
-		// Stream response: read and forward each event (line) one by one, and parse usage if present
-		c.Status(resp.StatusCode)
 		reader := bufio.NewReader(resp.Body)
 		var streamErr error
-		c.Stream(func(w io.Writer) bool {
+		clientDisconnected := c.Stream(func(w io.Writer) bool {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
-				// Try to parse usage from this line, assuming it's a data line
-				parsed := handlers.ParseStreamRespForUsage(string(line))
-				if parsed.Usage.CompletionTokens > 0 {
-					klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
-
-					// Always call onUsage callback to record output tokens
+				parseResult := parser.ParseStreamLine(string(line))
+				if parseResult.HasUsage {
+					klog.V(4).Infof("Parsed usage: %+v", parseResult.Usage)
 					if onUsage != nil {
-						onUsage(parsed)
+						onUsage(parseResult.Usage)
 					}
-
-					// The token usage is set by router, so remove it before sending to downstream
-					if v, ok := c.Get(common.TokenUsageKey); ok && v.(bool) {
+					if parseResult.SuppressLine {
 						return true
 					}
 				}
-				// Forward to downstream
-				_, _ = w.Write(line)
+				n, writeErr := w.Write(line)
+				if writeErr != nil {
+					klog.Errorf("error writing stream body: %v", writeErr)
+					streamErr = writeErr
+					return false
+				}
+				if n != len(line) {
+					klog.Errorf("error writing stream body: %v", io.ErrShortWrite)
+					streamErr = io.ErrShortWrite
+					return false
+				}
+				parser.RecordStreamLineWritten(string(line))
 			}
 			if err != nil {
 				if err != io.EOF {
-					klog.Errorf("error reading stream body: %v", err)
-					streamErr = err
+					if !errors.Is(err, context.Canceled) || !parser.StreamCompleted() {
+						klog.Errorf("error reading stream body: %v", err)
+						streamErr = err
+					}
 				}
 				return false
 			}
 			return true
 		})
+		if clientDisconnected && streamErr == nil && !parser.StreamCompleted() {
+			streamErr = context.Canceled
+		}
+		if usage, ok := parser.FinalStreamUsage(); ok && onUsage != nil {
+			onUsage(usage)
+		}
 		return streamErr
-	} else {
-		// Non-stream: efficiently stream response while capturing for parsing
-		var buf bytes.Buffer
-		ttee := io.TeeReader(resp.Body, &buf)
-
-		_, err := io.Copy(c.Writer, ttee)
-		if err != nil {
-			klog.Errorf("copy response to downstream failed: %v", err)
-			return err
-		}
-
-		// Parse usage if present
-		parsed, _ := handlers.ParseOpenAIResponseBody(buf.Bytes())
-		if parsed != nil && parsed.Usage.CompletionTokens > 0 {
-			klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
-			if onUsage != nil {
-				onUsage(*parsed)
-			}
-		}
 	}
 
+	var buf bytes.Buffer
+	teeReader := io.TeeReader(resp.Body, &buf)
+	if _, err := io.Copy(c.Writer, teeReader); err != nil {
+		klog.Errorf("copy response to downstream failed: %v", err)
+		return err
+	}
+
+	if usage, ok := parser.ParseBody(buf.Bytes()); ok && onUsage != nil {
+		klog.V(4).Infof("Parsed usage: %+v", usage)
+		onUsage(usage)
+	}
 	return nil
+}
+
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func copyResponseHeaders(c *gin.Context, headers http.Header, stream bool) {
+	dynamicHopByHopHeaders := connectionHeaderTokens(headers)
+	for key, values := range headers {
+		if shouldSkipResponseHeader(key, stream, dynamicHopByHopHeaders) {
+			continue
+		}
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+}
+
+func shouldSkipResponseHeader(header string, stream bool, dynamicHopByHopHeaders map[string]struct{}) bool {
+	if stream && strings.EqualFold(header, "Content-Length") {
+		return true
+	}
+	if _, ok := dynamicHopByHopHeaders[http.CanonicalHeaderKey(header)]; ok {
+		return true
+	}
+	for _, reserved := range hopByHopResponseHeaders {
+		if strings.EqualFold(header, reserved) {
+			return true
+		}
+	}
+	return false
+}
+
+func connectionHeaderTokens(headers http.Header) map[string]struct{} {
+	tokens := map[string]struct{}{}
+	for _, value := range headers.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				continue
+			}
+			tokens[http.CanonicalHeaderKey(token)] = struct{}{}
+		}
+	}
+	return tokens
+}
+
+var hopByHopResponseHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"TE",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// cancelOnClose releases the request context once the caller is done with the body.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnClose) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 func doRequest(
 	req *http.Request,
 	podIP string,
 	port int32,
+	timeout time.Duration,
 ) (*http.Response, error) {
 	// step 1: change request URL to prefill pod URL.
 	req.URL.Host = net.JoinHostPort(podIP, strconv.Itoa(int(port)))
 
 	// step 2: use http.Transport to do request to prefill pod.
-	transport := http.DefaultTransport
-	resp, err := transport.RoundTrip(req)
+	// One budget for dial, TLS, request upload and the header wait. Cancelling once
+	// headers arrive would close the body too, so release it on Body.Close instead
+	cancel := context.CancelFunc(func() {})
+	if timeout > 0 {
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(req.Context())
+		timer := time.AfterFunc(timeout, cancel)
+		defer timer.Stop()
+		req = req.WithContext(ctx)
+	}
+
+	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
+	if timeout > 0 {
+		resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		resp.Body.Close()
-		return nil, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
+		return resp, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
 	}
 	return resp, nil
 }
@@ -977,21 +1407,6 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 	}
 
-	modelServerName := fmt.Sprintf("%s/%s", ctx.ModelServerName.Namespace, ctx.ModelServerName.Name)
-
-	// Get model route name from context
-	var modelRouteName string
-	if routeName, exists := c.Get("modelRouteName"); exists {
-		if name, ok := routeName.(string); ok {
-			modelRouteName = name
-		}
-	}
-
-	// Set upstream connection info in metrics recorder
-	if metricsRecorder != nil {
-		metricsRecorder.SetUpstreamConnectionInfo(modelServerName, modelRouteName)
-	}
-
 	// Try multiple prefill/decode pairs
 	maxRetry := len(ctx.DecodePods)
 	if len(ctx.PrefillPods) < maxRetry {
@@ -1004,6 +1419,7 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 		prefillPod := ctx.PrefillPods[i].GetPod()
 		decodePod := ctx.DecodePods[i].GetPod()
+		accesslog.SetUpstreamInfo(c, 0, i+1)
 
 		// Build addresses for prefill and decode pods
 		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
@@ -1024,6 +1440,9 @@ func (r *Router) proxyToPDDisaggregated(
 
 		// Execute the PD disaggregated proxy operation
 		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, hooks)
+		if c.Writer.Written() {
+			accesslog.SetUpstreamInfo(c, c.Writer.Status(), 0)
+		}
 
 		if err != nil {
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",
@@ -1055,6 +1474,9 @@ func (r *Router) proxyToPDDisaggregated(
 }
 
 // handleFairnessScheduling handles the fairness scheduling flow for requests.
+// The caller (HandlerFunc) validates that modelName has a registered
+// ModelRoute before invoking this function, so Enqueue can never be reached
+// for an unregistered model name.
 func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequest, requestID string, modelName string) error {
 	// Extract session ID from HTTP header for multi-turn conversation tracking.
 	sessionHeader := r.store.GetSessionIDHeader()
@@ -1077,11 +1499,35 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		klog.Warningf("user ID not found in request %s", requestID)
 	}
 
-	klog.V(4).Infof("[FairnessScheduling] incoming request: reqID=%s user=%s model=%s",
-		requestID, userId, modelName)
+	// logPrefix reflects the active scheduling strategy so log lines emitted from
+	// this shared handler are attributed to the right queue (session boost vs
+	// user fairness).
+	logPrefix := "[FairnessScheduling]"
+	if EnableSessionBoost {
+		logPrefix = "[SessionBoost]"
+	}
 
-	// Create request-scoped context that unifies client disconnect and server timeout
-	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	klog.V(4).Infof("%s incoming request: reqID=%s user=%s model=%s",
+		logPrefix, requestID, userId, modelName)
+
+	// Create the request-scoped context that also drives the queue's cancellation
+	// cleanup (CancelCh). The queue-wait deadline differs by strategy:
+	//   - Fairness mode: bounded by FAIRNESS_QUEUE_TIMEOUT; exceeding it returns 504.
+	//   - Session-boost mode: FAIRNESS_QUEUE_TIMEOUT does NOT apply. SESSION_BOOST_TIMEOUT
+	//     (default 30s) bounds the wait and exceeding it returns 504; setting it to a
+	//     non-positive value disables the timeout, leaving the request bounded only by
+	//     client disconnect.
+	var reqCtx context.Context
+	var cancel context.CancelFunc
+	if EnableSessionBoost {
+		if r.sessionBoostTimeout > 0 {
+			reqCtx, cancel = context.WithTimeout(c.Request.Context(), r.sessionBoostTimeout)
+		} else {
+			reqCtx, cancel = context.WithCancel(c.Request.Context())
+		}
+	} else {
+		reqCtx, cancel = context.WithTimeout(c.Request.Context(), r.queueTimeout)
+	}
 	defer cancel()
 
 	var pri float64
@@ -1104,11 +1550,12 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		RequestTime: time.Now(),
 		NotifyChan:  make(chan struct{}),
 		CancelCh:    reqCtx.Done(),
+		Cancel:      cancel,
 	}
 
 	if err := r.store.Enqueue(queueReq); err != nil {
-		klog.Errorf("[FairnessScheduling] failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
-			requestID, sessionID, userId, modelName, err)
+		klog.Errorf("%s failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
+			logPrefix, requestID, sessionID, userId, modelName, err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to enqueue request: %v", err))
 		return fmt.Errorf("failed to enqueue request: %v", err)
 	}
@@ -1118,8 +1565,8 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		if queueReq.Release != nil {
 			defer queueReq.Release()
 		}
-		klog.V(4).Infof("[FairnessScheduling] request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
-			requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
+		klog.V(4).Infof("%s request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
+			logPrefix, requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
 		lbErr := r.doLoadbalance(c, modelRequest)
 
 		// After a successful proxy, mark the session request as completed so follow-up
@@ -1130,18 +1577,29 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		return nil
 	case <-reqCtx.Done():
-		if queueReq.Release != nil {
-			queueReq.Release()
-		}
+		// Abandon() atomically coordinates with the dequeue loop: if admission raced
+		// in first it releases the inflight permit we own; otherwise it marks the
+		// request abandoned so the loop skips admission and no permit can leak.
+		queueReq.Abandon()
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
-			klog.Errorf("[FairnessScheduling] request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
-				requestID, sessionID, userId, modelName, r.queueTimeout)
-			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out")
-			return fmt.Errorf("request processing timed out in fairness queue")
+			// Exceeded the queue-wait timeout. In session-boost mode this is expected
+			// load-shedding when SESSION_BOOST_TIMEOUT is set, and under sustained
+			// overload it can fire for many requests, so log at a verbose level to avoid
+			// flooding the logs. In fairness mode the FAIRNESS_QUEUE_TIMEOUT is unexpected
+			// and logs at error level.
+			if EnableSessionBoost {
+				klog.V(2).Infof("%s request rejected after exceeding queue-wait timeout: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
+					logPrefix, requestID, sessionID, userId, modelName, r.sessionBoostTimeout)
+			} else {
+				klog.Errorf("%s request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
+					logPrefix, requestID, sessionID, userId, modelName, r.queueTimeout)
+			}
+			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out in queue")
+			return fmt.Errorf("request processing timed out in queue")
 		}
-		klog.V(4).Infof("[FairnessScheduling] request cancelled (client disconnected): reqID=%s sessionID=%s user=%s model=%s",
-			requestID, sessionID, userId, modelName)
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in fairness queue")
-		return fmt.Errorf("client disconnected while waiting in fairness queue")
+		klog.V(4).Infof("%s request cancelled (client disconnected): reqID=%s sessionID=%s user=%s model=%s",
+			logPrefix, requestID, sessionID, userId, modelName)
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, "Client disconnected while waiting in queue")
+		return fmt.Errorf("client disconnected while waiting in queue")
 	}
 }

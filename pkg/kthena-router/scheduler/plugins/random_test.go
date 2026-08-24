@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -87,4 +88,31 @@ func TestRandom_Score(t *testing.T) {
 	if allSame {
 		t.Log("Warning: All scores were identical across two runs, which is unlikely but possible")
 	}
+}
+
+// TestRandom_ConcurrentScore exercises Score from multiple goroutines, the way
+// concurrent requests reach the single plugin instance the router builds once.
+func TestRandom_ConcurrentScore(t *testing.T) {
+	plugin := NewRandom(runtime.RawExtension{})
+	ctx := &framework.Context{}
+	pods := []*datastore.PodInfo{
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1"}}},
+		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2"}}},
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				scores := plugin.Score(ctx, pods)
+				if len(scores) != len(pods) {
+					t.Errorf("expected %d scores, got %d", len(pods), len(scores))
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

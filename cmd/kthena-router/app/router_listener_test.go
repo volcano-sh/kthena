@@ -16,7 +16,42 @@ limitations under the License.
 
 package app
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	routerpkg "github.com/volcano-sh/kthena/pkg/kthena-router/router"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+)
+
+func TestInferenceListenerMetricsExposure(t *testing.T) {
+	tests := []struct {
+		name          string
+		exposeMetrics bool
+		wantStatus    int
+	}{
+		{name: "disabled by default", exposeMetrics: false, wantStatus: http.StatusNotFound},
+		{name: "explicit compatibility endpoint", exposeMetrics: true, wantStatus: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := newListenerHandler(listenerConfig{
+				defaultRouter: &routerpkg.Router{},
+				readyCheck:    func() bool { return true },
+				exposeMetrics: tt.exposeMetrics,
+			})
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("GET /metrics status = %d, want %d", recorder.Code, tt.wantStatus)
+			}
+		})
+	}
+}
 
 func TestWildcardHostnameMatch(t *testing.T) {
 	tests := []struct {
@@ -38,10 +73,10 @@ func TestWildcardHostnameMatch(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "multi label subdomain should not match",
+			name:     "multi label subdomain match",
 			pattern:  "*.example.com",
 			hostname: "a.b.example.com",
-			want:     false,
+			want:     true,
 		},
 		{
 			name:     "apex hostname should not match",
@@ -126,4 +161,60 @@ func TestFindBestMatchingListener(t *testing.T) {
 			t.Fatalf("expected default-gw, got %s", listener.GatewayKey)
 		}
 	})
+}
+
+func TestMatchedListenerIsStableAfterGatewayUpdate(t *testing.T) {
+	requestHost := "request.example.com"
+	otherHost := "other.example.com"
+	target := ListenerConfig{
+		GatewayKey:   "default/target",
+		ListenerName: "http",
+		Port:         80,
+		Hostname:     &requestHost,
+		Protocol:     string(gatewayv1.HTTPProtocolType),
+	}
+	other := ListenerConfig{
+		GatewayKey:   "default/other",
+		ListenerName: "http",
+		Port:         80,
+		Hostname:     &otherHost,
+		Protocol:     string(gatewayv1.HTTPProtocolType),
+	}
+	lm := &ListenerManager{
+		server: &Server{Port: "8080"},
+		portListeners: map[int32]*PortListenerInfo{
+			80: {Listeners: []ListenerConfig{target, other}},
+		},
+		gatewayListeners: map[string][]ListenerConfig{
+			target.GatewayKey: {target},
+		},
+	}
+
+	matched, found := lm.findBestMatchingListener(80, requestHost)
+	if !found {
+		t.Fatalf("expected listener to be found")
+	}
+
+	updatedHost := gatewayv1.Hostname("updated.example.com")
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "target",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "http",
+					Port:     80,
+					Protocol: gatewayv1.HTTPProtocolType,
+					Hostname: &updatedHost,
+				},
+			},
+		},
+	}
+	lm.StartListenersForGateway(gateway)
+
+	if matched.GatewayKey != target.GatewayKey {
+		t.Fatalf("matched listener changed to %q after update", matched.GatewayKey)
+	}
 }

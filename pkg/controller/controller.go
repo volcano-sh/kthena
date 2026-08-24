@@ -25,6 +25,7 @@ import (
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	autoscaler "github.com/volcano-sh/kthena/pkg/autoscaler/controller"
+	"github.com/volcano-sh/kthena/pkg/kube"
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	modelserving "github.com/volcano-sh/kthena/pkg/model-serving-controller/controller"
@@ -32,7 +33,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/klog/v2"
@@ -52,7 +52,7 @@ const (
 )
 
 func SetupController(ctx context.Context, cc Config) {
-	config, err := clientcmd.BuildConfigFromFlags(cc.MasterURL, cc.Kubeconfig)
+	config, err := kube.BuildConfig(cc.MasterURL, cc.Kubeconfig)
 	if err != nil {
 		klog.Fatalf("build client config: %v", err)
 	}
@@ -96,7 +96,7 @@ func SetupController(ctx context.Context, cc Config) {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
 			case AutoscalerController:
-				ac = autoscaler.NewAutoscaleController(kubeClient, client)
+				ac = autoscaler.NewAutoscaleController(kubeClient, client, cc.AutoscalingSyncPeriodSeconds)
 			}
 		}
 	}

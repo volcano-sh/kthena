@@ -373,16 +373,16 @@ func SendChatRequestWithURL(t *testing.T, url string, modelName string, messages
 	return resp
 }
 
-// SendChatRequestUntilRouterProgrammed polls until the Kthena Router has programmed the route (stops returning 404).
-// We don't retry on 503 because it only occurs when the client disconnects before receiving a response.
+// SendChatRequestUntilRouterProgrammed polls until the Kthena Router has programmed the route
+// and has an available backend (stops returning 404 or 503).
 func SendChatRequestUntilRouterProgrammed(t *testing.T, modelName string, messages []ChatMessage) *http.Response {
 	var finalResp *http.Response
 	ctx := context.Background()
 
 	err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 60*time.Second, true, func(ctx context.Context) (bool, error) {
 		resp := SendChatRequest(t, modelName, messages)
-		if resp.StatusCode == http.StatusNotFound {
-			t.Logf("Route not yet programmed (404), retrying...")
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusServiceUnavailable {
+			t.Logf("Route or backend not ready (%d), retrying...", resp.StatusCode)
 			resp.Body.Close()
 			return false, nil
 		}

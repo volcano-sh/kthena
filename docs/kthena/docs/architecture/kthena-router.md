@@ -14,6 +14,8 @@ Our goal is to deliver a lightweight, user-friendly, and extensible LLM inferenc
 
 Kthena Router is deployed as a standalone binary that can seamlessly integrate with existing gateway infrastructure or serve as a direct traffic entry point for handling AI workloads independently.
 
+It is fully decoupled from the Kthena controller manager: the router only needs the `networking.serving.volcano.sh` CRDs (`ModelRoute`, `ModelServer`, `ExternalModelProvider`) and discovers backend pods through a label selector. This means it can front pods managed by a plain Deployment, a StatefulSet, another operator, or a Kthena `ModelServing` — install it alone with `--set workload.enabled=false` (see [Component-Scoped Installation](../getting-started/installation.md#component-scoped-installation)).
+
 For backend model access, the router supports both external public AI service providers (such as OpenAI, Google Gemini) and privately deployed models within the cluster.
 
 For privately deployed models in particular, the router supports mainstream inference frameworks including vLLM, SGLang, and others. By continuously monitoring the metrics interfaces of inference engines running on model pods, it obtains real-time model status information, including currently loaded LoRA details, KV cache utilization, and other key metrics. This information enables intelligent routing decisions that significantly improve inference service throughput while reducing latency.

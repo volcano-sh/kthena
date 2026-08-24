@@ -17,6 +17,8 @@ limitations under the License.
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -201,4 +203,36 @@ func TestGetModelBoosterStatus(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestGetKthenaClient_HonorsKubeconfigEnv verifies the CLI resolves the
+// kubeconfig the way kubectl does: a file named by KUBECONFIG wins over
+// the home-directory default.
+func TestGetKthenaClient_HonorsKubeconfigEnv(t *testing.T) {
+	kubeconfig := `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:6553
+  name: env-cluster
+contexts:
+- context:
+    cluster: env-cluster
+    namespace: kubeconfig-env-namespace
+    user: env-user
+  name: env-context
+current-context: env-context
+users:
+- name: env-user
+  user: {}
+`
+	path := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(path, []byte(kubeconfig), 0o600); err != nil {
+		t.Fatalf("failed to write kubeconfig: %v", err)
+	}
+	t.Setenv("KUBECONFIG", path)
+
+	_, contextNamespace, err := getKthenaClient()
+	assert.NoError(t, err)
+	assert.Equal(t, "kubeconfig-env-namespace", contextNamespace)
 }

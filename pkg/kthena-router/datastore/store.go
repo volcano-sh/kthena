@@ -60,16 +60,43 @@ var (
 		utils.TPOT,
 		utils.TTFT,
 	}
+
+	// Package-level read-only dispatch tables. Functions take podinfo as a parameter
+	// instead of capturing it, so the tables are built once and reused — no per-call
+	// map allocation. Concurrent reads of a never-written map are safe. Must stay unexported.
+	// The funcs write PodInfo fields and do not lock podinfo themselves; the caller
+	// must already hold podinfo.mutex (see updateGaugeMetricsInfo/updateHistogramMetrics).
+	gaugeUpdateFuncs = map[string]func(*PodInfo, float64){
+		utils.KVCacheUsage:      func(p *PodInfo, f float64) { p.GPUCacheUsage = f },
+		utils.RequestWaitingNum: func(p *PodInfo, f float64) { p.RequestWaitingNum = f },
+		utils.RequestRunningNum: func(p *PodInfo, f float64) { p.RequestRunningNum = f },
+		utils.TPOT: func(p *PodInfo, f float64) {
+			if f == 0.0 {
+				return
+			}
+			p.TPOT = f
+		},
+		utils.TTFT: func(p *PodInfo, f float64) {
+			if f == 0.0 {
+				return
+			}
+			p.TTFT = f
+		},
+	}
+
+	// histogramUpdateFuncs has the same caller-holds-podinfo.mutex precondition as above.
+	histogramUpdateFuncs = map[string]func(*PodInfo, *dto.Histogram){
+		utils.TPOT: func(p *PodInfo, h *dto.Histogram) { p.TimePerOutputToken = h },
+		utils.TTFT: func(p *PodInfo, h *dto.Histogram) { p.TimeToFirstToken = h },
+	}
 )
 
 const (
 	// defaultMetricsScrapeInterval is the default polling interval for pod metrics.
 	defaultMetricsScrapeInterval = 1 * time.Second
 	metricsScrapeIntervalEnv     = "METRICS_SCRAPE_INTERVAL"
-
 	// maxConcurrentPodScrapes caps goroutines spawned per metrics scrape cycle.
 	maxConcurrentPodScrapes = 100
-
 	// onFlightSyncInterval caps Redis read traffic from SyncOnFlightCounts.
 	// At most one HMGET is issued per interval regardless of request rate;
 	// all other callers use the local atomic values maintained by Incr/Decr.
@@ -98,18 +125,18 @@ func createTokenTracker() TokenTracker {
 		outputWeight := defaultOutputTokenWeight
 
 		if inputWeightStr != "" {
-			if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil {
+			if w, err := strconv.ParseFloat(inputWeightStr, 64); err == nil && isValidTokenWeight(w) {
 				inputWeight = w
 			} else {
-				klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %v, using default", err)
+				klog.Warningf("Invalid FAIRNESS_INPUT_TOKEN_WEIGHT: %q, using default", inputWeightStr)
 			}
 		}
 
 		if outputWeightStr != "" {
-			if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil {
+			if w, err := strconv.ParseFloat(outputWeightStr, 64); err == nil && isValidTokenWeight(w) {
 				outputWeight = w
 			} else {
-				klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %v, using default", err)
+				klog.Warningf("Invalid FAIRNESS_OUTPUT_TOKEN_WEIGHT: %q, using default", outputWeightStr)
 			}
 		}
 
@@ -194,12 +221,19 @@ type Store interface {
 	DeletePod(podName types.NamespacedName) error
 
 	// New methods for routing functionality
-	MatchModelServer(modelName string, request *http.Request, gatewayKey string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error)
+	MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error)
 
 	// Model routing methods
 	AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error
 	DeleteModelRoute(namespacedName string) error
 	GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute
+	AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error
+	DeleteExternalModelProvider(name types.NamespacedName) error
+	GetExternalModelProvider(name types.NamespacedName) *aiv1alpha1.ExternalModelProvider
+	GetAllExternalModelProviders() map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
+	AddOrUpdateSecret(secret *corev1.Secret) error
+	DeleteSecret(name types.NamespacedName) error
+	GetSecret(name types.NamespacedName) *corev1.Secret
 
 	// PDGroup methods for efficient PD scheduling
 	GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo, error)
@@ -277,6 +311,8 @@ type Store interface {
 	// GetModelNames returns all model names registered via ModelRoutes,
 	// including both base model names and LoRA adapter names.
 	GetModelNames() []string
+	// HasModel reports whether a base model or LoRA adapter is registered.
+	HasModel(name string) bool
 
 	// Debug interface methods
 	GetAllModelRoutes() map[string]*aiv1alpha1.ModelRoute
@@ -336,9 +372,23 @@ type modelRouteInfo struct {
 	loras []string
 }
 
+type ModelTargetKind string
+
+const (
+	ModelTargetKindModelServer           ModelTargetKind = "ModelServer"
+	ModelTargetKindExternalModelProvider ModelTargetKind = "ExternalModelProvider"
+)
+
+type ModelTarget struct {
+	Kind ModelTargetKind
+	Name types.NamespacedName
+}
+
 type store struct {
-	modelServer sync.Map // map[types.NamespacedName]*modelServer
-	pods        sync.Map // map[types.NamespacedName]*PodInfo
+	modelServer            sync.Map // map[types.NamespacedName]*modelServer
+	externalModelProviders sync.Map // map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
+	pods                   sync.Map // map[types.NamespacedName]*PodInfo
+	secrets                sync.Map // map[types.NamespacedName]*corev1.Secret
 
 	// onFlightCounter is optional. When non-nil (Redis-backed), in-flight request
 	// counts are shared across all router replicas via Redis. When nil, only the
@@ -356,6 +406,7 @@ type store struct {
 	routes             map[string][]*aiv1alpha1.ModelRoute // key: model name, value: list of ModelRoutes
 	loraRoutes         map[string][]*aiv1alpha1.ModelRoute // key: lora name, value: list of ModelRoutes
 	gatewayModelRoutes map[string]sets.Set[string]         // key: gateway key (namespace/name), value: set of ModelRoute keys
+	regexCache         sync.Map                            // key: regex pattern, value: *compiledPattern
 
 	// Gateway fields (using standard Gateway API)
 	gatewayMutex sync.RWMutex
@@ -914,6 +965,51 @@ func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, err
 	return pods, nil
 }
 
+func (s *store) AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error {
+	s.externalModelProviders.Store(utils.GetNamespaceName(provider), provider)
+	return nil
+}
+
+func (s *store) DeleteExternalModelProvider(name types.NamespacedName) error {
+	s.externalModelProviders.Delete(name)
+	return nil
+}
+
+func (s *store) GetExternalModelProvider(name types.NamespacedName) *aiv1alpha1.ExternalModelProvider {
+	if value, ok := s.externalModelProviders.Load(name); ok {
+		return value.(*aiv1alpha1.ExternalModelProvider)
+	}
+	return nil
+}
+
+func (s *store) GetAllExternalModelProviders() map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider {
+	result := make(map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider)
+	s.externalModelProviders.Range(func(key, value any) bool {
+		if namespacedName, ok := key.(types.NamespacedName); ok {
+			result[namespacedName] = value.(*aiv1alpha1.ExternalModelProvider)
+		}
+		return true
+	})
+	return result
+}
+
+func (s *store) AddOrUpdateSecret(secret *corev1.Secret) error {
+	s.secrets.Store(utils.GetNamespaceName(secret), secret)
+	return nil
+}
+
+func (s *store) DeleteSecret(name types.NamespacedName) error {
+	s.secrets.Delete(name)
+	return nil
+}
+
+func (s *store) GetSecret(name types.NamespacedName) *corev1.Secret {
+	if value, ok := s.secrets.Load(name); ok {
+		return value.(*corev1.Secret)
+	}
+	return nil
+}
+
 // GetDecodePods returns all decode pods for a given model server
 func (s *store) GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo, error) {
 	value, ok := s.modelServer.Load(modelServerName)
@@ -1106,6 +1202,8 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	s.routeMutex.Lock()
 	key := mr.Namespace + "/" + mr.Name
+	_, _, queueCleanupCandidates := s.removeModelRouteFromIndexesLocked(key)
+
 	s.routeInfo[key] = &modelRouteInfo{
 		model: mr.Spec.ModelName,
 		loras: mr.Spec.LoraAdapters,
@@ -1168,7 +1266,16 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		}
 	}
 
+	var queuesToClean []string
+	for _, name := range queueCleanupCandidates {
+		if len(s.routes[name]) == 0 && len(s.loraRoutes[name]) == 0 {
+			queuesToClean = append(queuesToClean, name)
+		}
+	}
 	s.routeMutex.Unlock()
+
+	s.cleanRequestWaitingQueues(queuesToClean)
+	s.gcRegexCache()
 
 	s.triggerCallbacks("ModelRoute", EventData{
 		EventType:  EventUpdate,
@@ -1178,27 +1285,12 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 	return nil
 }
 
-func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
-	sort.Slice(routes, func(i, j int) bool {
-		ti, tj := routes[i].CreationTimestamp.Time, routes[j].CreationTimestamp.Time
-		if !ti.Equal(tj) {
-			return ti.Before(tj)
-		}
-		ri, rj := routes[i].ResourceVersion, routes[j].ResourceVersion
-		if ri != rj {
-			return ri < rj
-		}
-		return routes[i].Namespace+"/"+routes[i].Name < routes[j].Namespace+"/"+routes[j].Name
-	})
-}
-
-func (s *store) DeleteModelRoute(namespacedName string) error {
-	s.routeMutex.Lock()
+func (s *store) removeModelRouteFromIndexesLocked(namespacedName string) (string, *aiv1alpha1.ModelRoute, []string) {
 	info := s.routeInfo[namespacedName]
 	var modelName string
 	var deletedRoute *aiv1alpha1.ModelRoute
 	// Collect all model/lora names that may have associated queues (for cleanup after unlock)
-	var namesToCleanQueue []string
+	var queueCleanupCandidates []string
 	if info != nil {
 		modelName = info.model
 		// Remove from routes map
@@ -1215,7 +1307,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			}
 			if len(newRoutes) == 0 {
 				delete(s.routes, modelName)
-				namesToCleanQueue = append(namesToCleanQueue, modelName)
+				queueCleanupCandidates = append(queueCleanupCandidates, modelName)
 			} else {
 				s.routes[modelName] = newRoutes
 			}
@@ -1234,7 +1326,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			}
 			if len(newLoraRoutes) == 0 {
 				delete(s.loraRoutes, lora)
-				namesToCleanQueue = append(namesToCleanQueue, lora)
+				queueCleanupCandidates = append(queueCleanupCandidates, lora)
 			} else {
 				s.loraRoutes[lora] = newLoraRoutes
 			}
@@ -1262,11 +1354,11 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 		}
 	}
 
-	delete(s.routeInfo, namespacedName)
-	s.routeMutex.Unlock()
+	return modelName, deletedRoute, queueCleanupCandidates
+}
 
-	// Clean up associated waiting queues for both base model and all lora adapters
-	for _, name := range namesToCleanQueue {
+func (s *store) cleanRequestWaitingQueues(names []string) {
+	for _, name := range names {
 		val, _ := s.requestWaitingQueue.LoadAndDelete(name)
 		if val != nil {
 			queue, _ := val.(*RequestPriorityQueue)
@@ -1274,6 +1366,31 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 			klog.Infof("deleted waiting queue for model %s", name)
 		}
 	}
+}
+
+func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
+	sort.Slice(routes, func(i, j int) bool {
+		ti, tj := routes[i].CreationTimestamp.Time, routes[j].CreationTimestamp.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		ri, rj := routes[i].ResourceVersion, routes[j].ResourceVersion
+		if ri != rj {
+			return ri < rj
+		}
+		return routes[i].Namespace+"/"+routes[i].Name < routes[j].Namespace+"/"+routes[j].Name
+	})
+}
+
+func (s *store) DeleteModelRoute(namespacedName string) error {
+	s.routeMutex.Lock()
+	modelName, deletedRoute, queueCleanupCandidates := s.removeModelRouteFromIndexesLocked(namespacedName)
+	delete(s.routeInfo, namespacedName)
+	s.routeMutex.Unlock()
+
+	// Clean up associated waiting queues for both base model and all lora adapters
+	s.cleanRequestWaitingQueues(queueCleanupCandidates)
+	s.gcRegexCache()
 
 	// Trigger callbacks outside the lock to avoid potential deadlocks
 	s.triggerCallbacks("ModelRoute", EventData{
@@ -1284,7 +1401,7 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	return nil
 }
 
-func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey string) (types.NamespacedName, bool, *aiv1alpha1.ModelRoute, error) {
+func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
 
@@ -1300,7 +1417,7 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		// Try to find routes by lora name
 		loraRoutes, ok := s.loraRoutes[model]
 		if !ok {
-			return types.NamespacedName{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
+			return ModelTarget{}, false, nil, fmt.Errorf("not found route rules for model %s", model)
 		}
 		candidateRoutes = loraRoutes
 		isLora = true
@@ -1319,14 +1436,9 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 				// If ModelRoute has parentRefs but gatewayKey is empty, skip it
 				continue // Skip ModelRoute with parentRefs when gatewayKey is not specified
 			}
-		} else {
-			// If gatewayKey is specified, we only match ModelRoute with parentRefs
-			// ModelRoute without parentRefs should not match when gatewayKey is provided
-			if gatewayKey != "" {
-				continue // Skip ModelRoute without parentRefs when gatewayKey is specified
-			}
-			// If gatewayKey is empty, ModelRoute without parentRefs can match
-			// (ModelRoute without parentRefs attaches to all Gateways in the same namespace)
+		} else if gatewayKey != "" && !strings.HasPrefix(gatewayKey, mr.Namespace+"/") {
+			// ModelRoutes without parentRefs only attach to Gateways in the same namespace
+			continue
 		}
 
 		// Try to match rules
@@ -1341,11 +1453,37 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		}
 
 		// Found a matching ModelRoute
-		return types.NamespacedName{Namespace: mr.Namespace, Name: dst.ModelServerName}, isLora, mr, nil
+		target, err := modelTargetFromDestination(mr.Namespace, dst)
+		if err != nil {
+			klog.Warningf("failed to resolve target for ModelRoute %s/%s: %v", mr.Namespace, mr.Name, err)
+			continue // Try next ModelRoute
+		}
+		return target, isLora, mr, nil
 	}
 
 	// No matching ModelRoute found
-	return types.NamespacedName{}, false, nil, fmt.Errorf("no matching ModelRoute found for model %s", model)
+	return ModelTarget{}, false, nil, fmt.Errorf("no matching ModelRoute found for model %s", model)
+}
+
+func modelTargetFromDestination(namespace string, target *aiv1alpha1.TargetModel) (ModelTarget, error) {
+	if target == nil {
+		return ModelTarget{}, fmt.Errorf("target backend must not be nil")
+	}
+	hasModelServer := target.ModelServerName != ""
+	hasExternalProvider := target.ExternalModelProviderName != ""
+	if hasModelServer == hasExternalProvider {
+		return ModelTarget{}, fmt.Errorf("exactly one target backend must be set")
+	}
+	if hasExternalProvider {
+		return ModelTarget{
+			Kind: ModelTargetKindExternalModelProvider,
+			Name: types.NamespacedName{Namespace: namespace, Name: target.ExternalModelProviderName},
+		}, nil
+	}
+	return ModelTarget{
+		Kind: ModelTargetKindModelServer,
+		Name: types.NamespacedName{Namespace: namespace, Name: target.ModelServerName},
+	}, nil
 }
 
 // matchesSpecificGateway checks if the ModelRoute matches a specific gateway
@@ -1359,6 +1497,10 @@ func (s *store) matchesSpecificGateway(mr *aiv1alpha1.ModelRoute, gatewayKey str
 	}
 
 	for _, parentRef := range mr.Spec.ParentRefs {
+		if !isGatewayParentRef(parentRef) {
+			continue
+		}
+
 		// Get namespace from parentRef, default to ModelRoute's namespace
 		namespace := mr.Namespace
 		if parentRef.Namespace != nil {
@@ -1406,7 +1548,7 @@ func (s *store) selectRule(modelName string, req *http.Request, rules []*aiv1alp
 		headersMatched := true
 		for key, sm := range rule.ModelMatch.Headers {
 			reqValue := req.Header.Get(key)
-			if !matchString(sm, reqValue) {
+			if !s.matchString(sm, reqValue) {
 				headersMatched = false
 				break
 			}
@@ -1417,7 +1559,7 @@ func (s *store) selectRule(modelName string, req *http.Request, rules []*aiv1alp
 
 		uriMatched := true
 		if uriMatch := rule.ModelMatch.Uri; uriMatch != nil {
-			if !matchString(uriMatch, req.URL.Path) {
+			if !s.matchString(uriMatch, req.URL.Path) {
 				uriMatched = false
 			}
 		}
@@ -1432,15 +1574,80 @@ func (s *store) selectRule(modelName string, req *http.Request, rules []*aiv1alp
 	return nil, fmt.Errorf("failed to find a matching rule")
 }
 
-func matchString(sm *aiv1alpha1.StringMatch, value string) bool {
+// compiledPattern caches a compile result, including failures
+type compiledPattern struct {
+	re  *regexp.Regexp
+	err error
+}
+
+// compileRegex returns the compiled pattern, compiling it on first use
+func (s *store) compileRegex(pattern string) (*regexp.Regexp, error) {
+	if v, ok := s.regexCache.Load(pattern); ok {
+		cp := v.(*compiledPattern)
+		return cp.re, cp.err
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		klog.Warningf("invalid regex %q in ModelRoute match, treating as no match: %v", pattern, err)
+	}
+	v, _ := s.regexCache.LoadOrStore(pattern, &compiledPattern{re: re, err: err})
+	cp := v.(*compiledPattern)
+	return cp.re, cp.err
+}
+
+// collectRouteRegexes adds every regex pattern referenced by mr to out
+func collectRouteRegexes(mr *aiv1alpha1.ModelRoute, out map[string]struct{}) {
+	for _, rule := range mr.Spec.Rules {
+		if rule == nil || rule.ModelMatch == nil {
+			continue
+		}
+		for _, sm := range rule.ModelMatch.Headers {
+			if sm != nil && sm.Regex != nil {
+				out[*sm.Regex] = struct{}{}
+			}
+		}
+		if uri := rule.ModelMatch.Uri; uri != nil && uri.Regex != nil {
+			out[*uri.Regex] = struct{}{}
+		}
+	}
+}
+
+// gcRegexCache drops compiled patterns that no ModelRoute references any more
+func (s *store) gcRegexCache() {
+	live := make(map[string]struct{})
+	s.routeMutex.RLock()
+	for _, routes := range s.routes {
+		for _, mr := range routes {
+			collectRouteRegexes(mr, live)
+		}
+	}
+	for _, routes := range s.loraRoutes {
+		for _, mr := range routes {
+			collectRouteRegexes(mr, live)
+		}
+	}
+	s.routeMutex.RUnlock()
+
+	s.regexCache.Range(func(key, _ any) bool {
+		if _, ok := live[key.(string)]; !ok {
+			s.regexCache.Delete(key)
+		}
+		return true
+	})
+}
+
+func (s *store) matchString(sm *aiv1alpha1.StringMatch, value string) bool {
 	switch {
 	case sm.Exact != nil:
 		return value == *sm.Exact
 	case sm.Prefix != nil:
 		return strings.HasPrefix(value, *sm.Prefix)
 	case sm.Regex != nil:
-		matched, _ := regexp.MatchString(*sm.Regex, value)
-		return matched
+		re, err := s.compileRegex(*sm.Regex)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(value)
 	default:
 		return true
 	}
@@ -1465,6 +1672,15 @@ func (s *store) selectDestination(targets []*aiv1alpha1.TargetModel) (*aiv1alpha
 }
 
 func toWeightedSlice(targets []*aiv1alpha1.TargetModel) ([]uint32, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no target models specified")
+	}
+	for _, target := range targets {
+		if target == nil {
+			return nil, fmt.Errorf("target model must not be nil")
+		}
+	}
+
 	var isWeighted bool
 	if targets[0].Weight != nil {
 		isWeighted = true
@@ -1493,8 +1709,6 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("no weights provided")
 	}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
 	totalWeight := 0
 	for _, weight := range weights {
 		totalWeight += int(weight)
@@ -1504,7 +1718,7 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 		return 0, fmt.Errorf("total weight is zero")
 	}
 
-	randomNum := rng.Intn(totalWeight)
+	randomNum := rand.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
@@ -1597,33 +1811,10 @@ func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
 func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
 	podinfo.mutex.Lock()
 	defer podinfo.mutex.Unlock()
-	updateFuncs := map[string]func(float64){
-		utils.KVCacheUsage: func(f float64) {
-			podinfo.GPUCacheUsage = f
-		},
-		utils.RequestWaitingNum: func(f float64) {
-			podinfo.RequestWaitingNum = f
-		},
-		utils.RequestRunningNum: func(f float64) {
-			podinfo.RequestRunningNum = f
-		},
-		utils.TPOT: func(f float64) {
-			if f == float64(0.0) {
-				return
-			}
-			podinfo.TPOT = f
-		},
-		utils.TTFT: func(f float64) {
-			if f == float64(0.0) {
-				return
-			}
-			podinfo.TTFT = f
-		},
-	}
 
 	for _, name := range metricsName {
-		if updateFunc, exist := updateFuncs[name]; exist {
-			updateFunc(metricsInfo[name])
+		if updateFunc, exist := gaugeUpdateFuncs[name]; exist {
+			updateFunc(podinfo, metricsInfo[name])
 		} else {
 			klog.V(4).Infof("Unknown metric: %s", name)
 		}
@@ -1633,18 +1824,10 @@ func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
 func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.Histogram) {
 	podinfo.mutex.Lock()
 	defer podinfo.mutex.Unlock()
-	updateFuncs := map[string]func(*dto.Histogram){
-		utils.TPOT: func(h *dto.Histogram) {
-			podinfo.TimePerOutputToken = h
-		},
-		utils.TTFT: func(h *dto.Histogram) {
-			podinfo.TimeToFirstToken = h
-		},
-	}
 
 	for _, name := range histogramMetricsName {
-		if updateFunc, exist := updateFuncs[name]; exist {
-			updateFunc(histogramMetrics[name])
+		if updateFunc, exist := histogramUpdateFuncs[name]; exist {
+			updateFunc(podinfo, histogramMetrics[name])
 		} else {
 			klog.V(4).Infof("Unknown histogram metric: %s", name)
 		}
@@ -1956,6 +2139,18 @@ func (s *store) GetModelNames() []string {
 	return names
 }
 
+// HasModel reports whether a base model or LoRA adapter is registered.
+func (s *store) HasModel(name string) bool {
+	s.routeMutex.RLock()
+	defer s.routeMutex.RUnlock()
+
+	if _, exists := s.routes[name]; exists {
+		return true
+	}
+	_, exists := s.loraRoutes[name]
+	return exists
+}
+
 // GetAllModelServers returns all ModelServers in the store
 func (s *store) GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelServer {
 	result := make(map[types.NamespacedName]*aiv1alpha1.ModelServer)
@@ -2182,9 +2377,29 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 	key := fmt.Sprintf("%s/%s", httpRoute.Namespace, httpRoute.Name)
 
 	s.httpRouteMutex.Lock()
+	oldRoute := s.httpRoutes[key]
 	s.httpRoutes[key] = httpRoute
 
 	// Update gateway routes mapping
+	if oldRoute != nil {
+		for _, parentRef := range oldRoute.Spec.ParentRefs {
+			if isGatewayParentRef(parentRef) {
+				gatewayName := string(parentRef.Name)
+				gatewayNamespace := oldRoute.Namespace
+				if parentRef.Namespace != nil {
+					gatewayNamespace = string(*parentRef.Namespace)
+				}
+				gatewayKey := fmt.Sprintf("%s/%s", gatewayNamespace, gatewayName)
+
+				if routeSet, exists := s.gatewayRoutes[gatewayKey]; exists {
+					routeSet.Delete(key)
+					if routeSet.IsEmpty() {
+						delete(s.gatewayRoutes, gatewayKey)
+					}
+				}
+			}
+		}
+	}
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
 		if isGatewayParentRef(parentRef) {
 			gatewayName := string(parentRef.Name)

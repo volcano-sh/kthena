@@ -34,6 +34,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	routermetrics "github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
@@ -52,12 +53,15 @@ import (
 )
 
 const (
-	defaultMetricsURL     = "http://127.0.0.1:8080/metrics"
+	defaultMetricsURL     = "http://127.0.0.1:9090/metrics"
 	defaultScalingTimeout = 3 * time.Minute
 
 	modelServingVLLMPDDisaggregationFixture   = "ModelServing-ds1.5b-pd-disaggregation.yaml"
 	modelServerVLLMPDDisaggregationFixture    = "ModelServer-ds1.5b-pd-disaggregation.yaml"
 	modelRouteVLLMPDDisaggregationFixture     = "ModelRoute-ds1.5b-pd-disaggregation.yaml"
+	modelServingVLLMPDMultinodeFixture        = "ModelServing-ds1.5b-pd-multinode.yaml"
+	modelServerVLLMPDMultinodeFixture         = "ModelServer-ds1.5b-pd-multinode.yaml"
+	modelRouteVLLMPDMultinodeFixture          = "ModelRoute-ds1.5b-pd-multinode.yaml"
 	modelServingSGLangPDDisaggregationFixture = "ModelServing-sglang-pd-disaggregation.yaml"
 	modelServerSGLangPDDisaggregationFixture  = "ModelServer-sglang-pd-disaggregation.yaml"
 	modelRouteSGLangPDDisaggregationFixture   = "ModelRoute-sglang-pd-disaggregation.yaml"
@@ -341,6 +345,18 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 			modelServing: modelServingVLLMPDDisaggregationFixture,
 			modelServer:  modelServerVLLMPDDisaggregationFixture,
 			modelRoute:   modelRouteVLLMPDDisaggregationFixture,
+		},
+	)
+}
+
+// TestModelRoutePrefillDecodeMultinodeShared verifies PD disaggregation on a multi-node ModelServing.
+func TestModelRoutePrefillDecodeMultinodeShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	testModelRoutePrefillDecodeDisaggregationSharedWithFixtures(
+		t, testCtx, testNamespace, useGatewayAPI, kthenaNamespace,
+		pdDisaggregationFixtures{
+			modelServing: modelServingVLLMPDMultinodeFixture,
+			modelServer:  modelServerVLLMPDMultinodeFixture,
+			modelRoute:   modelRouteVLLMPDMultinodeFixture,
 		},
 	)
 }
@@ -1308,11 +1324,15 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 			utils.NewChatMessage("user", "Hello"),
 		}
 
-		resp := utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, "lora-NonExistent", messages, nil)
+		resp := utils.SendChatRequest(t, "lora-NonExistent", messages)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err, "Failed to read response body")
 
 		// Non-existent LoRA adapter should return 404
-		assert.Equal(t, 404, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
-		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, resp.Body)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, "Expected HTTP 404 status code for non-existent LoRA adapter")
+		require.Contains(t, string(body), "route not found", "Expected route-not-found response body")
+		t.Logf("Non-existent adapter error handling verified: StatusCode=%d, Response=%s", resp.StatusCode, body)
 	})
 
 	// Unload LoRA adapters after test is complete
@@ -1498,7 +1518,8 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 	t.Run("VerifyErrorMetrics", func(t *testing.T) {
 		nonExistentModel := "non-existent-model-xyz"
 		labels := map[string]string{
-			"model":       nonExistentModel,
+			"error_type":  "route_not_found",
+			"model":       routermetrics.UnknownModel,
 			"status_code": "404",
 		}
 
@@ -1847,19 +1868,9 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, defaultScalingTimeout)
 	t.Log("Router deployment is ready after restart")
 
-	// Set up port-forward to the restarted router on a dynamically selected local port
-	// to avoid conflicts with the framework port-forward on 8080 and other parallel tests.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "Failed to find an available port")
-	restartedRouterPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	listener.Close()
-
-	pf, err := utils.SetupPortForward(kthenaNamespace, routerDeploymentName, restartedRouterPort, "80")
-	require.NoError(t, err, "Failed to setup port-forward to restarted router")
-	defer pf.Close()
-
-	restartedRouterURL := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", restartedRouterPort)
-	restartedMetricsURL := fmt.Sprintf("http://127.0.0.1:%s/metrics", restartedRouterPort)
+	// Set up independent inference and metrics port-forwards to the restarted router.
+	restartedRouterURL, restartedMetricsURL, closePF := utils.SetupRouterPortForwardAfterRestart(t, kthenaNamespace)
+	defer closePF()
 
 	// Verify routing works after config update and restart.
 	WaitForKthenaRouterValidatingWebhook(t, ctx, testCtx.KthenaClient, kthenaNamespace)

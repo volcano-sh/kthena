@@ -1,0 +1,24 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseek-r1-1-5b-pd-multinode
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: deepseek-r1-1-5b-pd-multinode
+      modelserving.volcano.sh/entry: "true"
+    pdGroup:
+      groupKey: "modelserving.volcano.sh/group-name"
+      prefillLabels:
+        modelserving.volcano.sh/role: "prefill"
+        modelserving.volcano.sh/entry: "true"
+      decodeLabels:
+        modelserving.volcano.sh/role: "decode"
+        modelserving.volcano.sh/entry: "true"
+  workloadPort:
+    port: 8000
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s

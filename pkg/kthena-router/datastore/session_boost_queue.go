@@ -56,10 +56,18 @@ type PodCounter func() int
 // keeping a few extra entries is harmless because boosting only matters when the
 // queue is contended.
 type SessionTracker struct {
-	// cache maps a session ID to a presence marker, ordered by recency. The
-	// underlying hashicorp/golang-lru cache is safe for concurrent use and evicts
-	// the least-recently-used session once capacity is exceeded.
-	cache *lru.Cache[string, struct{}]
+	// cache maps a session ID to the time its most recent request completed,
+	// ordered by recency. The underlying hashicorp/golang-lru cache is safe for
+	// concurrent use and evicts the least-recently-used session once capacity is
+	// exceeded. The stored timestamp is used to order boosted requests so that the
+	// session whose previous turn completed most recently—and is therefore most
+	// likely to still have a warm prefix cache—is served first.
+	cache *lru.Cache[string, time.Time]
+
+	// now returns the current time when a completion is recorded. It defaults to
+	// time.Now and is only overridden in tests to make completion timestamps
+	// deterministic.
+	now func() time.Time
 }
 
 // NewSessionTracker creates a new session tracker that remembers up to capacity
@@ -69,24 +77,24 @@ func NewSessionTracker(capacity int) *SessionTracker {
 	if capacity <= 0 {
 		capacity = defaultSessionBoostMaxSessions
 	}
-	cache, err := lru.NewWithEvict(capacity, func(sessionID string, _ struct{}) {
+	cache, err := lru.NewWithEvict(capacity, func(sessionID string, _ time.Time) {
 		klog.V(4).Infof("[SessionTracker] evicted LRU session %q", sessionID)
 	})
 	if err != nil {
 		// capacity is guaranteed positive above, so this is unreachable in practice.
 		klog.Errorf("[SessionTracker] failed to create LRU cache (capacity=%d): %v", capacity, err)
 	}
-	return &SessionTracker{cache: cache}
+	return &SessionTracker{cache: cache, now: time.Now}
 }
 
 // MarkRequestCompleted records that a request from the given session has completed,
-// promoting it to the most-recently-used position. When the cache exceeds its
-// capacity, the least-recently-used session is evicted.
+// storing the completion time and promoting it to the most-recently-used position.
+// When the cache exceeds its capacity, the least-recently-used session is evicted.
 func (st *SessionTracker) MarkRequestCompleted(sessionID string) {
 	if sessionID == "" {
 		return
 	}
-	st.cache.Add(sessionID, struct{}{})
+	st.cache.Add(sessionID, st.now())
 }
 
 // HasRecentCompletion reports whether the given session ID is currently tracked
@@ -97,6 +105,16 @@ func (st *SessionTracker) HasRecentCompletion(sessionID string) bool {
 		return false
 	}
 	return st.cache.Contains(sessionID)
+}
+
+// CompletionTime returns the time the given session's most recent request completed
+// and whether the session is currently tracked. It is a pure read (via Peek) and
+// does not change recency ordering.
+func (st *SessionTracker) CompletionTime(sessionID string) (time.Time, bool) {
+	if sessionID == "" {
+		return time.Time{}, false
+	}
+	return st.cache.Peek(sessionID)
 }
 
 // ActiveSessions returns the number of sessions currently tracked.
@@ -124,27 +142,40 @@ func (pq *RequestPriorityQueue) GetInflightCount() int64 {
 }
 
 // admitSessionBoost marks a request as inflight, installs its release callback and
-// unblocks the waiting caller by closing its NotifyChan.
-func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) {
-	pq.inflightCount.Add(1)
-	// req.Release returns the inflight permit this admission consumed. The request
-	// handler invokes it (via defer) once the backend response is fully proxied or
-	// the request fails/times out. It decrements the inflight count, signals
-	// releaseCh so the dequeue loop can immediately admit the next waiting request,
-	// and updates the inflight metric. sync.Once makes it idempotent so capacity is
-	// never released twice on overlapping exit paths.
-	releaseOnce := sync.Once{}
-	req.Release = func() {
-		releaseOnce.Do(func() {
-			pq.inflightCount.Add(-1)
-			select {
-			case pq.releaseCh <- struct{}{}:
-			default:
-			}
-			pq.metricDecInflight(req.ModelName)
-		})
+// unblocks the waiting caller by closing its NotifyChan. It returns false without
+// admitting when the caller has already abandoned the request (timed out or
+// cancelled): in that case the request has already left the queue and admitting it
+// would leak an inflight permit that no one will release.
+func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) bool {
+	// Commit the inflight accounting and Release installation atomically with
+	// respect to a concurrent Abandon(). If the caller abandoned first, skip
+	// admission entirely so the inflight permit is never consumed.
+	admitted := req.commitAdmission(func() {
+		pq.inflightCount.Add(1)
+		// req.Release returns the inflight permit this admission consumed. The request
+		// handler invokes it (via defer) once the backend response is fully proxied or
+		// the request fails/times out. It decrements the inflight count, signals
+		// releaseCh so the dequeue loop can immediately admit the next waiting request,
+		// and updates the inflight metric. sync.Once makes it idempotent so capacity is
+		// never released twice on overlapping exit paths.
+		releaseOnce := sync.Once{}
+		req.Release = func() {
+			releaseOnce.Do(func() {
+				pq.inflightCount.Add(-1)
+				select {
+				case pq.releaseCh <- struct{}{}:
+				default:
+				}
+				pq.metricDecInflight(req.ModelName)
+			})
+		}
+		pq.metricIncInflight(req.ModelName)
+	})
+	if !admitted {
+		klog.V(4).Infof("[SessionBoost] admission skipped, request abandoned before admission: user=%s model=%s",
+			req.UserID, req.ModelName)
+		return false
 	}
-	pq.metricIncInflight(req.ModelName)
 	// Closing NotifyChan is the admission signal: the caller blocked in Enqueue is
 	// waiting on this channel and proceeds to the backend only once it is closed.
 	// We notify here because admission (a free inflight slot plus backend capacity)
@@ -153,6 +184,7 @@ func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) {
 	if req.NotifyChan != nil {
 		close(req.NotifyChan)
 	}
+	return true
 }
 
 // runSessionBoostMode is the session-boost dequeue loop. It dequeues requests only
@@ -219,30 +251,16 @@ func (pq *RequestPriorityQueue) drainPendingRelease() bool {
 	}
 }
 
-// isHeadSessionBoosted checks if the highest-priority request in the queue has a session boost.
-func (pq *RequestPriorityQueue) isHeadSessionBoosted() bool {
-	pq.mu.RLock()
-	defer pq.mu.RUnlock()
-	if len(pq.heap) == 0 {
-		return false
-	}
-	return pq.heap[0].SessionBoost
-}
-
 // waitGraceAndDequeue holds a just-freed slot for up to SessionBoostGracePeriod
 // before dispatching, giving a same-session follow-up time to arrive. It does not
 // need to watch for the follow-up itself: boosted requests outrank others in the
-// heap, so once the timer fires tryBackpressureDequeue admits the boosted request
-// first if one showed up. The wait stays responsive to shutdown via ctx/stopCh.
+// heap and, among boosted requests, the one whose session completed most recently
+// wins, so once the timer fires tryBackpressureDequeue admits the warmest boosted
+// follow-up first if one showed up. The wait always runs for the full window even
+// when the head is already boosted, because a follow-up from an even-more-recently
+// completed session may yet arrive and should be the one to ride the warm prefix
+// cache. The wait stays responsive to shutdown via ctx/stopCh.
 func (pq *RequestPriorityQueue) waitGraceAndDequeue(ctx context.Context) {
-	// Fast path: a boosted follow-up is already at the head, so there is nothing
-	// to wait for.
-	if pq.isHeadSessionBoosted() {
-		klog.V(4).Info("[SessionBoost] grace: head already boosted, skipping wait")
-		pq.tryBackpressureDequeue(ctx)
-		return
-	}
-
 	klog.V(4).Infof("[SessionBoost] grace: holding freed slot for %v", pq.config.SessionBoostGracePeriod)
 	timer := time.NewTimer(pq.config.SessionBoostGracePeriod)
 	defer timer.Stop()
@@ -347,7 +365,12 @@ func (pq *RequestPriorityQueue) tryBackpressureDequeue(ctx context.Context) {
 			return
 		}
 
-		pq.admitSessionBoost(req)
+		if !pq.admitSessionBoost(req) {
+			// The request was abandoned (timed out / cancelled) between the
+			// cancellation check and admission; it consumed no inflight slot, so
+			// continue admitting the next queued request.
+			continue
+		}
 
 		klog.V(4).Infof("[SessionBoost] backpressure dequeue: user=%s model=%s sessionBoost=%v inflight=%d/%d",
 			req.UserID, req.ModelName, req.SessionBoost, pq.inflightCount.Load(), maxInflight)

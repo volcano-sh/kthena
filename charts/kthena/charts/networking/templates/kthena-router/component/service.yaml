@@ -14,7 +14,25 @@ spec:
     - port: 80
       targetPort: {{ .Values.kthenaRouter.port }}
       name: http
-  type: LoadBalancer
+  type: {{ .Values.kthenaRouter.service.type }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kthena-router-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-router-metrics
+    {{- include "kthena.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: kthena-router
+    {{- include "kthena.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.kthenaRouter.metrics.port }}
+      targetPort: metrics
+      name: metrics
+  type: ClusterIP
 ---
 {{- if and .Values.kthenaRouter.enabled .Values.kthenaRouter.webhook.enabled }}
 apiVersion: v1

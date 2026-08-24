@@ -18,6 +18,14 @@ limitations under the License.
 
 package v1alpha1
 
+// ExternalModelProviderListerExpansion allows custom methods to be added to
+// ExternalModelProviderLister.
+type ExternalModelProviderListerExpansion interface{}
+
+// ExternalModelProviderNamespaceListerExpansion allows custom methods to be added to
+// ExternalModelProviderNamespaceLister.
+type ExternalModelProviderNamespaceListerExpansion interface{}
+
 // ModelRouteListerExpansion allows custom methods to be added to
 // ModelRouteLister.
 type ModelRouteListerExpansion interface{}

@@ -45,7 +45,6 @@
           ]
         },
         "user-guide/multi-node-inference",
-        "user-guide/network-topology",
         {
           "type": "doc",
           "label": "Autoscaler",
@@ -53,7 +52,7 @@
         },
         {
           "type": "category",
-          "label": "workload",
+          "label": "Workload",
           "items": [
             "user-guide/binpack-scale-down",
             "user-guide/gang-scheduling",
@@ -80,7 +79,6 @@
           ]
         },
         "user-guide/runtime",
-        "user-guide/binpack-scale-down",
         {
           "type": "category",
           "label": "Prefill Decode Disaggregation",

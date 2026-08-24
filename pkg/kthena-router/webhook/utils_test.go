@@ -148,6 +148,38 @@ func TestParseModelServerFromRequest(t *testing.T) {
 	}
 }
 
+func TestParseExternalModelProviderFromRequest(t *testing.T) {
+	provider := &networkingv1alpha1.ExternalModelProvider{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-provider",
+		},
+	}
+	providerRaw, _ := json.Marshal(provider)
+
+	admissionReview := &admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			Object: runtime.RawExtension{Raw: providerRaw},
+		},
+	}
+	body, _ := json.Marshal(admissionReview)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	gotAR, gotProvider, err := ParseExternalModelProviderFromRequest(req)
+	if err != nil {
+		t.Fatalf("ParseExternalModelProviderFromRequest() unexpected error: %v", err)
+	}
+
+	if gotAR == nil || gotProvider == nil {
+		t.Fatal("ParseExternalModelProviderFromRequest() returned nil")
+	}
+
+	if gotProvider.Name != provider.Name {
+		t.Errorf("ParseExternalModelProviderFromRequest() got name = %v, want %v", gotProvider.Name, provider.Name)
+	}
+}
+
 func TestSendAdmissionResponse(t *testing.T) {
 	admissionReview := &admissionv1.AdmissionReview{
 		Response: &admissionv1.AdmissionResponse{

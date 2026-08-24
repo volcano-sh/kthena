@@ -22,7 +22,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/yaml"
+	yaml "sigs.k8s.io/yaml/goyaml.v3"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 )
 
 type RouterConfiguration struct {
@@ -58,6 +60,34 @@ type PluginWithWeight struct {
 type PluginConfig struct {
 	Name string               `yaml:"name"`
 	Args runtime.RawExtension `yaml:"args,omitempty"`
+}
+
+// UnmarshalYAML preserves plugin arguments as YAML. Parsing the outer
+// configuration through JSON rejects valid YAML scalar values such as .nan and
+// .inf before the plugin has a chance to validate or default them.
+func (p *PluginConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("plugin configuration must be a mapping")
+	}
+
+	p.Args = runtime.RawExtension{}
+	for i := 0; i < len(value.Content); i += 2 {
+		key := value.Content[i]
+		field := value.Content[i+1]
+		switch key.Value {
+		case "name":
+			if err := field.Decode(&p.Name); err != nil {
+				return fmt.Errorf("decode plugin name: %w", err)
+			}
+		case "args":
+			args, err := yaml.Marshal(field)
+			if err != nil {
+				return fmt.Errorf("marshal plugin arguments: %w", err)
+			}
+			p.Args.Raw = args
+		}
+	}
+	return nil
 }
 
 type AuthenticationConfig struct {
@@ -144,6 +174,11 @@ func unmarshalPluginsConfig(schedulerConfig *SchedulerConfiguration) (map[string
 
 	if len(schedulerConfig.PluginConfig) > 0 {
 		for _, pluginArg := range schedulerConfig.PluginConfig {
+			if pluginArg.Name == plugins.LeastLatencyPluginName {
+				if err := plugins.ValidateLeastLatencyArgs(pluginArg.Args); err != nil {
+					return nil, fmt.Errorf("invalid %s plugin configuration: %w", pluginArg.Name, err)
+				}
+			}
 			pluginsArgMap[pluginArg.Name] = pluginArg.Args
 		}
 	}

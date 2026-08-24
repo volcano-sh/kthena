@@ -17,9 +17,17 @@ Plugin Configuration (PluginConfig):
 | Plugin Name   | Parameters                                                  | Description                                                                                               |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | least-request | maxWaitingRequests                                          | Sets the maximum number of waiting requests                                                               |
-| least-latency | TTFTTPOTWeightFactor                                        | Sets the weight factor for TTFT and TPOT                                                                  |
+| least-latency | TTFTTPOTWeightFactor                                        | Sets the TTFT weight factor. Must be between `0.0` and `1.0`.                                             |
 | prefix-cache  | blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize | Configures prefix cache parameters                                                                        |
 | kvcache-aware | blockSizeToHash<br />maxBlocksToMatch                       | Configures KV cache aware token-block matching parameters. Requires Redis and the Kthena Runtime sidecar. |
+
+`TTFTTPOTWeightFactor` controls how the least-latency plugin balances Time To First Token (TTFT) and Time Per Output Token (TPOT):
+
+- `0.0` prioritizes TPOT.
+- `0.5` gives equal weight to TTFT and TPOT.
+- `1.0` prioritizes TTFT.
+
+The router exits with a configuration error when this value is outside the `0.0` to `1.0` range, or is non-finite.
 
 Filter Plugins (Filter):
 
@@ -59,41 +67,42 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: kthena-router-config
-  namespace: default
+  namespace: <namespace>
 data:
-  schedulerConfiguration: |-
-    pluginConfig:
-    - name: least-request
-      args: 
-        maxWaitingRequests: 10
-    - name: least-latency
-      args:
-        TTFTTPOTWeightFactor: 0.5
-    - name: prefix-cache
-      args:
-        blockSizeToHash: 64
-        maxBlocksToMatch: 128
-        maxHashCacheSize: 50000
-    - name: kvcache-aware
-      args:
-        blockSizeToHash: 16
-        maxBlocksToMatch: 128
-    plugins:
-      Filter:
-        enabled:
-          - least-request
-        disabled:
-          - lora-affinity
-      Score:
-        enabled:
-          - name: least-request
-            weight: 1
-          - name: kvcache-aware
-            weight: 1
-          - name: least-latency
-            weight: 1
-          - name: prefix-cache
-            weight: 1
+  routerConfiguration: |-
+    scheduler:
+      pluginConfig:
+      - name: least-request
+        args: 
+          maxWaitingRequests: 10
+      - name: least-latency
+        args:
+          TTFTTPOTWeightFactor: 0.5
+      - name: prefix-cache
+        args:
+          blockSizeToHash: 64
+          maxBlocksToMatch: 128
+          maxHashCacheSize: 50000
+      - name: kvcache-aware
+        args:
+          blockSizeToHash: 16
+          maxBlocksToMatch: 128
+      plugins:
+        Filter:
+          enabled:
+            - least-request
+          disabled:
+            - lora-affinity
+        Score:
+          enabled:
+            - name: least-request
+              weight: 1
+            - name: kvcache-aware
+              weight: 1
+            - name: least-latency
+              weight: 1
+            - name: prefix-cache
+              weight: 1
 ```
 
 If you want to use Authentication feature of router. Here is an example:

@@ -9,6 +9,10 @@ import CodeBlock from '@theme/CodeBlock';
 Get up and running with Kthena in minutes! This guide will walk you through deploying your first AI model.
 We'll install a model from Hugging Face and perform inference using a simple curl command.
 
+:::tip
+No GPUs available? Follow the [GPU-Free Quick Start](./gpu-free-quick-start.md) to evaluate Kthena end to end with a mock inference backend on a CPU-only cluster.
+:::
+
 Kthena provides two ways to quickly deploy LLMs. We recommend starting with `ModelServing` for flexible, self-hosted deployments.
 
 ## Prerequisites
@@ -24,7 +28,7 @@ You can flexibly configure your own self-hosted LLM through `ModelServing`.
 
 Model Serving Controller is a component of Kthena that provides a flexible and customizable way to deploy LLMs. It allows you to configure your own LLM through `ModelServing` CRD. ModelServing supports deploying large language models (LLMs) based on roles, with support for gang scheduling and network topology scheduling. It also provides fundamental features such as scaling and rolling updates.
 
-Here is an [example](https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-pd-disaggregation.yaml) of deploying the PD-disaggregation `Qwen/Qwen3-0.6B` model on GPU using `ModelServing`. For the complete walkthrough, including the matching `ModelServer` and `ModelRoute` resources, see [vLLM Prefill-Decode Disaggregation (GPU)](../user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation.md).
+Here is an [example](https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-pd-disaggregation.yaml) of deploying the PD-disaggregation `Qwen/Qwen3-0.6B` model on GPU using `ModelServing`. For the complete walkthrough, including the matching `ModelServer` and `ModelRoute` resources, see [Prefill-Decode Disaggregation with ModelServing (vLLM, NIXL & LMCache)](../user-guide/prefill-decode-disaggregation/modelserving-vllm-pd-disaggregation.md).
 
 **Step 1: Create a ModelServing Resource Object:**
 
@@ -67,7 +71,7 @@ kubectl get modelserving vllm-qwen-06b -o jsonpath='{.status.conditions}' | jq '
 
 **Step 3: Send Inference Request**
 
-Before you can chat with the LLM, create the matching `ModelServer` and `ModelRoute` resources. You can refer to the [ModelServer configuration](../user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation.md#2-modelserver-configuration) and [ModelRoute configuration](../user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation.md#3-modelroute-configuration) in the vLLM GPU PD guide.
+Before you can chat with the LLM, create the matching `ModelServer` and `ModelRoute` resources. You can refer to the [ModelServer configuration](../user-guide/prefill-decode-disaggregation/modelserving-vllm-pd-disaggregation.md#2-modelserver-nixl) and [ModelRoute configuration](../user-guide/prefill-decode-disaggregation/modelserving-vllm-pd-disaggregation.md#3-modelroute-nixl) in the vLLM GPU PD guide.
 
 Then you can use the following command to send a request:
 
@@ -135,7 +139,7 @@ You can now perform inference using the model. Here's an example of how to send 
 curl -X POST http://<model-route-ip>/v1/chat/completions \
 -H "Content-Type: application/json" \
 -d '{
-  "model": "Qwen2.5-0.5B-Instruct",
+  "model": "demo",
   "messages": [
     {
       "role": "user",
@@ -149,7 +153,7 @@ curl -X POST http://<model-route-ip>/v1/chat/completions \
 Use the following command to get the `<model-route-ip>`:
 
 ```bash
-kubectl get svc kthena-router -o jsonpath='{.spec.clusterIP}' -n <your-namespace>
+kubectl get svc kthena-router -o jsonpath='{.spec.clusterIP}' -n kthena-system
 ```
 
 This IP can only be used inside the cluster. If you want to chat from outside the cluster, you can use the `EXTERNAL-IP`

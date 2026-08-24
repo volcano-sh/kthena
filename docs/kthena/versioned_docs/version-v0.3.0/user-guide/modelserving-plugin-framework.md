@@ -114,7 +114,7 @@ Kthena ships with a built-in demo plugin `demo-pod-tweaks` that can set `runtime
 **Example: Using the demo plugin**
 
 ```yaml
-apiVersion: workload.kthena.io/v1alpha1
+apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
   name: llama-8b

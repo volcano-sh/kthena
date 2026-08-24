@@ -143,6 +143,8 @@ class VLLMZMQSubscriber:
 
             logger.info(f"Connected to ZMQ endpoint: {self.config.zmq_endpoint}")
 
+            expected_topic = self.config.zmq_topic_filter
+
             while self.running:
                 try:
                     parts = await self.socket.recv_multipart(zmq.NOBLOCK)
@@ -151,7 +153,7 @@ class VLLMZMQSubscriber:
                         continue
 
                     topic, payload = self._extract_message_data(parts)
-                    if not topic or topic != "kv-events":
+                    if expected_topic and topic != expected_topic:
                         continue
 
                     await self._process_message(payload, self.config.pod_identifier, self.config.model_name)

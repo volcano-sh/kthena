@@ -121,13 +121,13 @@ env:
 
 ### Core Settings
 
-| Environment Variable           | Purpose                                               | Default              | Notes                                                                 |
-| ------------------------------ | ----------------------------------------------------- | -------------------- | --------------------------------------------------------------------- |
-| `ENABLE_FAIRNESS_SCHEDULING`   | Enables fairness scheduling in the router             | `false`              | Global feature switch. Mutually exclusive with `ENABLE_SESSION_BOOST` |
-| `FAIRNESS_WINDOW_SIZE`         | Sliding window used to track recent usage             | runtime default `5m` | The Helm chart default sets this to `1h` when fairness is enabled     |
-| `FAIRNESS_INPUT_TOKEN_WEIGHT`  | Weight applied to input tokens when recording usage   | `1.0`                | Used by the token tracker                                             |
-| `FAIRNESS_OUTPUT_TOKEN_WEIGHT` | Weight applied to output tokens when recording usage  | `2.0`                | Used by the token tracker                                             |
-| `FAIRNESS_QUEUE_TIMEOUT`       | Maximum time a request may wait in the fairness queue | `60s`                | Waiting longer returns a timeout to the client                        |
+| Environment Variable           | Purpose                                               | Default              | Notes                                                                                                            |
+| ------------------------------ | ----------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `ENABLE_FAIRNESS_SCHEDULING`   | Enables fairness scheduling in the router             | `false`              | Global feature switch. Mutually exclusive with `ENABLE_SESSION_BOOST`                                            |
+| `FAIRNESS_WINDOW_SIZE`         | Sliding window used to track recent usage             | runtime default `5m` | The Helm chart default sets this to `1h` when fairness is enabled                                                |
+| `FAIRNESS_INPUT_TOKEN_WEIGHT`  | Weight applied to input tokens when recording usage   | `1.0`                | Used by the token tracker                                                                                        |
+| `FAIRNESS_OUTPUT_TOKEN_WEIGHT` | Weight applied to output tokens when recording usage  | `2.0`                | Used by the token tracker                                                                                        |
+| `FAIRNESS_QUEUE_TIMEOUT`       | Maximum time a request may wait in the fairness queue | `60s`                | Waiting longer returns a timeout (504) to the client. Applies only to the user-fairness queue, not session boost |
 
 ### Queue Policy Settings
 
@@ -186,13 +186,13 @@ Confirm that the router is running with the fairness variables you expect.
 Port-forward the router metrics endpoint:
 
 ```bash
-kubectl -n kthena-system port-forward deploy/kthena-router 8080:8080
+kubectl -n kthena-system port-forward svc/kthena-router-metrics 9090:9090
 ```
 
 Then inspect fairness metrics:
 
 ```bash
-curl -s http://localhost:8080/metrics | grep kthena_router_fairness_queue
+curl -s http://localhost:9090/metrics | grep kthena_router_fairness_queue
 ```
 
 Key metrics to watch:
@@ -204,6 +204,10 @@ Key metrics to watch:
 - `kthena_router_fairness_queue_inflight`
 - `kthena_router_fairness_queue_priority_refresh_total`
 - `kthena_router_fairness_queue_heap_rebuild_total`
+
+Fairness metrics are aggregated per model. Their `user_id` label is fixed to
+`_all`; raw user identities are not exported, which bounds Prometheus series
+cardinality and avoids exposing identity data.
 
 ### 3. Compare Competing Users
 

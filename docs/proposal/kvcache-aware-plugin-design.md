@@ -42,7 +42,7 @@ The plugin addresses the challenge of efficiently routing inference requests to 
 
 **Token Block Matching**
 - Tokenizes input prompts using model-specific tokenizers
-- Divides token sequences into fixed-size blocks (default: 128 tokens)
+- Divides token sequences into fixed-size blocks (default: 16 tokens)
 - Generates standardized SHA-256 hashes for each token block
 - Queries Redis to find pods with cached token blocks
 
@@ -66,7 +66,7 @@ Input Prompt → Tokenization → Block Division → Hash Generation → Redis Q
 ```
 
 1. **Tokenization**: Convert input text/messages to token sequences using model-specific tokenizers
-2. **Block Division**: Split tokens into fixed-size blocks (configurable, default 128)
+2. **Block Division**: Split tokens into fixed-size blocks (configurable, default 16)
 3. **Hash Generation**: Generate SHA-256 hashes for each token block
 4. **Redis Query**: Batch query Redis for pods that have cached each block
 5. **Pod Scoring**: Calculate scores based on consecutive block matches
@@ -138,7 +138,7 @@ Uses the existing Redis infrastructure:
 **Block Size Tuning**
 - Larger blocks: Fewer Redis queries, less granular matching
 - Smaller blocks: More Redis queries, more granular matching
-- Default 128 tokens balances performance and accuracy
+- The default block size is 16 tokens
 
 **Maximum Block Limits**
 - Prevents excessive processing for very long prompts

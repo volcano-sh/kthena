@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +33,7 @@ import (
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -110,14 +113,16 @@ func (collector *MetricCollector) UpdateMetrics(
 		pastHistograms = make(map[string]HistogramInfo)
 	}
 	currentHistograms := make(map[string]HistogramInfo)
+	unreadyPods := sets.New[string]()
 
 	// Group pod metrics by identical PodMetricSource (uri/port/selector) so we
-	// scrape each pod endpoint once per reconcile and extract every required
-	// metric from the same payload. Prometheus-sourced metrics stay per-metric.
+	// scrape each ready pod endpoint once per reconcile and extract every
+	// required metric from the same payload. Prometheus-sourced metrics stay
+	// per-metric.
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, anyUnready, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		values, groupUnreadyPods, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
 		if collectErr != nil {
 			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
 			continue
@@ -126,15 +131,15 @@ func (collector *MetricCollector) UpdateMetrics(
 			klog.Warningf("collect pod metrics for target %s skipped because pod failed/restarted", collector.Target.TargetRef.Name)
 			continue
 		}
-		if anyUnready {
-			unreadyInstancesCount = 1
-			continue
+		for podKey := range groupUnreadyPods {
+			unreadyPods.Insert(podKey)
 		}
 		for policyKey, v := range values {
 			readyInstancesMetric[policyKey] = v
 		}
 	}
 
+	unreadyInstancesCount = int32(len(unreadyPods))
 	collector.PastHistograms.Append(currentHistograms)
 	return
 }
@@ -223,8 +228,8 @@ func podMetricGroupKey(s *v1alpha1.PodMetricSource) string {
 	return fmt.Sprintf("%s|%d|%s", s.Uri, s.Port, metav1.FormatLabelSelector(s.LabelSelector))
 }
 
-// collectPodMetricsGroup scrapes each pod in the target group exactly once
-// and extracts every metric required by specs from the same payload.
+// collectPodMetricsGroup scrapes each ready pod in the target group exactly
+// once and extracts every metric required by specs from the same payload.
 func (collector *MetricCollector) collectPodMetricsGroup(
 	ctx context.Context,
 	podLister listerv1.PodLister,
@@ -232,18 +237,18 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (values map[string]float64, anyUnready bool, failed bool, err error) {
+) (values map[string]float64, unreadyPods sets.Set[string], failed bool, err error) {
 	values = make(map[string]float64, len(specs))
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
 	if err != nil {
-		return nil, false, false, err
+		return nil, nil, false, err
 	}
 	if len(pods) == 0 {
-		return nil, false, false, fmt.Errorf("pod list is empty")
+		return nil, nil, false, fmt.Errorf("pod list is empty")
 	}
 
-	anyUnready, failed = evaluatePodsReadiness(pods)
-	if failed || anyUnready {
+	unreadyPods, failed = evaluatePodsReadiness(pods)
+	if failed {
 		return
 	}
 
@@ -251,25 +256,35 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	wanted := groupPolicyKeysByScrapeName(specs)
 
 	for _, pod := range pods {
+		if !inferControllerUtils.IsPodRunningAndReady(pod) {
+			continue
+		}
 		if err = collector.collectPodMetrics(ctx, pod, podSource, wanted, values, pastHistograms, currentHistograms); err != nil {
-			return nil, false, false, err
+			return nil, nil, false, err
 		}
 	}
 	return
 }
 
-// evaluatePodsReadiness reports whether any pod is not ready and whether any pod
-// has failed or restarted.
-func evaluatePodsReadiness(pods []*corev1.Pod) (anyUnready, failed bool) {
+// evaluatePodsReadiness counts pods that are not ready and reports whether any
+// pod has failed or restarted.
+func evaluatePodsReadiness(pods []*corev1.Pod) (unreadyPods sets.Set[string], failed bool) {
+	unreadyPods = sets.New[string]()
 	for _, pod := range pods {
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
-			anyUnready = true
+			unreadyPods.Insert(metricPodKey(pod))
 		}
 		if util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod) {
 			failed = true
 		}
 	}
 	return
+}
+
+// metricPodKey identifies a pod across metric groups. Metric collectors are
+// namespace-scoped, but include the namespace so the key remains unambiguous.
+func metricPodKey(pod *corev1.Pod) string {
+	return pod.Namespace + "/" + pod.Name
 }
 
 // groupPolicyKeysByScrapeName maps each scrape metric name to the policy keys
@@ -378,7 +393,8 @@ func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *
 	if port == 0 {
 		port = 8100
 	}
-	return fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, port, uri)
+	hostPort := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(int(port)))
+	return fmt.Sprintf("http://%s%s", hostPort, uri)
 }
 
 // parsePrometheusFamilies decodes a Prometheus text exposition payload once and
@@ -535,12 +551,4 @@ func (collector *MetricCollector) getPrometheusAPI(serverURL string, timeout tim
 
 	collector.promClients[serverURL] = client
 	return prometheusv1.NewAPI(client), nil
-}
-
-func addMetric(instanceMetricMap algorithm.Metrics, metricName string, metricValue float64) {
-	if oldValue, ok := instanceMetricMap[metricName]; ok {
-		instanceMetricMap[metricName] = oldValue + metricValue
-	} else {
-		instanceMetricMap[metricName] = metricValue
-	}
 }

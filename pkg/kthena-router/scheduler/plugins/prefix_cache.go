@@ -71,7 +71,7 @@ Configuration Parameters:
 */
 
 import (
-	"fmt"
+	"strconv"
 
 	"github.com/cespare/xxhash"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -225,15 +225,26 @@ func (p *PrefixCache) PostSchedule(ctx *framework.Context, index int) {
 }
 
 func (p *PrefixCache) hashPrompt(model string, prompt string) []uint64 {
-	res := []uint64{}
 	if len(prompt) == 0 {
-		return res
+		return []uint64{}
 	}
+
+	// Size from the blocks this prompt will produce. Capping at maxBlocksToMatch
+	// instead would give a single-block prompt the full maximum backing array.
+	blocks := (len(prompt) + p.blockSizeToHash - 1) / p.blockSizeToHash
+	if blocks > p.maxBlocksToMatch {
+		blocks = p.maxBlocksToMatch
+	}
+	res := make([]uint64, 0, blocks)
 
 	// Initialize first block hash
 	// Use model name as the first hash to avoid hash collision
 	var prevHash uint64 = xxhash.Sum64([]byte(model))
 	blockStart := 0
+
+	// Reusable buffer: strconv.AppendUint + block bytes is byte-identical to
+	// fmt.Sprintf("%d%s", prevHash, block) but avoids per-iteration allocation.
+	var buf []byte
 
 	// Process blocks up to maxBlocksToMatch or until we run out of prompt
 	for i := 0; i < p.maxBlocksToMatch && blockStart < len(prompt); i++ {
@@ -243,12 +254,13 @@ func (p *PrefixCache) hashPrompt(model string, prompt string) []uint64 {
 			blockEnd = len(prompt)
 		}
 
-		// Get current block content and combine with previous hash
-		block := prompt[blockStart:blockEnd]
-		data := []byte(fmt.Sprintf("%d%s", prevHash, block))
+		// Combine previous hash (base-10) with the current block, then hash.
+		buf = buf[:0]
+		buf = strconv.AppendUint(buf, prevHash, 10)
+		buf = append(buf, prompt[blockStart:blockEnd]...)
 
 		// Use xxHash algorithm
-		currHash := xxhash.Sum64(data)
+		currHash := xxhash.Sum64(buf)
 
 		// Append hash to results
 		res = append(res, currHash)

@@ -47,11 +47,14 @@ func TestGenerateEntryPod_WithAnnotations(t *testing.T) {
 		},
 	}
 
+	roleID := "test-role-0"
 	var pod *corev1.Pod
 	assert.NotPanics(t, func() {
-		pod = GenerateEntryPod(role, ms, "test-group", 0, "test-revision", "role-revision")
+		pod = GenerateEntryPod(role, ms, "test-group", roleID, "test-revision", "role-revision")
 	})
 	assert.NotNil(t, pod)
+	assert.Equal(t, "test-group-test-role-0-0", pod.Name)
+	assert.Equal(t, roleID, pod.Labels[workloadv1alpha1.RoleIDKey])
 	assert.Equal(t, annotations, pod.Annotations)
 }
 
@@ -80,11 +83,14 @@ func TestGenerateWorkerPod_WithAnnotations(t *testing.T) {
 			Namespace: "default",
 		},
 	}
+	roleID := "test-role-0"
 	var pod *corev1.Pod
 	assert.NotPanics(t, func() {
-		pod = GenerateWorkerPod(role, ms, entryPod, "test-group", 0, 1, "test-revision", "role-revision")
+		pod = GenerateWorkerPod(role, ms, entryPod, "test-group", roleID, 1, "test-revision", "role-revision")
 	})
 	assert.NotNil(t, pod)
+	assert.Equal(t, "test-group-test-role-0-1", pod.Name)
+	assert.Equal(t, roleID, pod.Labels[workloadv1alpha1.RoleIDKey])
 	assert.Equal(t, annotations, pod.Annotations)
 }
 
@@ -320,9 +326,11 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 		{
 			name: "absolute value",
 			role: workloadv1alpha1.Role{
-				Name:           "decode",
-				Replicas:       ptr.To[int32](4),
-				MaxUnavailable: ptr.To(intstr.FromInt(2)),
+				Name:     "decode",
+				Replicas: ptr.To[int32](4),
+				RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: ptr.To(intstr.FromInt(2)),
+				},
 			},
 			wantValue:      2,
 			wantConfigured: true,
@@ -330,9 +338,11 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 		{
 			name: "percentage rounds down",
 			role: workloadv1alpha1.Role{
-				Name:           "decode",
-				Replicas:       ptr.To[int32](5),
-				MaxUnavailable: ptr.To(intstr.FromString("50%")),
+				Name:     "decode",
+				Replicas: ptr.To[int32](5),
+				RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: ptr.To(intstr.FromString("50%")),
+				},
 			},
 			wantValue:      2,
 			wantConfigured: true,
@@ -340,8 +350,10 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 		{
 			name: "nil replicas defaults to one",
 			role: workloadv1alpha1.Role{
-				Name:           "decode",
-				MaxUnavailable: ptr.To(intstr.FromInt(1)),
+				Name: "decode",
+				RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: ptr.To(intstr.FromInt(1)),
+				},
 			},
 			wantValue:      1,
 			wantConfigured: true,

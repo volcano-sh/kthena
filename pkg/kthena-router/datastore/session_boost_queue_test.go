@@ -18,6 +18,7 @@ package datastore
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -186,8 +187,16 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
-	q.MarkSessionRequestCompleted("conv-A")
-	q.MarkSessionRequestCompleted("conv-B")
+	// Use a controllable clock so conv-B's completion is strictly after conv-A's,
+	// keeping the completion-time ordering below deterministic.
+	st := q.GetSessionTracker()
+	base := time.Now()
+	markCompletedAt := func(sessionID string, completedAt time.Time) {
+		st.now = func() time.Time { return completedAt }
+		q.MarkSessionRequestCompleted(sessionID)
+	}
+	markCompletedAt("conv-A", base)
+	markCompletedAt("conv-B", base.Add(time.Second))
 
 	now := time.Now()
 	requests := []*Request{
@@ -216,12 +225,13 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 		t.Errorf("Last two should not be boosted: third=%v fourth=%v", third.SessionBoost, fourth.SessionBoost)
 	}
 
-	// Among boosted: FIFO order (boost-A arrived before boost-B)
-	if first.UserID != "u2" {
-		t.Errorf("Expected boost-A first (earlier arrival), got %s", first.UserID)
+	// Among boosted: the session that completed most recently wins. conv-B was
+	// marked completed after conv-A, so boost-B (u3) is dequeued before boost-A (u2).
+	if first.UserID != "u3" {
+		t.Errorf("Expected boost-B first (most recently completed session), got %s", first.UserID)
 	}
-	if second.UserID != "u3" {
-		t.Errorf("Expected boost-B second, got %s", second.UserID)
+	if second.UserID != "u2" {
+		t.Errorf("Expected boost-A second, got %s", second.UserID)
 	}
 
 	// Among normal: FIFO order
@@ -230,6 +240,60 @@ func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 	}
 	if fourth.UserID != "u4" {
 		t.Errorf("Expected normal-2 fourth, got %s", fourth.UserID)
+	}
+}
+
+// TestSessionBoostQueue_OrderedByCompletionTime verifies that boosted requests are
+// dequeued by their session's completion time (most recently completed first),
+// independent of the order in which the requests arrived in the queue.
+func TestSessionBoostQueue_OrderedByCompletionTime(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	// Drive the tracker with a controllable clock so each completion gets a
+	// strictly increasing, distinct timestamp regardless of the wall clock's
+	// resolution or how fast the test executes. This keeps the completion-time
+	// ordering deterministic instead of falling back to the RequestTime tiebreak.
+	st := q.GetSessionTracker()
+	base := time.Now()
+	markCompletedAt := func(sessionID string, completedAt time.Time) {
+		st.now = func() time.Time { return completedAt }
+		q.MarkSessionRequestCompleted(sessionID)
+	}
+
+	// Completion order: conv-A, then conv-B, then conv-C (conv-C most recent).
+	markCompletedAt("conv-A", base)
+	markCompletedAt("conv-B", base.Add(time.Second))
+	markCompletedAt("conv-C", base.Add(2*time.Second))
+
+	now := time.Now()
+	// Arrival order deliberately differs from completion order: B arrives first,
+	// then C, then A. This distinguishes completion-time ordering from both FIFO
+	// (which would yield B, C, A) and LIFO (which would yield A, C, B).
+	requests := []*Request{
+		{UserID: "u-B", ModelName: "m", SessionID: "conv-B", RequestTime: now},
+		{UserID: "u-C", ModelName: "m", SessionID: "conv-C", RequestTime: now.Add(time.Millisecond)},
+		{UserID: "u-A", ModelName: "m", SessionID: "conv-A", RequestTime: now.Add(2 * time.Millisecond)},
+	}
+	for _, r := range requests {
+		if err := q.PushRequest(r); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	// Expect dequeue order by most-recent completion: C, then B, then A.
+	for i, expected := range []string{"u-C", "u-B", "u-A"} {
+		got, err := q.popWhenAvailable(context.Background())
+		if err != nil {
+			t.Fatalf("Pop %d failed: %v", i, err)
+		}
+		if !got.SessionBoost {
+			t.Errorf("Position %d: expected boosted request, got non-boosted %s", i, got.UserID)
+		}
+		if got.UserID != expected {
+			t.Errorf("Position %d: expected %s (by completion time), got %s", i, expected, got.UserID)
+		}
 	}
 }
 
@@ -554,5 +618,115 @@ func TestSessionBoostQueue_Len(t *testing.T) {
 
 	if q.Len() != 5 {
 		t.Errorf("Expected len=5, got %d", q.Len())
+	}
+}
+
+// TestSessionBoost_AbandonBeforeAdmissionBlocksAdmission verifies that a request
+// abandoned by the caller before the dequeue loop admits it consumes no inflight
+// slot: admitSessionBoost must observe the abandonment and skip.
+func TestSessionBoost_AbandonBeforeAdmissionBlocksAdmission(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	req := &Request{
+		UserID:     "user-A",
+		ModelName:  "model-1",
+		NotifyChan: make(chan struct{}),
+	}
+
+	// Caller gives up first.
+	req.Abandon()
+
+	// The dequeue loop then tries to admit; it must skip.
+	if q.admitSessionBoost(req) {
+		t.Fatal("admitSessionBoost should skip an already-abandoned request")
+	}
+	if got := q.GetInflightCount(); got != 0 {
+		t.Fatalf("inflight count should stay 0 after skipped admission, got %d", got)
+	}
+	select {
+	case <-req.NotifyChan:
+		t.Fatal("NotifyChan must not be closed for a skipped admission")
+	default:
+	}
+}
+
+// TestSessionBoost_AdmissionBeforeAbandonReleases verifies that when admission wins
+// the race, the caller's Abandon() releases the permit it owns, returning the
+// inflight count to zero.
+func TestSessionBoost_AdmissionBeforeAbandonReleases(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	req := &Request{
+		UserID:     "user-A",
+		ModelName:  "model-1",
+		NotifyChan: make(chan struct{}),
+	}
+
+	if !q.admitSessionBoost(req) {
+		t.Fatal("admitSessionBoost should admit a live request")
+	}
+	select {
+	case <-req.NotifyChan:
+	default:
+		t.Fatal("NotifyChan should be closed after admission")
+	}
+	if got := q.GetInflightCount(); got != 1 {
+		t.Fatalf("inflight count should be 1 after admission, got %d", got)
+	}
+
+	// Caller times out after admission raced in: Abandon() must release the permit
+	// it owns.
+	req.Abandon()
+	if got := q.GetInflightCount(); got != 0 {
+		t.Fatalf("inflight count should return to 0 after Abandon, got %d", got)
+	}
+}
+
+// TestSessionBoost_ConcurrentAdmitAbandonNoLeak stresses the admission/abandonment
+// race directly: for each request one goroutine admits while another abandons. No
+// matter which wins, the inflight count must return to zero, proving the permit is
+// never leaked and never double-released. Run with -race to catch data races.
+func TestSessionBoost_ConcurrentAdmitAbandonNoLeak(t *testing.T) {
+	cfg := sessionBoostConfig()
+	q := newSessionBoostQueue(cfg, nil)
+	defer q.Close()
+
+	const iterations = 2000
+	for i := 0; i < iterations; i++ {
+		req := &Request{
+			UserID:     "user-A",
+			ModelName:  "model-1",
+			NotifyChan: make(chan struct{}),
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// Dequeue-loop side: attempt admission.
+		go func() {
+			defer wg.Done()
+			q.admitSessionBoost(req)
+		}()
+		// Handler side: time out and abandon; Abandon releases if admission raced in.
+		// This mirrors the router's queue-wait timeout handling.
+		go func() {
+			defer wg.Done()
+			req.Abandon()
+		}()
+		wg.Wait()
+
+		// After both settle, drain any releaseCh signal the release may have posted so
+		// it does not affect the next iteration's assertions.
+		select {
+		case <-q.releaseCh:
+		default:
+		}
+
+		if got := q.GetInflightCount(); got != 0 {
+			t.Fatalf("iteration %d: inflight leaked, count=%d", i, got)
+		}
 	}
 }

@@ -13,12 +13,12 @@ Both modes use the same core autoscaling mechanisms but differ in their resource
 
 The autoscaler operates through two primary custom resources:
 
-- **[`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy)**: Defines the core autoscaling strategy, metrics, and behavior parameters
-- **[`AutoscalingPolicyBinding`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding)**: Connects policies to target resources and specifies scaling boundaries
+- **[`AutoscalingPolicy`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy)**: Defines the core autoscaling strategy, metrics, and behavior parameters
+- **[`AutoscalingPolicyBinding`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding)**: Connects policies to target resources and specifies scaling boundaries
 
 ### AutoscalingPolicy Configuration
 
-The [`AutoscalingPolicy`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) resource defines the core autoscaling strategy and behavior parameters.
+The [`AutoscalingPolicy`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicy) resource defines the core autoscaling strategy and behavior parameters.
 
 #### Metrics Configuration
 - **metricName**: Name of the metric to monitor (e.g., `kthena:num_requests_waiting`)
@@ -47,7 +47,7 @@ These configuration parameters work together to create a responsive yet stable a
 
 ### AutoscalingPolicyBinding Configuration
 
-The [`AutoscalingPolicyBinding`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding) resource connects autoscaling policies to target resources and specifies scaling boundaries. It supports two distinct scaling modes:
+The [`AutoscalingPolicyBinding`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding) resource connects autoscaling policies to target resources and specifies scaling boundaries. It supports two distinct scaling modes:
 
 #### Configuration Structure
 
@@ -316,7 +316,7 @@ Monitor these critical metrics to assess autoscaling effectiveness:
 If your autoscaling configuration doesn't behave as expected:
 
 1. **Verify Metric Availability**: Ensure target metrics are properly collected and exposed
-2. **Check Policy Binding**: Confirm [`AutoscalingPolicyBinding`](reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding) correctly references both policy and target resources
+2. **Check Policy Binding**: Confirm [`AutoscalingPolicyBinding`](../reference/crd/workload.serving.volcano.sh.md#autoscalingpolicybinding) correctly references both policy and target resources
 3. **Examine Controller Logs**: Look for error messages or warnings in autoscaler controller logs
 4. **Review Scaling Boundaries**: Ensure `minReplicas` and `maxReplicas` values are appropriately set
 5. **Test Load Patterns**: Gradually increase or decrease load to observe scaling behavior across different conditions

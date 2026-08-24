@@ -2,6 +2,8 @@ workload:
   # -- Enable the workload subchart.
   enabled: true
   controllerManager:
+    # -- Number of Controller Manager instances to run.
+    replicas: 1
     image:
       # -- Image repository for the Controller Manager.
       repository: ghcr.io/volcano-sh/kthena-controller-manager
@@ -11,6 +13,9 @@ workload:
       pullPolicy: IfNotPresent
     # -- Debug server port for Controller Manager (set 0 to disable).
     debugPort: 0
+    # -- Reconcile interval in seconds for the autoscaler. Smaller values react
+    # faster to traffic spikes but increase API server load. 0 uses the binary default (15).
+    autoscalingSyncPeriodSeconds: 0
     downloaderImage:
       # -- Image repository for the Downloader.
       repository: ghcr.io/volcano-sh/downloader
@@ -36,10 +41,20 @@ networking:
   kthenaRouter:
     # -- Enable Kthena Router.
     enabled: true
+    # -- Number of Kthena Router instances to run.
+    replicas: 1
     # -- Container port for Kthena Router.
     port: 8080
+    metrics:
+      # -- Internal Prometheus metrics port for Kthena Router.
+      port: 9090
+      # -- Also expose /metrics on the public inference listener. Enable only for legacy compatibility.
+      exposeOnRouterPort: false
     # -- Debug server port for Kthena Router (localhost only).
     debugPort: 15000
+    service:
+      # -- Kubernetes Service type used to expose Kthena Router.
+      type: LoadBalancer
     image:
       # -- Image repository for Kthena Router.
       repository: ghcr.io/volcano-sh/kthena-router
@@ -47,6 +62,13 @@ networking:
       tag: latest
       # -- Image pull policy for Kthena Router.
       pullPolicy: IfNotPresent
+    accessLog:
+      # -- Enable router access logging.
+      enabled: true
+      # -- Access-log format. Supported values are `text` and `json`.
+      format: "text"
+      # -- Access-log destination: `stdout`, `stderr`, or a file path.
+      output: "stdout"
     tls:
       # -- Enable TLS for Kthena Router server.
       enabled: false
@@ -100,6 +122,10 @@ networking:
       # -- Wait time after a request completes for a same-session follow-up.<br/>
       # Disabled by default (`0s`).
       gracePeriod: "0s"
+      # -- Maximum time a request may wait in the session-boost queue before it is<br/>
+      # rejected with HTTP 504. Defaults to `30s`; set a non-positive duration<br/>
+      # (e.g. `0s`) to disable it (bounded only by client disconnect).
+      timeout: "30s"
     gatewayAPI:
       # -- Enable Gateway API related features.
       enabled: false

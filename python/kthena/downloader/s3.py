@@ -74,8 +74,7 @@ class S3Downloader(ModelDownloader):
         logger.info(f"Syncing: {self.model_uri} to {output_dir}")
 
         if not self.access_key or not self.secret_key:
-            logger.error("Missing credentials")
-            return
+            raise ValueError("Missing credentials")
 
         os.makedirs(output_dir, exist_ok=True)
         bucket_name, bucket_path = parse_bucket_from_model_url(self.model_uri, "s3")
