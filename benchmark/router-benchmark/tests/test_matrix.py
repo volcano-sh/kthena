@@ -13,10 +13,7 @@
 # limitations under the License.
 import importlib.util
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-from unittest import mock
 
 import yaml
 
@@ -33,10 +30,9 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(tier2_matrix)
 
 # Also import the shared modules needed
-from router_ab_test.models import ScenarioConfig, BenchmarkResult
-from router_ab_test.reporter import ResultReporter
-from router_ab_test.orchestrator import MatrixOrchestrator, ABTestOrchestrator
-from router_ab_test.load_generator import AIPerfRunner
+from router_ab_test.models import ScenarioConfig, BenchmarkResult  # noqa: E402
+from router_ab_test.reporter import ResultReporter  # noqa: E402
+from router_ab_test.load_generator import AIPerfRunner  # noqa: E402
 
 
 # --- Test 1: ConfigMap YAML validity --------------------------------------
@@ -139,7 +135,10 @@ class ScenarioDimensionCoverageTest:
             "tier2-p0.1-burstiness": lambda s: s.load["traffic"]["burstiness"] < 1.0,
             "tier2-p0.2-ramp": lambda s: s.load["traffic"]["ramp"]["strategy"] == "linear",
             "tier2-p0.4-prompt-distribution": lambda s: True,  # Has multiple prompt token sizes
-            "tier2-p1.1-engine-mix": lambda s: len(s.backends.profiles) >= 2 and len(set(p.engine_type for p in s.backends.profiles)) >= 2,
+            "tier2-p1.1-engine-mix": lambda s: (
+                len(s.backends.profiles) >= 2
+                and len(set(p.engine_type for p in s.backends.profiles)) >= 2
+            ),
             "tier2-p1.2-speedup-variance": lambda s: len(set(p.speedup_ratio for p in s.backends.profiles)) >= 2,
             "tier2-p1.3-kvcache-variance": lambda s: any(p.kv_cache_blocks is not None for p in s.backends.profiles),
             "tier2-p1.5-maxnumseqs-variance": lambda s: any(p.max_num_seqs is not None for p in s.backends.profiles),
@@ -188,10 +187,26 @@ class MatrixReportBuilderTest:
 
         # Create a 2x2 matrix: 2 scenarios x 2 chains
         run_results = [
-            {"scenario": "p0.1-burstiness", "chain": "router-config-least-latency", "result": make_result("ll", "p0.1-burstiness")},
-            {"scenario": "p0.1-burstiness", "chain": "router-config-random", "result": make_result("rand", "p0.1-burstiness")},
-            {"scenario": "p0.2-ramp", "chain": "router-config-least-latency", "result": make_result("ll2", "p0.2-ramp")},
-            {"scenario": "p0.2-ramp", "chain": "router-config-random", "result": make_result("rand2", "p0.2-ramp")},
+            {
+                "scenario": "p0.1-burstiness",
+                "chain": "router-config-least-latency",
+                "result": make_result("ll", "p0.1-burstiness"),
+            },
+            {
+                "scenario": "p0.1-burstiness",
+                "chain": "router-config-random",
+                "result": make_result("rand", "p0.1-burstiness"),
+            },
+            {
+                "scenario": "p0.2-ramp",
+                "chain": "router-config-least-latency",
+                "result": make_result("ll2", "p0.2-ramp"),
+            },
+            {
+                "scenario": "p0.2-ramp",
+                "chain": "router-config-random",
+                "result": make_result("rand2", "p0.2-ramp"),
+            },
         ]
 
         report = reporter.build_matrix_report(run_results)
@@ -233,13 +248,20 @@ class MatrixReportBuilderTest:
 
         # Test nil_scores note for kvcache-aware chains
         run_results_kvcache = [
-            {"scenario": "p0.1-burstiness", "chain": "router-config-kvcache-aware",
-             "result": make_result("kv", "p0.1-burstiness", artifacts={})},
+            {
+                "scenario": "p0.1-burstiness",
+                "chain": "router-config-kvcache-aware",
+                "result": make_result("kv", "p0.1-burstiness", artifacts={}),
+            },
         ]
         report_kv = reporter.build_matrix_report(run_results_kvcache)
         cell = report_kv["matrix"].get("p0.1-burstiness", {}).get("router-config-kvcache-aware", {})
         if cell.get("_note") != "nil_scores":
-            errors.append(f"kvcache-aware chain without router_analysis should have _note='nil_scores', got: {cell.get('_note')}")
+            got = cell.get("_note")
+            errors.append(
+                f"kvcache-aware chain without router_analysis "
+                f"should have _note='nil_scores', got: {got}"
+            )
 
         # Test cross_chain_plugin_name_mismatch detection
         # This happens when compare_router returns empty because no plugin intersection
@@ -369,8 +391,14 @@ class CRDSingleEngineLimitationTest:
         # Test with a mock scenario config having mixed engines
         from router_ab_test.models import BackendsConfig, BackendProfile
         backends = BackendsConfig(profiles=[
-            BackendProfile(name="sglang-pool", count=2, engine_type="sglang", model="Qwen/Qwen3-0.6B", speedup_ratio=1.0),
-            BackendProfile(name="vllm-pool", count=2, engine_type="vllm", model="Qwen/Qwen3-0.6B", speedup_ratio=1.0),
+            BackendProfile(
+                name="sglang-pool", count=2, engine_type="sglang",
+                model="Qwen/Qwen3-0.6B", speedup_ratio=1.0,
+            ),
+            BackendProfile(
+                name="vllm-pool", count=2, engine_type="vllm",
+                model="Qwen/Qwen3-0.6B", speedup_ratio=1.0,
+            ),
         ])
 
         # The first profile's engine_type should be "sglang"

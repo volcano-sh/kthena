@@ -1,4 +1,17 @@
-#!/usr/bin/env python3
+# Copyright The Volcano Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Visualization for Tier 2 matrix benchmark reports.
 
 Generates grouped bar charts from tier2_matrix_report.json:
@@ -15,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
 
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend for server/CI use
@@ -88,8 +100,9 @@ def generate_charts(report_path: str, output_dir: str) -> list[str]:
         ax.set_title(title)
         ax.set_xticks(x)
         # Truncate scenario names for readability
-        ax.set_xticklabels([s.replace("tier2-", "").replace("latency-variance-composite", "latency-var") for s in scenarios],
-                          rotation=45, ha="right")
+        labels = [s.replace("tier2-", "").replace("latency-variance-composite", "latency-var")
+                  for s in scenarios]
+        ax.set_xticklabels(labels, rotation=45, ha="right")
         ax.legend(title="Plugin Chain", bbox_to_anchor=(1.05, 1), loc="upper left", fontsize="small")
         ax.grid(axis="y", alpha=0.3)
 
@@ -132,8 +145,8 @@ def generate_charts(report_path: str, output_dir: str) -> list[str]:
     ax.set_ylabel("Plugin Scheduling Latency (ms)")
     ax.set_title("Average Plugin Scheduling Latency (ms)")
     ax.set_xticks(x)
-    ax.set_xticklabels([s.replace("tier2-", "").replace("latency-variance-composite", "latency-var") for s in scenarios],
-                      rotation=45, ha="right")
+    labels = [s.replace("tier2-", "").replace("latency-variance-composite", "latency-var") for s in scenarios]
+    ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.legend(title="Plugin Chain", bbox_to_anchor=(1.05, 1), loc="upper left", fontsize="small")
     ax.grid(axis="y", alpha=0.3)
 

@@ -786,7 +786,10 @@ class ResultReporter:
                 if "least-latency" in chain and "-latency" in chain:
                     # Check if this is the baseline chain.
                     if "router-config-least-latency" in chain:
-                        status_display = "VALID (base)" if verdict_status == VERDICT_VALID else f"{verdict_status} (base)"
+                        if verdict_status == VERDICT_VALID:
+                            status_display = "VALID (base)"
+                        else:
+                            status_display = f"{verdict_status} (base)"
                         row += f" | {status_display:<15}"
                         continue
 

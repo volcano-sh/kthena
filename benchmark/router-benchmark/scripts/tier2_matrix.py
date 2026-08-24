@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright The Volcano Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -145,7 +144,7 @@ def main() -> None:
         for cp in chain_paths:
             try:
                 with open(cp) as f:
-                    data = yaml.safe_load(f)
+                    yaml.safe_load(f)
                 chain_name = Path(cp).stem
                 chains.append((cp, chain_name))
             except Exception as exc:
@@ -171,7 +170,7 @@ def main() -> None:
         endpoint_mode=args.endpoint_mode,
     )
 
-    report = orchestrator.run_matrix()
+    orchestrator.run_matrix()
     report_path = Path(args.output) / "tier2_matrix_report.json"
 
     if args.visualize:

@@ -257,7 +257,6 @@ class MatrixOrchestrator:
             cleanup_redis()
 
         report = self.reporter.build_matrix_report(results_grid)
-        report_path = self.output_dir / "tier2_matrix_report.json"
         self.reporter.write_matrix_report(report, str(self.output_dir))
         self.reporter.print_matrix_report(report)
         return report
