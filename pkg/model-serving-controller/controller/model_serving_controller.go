@@ -1696,6 +1696,10 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 		err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupCreating)
 		klog.V(4).Infof("Setting ServingGroup %s/%s status to Creating when pod fails", ms.GetName(), servingGroupName)
 		if err != nil {
+			// Clear the graceMap entry so a later failure event can retry recovery.
+			// Otherwise LoadOrStore would treat the pod as already in grace period forever
+			// because handlePodAfterGraceTime (which deletes the key) never starts.
+			c.graceMap.Delete(key)
 			return fmt.Errorf("update ServingGroup status failed, err:%v", err)
 		}
 		klog.V(2).Infof("update ServingGroup %s to processing when pod fails", servingGroupName)
