@@ -25,6 +25,7 @@ from router_ab_test.models import BenchmarkResult, ScenarioConfig
 
 _AIPERF_METRIC_MAP = {
     "time_to_first_token": "ttft_avg_ms",
+    "inter_token_latency": "tpot_avg_ms",
     "request_latency": "latency_avg_ms",
     "request_throughput": "throughput_rps",
 }

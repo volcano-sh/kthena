@@ -126,6 +126,10 @@ class MockerDeploymentBuilder:
                                     "--num-gpu-blocks-override", str(kv_blocks),
                                     "--max-num-seqs", str(max_seqs),
                                 ],
+                                "env": [
+                                    {"name": "HF_HUB_OFFLINE", "value": "1"},
+                                    {"name": "HF_HOME", "value": "/root/.cache/huggingface"},
+                                ],
                                 "ports": [
                                     {
                                         "containerPort": self.CONTAINER_PORT,
@@ -134,6 +138,12 @@ class MockerDeploymentBuilder:
                                     },
                                 ],
                                 "resources": resources,
+                                "volumeMounts": [
+                                    {
+                                        "name": "hf-cache",
+                                        "mountPath": "/root/.cache/huggingface/hub",
+                                    },
+                                ],
                                 "readinessProbe": {
                                     "httpGet": {
                                         "path": "/v1/models",
@@ -149,6 +159,15 @@ class MockerDeploymentBuilder:
                                     },
                                     "initialDelaySeconds": 15,
                                     "periodSeconds": 15,
+                                },
+                            },
+                        ],
+                        "volumes": [
+                            {
+                                "name": "hf-cache",
+                                "hostPath": {
+                                    "path": "/opt/hf-cache",
+                                    "type": "Directory",
                                 },
                             },
                         ],
@@ -217,8 +236,10 @@ class K8sManager:
     ROUTER_SVC_PORT = 80
     ROUTER_SVC_NAME = "kthena-router"
     ROUTER_DEBUG_PORT = 15000
+    ROUTER_METRICS_PORT = 9090
     DEFAULT_LOCAL_PORT = 8080
     DEFAULT_DEBUG_LOCAL_PORT = 18080
+    DEFAULT_METRICS_LOCAL_PORT = 9090
     MOCKER_NAMESPACE = "default"
     MOCKER_DEPLOYMENT = "mocker-llm"
     _MOCKER_LABEL_SELECTOR = "app=mocker-llm"
@@ -228,14 +249,17 @@ class K8sManager:
         namespace: str = "default",
         local_port: int = DEFAULT_LOCAL_PORT,
         debug_local_port: int = DEFAULT_DEBUG_LOCAL_PORT,
+        metrics_local_port: int = DEFAULT_METRICS_LOCAL_PORT,
         endpoint_mode: str = EndpointMode.PORT_FORWARD,
     ):
         self.namespace = namespace
         self.local_port = local_port
         self.debug_local_port = debug_local_port
+        self.metrics_local_port = metrics_local_port
         self.endpoint_mode = endpoint_mode
         self._pf_proc: subprocess.Popen[str] | None = None
         self._debug_pf_proc: subprocess.Popen[str] | None = None
+        self._metrics_pf_proc: subprocess.Popen[str] | None = None
         self._builder = MockerDeploymentBuilder(namespace=self.MOCKER_NAMESPACE)
 
     # Mapping from scenario engineType (lowercase) to Kthena CRD InferenceEngine.
@@ -481,12 +505,21 @@ class K8sManager:
             target_type="deployment",
         )
 
+    def get_router_metrics_endpoint(self) -> str:
+        return self._start_port_forward(
+            process_attr="_metrics_pf_proc",
+            local_port=self.metrics_local_port,
+            remote_port=self.ROUTER_METRICS_PORT,
+            description=f"svc/{self.ROUTER_SVC_NAME}:{self.ROUTER_METRICS_PORT}",
+        )
+
     # ---- Port-forward lifecycle -----------------------------------------------
 
     def cleanup_port_forward(self) -> None:
         if self.endpoint_mode == EndpointMode.PORT_FORWARD:
             self._stop_port_forward("_pf_proc")
         self._stop_port_forward("_debug_pf_proc")
+        self._stop_port_forward("_metrics_pf_proc")
 
     def _start_port_forward(
         self,

@@ -25,6 +25,7 @@ from router_ab_test.models import BenchmarkResult, VERDICT_VALID
 
 _METRIC_SPECS: dict[str, dict[str, Any]] = {
     "ttft_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
+    "tpot_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
     "latency_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
     "throughput_rps": {"higher_is_better": True, "regression_threshold": 10},
 }
@@ -32,7 +33,6 @@ _METRIC_SPECS: dict[str, dict[str, Any]] = {
 # Router-side (Prometheus) comparison specs. Keys that are per-plugin are
 # built dynamically in ``compare_router``; these cover the fixed ones.
 _ROUTER_METRIC_SPECS: dict[str, dict[str, Any]] = {
-    "request_duration_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
     "prefix_cache_match_ratio_avg": {"higher_is_better": True, "regression_threshold": 5},
     "kvcache_aware_match_ratio_avg": {"higher_is_better": True, "regression_threshold": 5},
 }
@@ -49,7 +49,6 @@ _PROM_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"')
 
 # kthena-router metric families (pkg/kthena-router/metrics/metrics.go).
 _M_REQUESTS_TOTAL = "kthena_router_requests_total"
-_M_REQUEST_DURATION = "kthena_router_request_duration_seconds"
 _M_TOKENS_TOTAL = "kthena_router_tokens_total"
 _M_PLUGIN_DURATION = "kthena_router_scheduler_plugin_duration_seconds"
 _M_RATE_LIMIT = "kthena_router_rate_limit_exceeded_total"
@@ -207,12 +206,6 @@ def analyze_router_metrics(prom_text: str) -> dict[str, Any]:
             "success_rate_pct": round(successful / total * 100, 2) if total > 0 else None,
         }
 
-    duration_stats = _histogram_stats(samples, _M_REQUEST_DURATION, group_label="status_code")
-    if duration_stats:
-        analysis["request_duration_seconds"] = {
-            code: _duration_entry(stats) for code, stats in sorted(duration_stats.items())
-        }
-
     # --- Tokens ------------------------------------------------------------
     by_token_type = _counter_by_label(samples, _M_TOKENS_TOTAL, "token_type")
     if by_token_type:
@@ -348,14 +341,6 @@ def format_router_analysis(analysis: dict[str, Any], indent: str = "  ") -> list
         non_success = {err: n for err, n in requests["by_error_type"].items() if err != "successful_request"}
         if non_success:
             lines.append(f"{indent}  errors: {non_success}")
-
-    durations = analysis.get("request_duration_seconds", {})
-    for code, stats in durations.items():
-        lines.append(
-            f"{indent}request_duration[{code}]: n={stats['count']} "
-            f"avg={stats['avg_ms']}ms p50={stats['p50_ms']}ms "
-            f"p90={stats['p90_ms']}ms p99={stats['p99_ms']}ms"
-        )
 
     tokens = analysis.get("tokens")
     if tokens:
@@ -500,12 +485,6 @@ class ResultReporter:
 
     @staticmethod
     def _router_metric_value(analysis: dict[str, Any], metric_key: str) -> float | None:
-        if metric_key == "request_duration_avg_ms":
-            # Successful requests only — error paths have unrelated latency.
-            for code, stats in analysis.get("request_duration_seconds", {}).items():
-                if code.startswith("2"):
-                    return stats.get("avg_ms")
-            return None
         if metric_key == "prefix_cache_match_ratio_avg":
             return (analysis.get("prefix_cache", {}).get("match_ratio") or {}).get("avg")
         if metric_key == "kvcache_aware_match_ratio_avg":

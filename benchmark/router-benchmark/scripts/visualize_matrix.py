@@ -3,9 +3,9 @@
 
 Generates grouped bar charts from tier2_matrix_report.json:
   - TTFT average (ms)
+  - TPOT average (ms)
   - Latency average (ms)
   - Throughput (rps)
-  - Request duration (ms)
 
 Usage:
     python visualize_matrix.py --input results/tier2/tier2_matrix_report.json --output results/tier2/charts/
@@ -47,6 +47,7 @@ def generate_charts(report_path: str, output_dir: str) -> list[str]:
     # Define metrics to chart
     metric_specs = [
         ("ttft_avg_ms", "TTFT Average (ms)", "ms"),
+        ("tpot_avg_ms", "TPOT Average (ms)", "ms"),
         ("latency_avg_ms", "Latency Average (ms)", "ms"),
         ("throughput_rps", "Throughput (req/s)", "rps"),
     ]
@@ -99,7 +100,7 @@ def generate_charts(report_path: str, output_dir: str) -> list[str]:
         generated_files.append(str(file_path))
         print(f"Generated: {file_path}")
 
-    # 4th chart: request_duration_avg_ms from router_analysis
+    # 5th chart: plugin scheduling latency from router_analysis
     fig, ax = plt.subplots(figsize=(14, 6))
     for i, chain in enumerate(chains):
         values = []
@@ -109,17 +110,13 @@ def generate_charts(report_path: str, output_dir: str) -> list[str]:
             router_analysis = cell.get("router_analysis")
 
             if verdict == "valid" and router_analysis:
-                # Try to get request_duration_seconds for 2xx status codes
-                duration = router_analysis.get("request_duration_seconds", {})
-                avg_ms = None
-                for code, stats in duration.items():
-                    if code.startswith("2"):
-                        avg_ms = stats.get("avg_ms")
-                        break
-                if avg_ms is None:
-                    # Fallback to latency_avg_ms from metrics
-                    avg_ms = (cell.get("metrics") or {}).get("latency_avg_ms", 0)
-                values.append(avg_ms)
+                plugins = router_analysis.get("scheduler_plugins", {})
+                if plugins:
+                    # Calculate average plugin scheduling latency
+                    avg_latencies = [p.get("avg_ms", 0) for p in plugins.values() if p.get("avg_ms") is not None]
+                    values.append(sum(avg_latencies) / len(avg_latencies) if avg_latencies else 0)
+                else:
+                    values.append(0)
             else:
                 values.append(0)
 
@@ -132,8 +129,8 @@ def generate_charts(report_path: str, output_dir: str) -> list[str]:
                 bar.set_hatch("//")
 
     ax.set_xlabel("Scenario")
-    ax.set_ylabel("Duration (ms)")
-    ax.set_title("Request Duration Average (ms)")
+    ax.set_ylabel("Plugin Scheduling Latency (ms)")
+    ax.set_title("Average Plugin Scheduling Latency (ms)")
     ax.set_xticks(x)
     ax.set_xticklabels([s.replace("tier2-", "").replace("latency-variance-composite", "latency-var") for s in scenarios],
                       rotation=45, ha="right")
@@ -141,7 +138,7 @@ def generate_charts(report_path: str, output_dir: str) -> list[str]:
     ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
-    file_path = output_path / "request_duration_avg_ms.png"
+    file_path = output_path / "plugin_scheduling_latency_avg_ms.png"
     plt.savefig(str(file_path), dpi=150, bbox_inches="tight")
     plt.close()
     generated_files.append(str(file_path))

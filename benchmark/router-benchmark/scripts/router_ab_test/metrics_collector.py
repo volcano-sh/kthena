@@ -114,7 +114,26 @@ class MetricsCollector:
 
     def _collect_prometheus(self, config_dir: Path, router_metrics_endpoint: str) -> dict[str, Any]:
         url = f"http://{router_metrics_endpoint}/metrics"
-        body = self._fetch_text(url)
+        try:
+            body = self._fetch_text(url)
+        except urllib.error.HTTPError as exc:
+            print(f"  WARNING: metrics endpoint {url} returned HTTP {exc.code}; skipping prometheus collection")
+            return {
+                "endpoint": url,
+                "path": "",
+                "sample_count": 0,
+                "key_metrics": {},
+                "error": f"HTTP {exc.code}",
+            }
+        except urllib.error.URLError as exc:
+            print(f"  WARNING: metrics endpoint {url} unreachable: {exc.reason}; skipping prometheus collection")
+            return {
+                "endpoint": url,
+                "path": "",
+                "sample_count": 0,
+                "key_metrics": {},
+                "error": str(exc.reason),
+            }
         output_path = config_dir / "router_metrics.prom"
         output_path.write_text(body, encoding="utf-8")
 
