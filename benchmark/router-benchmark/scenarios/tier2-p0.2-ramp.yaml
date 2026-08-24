@@ -4,7 +4,7 @@ description: "P0.2: linear ramp strategy"
 load:
   schedule:
     mode: "rate"
-    rate: 0.5
+    rate: 5
   traffic:
     burstiness: 1.0
     ramp:

@@ -4,7 +4,7 @@ description: "P1.3: kvCacheBlocks variance across backends"
 load:
   schedule:
     mode: "rate"
-    rate: 0.5
+    rate: 5
   traffic:
     burstiness: 1.0
     ramp:

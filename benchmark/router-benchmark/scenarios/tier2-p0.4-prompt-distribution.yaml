@@ -4,7 +4,7 @@ description: "P0.4: multi-token prompt distribution"
 load:
   schedule:
     mode: "rate"
-    rate: 0.5
+    rate: 1
   traffic:
     burstiness: 1.0
     ramp:
@@ -14,12 +14,12 @@ load:
       weight: 4
     - tokens: 512
       weight: 4
-    - tokens: 2048
+    - tokens: 1024
       weight: 2
   max_tokens:
     - tokens: 128
       weight: 10
-  duration: "60s"
+  duration: "120s"
 
 backends:
   common:

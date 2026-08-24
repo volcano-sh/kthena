@@ -4,7 +4,7 @@ description: "P1.1: mixed engine types (sglang + vllm)"
 load:
   schedule:
     mode: "rate"
-    rate: 0.5
+    rate: 5
   traffic:
     burstiness: 1.0
     ramp:

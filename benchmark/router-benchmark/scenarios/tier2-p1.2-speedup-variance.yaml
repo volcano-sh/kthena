@@ -4,7 +4,7 @@ description: "P1.2: speedup ratio variance across backends"
 load:
   schedule:
     mode: "rate"
-    rate: 0.5
+    rate: 5
   traffic:
     burstiness: 1.0
     ramp:

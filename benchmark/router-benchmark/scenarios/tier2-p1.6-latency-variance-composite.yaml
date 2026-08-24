@@ -4,7 +4,7 @@ description: "P1.6: composite latency variance (speedup + maxNumSeqs)"
 load:
   schedule:
     mode: "rate"
-    rate: 0.5
+    rate: 5
   traffic:
     burstiness: 1.0
     ramp:
