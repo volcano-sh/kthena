@@ -1,4 +1,4 @@
-name: Router Benchmark
+name: Router Benchmark (A/B Test)
 
 on:
   workflow_dispatch:
