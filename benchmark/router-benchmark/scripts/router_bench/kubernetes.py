@@ -25,7 +25,7 @@ from typing import Any
 import requests
 import yaml
 
-from router_ab_test.models import BackendProfile, BackendsConfig
+from router_bench.models import BackendProfile, BackendsConfig
 
 
 class EndpointMode:
@@ -510,7 +510,8 @@ class K8sManager:
             process_attr="_metrics_pf_proc",
             local_port=self.metrics_local_port,
             remote_port=self.ROUTER_METRICS_PORT,
-            description=f"svc/{self.ROUTER_SVC_NAME}:{self.ROUTER_METRICS_PORT}",
+            description=f"deployment/{self.ROUTER_DEPLOYMENT}:{self.ROUTER_METRICS_PORT}",
+            target_type="deployment",
         )
 
     # ---- Port-forward lifecycle -----------------------------------------------

@@ -17,17 +17,17 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.dependency import cleanup_redis, deploy_redis, wait_for_redis_ready
-from router_ab_test.kubernetes import EndpointMode, K8sManager
-from router_ab_test.load_generator import AIPerfRunner
-from router_ab_test.metrics_collector import MetricsCollector
-from router_ab_test.models import (
+from router_bench.dependency import cleanup_redis, deploy_redis, wait_for_redis_ready
+from router_bench.kubernetes import EndpointMode, K8sManager
+from router_bench.load_generator import AIPerfRunner
+from router_bench.metrics_collector import MetricsCollector
+from router_bench.models import (
     VERDICT_FRAMEWORK_ERROR,
     BenchmarkResult,
     ScenarioConfig,
     compute_run_verdict,
 )
-from router_ab_test.reporter import ResultReporter
+from router_bench.reporter import ResultReporter
 
 
 class ABTestOrchestrator:

@@ -30,7 +30,7 @@ from pathlib import Path
 
 import yaml
 
-from router_ab_test import (
+from router_bench import (
     EndpointMode,
     K8sManager,
     MatrixOrchestrator,

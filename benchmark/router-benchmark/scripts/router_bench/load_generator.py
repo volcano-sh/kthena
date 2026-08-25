@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.models import BenchmarkResult, ScenarioConfig
+from router_bench.models import BenchmarkResult, ScenarioConfig
 
 _AIPERF_METRIC_MAP = {
     "time_to_first_token": "ttft_avg_ms",

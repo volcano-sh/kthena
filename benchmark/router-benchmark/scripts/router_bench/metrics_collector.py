@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.models import ScenarioConfig
+from router_bench.models import ScenarioConfig
 
 _DEFAULT_CPU_PROFILE_SECONDS = 30
 _DEFAULT_PPROF_PROFILES = ("heap", "goroutine", "allocs", "block", "mutex")

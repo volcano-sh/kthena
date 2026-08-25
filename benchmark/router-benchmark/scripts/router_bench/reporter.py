@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from router_ab_test.models import BenchmarkResult, VERDICT_VALID
+from router_bench.models import BenchmarkResult, VERDICT_VALID
 
 _METRIC_SPECS: dict[str, dict[str, Any]] = {
     "ttft_avg_ms": {"higher_is_better": False, "regression_threshold": 5},
@@ -826,7 +826,7 @@ class ResultReporter:
 def main(argv: list[str] | None = None) -> int:
     """Offline analysis of collected router_metrics.prom files.
 
-    Usage: python -m router_ab_test.reporter <router_metrics.prom> [...]
+    Usage: python -m router_bench.reporter <router_metrics.prom> [...]
     """
     parser = argparse.ArgumentParser(description="Analyze kthena router Prometheus metrics snapshots.")
     parser.add_argument("prom_files", nargs="+", help="Path(s) to router_metrics.prom files")

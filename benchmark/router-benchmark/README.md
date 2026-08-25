@@ -41,7 +41,7 @@ To make `ab_test` easier to review and to gradually align with the layered desig
 router-benchmark/
 ├── scripts/
 │   ├── ab_test.py                         # CLI entrypoint
-│   └── router_ab_test/
+│   └── router_bench/
 │       ├── __init__.py
 │       ├── models.py                      # ScenarioConfig / BenchmarkResult
 │       ├── kubernetes.py                  # K8sManager: apply, rollout, probe, port-forward
@@ -58,22 +58,22 @@ router-benchmark/
 - `scripts/ab_test.py`
   - Keeps the original entrypoint path so existing commands, docs, and tests stay valid
   - Provides the CLI parser and `main()`
-- `scripts/router_ab_test/models.py`
+- `scripts/router_bench/models.py`
   - Benchmark domain models and scenario config loading
   - `ScenarioConfig.metrics` defines whether Prometheus / pprof collection is enabled per scenario
   - `BenchmarkResult.artifacts` holds additional collection results
-- `scripts/router_ab_test/kubernetes.py`
+- `scripts/router_bench/kubernetes.py`
   - Kubernetes resource operations, router rollout, service/debug port-forwarding, route ready probe
-- `scripts/router_ab_test/load_generator.py`
+- `scripts/router_bench/load_generator.py`
   - Maps the scenario YAML to AIPerf CLI arguments
-- `scripts/router_ab_test/metrics_collector.py`
+- `scripts/router_bench/metrics_collector.py`
   - Scrapes the router `/metrics` endpoint
   - Fetches the router `/debug/pprof/profile` and other profiles
   - Writes metrics and profile files to `artifacts/<config>/`
-- `scripts/router_ab_test/orchestrator.py`
+- `scripts/router_bench/orchestrator.py`
   - Drives the end-to-end A/B execution flow
   - Triggers the Metrics Collector after each AIPerf run
-- `scripts/router_ab_test/reporter.py`
+- `scripts/router_bench/reporter.py`
   - Compares metrics, builds the report structure, writes JSON, prints the summary
 
 ## Quick Start

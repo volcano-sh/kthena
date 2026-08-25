@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import argparse
 
-from router_ab_test import (
+from router_bench import (
     VERDICT_FRAMEWORK_ERROR,
     VERDICT_INVALID,
     VERDICT_VALID,
@@ -125,7 +125,7 @@ def main() -> None:
 def _dry_run(scenario_path: str) -> None:
     """Write scenario resources YAML to /tmp and exit."""
     from pathlib import Path
-    from router_ab_test.kubernetes import K8sManager
+    from router_bench.kubernetes import K8sManager
 
     scenario = ScenarioConfig.from_yaml(scenario_path)
     k8s = K8sManager()

@@ -315,7 +315,7 @@ class BackendsConfigTest(unittest.TestCase):
         self.assertEqual(profile.resources["limits"]["memory"], "1Gi")
 
     def test_builder_uses_profile_resources_when_present(self):
-        from router_ab_test.kubernetes import MockerDeploymentBuilder
+        from router_bench.kubernetes import MockerDeploymentBuilder
 
         config = ab_test.ScenarioConfig(
             name="s4",
@@ -345,7 +345,7 @@ class BackendsConfigTest(unittest.TestCase):
         self.assertEqual(container["resources"]["limits"]["memory"], "1Gi")
 
     def test_builder_falls_back_to_defaults_when_profile_has_no_resources(self):
-        from router_ab_test.kubernetes import MockerDeploymentBuilder
+        from router_bench.kubernetes import MockerDeploymentBuilder
 
         config = ab_test.ScenarioConfig(
             name="s2",
@@ -599,7 +599,7 @@ class MainTest(unittest.TestCase):
 
         self.assertEqual(exit_ctx.exception.code, 1)
 
-    @mock.patch("router_ab_test.kubernetes.K8sManager")
+    @mock.patch("router_bench.kubernetes.K8sManager")
     @mock.patch.object(ab_test, "ScenarioConfig")
     def test_dry_run_writes_yaml_to_tmp(self, mock_scenario_cls, mock_k8s_cls):
         from pathlib import Path
@@ -764,7 +764,7 @@ class K8sManagerRestartStatsTest(unittest.TestCase):
 
     def test_parses_restart_counts_and_reasons(self):
         import json as _json
-        from router_ab_test.kubernetes import K8sManager
+        from router_bench.kubernetes import K8sManager
 
         payload = {
             "items": [
@@ -786,7 +786,7 @@ class K8sManagerRestartStatsTest(unittest.TestCase):
 
     def test_empty_cluster_returns_zero(self):
         import json as _json
-        from router_ab_test.kubernetes import K8sManager
+        from router_bench.kubernetes import K8sManager
 
         fake_result = mock.Mock(stdout=_json.dumps({"items": []}), returncode=0)
         k8s = K8sManager()
@@ -822,7 +822,7 @@ class TempManifestCleanupTest(unittest.TestCase):
         return mock.patch("tempfile.NamedTemporaryFile", side_effect=spy)
 
     def test_deploy_backends_deletes_temp_manifests(self):
-        from router_ab_test.kubernetes import K8sManager
+        from router_bench.kubernetes import K8sManager
 
         k8s = K8sManager()
         created: list[str] = []
@@ -839,7 +839,7 @@ class TempManifestCleanupTest(unittest.TestCase):
     def test_deploy_backends_deletes_temp_manifest_when_apply_fails(self):
         import subprocess
 
-        from router_ab_test.kubernetes import K8sManager
+        from router_bench.kubernetes import K8sManager
 
         k8s = K8sManager()
         created: list[str] = []

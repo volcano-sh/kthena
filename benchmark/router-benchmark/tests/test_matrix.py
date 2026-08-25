@@ -30,9 +30,9 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(tier2_matrix)
 
 # Also import the shared modules needed
-from router_ab_test.models import ScenarioConfig, BenchmarkResult  # noqa: E402
-from router_ab_test.reporter import ResultReporter  # noqa: E402
-from router_ab_test.load_generator import AIPerfRunner  # noqa: E402
+from router_bench.models import ScenarioConfig, BenchmarkResult  # noqa: E402
+from router_bench.reporter import ResultReporter  # noqa: E402
+from router_bench.load_generator import AIPerfRunner  # noqa: E402
 
 
 # --- Test 1: ConfigMap YAML validity --------------------------------------
@@ -373,7 +373,7 @@ class CRDSingleEngineLimitationTest:
         # Read the orchestrator source to verify the logic references profiles[0]
         tests_dir = Path(__file__).resolve().parent
         benchmark_dir = tests_dir.parent
-        orchestrator_path = benchmark_dir / "scripts" / "router_ab_test" / "orchestrator.py"
+        orchestrator_path = benchmark_dir / "scripts" / "router_bench" / "orchestrator.py"
 
         if orchestrator_path.exists():
             content = orchestrator_path.read_text(encoding="utf-8")
@@ -389,7 +389,7 @@ class CRDSingleEngineLimitationTest:
             errors.append(f"orchestrator.py not found at {orchestrator_path}")
 
         # Test with a mock scenario config having mixed engines
-        from router_ab_test.models import BackendsConfig, BackendProfile
+        from router_bench.models import BackendsConfig, BackendProfile
         backends = BackendsConfig(profiles=[
             BackendProfile(
                 name="sglang-pool", count=2, engine_type="sglang",
@@ -441,7 +441,7 @@ class MethodEquivalenceTest:
         # We can verify this by reading the source code of both methods
         tests_dir = Path(__file__).resolve().parent
         benchmark_dir = tests_dir.parent
-        orchestrator_path = benchmark_dir / "scripts" / "router_ab_test" / "orchestrator.py"
+        orchestrator_path = benchmark_dir / "scripts" / "router_bench" / "orchestrator.py"
 
         if not orchestrator_path.exists():
             errors.append(f"orchestrator.py not found at {orchestrator_path}")
