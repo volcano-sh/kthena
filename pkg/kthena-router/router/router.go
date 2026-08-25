@@ -142,17 +142,46 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
 		switch data.EventType {
 		case datastore.EventAdd, datastore.EventUpdate:
-			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
+			if data.ModelRoute == nil {
 				return
 			}
-			klog.Infof("add or update rate limit for model %s", data.ModelName)
+			namespacedName := data.ModelRoute.Namespace + "/" + data.ModelRoute.Name
+			currentMR := store.GetModelRoute(namespacedName)
 
+			if data.ModelRoute.Spec.RateLimit == nil {
+				// Reject stale deletion if the current route in store has a rate limit configured
+				if currentMR != nil && currentMR.Spec.RateLimit != nil {
+					klog.V(4).Infof("ignoring stale rate limit removal for model %s (current spec has rate limit)", data.ModelName)
+					return
+				}
+				klog.Infof("delete rate limit for model %s as rateLimit is nil", data.ModelName)
+				loadRateLimiter.DeleteLimiter(data.ModelName)
+				return
+			}
+
+			// Reject stale update if the current route in store has cleared the rate limit
+			if currentMR != nil && currentMR.Spec.RateLimit == nil {
+				klog.V(4).Infof("ignoring stale rate limit update for model %s (current spec cleared rate limit)", data.ModelName)
+				loadRateLimiter.DeleteLimiter(data.ModelName)
+				return
+			}
+
+			klog.Infof("add or update rate limit for model %s", data.ModelName)
 			// Configure the unified rate limiter for this model
 			if err := loadRateLimiter.AddOrUpdateLimiter(data.ModelName, data.ModelRoute.Spec.RateLimit); err != nil {
 				klog.Errorf("failed to configure rate limiter for model %s: %v", data.ModelName, err)
 			}
 
 		case datastore.EventDelete:
+			if data.ModelRoute != nil {
+				namespacedName := data.ModelRoute.Namespace + "/" + data.ModelRoute.Name
+				currentMR := store.GetModelRoute(namespacedName)
+				// Reject stale deletion if a newer route exists in store with a rate limit
+				if currentMR != nil && currentMR.Spec.RateLimit != nil {
+					klog.V(4).Infof("ignoring stale rate limit deletion for model %s (current spec has rate limit)", data.ModelName)
+					return
+				}
+			}
 			klog.Infof("delete rate limit for model %s", data.ModelName)
 			loadRateLimiter.DeleteLimiter(data.ModelName)
 		}
