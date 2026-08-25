@@ -96,11 +96,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: 'go.mod'
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -119,11 +114,25 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
-      - name: Deploy Kthena
+      - name: Create Kind Cluster
         run: |
-          export CLUSTER_NAME=kthena-benchmark
-          export TAG=benchmark-${{ github.run_id }}
-          ./hack/local-up-kthena.sh
+          kind create cluster --name kthena-benchmark
+
+      - name: Deploy Kthena via Helm
+        run: |
+          kubectl create namespace kthena-system
+          helm upgrade --install kthena ./charts/kthena \
+            --namespace kthena-system \
+            --set workload.controllerManager.image.repository=ghcr.io/volcano-sh/kthena-controller-manager \
+            --set workload.controllerManager.image.tag=latest \
+            --set workload.controllerManager.image.pullPolicy=Always \
+            --set workload.controllerManager.downloaderImage.repository=ghcr.io/volcano-sh/downloader \
+            --set workload.controllerManager.downloaderImage.tag=latest \
+            --set workload.controllerManager.runtimeImage.repository=ghcr.io/volcano-sh/runtime \
+            --set workload.controllerManager.runtimeImage.tag=latest \
+            --set networking.kthenaRouter.image.repository=ghcr.io/volcano-sh/kthena-router \
+            --set networking.kthenaRouter.image.tag=latest \
+            --set networking.kthenaRouter.image.pullPolicy=Always
 
       - name: Check Kthena Deployment
         run: |
@@ -254,5 +263,4 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          export CLUSTER_NAME=kthena-benchmark
-          ./hack/local-up-kthena.sh -q || true
+          kind delete cluster --name kthena-benchmark || true
