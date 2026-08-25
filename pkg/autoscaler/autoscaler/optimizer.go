@@ -65,7 +65,11 @@ func HeterogeneousTargetKey(targetRef corev1.ObjectReference, policyNamespace st
 func (meta *OptimizerMeta) RestoreReplicasOfEachBackend(replicas int32) map[string]int32 {
 	replicasMap := make(map[string]int32, len(meta.Config.Params))
 	for _, param := range meta.Config.Params {
-		replicasMap[HeterogeneousTargetKey(param.Target.TargetRef, meta.Scope.Namespace)] = param.MinReplicas
+		// A backend with MinReplicas > MaxReplicas is dropped from ScalingOrder
+		// by NewOptimizerMeta, so this clamp is the only guard keeping such a
+		// backend (from a stale or validation-bypassed policy) within its own
+		// MaxReplicas.
+		replicasMap[HeterogeneousTargetKey(param.Target.TargetRef, meta.Scope.Namespace)] = min(param.MinReplicas, param.MaxReplicas)
 	}
 	replicas = min(max(replicas, meta.MinReplicas), meta.MaxReplicas)
 	replicas -= meta.MinReplicas

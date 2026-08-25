@@ -294,6 +294,17 @@ func TestNewOptimizerMeta(t *testing.T) {
 		assert.Len(t, meta.ScalingOrder, 0)
 	})
 
+	t.Run("MinReplicas greater than MaxReplicas is excluded from ScalingOrder", func(t *testing.T) {
+		// Excluded like a zero delta; RestoreReplicasOfEachBackend is what keeps
+		// such a backend within its own MaxReplicas.
+		policy := makePolicy("uid-invalid", "ns-1", 100, []workload.HeterogeneousTargetParam{
+			makeParam("h100", 10, 5, 2),
+		})
+		meta := NewOptimizerMeta(policy)
+		require.NotNil(t, meta)
+		assert.Len(t, meta.ScalingOrder, 0)
+	})
+
 	t.Run("CostExpansionRatePercent == 100 — single block per backend", func(t *testing.T) {
 		policy := makePolicy("uid-3", "ns-1", 100, []workload.HeterogeneousTargetParam{
 			makeParam("h100", 10, 1, 4),
@@ -377,6 +388,44 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			replicas: 4,
 			want: map[string]int32{
 				"ns/h100": 4,
+			},
+		},
+		{
+			// min > max excludes this backend from ScalingOrder, so the initial
+			// clamp here is the only thing keeping a stale or validation-bypassed
+			// policy within MaxReplicas.
+			name: "MinReplicas greater than MaxReplicas never exceeds MaxReplicas",
+			params: []workload.HeterogeneousTargetParam{
+				makeParam("h100", 10, 5, 2),
+			},
+			rate:     100,
+			replicas: 0,
+			want: map[string]int32{
+				"ns/h100": 2,
+			},
+		},
+		{
+			name: "MinReplicas equal to MaxReplicas is pinned at that value",
+			params: []workload.HeterogeneousTargetParam{
+				makeParam("h100", 10, 3, 3),
+			},
+			rate:     100,
+			replicas: 999,
+			want: map[string]int32{
+				"ns/h100": 3,
+			},
+		},
+		{
+			name: "invalid backend alongside a valid one stays within its own MaxReplicas",
+			params: []workload.HeterogeneousTargetParam{
+				makeParam("h100", 10, 1, 4),
+				makeParam("broken", 5, 5, 2),
+			},
+			rate:     100,
+			replicas: 3,
+			want: map[string]int32{
+				"ns/h100":   1,
+				"ns/broken": 2,
 			},
 		},
 		{
