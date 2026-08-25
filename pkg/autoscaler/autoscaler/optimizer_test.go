@@ -17,13 +17,23 @@ limitations under the License.
 package autoscaler
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	corelister "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -413,4 +423,104 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// Optimize must record the raw recommendation, not the corrected value, into
+// the recommendation windows; otherwise the scale-down stabilization window
+// refills itself every cycle and never drains (#1644).
+func TestOptimizeRecordsRawRecommendationInStabilizationWindows(t *testing.T) {
+	var metricValue atomic.Value
+	metricValue.Store("100")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/api/v1/query") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"scalar","result":[1700000000,"%s"]}}`, metricValue.Load())
+	}))
+	t.Cleanup(srv.Close)
+
+	targetRef := corev1.ObjectReference{Kind: "ModelServing", Name: "backend-a"}
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "hetero-policy", Namespace: "default"},
+		Spec: workload.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []workload.AutoscalingPolicyMetric{
+				{Name: "http_rps", TargetValue: resource.MustParse("10")},
+			},
+			Behavior: workload.AutoscalingPolicyBehavior{
+				ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{
+					StablePolicy: workload.AutoscalingPolicyStablePolicy{
+						Instances:           ptr(int32(1000)),
+						Percent:             ptr(int32(1000)),
+						Period:              &metav1.Duration{Duration: 15 * time.Second},
+						SelectPolicy:        workload.SelectPolicyOr,
+						StabilizationWindow: &metav1.Duration{Duration: time.Hour},
+					},
+					PanicPolicy: workload.AutoscalingPolicyPanicPolicy{
+						Percent:               ptr(int32(1000)),
+						Period:                metav1.Duration{Duration: 15 * time.Second},
+						PanicThresholdPercent: ptr(int32(1000)),
+					},
+				},
+				ScaleDown: workload.AutoscalingPolicyStablePolicy{
+					Instances:           ptr(int32(1000)),
+					Percent:             ptr(int32(100)),
+					Period:              &metav1.Duration{Duration: 15 * time.Second},
+					SelectPolicy:        workload.SelectPolicyOr,
+					StabilizationWindow: &metav1.Duration{Duration: time.Hour},
+				},
+			},
+			HeterogeneousTarget: &workload.HeterogeneousTarget{
+				CostExpansionRatePercent: 100,
+				Params: []workload.HeterogeneousTargetParam{
+					{
+						Target: workload.Target{
+							TargetRef: targetRef,
+							MetricSources: map[string]workload.MetricSource{
+								"http_rps": {Prometheus: &workload.PrometheusMetricSource{
+									ServerURL: srv.URL,
+									Query:     "sum(rate(http_requests_total[2m]))",
+								}},
+							},
+						},
+						Cost:        100,
+						MinReplicas: 0,
+						MaxReplicas: 100,
+					},
+				},
+			},
+		},
+	}
+
+	optimizer := NewOptimizer(policy)
+	podLister := corelister.NewPodLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}))
+	targetKey := HeterogeneousTargetKey(targetRef, policy.Namespace)
+	current := map[string]int32{targetKey: 10}
+
+	// High-demand cycle: recommendation matches the current 10 replicas.
+	replicas, err := optimizer.Optimize(context.Background(), podLister, policy, current)
+	require.NoError(t, err)
+	require.NotNil(t, replicas)
+	assert.Equal(t, int32(10), replicas[targetKey])
+
+	// Low-demand cycle: the stabilization window holds replicas at 10 while
+	// the recommendation windows must record the raw value 2.
+	metricValue.Store("20")
+	replicas, err = optimizer.Optimize(context.Background(), podLister, policy, current)
+	require.NoError(t, err)
+	require.NotNil(t, replicas)
+	assert.Equal(t, int32(10), replicas[targetKey],
+		"scale down should be held up by the stabilization window")
+
+	rawMin, ok := optimizer.Status.History.MinRecommendation.GetBest()
+	require.True(t, ok)
+	assert.Equal(t, int32(2), rawMin,
+		"recommendation windows must record the raw recommendation, not the corrected value")
+
+	heldMax, ok := optimizer.Status.History.MaxCorrected.GetBest(current[targetKey])
+	require.True(t, ok)
+	assert.Equal(t, int32(10), heldMax,
+		"corrected windows must record the corrected value")
 }

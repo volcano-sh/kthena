@@ -229,13 +229,13 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		MaxInstances:         optimizer.Meta.MaxReplicas,
 		CurrentInstances:     instancesCountSum,
 		RecommendedInstances: recommendedInstances}
-	recommendedInstances = CorrectedInstancesAlgorithm.GetCorrectedInstances()
+	correctedInstances := CorrectedInstancesAlgorithm.GetCorrectedInstances()
 
-	klog.InfoS("autoscale controller", "recommendedInstances", recommendedInstances, "correctedInstances", recommendedInstances)
+	klog.InfoS("autoscale controller", "recommendedInstances", recommendedInstances, "correctedInstances", correctedInstances)
 	optimizer.Status.AppendRecommendation(recommendedInstances)
-	optimizer.Status.AppendCorrected(recommendedInstances)
+	optimizer.Status.AppendCorrected(correctedInstances)
 
-	replicasMap := optimizer.Meta.RestoreReplicasOfEachBackend(recommendedInstances)
+	replicasMap := optimizer.Meta.RestoreReplicasOfEachBackend(correctedInstances)
 	return replicasMap, nil
 }
 
