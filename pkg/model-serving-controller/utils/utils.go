@@ -156,6 +156,10 @@ func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metada
 		}
 		for k, v := range metadata.Labels {
 			if workloadv1alpha1.IsControllerReservedPodLabel(k) {
+				// Admission rejects this for newly created ModelServings. Keep this
+				// guard for resources created before the webhook or when admission is
+				// bypassed, and make the ignored label visible to the user.
+				klog.Warningf("Ignoring controller-reserved Pod label %q from the template for Pod %s/%s", k, pod.Namespace, pod.Name)
 				continue
 			}
 			if _, exists := pod.Labels[k]; exists {
