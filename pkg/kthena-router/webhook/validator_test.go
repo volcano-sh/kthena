@@ -991,7 +991,22 @@ func TestValidateExternalModelProvider(t *testing.T) {
 				},
 			},
 			expectValid:    false,
-			expectedReason: "validation failed:\n  - spec.headers[X-Tenant]: Invalid value: \"tenant-a\\r\\nX-Injected: true\": header value must not contain CR or LF",
+			expectedReason: "validation failed:\n  - spec.headers[X-Tenant]: Invalid value: \"tenant-a\\r\\nX-Injected: true\": header value is invalid",
+		},
+		{
+			name: "invalid provider - static header value contains DEL",
+			provider: &networkingv1alpha1.ExternalModelProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-provider", Namespace: "default"},
+				Spec: networkingv1alpha1.ExternalModelProviderSpec{
+					ProviderType: networkingv1alpha1.OpenAI,
+					BaseURL:      "https://api.example.com/v1",
+					Headers: map[string]string{
+						"X-Tenant": "tenant-a\u007f",
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:\n  - spec.headers[X-Tenant]: Invalid value: \"tenant-a\\x7f\": header value is invalid",
 		},
 		{
 			name: "invalid provider - optional secret ref",
