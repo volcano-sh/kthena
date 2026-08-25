@@ -167,7 +167,7 @@ class MockerDeploymentBuilder:
                                 "name": "hf-cache",
                                 "hostPath": {
                                     "path": "/opt/hf-cache",
-                                    "type": "DirectoryOrCreate",
+                                    "type": "Directory",
                                 },
                             },
                         ],

@@ -164,7 +164,7 @@ jobs:
         run: |
           sudo mkdir -p /opt/hf-cache
           pip install huggingface_hub
-          HF_HOME=/opt/hf-cache huggingface-cli download Qwen/Qwen3-0.6B
+          HF_HOME=/opt/hf-cache hf download Qwen/Qwen3-0.6B --exclude model.safetensors
 
       - name: Run Tier2 Matrix Benchmark
         working-directory: benchmark/router-benchmark
