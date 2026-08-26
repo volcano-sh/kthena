@@ -63,7 +63,7 @@ func (autoscaler *Autoscaler) UpdateAutoscalePolicy(autoscalePolicy *workload.Au
 }
 
 func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCount int32) (int32, error) {
-	unreadyInstancesCount, readyInstancesMetrics, metricReporterCounts, externalMetrics, err := autoscaler.Collector.UpdateMetrics(ctx, podLister, autoscaler.Meta.Config.Target.MetricSources)
+	unreadyInstancesCount, _, readyInstancesMetrics, _, externalMetrics, err := autoscaler.Collector.UpdateMetrics(ctx, podLister, autoscaler.Meta.Config.Target.MetricSources)
 	if err != nil {
 		klog.Errorf("update metrics error: %v", err)
 		return -1, err
@@ -78,7 +78,6 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 		MetricTargets:         autoscaler.Collector.MetricTargets,
 		UnreadyInstancesCount: unreadyInstancesCount,
 		ReadyInstancesMetrics: readyInstancesMetrics,
-		MetricReporterCounts:  metricReporterCounts,
 		ExternalMetrics:       externalMetrics,
 	})
 	if result.Skip {
@@ -101,7 +100,6 @@ type scaleOneTargetInput struct {
 	MetricTargets         algorithm.Metrics
 	UnreadyInstancesCount int32
 	ReadyInstancesMetrics algorithm.Metrics
-	MetricReporterCounts  algorithm.ReporterCounts
 	ExternalMetrics       algorithm.Metrics
 }
 
@@ -121,7 +119,6 @@ func scaleOneTarget(input scaleOneTargetInput) scaleOneTargetResult {
 		MetricTargets:         input.MetricTargets,
 		UnreadyInstancesCount: input.UnreadyInstancesCount,
 		ReadyInstancesMetrics: []algorithm.Metrics{input.ReadyInstancesMetrics},
-		MetricReporterCounts:  input.MetricReporterCounts,
 		ExternalMetrics:       input.ExternalMetrics,
 	}
 	recommendedReplicas, skip := instancesAlgorithm.GetRecommendedInstances()

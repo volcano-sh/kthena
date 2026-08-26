@@ -105,7 +105,8 @@ func (collector *MetricCollector) UpdateMetrics(
 	ctx context.Context,
 	podLister listerv1.PodLister,
 	targetMetricSources map[string]v1alpha1.MetricSource,
-) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, metricReporterCounts algorithm.ReporterCounts, externalMetrics algorithm.Metrics, err error) {
+) (unreadyInstancesCount int32, metricUnreadyCounts map[string]int32, readyInstancesMetric algorithm.Metrics, metricReporterCounts algorithm.ReporterCounts, externalMetrics algorithm.Metrics, err error) {
+	metricUnreadyCounts = make(map[string]int32)
 	readyInstancesMetric = make(algorithm.Metrics)
 	metricReporterCounts = make(algorithm.ReporterCounts)
 
@@ -134,6 +135,9 @@ func (collector *MetricCollector) UpdateMetrics(
 		}
 		for podKey := range groupUnreadyPods {
 			unreadyPods.Insert(podKey)
+		}
+		for _, spec := range g.specs {
+			metricUnreadyCounts[spec.policyKey] = int32(groupUnreadyPods.Len())
 		}
 		for policyKey, v := range values {
 			readyInstancesMetric[policyKey] = v

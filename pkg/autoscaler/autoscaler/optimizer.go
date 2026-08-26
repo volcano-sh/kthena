@@ -163,7 +163,7 @@ func (optimizer *Optimizer) NeedUpdate(policy *workload.AutoscalingPolicy) bool 
 
 func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCounts map[string]int32) (map[string]int32, error) {
 	size := len(optimizer.Meta.Config.Params)
-	unreadyInstancesCount := int32(0)
+	metricUnreadyCounts := make(map[string]int32)
 	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
 	metricReporterCounts := make(algorithm.ReporterCounts)
 	// externalSamples accumulates per-backend (value, replicas) pairs for each
@@ -181,12 +181,14 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 
 		backendReplicas := currentInstancesCounts[targetKey]
 		instancesCountSum += backendReplicas
-		currentUnreadyInstancesCount, currentReadyInstancesMetrics, currentMetricReporterCounts, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
+		_, currentMetricUnreadyCounts, currentReadyInstancesMetrics, currentMetricReporterCounts, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
 			continue
 		}
-		unreadyInstancesCount += currentUnreadyInstancesCount
+		for metricName, count := range currentMetricUnreadyCounts {
+			metricUnreadyCounts[metricName] += count
+		}
 		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
 		for metricName, count := range currentMetricReporterCounts {
 			metricReporterCounts[metricName] += count
@@ -213,7 +215,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		CurrentInstancesCount: instancesCountSum,
 		Tolerance:             float64(autoscalePolicy.Spec.TolerancePercent) * 0.01,
 		MetricTargets:         optimizer.Meta.MetricTargets,
-		UnreadyInstancesCount: unreadyInstancesCount,
+		MetricUnreadyCounts:   metricUnreadyCounts,
 		ReadyInstancesMetrics: readyInstancesMetrics,
 		MetricReporterCounts:  metricReporterCounts,
 		ExternalMetrics:       externalMetrics,
