@@ -133,9 +133,14 @@ class AIPerfRunner:
         if mode in {"rate", "constant_rate"}:
             cmd.extend(["--request-rate", str(schedule.get("rate", 10))])
             self._append_traffic_args(cmd, traffic, benchmark_secs)
-        else:
+        elif mode in {"concurrency", "constant_concurrency"}:
             cmd.extend(["--concurrency", str(concurrency.get("connections", 10))])
             self._append_concurrency_args(cmd, concurrency)
+        else:
+            raise ValueError(
+                f"Unknown schedule mode '{mode}'. Expected 'rate', 'constant_rate', "
+                f"'concurrency', or 'constant_concurrency'."
+            )
 
     def _append_traffic_args(self, cmd: list[str], traffic: dict[str, Any], benchmark_secs: int) -> None:
         burstiness = float(traffic.get("burstiness", 1.0))

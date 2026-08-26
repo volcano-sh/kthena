@@ -232,7 +232,7 @@ class K8sManager:
     """Manage Kubernetes resources needed by the benchmark."""
 
     ROUTER_NAMESPACE = "kthena-system"
-    ROUTER_DEPLOYMENT = "kthena-router"  # SVC uses the same name
+    ROUTER_DEPLOYMENT = "kthena-router"
     ROUTER_SVC_PORT = 80
     ROUTER_SVC_NAME = "kthena-router"
     ROUTER_DEBUG_PORT = 15000
@@ -311,6 +311,8 @@ class K8sManager:
 
     def _build_model_crds_docs(self, config: BackendsConfig) -> list[dict[str, Any]]:
         """Return ModelServer and ModelRoute dicts for the mocker model."""
+        if not config.profiles:
+            raise ValueError("BackendsConfig.profiles is empty.")
         model = config.profiles[0].model
         engine = self._ENGINE_CRD_MAP.get(config.profiles[0].engine_type, config.profiles[0].engine_type)
 
@@ -537,7 +539,11 @@ class K8sManager:
         local_endpoint = f"localhost:{local_port}"
         print(f"  Starting port-forward ({local_endpoint} → {description})")
 
-        target = f"{target_type}/{self.ROUTER_DEPLOYMENT}"
+        if target_type == "svc":
+            target_name = self.ROUTER_SVC_NAME
+        else:
+            target_name = self.ROUTER_DEPLOYMENT
+        target = f"{target_type}/{target_name}"
         proc = subprocess.Popen(
             [
                 "kubectl", "port-forward", target,

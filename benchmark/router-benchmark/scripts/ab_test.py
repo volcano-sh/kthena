@@ -118,6 +118,10 @@ def main() -> None:
         # At least one run was invalid/framework_error — not a regression
         # signal, but the run itself failed the validity gate (issue #1271).
         raise SystemExit(2)
+    if not comparison:
+        # Empty comparison (e.g., no metrics collected) is an error, not success.
+        print("Error: comparison is empty, maybe no metrics collected.")
+        raise SystemExit(3)
     has_regression = any(metric.get("regression", False) for metric in comparison.values())
     raise SystemExit(1 if has_regression else 0)
 

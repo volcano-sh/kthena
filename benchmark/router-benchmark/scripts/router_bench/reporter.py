@@ -472,7 +472,7 @@ class ResultReporter:
         for plugin_key in sorted(set(plugins_a) & set(plugins_b)):
             avg_a = plugins_a[plugin_key].get("avg_ms")
             avg_b = plugins_b[plugin_key].get("avg_ms")
-            if not avg_a or avg_b is None:
+            if avg_a is None or avg_b is None:
                 continue
             delta_pct = self._calculate_delta_pct(avg_a, avg_b, higher_is_better=False)
             comparison[f"plugin_avg_ms[{plugin_key}]"] = {
@@ -686,6 +686,9 @@ class ResultReporter:
                                 "_skipped": True,
                                 "reason": "cross_chain_plugin_name_mismatch",
                             }
+                else:
+                    end_to_end = {"_skipped": True, "reason": "invalid_or_missing_verdict"}
+                    router_comparison = {"_skipped": True, "reason": "invalid_or_missing_verdict"}
 
                 vs_least_latency[sc_name][e["chain"]] = {
                     "end_to_end": end_to_end,
@@ -734,7 +737,7 @@ class ResultReporter:
                     else:
                         router_comparison = {
                             "_skipped": True,
-                            "reason": "nil_scores",
+                            "reason": "invalid_or_missing_analysis",
                         }
                     chain_cross[sc_name] = router_comparison
 
