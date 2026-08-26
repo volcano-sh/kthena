@@ -116,7 +116,16 @@ jobs:
 
       - name: Create Kind Cluster
         run: |
-          kind create cluster --name kthena-benchmark
+          cat <<EOF > kind-config.yaml
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+          - role: control-plane
+            extraMounts:
+            - hostPath: /opt/hf-cache
+              containerPath: /opt/hf-cache
+          EOF
+          kind create cluster --name kthena-benchmark --config kind-config.yaml
 
       - name: Deploy Kthena via Helm
         run: |
@@ -172,6 +181,7 @@ jobs:
       - name: Pre-download model cache
         run: |
           sudo mkdir -p /opt/hf-cache
+          sudo chown -R $USER:$USER /opt/hf-cache
           pip install huggingface_hub
           HF_HOME=/opt/hf-cache hf download Qwen/Qwen3-0.6B --exclude model.safetensors
 
