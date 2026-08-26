@@ -58,6 +58,8 @@ func (p *HeadlessServicePlugin) OnPodCreate(ctx context.Context, req *HookReques
 		return nil
 	}
 	entryServiceName := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
+	req.Pod.Spec.Hostname = req.Pod.Name
+	req.Pod.Spec.Subdomain = entryServiceName
 	utils.AddPodEnvVars(req.Pod, corev1.EnvVar{
 		Name:  workloadv1alpha1.EntryAddressEnv,
 		Value: entryServiceName + "." + req.ModelServing.Namespace,
@@ -146,7 +148,6 @@ func (p *HeadlessServicePlugin) ensureService(
 		workloadv1alpha1.GroupNameLabelKey: servingGroup,
 		workloadv1alpha1.RoleLabelKey:      roleName,
 		workloadv1alpha1.RoleIDKey:         roleID,
-		workloadv1alpha1.EntryLabelKey:     utils.Entry,
 	}
 	err = utils.CreateHeadlessService(ctx, req.KubeClient, ms, selector, servingGroup, roleName, roleIndex, map[string]string{
 		HeadlessServicePluginLabelKey: HeadlessServicePluginName,

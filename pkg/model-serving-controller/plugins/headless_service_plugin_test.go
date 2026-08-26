@@ -62,7 +62,7 @@ func TestHeadlessServicePluginLifecycle(t *testing.T) {
 		RoleID:       "prefill-0",
 		Role:         role,
 		IsEntry:      true,
-		Pod: &corev1.Pod{Spec: corev1.PodSpec{
+		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-ms-0-prefill-0-0"}, Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "entry", Env: []corev1.EnvVar{{
 				Name: workloadv1alpha1.EntryAddressEnv, Value: "user-value",
 			}}}},
@@ -75,8 +75,13 @@ func TestHeadlessServicePluginLifecycle(t *testing.T) {
 	entryAddress := "test-ms-0-prefill-0-0.default"
 	assert.Equal(t, entryAddress, envMap(req.Pod.Spec.Containers[0].Env)[workloadv1alpha1.EntryAddressEnv])
 	assert.Equal(t, entryAddress, envMap(req.Pod.Spec.InitContainers[0].Env)[workloadv1alpha1.EntryAddressEnv])
+	assert.Equal(t, req.Pod.Name, req.Pod.Spec.Hostname)
+	assert.Equal(t, req.Pod.Name, req.Pod.Spec.Subdomain)
 
-	workerPod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}}}
+	workerPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms-0-prefill-0-1"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}},
+	}
 	require.NoError(t, plugin.OnPodCreate(ctx, &HookRequest{
 		ModelServing: ms,
 		ServingGroup: req.ServingGroup,
@@ -86,13 +91,17 @@ func TestHeadlessServicePluginLifecycle(t *testing.T) {
 		Pod:          workerPod,
 	}))
 	assert.Equal(t, entryAddress, envMap(workerPod.Spec.Containers[0].Env)[workloadv1alpha1.EntryAddressEnv])
+	assert.Equal(t, workerPod.Name, workerPod.Spec.Hostname)
+	assert.Equal(t, req.Pod.Name, workerPod.Spec.Subdomain)
 
 	serviceName := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
 	service, err := kubeClient.CoreV1().Services(ms.Namespace).Get(ctx, serviceName, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, corev1.ClusterIPNone, service.Spec.ClusterIP)
 	assert.True(t, service.Spec.PublishNotReadyAddresses)
-	assert.Equal(t, utils.Entry, service.Spec.Selector[workloadv1alpha1.EntryLabelKey])
+	assert.Equal(t, req.ServingGroup, service.Spec.Selector[workloadv1alpha1.GroupNameLabelKey])
+	assert.Equal(t, req.RoleName, service.Spec.Selector[workloadv1alpha1.RoleLabelKey])
+	assert.Equal(t, req.RoleID, service.Spec.Selector[workloadv1alpha1.RoleIDKey])
 	assert.Equal(t, HeadlessServicePluginName, service.Labels[HeadlessServicePluginLabelKey])
 	assert.True(t, utils.IsOwnedByModelServingWithUID(service, ms.UID))
 
@@ -128,6 +137,39 @@ func envMap(envVars []corev1.EnvVar) map[string]string {
 		env[item.Name] = item.Value
 	}
 	return env
+}
+
+func TestHeadlessServicePluginSetsPodDNSWithZeroWorkerReplicas(t *testing.T) {
+	ctx := context.Background()
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-ms", Namespace: "default", UID: types.UID("test-ms-uid"),
+	}}
+	role := &workloadv1alpha1.Role{
+		Name:           "prefill",
+		WorkerReplicas: 0,
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-ms-0-prefill-0-0"}}
+	kubeClient := kubefake.NewSimpleClientset()
+	plugin, err := NewHeadlessServicePlugin(
+		workloadv1alpha1.PluginSpec{Name: HeadlessServicePluginName, Type: workloadv1alpha1.PluginTypeBuiltIn},
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, plugin.OnPodCreate(ctx, &HookRequest{
+		ModelServing: ms,
+		ServingGroup: "test-ms-0",
+		RoleName:     role.Name,
+		RoleID:       "prefill-0",
+		Role:         role,
+		IsEntry:      true,
+		Pod:          pod,
+		KubeClient:   kubeClient,
+	}))
+	assert.Equal(t, pod.Name, pod.Spec.Hostname)
+	assert.Equal(t, pod.Name, pod.Spec.Subdomain)
+	_, err = kubeClient.CoreV1().Services(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
 }
 
 func TestHeadlessServicePluginSkipsUnsupportedRoles(t *testing.T) {

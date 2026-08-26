@@ -5979,7 +5979,6 @@ func TestManageHeadlessService(t *testing.T) {
 					assert.Contains(t, item.Labels, workloadv1alpha1.GroupNameLabelKey)
 					assert.Contains(t, item.Labels, workloadv1alpha1.RoleLabelKey)
 					assert.Contains(t, item.Labels, workloadv1alpha1.RoleIDKey)
-					assert.Contains(t, item.Spec.Selector, workloadv1alpha1.EntryLabelKey)
 					assert.Contains(t, item.Spec.Selector, workloadv1alpha1.GroupNameLabelKey)
 					assert.Contains(t, item.Spec.Selector, workloadv1alpha1.RoleLabelKey)
 					assert.Contains(t, item.Spec.Selector, workloadv1alpha1.RoleIDKey)

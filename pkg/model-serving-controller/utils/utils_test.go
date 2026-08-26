@@ -88,7 +88,7 @@ func TestGenerateWorkerPod_WithAnnotations(t *testing.T) {
 	assert.Equal(t, annotations, pod.Annotations)
 }
 
-func TestGeneratePodsDoNotInjectEntryAddress(t *testing.T) {
+func TestGeneratePodsDoNotInjectHeadlessServiceSettings(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
 	}
@@ -109,6 +109,8 @@ func TestGeneratePodsDoNotInjectEntryAddress(t *testing.T) {
 	for _, pod := range []*corev1.Pod{entryPod, workerPod} {
 		assert.NotContains(t, envMap(pod.Spec.Containers[0].Env), workloadv1alpha1.EntryAddressEnv)
 		assert.Equal(t, "2", envMap(pod.Spec.Containers[0].Env)[workloadv1alpha1.GroupSizeEnv])
+		assert.Empty(t, pod.Spec.Hostname)
+		assert.Empty(t, pod.Spec.Subdomain)
 	}
 	assert.Equal(t, "0", envMap(entryPod.Spec.Containers[0].Env)[workloadv1alpha1.WorkerIndexEnv])
 	assert.Equal(t, "1", envMap(workerPod.Spec.Containers[0].Env)[workloadv1alpha1.WorkerIndexEnv])

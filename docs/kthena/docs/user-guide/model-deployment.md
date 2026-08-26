@@ -265,7 +265,10 @@ spec:
 Without the plugin, no new Headless Services are created or recovered. Removing
 the plugin does not immediately delete existing Services; they are deleted when
 their corresponding Roles are deleted. `ENTRY_ADDRESS` is injected into new
-Entry and Worker Pods only when this plugin runs.
+Entry and Worker Pods only when this plugin runs. The plugin also sets each
+Pod's hostname to its generated Pod name and its subdomain to the Entry Service
+name. Because that Service selects both Entry and Worker Pods, every Pod in the
+Role replica receives a DNS record under the Headless Service domain.
 
 ### GPU PD Disaggregation
 
