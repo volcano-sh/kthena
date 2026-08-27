@@ -2939,7 +2939,8 @@ func (s *failingEnqueueStore) Enqueue(req *datastore.Request) error {
 
 type immediateFairnessStore struct {
 	datastore.Store
-	matchCalls atomic.Int32
+	matchCalls   atomic.Int32
+	beforeNotify func()
 }
 
 func (s *immediateFairnessStore) MatchModelTarget(model string, req *http.Request, gatewayKey string) (datastore.ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
@@ -2948,11 +2949,14 @@ func (s *immediateFairnessStore) MatchModelTarget(model string, req *http.Reques
 }
 
 func (s *immediateFairnessStore) Enqueue(req *datastore.Request) error {
+	if s.beforeNotify != nil {
+		s.beforeNotify()
+	}
 	close(req.NotifyChan)
 	return nil
 }
 
-func TestRouter_HandlerFunc_FairnessResolvesModelTargetOnce(t *testing.T) {
+func TestRouter_HandlerFunc_FairnessRefreshesBackendAfterDequeue(t *testing.T) {
 	previousFairnessScheduling := EnableFairnessScheduling
 	previousSessionBoost := EnableSessionBoost
 	EnableFairnessScheduling = true
@@ -2962,13 +2966,42 @@ func TestRouter_HandlerFunc_FairnessResolvesModelTargetOnce(t *testing.T) {
 		EnableSessionBoost = previousSessionBoost
 	}()
 
-	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	staleHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"id":"fair-ok"}`)
+		fmt.Fprint(w, `{"id":"stale"}`)
 	})
-	router, store, backend := setupFairnessTestRouter(t, backendHandler)
-	defer backend.Close()
+	router, store, staleBackend := setupFairnessTestRouter(t, staleHandler)
+	defer staleBackend.Close()
+
+	freshHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"fresh"}`)
+	})
+	freshBackend := httptest.NewServer(freshHandler)
+	defer freshBackend.Close()
+	freshBackendURL, _ := url.Parse(freshBackend.URL)
+	freshBackendPort, _ := strconv.Atoi(freshBackendURL.Port())
+
+	freshPodName := types.NamespacedName{Name: "pod-fresh", Namespace: "default"}
+	freshModelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-fair", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("fair-model-base"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(freshBackendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	freshPod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: freshPodName.Name, Namespace: freshPodName.Namespace},
+		Status:     corev1.PodStatus{PodIP: freshBackendURL.Hostname(), Phase: corev1.PodRunning},
+	}
+
 	fairnessStore := &immediateFairnessStore{Store: store}
+	fairnessStore.beforeNotify = func() {
+		assert.NoError(t, store.DeletePod(types.NamespacedName{Name: "pod-fair", Namespace: "default"}))
+		assert.NoError(t, store.AddOrUpdateModelServer(freshModelServer, sets.New(freshPodName)))
+		assert.NoError(t, store.AddOrUpdatePod(freshPod, []*aiv1alpha1.ModelServer{freshModelServer}))
+	}
 	router.store = fairnessStore
 
 	w := httptest.NewRecorder()
@@ -2979,6 +3012,7 @@ func TestRouter_HandlerFunc_FairnessResolvesModelTargetOnce(t *testing.T) {
 	router.HandlerFunc()(c)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"id":"fresh"`)
 	assert.Equal(t, int32(1), fairnessStore.matchCalls.Load())
 }
 

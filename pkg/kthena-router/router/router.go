@@ -271,7 +271,9 @@ type resolvedBackend struct {
 	pods                  []*datastore.PodInfo
 	port                  int32
 	modelServerName       types.NamespacedName
+	inferencePoolName     types.NamespacedName
 	inferencePoolFullName string
+	providerName          types.NamespacedName
 	modelRoute            *v1alpha1.ModelRoute
 	modelServer           *v1alpha1.ModelServer
 	provider              *v1alpha1.ExternalModelProvider
@@ -431,6 +433,7 @@ func (r *Router) resolveBackend(c *gin.Context, modelRequest ModelRequest) (*res
 	var pods []*datastore.PodInfo
 	var port int32
 	var modelServerName types.NamespacedName
+	var inferencePoolName types.NamespacedName
 	var modelTarget datastore.ModelTarget
 	var modelRoute *v1alpha1.ModelRoute
 	var modelServer *v1alpha1.ModelServer
@@ -466,7 +469,7 @@ func (r *Router) resolveBackend(c *gin.Context, modelRequest ModelRequest) (*res
 				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
 				return nil, fmt.Errorf("can't find external model provider: %v", modelTarget.Name)
 			}
-			return &resolvedBackend{modelRoute: modelRoute, provider: provider}, nil
+			return &resolvedBackend{providerName: modelTarget.Name, modelRoute: modelRoute, provider: provider}, nil
 		}
 
 		modelServerName = modelTarget.Name
@@ -492,13 +495,14 @@ func (r *Router) resolveBackend(c *gin.Context, modelRequest ModelRequest) (*res
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
-	} else if matched, inferencePoolName, httpRouteErr := r.handleHTTPRoute(c, gatewayKey); httpRouteErr != nil {
+	} else if matched, matchedInferencePoolName, httpRouteErr := r.handleHTTPRoute(c, gatewayKey); httpRouteErr != nil {
 		klog.Errorf("failed to select InferencePool for matched HTTPRoute: %v", httpRouteErr)
 		accesslog.SetError(c, "inference_pool_selection", httpRouteErr.Error())
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, httpRouteErr.Error())
 		c.Set("finishReason", "inference_pool_selection")
 		return nil, httpRouteErr
 	} else if matched {
+		inferencePoolName = matchedInferencePoolName
 		// If ModelRoute is not matched, try to match HTTPRoute
 
 		// Get InferencePool from store
@@ -559,11 +563,59 @@ func (r *Router) resolveBackend(c *gin.Context, modelRequest ModelRequest) (*res
 		pods:                  pods,
 		port:                  port,
 		modelServerName:       modelServerName,
+		inferencePoolName:     inferencePoolName,
 		inferencePoolFullName: inferencePoolFullName,
 		modelRoute:            modelRoute,
 		modelServer:           modelServer,
 		isLora:                isLora,
 	}, nil
+}
+
+func (r *Router) refreshBackend(backend *resolvedBackend) error {
+	if backend.providerName.Name != "" {
+		provider := r.store.GetExternalModelProvider(backend.providerName)
+		if provider == nil {
+			return fmt.Errorf("can't find external model provider: %v", backend.providerName)
+		}
+		backend.provider = provider
+		return nil
+	}
+
+	if backend.modelServerName.Name != "" {
+		pods, modelServer, err := r.getPodsAndServer(backend.modelServerName)
+		if err != nil {
+			return err
+		}
+		if len(pods) == 0 {
+			return fmt.Errorf("no available pods for model server: %v", backend.modelServerName)
+		}
+		backend.pods = pods
+		backend.modelServer = modelServer
+		backend.port = modelServer.Spec.WorkloadPort.Port
+		return nil
+	}
+
+	if backend.inferencePoolName.Name != "" {
+		inferencePool := r.store.GetInferencePool(backend.inferencePoolFullName)
+		if inferencePool == nil {
+			return fmt.Errorf("can't find inference pool: %v", backend.inferencePoolName)
+		}
+		pods, err := r.store.GetPodsByInferencePool(backend.inferencePoolName)
+		if err != nil {
+			return fmt.Errorf("failed to get pods for inference pool %v: %w", backend.inferencePoolName, err)
+		}
+		if len(pods) == 0 {
+			return fmt.Errorf("no available pods for inference pool: %v", backend.inferencePoolName)
+		}
+		if len(inferencePool.Spec.TargetPorts) == 0 {
+			return fmt.Errorf("inference pool %v has no target ports", backend.inferencePoolName)
+		}
+		backend.pods = pods
+		backend.port = int32(inferencePool.Spec.TargetPorts[0].Number)
+		return nil
+	}
+
+	return fmt.Errorf("backend is not resolved")
 }
 
 func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest, backend *resolvedBackend) error {
@@ -1602,6 +1654,10 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		klog.V(4).Infof("%s request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
 			logPrefix, requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
+		if err := r.refreshBackend(backend); err != nil {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, err.Error())
+			return err
+		}
 		lbErr := r.doLoadbalance(c, modelRequest, backend)
 
 		// After a successful proxy, mark the session request as completed so follow-up
