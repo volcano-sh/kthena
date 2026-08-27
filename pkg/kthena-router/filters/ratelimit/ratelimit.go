@@ -169,6 +169,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				*ratelimit.InputTokensPerUnit,
 				ratelimit.Unit,
 			)
+		} else {
+			delete(r.inputLimiter, model)
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
@@ -180,6 +182,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				*ratelimit.OutputTokensPerUnit,
 				ratelimit.Unit,
 			)
+		} else {
+			delete(r.outputLimiter, model)
 		}
 	} else {
 		// Create local rate limiters
@@ -190,6 +194,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				rate.Limit(float64(*ratelimit.InputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.InputTokensPerUnit),
 			)
+		} else {
+			delete(r.inputLimiter, model)
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
@@ -197,6 +203,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				rate.Limit(float64(*ratelimit.OutputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.OutputTokensPerUnit),
 			)
+		} else {
+			delete(r.outputLimiter, model)
 		}
 	}
 

@@ -227,6 +227,9 @@ type Store interface {
 	AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error
 	DeleteModelRoute(namespacedName string) error
 	GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute
+	// GetModelRoutesByModelName returns the ModelRoutes for a base model name,
+	// ordered oldest-first (the order MatchModelTarget evaluates them).
+	GetModelRoutesByModelName(modelName string) []*aiv1alpha1.ModelRoute
 	AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error
 	DeleteExternalModelProvider(name types.NamespacedName) error
 	GetExternalModelProvider(name types.NamespacedName) *aiv1alpha1.ExternalModelProvider
@@ -2216,6 +2219,21 @@ func (s *store) GetModelRoute(namespacedName string) *aiv1alpha1.ModelRoute {
 	}
 
 	return nil
+}
+
+// GetModelRoutesByModelName returns the ModelRoutes registered for a base model
+// name. The returned slice is a copy kept oldest-first.
+func (s *store) GetModelRoutesByModelName(modelName string) []*aiv1alpha1.ModelRoute {
+	s.routeMutex.RLock()
+	defer s.routeMutex.RUnlock()
+
+	routes := s.routes[modelName]
+	if len(routes) == 0 {
+		return nil
+	}
+	out := make([]*aiv1alpha1.ModelRoute, len(routes))
+	copy(out, routes)
+	return out
 }
 
 // Gateway methods (using standard Gateway API)

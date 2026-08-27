@@ -196,6 +196,79 @@ func TestTokenRateLimiter_DeleteLimiter(t *testing.T) {
 	rl.RecordOutputTokens(model, 100)
 }
 
+func TestTokenRateLimiter_AddOrUpdateClearsRemovedInputLimit(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	inputTokens := uint32(3)
+	outputTokens := uint32(5)
+	unit := networkingv1alpha1.Second
+
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	})
+
+	// Exhaust the input limiter.
+	_ = rl.RateLimit(model, "hello world")
+	if err := rl.RateLimit(model, "hello world"); err == nil {
+		t.Fatalf("expected input rate limit error before update")
+	}
+
+	// Update dropping the input token limit; the stale input limiter must go.
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	})
+
+	for i := 0; i < 10; i++ {
+		if err := rl.RateLimit(model, "hello world"); err != nil {
+			if _, ok := err.(*InputRateLimitExceededError); ok {
+				t.Fatalf("input limiter should have been cleared, got %v", err)
+			}
+		}
+	}
+
+	// The output limiter must still be in effect.
+	rl.RecordOutputTokens(model, 5)
+	if err := rl.RateLimit(model, "hello world"); err == nil {
+		t.Fatalf("expected output rate limit still enforced")
+	} else if _, ok := err.(*OutputRateLimitExceededError); !ok {
+		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
+	}
+}
+
+func TestTokenRateLimiter_AddOrUpdateClearsRemovedOutputLimit(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	inputTokens := uint32(100)
+	outputTokens := uint32(5)
+	unit := networkingv1alpha1.Second
+
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	})
+
+	// Exhaust the output limiter.
+	rl.RecordOutputTokens(model, 5)
+	if err := rl.RateLimit(model, "short"); err == nil {
+		t.Fatalf("expected output rate limit error before update")
+	}
+
+	// Update dropping the output token limit; the stale output limiter must go.
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &inputTokens,
+		Unit:               unit,
+	})
+
+	rl.RecordOutputTokens(model, 1000)
+	if err := rl.RateLimit(model, "short"); err != nil {
+		t.Fatalf("output limiter should have been cleared, got %v", err)
+	}
+}
+
 func TestTokenRateLimiter_OutputRateLimit(t *testing.T) {
 	rl := NewTokenRateLimiter()
 	model := "test-model"
