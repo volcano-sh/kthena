@@ -3016,6 +3016,45 @@ func TestRouter_HandlerFunc_FairnessRefreshesBackendAfterDequeue(t *testing.T) {
 	assert.Equal(t, int32(1), fairnessStore.matchCalls.Load())
 }
 
+func TestRouter_HandlerFunc_FairnessRefreshFailureUsesDiscoveryError(t *testing.T) {
+	previousFairnessScheduling := EnableFairnessScheduling
+	previousSessionBoost := EnableSessionBoost
+	EnableFairnessScheduling = true
+	EnableSessionBoost = false
+	defer func() {
+		EnableFairnessScheduling = previousFairnessScheduling
+		EnableSessionBoost = previousSessionBoost
+	}()
+
+	router, store, backend := setupFairnessTestRouter(t, nil)
+	defer backend.Close()
+
+	fairnessStore := &immediateFairnessStore{Store: store}
+	fairnessStore.beforeNotify = func() {
+		assert.NoError(t, store.DeleteModelServer(types.NamespacedName{Name: "ms-fair", Namespace: "default"}))
+	}
+	router.store = fairnessStore
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"fair-model","prompt":"hello fairness"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	accessCtx := accesslog.NewAccessLogContext("refresh-failure", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "fair-model")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "can't find model server")
+	reason, exists := c.Get("finishReason")
+	assert.True(t, exists)
+	assert.Equal(t, "pod_discovery", reason)
+	if assert.NotNil(t, accessCtx.Error) {
+		assert.Equal(t, "pod_discovery", accessCtx.Error.Type)
+	}
+	assert.Equal(t, int32(1), fairnessStore.matchCalls.Load())
+}
+
 func TestUpstreamTimeoutFor(t *testing.T) {
 	tests := []struct {
 		name   string

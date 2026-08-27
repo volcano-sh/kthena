@@ -571,11 +571,20 @@ func (r *Router) resolveBackend(c *gin.Context, modelRequest ModelRequest) (*res
 	}, nil
 }
 
-func (r *Router) refreshBackend(backend *resolvedBackend) error {
+func abortBackendRefresh(c *gin.Context, statusCode int, reason, message string) error {
+	accesslog.SetError(c, reason, message)
+	c.Set("finishReason", reason)
+	c.AbortWithStatusJSON(statusCode, message)
+	return errors.New(message)
+}
+
+func (r *Router) refreshBackend(c *gin.Context, backend *resolvedBackend) error {
 	if backend.providerName.Name != "" {
 		provider := r.store.GetExternalModelProvider(backend.providerName)
 		if provider == nil {
-			return fmt.Errorf("can't find external model provider: %v", backend.providerName)
+			message := fmt.Sprintf("can't find external model provider: %v", backend.providerName)
+			accesslog.SetErrorOrigin(c, "router")
+			return abortBackendRefresh(c, http.StatusNotFound, "provider_discovery", message)
 		}
 		backend.provider = provider
 		return nil
@@ -584,10 +593,13 @@ func (r *Router) refreshBackend(backend *resolvedBackend) error {
 	if backend.modelServerName.Name != "" {
 		pods, modelServer, err := r.getPodsAndServer(backend.modelServerName)
 		if err != nil {
-			return err
+			klog.Errorf("failed to get pods and model server: %v, %v", backend.modelServerName, err)
+			message := fmt.Sprintf("can't find model server: %v", backend.modelServerName)
+			return abortBackendRefresh(c, http.StatusNotFound, "pod_discovery", message)
 		}
 		if len(pods) == 0 {
-			return fmt.Errorf("no available pods for model server: %v", backend.modelServerName)
+			message := fmt.Sprintf("no available pods for model server: %v", backend.modelServerName)
+			return abortBackendRefresh(c, http.StatusServiceUnavailable, "pod_discovery", message)
 		}
 		backend.pods = pods
 		backend.modelServer = modelServer
@@ -598,24 +610,33 @@ func (r *Router) refreshBackend(backend *resolvedBackend) error {
 	if backend.inferencePoolName.Name != "" {
 		inferencePool := r.store.GetInferencePool(backend.inferencePoolFullName)
 		if inferencePool == nil {
-			return fmt.Errorf("can't find inference pool: %v", backend.inferencePoolName)
+			message := fmt.Sprintf("can't find inference pool: %v", backend.inferencePoolName)
+			return abortBackendRefresh(c, http.StatusNotFound, "inference_pool_discovery", message)
 		}
 		pods, err := r.store.GetPodsByInferencePool(backend.inferencePoolName)
 		if err != nil {
-			return fmt.Errorf("failed to get pods for inference pool %v: %w", backend.inferencePoolName, err)
+			klog.Errorf("failed to get pods for inference pool: %v, %v", backend.inferencePoolName, err)
+			if r.store.GetInferencePool(backend.inferencePoolFullName) == nil {
+				message := fmt.Sprintf("can't find inference pool: %v", backend.inferencePoolName)
+				return abortBackendRefresh(c, http.StatusNotFound, "inference_pool_discovery", message)
+			}
+			message := fmt.Sprintf("failed to get pods for inference pool: %v", backend.inferencePoolName)
+			return abortBackendRefresh(c, http.StatusInternalServerError, "pod_discovery", message)
 		}
 		if len(pods) == 0 {
-			return fmt.Errorf("no available pods for inference pool: %v", backend.inferencePoolName)
+			message := fmt.Sprintf("no available pods for inference pool: %v", backend.inferencePoolName)
+			return abortBackendRefresh(c, http.StatusServiceUnavailable, "pod_discovery", message)
 		}
 		if len(inferencePool.Spec.TargetPorts) == 0 {
-			return fmt.Errorf("inference pool %v has no target ports", backend.inferencePoolName)
+			message := fmt.Sprintf("inference pool %v has no target ports", backend.inferencePoolName)
+			return abortBackendRefresh(c, http.StatusBadRequest, "port_discovery", message)
 		}
 		backend.pods = pods
 		backend.port = int32(inferencePool.Spec.TargetPorts[0].Number)
 		return nil
 	}
 
-	return fmt.Errorf("backend is not resolved")
+	return abortBackendRefresh(c, http.StatusInternalServerError, "scheduling", "backend is not resolved")
 }
 
 func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest, backend *resolvedBackend) error {
@@ -1654,9 +1675,8 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		klog.V(4).Infof("%s request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
 			logPrefix, requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
-		if err := r.refreshBackend(backend); err != nil {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, err.Error())
-			return err
+		if err := r.refreshBackend(c, backend); err != nil {
+			return nil
 		}
 		lbErr := r.doLoadbalance(c, modelRequest, backend)
 
