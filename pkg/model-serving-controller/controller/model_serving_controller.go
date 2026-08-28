@@ -2102,7 +2102,7 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 // modelServingOwnerUID returns the UID of metaObj's ModelServing owner reference, if any.
 func modelServingOwnerUID(metaObj metav1.Object) (types.UID, bool) {
 	for _, ownerRef := range metaObj.GetOwnerReferences() {
-		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == "ModelServing" {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == workloadv1alpha1.ModelServingKind.Kind {
 			return ownerRef.UID, true
 		}
 	}
