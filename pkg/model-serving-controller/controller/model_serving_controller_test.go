@@ -2784,6 +2784,7 @@ func TestManageRoleReplicas(t *testing.T) {
 		initialRoleIDs   []int
 		addEntryPod      bool
 		mismatchOwnerUID bool
+		ownerlessPod     bool
 		expectedRoleSize int
 		expectedPodCount int
 		expectRequeue    bool
@@ -2825,6 +2826,21 @@ func TestManageRoleReplicas(t *testing.T) {
 			initialRoleIDs:   []int{0},
 			addEntryPod:      true,
 			mismatchOwnerUID: true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			expectRequeue:    true,
+		},
+		{
+			// expectRequeue here is satisfied by createPod's pre-existing, unrelated
+			// AlreadyExists handling (the pod name collides with the one this role
+			// would create), not by the orphan-detection logic under test; this case
+			// only asserts that an ownerless pod is left alone and doesn't panic.
+			name:             "pod with no owner references is left untouched and does not panic",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			ownerlessPod:     true,
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
@@ -2897,6 +2913,9 @@ func TestManageRoleReplicas(t *testing.T) {
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
 				}
+				if tt.ownerlessPod {
+					entryPod.OwnerReferences = nil
+				}
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
@@ -2949,13 +2968,22 @@ func TestManageRoleReplicas(t *testing.T) {
 				}
 			}
 
+			if tt.ownerlessPod {
+				// A pod with no owner references is not a ModelServing pod at all, so it
+				// must be left untouched (not deleted) rather than treated as a stale
+				// leftover -- and reading its (nonexistent) owner UID must not panic.
+				if assert.Len(t, pods.Items, 1) {
+					assert.Empty(t, pods.Items[0].OwnerReferences, "ownerless pod should be left untouched, not deleted")
+				}
+			}
+
 			if tt.expectRequeue {
 				require.Len(t, pods.Items, 1)
 				assert.Equal(t, types.UID("original-entry-uid"), pods.Items[0].UID, "foreign Pod must not be replaced or adopted")
 				requeued := waitForObjectInCache(t, 2*time.Second, func() bool {
 					return controller.workqueue.Len() > 0
 				})
-				assert.True(t, requeued, "model serving should be requeued for owner UID mismatch")
+				assert.True(t, requeued, "model serving should be requeued")
 			}
 		})
 	}
