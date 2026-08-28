@@ -1145,26 +1145,34 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 			continue
 		}
 		ownedPodCount := 0
+		staleFound := false
 		for _, pod := range pods {
-			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-				// Pod is left over from a previous ModelServing with the same name (e.g.
-				// deleted and immediately recreated before Kubernetes GC removed its old
-				// pods). It must not be counted below, otherwise pod (re)creation for the
-				// current ModelServing would be blocked until GC catches up. Delete it so
-				// the name frees up immediately instead of waiting on GC.
-				var ownerUID types.UID
-				if len(pod.OwnerReferences) > 0 {
-					ownerUID = pod.OwnerReferences[0].UID
-				}
-				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), deleting orphaned pod and re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
-				if err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID))); err != nil && !apierrors.IsNotFound(err) {
-					klog.Warningf("manageRoleReplicasPerGroup: failed to delete orphaned pod %s/%s: %v", pod.Namespace, pod.Name, err)
-				}
-				c.enqueueModelServingAfter(ms, 1*time.Second)
+			ownerUID, isModelServingPod := modelServingOwnerUID(pod)
+			if !isModelServingPod {
+				// Not owned by any ModelServing (e.g. no owner references, or owned by
+				// something else entirely). Leave it alone: it simply doesn't count
+				// toward ownedPodCount.
 				continue
 			}
-			ownedPodCount++
+			if ownerUID == ms.UID {
+				ownedPodCount++
+				continue
+			}
+			// Pod is owned by a ModelServing with a different UID: left over from a
+			// previous ModelServing with the same name (e.g. deleted and immediately
+			// recreated before Kubernetes GC removed its old pods). It must not be
+			// counted above, otherwise pod (re)creation for the current ModelServing
+			// would be blocked until GC catches up. Delete it so the name frees up
+			// immediately instead of waiting on GC.
+			staleFound = true
+			klog.Warningf("manageRoleReplicasPerGroup: deleting pod %s/%s left over from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s)",
+				pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
+			if err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID))); err != nil && !apierrors.IsNotFound(err) {
+				klog.Warningf("manageRoleReplicasPerGroup: failed to delete stale pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			}
+		}
+		if staleFound {
+			c.enqueueModelServingAfter(ms, 1*time.Second)
 		}
 		if ownedPodCount < expectedPods {
 			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, ownedPodCount, expectedPods)
@@ -2089,6 +2097,16 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 		}
 	}
 	return false
+}
+
+// modelServingOwnerUID returns the UID of metaObj's ModelServing owner reference, if any.
+func modelServingOwnerUID(metaObj metav1.Object) (types.UID, bool) {
+	for _, ownerRef := range metaObj.GetOwnerReferences() {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == "ModelServing" {
+			return ownerRef.UID, true
+		}
+	}
+	return "", false
 }
 
 // handleDeletionInProgress checks and handles deletion states for ServingGroup or Role.
