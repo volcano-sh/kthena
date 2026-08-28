@@ -1144,17 +1144,30 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 			klog.Warningf("manageRoleReplicasPerGroup: failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			continue
 		}
+		ownedPodCount := 0
 		for _, pod := range pods {
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-				// If the pod is not owned by the ModelServing, we do not need to handle it.
-				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
+				// Pod is left over from a previous ModelServing with the same name (e.g.
+				// deleted and immediately recreated before Kubernetes GC removed its old
+				// pods). It must not be counted below, otherwise pod (re)creation for the
+				// current ModelServing would be blocked until GC catches up. Delete it so
+				// the name frees up immediately instead of waiting on GC.
+				var ownerUID types.UID
+				if len(pod.OwnerReferences) > 0 {
+					ownerUID = pod.OwnerReferences[0].UID
+				}
+				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), deleting orphaned pod and re-enqueuing",
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
+				if err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID))); err != nil && !apierrors.IsNotFound(err) {
+					klog.Warningf("manageRoleReplicasPerGroup: failed to delete orphaned pod %s/%s: %v", pod.Namespace, pod.Name, err)
+				}
 				c.enqueueModelServingAfter(ms, 1*time.Second)
-				break
+				continue
 			}
+			ownedPodCount++
 		}
-		if len(pods) < expectedPods {
-			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+		if ownedPodCount < expectedPods {
+			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, ownedPodCount, expectedPods)
 			partitionProtected := partitionConfigured && partition > 0 && index < partition
 			roleToApply, revisionToUse, hashToUse := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, partitionProtected)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)

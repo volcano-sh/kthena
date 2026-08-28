@@ -2842,6 +2842,16 @@ func TestManageRoleReplicas(t *testing.T) {
 			assert.Equal(t, tt.expectedPodCount, len(pods.Items), "pod count should match expected")
 			//}
 
+			if tt.mismatchOwnerUID {
+				// The orphaned pod left behind by a previous same-named ModelServing must
+				// not block (re)creation of a pod owned by the current ModelServing: it
+				// should be deleted and replaced, not merely counted as satisfying demand.
+				for _, pod := range pods.Items {
+					assert.True(t, utils.IsOwnedByModelServingWithUID(&pod, ms.UID),
+						"pod %s should be owned by the current ModelServing, not left over from the previous one", pod.Name)
+				}
+			}
+
 			if tt.expectRequeue {
 				requeued := waitForObjectInCache(t, 2*time.Second, func() bool {
 					return controller.workqueue.Len() > 0
