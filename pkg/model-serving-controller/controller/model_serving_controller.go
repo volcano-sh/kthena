@@ -1423,6 +1423,29 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 				return err
 			}
 		}
+		ownedPods := make([]*corev1.Pod, 0, len(pods))
+		for _, pod := range pods {
+			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+				// Pod is left over from a previous ModelServing with the same name (e.g.
+				// deleted and immediately recreated before Kubernetes GC removed its old
+				// pods). It must not be counted below, otherwise pod (re)creation for the
+				// current ModelServing would be blocked until GC catches up. Delete it so
+				// the name frees up immediately instead of waiting on GC.
+				var ownerUID types.UID
+				if len(pod.OwnerReferences) > 0 {
+					ownerUID = pod.OwnerReferences[0].UID
+				}
+				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), deleting orphaned pod and re-enqueuing",
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
+				if err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID))); err != nil && !apierrors.IsNotFound(err) {
+					klog.Warningf("manageRoleReplicasPerGroup: failed to delete orphaned pod %s/%s: %v", pod.Namespace, pod.Name, err)
+				}
+				c.enqueueModelServingAfter(ms, 1*time.Second)
+				continue
+			}
+			ownedPods = append(ownedPods, pod)
+		}
+		pods = ownedPods
 		roleToApply, revisionToUse, hashToUse, err := c.appliedRoleTemplate(ctx, ms, groupName, targetRole.Name, roleObj)
 		if err != nil {
 			klog.Warningf("manageRoleReplicasPerGroup: cannot resolve template for role %s/%s: %v", targetRole.Name, roleObj.Name, err)
