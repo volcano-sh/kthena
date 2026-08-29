@@ -1149,21 +1149,15 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 		for _, pod := range pods {
 			ownerUID, isModelServingPod := modelServingOwnerUID(pod)
 			if !isModelServingPod {
-				// Not owned by any ModelServing (e.g. no owner references, or owned by
-				// something else entirely). Leave it alone: it simply doesn't count
-				// toward ownedPodCount.
+				// Not owned by any ModelServing; leave it alone.
 				continue
 			}
 			if ownerUID == ms.UID {
 				ownedPodCount++
 				continue
 			}
-			// Pod is owned by a ModelServing with a different UID: left over from a
-			// previous ModelServing with the same name (e.g. deleted and immediately
-			// recreated before Kubernetes GC removed its old pods). It must not be
-			// counted above, otherwise pod (re)creation for the current ModelServing
-			// would be blocked until GC catches up. Delete it so the name frees up
-			// immediately instead of waiting on GC.
+			// Left over from a previous same-named ModelServing; delete it instead
+			// of waiting for GC.
 			staleFound = true
 			klog.Warningf("manageRoleReplicasPerGroup: deleting pod %s/%s left over from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s)",
 				pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)

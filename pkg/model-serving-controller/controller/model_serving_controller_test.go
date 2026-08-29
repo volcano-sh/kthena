@@ -2862,9 +2862,7 @@ func TestManageRoleReplicas(t *testing.T) {
 			//}
 
 			if tt.mismatchOwnerUID {
-				// The orphaned pod left behind by a previous same-named ModelServing must
-				// not block (re)creation of a pod owned by the current ModelServing: it
-				// should be deleted and replaced, not merely counted as satisfying demand.
+				// The orphaned pod should be deleted and replaced, not counted as satisfying demand.
 				for _, pod := range pods.Items {
 					assert.True(t, utils.IsOwnedByModelServingWithUID(&pod, ms.UID),
 						"pod %s should be owned by the current ModelServing, not left over from the previous one", pod.Name)
@@ -2872,9 +2870,7 @@ func TestManageRoleReplicas(t *testing.T) {
 			}
 
 			if tt.ownerlessPod {
-				// A pod with no owner references is not a ModelServing pod at all, so it
-				// must be left untouched (not deleted) rather than treated as a stale
-				// leftover -- and reading its (nonexistent) owner UID must not panic.
+				// An ownerless pod is not a ModelServing pod; it must be left untouched.
 				if assert.Len(t, pods.Items, 1) {
 					assert.Empty(t, pods.Items[0].OwnerReferences, "ownerless pod should be left untouched, not deleted")
 				}
