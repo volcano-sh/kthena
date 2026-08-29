@@ -1147,9 +1147,9 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 		ownedPodCount := 0
 		staleFound := false
 		for _, pod := range pods {
-			ownerUID, isModelServingPod := modelServingOwnerUID(pod)
+			ownerUID, isModelServingPod := modelServingOwnerUID(pod, ms.Name)
 			if !isModelServingPod {
-				// Not owned by any ModelServing; leave it alone.
+				// Not owned by a ModelServing named ms.Name; leave it alone.
 				continue
 			}
 			if ownerUID == ms.UID {
@@ -2093,10 +2093,11 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 	return false
 }
 
-// modelServingOwnerUID returns the UID of metaObj's ModelServing owner reference, if any.
-func modelServingOwnerUID(metaObj metav1.Object) (types.UID, bool) {
+// modelServingOwnerUID returns the UID of metaObj's owner reference to the ModelServing named
+// msName, if any.
+func modelServingOwnerUID(metaObj metav1.Object, msName string) (types.UID, bool) {
 	for _, ownerRef := range metaObj.GetOwnerReferences() {
-		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == workloadv1alpha1.ModelServingKind.Kind {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == workloadv1alpha1.ModelServingKind.Kind && ownerRef.Name == msName {
 			return ownerRef.UID, true
 		}
 	}

@@ -2706,6 +2706,7 @@ func TestManageRoleReplicas(t *testing.T) {
 		addEntryPod      bool
 		mismatchOwnerUID bool
 		ownerlessPod     bool
+		otherMSOwnedPod  bool
 		expectedRoleSize int
 		expectedPodCount int
 		expectRequeue    bool
@@ -2762,6 +2763,21 @@ func TestManageRoleReplicas(t *testing.T) {
 			initialRoleIDs:   []int{0},
 			addEntryPod:      true,
 			ownerlessPod:     true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			expectRequeue:    true,
+		},
+		{
+			// expectRequeue here is satisfied by createPod's pre-existing, unrelated
+			// AlreadyExists handling, not by the orphan-detection logic under test;
+			// this case only asserts that a pod owned by a differently-named
+			// ModelServing (same labels, different owner) is left alone, not deleted.
+			name:             "pod owned by a differently-named ModelServing is left untouched",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			otherMSOwnedPod:  true,
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
@@ -2834,6 +2850,10 @@ func TestManageRoleReplicas(t *testing.T) {
 				if tt.ownerlessPod {
 					entryPod.OwnerReferences = nil
 				}
+				if tt.otherMSOwnedPod && len(entryPod.OwnerReferences) > 0 {
+					entryPod.OwnerReferences[0].Name = "other-model-serving"
+					entryPod.OwnerReferences[0].UID = types.UID("other-ms-uid")
+				}
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
@@ -2873,6 +2893,17 @@ func TestManageRoleReplicas(t *testing.T) {
 				// An ownerless pod is not a ModelServing pod; it must be left untouched.
 				if assert.Len(t, pods.Items, 1) {
 					assert.Empty(t, pods.Items[0].OwnerReferences, "ownerless pod should be left untouched, not deleted")
+				}
+			}
+
+			if tt.otherMSOwnedPod {
+				// A pod owned by a differently-named ModelServing must be left untouched,
+				// not mistaken for a stale pod of the current ModelServing.
+				if assert.Len(t, pods.Items, 1) {
+					if assert.NotEmpty(t, pods.Items[0].OwnerReferences) {
+						assert.Equal(t, "other-model-serving", pods.Items[0].OwnerReferences[0].Name,
+							"pod owned by another ModelServing should be left untouched, not deleted")
+					}
 				}
 			}
 
