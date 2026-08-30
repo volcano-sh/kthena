@@ -2753,10 +2753,6 @@ func TestManageRoleReplicas(t *testing.T) {
 			expectRequeue:    true,
 		},
 		{
-			// expectRequeue here is satisfied by createPod's pre-existing, unrelated
-			// AlreadyExists handling (the pod name collides with the one this role
-			// would create), not by the orphan-detection logic under test; this case
-			// only asserts that an ownerless pod is left alone and doesn't panic.
 			name:             "pod with no owner references is left untouched and does not panic",
 			roleReplicas:     1,
 			workerReplicas:   0,
@@ -2765,13 +2761,11 @@ func TestManageRoleReplicas(t *testing.T) {
 			ownerlessPod:     true,
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
-			expectRequeue:    true,
+			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
+			// orphan-detection logic under test.
+			expectRequeue: true,
 		},
 		{
-			// expectRequeue here is satisfied by createPod's pre-existing, unrelated
-			// AlreadyExists handling, not by the orphan-detection logic under test;
-			// this case only asserts that a pod owned by a differently-named
-			// ModelServing (same labels, different owner) is left alone, not deleted.
 			name:             "pod owned by a differently-named ModelServing is left untouched",
 			roleReplicas:     1,
 			workerReplicas:   0,
@@ -2780,7 +2774,9 @@ func TestManageRoleReplicas(t *testing.T) {
 			otherMSOwnedPod:  true,
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
-			expectRequeue:    true,
+			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
+			// orphan-detection logic under test.
+			expectRequeue: true,
 		},
 	}
 
