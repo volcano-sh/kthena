@@ -492,6 +492,52 @@ func TestIsServingGroupOutdatedOnIndexerError(t *testing.T) {
 	assert.False(t, result, "should return false on indexer error to avoid spurious deletion")
 }
 
+// TestGetMetaObject tests the getMetaObject helper for raw objects, tombstones, and invalid inputs.
+func TestGetMetaObject(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-0"}}
+
+	tests := []struct {
+		name     string
+		obj      interface{}
+		wantName string
+	}{
+		{
+			name:     "raw object",
+			obj:      pod,
+			wantName: "pod-0",
+		},
+		{
+			name:     "tombstone with object",
+			obj:      cache.DeletedFinalStateUnknown{Key: "default/pod-0", Obj: pod},
+			wantName: "pod-0",
+		},
+		{
+			name: "tombstone with non-object",
+			obj:  cache.DeletedFinalStateUnknown{Key: "default/pod-0", Obj: "not-an-object"},
+		},
+		{
+			name: "unexpected type",
+			obj:  "not-an-object",
+		},
+		{
+			name: "nil",
+			obj:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getMetaObject(tt.obj)
+			if tt.wantName == "" {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, tt.wantName, got.GetName())
+		})
+	}
+}
+
 func TestCheckServingGroupReady(t *testing.T) {
 	tests := []struct {
 		name          string
