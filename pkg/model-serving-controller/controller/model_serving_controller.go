@@ -1803,14 +1803,20 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.ModelServing, servingGroupName string) (bool, error) {
 	// TODO: modify ServingGroupReady logic after rolling update functionality is implemented
 	klog.V(4).Infof("checkServingGroupReady: modelServing=%s/%s, servingGroup=%s", ms.Namespace, ms.Name, servingGroupName)
-	for _, role := range ms.Spec.Template.Roles {
+	for _, role := range c.rolesForServingGroupReadiness(ms, servingGroupName) {
 		roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), servingGroupName, role.Name)
 		if err != nil {
 			return false, err
 		}
-		if len(roleList) != int(*role.Replicas) {
+
+		replicas := 1
+		if role.Replicas != nil {
+			replicas = int(*role.Replicas)
+		}
+
+		if len(roleList) != replicas {
 			klog.V(4).Infof("checkServingGroupReady: role %s in group %s not ready: replica count mismatch (%d/%d)",
-				role.Name, servingGroupName, len(roleList), int(*role.Replicas))
+				role.Name, servingGroupName, len(roleList), replicas)
 			return false, nil
 		}
 		for _, r := range roleList {
@@ -1825,6 +1831,48 @@ func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.Mod
 	return true, nil
 }
 
+// rolesForServingGroupReadiness returns the role template that was used to
+// create a partition-protected ServingGroup. Such a group keeps its old
+// ControllerRevision and must not be checked against the latest template.
+func (c *ModelServingController) rolesForServingGroupReadiness(ms *workloadv1alpha1.ModelServing, servingGroupName string) []workloadv1alpha1.Role {
+	latestRoles := ms.Spec.Template.Roles
+	partition, configured, err := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
+	if err != nil {
+		klog.Warningf("failed to resolve partition when checking ServingGroup %s readiness: %v", servingGroupName, err)
+		return latestRoles
+	}
+	_, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
+	if !configured || partition <= 0 || ordinal < 0 || ordinal >= partition {
+		return latestRoles
+	}
+
+	revision, _ := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroupName)
+	if revision == "" {
+		revision = ms.Status.CurrentRevision
+	}
+	if revision == "" || c.kubeClientSet == nil {
+		return latestRoles
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+	if err != nil {
+		klog.Warningf("failed to get ControllerRevision %s when checking ServingGroup %s readiness: %v", revision, servingGroupName, err)
+		return latestRoles
+	}
+	if cr == nil {
+		klog.Warningf("ControllerRevision %s not found when checking partition-protected ServingGroup %s readiness, falling back to latest roles", revision, servingGroupName)
+		return latestRoles
+	}
+	roles, err := utils.GetRolesFromControllerRevision(cr)
+	if err != nil {
+		klog.Warningf("failed to get roles from ControllerRevision %s when checking ServingGroup %s readiness: %v", revision, servingGroupName, err)
+		return latestRoles
+	}
+	return roles
+}
+
 func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) (bool, error) {
 	// Get all pods for this specific role
 	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, servingGroupName, roleName, roleID)
@@ -1834,15 +1882,16 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 	}
 	// Find the role specification to get expected pod count
 	var targetRole *workloadv1alpha1.Role
-	for i := range ms.Spec.Template.Roles {
-		if ms.Spec.Template.Roles[i].Name == roleName {
-			targetRole = &ms.Spec.Template.Roles[i]
+	roles := c.rolesForServingGroupReadiness(ms, servingGroupName)
+	for i := range roles {
+		if roles[i].Name == roleName {
+			targetRole = &roles[i]
 			break
 		}
 	}
 
 	if targetRole == nil {
-		klog.Warningf("role %s not found in ModelServing spec", roleName)
+		klog.Warningf("role %s not found in ModelServing spec or ControllerRevision", roleName)
 		return false, nil
 	}
 

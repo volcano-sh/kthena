@@ -8179,3 +8179,100 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
 }
+
+func TestPartitionProtectedServingGroupReadinessUsesControllerRevision(t *testing.T) {
+	ns := "default"
+	msName := "test-model-serving"
+	groupName := utils.GenerateServingGroupName(msName, 0)
+	roleName := "prefill"
+	roleID := "prefill-0"
+	oldRevision := "old-revision"
+
+	oldRoles := []workloadv1alpha1.Role{
+		{
+			Name:           roleName,
+			Replicas:       ptr.To[int32](1),
+			WorkerReplicas: 0,
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      msName,
+			Namespace: ns,
+			UID:       types.UID("test-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					Partition: ptr.To(intstr.FromInt32(1)),
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           roleName,
+						Replicas:       ptr.To[int32](2),
+						WorkerReplicas: 2,
+					},
+					{
+						Name:     "new-role",
+						Replicas: ptr.To[int32](1),
+					},
+				},
+			},
+		},
+		Status: workloadv1alpha1.ModelServingStatus{
+			CurrentRevision: oldRevision,
+		},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset()
+	_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, oldRevision, oldRoles)
+	require.NoError(t, err)
+	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	podInformer := informerFactory.Core().V1().Pods()
+	require.NoError(t, podInformer.Informer().AddIndexers(cache.Indexers{
+		GroupNameKey: utils.GroupNameIndexFunc,
+		RoleIDKey:    utils.RoleIDIndexFunc,
+	}))
+
+	store := datastore.New()
+	store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
+	store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, roleID, oldRevision, utils.CalRoleTemplateHash(oldRoles[0]))
+	require.NoError(t, store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleRunning))
+	controller := &ModelServingController{
+		kubeClientSet: kubeClient,
+		podsInformer:  podInformer.Informer(),
+		podsLister:    podInformer.Lister(),
+		store:         store,
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "prefill-entry-0",
+			Labels: map[string]string{
+				workloadv1alpha1.GroupNameLabelKey: groupName,
+				workloadv1alpha1.RoleLabelKey:      roleName,
+				workloadv1alpha1.RoleIDKey:         roleID,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	require.NoError(t, podInformer.Informer().GetIndexer().Add(pod))
+
+	roleReady, err := controller.checkRoleReady(ms, groupName, roleName, roleID)
+	require.NoError(t, err)
+	assert.True(t, roleReady, "role readiness should use workerReplicas from the old ControllerRevision")
+
+	groupReady, err := controller.checkServingGroupReady(ms, groupName)
+	require.NoError(t, err)
+	assert.True(t, groupReady, "ServingGroup readiness should use roles and replicas from the old ControllerRevision")
+}
