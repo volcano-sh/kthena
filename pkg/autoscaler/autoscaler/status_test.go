@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 )
 
 func int32Ptr(v int32) *int32 { return &v }
@@ -62,4 +63,81 @@ func TestNewStatusWiresMaxCorrectedAsMaximumWindow(t *testing.T) {
 	got, ok := status.History.MaxCorrected.GetBest(4)
 	assert.True(t, ok)
 	assert.Equal(t, int32(8), got, "MaxCorrected must return the maximum sample; a Minimum window would return 3")
+}
+
+func newFreshBehavior() *v1alpha1.AutoscalingPolicyBehavior {
+	return &v1alpha1.AutoscalingPolicyBehavior{
+		ScaleDown: v1alpha1.AutoscalingPolicyStablePolicy{
+			Period:              durationPtr(time.Hour),
+			StabilizationWindow: durationPtr(time.Hour),
+		},
+		ScaleUp: v1alpha1.AutoscalingPolicyScaleUpPolicy{
+			StablePolicy: v1alpha1.AutoscalingPolicyStablePolicy{
+				Period:              durationPtr(time.Hour),
+				StabilizationWindow: durationPtr(time.Hour),
+			},
+			PanicPolicy: v1alpha1.AutoscalingPolicyPanicPolicy{
+				Percent: int32Ptr(1000),
+				Period:  metav1.Duration{Duration: time.Hour},
+			},
+		},
+	}
+}
+
+func TestAppendRecommendation(t *testing.T) {
+	status := NewStatus(newFreshBehavior())
+	for _, v := range []int32{5, 2, 9, 4} {
+		status.AppendRecommendation(v)
+	}
+
+	gotMax, ok := status.History.MaxRecommendation.GetBest()
+	assert.True(t, ok)
+	assert.Equal(t, int32(9), gotMax)
+
+	gotMin, ok := status.History.MinRecommendation.GetBest()
+	assert.True(t, ok)
+	assert.Equal(t, int32(2), gotMin)
+}
+
+func TestAppendCorrected(t *testing.T) {
+	status := NewStatus(newFreshBehavior())
+	for _, v := range []int32{3, 8, 5} {
+		status.AppendCorrected(v)
+	}
+
+	gotMax, ok := status.History.MaxCorrected.GetBest(0)
+	assert.True(t, ok)
+	assert.Equal(t, int32(8), gotMax)
+
+	gotMinStable, ok := status.History.MinCorrectedForStable.GetBest(1000)
+	assert.True(t, ok)
+	assert.Equal(t, int32(3), gotMinStable)
+
+	gotMinPanic, ok := status.History.MinCorrectedForPanic.GetBest(1000)
+	assert.True(t, ok)
+	assert.Equal(t, int32(3), gotMinPanic)
+}
+
+func TestRefreshPanicMode(t *testing.T) {
+	t.Run("hold disabled clears the panic deadline", func(t *testing.T) {
+		s := &Status{PanicModeHoldMilliseconds: 0, PanicModeEndsAt: 12345}
+
+		s.RefreshPanicMode()
+
+		assert.Equal(t, int64(0), s.PanicModeEndsAt)
+		assert.False(t, s.IsPanicMode())
+	})
+
+	t.Run("hold enabled arms the panic deadline", func(t *testing.T) {
+		const holdMs = int64(60_000)
+		s := &Status{PanicModeHoldMilliseconds: holdMs}
+
+		before := util.GetCurrentTimestamp()
+		s.RefreshPanicMode()
+		after := util.GetCurrentTimestamp()
+
+		assert.GreaterOrEqual(t, s.PanicModeEndsAt, before+holdMs)
+		assert.LessOrEqual(t, s.PanicModeEndsAt, after+holdMs)
+		assert.True(t, s.IsPanicMode())
+	})
 }
