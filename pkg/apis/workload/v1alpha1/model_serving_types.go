@@ -161,6 +161,11 @@ type RolloutStrategy struct {
 	// and partition on each Role instead.
 	// +optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
+
+	// RoleCoordination defines the cross-Role coordination parameters to be used
+	// when type is RoleRollingUpdate.
+	// +optional
+	RoleCoordination *RoleCoordination `json:"roleCoordination,omitempty"`
 }
 
 // RolloutStrategyType defines the strategy to use to update replicas.
@@ -201,6 +206,38 @@ type RollingUpdateConfiguration struct {
 	Partition *intstr.IntOrString `json:"partition,omitempty"`
 }
 
+// RoleCoordination enables proportional rolling updates across selected Roles
+// in each ServingGroup.
+type RoleCoordination struct {
+	// Roles selects the Roles participating in coordinated rolling update. An
+	// empty list selects every Role in spec.template.roles.
+	// +optional
+	// +listType=set
+	Roles []string `json:"roles,omitempty"`
+
+	// MaxSkew is the maximum percentage-point difference allowed between the
+	// normalized rolling progress of participating Roles. Only percentage values,
+	// for example "10%", are accepted.
+	// +kubebuilder:validation:XIntOrString
+	MaxSkew *intstr.IntOrString `json:"maxSkew"`
+
+	// Dependencies defines rollout startup dependencies. If Role A depends on B,
+	// compatible target-version dependencies must be Ready before A first starts.
+	// +optional
+	// +listType=map
+	// +listMapKey=role
+	Dependencies []RoleRolloutDependency `json:"dependencies,omitempty"`
+}
+
+type RoleRolloutDependency struct {
+	// Role is the dependent Role.
+	Role string `json:"role"`
+
+	// DependsOn lists the downstream Roles required by Role.
+	// +listType=set
+	DependsOn []string `json:"dependsOn"`
+}
+
 type ModelServingConditionType string
 
 // There is a condition type of a modelServing
@@ -219,6 +256,11 @@ const (
 	// When the entry or worker template is updated, modelServing controller enters the upgrade process and
 	// UpdateInProgress is set to true.
 	ModelServingUpdateInProgress ModelServingConditionType = "UpdateInProgress"
+
+	// ModelServingCoordinatedRoleRolloutBlocked indicates that a coordinated
+	// Role rolling update is waiting for a dependency, proportional progress,
+	// old-version retention, or admitted target-version readiness.
+	ModelServingCoordinatedRoleRolloutBlocked ModelServingConditionType = "CoordinatedRoleRolloutBlocked"
 )
 
 // ModelServingStatus defines the observed state of ModelServing

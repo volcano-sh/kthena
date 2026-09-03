@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -52,8 +53,19 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate the ModelServing
-	allowed, reason := v.validateModelServing(modelServing)
+	// UPDATE validation needs both revisions to determine whether a dependency
+	// can bootstrap target-version capacity while the old request path is kept.
+	var oldModelServing *workloadv1alpha1.ModelServing
+	if admissionReview.Request.Operation == admissionv1.Update && len(admissionReview.Request.OldObject.Raw) > 0 {
+		oldModelServing = &workloadv1alpha1.ModelServing{}
+		if err := json.Unmarshal(admissionReview.Request.OldObject.Raw, oldModelServing); err != nil {
+			klog.Errorf("Failed to decode old ModelServing: %v", err)
+			http.Error(w, fmt.Sprintf("failed to decode old ModelServing: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	allowed, reason := v.validateModelServingUpdate(oldModelServing, modelServing)
 
 	// Create the admission response
 	admissionResponse := admissionv1.AdmissionResponse{
@@ -80,6 +92,18 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 
 // validateModelServing validates the ModelServing resource
 func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alpha1.ModelServing) (bool, string) {
+	return validationResult(modelServingValidationErrors(modelServing))
+}
+
+func (v *ModelServingValidator) validateModelServingUpdate(
+	oldModelServing, modelServing *workloadv1alpha1.ModelServing,
+) (bool, string) {
+	allErrs := modelServingValidationErrors(modelServing)
+	allErrs = append(allErrs, validateRoleCoordinationUpdate(oldModelServing, modelServing)...)
+	return validationResult(allErrs)
+}
+
+func modelServingValidationErrors(modelServing *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 
 	allErrs = append(allErrs, validGeneratedNameLength(modelServing)...)
@@ -88,10 +112,15 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validatorReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateMaxUnavailableForRoles(modelServing)...)
+	allErrs = append(allErrs, validateRoleCoordination(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 
+	return allErrs
+}
+
+func validationResult(allErrs field.ErrorList) (bool, string) {
 	if len(allErrs) > 0 {
 		var messages []string
 		for _, err := range allErrs {

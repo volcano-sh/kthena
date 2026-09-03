@@ -870,6 +870,25 @@ _Appears in:_
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition protects the first N existing replicas in ascending ordinal order<br />from updates. The remaining replicas are eligible for rolling update.<br />For a contiguous ordinal set, this is equivalent to protecting [0, Partition).<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
+#### RoleCoordination
+
+
+
+RoleCoordination enables proportional rolling updates across selected Roles
+in each ServingGroup.
+
+
+
+_Appears in:_
+- [RolloutStrategy](#rolloutstrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `roles` _string array_ | Roles selects the Roles participating in coordinated rolling update. An<br />empty list selects every Role in spec.template.roles. |  |  |
+| `maxSkew` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSkew is the maximum percentage-point difference allowed between the<br />normalized rolling progress of participating Roles. Only percentage values,<br />for example "10%", are accepted. |  | XIntOrString: \{\} <br /> |
+| `dependencies` _[RoleRolloutDependency](#rolerolloutdependency) array_ | Dependencies defines rollout startup dependencies. If Role A depends on B,<br />compatible target-version dependencies must be Ready before A first starts. |  |  |
+
+
 #### RoleRatioConstraint
 
 
@@ -905,6 +924,23 @@ _Appears in:_
 | `numeratorRole` _string_ |  |  |  |
 | `denominatorRole` _string_ |  |  |  |
 | `currentRatio` _string_ |  |  |  |
+
+
+#### RoleRolloutDependency
+
+
+
+
+
+
+
+_Appears in:_
+- [RoleCoordination](#rolecoordination)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `role` _string_ | Role is the dependent Role. |  |  |
+| `dependsOn` _string array_ | DependsOn lists the downstream Roles required by Role. |  |  |
 
 
 #### RoleScalingParam
@@ -961,6 +997,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles do not take effect.<br />RoleRollingUpdate uses the rolling update configuration on each Role;<br />rolloutStrategy.rollingUpdateConfiguration must not be set.<br />Kthena performs RoleRollingUpdate across all ServingGroups at the same time.<br />Therefore, we recommend using it only in scenarios with a single ServingGroup. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
 | `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set when type is RoleRollingUpdate; configure maxUnavailable<br />and partition on each Role instead. |  |  |
+| `roleCoordination` _[RoleCoordination](#rolecoordination)_ | RoleCoordination defines the cross-Role coordination parameters to be used<br />when type is RoleRollingUpdate. |  |  |
 
 
 #### RolloutStrategyType
