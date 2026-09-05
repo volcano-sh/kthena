@@ -475,6 +475,13 @@ func SetConditionWithRolloutAndProgressState(
 			// Available and progressing/updateInprogress are not allowed to be true at the same time.
 			if exclusiveConditionTypes(curCondition, newCond) && curCondition.Status == metav1.ConditionTrue && newCond.Status == metav1.ConditionTrue {
 				ms.Status.Conditions[i].Status = metav1.ConditionFalse
+				// This condition just transitioned, so its timestamp has to move with it and its
+				// reason and message have to describe what superseded it. Assigning only Status
+				// leaves the text that was written when the condition went True, so the object
+				// reports a state it is no longer in.
+				ms.Status.Conditions[i].LastTransitionTime = newCond.LastTransitionTime
+				ms.Status.Conditions[i].Reason = newCond.Reason
+				ms.Status.Conditions[i].Message = newCond.Message
 				shouldUpdate = true
 			}
 		}
