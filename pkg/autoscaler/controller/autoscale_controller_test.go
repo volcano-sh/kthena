@@ -134,8 +134,6 @@ func TestNewAutoscaleControllerSyncPeriodFallback(t *testing.T) {
 func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	ns := "ns"
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(3)}}
-	client := clientfake.NewSimpleClientset(ms)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
 
 	srv := httptest.NewServer(httpHandlerWithBody("load 1\n"))
 	defer srv.Close()
@@ -146,23 +144,31 @@ func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-a"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 100, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 100}}}
 
+	client := clientfake.NewSimpleClientset(ms, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbs)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
 	}
-	if len(client.Fake.Actions()) != 0 {
-		t.Fatalf("expected no update actions with tolerance=100, got %d", len(client.Fake.Actions()))
+	msUpdates := 0
+	for _, a := range client.Fake.Actions() {
+		if (a.GetVerb() == "update" || a.GetVerb() == "patch") && a.GetResource().Resource == "modelservings" {
+			msUpdates++
+		}
+	}
+	if msUpdates != 0 {
+		t.Fatalf("expected no modelserving update actions with tolerance=100, got %d", msUpdates)
 	}
 }
 
 func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	ns := "ns"
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-up", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
-	client := clientfake.NewSimpleClientset(ms)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
 
 	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 10\n"))
 	defer srv.Close()
@@ -173,9 +179,13 @@ func TestHighLoad_then_DoScale_expect_Replicas10(t *testing.T) {
 	target := workload.Target{TargetRef: corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: "ms-up"}, MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: port}}}}
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10}}}
 
+	client := clientfake.NewSimpleClientset(ms, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(ms))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbs := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-up", host, lbs)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doScale(context.Background(), policy); err != nil {
 		t.Fatalf("doScale error: %v", err)
@@ -193,8 +203,6 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	ns := "ns"
 	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
 	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-b", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
-	client := clientfake.NewSimpleClientset(msA, msB)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
 
 	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 10\n"))
 	defer srv.Close()
@@ -207,10 +215,14 @@ func TestTwoBackends_then_DoOptimize_expect_PatchActions(t *testing.T) {
 	var threshold int32 = 200
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
 
+	client := clientfake.NewSimpleClientset(msA, msB, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a", host, lbsA), readyPod(ns, "pod-b", host, lbsB)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
@@ -230,8 +242,6 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	ns := "ns"
 	msA := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a2", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
 	msB := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-b2", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(2)}}
-	client := clientfake.NewSimpleClientset(msA, msB)
-	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
 
 	srv := httptest.NewServer(httpHandlerWithBody("# TYPE load gauge\nload 100\n"))
 	defer srv.Close()
@@ -244,10 +254,14 @@ func TestTwoBackendsHighLoad_then_DoOptimize_expect_DistributionA5B4(t *testing.
 	var threshold int32 = 200
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns}, Spec: workload.AutoscalingPolicySpec{TolerancePercent: 0, Metrics: []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}}, Behavior: workload.AutoscalingPolicyBehavior{ScaleUp: workload.AutoscalingPolicyScaleUpPolicy{PanicPolicy: workload.AutoscalingPolicyPanicPolicy{Period: metav1.Duration{Duration: (1 * time.Second)}, PanicThresholdPercent: &threshold}}}, HeterogeneousTarget: &workload.HeterogeneousTarget{Params: []workload.HeterogeneousTargetParam{paramA, paramB}, CostExpansionRatePercent: 100}}}
 
+	client := clientfake.NewSimpleClientset(msA, msB, policy)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(msA, msB))
+	policyLister := workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy))
+
 	lbsA := map[string]string{}
 	lbsB := map[string]string{}
 	pods := []*corev1.Pod{readyPod(ns, "pod-a2", host, lbsA), readyPod(ns, "pod-b2", host, lbsB)}
-	ac := &AutoscaleController{client: client, modelServingLister: msLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
+	ac := &AutoscaleController{client: client, modelServingLister: msLister, autoscalingPoliciesLister: policyLister, podsLister: fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}}, scalerMap: map[string]*autoscalerAutoscaler{}, optimizerMap: map[string]*autoscalerOptimizer{}}
 
 	if err := ac.doOptimize(context.Background(), policy); err != nil {
 		t.Fatalf("doOptimize error: %v", err)
@@ -1065,5 +1079,264 @@ func TestPatchDoesNotMutateResourcesInFakeClient(t *testing.T) {
 				gotPrefillCPU.String(), gotPrefillMem.String(),
 				gotDecodeCPU.String(), gotDecodeMem.String(), gotImage)
 		})
+	}
+}
+
+func newAutoscalingPolicyIndexer(objs ...interface{}) cache.Indexer {
+	idx := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	for _, o := range objs {
+		_ = idx.Add(o)
+	}
+	return idx
+}
+
+func TestUpdateHomogeneousPolicyStatus_Success(t *testing.T) {
+	ns := "default"
+	policyName := "policy-homo"
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       policyName,
+			Namespace:  ns,
+			Generation: 2,
+		},
+		Spec: workload.AutoscalingPolicySpec{
+			HomogeneousTarget: &workload.HomogeneousTarget{
+				Target: workload.Target{
+					TargetRef: corev1.ObjectReference{
+						Kind: workload.ModelServingKind.Kind,
+						Name: "ms-target",
+					},
+				},
+			},
+		},
+	}
+
+	client := clientfake.NewSimpleClientset(policy)
+	ac := &AutoscaleController{
+		client:                    client,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy)),
+	}
+
+	err := ac.updateHomogeneousPolicyStatus(context.Background(), policy, 3, 5, "Stable", nil, true)
+	if err != nil {
+		t.Fatalf("updateHomogeneousPolicyStatus returned error: %v", err)
+	}
+
+	updated, err := client.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), policyName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get updated policy: %v", err)
+	}
+
+	if updated.Status.ObservedGeneration != 2 {
+		t.Errorf("expected ObservedGeneration=2, got %d", updated.Status.ObservedGeneration)
+	}
+
+	if updated.Status.HomogeneousStatus == nil {
+		t.Fatal("expected HomogeneousStatus to be non-nil")
+	}
+	if updated.Status.HomogeneousStatus.CurrentReplicas != 3 {
+		t.Errorf("expected CurrentReplicas=3, got %d", updated.Status.HomogeneousStatus.CurrentReplicas)
+	}
+	if updated.Status.HomogeneousStatus.DesiredReplicas != 5 {
+		t.Errorf("expected DesiredReplicas=5, got %d", updated.Status.HomogeneousStatus.DesiredReplicas)
+	}
+	if updated.Status.HomogeneousStatus.Mode != "Stable" {
+		t.Errorf("expected Mode='Stable', got %s", updated.Status.HomogeneousStatus.Mode)
+	}
+	if updated.Status.HomogeneousStatus.LastScaleTime == nil {
+		t.Error("expected LastScaleTime to be set when replicas change")
+	}
+
+	// Verify conditions
+	var readyCond, targetCond *metav1.Condition
+	for i := range updated.Status.Conditions {
+		cond := &updated.Status.Conditions[i]
+		if cond.Type == "Ready" {
+			readyCond = cond
+		} else if cond.Type == "TargetFound" {
+			targetCond = cond
+		}
+	}
+
+	if readyCond == nil || readyCond.Status != metav1.ConditionTrue || readyCond.Reason != "Reconciled" {
+		t.Errorf("unexpected Ready condition: %+v", readyCond)
+	}
+	if targetCond == nil || targetCond.Status != metav1.ConditionTrue || targetCond.Reason != "TargetFound" {
+		t.Errorf("unexpected TargetFound condition: %+v", targetCond)
+	}
+}
+
+func TestUpdateHomogeneousPolicyStatus_TargetNotFound(t *testing.T) {
+	ns := "default"
+	policyName := "policy-homo-err"
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       policyName,
+			Namespace:  ns,
+			Generation: 1,
+		},
+		Spec: workload.AutoscalingPolicySpec{
+			HomogeneousTarget: &workload.HomogeneousTarget{},
+		},
+	}
+
+	client := clientfake.NewSimpleClientset(policy)
+	ac := &AutoscaleController{
+		client:                    client,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy)),
+	}
+
+	targetErr := fmt.Errorf("modelserving ms-missing not found")
+	err := ac.updateHomogeneousPolicyStatus(context.Background(), policy, 0, 0, "", targetErr, false)
+	if err != nil {
+		t.Fatalf("updateHomogeneousPolicyStatus returned error: %v", err)
+	}
+
+	updated, err := client.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), policyName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get updated policy: %v", err)
+	}
+
+	if updated.Status.HomogeneousStatus != nil {
+		t.Error("expected HomogeneousStatus to be nil when target is not found")
+	}
+
+	var readyCond, targetCond *metav1.Condition
+	for i := range updated.Status.Conditions {
+		cond := &updated.Status.Conditions[i]
+		if cond.Type == "Ready" {
+			readyCond = cond
+		} else if cond.Type == "TargetFound" {
+			targetCond = cond
+		}
+	}
+
+	if readyCond == nil || readyCond.Status != metav1.ConditionFalse || readyCond.Reason != "ReconcileFailed" {
+		t.Errorf("unexpected Ready condition: %+v", readyCond)
+	}
+	if targetCond == nil || targetCond.Status != metav1.ConditionFalse || targetCond.Reason != "TargetInvalid" {
+		t.Errorf("unexpected TargetFound condition: %+v", targetCond)
+	}
+}
+
+func TestUpdateHeterogeneousPolicyStatus_Success(t *testing.T) {
+	ns := "default"
+	policyName := "policy-hetero"
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       policyName,
+			Namespace:  ns,
+			Generation: 3,
+		},
+		Spec: workload.AutoscalingPolicySpec{
+			HeterogeneousTarget: &workload.HeterogeneousTarget{},
+		},
+	}
+
+	client := clientfake.NewSimpleClientset(policy)
+	ac := &AutoscaleController{
+		client:                    client,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy)),
+	}
+
+	targetStatuses := []workload.TargetScalingStatus{
+		{Name: "ms-a", CurrentReplicas: 2, DesiredReplicas: 4, Mode: "Stable"},
+		{Name: "ms-b", CurrentReplicas: 1, DesiredReplicas: 2, Mode: "Stable"},
+	}
+
+	err := ac.updateHeterogeneousPolicyStatus(context.Background(), policy, targetStatuses, nil, true)
+	if err != nil {
+		t.Fatalf("updateHeterogeneousPolicyStatus returned error: %v", err)
+	}
+
+	updated, err := client.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), policyName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get updated policy: %v", err)
+	}
+
+	if updated.Status.ObservedGeneration != 3 {
+		t.Errorf("expected ObservedGeneration=3, got %d", updated.Status.ObservedGeneration)
+	}
+
+	if len(updated.Status.HeterogeneousStatus) != 2 {
+		t.Fatalf("expected 2 HeterogeneousStatus entries, got %d", len(updated.Status.HeterogeneousStatus))
+	}
+
+	if updated.Status.HeterogeneousStatus[0].Name != "ms-a" || updated.Status.HeterogeneousStatus[0].DesiredReplicas != 4 {
+		t.Errorf("unexpected target 0 status: %+v", updated.Status.HeterogeneousStatus[0])
+	}
+	if updated.Status.HeterogeneousStatus[1].Name != "ms-b" || updated.Status.HeterogeneousStatus[1].DesiredReplicas != 2 {
+		t.Errorf("unexpected target 1 status: %+v", updated.Status.HeterogeneousStatus[1])
+	}
+
+	// Verify conditions
+	var readyCond, targetCond *metav1.Condition
+	for i := range updated.Status.Conditions {
+		cond := &updated.Status.Conditions[i]
+		if cond.Type == "Ready" {
+			readyCond = cond
+		} else if cond.Type == "TargetFound" {
+			targetCond = cond
+		}
+	}
+
+	if readyCond == nil || readyCond.Status != metav1.ConditionTrue || readyCond.Reason != "Reconciled" {
+		t.Errorf("unexpected Ready condition: %+v", readyCond)
+	}
+	if targetCond == nil || targetCond.Status != metav1.ConditionTrue || targetCond.Reason != "TargetFound" {
+		t.Errorf("unexpected TargetFound condition: %+v", targetCond)
+	}
+}
+
+func TestUpdateHeterogeneousPolicyStatus_TargetNotFound(t *testing.T) {
+	ns := "default"
+	policyName := "policy-hetero-err"
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       policyName,
+			Namespace:  ns,
+			Generation: 1,
+		},
+		Spec: workload.AutoscalingPolicySpec{
+			HeterogeneousTarget: &workload.HeterogeneousTarget{},
+		},
+	}
+
+	client := clientfake.NewSimpleClientset(policy)
+	ac := &AutoscaleController{
+		client:                    client,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newAutoscalingPolicyIndexer(policy)),
+	}
+
+	targetErr := fmt.Errorf("modelserving ms-missing not found")
+	err := ac.updateHeterogeneousPolicyStatus(context.Background(), policy, nil, targetErr, false)
+	if err != nil {
+		t.Fatalf("updateHeterogeneousPolicyStatus returned error: %v", err)
+	}
+
+	updated, err := client.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), policyName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get updated policy: %v", err)
+	}
+
+	if len(updated.Status.HeterogeneousStatus) != 0 {
+		t.Error("expected HeterogeneousStatus to be empty when target is not found")
+	}
+
+	var readyCond, targetCond *metav1.Condition
+	for i := range updated.Status.Conditions {
+		cond := &updated.Status.Conditions[i]
+		if cond.Type == "Ready" {
+			readyCond = cond
+		} else if cond.Type == "TargetFound" {
+			targetCond = cond
+		}
+	}
+
+	if readyCond == nil || readyCond.Status != metav1.ConditionFalse || readyCond.Reason != "ReconcileFailed" {
+		t.Errorf("unexpected Ready condition: %+v", readyCond)
+	}
+	if targetCond == nil || targetCond.Status != metav1.ConditionFalse || targetCond.Reason != "TargetInvalid" {
+		t.Errorf("unexpected TargetFound condition: %+v", targetCond)
 	}
 }
