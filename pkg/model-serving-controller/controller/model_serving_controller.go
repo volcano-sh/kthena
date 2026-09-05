@@ -1144,17 +1144,32 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 			klog.Warningf("manageRoleReplicasPerGroup: failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			continue
 		}
+		ownedPodCount := 0
+		staleFound := false
 		for _, pod := range pods {
-			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-				// If the pod is not owned by the ModelServing, we do not need to handle it.
-				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
-				c.enqueueModelServingAfter(ms, 1*time.Second)
-				break
+			ownerUID, isModelServingPod := modelServingOwnerUID(pod, ms.Name)
+			if !isModelServingPod {
+				// Not owned by a ModelServing named ms.Name; leave it alone.
+				continue
+			}
+			if ownerUID == ms.UID {
+				ownedPodCount++
+				continue
+			}
+			// Left over from a previous same-named ModelServing; delete it instead
+			// of waiting for GC.
+			staleFound = true
+			klog.Warningf("manageRoleReplicasPerGroup: deleting pod %s/%s left over from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s)",
+				pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
+			if err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID))); err != nil && !apierrors.IsNotFound(err) {
+				klog.Warningf("manageRoleReplicasPerGroup: failed to delete stale pod %s/%s: %v", pod.Namespace, pod.Name, err)
 			}
 		}
-		if len(pods) < expectedPods {
-			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+		if staleFound {
+			c.enqueueModelServingAfter(ms, 1*time.Second)
+		}
+		if ownedPodCount < expectedPods {
+			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, ownedPodCount, expectedPods)
 			partitionProtected := partitionConfigured && partition > 0 && index < partition
 			roleToApply, revisionToUse, hashToUse := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, partitionProtected)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
@@ -2076,6 +2091,17 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 		}
 	}
 	return false
+}
+
+// modelServingOwnerUID returns the UID of metaObj's owner reference to the ModelServing named
+// msName, if any.
+func modelServingOwnerUID(metaObj metav1.Object, msName string) (types.UID, bool) {
+	for _, ownerRef := range metaObj.GetOwnerReferences() {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == workloadv1alpha1.ModelServingKind.Kind && ownerRef.Name == msName {
+			return ownerRef.UID, true
+		}
+	}
+	return "", false
 }
 
 // handleDeletionInProgress checks and handles deletion states for ServingGroup or Role.

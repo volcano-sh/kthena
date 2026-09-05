@@ -2705,6 +2705,8 @@ func TestManageRoleReplicas(t *testing.T) {
 		initialRoleIDs   []int
 		addEntryPod      bool
 		mismatchOwnerUID bool
+		ownerlessPod     bool
+		otherMSOwnedPod  bool
 		expectedRoleSize int
 		expectedPodCount int
 		expectRequeue    bool
@@ -2749,6 +2751,32 @@ func TestManageRoleReplicas(t *testing.T) {
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
+		},
+		{
+			name:             "pod with no owner references is left untouched and does not panic",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			ownerlessPod:     true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
+			// orphan-detection logic under test.
+			expectRequeue: true,
+		},
+		{
+			name:             "pod owned by a differently-named ModelServing is left untouched",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			otherMSOwnedPod:  true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
+			// orphan-detection logic under test.
+			expectRequeue: true,
 		},
 	}
 
@@ -2815,6 +2843,13 @@ func TestManageRoleReplicas(t *testing.T) {
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
 				}
+				if tt.ownerlessPod {
+					entryPod.OwnerReferences = nil
+				}
+				if tt.otherMSOwnedPod && len(entryPod.OwnerReferences) > 0 {
+					entryPod.OwnerReferences[0].Name = "other-model-serving"
+					entryPod.OwnerReferences[0].UID = types.UID("other-ms-uid")
+				}
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
@@ -2842,11 +2877,37 @@ func TestManageRoleReplicas(t *testing.T) {
 			assert.Equal(t, tt.expectedPodCount, len(pods.Items), "pod count should match expected")
 			//}
 
+			if tt.mismatchOwnerUID {
+				// The orphaned pod should be deleted and replaced, not counted as satisfying demand.
+				for _, pod := range pods.Items {
+					assert.True(t, utils.IsOwnedByModelServingWithUID(&pod, ms.UID),
+						"pod %s should be owned by the current ModelServing, not left over from the previous one", pod.Name)
+				}
+			}
+
+			if tt.ownerlessPod {
+				// An ownerless pod is not a ModelServing pod; it must be left untouched.
+				if assert.Len(t, pods.Items, 1) {
+					assert.Empty(t, pods.Items[0].OwnerReferences, "ownerless pod should be left untouched, not deleted")
+				}
+			}
+
+			if tt.otherMSOwnedPod {
+				// A pod owned by a differently-named ModelServing must be left untouched,
+				// not mistaken for a stale pod of the current ModelServing.
+				if assert.Len(t, pods.Items, 1) {
+					if assert.NotEmpty(t, pods.Items[0].OwnerReferences) {
+						assert.Equal(t, "other-model-serving", pods.Items[0].OwnerReferences[0].Name,
+							"pod owned by another ModelServing should be left untouched, not deleted")
+					}
+				}
+			}
+
 			if tt.expectRequeue {
 				requeued := waitForObjectInCache(t, 2*time.Second, func() bool {
 					return controller.workqueue.Len() > 0
 				})
-				assert.True(t, requeued, "model serving should be requeued for owner UID mismatch")
+				assert.True(t, requeued, "model serving should be requeued")
 			}
 		})
 	}
