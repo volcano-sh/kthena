@@ -12,11 +12,59 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
+from unittest.mock import AsyncMock
 
+import msgspec
 import pytest
 
 from kthena.runtime import zmq_subscriber
-from kthena.runtime.zmq_subscriber import VLLMZMQSubscriber
+from kthena.runtime.events import VLLMBlockStoredEvent
+from kthena.runtime.zmq_subscriber import BlockStored, KVEventBatch, VLLMZMQSubscriber
+
+
+def test_vllm_block_stored_decodes_without_medium():
+    batch = KVEventBatch(
+        ts=1.0,
+        events=[
+            BlockStored(
+                block_hashes=[1],
+                parent_block_hash=None,
+                token_ids=[1],
+                block_size=16,
+                lora_id=None,
+            )
+        ],
+    )
+
+    payload = msgspec.msgpack.encode(batch)
+    decoded = msgspec.msgpack.Decoder(type=KVEventBatch).decode(payload)
+
+    assert decoded.events[0].medium is None
+
+
+@pytest.mark.asyncio
+async def test_vllm_block_stored_preserves_medium():
+    sub = VLLMZMQSubscriber(pod_identifier="pod-a", model_name="m")
+    sub.event_publisher = AsyncMock()
+    batch = KVEventBatch(
+        ts=1.0,
+        events=[
+            BlockStored(
+                block_hashes=[1],
+                parent_block_hash=None,
+                token_ids=[1],
+                block_size=16,
+                lora_id=None,
+                medium="CPU",
+            )
+        ],
+    )
+
+    await sub._process_message(msgspec.msgpack.encode(batch), "pod-a", "m")
+
+    published = sub.event_publisher.publish.await_args.args[0]
+    assert isinstance(published.vllm_event, VLLMBlockStoredEvent)
+    assert published.vllm_event.medium == "CPU"
 
 
 @pytest.mark.asyncio
