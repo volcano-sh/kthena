@@ -21,6 +21,7 @@ import (
 
 	"istio.io/istio/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
@@ -77,6 +78,7 @@ type ModelPrefixStore struct {
 	podHashes    map[types.NamespacedName]Cache[hashModelKey, struct{}] // Map of pod to its hash LRU
 	topK         int                                                    // Each match returns at most topK pods.
 	hashCapacity int                                                    // Capacity for each pod's hash LRU
+	store        datastore.Store                                        // Liveness source for Add's registration gate
 }
 
 // NewModelPrefixStore creates a new ModelPrefixStore with the specified capacity and topK
@@ -86,6 +88,7 @@ func NewModelPrefixStore(store datastore.Store, hashCapacity, topK int) *ModelPr
 		podHashes:    make(map[types.NamespacedName]Cache[hashModelKey, struct{}]),
 		topK:         topK,
 		hashCapacity: hashCapacity,
+		store:        store,
 	}
 
 	// Register callback for pod deletion
@@ -113,15 +116,21 @@ func (s *ModelPrefixStore) onPodDeleted(data datastore.EventData) {
 			hashByModel[key.model] = append(hashByModel[key.model], key.hash)
 		}
 		for model, hashSlice := range hashByModel {
-			s.onHashEvicted(model, hashSlice, data.Pod)
-			// check whether we need to delete entries
-			s.entriesMu.Lock()
-			if modelCache, exists := s.entries[model]; exists && isModelHashShardEmpty(modelCache) {
-				delete(s.entries, model)
-			}
-			s.entriesMu.Unlock()
+			s.purgeModelHashes(model, hashSlice, data.Pod)
 		}
 	}
+}
+
+// purgeModelHashes removes the pod's entries for the given hashes and drops the model when it
+// empties. Shared by pod deletion and Add's undo; must not take podHashesMu.
+func (s *ModelPrefixStore) purgeModelHashes(model string, hashes []uint64, nsName types.NamespacedName) {
+	s.onHashEvicted(model, hashes, nsName)
+	// check whether we need to delete entries
+	s.entriesMu.Lock()
+	if modelCache, exists := s.entries[model]; exists && isModelHashShardEmpty(modelCache) {
+		delete(s.entries, model)
+	}
+	s.entriesMu.Unlock()
 }
 
 func isModelHashShardEmpty(model *modelHashes) bool {
@@ -165,7 +174,8 @@ func (s *ModelPrefixStore) FindTopMatches(model string, hashes []uint64, pods []
 		shard.mu.RLock()
 		podSet, exists := shard.hashes[hash]
 		if exists {
-			// Note: we are iterating over a copy of the set, so we don't need to hold the lock.
+			// The set is the live map, not a copy; iteration is safe because the shard
+			// read lock is held until the loop ends.
 			for pod := range podSet {
 				// Skip if pod is not in the candidate set or already matched
 				if !candidatePods.Contains(pod) {
@@ -199,13 +209,26 @@ func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.Pod
 	s.podHashesMu.Lock()
 	podLRU, exists := s.podHashes[nsName]
 	if !exists {
-		podLRU, _ = NewLRUCache(s.hashCapacity, func(key hashModelKey, value struct{}) {
+		if s.store.GetPodInfo(nsName) == nil {
+			s.podHashesMu.Unlock()
+			return
+		}
+		var err error
+		podLRU, err = NewLRUCache(s.hashCapacity, func(key hashModelKey, value struct{}) {
 			// Only capacity-driven evictions reach this callback; pod deletion removes
 			// entries via onHashEvicted directly, so this is the right place to count them.
 			metrics.DefaultMetrics.RecordPrefixCacheEviction(key.model)
-			// Safe to call synchronously: podLRU.Add() is invoked after shard.mu.Unlock().
+			// Safe to call synchronously: golang-lru v2 runs it outside its own lock, and
+			// podLRU.Add() is invoked after shard.mu.Unlock().
 			s.onHashEvicted(key.model, []uint64{key.hash}, nsName)
 		})
+		if err != nil {
+			// Only reachable with a non-positive capacity; without the log this would
+			// silently disable caching.
+			klog.Errorf("ModelPrefixStore: failed to create pod LRU (capacity %d): %v", s.hashCapacity, err)
+			s.podHashesMu.Unlock()
+			return
+		}
 		s.podHashes[nsName] = podLRU
 	}
 	s.podHashesMu.Unlock()
@@ -232,6 +255,13 @@ func (s *ModelPrefixStore) Add(model string, hashes []uint64, pod *datastore.Pod
 		shard.hashes[hash].Insert(nsName)
 		shard.mu.Unlock()
 		podLRU.Add(hashModelKey{hash: hash, model: model}, struct{}{})
+	}
+
+	s.podHashesMu.RLock()
+	current, registered := s.podHashes[nsName]
+	s.podHashesMu.RUnlock()
+	if !registered || current != podLRU {
+		s.purgeModelHashes(model, hashes, nsName)
 	}
 }
 
