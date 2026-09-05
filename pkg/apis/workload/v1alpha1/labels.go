@@ -32,4 +32,9 @@ const (
 	RevisionLabelKey = "modelserving.volcano.sh/revision"
 	// RoleTemplateHashLabelKey is the revision label for the role, used for RoleRollingUpdate strategy.
 	RoleTemplateHashLabelKey = "modelserving.volcano.sh/role-template-hash"
+
+	// PrometheusAuthSecretLabelKey marks Secrets that AutoscalingPolicy prometheus auth may read.
+	PrometheusAuthSecretLabelKey = "workload.serving.volcano.sh/prometheus-auth-credential"
+	// PrometheusAuthSecretLabelValue is the required value of PrometheusAuthSecretLabelKey.
+	PrometheusAuthSecretLabelValue = "true"
 )

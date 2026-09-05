@@ -345,16 +345,29 @@ type PrometheusMetricSource struct {
 	// +kubebuilder:validation:MinLength=1
 	Query string `json:"query"`
 	// Auth holds optional authentication configuration for the Prometheus server.
+	// Referenced Secrets must live in the AutoscalingPolicy namespace and carry the label workload.serving.volcano.sh/prometheus-auth-credential=true.
 	// +optional
 	Auth *PrometheusAuth `json:"auth,omitempty"`
 }
 
-// PrometheusAuth configures authentication when connecting to an external Prometheus server.
-//
-// NOTE: This struct describes the intended configuration surface. The runtime
-// does not honor any of these fields yet; they are reserved for a follow-up
-// implementation. Setting them today has no effect on Prometheus requests.
+// PrometheusAuth configures authentication for an external Prometheus server; referenced Secrets must live in the policy namespace and carry the label workload.serving.volcano.sh/prometheus-auth-credential=true.
 type PrometheusAuth struct {
+	// BearerTokenSecret references a Secret key whose value is sent as the bearer token.
+	// +optional
+	BearerTokenSecret *corev1.SecretKeySelector `json:"bearerTokenSecret,omitempty"`
+	// TLSConfig controls TLS certificate validation for https serverURLs.
+	// +optional
+	TLSConfig *PrometheusTLSConfig `json:"tlsConfig,omitempty"`
+}
+
+// PrometheusTLSConfig holds TLS settings for Prometheus HTTPS connections.
+type PrometheusTLSConfig struct {
+	// InsecureSkipVerify disables TLS certificate verification. For development only.
+	// +optional
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+	// CASecret references a Secret key holding the PEM CA bundle used to verify the server certificate.
+	// +optional
+	CASecret *corev1.SecretKeySelector `json:"caSecret,omitempty"`
 }
 
 // Target defines a ModelServing deployment that can be monitored and scaled.

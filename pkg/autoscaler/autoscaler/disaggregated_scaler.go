@@ -77,7 +77,7 @@ type DisaggregatedScaleResult struct {
 // histories from a disaggregated autoscaling policy. Fixed roles still get an
 // entry in the scaler metadata for status and ratio enforcement, but their
 // metric target map is empty and Scale will skip collection for them.
-func NewDisaggregatedAutoscaler(policy *workload.AutoscalingPolicy) *DisaggregatedAutoscaler {
+func NewDisaggregatedAutoscaler(policy *workload.AutoscalingPolicy, getSecret SecretGetter) *DisaggregatedAutoscaler {
 	if policy == nil || policy.Spec.DisaggregatedTarget == nil {
 		return nil
 	}
@@ -90,7 +90,7 @@ func NewDisaggregatedAutoscaler(policy *workload.AutoscalingPolicy) *Disaggregat
 			TargetRef:     policy.Spec.DisaggregatedTarget.TargetRef,
 			MetricSources: metricSourcesForRole(roleName, roleParam.MetricSources),
 		}
-		collectors[roleName] = NewMetricCollector(&target, policy, metricTargetsByRole[roleName])
+		collectors[roleName] = NewMetricCollector(&target, policy, metricTargetsByRole[roleName], getSecret)
 		statuses[roleName] = NewStatus(&policy.Spec.Behavior)
 	}
 

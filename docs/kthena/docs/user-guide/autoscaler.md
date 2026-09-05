@@ -105,6 +105,46 @@ Configures autoscaling across multiple instance types with cost optimization:
 
 The heterogeneous mode's optimization algorithm automatically determines the optimal combination of instance types to balance performance requirements against cost constraints, always respecting the defined minReplicas and maxReplicas boundaries for each instance type.
 
+#### Prometheus Metric Source Authentication
+
+A `prometheus` metric source can authenticate against a Prometheus server that requires a bearer token or presents a certificate from a private CA. Both values are read from Secrets in the AutoscalingPolicy namespace that carry the label `workload.serving.volcano.sh/prometheus-auth-credential: "true"`; the controller never uses the value of a Secret without it, so a policy cannot send any other Secret in the namespace to a Prometheus endpoint.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: prometheus-token
+  namespace: default
+  labels:
+    workload.serving.volcano.sh/prometheus-auth-credential: "true"
+type: Opaque
+stringData:
+  token: "replace-with-your-token"
+```
+
+```yaml
+metricSources:
+  requests_per_second:
+    prometheus:
+      serverURL: https://prometheus.monitoring.svc:9090
+      query: sum(rate(http_requests_total[2m]))
+      auth:
+        bearerTokenSecret:
+          name: prometheus-token
+          key: token
+        tlsConfig:
+          caSecret:              # this Secret needs the same label
+            name: prometheus-ca
+            key: ca.crt
+          # insecureSkipVerify: true   # development only
+```
+
+- **bearerTokenSecret**: Secret key whose value is sent as `Authorization: Bearer <token>`. Surrounding whitespace is trimmed, so a value stored from a file with a trailing newline still works. With an `http://` serverURL the token travels in cleartext, so prefer `https://` outside a trusted network.
+- **tlsConfig.caSecret**: Secret key holding a PEM-encoded CA bundle used to verify the server certificate. `tlsConfig` requires an `https://` serverURL.
+- **tlsConfig.insecureSkipVerify**: Disables certificate verification, which also makes `caSecret` irrelevant. For development only.
+
+The Secrets are read on every reconcile, so a rotated token or CA takes effect without restarting the controller. If a referenced Secret is missing or unlabeled, or its key is missing or holds an empty value, the metric is skipped for that reconcile with a warning and no scaling decision is made from it; set `optional: true` on a selector to proceed without that value instead.
+
 ### Configuration Examples
 
 #### Homogeneous Target Example

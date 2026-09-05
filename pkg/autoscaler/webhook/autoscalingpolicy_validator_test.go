@@ -380,3 +380,118 @@ func TestAutoscalingPolicyValidator_Handle_ValidPolicy(t *testing.T) {
 		assert.Empty(t, responseReview.Response.Result.Message)
 	}
 }
+
+func TestValidateAutoscalingPolicy_PrometheusAuth(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+	newPolicy := func(serverURL string, auth *registryv1.PrometheusAuth) *registryv1.AutoscalingPolicy {
+		return &registryv1.AutoscalingPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+			Spec: registryv1.AutoscalingPolicySpec{
+				Metrics: []registryv1.AutoscalingPolicyMetric{{Name: "rps", TargetValue: resource.MustParse("10")}},
+				HomogeneousTarget: &registryv1.HomogeneousTarget{
+					Target: registryv1.Target{
+						TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "test-target"},
+						MetricSources: map[string]registryv1.MetricSource{
+							"rps": {Prometheus: &registryv1.PrometheusMetricSource{ServerURL: serverURL, Query: "up", Auth: auth}},
+						},
+					},
+				},
+			},
+		}
+	}
+	tokenRef := &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "prom-token"}, Key: "token"}
+
+	cases := []struct {
+		name      string
+		serverURL string
+		auth      *registryv1.PrometheusAuth
+		wantErrs  []string
+	}{
+		{
+			name:      "bearer token and ca over https",
+			serverURL: "https://prom:9090",
+			auth: &registryv1.PrometheusAuth{
+				BearerTokenSecret: tokenRef,
+				TLSConfig:         &registryv1.PrometheusTLSConfig{CASecret: tokenRef},
+			},
+		},
+		{
+			name:      "no auth",
+			serverURL: "http://prom:9090",
+		},
+		{
+			name:      "secret reference without a name",
+			serverURL: "https://prom:9090",
+			auth:      &registryv1.PrometheusAuth{BearerTokenSecret: &corev1.SecretKeySelector{Key: "token"}},
+			wantErrs:  []string{"bearerTokenSecret.name"},
+		},
+		{
+			name:      "tls config on http serverURL",
+			serverURL: "http://prom:9090",
+			auth:      &registryv1.PrometheusAuth{TLSConfig: &registryv1.PrometheusTLSConfig{InsecureSkipVerify: true}},
+			wantErrs:  []string{"tlsConfig requires an https serverURL"},
+		},
+		{
+			name:      "ca secret without a name",
+			serverURL: "https://prom:9090",
+			auth:      &registryv1.PrometheusAuth{TLSConfig: &registryv1.PrometheusTLSConfig{CASecret: &corev1.SecretKeySelector{Key: "ca.crt"}}},
+			wantErrs:  []string{"tlsConfig.caSecret.name"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validator.validateMetricSources(newPolicy(tc.serverURL, tc.auth))
+			if len(tc.wantErrs) == 0 {
+				assert.Empty(t, errs)
+				return
+			}
+			var messages []string
+			for _, err := range errs {
+				messages = append(messages, err.Error())
+			}
+			joined := strings.Join(messages, "; ")
+			for _, want := range tc.wantErrs {
+				assert.Contains(t, joined, want)
+			}
+		})
+	}
+
+	tlsOnHTTP := map[string]registryv1.MetricSource{
+		"rps": {Prometheus: &registryv1.PrometheusMetricSource{
+			ServerURL: "http://prom:9090",
+			Query:     "up",
+			Auth:      &registryv1.PrometheusAuth{TLSConfig: &registryv1.PrometheusTLSConfig{InsecureSkipVerify: true}},
+		}},
+	}
+
+	t.Run("heterogeneous target path", func(t *testing.T) {
+		policy := &registryv1.AutoscalingPolicy{Spec: registryv1.AutoscalingPolicySpec{
+			HeterogeneousTarget: &registryv1.HeterogeneousTarget{Params: []registryv1.HeterogeneousTargetParam{
+				{Target: registryv1.Target{MetricSources: tlsOnHTTP}},
+			}},
+		}}
+		errs := validator.validateMetricSources(policy)
+		require.Len(t, errs, 1)
+		assert.Equal(t, "spec.heterogeneousTarget.params[0].target.metricSources[rps].prometheus.auth.tlsConfig", errs[0].Field)
+	})
+
+	t.Run("disaggregated target path", func(t *testing.T) {
+		policy := &registryv1.AutoscalingPolicy{Spec: registryv1.AutoscalingPolicySpec{
+			DisaggregatedTarget: &registryv1.DisaggregatedTarget{Roles: map[string]registryv1.RoleScalingParam{
+				"decode": {MetricSources: tlsOnHTTP},
+			}},
+		}}
+		errs := validator.validateMetricSources(policy)
+		require.Len(t, errs, 1)
+		assert.Equal(t, "spec.disaggregatedTarget.roles[decode].metricSources[rps].prometheus.auth.tlsConfig", errs[0].Field)
+	})
+
+	t.Run("rejected through validateAutoscalingPolicy", func(t *testing.T) {
+		allowed, msg := validator.validateAutoscalingPolicy(newPolicy("https://prom:9090", nil))
+		require.True(t, allowed, msg)
+
+		allowed, msg = validator.validateAutoscalingPolicy(newPolicy("http://prom:9090", &registryv1.PrometheusAuth{TLSConfig: &registryv1.PrometheusTLSConfig{InsecureSkipVerify: true}}))
+		assert.False(t, allowed)
+		assert.Contains(t, msg, "tlsConfig requires an https serverURL")
+	})
+}

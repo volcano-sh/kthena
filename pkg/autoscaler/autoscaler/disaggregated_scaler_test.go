@@ -122,7 +122,7 @@ func TestDisaggregatedAutoscalerScale_FixedSingleRoleWithoutMetrics(t *testing.T
 			},
 		},
 	}
-	scaler := NewDisaggregatedAutoscaler(policy)
+	scaler := NewDisaggregatedAutoscaler(policy, nil)
 
 	result, err := scaler.Scale(context.Background(), nil, policy, map[string]int32{"decode": 5})
 	if err != nil {

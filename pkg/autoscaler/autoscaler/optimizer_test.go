@@ -246,7 +246,7 @@ func TestHeterogeneousTargetsWithSameNameAcrossNamespaces(t *testing.T) {
 		},
 	})
 
-	optimizer := NewOptimizer(policy)
+	optimizer := NewOptimizer(policy, nil)
 
 	// Names are unique only within a namespace. The optimizer must preserve
 	// one metric collector for each separately addressable ModelServing target.

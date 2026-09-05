@@ -68,6 +68,13 @@ rules:
       - get
       - list
       - watch
+  # Secrets referenced by AutoscalingPolicy prometheus auth.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
   - apiGroups:
       - ""
     resources:
