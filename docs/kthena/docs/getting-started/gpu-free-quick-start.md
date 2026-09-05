@@ -14,12 +14,13 @@ Try out Kthena on a Kubernetes cluster **without GPUs or NPUs**! This guide depl
 - Pod in Kubernetes can access the internet
 - [volcano](https://volcano.sh/en/docs/installation/) is installed.
 
-## Step 1: Deploy the Mock Inference Backend
+## Step 1: Deploy with Kustomize
 
-The repository ships a mock backend that emulates a vLLM server: it exposes the same OpenAI-compatible HTTP API and metrics endpoint, but returns simulated responses instead of running a real model — no GPU, no model weights.
+From a local checkout, deploy the mock backend, `ModelServer`, and `ModelRoute`
+as one scenario:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/kthena-router/LLM-Mock-ds1.5b.yaml
+kubectl apply -k examples/kthena-router/scenarios/simple
 ```
 
 Wait for the mock Pods to become ready:
@@ -38,16 +39,7 @@ deepseek-r1-1-5b-xxxxxxxxx-xxxxx    1/1     Running   0          1m
 deepseek-r1-1-5b-xxxxxxxxx-xxxxx    1/1     Running   0          1m
 ```
 
-## Step 2: Create the ModelServer and ModelRoute
-
-A `ModelServer` tells the router which Pods serve a model (via a workload selector and port). A `ModelRoute` declares a routable model name and maps it to one or more `ModelServer` targets.
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/kthena-router/ModelServer-ds1.5b.yaml
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/kthena-router/ModelRouteSimple.yaml
-```
-
-Verify both resources exist:
+Verify that the `ModelServer` and `ModelRoute` were created:
 
 ```bash
 kubectl get modelservers,modelroutes
@@ -63,7 +55,7 @@ NAME                                                              AGE
 modelroute.networking.serving.volcano.sh/deepseek-simple          1m
 ```
 
-## Step 3: Port-Forward the Kthena Router
+## Step 2: Port-Forward the Kthena Router
 
 The router Service is of type `LoadBalancer`. On clusters without a load-balancer implementation (such as a default Kind cluster) its external IP stays `<pending>`, so use a port-forward for local access:
 
@@ -75,7 +67,7 @@ If port 8080 is already taken on your machine (for example, Podman occupies it b
 
 Keep this command running and continue in a second terminal.
 
-## Step 4: Send a Test Inference Request
+## Step 3: Send a Test Inference Request
 
 The `ModelRoute` above registers the model name `deepseek-simple`. Send an OpenAI-style completion request through the router (the current mock image requires `max_tokens` and `"stream": true`):
 

@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../bases/deepseek-1.5b
+  - Gateway.yaml
+  - ModelRoute-binding-gateway.yaml
+
+patches:
+  - target:
+      group: networking.serving.volcano.sh
+      version: v1alpha1
+      kind: ModelRoute
+      name: deepseek-binding-gateway
+    patch: |-
+      - op: replace
+        path: /spec/parentRefs/0/name
+        value: kthena-gateway

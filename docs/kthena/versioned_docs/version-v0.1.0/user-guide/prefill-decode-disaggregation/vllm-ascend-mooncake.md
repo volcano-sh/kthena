@@ -133,7 +133,7 @@ For a detailed comparison of the ModelServing approach's advantages, manually cr
 First, create the ModelServing resource to manage prefill and decode workloads using the [ModelServing configuration](../../assets/examples/model-serving/prefill-decode-disaggregation.yaml):
 
 ```sh
-kubectl apply -f examples/model-serving/prefill-decode-disaggregation.yaml
+kubectl apply -f examples/model-serving/prefill-decode-disaggregation/modelserving.yaml
 ```
 
 This configuration includes:
@@ -149,7 +149,7 @@ Create the ModelServer resource to manage the networking layer for disaggregated
 traffic management between prefill and decode services using the [ModelServer configuration](../../assets/examples/kthena-router/ModelServer-prefill-decode-disaggregation.yaml):
 
 ```sh
-kubectl apply -f examples/kthena-router/ModelServer-prefill-decode-disaggregation.yaml
+kubectl apply -f examples/kthena-router/scenarios/ascend-pd-disaggregation/ModelServer-prefill-decode-disaggregation.yaml
 ```
 
 This configuration includes:
@@ -163,7 +163,7 @@ This configuration includes:
 Create the ModelRoute resource to provide routing functionality, directing requests to the appropriate model server using the [ModelRoute configuration](../../assets/examples/kthena-router/ModelRoute-prefill-decode-disaggregation.yaml):
 
 ```sh
-kubectl apply -f examples/kthena-router/ModelRoute-prefill-decode-disaggregation.yaml
+kubectl apply -f examples/kthena-router/scenarios/ascend-pd-disaggregation/ModelRoute-prefill-decode-disaggregation.yaml
 ```
 
 This configuration includes:
@@ -177,13 +177,13 @@ When using the ModelServing approach, create resources in the following order:
 
 ```bash
 # 1. Create ModelServing resource
-kubectl apply -f examples/model-serving/prefill-decode-disaggregation.yaml
+kubectl apply -f examples/model-serving/prefill-decode-disaggregation/modelserving.yaml
 
 # 2. Create ModelServer resource
-kubectl apply -f examples/kthena-router/ModelServer-prefill-decode-disaggregation.yaml
+kubectl apply -f examples/kthena-router/scenarios/ascend-pd-disaggregation/ModelServer-prefill-decode-disaggregation.yaml
 
 # 3. Create ModelRoute resource
-kubectl apply -f examples/kthena-router/ModelRoute-prefill-decode-disaggregation.yaml
+kubectl apply -f examples/kthena-router/scenarios/ascend-pd-disaggregation/ModelRoute-prefill-decode-disaggregation.yaml
 ```
 
 ##### Verifying ModelServing Deployment

@@ -67,7 +67,7 @@ To test this, you can set a low limit (e.g., `inputTokensPerUnit: 10`) and send 
 
 ```bash
 # 1. Apply the ModelRoute yaml above
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelRouteWithRateLimit.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/scenarios/local-rate-limit/ModelRouteWithRateLimit.yaml
 
 # 2. Scale down the replicas of the router to 1 to demonstrate local rate limiting
 kubectl scale deployment kthena-router -n kthena-system --replicas=1
@@ -89,7 +89,7 @@ curl http://$ROUTER_IP/v1/completions \
 "input token rate limit exceeded"
 
 # 5. Clean up
-kubectl delete -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelRouteWithRateLimit.yaml
+kubectl delete -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/scenarios/local-rate-limit/ModelRouteWithRateLimit.yaml
 ```
 
 ### 2. Global Rate Limiting
@@ -138,7 +138,7 @@ The test process is similar to local rate limiting. Even if your requests are ha
 kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/redis/redis-standalone.yaml
 
 # 2. Apply the ModelRoute yaml above
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelRouteWithGlobalRateLimit.yaml
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/scenarios/global-rate-limit/ModelRouteWithGlobalRateLimit.yaml
 
 # 3. Scale up the replicas of the router to 3 to demonstrate global rate limiting
 kubectl scale deployment kthena-router -n kthena-system --replicas=3
@@ -160,7 +160,7 @@ curl http://$ROUTER_IP/v1/completions \
 "input token rate limit exceeded"
 
 # 6. Clean up
-kubectl delete -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/ModelRouteWithGlobalRateLimit.yaml
+kubectl delete -f https://raw.githubusercontent.com/volcano-sh/kthena/main/examples/kthena-router/scenarios/global-rate-limit/ModelRouteWithGlobalRateLimit.yaml
 ```
 
 By leveraging local and global rate limiting, Kthena gives you fine-grained control over your AI service traffic, enabling robust, scalable, and cost-effective model deployments.
