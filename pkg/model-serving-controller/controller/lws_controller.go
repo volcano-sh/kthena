@@ -25,8 +25,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
@@ -78,8 +81,10 @@ type LWSController struct {
 	kubeClient            kubernetes.Interface
 	kthenaClient          kthenaclientset.Interface
 	lwsClient             lwsclientset.Interface
+	kubeInformerFactory   kubeinformers.SharedInformerFactory
 	lwsInformerFactory    lwsinformers.SharedInformerFactory
 	kthenaInformerFactory kthenainformers.SharedInformerFactory
+	serviceSynced         cache.InformerSynced
 	lwsLister             lwslisters.LeaderWorkerSetLister
 	lwsSynced             cache.InformerSynced
 	modelServingLister    kthenalisters.ModelServingLister
@@ -95,6 +100,18 @@ func NewLWSController(
 	lwsInformer lwsinformers.SharedInformerFactory,
 	kthenaInformer kthenainformers.SharedInformerFactory,
 ) (*LWSController, error) {
+	selector, err := labels.NewRequirement(lwsv1.SetNameLabelKey, selection.Exists, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create LWS service selector: %w", err)
+	}
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(
+		kubeClient,
+		0,
+		kubeinformers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = selector.String()
+		}),
+	)
+	serviceInformerInstance := kubeInformerFactory.Core().V1().Services()
 	lwsInformerInstance := lwsInformer.Leaderworkerset().V1().LeaderWorkerSets()
 	modelServingInformerInstance := kthenaInformer.Workload().V1alpha1().ModelServings()
 
@@ -102,8 +119,10 @@ func NewLWSController(
 		kubeClient:            kubeClient,
 		kthenaClient:          kthenaClient,
 		lwsClient:             lwsClient,
+		kubeInformerFactory:   kubeInformerFactory,
 		lwsInformerFactory:    lwsInformer,
 		kthenaInformerFactory: kthenaInformer,
+		serviceSynced:         serviceInformerInstance.Informer().HasSynced,
 		lwsLister:             lwsInformerInstance.Lister(),
 		lwsSynced:             lwsInformerInstance.Informer().HasSynced,
 		modelServingLister:    modelServingInformerInstance.Lister(),
@@ -115,7 +134,7 @@ func NewLWSController(
 	}
 
 	klog.Info("Setting up event handlers for LWS Controller")
-	_, err := lwsInformerInstance.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err = lwsInformerInstance.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: c.enqueueLWS,
 		UpdateFunc: func(old, new interface{}) {
 			c.enqueueLWS(new)
@@ -141,6 +160,13 @@ func NewLWSController(
 		return nil, err
 	}
 
+	_, err = serviceInformerInstance.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		DeleteFunc: c.handleObject,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return c, nil
 }
 
@@ -150,11 +176,12 @@ func (c *LWSController) Run(ctx context.Context, workers int) error {
 
 	klog.Info("Starting LWS controller")
 
+	c.kubeInformerFactory.Start(ctx.Done())
 	c.lwsInformerFactory.Start(ctx.Done())
 	c.kthenaInformerFactory.Start(ctx.Done())
 
 	klog.Info("Waiting for informer caches to sync")
-	if ok := cache.WaitForCacheSync(ctx.Done(), c.lwsSynced, c.modelServingSynced); !ok {
+	if ok := cache.WaitForCacheSync(ctx.Done(), c.serviceSynced, c.lwsSynced, c.modelServingSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
@@ -214,6 +241,9 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 		}
 		return err
 	}
+	if err := c.ensureLWSHeadlessService(ctx, lws); err != nil {
+		return err
+	}
 
 	msName := lws.Name
 	ms, err := c.modelServingLister.ModelServings(namespace).Get(msName)
@@ -223,6 +253,9 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 		if err != nil {
 			return err
 		}
+		// Wait for the ModelServing informer to observe the created object before
+		// projecting its status back to the LWS.
+		return nil
 	} else if err != nil {
 		return err
 	} else {
@@ -230,20 +263,21 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 		if !reflect.DeepEqual(ms.Spec, desiredMs.Spec) {
 			msCopy := ms.DeepCopy()
 			msCopy.Spec = desiredMs.Spec
-			_, err = c.kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Update(ctx, msCopy, metav1.UpdateOptions{})
+			ms, err = c.kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Update(ctx, msCopy, metav1.UpdateOptions{})
 			if err != nil {
 				return err
+			}
+			// Admission defaults can make the stored spec differ from the
+			// constructed spec without changing its generation. Only wait when the
+			// update actually made the ModelServing status stale.
+			if ms.Status.ObservedGeneration != ms.Generation {
+				return nil
 			}
 		}
 	}
 
-	// Refetch ms for status update
-	ms, err = c.modelServingLister.ModelServings(namespace).Get(msName)
-	if err == nil {
-		err = c.updateLWSStatus(ctx, lws, ms)
-		if err != nil {
-			return err
-		}
+	if err := c.updateLWSStatus(ctx, lws, ms); err != nil {
+		return err
 	}
 
 	return nil
@@ -364,17 +398,119 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 }
 
 func (c *LWSController) updateLWSStatus(ctx context.Context, lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.ModelServing) error {
-	newStatus := lws.Status.DeepCopy()
-	newStatus.Replicas = ms.Status.Replicas
-	newStatus.ReadyReplicas = ms.Status.AvailableReplicas
+	newStatus := buildLWSStatus(lws, ms, metav1.Now())
 
-	if !reflect.DeepEqual(lws.Status, *newStatus) {
+	if !reflect.DeepEqual(lws.Status, newStatus) {
 		lwsCopy := lws.DeepCopy()
-		lwsCopy.Status = *newStatus
+		lwsCopy.Status = newStatus
 		_, err := c.lwsClient.LeaderworkersetV1().LeaderWorkerSets(lws.Namespace).UpdateStatus(ctx, lwsCopy, metav1.UpdateOptions{})
 		return err
 	}
 	return nil
+}
+
+func buildLWSStatus(lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.ModelServing, now metav1.Time) lwsv1.LeaderWorkerSetStatus {
+	newStatus := *lws.Status.DeepCopy()
+	newStatus.Replicas = ms.Status.Replicas
+	newStatus.ReadyReplicas = ms.Status.AvailableReplicas
+	newStatus.UpdatedReplicas = ms.Status.UpdatedReplicas
+	newStatus.Conditions = projectLWSConditions(lws, ms, now)
+	return newStatus
+}
+
+func (c *LWSController) ensureLWSHeadlessService(ctx context.Context, lws *lwsv1.LeaderWorkerSet) error {
+	_, err := c.kubeClient.CoreV1().Services(lws.Namespace).Get(ctx, lws.Name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      lws.Name,
+			Namespace: lws.Namespace,
+			Labels: map[string]string{
+				lwsv1.SetNameLabelKey: lws.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(lws, lwsv1.GroupVersion.WithKind("LeaderWorkerSet")),
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:                corev1.ClusterIPNone,
+			PublishNotReadyAddresses: true,
+			Selector: map[string]string{
+				lwsv1.SetNameLabelKey: lws.Name,
+			},
+		},
+	}
+	if _, err := c.kubeClient.CoreV1().Services(lws.Namespace).Create(ctx, service, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("create LWS headless service: %w", err)
+	}
+	return nil
+}
+
+func projectLWSConditions(lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.ModelServing, now metav1.Time) []metav1.Condition {
+	managedTypes := map[string]struct{}{
+		string(lwsv1.LeaderWorkerSetAvailable):        {},
+		string(lwsv1.LeaderWorkerSetProgressing):      {},
+		string(lwsv1.LeaderWorkerSetUpdateInProgress): {},
+	}
+
+	conditions := make([]metav1.Condition, 0, len(ms.Status.Conditions))
+	for _, condition := range lws.Status.Conditions {
+		if _, managed := managedTypes[condition.Type]; !managed {
+			conditions = append(conditions, condition)
+		}
+	}
+
+	sourceConditions := ms.Status.Conditions
+	if ms.Status.ObservedGeneration != ms.Generation {
+		sourceConditions = append([]metav1.Condition(nil), sourceConditions...)
+		availableFound := false
+		for i := range sourceConditions {
+			if sourceConditions[i].Type == string(workloadv1alpha1.ModelServingAvailable) {
+				sourceConditions[i].Status = metav1.ConditionFalse
+				sourceConditions[i].Reason = "ModelServingStatusStale"
+				sourceConditions[i].Message = "ModelServing has not observed its latest generation"
+				availableFound = true
+			}
+		}
+		if !availableFound {
+			sourceConditions = append(sourceConditions, metav1.Condition{
+				Type:    string(workloadv1alpha1.ModelServingAvailable),
+				Status:  metav1.ConditionFalse,
+				Reason:  "ModelServingStatusStale",
+				Message: "ModelServing has not observed its latest generation",
+			})
+		}
+	}
+
+	for _, condition := range sourceConditions {
+		if _, managed := managedTypes[condition.Type]; !managed {
+			continue
+		}
+		projected := condition
+		projected.ObservedGeneration = lws.Generation
+		for _, previous := range lws.Status.Conditions {
+			if previous.Type != projected.Type {
+				continue
+			}
+			if previous.Status == projected.Status {
+				projected.LastTransitionTime = previous.LastTransitionTime
+			} else {
+				projected.LastTransitionTime = now
+			}
+			break
+		}
+		if projected.LastTransitionTime.IsZero() {
+			projected.LastTransitionTime = now
+		}
+		conditions = append(conditions, projected)
+	}
+	return conditions
 }
 
 func ResourceExists(client kubernetes.Interface, groupVersion string, kind string) (bool, error) {

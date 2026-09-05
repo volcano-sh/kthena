@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -67,7 +68,12 @@ func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error
 		return err
 	}
 
-	groupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s-%d", lwsName, groupIndex))
+	groupSize, err := getGroupSize(req)
+	if err != nil {
+		return err
+	}
+	leaderHostname := fmt.Sprintf("%s-%d", lwsName, groupIndex)
+	groupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s/%s", req.Pod.Namespace, leaderHostname))
 
 	if req.Pod.Labels == nil {
 		req.Pod.Labels = map[string]string{}
@@ -76,6 +82,32 @@ func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error
 	req.Pod.Labels[leaderworkerset.GroupIndexLabelKey] = strconv.Itoa(groupIndex)
 	req.Pod.Labels[leaderworkerset.WorkerIndexLabelKey] = strconv.Itoa(workerIndex)
 	req.Pod.Labels[leaderworkerset.GroupUniqueHashLabelKey] = groupKey
+	if req.Pod.Annotations == nil {
+		req.Pod.Annotations = map[string]string{}
+	}
+	req.Pod.Annotations[leaderworkerset.SizeAnnotationKey] = strconv.Itoa(groupSize)
+
+	req.Pod.Spec.Hostname = leaderHostname
+	if workerIndex > 0 {
+		req.Pod.Spec.Hostname = fmt.Sprintf("%s-%d", leaderHostname, workerIndex)
+		req.Pod.Annotations[leaderworkerset.LeaderPodNameAnnotationKey] = leaderHostname
+	}
+	req.Pod.Spec.Subdomain = lwsName
+
+	lwsEnv := []corev1.EnvVar{
+		{
+			Name:  leaderworkerset.LwsLeaderAddress,
+			Value: fmt.Sprintf("%s.%s.%s", leaderHostname, lwsName, req.Pod.Namespace),
+		},
+		{Name: leaderworkerset.LwsGroupSize, Value: strconv.Itoa(groupSize)},
+		{Name: leaderworkerset.LwsWorkerIndex, Value: strconv.Itoa(workerIndex)},
+	}
+	for i := range req.Pod.Spec.Containers {
+		prependEnvVars(&req.Pod.Spec.Containers[i], lwsEnv)
+	}
+	for i := range req.Pod.Spec.InitContainers {
+		prependEnvVars(&req.Pod.Spec.InitContainers[i], lwsEnv)
+	}
 
 	return nil
 }
@@ -109,4 +141,28 @@ func deriveWorkerIndex(isEntry bool, podName string) (int, error) {
 		return 0, fmt.Errorf("invalid worker-index %d derived from pod name %q", n, podName)
 	}
 	return n, nil
+}
+
+func getGroupSize(req *HookRequest) (int, error) {
+	for _, role := range req.ModelServing.Spec.Template.Roles {
+		if role.Name == req.RoleName {
+			return int(role.WorkerReplicas) + 1, nil
+		}
+	}
+	return 0, fmt.Errorf("role %q not found in modelServing %s/%s", req.RoleName, req.ModelServing.Namespace, req.ModelServing.Name)
+}
+
+func prependEnvVars(container *corev1.Container, envVars []corev1.EnvVar) {
+	names := make(map[string]struct{}, len(envVars))
+	for _, env := range envVars {
+		names[env.Name] = struct{}{}
+	}
+
+	retained := make([]corev1.EnvVar, 0, len(container.Env))
+	for _, env := range container.Env {
+		if _, replaced := names[env.Name]; !replaced {
+			retained = append(retained, env)
+		}
+	}
+	container.Env = append(envVars, retained...)
 }
