@@ -30,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1926,6 +1927,240 @@ func TestRouter_HandlerFunc_BackendUnavailable(t *testing.T) {
 	}
 }
 
+func TestRouter_HandlerFunc_TrafficPolicyRetry(t *testing.T) {
+	tests := []struct {
+		name         string
+		pods         int
+		retry        *aiv1alpha1.Retry
+		expectedHits int
+		expectGap    time.Duration
+	}{
+		{
+			name:         "no retry policy walks every candidate pod",
+			pods:         3,
+			expectedHits: 3,
+		},
+		{
+			name:         "attempts caps the number of pods tried",
+			pods:         5,
+			retry:        &aiv1alpha1.Retry{Attempts: 2},
+			expectedHits: 2,
+		},
+		{
+			name:         "attempts above the candidate count does not add attempts",
+			pods:         2,
+			retry:        &aiv1alpha1.Retry{Attempts: 10},
+			expectedHits: 2,
+		},
+		{
+			name:         "retryInterval separates attempts",
+			pods:         3,
+			retry:        &aiv1alpha1.Retry{Attempts: 3, RetryInterval: &v1.Duration{Duration: 60 * time.Millisecond}},
+			expectedHits: 3,
+			expectGap:    60 * time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var stamps []time.Time
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				mu.Lock()
+				stamps = append(stamps, time.Now())
+				mu.Unlock()
+				w.WriteHeader(http.StatusServiceUnavailable)
+			})
+			router, store, backend := setupTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			backendURL, err := url.Parse(backend.URL)
+			assert.NoError(t, err)
+			backendPort, err := strconv.Atoi(backendURL.Port())
+			assert.NoError(t, err)
+
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: v1.ObjectMeta{Name: "ms-retry", Namespace: "default"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					Model:        func(s string) *string { return &s }("base-model"),
+					WorkloadPort: aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+				},
+			}
+			if tt.retry != nil {
+				modelServer.Spec.TrafficPolicy = &aiv1alpha1.TrafficPolicy{Retry: tt.retry}
+			}
+			modelRoute := &aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-retry", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: "retry-model",
+					Rules: []*aiv1alpha1.Rule{
+						{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: modelServer.Name}}},
+					},
+				},
+			}
+
+			podNames := sets.New[types.NamespacedName]()
+			var pods []*corev1.Pod
+			for i := 0; i < tt.pods; i++ {
+				podName := types.NamespacedName{Name: fmt.Sprintf("pod-retry-%d", i), Namespace: "default"}
+				podNames.Insert(podName)
+				pods = append(pods, &corev1.Pod{
+					ObjectMeta: v1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace},
+					Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+				})
+			}
+			store.AddOrUpdateModelServer(modelServer, podNames)
+			for _, pod := range pods {
+				store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer})
+			}
+			store.AddOrUpdateModelRoute(modelRoute)
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request, err = http.NewRequest(http.MethodPost, "/v1/chat/completions",
+				bytes.NewBufferString(`{"model":"retry-model","prompt":"hello"}`))
+			assert.NoError(t, err)
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			router.HandlerFunc()(c)
+
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, tt.expectedHits, len(stamps))
+			for i := 1; i < len(stamps); i++ {
+				gap := stamps[i].Sub(stamps[i-1])
+				if tt.expectGap == 0 {
+					continue
+				}
+				assert.GreaterOrEqual(t, gap, tt.expectGap, "attempt %d followed the previous one too quickly", i)
+			}
+		})
+	}
+}
+
+func TestRouter_HandlerFunc_TrafficPolicyRetryPDDisaggregated(t *testing.T) {
+	tests := []struct {
+		name             string
+		pairs            int
+		retry            *aiv1alpha1.Retry
+		expectedPrefills int
+		expectGap        time.Duration
+	}{
+		{
+			name:             "no retry policy tries every prefill decode pair",
+			pairs:            3,
+			expectedPrefills: 3,
+		},
+		{
+			name:             "attempts caps the number of pairs tried",
+			pairs:            3,
+			retry:            &aiv1alpha1.Retry{Attempts: 1},
+			expectedPrefills: 1,
+		},
+		{
+			name:             "retryInterval separates attempts",
+			pairs:            3,
+			retry:            &aiv1alpha1.Retry{Attempts: 3, RetryInterval: &v1.Duration{Duration: 60 * time.Millisecond}},
+			expectedPrefills: 3,
+			expectGap:        60 * time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var stamps []time.Time
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var reqBody ModelRequest
+				json.Unmarshal(body, &reqBody)
+				if _, hasStream := reqBody["stream"]; !hasStream {
+					mu.Lock()
+					stamps = append(stamps, time.Now())
+					mu.Unlock()
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+			})
+			router, store, backend := setupTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			backendURL, _ := url.Parse(backend.URL)
+			backendIP := backendURL.Hostname()
+			backendPort, _ := strconv.Atoi(backendURL.Port())
+
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: v1.ObjectMeta{Name: "ms-pd-retry", Namespace: "default"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					Model:           func(s string) *string { return &s }("test-model-base"),
+					WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+					InferenceEngine: "vLLM",
+					WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+						PDGroup: &aiv1alpha1.PDGroup{
+							GroupKey:      "group",
+							DecodeLabels:  map[string]string{"app": "decode"},
+							PrefillLabels: map[string]string{"app": "prefill"},
+						},
+					},
+				},
+			}
+			if tt.retry != nil {
+				modelServer.Spec.TrafficPolicy = &aiv1alpha1.TrafficPolicy{Retry: tt.retry}
+			}
+			modelRoute := &aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-pd-retry", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules: []*aiv1alpha1.Rule{
+						{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: modelServer.Name}}},
+					},
+				},
+			}
+
+			podNames := sets.New[types.NamespacedName]()
+			var pods []*corev1.Pod
+			for i := 0; i < tt.pairs; i++ {
+				for _, role := range []string{"decode", "prefill"} {
+					name := fmt.Sprintf("%s-pod-%d", role, i)
+					podNames.Insert(types.NamespacedName{Name: name, Namespace: "default"})
+					pods = append(pods, &corev1.Pod{
+						ObjectMeta: v1.ObjectMeta{
+							Name:      name,
+							Namespace: "default",
+							Labels:    map[string]string{"app": role, "group": "test-group"},
+						},
+						Status: corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+					})
+				}
+			}
+			store.AddOrUpdateModelServer(modelServer, podNames)
+			for _, pod := range pods {
+				store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer})
+			}
+			store.AddOrUpdateModelRoute(modelRoute)
+
+			w := connectors.CreateTestResponseRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request, _ = http.NewRequest("POST", "/v1/chat/completions",
+				bytes.NewBufferString(`{"model": "test-model", "prompt": "hello", "stream": true}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			router.HandlerFunc()(c)
+
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, tt.expectedPrefills, len(stamps))
+			for i := 1; i < len(stamps); i++ {
+				if tt.expectGap == 0 {
+					continue
+				}
+				gap := stamps[i].Sub(stamps[i-1])
+				assert.GreaterOrEqual(t, gap, tt.expectGap, "attempt %d followed the previous one too quickly", i)
+			}
+		})
+	}
+}
+
 func TestRouter_HandlerFunc_InferencePoolPodDiscovery(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -3184,7 +3419,7 @@ func TestRouter_ProxyToPDDisaggregated_RetryBehavior(t *testing.T) {
 			c, _ := gin.CreateTestContext(w)
 			c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model"}`))
 
-			err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "test-model"}, 8000, 2*time.Second)
+			err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "test-model"}, 8000, 2*time.Second, retryPolicy{})
 
 			if tt.wantErr {
 				assert.Error(t, err)
