@@ -25,10 +25,21 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/filesource"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
 const defaultDrainTimeout = 5 * time.Minute
+
+// Resource sources the router can read ModelRoute, ModelServer and
+// ExternalModelProvider objects from.
+const (
+	// ResourceSourceKubernetes watches the Kubernetes API server.
+	ResourceSourceKubernetes = "kubernetes"
+	// ResourceSourceFile reads manifests from a local directory, allowing the
+	// router to run without an API server.
+	ResourceSourceFile = "file"
+)
 
 type Server struct {
 	store                              datastore.Store
@@ -45,6 +56,17 @@ type Server struct {
 	ExposeMetricsOnRouterPort          bool
 	KubeAPIQPS                         float32
 	KubeAPIBurst                       int
+	// ResourceSource selects where ModelRoute, ModelServer and
+	// ExternalModelProvider objects are read from. Defaults to
+	// ResourceSourceKubernetes.
+	ResourceSource string
+	// ResourceDir holds the manifests when ResourceSource is ResourceSourceFile.
+	ResourceDir string
+	// ResourceSyncPeriod is how often ResourceDir is re-read.
+	ResourceSyncPeriod time.Duration
+	// RouterConfigFile is the scheduler and authentication configuration. It
+	// defaults to DefaultRouterConfigFile.
+	RouterConfigFile string
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
 }
@@ -63,6 +85,7 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		ExposeMetricsOnRouterPort:          exposeMetricsOnRouterPort,
 		KubeAPIQPS:                         kubeAPIQPS,
 		KubeAPIBurst:                       kubeAPIBurst,
+		ResourceSource:                     ResourceSourceKubernetes,
 		drainTimeout:                       parseDrainTimeout(),
 	}
 }
@@ -96,9 +119,13 @@ func (s *Server) Run(ctx context.Context) {
 	s.store = store
 
 	// must be run before the controller, because it will register callbacks
-	r := NewRouter(store)
-	// start controller
-	s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst)
+	r := NewRouter(store, s.RouterConfigFile)
+	// start the configured resource source
+	if s.ResourceSource == ResourceSourceFile {
+		s.controllers = s.startFileSource(store, ctx.Done())
+	} else {
+		s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst)
+	}
 
 	// Start store's periodic update loop after controllers have synced
 	if !cache.WaitForCacheSync(ctx.Done(), s.controllers.HasSynced) {
@@ -117,4 +144,23 @@ func (s *Server) Run(ctx context.Context) {
 
 func (s *Server) HasSynced() bool {
 	return s.controllers.HasSynced() && s.store.HasSynced()
+}
+
+// startFileSource loads resources from ResourceDir and keeps the store in sync
+// with it, replacing the API server backed controllers.
+func (s *Server) startFileSource(store datastore.Store, stop <-chan struct{}) Controller {
+	source, err := filesource.New(s.ResourceDir, s.ResourceSyncPeriod, store)
+	if err != nil {
+		klog.Fatalf("Failed to create file resource source: %v", err)
+	}
+	klog.Infof("Reading resources from directory %s", s.ResourceDir)
+	go func() {
+		if err := source.Run(stop); err != nil {
+			klog.Fatalf("Error running file resource source: %v", err)
+		}
+	}()
+	if !cache.WaitForCacheSync(stop, source.HasSynced) {
+		klog.Fatalf("Failed to load resources from %s", s.ResourceDir)
+	}
+	return source
 }

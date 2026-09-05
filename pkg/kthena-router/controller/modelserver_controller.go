@@ -183,6 +183,15 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		return err
 	}
 
+	if len(ms.Spec.Endpoints) > 0 {
+		return SyncStaticEndpoints(c.store, ms)
+	}
+
+	if ms.Spec.WorkloadSelector == nil {
+		klog.Warningf("model server %s specifies neither workloadSelector nor endpoints, skipping", key)
+		return nil
+	}
+
 	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: ms.Spec.WorkloadSelector.MatchLabels})
 	if err != nil {
 		return fmt.Errorf("invalid selector: %v", err)
@@ -265,6 +274,10 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 
 	servers := []*aiv1alpha1.ModelServer{}
 	for _, item := range modelServers {
+		// ModelServers backed by static endpoints do not select cluster pods.
+		if item.Spec.WorkloadSelector == nil || len(item.Spec.Endpoints) > 0 {
+			continue
+		}
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: item.Spec.WorkloadSelector.MatchLabels})
 		if err != nil || !selector.Matches(labels.Set(pod.Labels)) {
 			continue

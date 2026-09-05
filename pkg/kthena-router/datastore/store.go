@@ -1782,14 +1782,20 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
-	modelServers := podInfo.GetModelServers()
-	for msName := range modelServers {
+	var fallback int32
+	for msName := range podInfo.GetModelServers() {
 		if msValue, ok := s.modelServer.Load(msName); ok {
 			ms := msValue.(*modelServer).getModelServer()
 			if ms != nil && ms.Spec.WorkloadPort.Port > 0 {
-				return uint32(ms.Spec.WorkloadPort.Port)
+				fallback = ms.Spec.WorkloadPort.Port
+				break
 			}
 		}
+	}
+	// Statically configured endpoints may carry their own port, which overrides
+	// `spec.workloadPort.port` and is the only port when the latter is unset.
+	if port := utils.EndpointPort(podInfo.GetPod(), fallback); port > 0 {
+		return uint32(port)
 	}
 	return 0
 }

@@ -2906,3 +2906,63 @@ func BenchmarkSelectRuleRegex(b *testing.B) {
 		}
 	}
 }
+
+func TestGetPodWorkloadPort(t *testing.T) {
+	workloadPort := int32(8000)
+	endpointPort := "9000"
+
+	tests := []struct {
+		name         string
+		workloadPort int32
+		annotations  map[string]string
+		expected     uint32
+	}{
+		{
+			name:         "workload port only",
+			workloadPort: workloadPort,
+			expected:     8000,
+		},
+		{
+			name:         "endpoint port overrides workload port",
+			workloadPort: workloadPort,
+			annotations:  map[string]string{utils.EndpointPortAnnotation: endpointPort},
+			expected:     9000,
+		},
+		{
+			// Static endpoints may declare every port per endpoint, leaving
+			// spec.workloadPort unset.
+			name:        "endpoint port without workload port",
+			annotations: map[string]string{utils.EndpointPortAnnotation: endpointPort},
+			expected:    9000,
+		},
+		{
+			name:     "no port configured",
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New().(*store)
+			ms := &aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					WorkloadPort: aiv1alpha1.WorkloadPort{Port: tt.workloadPort},
+				},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "default",
+					Name:        "pod1",
+					Annotations: tt.annotations,
+				},
+			}
+			assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
+			assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+
+			podInfo := s.GetPodInfo(utils.GetNamespaceName(pod))
+			assert.NotNil(t, podInfo)
+			assert.Equal(t, tt.expected, s.getPodWorkloadPort(podInfo))
+		})
+	}
+}

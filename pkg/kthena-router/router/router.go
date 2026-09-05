@@ -867,7 +867,7 @@ func (r *Router) proxy(
 		}
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, timeout, onUsage)
+		err := proxyRequest(c, req, podObj.Status.PodIP, utils.EndpointPort(podObj, port), stream, timeout, onUsage)
 
 		if ctx.MetricsRecorder != nil {
 			ctx.MetricsRecorder.DecActiveUpstreamRequests()
@@ -1423,8 +1423,8 @@ func (r *Router) proxyToPDDisaggregated(
 		accesslog.SetUpstreamInfo(c, 0, i+1)
 
 		// Build addresses for prefill and decode pods
-		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
-		decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(port)))
+		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(utils.EndpointPort(prefillPod, port))))
+		decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(utils.EndpointPort(decodePod, port))))
 
 		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 

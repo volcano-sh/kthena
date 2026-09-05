@@ -28,6 +28,7 @@ type ModelServerSpecApplyConfiguration struct {
 	Model            *string                             `json:"model,omitempty"`
 	InferenceEngine  *networkingv1alpha1.InferenceEngine `json:"inferenceEngine,omitempty"`
 	WorkloadSelector *WorkloadSelectorApplyConfiguration `json:"workloadSelector,omitempty"`
+	Endpoints        []EndpointApplyConfiguration        `json:"endpoints,omitempty"`
 	WorkloadPort     *WorkloadPortApplyConfiguration     `json:"workloadPort,omitempty"`
 	TrafficPolicy    *TrafficPolicyApplyConfiguration    `json:"trafficPolicy,omitempty"`
 	KVConnector      *KVConnectorSpecApplyConfiguration  `json:"kvConnector,omitempty"`
@@ -60,6 +61,19 @@ func (b *ModelServerSpecApplyConfiguration) WithInferenceEngine(value networking
 // If called multiple times, the WorkloadSelector field is set to the value of the last call.
 func (b *ModelServerSpecApplyConfiguration) WithWorkloadSelector(value *WorkloadSelectorApplyConfiguration) *ModelServerSpecApplyConfiguration {
 	b.WorkloadSelector = value
+	return b
+}
+
+// WithEndpoints adds the given value to the Endpoints field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Endpoints field.
+func (b *ModelServerSpecApplyConfiguration) WithEndpoints(values ...*EndpointApplyConfiguration) *ModelServerSpecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithEndpoints")
+		}
+		b.Endpoints = append(b.Endpoints, *values[i])
+	}
 	return b
 }
 

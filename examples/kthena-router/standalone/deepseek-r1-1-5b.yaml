@@ -1,0 +1,31 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseek-r1-1-5b
+  namespace: default
+spec:
+  # Serving instances are configured statically instead of being discovered as
+  # pods, so the router does not need the Kubernetes API server.
+  endpoints:
+    - name: vllm-0
+      address: 127.0.0.1
+      port: 8000
+    - name: vllm-1
+      address: 127.0.0.1
+      port: 8001
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-simple
+  namespace: default
+spec:
+  modelName: "deepseek-simple"
+  rules:
+    - name: "default"
+      targetModels:
+        - modelServerName: "deepseek-r1-1-5b"
