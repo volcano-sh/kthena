@@ -1,0 +1,276 @@
+name: Router Benchmark (Matrix Test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Comma-separated tier2 scenarios (e.g. tier2-p0.1-burstiness,tier2-p0.2-ramp)"
+        required: true
+        type: string
+        default: "tier2-p0.1-burstiness,tier2-p0.2-ramp,tier2-p1.2-speedup-variance,tier2-p1.3-kvcache-variance,tier2-p1.5-maxnumseqs-variance"
+      chains:
+        description: "Comma-separated plugin chains (e.g. router-config-least-latency,router-config-least-request)"
+        required: true
+        type: string
+        default: "router-config-least-latency,router-config-least-latency-kvcache-aware,router-config-least-request"
+      visualize:
+        description: "Generate charts from results"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    outputs:
+      scenarios: ${{ steps.parse-scenarios.outputs.scenarios }}
+      chains: ${{ steps.parse-chains.outputs.chains }}
+    steps:
+      - name: Parse and validate scenarios
+        id: parse-scenarios
+        shell: bash
+        run: |
+          RAW="${{ inputs.scenarios }}"
+          ERRORS=""
+          SCENARIOS=""
+          IFS=',' read -ra ITEMS <<< "$RAW"
+          for item in "${ITEMS[@]}"; do
+            item=$(echo "$item" | xargs)  # trim whitespace
+            if [[ ! "$item" == tier2-* ]]; then
+              ERRORS+="Scenario '$item' is not a tier2 scenario (must start with 'tier2-').\n"
+              continue
+            fi
+            SCENARIOS+="${SCENARIOS:+,}$item"
+          done
+          if [ -z "$SCENARIOS" ]; then
+            echo "::error::No valid tier2 scenarios provided."
+            exit 1
+          fi
+          if [ -n "$ERRORS" ]; then
+            echo "::error::$ERRORS"
+            exit 1
+          fi
+          echo "scenarios=$SCENARIOS" >> $GITHUB_OUTPUT
+          echo "Parsed scenarios: $SCENARIOS"
+
+      - name: Parse and validate chains
+        id: parse-chains
+        shell: bash
+        run: |
+          RAW="${{ inputs.chains }}"
+          CHAINS=""
+          IFS=',' read -ra ITEMS <<< "$RAW"
+          for item in "${ITEMS[@]}"; do
+            item=$(echo "$item" | xargs)
+            if [[ ! "$item" == router-config-* ]]; then
+              echo "::error::Chain '$item' does not start with 'router-config-'."
+              exit 1
+            fi
+            CHAINS+="${CHAINS:+,}$item"
+          done
+          if [ -z "$CHAINS" ]; then
+            echo "::error::No valid chains provided."
+            exit 1
+          fi
+          echo "chains=$CHAINS" >> $GITHUB_OUTPUT
+          echo "Parsed chains: $CHAINS"
+
+  benchmark:
+    name: Tier2 Matrix
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: false
+          haskell: false
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Helm
+        shell: bash
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.21.1-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+
+      - name: Install Kind
+        shell: bash
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Create Kind Cluster
+        run: |
+          cat <<EOF > kind-config.yaml
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+          - role: control-plane
+            extraMounts:
+            - hostPath: /opt/hf-cache
+              containerPath: /opt/hf-cache
+          EOF
+          kind create cluster --name kthena-benchmark --config kind-config.yaml
+
+      - name: Deploy Kthena via Helm
+        run: |
+          kubectl create namespace kthena-system
+          helm upgrade --install kthena ./charts/kthena \
+            --namespace kthena-system \
+            --set workload.controllerManager.image.repository=ghcr.io/volcano-sh/kthena-controller-manager \
+            --set workload.controllerManager.image.tag=latest \
+            --set workload.controllerManager.image.pullPolicy=Always \
+            --set workload.controllerManager.downloaderImage.repository=ghcr.io/volcano-sh/downloader \
+            --set workload.controllerManager.downloaderImage.tag=latest \
+            --set workload.controllerManager.runtimeImage.repository=ghcr.io/volcano-sh/runtime \
+            --set workload.controllerManager.runtimeImage.tag=latest \
+            --set networking.kthenaRouter.image.repository=ghcr.io/volcano-sh/kthena-router \
+            --set networking.kthenaRouter.image.tag=latest \
+            --set networking.kthenaRouter.image.pullPolicy=Always
+
+      - name: Check Kthena Deployment
+        run: |
+          kubectl get pods -n kthena-system
+          kubectl rollout status deployment/kthena-controller-manager -n kthena-system --timeout=300s
+          kubectl rollout status deployment/kthena-router -n kthena-system --timeout=300s
+
+      - name: Install AIPerf and dependencies
+        run: |
+          pip install 'aiperf>=0.9,<0.11'
+          pip install -r benchmark/router-benchmark/scripts/requirements.txt
+
+      - name: Build scenario and chain file lists
+        id: build-paths
+        shell: bash
+        run: |
+          SCENARIOS="${{ needs.validate.outputs.scenarios }}"
+          CHAINS="${{ needs.validate.outputs.chains }}"
+
+          SCENARIO_FILES=""
+          IFS=',' read -ra SC_ITEMS <<< "$SCENARIOS"
+          for s in "${SC_ITEMS[@]}"; do
+            SCENARIO_FILES+="${SCENARIO_FILES:+ }scenarios/${s}.yaml"
+          done
+
+          CHAIN_FILES=""
+          IFS=',' read -ra CH_ITEMS <<< "$CHAINS"
+          for c in "${CH_ITEMS[@]}"; do
+            CHAIN_FILES+="${CHAIN_FILES:+ }plugins/${c}.yaml"
+          done
+
+          echo "scenario_files=$SCENARIO_FILES" >> $GITHUB_OUTPUT
+          echo "chain_files=$CHAIN_FILES" >> $GITHUB_OUTPUT
+          echo "Scenario files: $SCENARIO_FILES"
+          echo "Chain files: $CHAIN_FILES"
+
+      - name: Pre-download model cache
+        run: |
+          sudo mkdir -p /opt/hf-cache
+          sudo chown -R $USER:$USER /opt/hf-cache
+          pip install huggingface_hub
+          HF_HOME=/opt/hf-cache hf download Qwen/Qwen3-0.6B --exclude model.safetensors
+
+      - name: Run Tier2 Matrix Benchmark
+        working-directory: benchmark/router-benchmark
+        run: |
+          python scripts/tier2_matrix.py \
+            --scenarios ${{ steps.build-paths.outputs.scenario_files }} \
+            --chains ${{ steps.build-paths.outputs.chain_files }} \
+            --output results/tier2/ \
+            --local-port 8083 \
+            ${{ inputs.visualize == true && '--visualize' || '' }}
+
+      - name: Collect Results
+        if: always()
+        working-directory: benchmark/router-benchmark
+        run: |
+          echo "=== Tier2 Matrix Results ==="
+          ls -la results/tier2/ || echo "No results directory"
+          cat results/tier2/tier2_matrix_report.json 2>/dev/null || echo "No report file"
+          echo "=== Charts ==="
+          ls -la results/tier2/charts/ 2>/dev/null || echo "No charts directory"
+
+      - name: Upload Benchmark Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-matrix-results-${{ github.run_id }}
+          path: benchmark/router-benchmark/results/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Collect Cluster Snapshot on Failure
+        if: failure()
+        run: |
+          SNAPDIR=/tmp/kind-logs
+          mkdir -p "$SNAPDIR"
+
+          # Pod status (all namespaces)
+          kubectl get pods -A -o wide > "$SNAPDIR/pods.txt" 2>&1 || true
+
+          # Deployment status
+          kubectl get deployments -A -o wide > "$SNAPDIR/deployments.txt" 2>&1 || true
+
+          # Service status
+          kubectl get services -A -o wide > "$SNAPDIR/services.txt" 2>&1 || true
+
+          # Cluster events (last 10 min, sorted by time)
+          kubectl get events -A --sort-by='.lastTimestamp' > "$SNAPDIR/events.txt" 2>&1 || true
+
+          # Describe problematic pods (non-Running/Non-Completed)
+          kubectl get pods -A --no-headers | grep -v -E '(Running|Completed)' | \
+            awk '{print "-n " $1, $2}' | while read -r args; do
+              kubectl describe pod $args >> "$SNAPDIR/describe-failed-pods.txt" 2>&1 || true
+            done
+
+          # Describe all mocker pods (may be CrashLoopBackOff between restarts)
+          for pod in $(kubectl get pods -l app=mocker-llm -o name 2>/dev/null); do
+            kubectl describe "$pod" >> "$SNAPDIR/describe-mocker-pods.txt" 2>&1 || true
+          done
+
+          # Node resource usage
+          kubectl describe nodes > "$SNAPDIR/nodes-describe.txt" 2>&1 || true
+
+          # Mocker pod logs (current + previous instance)
+          for pod in $(kubectl get pods -l app=mocker-llm -o name 2>/dev/null); do
+            kubectl logs "$pod" --tail=500 > "$SNAPDIR/${pod//\//-}-current.log" 2>&1 || true
+            kubectl logs "$pod" --previous --tail=500 > "$SNAPDIR/${pod//\//-}-previous.log" 2>&1 || true
+          done
+
+          # Kthena controller & router logs
+          kubectl logs deployment/kthena-controller-manager -n kthena-system --tail=500 \
+            > "$SNAPDIR/kthena-controller.log" 2>&1 || true
+          kubectl logs deployment/kthena-router -n kthena-system --tail=500 \
+            > "$SNAPDIR/kthena-router.log" 2>&1 || true
+
+          echo "=== Snapshot saved to $SNAPDIR ==="
+          ls -la "$SNAPDIR"
+
+      - name: Upload Cluster Snapshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-cluster-snapshot-${{ github.run_id }}
+          path: /tmp/kind-logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kind delete cluster --name kthena-benchmark || true
