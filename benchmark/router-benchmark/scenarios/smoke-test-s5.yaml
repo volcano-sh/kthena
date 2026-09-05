@@ -1,0 +1,65 @@
+name: "smoke-test-s5-prompt-length-impact"
+description: "s5 scenario: request parsing cost with long prompts (2048 tokens)"
+
+# rate=0.5 with 8 pods at 250m/1 CPU was empirically validated on the
+# 4c/16g CI runner: CI runs 30695729677 and 30696682560 cleared 93.94-100%
+# success on random and least-request, 0 mocker restarts, 0 genuine AIPerf
+# errors, no tail-latency warnings.
+#
+# Rejected/adjusted along the way:
+#   - rate=1 on the original 4-pod, default-resource shape (CI run
+#     30693603161): still unsafe - 19/26 genuine AIPerf errors, p95 26-29s.
+#   - rate=0.5 on the same 4-pod default-resource shape (CI run
+#     30694269799): still unsafe - 3 genuine errors on one arm, 87.88%
+#     success on the other (caught by the success-rate floor).
+#   - Applying the 8-pod/250m-1CPU shape already validated for s2-s4 (same
+#     rate=0.5, CI run 30695729677) fixed it on the first try - the
+#     bottleneck was the pod topology (too few, too-generously-resourced
+#     pods), not just the offered rate, once prompts are 4x the baseline
+#     length.
+#
+# One run (CI 30696222084) showed a single genuine AIPerf error on one arm
+# (90.91%/100% success) amid otherwise-clean runs before and after it;
+# treated as an isolated event, not a recurring pattern, but noted here
+# rather than hidden.
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
+load:
+  schedule:
+    mode: "rate"
+    rate: 0.5
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  prompts:
+    - tokens: 2048
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 8
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
