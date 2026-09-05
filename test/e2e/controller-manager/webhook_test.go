@@ -17,18 +17,58 @@ limitations under the License.
 package controller_manager
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const expectedModelBoosterDeprecationWarning = "ModelBooster is deprecated in v1.1; Use ModelServing, ModelServer, and ModelRoute. " +
+	"Removal is no earlier than v1.5."
+
+type recordingWarningHandler struct {
+	mu       sync.Mutex
+	warnings []string
+}
+
+func (h *recordingWarningHandler) HandleWarningHeader(_ int, _ string, message string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.warnings = append(h.warnings, message)
+}
+
+func (h *recordingWarningHandler) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.warnings = nil
+}
+
+func (h *recordingWarningHandler) contains(message string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, warning := range h.warnings {
+		if warning == message {
+			return true
+		}
+	}
+	return false
+}
+
 // TestWebhook tests that the webhooks (validation and mutation) work as expected.
 func TestWebhook(t *testing.T) {
-	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
+	ctx, _, _ := setupControllerManagerE2ETest(t)
+	warningHandler := &recordingWarningHandler{}
+	config, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+	config.WarningHandler = warningHandler
+	kthenaClient, err := clientset.NewForConfig(config)
+	require.NoError(t, err, "Failed to create Kthena client")
 
 	// waiting for webhook to be ready before running tests
 	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
@@ -39,6 +79,7 @@ func TestWebhook(t *testing.T) {
 		expectError   bool
 		errorMsg      string
 		checkMutation func(t *testing.T, obj interface{})
+		expectWarning bool
 	}{
 		{
 			name:        "Invalid ModelBooster (replicas too large)",
@@ -47,9 +88,10 @@ func TestWebhook(t *testing.T) {
 			errorMsg:    "replicas",
 		},
 		{
-			name:        "Valid ModelBooster (DryRun)",
-			resource:    createValidModelBoosterForWebhookTest(),
-			expectError: false,
+			name:          "Valid ModelBooster (DryRun)",
+			resource:      createValidModelBoosterForWebhookTest(),
+			expectError:   false,
+			expectWarning: true,
 		},
 		{
 			name:        "Invalid AutoscalingPolicy (duplicate metric names)",
@@ -86,6 +128,7 @@ func TestWebhook(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			warningHandler.reset()
 			var err error
 			var created interface{}
 
@@ -108,6 +151,10 @@ func TestWebhook(t *testing.T) {
 				if tc.checkMutation != nil {
 					tc.checkMutation(t, created)
 				}
+			}
+			if tc.expectWarning {
+				assert.True(t, warningHandler.contains(expectedModelBoosterDeprecationWarning),
+					"Expected ModelBooster deprecation warning")
 			}
 		})
 	}

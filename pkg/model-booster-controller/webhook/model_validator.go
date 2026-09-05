@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -28,10 +29,14 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	admissionv1 "k8s.io/api/admission/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
 )
+
+const modelBoosterDeprecationWarning = "ModelBooster is deprecated in v1.1; Use ModelServing, ModelServer, and ModelRoute. " +
+	"Removal is no earlier than v1.5."
 
 // ModelValidator handles validation of ModelBooster resources
 type ModelValidator struct {
@@ -57,8 +62,9 @@ func (v *ModelValidator) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Create the admission response
 	admissionResponse := admissionv1.AdmissionResponse{
-		Allowed: allowed,
-		UID:     admissionReview.Request.UID,
+		Allowed:  allowed,
+		UID:      admissionReview.Request.UID,
+		Warnings: modelBoosterDeprecationWarnings(admissionReview.Request, model),
 	}
 
 	if !allowed {
@@ -76,6 +82,32 @@ func (v *ModelValidator) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("could not send response: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+func modelBoosterDeprecationWarnings(request *admissionv1.AdmissionRequest, model *registryv1alpha1.ModelBooster) []string {
+	switch request.Operation {
+	case admissionv1.Create:
+		return []string{modelBoosterDeprecationWarning}
+	case admissionv1.Update:
+		if request.SubResource != "" || request.RequestSubResource != "" {
+			return nil
+		}
+
+		var oldModel registryv1alpha1.ModelBooster
+		if len(request.OldObject.Raw) == 0 {
+			klog.Warning("ModelBooster update admission request has no old object; emitting deprecation warning")
+			return []string{modelBoosterDeprecationWarning}
+		}
+		if err := json.Unmarshal(request.OldObject.Raw, &oldModel); err != nil {
+			klog.Warningf("Failed to decode old ModelBooster in update admission request; emitting deprecation warning: %v", err)
+			return []string{modelBoosterDeprecationWarning}
+		}
+		if !apiequality.Semantic.DeepEqual(oldModel.Spec, model.Spec) {
+			return []string{modelBoosterDeprecationWarning}
+		}
+	}
+
+	return nil
 }
 
 // validateModel validates the ModelBooster resource
