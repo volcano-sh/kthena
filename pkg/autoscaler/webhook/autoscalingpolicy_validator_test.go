@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
@@ -174,6 +175,125 @@ func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 	assert.Empty(t, errorMsg)
 }
 
+// newHomogeneousPolicy builds a policy with a HomogeneousTarget using the given replica bounds.
+func newHomogeneousPolicy(minReplicas, maxReplicas int32) *registryv1.AutoscalingPolicy {
+	return &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "homogeneous-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []registryv1.AutoscalingPolicyMetric{
+				{Name: "cpu", TargetValue: resource.MustParse("80")},
+			},
+			HomogeneousTarget: &registryv1.HomogeneousTarget{
+				Target: registryv1.Target{
+					TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "test-target"},
+				},
+				MinReplicas: minReplicas,
+				MaxReplicas: maxReplicas,
+			},
+		},
+	}
+}
+
+// newHeterogeneousPolicy builds a policy with a HeterogeneousTarget whose second param uses the
+// given replica bounds; the first param is kept valid so it never contributes an error.
+func newHeterogeneousPolicy(secondMinReplicas, secondMaxReplicas int32) *registryv1.AutoscalingPolicy {
+	return &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "heterogeneous-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []registryv1.AutoscalingPolicyMetric{
+				{Name: "cpu", TargetValue: resource.MustParse("80")},
+			},
+			HeterogeneousTarget: &registryv1.HeterogeneousTarget{
+				Params: []registryv1.HeterogeneousTargetParam{
+					{
+						Target:      registryv1.Target{TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "h100-target"}},
+						MinReplicas: 0,
+						MaxReplicas: 4,
+					},
+					{
+						Target:      registryv1.Target{TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "a100-target"}},
+						MinReplicas: secondMinReplicas,
+						MaxReplicas: secondMaxReplicas,
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestValidateAutoscalingPolicy_ReplicaRangeValidation(t *testing.T) {
+	tests := []struct {
+		name           string
+		policy         *registryv1.AutoscalingPolicy
+		wantAllowed    bool
+		wantTargetErrs field.ErrorList
+	}{
+		{
+			name:        "homogeneous minReplicas less than maxReplicas",
+			policy:      newHomogeneousPolicy(1, 8),
+			wantAllowed: true,
+		},
+		{
+			name:        "homogeneous minReplicas equals maxReplicas",
+			policy:      newHomogeneousPolicy(4, 4),
+			wantAllowed: true,
+		},
+		{
+			name:        "homogeneous minReplicas greater than maxReplicas",
+			policy:      newHomogeneousPolicy(5, 2),
+			wantAllowed: false,
+			wantTargetErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("homogeneousTarget").Child("minReplicas"),
+					int32(5),
+					"minReplicas must be <= maxReplicas"),
+			},
+		},
+		{
+			name:        "heterogeneous minReplicas less than maxReplicas",
+			policy:      newHeterogeneousPolicy(1, 8),
+			wantAllowed: true,
+		},
+		{
+			name:        "heterogeneous minReplicas equals maxReplicas",
+			policy:      newHeterogeneousPolicy(8, 8),
+			wantAllowed: true,
+		},
+		{
+			name:        "heterogeneous minReplicas greater than maxReplicas",
+			policy:      newHeterogeneousPolicy(5, 2),
+			wantAllowed: false,
+			wantTargetErrs: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("heterogeneousTarget").Child("params").Index(1).Child("minReplicas"),
+					int32(5),
+					"minReplicas must be <= maxReplicas"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validator := NewAutoscalingPolicyValidator()
+
+			allowed, msg := validator.validateAutoscalingPolicy(tt.policy)
+			assert.Equal(t, tt.wantAllowed, allowed, msg)
+
+			// validateTarget returns the structured field.ErrorList before it is
+			// flattened into the message string; assert on it directly so the
+			// test verifies the reported field path, not just the message text.
+			gotTargetErrs := validator.validateTarget(tt.policy)
+			if len(tt.wantTargetErrs) == 0 {
+				assert.Empty(t, gotTargetErrs)
+			} else {
+				assert.EqualValues(t, tt.wantTargetErrs[0], gotTargetErrs[0])
+			}
+		})
+	}
+}
+
 func TestValidateAutoscalingPolicy_DisaggregatedTarget(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
 
@@ -231,6 +351,13 @@ func TestValidateAutoscalingPolicy_DisaggregatedTarget(t *testing.T) {
 	assert.NotContains(t, msg, "spec.metrics and per-role metrics are mutually exclusive")
 	assert.Contains(t, msg, "minReplicas must be <= maxReplicas")
 	assert.Contains(t, msg, "metricSources key must match an effective metric name")
+
+	// Same field-path check as the homogeneous/heterogeneous targets: the reported
+	// error must point at the specific role's minReplicas, not just say so in prose.
+	assert.Contains(t, validator.validateDisaggregatedTarget(invalidPolicy), field.Invalid(
+		field.NewPath("spec").Child("disaggregatedTarget").Child("roles").Key("prefill").Child("minReplicas"),
+		int32(9),
+		"minReplicas must be <= maxReplicas"))
 
 	missingSourcesPolicy := validPolicy.DeepCopy()
 	missingSourcesPolicy.Spec.DisaggregatedTarget.Roles["prefill"] = registryv1.RoleScalingParam{
