@@ -273,7 +273,8 @@ func (s *SchedulerImpl) RunPostHooks(ctx *framework.Context, index int) {
 }
 
 func TopNPodInfos(m map[*datastore.PodInfo]int, n int) []*datastore.PodInfo {
-	var list []podInfoWithValue
+	// One entry per scored pod, so the length is known before the loop
+	list := make([]podInfoWithValue, 0, len(m))
 	for k, v := range m {
 		list = append(list, podInfoWithValue{pod: k, score: v})
 	}
@@ -282,11 +283,15 @@ func TopNPodInfos(m map[*datastore.PodInfo]int, n int) []*datastore.PodInfo {
 		return list[i].score > list[j].score
 	})
 
-	res := []*datastore.PodInfo{}
-	for i := range list {
-		if i >= n {
-			break
-		}
+	// Clamp first, make() panics on a negative capacity
+	if n > len(list) {
+		n = len(list)
+	}
+	if n < 0 {
+		n = 0
+	}
+	res := make([]*datastore.PodInfo, 0, n)
+	for i := 0; i < n; i++ {
 		res = append(res, list[i].pod)
 	}
 

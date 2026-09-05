@@ -88,11 +88,21 @@ func TestTopNPodInfos(t *testing.T) {
 			n:        0,
 			expected: 0,
 		},
+		{
+			name: "negative n returns empty slice",
+			scores: map[*datastore.PodInfo]int{
+				createTestPodInfo("pod1"): 100,
+			},
+			n:        -1,
+			expected: 0,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := TopNPodInfos(tt.scores, tt.n)
+			// Callers branch on BestPods != nil, so an empty result must not be nil
+			assert.NotNil(t, result)
 			assert.Equal(t, tt.expected, len(result))
 		})
 	}
@@ -396,5 +406,33 @@ func BenchmarkRunScorePlugins(b *testing.B) {
 				_ = scheduler.RunScorePlugins(pods, ctx)
 			}
 		})
+	}
+}
+
+// Helper function to build a scored pod map
+func benchScores(n int) map[*datastore.PodInfo]int {
+	m := make(map[*datastore.PodInfo]int, n)
+	for i := 0; i < n; i++ {
+		p := &datastore.PodInfo{Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%d", i), Namespace: "default"},
+		}}
+		m[p] = (i * 7) % 101
+	}
+	return m
+}
+
+// BenchmarkTopNPodInfos measures top-N selection at the pod counts and topN values the scheduler uses.
+func BenchmarkTopNPodInfos(b *testing.B) {
+	for _, pods := range []int{8, 32, 128} {
+		for _, n := range []int{1, 5} {
+			b.Run(fmt.Sprintf("pods=%d/topN=%d", pods, n), func(b *testing.B) {
+				m := benchScores(pods)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					_ = TopNPodInfos(m, n)
+				}
+			})
+		}
 	}
 }
