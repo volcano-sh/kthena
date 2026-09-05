@@ -33,6 +33,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -85,6 +86,12 @@ type KVCacheAwareArgs struct {
 	VLLMTokenizerPort int `yaml:"vllmTokenizerPort,omitempty"`
 	// SGLangTokenizerPort overrides the default SGLang tokenizer port (30000).
 	SGLangTokenizerPort int `yaml:"sglangTokenizerPort,omitempty"`
+	// GCInterval overrides how often the ownership GC runs (default 1h).
+	GCInterval string `yaml:"gcInterval,omitempty"`
+	// GCFieldFreshDuration overrides how long an unrefreshed ownership field survives (default 24h).
+	GCFieldFreshDuration string `yaml:"gcFieldFreshDuration,omitempty"`
+	// GCScanSize overrides the SCAN COUNT hint per round (default 100).
+	GCScanSize int64 `yaml:"gcScanSize,omitempty"`
 }
 
 type KVCacheAware struct {
@@ -95,6 +102,11 @@ type KVCacheAware struct {
 	processor        *TokenBlockProcessor
 	tokenizerManager *tokenization.TokenizerManager
 	gcCursor         uint64
+	gcInterval       time.Duration
+	gcFreshDuration  time.Duration
+	gcScanSize       int64
+	gcStopCh         chan struct{}
+	gcStopOnce       sync.Once
 }
 
 var _ framework.ScorePlugin = &KVCacheAware{}
@@ -146,8 +158,15 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 	vllmPort := normalizeTokenizerPort(tokenization.EngineVLLM, args.VLLMTokenizerPort, defaultVLLMTokenizerPort)
 	sglangPort := normalizeTokenizerPort(tokenization.EngineSGLang, args.SGLangTokenizerPort, defaultSGLangTokenizerPort)
 
-	klog.Infof("KVCacheAware: config blockSizeToHash=%d, maxBlocksToMatch=%d, vllmTokenizerPort=%d, sglangTokenizerPort=%d",
-		blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort)
+	gcInterval := parseGCDurationArg("gcInterval", args.GCInterval, kvCacheGCInterval)
+	gcFreshDuration := parseGCDurationArg("gcFieldFreshDuration", args.GCFieldFreshDuration, kvCacheFieldFreshDuration)
+	gcScanSize := args.GCScanSize
+	if gcScanSize <= 0 {
+		gcScanSize = kvCacheGCScanSize
+	}
+
+	klog.Infof("KVCacheAware: config blockSizeToHash=%d, maxBlocksToMatch=%d, vllmTokenizerPort=%d, sglangTokenizerPort=%d, gcInterval=%v, gcFieldFreshDuration=%v, gcScanSize=%d",
+		blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort, gcInterval, gcFreshDuration, gcScanSize)
 
 	managerConfig := tokenization.TokenizerManagerConfig{
 		EndpointPorts: map[string]int{
@@ -171,6 +190,10 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 		redisClient:      redisClient,
 		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
 		tokenizerManager: manager,
+		gcInterval:       gcInterval,
+		gcFreshDuration:  gcFreshDuration,
+		gcScanSize:       gcScanSize,
+		gcStopCh:         make(chan struct{}),
 	}
 	plugin.startGC()
 	return plugin
@@ -184,6 +207,55 @@ func normalizeTokenizerPort(engine string, configuredPort, defaultPort int) int 
 		klog.Warningf("KVCacheAware: invalid %s tokenizer port %d, using default %d", engine, configuredPort, defaultPort)
 	}
 	return defaultPort
+}
+
+// Stop halts the GC goroutine; safe to call more than once.
+func (t *KVCacheAware) Stop() {
+	t.gcStopOnce.Do(func() {
+		if t.gcStopCh != nil {
+			close(t.gcStopCh)
+		}
+	})
+}
+
+// parseGCDurationArg parses a duration arg, falling back to the default when unset, unparsable, or not positive.
+func parseGCDurationArg(field, raw string, fallback time.Duration) time.Duration {
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		klog.Warningf("KVCacheAware: ignoring unparsable %s %q, using %v: %v", field, raw, fallback, err)
+		return fallback
+	}
+	if value <= 0 {
+		klog.Warningf("KVCacheAware: ignoring non-positive %s %q, using %v", field, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+// The effective* helpers keep the documented defaults for a zero-valued KVCacheAware.
+
+func (t *KVCacheAware) effectiveGCInterval() time.Duration {
+	if t.gcInterval <= 0 {
+		return kvCacheGCInterval
+	}
+	return t.gcInterval
+}
+
+func (t *KVCacheAware) effectiveGCFreshDuration() time.Duration {
+	if t.gcFreshDuration <= 0 {
+		return kvCacheFieldFreshDuration
+	}
+	return t.gcFreshDuration
+}
+
+func (t *KVCacheAware) effectiveGCScanSize() int64 {
+	if t.gcScanSize <= 0 {
+		return kvCacheGCScanSize
+	}
+	return t.gcScanSize
 }
 
 func (t *KVCacheAware) Name() string {
@@ -371,10 +443,15 @@ func (t *KVCacheAware) startGC() {
 }
 
 func (t *KVCacheAware) runGC() {
-	ticker := time.NewTicker(kvCacheGCInterval)
+	ticker := time.NewTicker(t.effectiveGCInterval())
 	defer ticker.Stop()
-	for range ticker.C {
-		t.gcStaleFields()
+	for {
+		select {
+		case <-t.gcStopCh:
+			return
+		case <-ticker.C:
+			t.gcStaleFields()
+		}
 	}
 }
 
@@ -386,9 +463,9 @@ func (t *KVCacheAware) gcStaleFields() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	keys, nextCursor, err := t.redisClient.Scan(ctx, t.gcCursor, t.keyPrefix+"*", kvCacheGCScanSize).Result()
+	keys, nextCursor, err := t.redisClient.Scan(ctx, t.gcCursor, t.keyPrefix+"*", t.effectiveGCScanSize()).Result()
 	if err != nil {
-		klog.V(4).Infof("KVCacheAware.gcStaleFields: scan failed: %v", err)
+		klog.Warningf("KVCacheAware.gcStaleFields: scan failed: %v", err)
 		return
 	}
 	t.gcCursor = nextCursor
@@ -398,12 +475,12 @@ func (t *KVCacheAware) gcStaleFields() {
 	for _, key := range keys {
 		podTimes, err := t.redisClient.HGetAll(ctx, key).Result()
 		if err != nil {
-			klog.V(4).Infof("KVCacheAware.gcStaleFields: failed to read %s: %v", key, err)
+			klog.Warningf("KVCacheAware.gcStaleFields: failed to read %s: %v", key, err)
 			continue
 		}
 		for pod, ts := range podTimes {
 			updatedAt, err := strconv.ParseInt(ts, 10, 64)
-			if err == nil && now.Sub(time.Unix(updatedAt, 0)) > kvCacheFieldFreshDuration {
+			if err == nil && now.Sub(time.Unix(updatedAt, 0)) > t.effectiveGCFreshDuration() {
 				staleFields[key] = append(staleFields[key], pod)
 			}
 		}
@@ -422,7 +499,7 @@ func (t *KVCacheAware) deleteStaleFields(staleFields map[string][]string) {
 		pipe.HDel(ctx, key, pods...)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
-		klog.V(4).Infof("KVCacheAware.gcStaleFields: failed to delete stale fields: %v", err)
+		klog.Warningf("KVCacheAware.gcStaleFields: failed to delete stale fields: %v", err)
 	}
 }
 
