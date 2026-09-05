@@ -708,8 +708,11 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		rateLimitWindowSeconds = 60
 		windowResetBuffer      = 10 * time.Second
 		inputTokenLimit        = 30
-		outputTokenLimit       = 100
-		tokensPerRequest       = 10
+		// The echo-mode simulator returns two completion tokens for the standard
+		// "hello world" message, so an output budget of six is drained to exactly
+		// zero after three requests and then enforced on the fourth.
+		outputTokenLimit = 6
+		tokensPerRequest = 10
 	)
 	ctx := context.Background()
 
@@ -972,17 +975,16 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		// Wait for update to propagate
 		time.Sleep(2 * time.Second)
 
-		longerPrompt := []utils.ChatMessage{
-			utils.NewChatMessage("user", "Write a detailed explanation of rate limiting"),
-		}
-
-		// Send requests until we hit the output token limit
+		// Send requests until we hit the output token limit. The stale input
+		// limiter must not interfere: with a predictable two-token echo response
+		// per request, the six-token output budget is exhausted after three
+		// successful requests.
 		var successfulRequests int
 		var totalResponseSize int
 		var rateLimited bool
 
 		for attempt := 0; attempt < 20; attempt++ {
-			resp := utils.SendChatRequest(t, updatedModelRoute.Spec.ModelName, longerPrompt)
+			resp := utils.SendChatRequest(t, updatedModelRoute.Spec.ModelName, standardMessage)
 			responseBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 

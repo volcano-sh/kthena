@@ -30,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -123,6 +124,18 @@ func (r *Router) ActiveRequestCount() int64 {
 	return r.metrics.ActiveRequestsCount()
 }
 
+// effectiveModelRateLimit returns the rate limit that applies to a model: the
+// first spec.rateLimit configured among its ModelRoutes (evaluated oldest-first,
+// as MatchModelTarget does), or nil if none configure one.
+func effectiveModelRateLimit(routes []*v1alpha1.ModelRoute) *v1alpha1.RateLimit {
+	for _, route := range routes {
+		if route.Spec.RateLimit != nil {
+			return route.Spec.RateLimit
+		}
+	}
+	return nil
+}
+
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	// User fairness and session boost are mutually exclusive scheduling strategies.
 	// Enabling both is a configuration error.
@@ -139,22 +152,29 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	// Initialize tokenizer
 	tokenizerInstance := tokenizer.NewSimpleEstimateTokenizer()
 
+	// A model's limiter is keyed by model name but several ModelRoutes may share
+	// one, so every ModelRoute event recomputes the model's effective rate limit
+	// from the current route set. rateLimitMu serializes callbacks so the
+	// recompute and the apply are atomic; the last callback then always reads the
+	// converged route set and stale async events cannot reapply an old config.
+	var rateLimitMu sync.Mutex
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
-		switch data.EventType {
-		case datastore.EventAdd, datastore.EventUpdate:
-			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
-				return
-			}
-			klog.Infof("add or update rate limit for model %s", data.ModelName)
+		model := data.ModelName
+		if model == "" {
+			return
+		}
+		rateLimitMu.Lock()
+		defer rateLimitMu.Unlock()
 
-			// Configure the unified rate limiter for this model
-			if err := loadRateLimiter.AddOrUpdateLimiter(data.ModelName, data.ModelRoute.Spec.RateLimit); err != nil {
-				klog.Errorf("failed to configure rate limiter for model %s: %v", data.ModelName, err)
-			}
-
-		case datastore.EventDelete:
-			klog.Infof("delete rate limit for model %s", data.ModelName)
-			loadRateLimiter.DeleteLimiter(data.ModelName)
+		rateLimit := effectiveModelRateLimit(store.GetModelRoutesByModelName(model))
+		if rateLimit == nil {
+			klog.Infof("clear rate limit for model %s", model)
+			loadRateLimiter.DeleteLimiter(model)
+			return
+		}
+		klog.Infof("add or update rate limit for model %s", model)
+		if err := loadRateLimiter.AddOrUpdateLimiter(model, rateLimit); err != nil {
+			klog.Errorf("failed to configure rate limiter for model %s: %v", model, err)
 		}
 	})
 
