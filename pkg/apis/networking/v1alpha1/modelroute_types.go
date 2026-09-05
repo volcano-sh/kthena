@@ -97,6 +97,7 @@ type BodyMatch struct {
 
 // StringMatch defines the matching conditions for string fields.
 // Only one of the fields may be set.
+// +kubebuilder:validation:XValidation:rule="(has(self.exact) ? 1 : 0) + (has(self.prefix) ? 1 : 0) + (has(self.regex) ? 1 : 0) <= 1",message="only one of exact, prefix, or regex may be set"
 type StringMatch struct {
 	Exact  *string `json:"exact,omitempty"`
 	Prefix *string `json:"prefix,omitempty"`
