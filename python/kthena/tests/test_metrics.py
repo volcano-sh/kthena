@@ -95,3 +95,55 @@ def test_metric_adapter_handles_empty_metrics():
 
     adapter = MetricAdapter(empty_metric_text, standard)
     assert len(adapter.metrics) == 0
+VLLM_COUNTER_METRICS = """
+# HELP vllm:generation_tokens_total Number of generation tokens processed.
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model_name="m"} 42.0
+""".strip()
+
+SGLANG_COUNTER_METRICS = """
+# HELP sglang:generation_tokens_total Number of generation tokens processed.
+# TYPE sglang:generation_tokens_total counter
+sglang:generation_tokens_total{model_name="m"} 7.0
+""".strip()
+
+
+def _standardized(adapter, name):
+    return [m for m in adapter.metrics if m.name == name]
+
+
+def test_vllm_counter_rename_survives_parser_family_munging():
+    # The parser strips _total from a counter FAMILY name, so the rule must
+    # match the munged family and the samples must come back out with _total.
+    standard = MetricStandard("vllm")
+    adapter = MetricAdapter(VLLM_COUNTER_METRICS, standard)
+
+    twins = _standardized(adapter, "kthena:generation_tokens")
+    assert len(twins) == 1, [m.name for m in adapter.metrics]
+    twin = twins[0]
+    assert twin.type == "counter"
+    sample_names = [s.name for s in twin.samples]
+    assert "kthena:generation_tokens_total" in sample_names
+    total = next(s for s in twin.samples if s.name == "kthena:generation_tokens_total")
+    assert total.value == 42.0
+    assert total.labels == {"model_name": "m"}
+
+
+def test_sglang_counter_rename_survives_parser_family_munging():
+    standard = MetricStandard("sglang")
+    adapter = MetricAdapter(SGLANG_COUNTER_METRICS, standard)
+
+    twins = _standardized(adapter, "kthena:generation_tokens")
+    assert len(twins) == 1, [m.name for m in adapter.metrics]
+    sample_names = [s.name for s in twins[0].samples]
+    assert "kthena:generation_tokens_total" in sample_names
+
+
+def test_process_metrics_exposes_documented_counter_series():
+    import asyncio
+
+    from kthena.runtime.collect import process_metrics
+
+    standard = MetricStandard("vllm")
+    output = asyncio.run(process_metrics(VLLM_COUNTER_METRICS, standard))
+    assert b'kthena:generation_tokens_total{model_name="m"} 42.0' in output
