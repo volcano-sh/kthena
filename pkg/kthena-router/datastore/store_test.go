@@ -1592,7 +1592,7 @@ func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, "")
+			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, "", "")
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -1680,7 +1680,7 @@ func TestStoreMatchModelTargetExternalProvider(t *testing.T) {
 	}
 	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
 
-	target, isLora, route, err := s.MatchModelTarget("gpt-router", req, "")
+	target, isLora, route, err := s.MatchModelTarget("gpt-router", req, "", "")
 	assert.NoError(t, err)
 	assert.False(t, isLora)
 	assert.Equal(t, mr, route)
@@ -1706,6 +1706,7 @@ func TestStoreMatchesModelBoosterSpecName(t *testing.T) {
 	target, isLora, matchedRoute, err := store.MatchModelTarget(
 		model.Spec.Name,
 		&http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+		"",
 		"",
 	)
 	assert.NoError(t, err)
@@ -1768,10 +1769,10 @@ func TestAddOrUpdateModelRoute_UpdatesLoraRoutes(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	_, _, _, err := s.MatchModelTarget("math-lora", req, "")
+	_, _, _, err := s.MatchModelTarget("math-lora", req, "", "")
 	assert.Error(t, err)
 
-	target, isLora, _, err := s.MatchModelTarget("code-lora", req, "")
+	target, isLora, _, err := s.MatchModelTarget("code-lora", req, "", "")
 	assert.NoError(t, err)
 	assert.True(t, isLora)
 	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
@@ -2106,14 +2107,14 @@ func TestSelectDestination_EmptyTargets(t *testing.T) {
 	// Before the fix, toWeightedSlice would panic with index out of range [0] with length 0.
 	targets := []*aiv1alpha1.TargetModel{}
 	s := &store{}
-	_, err := s.selectDestination(targets)
+	_, err := s.selectDestination(targets, "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no target models specified in rule")
 }
 
 func TestSelectDestination_NilTarget(t *testing.T) {
 	s := &store{}
-	_, err := s.selectDestination([]*aiv1alpha1.TargetModel{nil})
+	_, err := s.selectDestination([]*aiv1alpha1.TargetModel{nil}, "")
 	assert.EqualError(t, err, "target model must not be nil")
 }
 
@@ -2188,6 +2189,25 @@ func TestSelectFromWeightedSlice_ValidWeights(t *testing.T) {
 	}
 }
 
+func TestSelectDestination_PreferredModelServer(t *testing.T) {
+	s := &store{}
+	w50 := uint32(50)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &w50},
+		{ModelServerName: "server-b", Weight: &w50},
+	}
+
+	for i := 0; i < 20; i++ {
+		dst, err := s.selectDestination(targets, "server-b")
+		assert.NoError(t, err)
+		assert.Equal(t, "server-b", dst.ModelServerName)
+	}
+
+	dst, err := s.selectDestination(targets, "missing")
+	assert.NoError(t, err)
+	assert.Contains(t, []string{"server-a", "server-b"}, dst.ModelServerName)
+}
+
 func TestMatchModelTarget_EmptyTargetModels_NoPanic(t *testing.T) {
 	// This is the end-to-end test for the bug: a ModelRoute with a rule
 	// that has empty TargetModels should return an error, not panic.
@@ -2219,7 +2239,7 @@ func TestMatchModelTarget_EmptyTargetModels_NoPanic(t *testing.T) {
 
 	// Before the fix this would panic. After the fix it returns an error.
 	assert.NotPanics(t, func() {
-		_, _, _, err := s.MatchModelTarget("my-model", req, "")
+		_, _, _, err := s.MatchModelTarget("my-model", req, "", "")
 		assert.Error(t, err)
 	})
 }
@@ -2262,7 +2282,7 @@ func TestMatchModelTarget_EmptyTargetModels_FallsThrough(t *testing.T) {
 	s.AddOrUpdateModelRoute(mr)
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	target, _, _, err := s.MatchModelTarget("my-model", req, "")
+	target, _, _, err := s.MatchModelTarget("my-model", req, "", "")
 	assert.NoError(t, err)
 	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, target.Name)
@@ -2581,7 +2601,7 @@ func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, tt.gatewayKey)
+			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, tt.gatewayKey, "")
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -2807,7 +2827,7 @@ func TestGCRegexCacheDropsUnreferencedPatterns(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(regexModelRoute("default", "r1", "m1", pattern)))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/gc-me"}, Header: http.Header{}}
-	_, _, _, err := s.MatchModelTarget("m1", req, "")
+	_, _, _, err := s.MatchModelTarget("m1", req, "", "")
 	assert.NoError(t, err)
 	assert.Equal(t, []string{pattern}, cachedPatterns(s), "pattern should be cached after a matching request")
 
@@ -2822,7 +2842,7 @@ func TestGCRegexCacheKeepsPatternsStillInUse(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(regexModelRoute("default", "r2", "m2", shared)))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/shared"}, Header: http.Header{}}
-	_, _, _, err := s.MatchModelTarget("m1", req, "")
+	_, _, _, err := s.MatchModelTarget("m1", req, "", "")
 	assert.NoError(t, err)
 	assert.Equal(t, []string{shared}, cachedPatterns(s))
 
@@ -2853,7 +2873,7 @@ func TestRegexCacheUnderRouteChurn(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_, _, _, _ = s.MatchModelTarget("stable-model", req, "")
+					_, _, _, _ = s.MatchModelTarget("stable-model", req, "", "")
 				}
 			}
 		}()

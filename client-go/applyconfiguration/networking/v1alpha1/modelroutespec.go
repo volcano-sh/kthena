@@ -26,11 +26,12 @@ import (
 // ModelRouteSpecApplyConfiguration represents a declarative configuration of the ModelRouteSpec type for use
 // with apply.
 type ModelRouteSpecApplyConfiguration struct {
-	ModelName    *string                      `json:"modelName,omitempty"`
-	LoraAdapters []string                     `json:"loraAdapters,omitempty"`
-	ParentRefs   []v1.ParentReference         `json:"parentRefs,omitempty"`
-	Rules        []*networkingv1alpha1.Rule   `json:"rules,omitempty"`
-	RateLimit    *RateLimitApplyConfiguration `json:"rateLimit,omitempty"`
+	ModelName     *string                          `json:"modelName,omitempty"`
+	LoraAdapters  []string                         `json:"loraAdapters,omitempty"`
+	ParentRefs    []v1.ParentReference             `json:"parentRefs,omitempty"`
+	Rules         []*networkingv1alpha1.Rule       `json:"rules,omitempty"`
+	RateLimit     *RateLimitApplyConfiguration     `json:"rateLimit,omitempty"`
+	SessionSticky *SessionStickyApplyConfiguration `json:"sessionSticky,omitempty"`
 }
 
 // ModelRouteSpecApplyConfiguration constructs a declarative configuration of the ModelRouteSpec type for use with
@@ -85,5 +86,13 @@ func (b *ModelRouteSpecApplyConfiguration) WithRules(values ...**networkingv1alp
 // If called multiple times, the RateLimit field is set to the value of the last call.
 func (b *ModelRouteSpecApplyConfiguration) WithRateLimit(value *RateLimitApplyConfiguration) *ModelRouteSpecApplyConfiguration {
 	b.RateLimit = value
+	return b
+}
+
+// WithSessionSticky sets the SessionSticky field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the SessionSticky field is set to the value of the last call.
+func (b *ModelRouteSpecApplyConfiguration) WithSessionSticky(value *SessionStickyApplyConfiguration) *ModelRouteSpecApplyConfiguration {
+	b.SessionSticky = value
 	return b
 }

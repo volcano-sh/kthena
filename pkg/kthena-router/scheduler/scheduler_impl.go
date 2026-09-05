@@ -195,6 +195,21 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		return err
 	}
 
+	if ctx.StickyPodName != "" {
+		var pinned []*datastore.PodInfo
+		for _, p := range pods {
+			if p.Pod != nil && p.Pod.Name == ctx.StickyPodName {
+				pinned = append(pinned, p)
+				break
+			}
+		}
+		if len(pinned) > 0 {
+			pods = pinned
+		} else {
+			ctx.StickyPodName = ""
+		}
+	}
+
 	klog.V(4).Info("Running score plugins for PD aggregated pod")
 	scores := s.RunScorePlugins(pods, ctx)
 	ctx.BestPods = TopNPodInfos(scores, topN)
