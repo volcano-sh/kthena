@@ -4,28 +4,43 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - 'docs/kthena/**'
-  push:
-    branches:
-      - main
-    paths:
-      - 'docs/kthena/**'
+      - "release-*"
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   docs_test:
     name: Docusaurus tests
     runs-on: ubuntu-latest
     steps:
+      - name: Check Documentation related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            docs:
+              - "docs/kthena/**"
+              - ".github/workflows/docs-tests.yml"
+
+      - name: Skip Documentation tests
+        if: steps.filter.outputs.docs != 'true'
+        run: echo "No documentation-related files changed; marking required check as passed."
+
       - uses: actions/checkout@v4
+        if: steps.filter.outputs.docs == 'true'
       - name: Setup Node.js
+        if: steps.filter.outputs.docs == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '24.5.0'
-          cache: 'npm'
-          cache-dependency-path: './docs/kthena/package-lock.json'
+          node-version: "24.5.0"
+          cache: "npm"
+          cache-dependency-path: "./docs/kthena/package-lock.json"
       - name: Install dependencies
+        if: steps.filter.outputs.docs == 'true'
         working-directory: ./docs/kthena
         run: npm ci
       - name: Run documentation tests
+        if: steps.filter.outputs.docs == 'true'
         run: make test-docs

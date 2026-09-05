@@ -5,18 +5,11 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "pkg/**"
-      - "cmd/**"
-      - "test/**"
-      - "config/**"
-      - "charts/**"
-      - "docker/**"
-      - "hack/**"
-      - "go.mod"
-      - "go.sum"
-      - "Makefile"
-      - ".github/workflows/e2e-tests.yml"
+      - "release-*"
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   e2e-tests:
@@ -32,7 +25,31 @@ jobs:
           - gateway-api
           - gateway-inference-extension
     steps:
+      - name: Check E2E related changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            e2e:
+              - "pkg/**"
+              - "cmd/**"
+              - "test/**"
+              - "config/**"
+              - "charts/**"
+              - "docker/**"
+              - "hack/**"
+              - "go.mod"
+              - "go.sum"
+              - "Makefile"
+              - ".github/workflows/e2e-tests.yml"
+
+      - name: Skip E2E Tests
+        if: github.event_name != 'workflow_dispatch' && steps.filter.outputs.e2e != 'true'
+        run: echo "No E2E-related files changed; marking required check as passed."
+
       - name: Free Disk Space
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true'
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: false
@@ -44,30 +61,35 @@ jobs:
           swap-storage: true
 
       - name: Checkout code
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true'
         uses: actions/checkout@v6
 
       - name: Setup Go
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true'
         uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
 
       - name: Install helm
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true'
         shell: bash
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
       - name: Create k8s Kind Cluster
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true'
         uses: helm/kind-action@v1
         with:
           install_only: true
 
       - name: Run E2E Tests (${{ matrix.category }})
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true'
         run: make test-e2e-${{ matrix.category }}
         env:
           CLUSTER_NAME: kthena-${{ matrix.category }}
 
       - name: Collect logs on failure
-        if: failure()
+        if: failure() && (github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true')
         run: |
           echo "=== Kind cluster logs for ${{ matrix.category }} ==="
           mkdir -p /tmp/kind-logs
@@ -80,7 +102,7 @@ jobs:
           fi
 
       - name: Upload logs on failure
-        if: failure()
+        if: failure() && (github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true')
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs-${{ matrix.category }}-${{ github.run_id }}
@@ -89,7 +111,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Cleanup E2E Environment
-        if: always()
+        if: always() && (github.event_name == 'workflow_dispatch' || steps.filter.outputs.e2e == 'true')
         run: make test-e2e-cleanup
         env:
           CLUSTER_NAME: kthena-${{ matrix.category }}
