@@ -17,7 +17,7 @@ Pods with more consecutive matching blocks score higher and are preferred for ro
 ## Prerequisites
 
 - **Redis**: A Redis instance accessible by both the router and the runtime sidecars. Deploy Redis using the provided [redis-standalone.yaml](../assets/examples/redis/redis-standalone.yaml) example.
-- **Kthena Runtime sidecar**: Must be deployed alongside each vLLM pod. The sidecar listens to vLLM's ZMQ `kv-events` stream and writes token block hashes into Redis.
+- **Kthena Runtime sidecar**: Must be deployed alongside each vLLM pod. The sidecar listens to vLLM's ZMQ `kv-events` stream and writes token block hashes into Redis. The container should be named `runtime` (the generated templates and examples do this): the router excludes that container from its cache freshness restart signal, since a sidecar restart leaves the engine's KV cache intact. Deployments that name the sidecar differently can set the plugin's `runtimeContainerName` argument to match (one value for the whole router).
 - **vLLM v1 with KV event support**: The vLLM engine must be running with `VLLM_USE_V1=1` and expose the ZMQ kv-events topic.
 - **Multi-pod inference deployment**: The plugin is meaningful only when multiple pods serve the same model.
 
