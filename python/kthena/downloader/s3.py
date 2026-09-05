@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import os
 import subprocess
 
@@ -46,29 +47,32 @@ class S3Downloader(ModelDownloader):
 
     @staticmethod
     def _execute_command(cmd, env):
+        # stderr is merged into stdout: reading two pipes in sequence deadlocks
+        # once the child fills the 64KB stderr buffer while we are still on stdout.
         process = subprocess.Popen(
             cmd,
             env=env,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             bufsize=1
         )
 
-        while True:
-            output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
-                break
-            if output:
-                logger.info(output.strip())
+        tail = collections.deque(maxlen=1000)
+        for output in iter(process.stdout.readline, ''):
+            line = output.strip()
+            if line:
+                logger.info(line)
+                tail.append(line)
 
-        for error in process.stderr.readlines():
-            logger.error(error.strip())
-
-        return_code = process.poll()
+        process.stdout.close()
+        return_code = process.wait()
         if return_code != 0:
-            logger.error(f"AWS CLI command exited with status: {return_code}")
-            raise Exception(f"AWS S3 sync command failed with exit code: {return_code}")
+            output_tail = "\n".join(tail)
+            logger.error(f"AWS CLI command exited with status: {return_code}\n{output_tail}")
+            raise Exception(
+                f"AWS S3 sync command failed with exit code: {return_code}\n{output_tail}"
+            )
 
     def download(self, output_dir: str):
         logger.info(f"Syncing: {self.model_uri} to {output_dir}")

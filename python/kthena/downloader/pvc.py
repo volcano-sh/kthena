@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import os
 import subprocess
 from pathlib import Path
@@ -59,25 +60,32 @@ class PVCDownloader(ModelDownloader):
 
         logger.info(f"Starting file sync from {pvc_path} to {output_dir}")
 
+        # stderr is merged into stdout: draining stdout first and only then
+        # reading stderr deadlocks once rsync fills the 64KB stderr buffer.
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             bufsize=1
         )
 
-        for line in iter(process.stdout.readline, ''):
+        # --progress turns every \r refresh into a line, so keep the tail deep
+        # enough that per-file errors survive until the exit-code summary.
+        tail = collections.deque(maxlen=1000)
+        for output in iter(process.stdout.readline, ''):
+            line = output.strip()
             if line:
-                logger.info(line.strip())
+                logger.info(line)
+                tail.append(line)
 
         process.stdout.close()
         return_code = process.wait()
 
         if return_code != 0:
-            errors = process.stderr.read()
+            errors = "\n".join(tail)
             logger.error(f"rsync failed with code {return_code}: {errors}")
-            raise subprocess.SubprocessError(f"rsync failed with code {return_code}")
+            raise subprocess.SubprocessError(f"rsync failed with code {return_code}: {errors}")
 
         return True
 
