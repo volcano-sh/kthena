@@ -14,12 +14,12 @@ The scheduler configuration includes plugin configurations and lists of enabled/
 
 Plugin Configuration (PluginConfig):
 
-| Plugin Name   | Parameters                                                  | Description                                                                                               |
-| ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| least-request | maxWaitingRequests                                          | Sets the maximum number of waiting requests                                                               |
-| least-latency | TTFTTPOTWeightFactor                                        | Sets the TTFT weight factor. Must be between `0.0` and `1.0`.                                             |
-| prefix-cache  | blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize | Configures prefix cache parameters                                                                        |
-| kvcache-aware | blockSizeToHash<br />maxBlocksToMatch                       | Configures KV cache aware token-block matching parameters. Requires Redis and the Kthena Runtime sidecar. |
+| Plugin Name   | Parameters                                                                              | Description                                                                                                                                                                                               |
+| ------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| least-request | maxWaitingRequests                                                                      | Sets the maximum number of waiting requests                                                                                                                                                               |
+| least-latency | TTFTTPOTWeightFactor                                                                    | Sets the TTFT weight factor. Must be between `0.0` and `1.0`.                                                                                                                                             |
+| prefix-cache  | blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize                             | Configures prefix cache parameters                                                                                                                                                                        |
+| kvcache-aware | blockSizeToHash<br />maxBlocksToMatch<br />indexMode<br />kvEventsPort<br />runtimePort | Configures KV cache aware token-block matching parameters. Requires the Kthena Runtime sidecar; uses Redis (`indexMode: redis`, default) or an in-memory index fed by runtime push (`indexMode: memory`). |
 
 `TTFTTPOTWeightFactor` controls how the least-latency plugin balances Time To First Token (TTFT) and Time Per Output Token (TPOT):
 

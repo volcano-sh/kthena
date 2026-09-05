@@ -15,7 +15,7 @@
 import hashlib
 import logging
 import time
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 from kthena.runtime.events import (
     EventHandler, EventType, EventData, VLLMEventData,
@@ -54,6 +54,32 @@ def compute_standardized_hash(token_ids: List[int]) -> int:
     # Token ids are detokenizable prompt content, so they must never reach the logs.
     logger.debug(f"KVCacheManager: compute standardized hash={result}, tokens={len(token_ids)}")
     return result
+
+
+def standardize_block_hashes(engine_hashes: List[int],
+                             token_ids: List[int]) -> Optional[List[Tuple[int, int]]]:
+    """Split token_ids evenly across engine_hashes and pair each engine hash
+    with the standardized hash of its token block.
+
+    Returns None when the token count does not divide evenly across the hashes.
+    """
+    if not engine_hashes or not token_ids:
+        return None
+
+    block_size = len(token_ids) // len(engine_hashes)
+    if block_size == 0 or len(token_ids) % len(engine_hashes) != 0:
+        logger.error(
+            f"Token count ({len(token_ids)}) cannot match block size with "
+            f"{len(engine_hashes)} hashes")
+        return None
+
+    pairs: List[Tuple[int, int]] = []
+    for i, engine_hash in enumerate(engine_hashes):
+        block_tokens = token_ids[i * block_size:(i + 1) * block_size]
+        if not block_tokens:
+            continue
+        pairs.append((engine_hash, compute_standardized_hash(block_tokens)))
+    return pairs
 
 
 class VLLMKVCacheRedisManager:
@@ -105,22 +131,11 @@ class VLLMKVCacheRedisManager:
     async def _process_token_blocks_with_mapping(self, model_name: str, engine_hashes: List[int],
                                                  token_ids: List[int], pod_identifier: str,
                                                  timestamp: str, pipe) -> bool:
-        if not engine_hashes:
+        pairs = standardize_block_hashes(engine_hashes, token_ids)
+        if pairs is None:
             return False
 
-        # Calculate block size: len(token_ids) / len(block_hashes)
-        block_size = len(token_ids) // len(engine_hashes)
-        if len(token_ids) % len(engine_hashes) != 0:
-            logger.error(f"Token count ({len(token_ids)}) cannot match block size with {len(engine_hashes)} hashes")
-            return False
-
-        for i, engine_hash in enumerate(engine_hashes):
-            start_idx = i * block_size
-            end_idx = min(start_idx + block_size, len(token_ids))
-            block_tokens = token_ids[start_idx:end_idx]
-            if len(block_tokens) == 0:
-                continue
-            std_hash = compute_standardized_hash(block_tokens)
+        for engine_hash, std_hash in pairs:
             matrix_block_key = self._get_matrix_block_key(model_name, std_hash)
             self.hash_mapping[engine_hash] = std_hash
             mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
@@ -260,8 +275,10 @@ class VLLMKVCacheRedisManager:
 
 class VLLMKVCacheEventHandler(EventHandler):
 
-    def __init__(self, redis_manager: Optional[VLLMKVCacheRedisManager] = None):
-        self.redis_manager = redis_manager or VLLMKVCacheRedisManager()
+    # kv_manager may be any object implementing add_blocks / remove_blocks /
+    # clear_all_blocks, e.g. VLLMKVCacheRedisManager or MemoryKVCacheManager.
+    def __init__(self, kv_manager=None):
+        self.kv_manager = kv_manager or VLLMKVCacheRedisManager()
 
     async def handle(self, event_data: EventData) -> None:
         if not event_data:
@@ -293,7 +310,7 @@ class VLLMKVCacheEventHandler(EventHandler):
             return
 
         block_event = event_data.vllm_event
-        await self.redis_manager.add_blocks(
+        await self.kv_manager.add_blocks(
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
@@ -305,21 +322,21 @@ class VLLMKVCacheEventHandler(EventHandler):
             return
 
         block_event = event_data.vllm_event
-        await self.redis_manager.remove_blocks(
+        await self.kv_manager.remove_blocks(
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier
         )
 
     async def _handle_all_blocks_cleared(self, event_data: VLLMEventData) -> None:
-        await self.redis_manager.clear_all_blocks(
+        await self.kv_manager.clear_all_blocks(
             model_name=event_data.model_name,
             pod_identifier=event_data.pod_identifier
         )
 
 
-def get_vllm_kv_cache_handler() -> VLLMKVCacheEventHandler:
-    return VLLMKVCacheEventHandler()
+def get_vllm_kv_cache_handler(kv_manager=None) -> VLLMKVCacheEventHandler:
+    return VLLMKVCacheEventHandler(kv_manager)
 
 
 class SGLangKVCacheRedisManager(VLLMKVCacheRedisManager):
@@ -330,8 +347,10 @@ class SGLangKVCacheRedisManager(VLLMKVCacheRedisManager):
 
 class SGLangKVCacheEventHandler(EventHandler):
 
-    def __init__(self, redis_manager: Optional[SGLangKVCacheRedisManager] = None):
-        self.redis_manager = redis_manager or SGLangKVCacheRedisManager()
+    # kv_manager may be any object implementing add_blocks / remove_blocks /
+    # clear_all_blocks, e.g. SGLangKVCacheRedisManager or MemoryKVCacheManager.
+    def __init__(self, kv_manager=None):
+        self.kv_manager = kv_manager or SGLangKVCacheRedisManager()
 
     async def handle(self, event_data: EventData) -> None:
         if not event_data:
@@ -363,7 +382,7 @@ class SGLangKVCacheEventHandler(EventHandler):
             return
 
         block_event = event_data.sglang_event
-        await self.redis_manager.add_blocks(
+        await self.kv_manager.add_blocks(
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
@@ -375,18 +394,18 @@ class SGLangKVCacheEventHandler(EventHandler):
             return
 
         block_event = event_data.sglang_event
-        await self.redis_manager.remove_blocks(
+        await self.kv_manager.remove_blocks(
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
         )
 
     async def _handle_all_blocks_cleared(self, event_data: SGLangEventData) -> None:
-        await self.redis_manager.clear_all_blocks(
+        await self.kv_manager.clear_all_blocks(
             model_name=event_data.model_name,
             pod_identifier=event_data.pod_identifier,
         )
 
 
-def get_sglang_kv_cache_handler() -> SGLangKVCacheEventHandler:
-    return SGLangKVCacheEventHandler()
+def get_sglang_kv_cache_handler(kv_manager=None) -> SGLangKVCacheEventHandler:
+    return SGLangKVCacheEventHandler(kv_manager)

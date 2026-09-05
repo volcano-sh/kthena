@@ -1,13 +1,15 @@
 # Runtime
 
-Kthena Runtime is a lightweight sidecar service designed to standardize Prometheus metrics from inference engines, provide LoRA adapter download/load/unload capabilities, support model downloading, and publish KV cache events to Redis for the `kvcache-aware` router plugin.
+Kthena Runtime is a lightweight sidecar service designed to standardize Prometheus metrics from inference engines, provide LoRA adapter download/load/unload capabilities, support model downloading, and publish KV cache events for the `kvcache-aware` router plugin — either to Redis or directly to router instances in memory push mode.
 
 ## Overview
 
 - Metrics standardization: fetch native metrics from the engine's /metrics endpoint, rename them to unified Kthena metrics according to rules.
 - LoRA lifecycle management: simple HTTP APIs to download+load and unload LoRA adapters for dynamic enable/disable.
 - Model downloading: supports downloading models from S3/OBS/PVC/HuggingFace to a local path.
-- KV cache event ingestion: for vLLM engines, subscribes to the ZMQ `kv-events` stream and writes standardized token block hashes into Redis, enabling the router's [`kvcache-aware`](kvcache-aware.md) score plugin.
+- KV cache event ingestion: for vLLM engines, subscribes to the ZMQ `kv-events` stream and publishes standardized token block hashes, enabling the router's [`kvcache-aware`](kvcache-aware.md) score plugin. Two sync modes are supported (env `KV_EVENT_SYNC_MODE`):
+  - `redis` (default): block hashes are written into Redis and queried by the router per request.
+  - `memory`: router instances register with the runtime via `POST /kvcache/routers/register` (renewed periodically as a heartbeat with a TTL); the runtime then pushes KV events (with a full snapshot on first registration) to every registered router's `/kvcache/events` endpoint, so the router can score from its local in-memory index without Redis.
 
 Notes:
 
@@ -73,6 +75,11 @@ Startup arguments:
 - `-M, --engine-metrics-path` (default `/metrics`): engine metrics path
 - `-I, --pod` (required): current instance/Pod identifier, used for events and Redis keys
 - `-N, --model` (required): model name
+
+Environment variables:
+
+- `KV_EVENT_SYNC_MODE` (default `redis`): KV cache event sync backend, `redis` or `memory`. In `memory` mode the runtime does not connect to Redis; instead it pushes KV events to router instances that registered themselves via `POST /kvcache/routers/register`. See the [`kvcache-aware`](kvcache-aware.md) guide for the full setup.
+- `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: Redis connection used in `redis` mode.
 
 In the ModelBooster YAML, you can control Runtime startup values via `spec.backend.env`:
 
