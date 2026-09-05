@@ -1765,6 +1765,11 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 		return nil
 	}
 	if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
+		// The grace goroutine below is what eventually clears this key. It never
+		// starts on this path, so leaving the entry behind would make every
+		// later event for this pod return early at the LoadOrStore check above
+		// and the pod would never be recovered.
+		c.graceMap.Delete(key)
 		return err
 	}
 	// Wait for the grace period before processing
