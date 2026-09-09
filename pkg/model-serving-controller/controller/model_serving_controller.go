@@ -2820,6 +2820,13 @@ func (c *ModelServingController) createPod(
 				utils.ObjectRevision(existing) == utils.ObjectRevision(pod) &&
 				roleTemplateHashMatches
 			if !identityMatches {
+				if ownerUID, ok := modelServingOwnerUID(existing, ms.Name); ok && ownerUID != ms.UID {
+					// existing is left over from a previous same-named ModelServing; delete it
+					// instead of waiting on garbage collection so a later reconcile can recreate it.
+					if delErr := c.kubeClientSet.CoreV1().Pods(existing.Namespace).Delete(ctx, existing.Name, *metav1.NewPreconditionDeleteOptions(string(existing.UID))); delErr != nil && !apierrors.IsNotFound(delErr) {
+						klog.Warningf("createPod: failed to delete stale %s pod %s left over from previous same-named ModelServing %s/%s: %v", roleKind, existing.Name, ms.Namespace, ms.Name, delErr)
+					}
+				}
 				c.enqueueModelServingAfter(ms, enqueueAfter)
 				return fmt.Errorf("existing %s pod %s does not match expected identity: owner=%t group=%q/%q role=%q/%q roleID=%q/%q revision=%q/%q roleTemplateHash=%q/%q",
 					roleKind, pod.Name,

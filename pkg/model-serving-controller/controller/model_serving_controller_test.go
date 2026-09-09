@@ -289,6 +289,67 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
+func TestCreatePodDeletesStalePodFromPreviousSameNamedModelServing(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms",
+			Namespace: "default",
+			UID:       types.UID("new-uid"),
+		},
+	}
+
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	existing := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms-entry-0",
+			Namespace: "default",
+			UID:       types.UID("existing-pod-uid"),
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "role",
+				workloadv1alpha1.RoleIDKey:                "role-0",
+				workloadv1alpha1.EntryLabelKey:            utils.Entry,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					// Left over from a previous ModelServing with the same name but a
+					// different UID.
+					Name: ms.Name,
+					UID:  types.UID("old-uid"),
+				},
+			},
+		},
+	}
+
+	_, err := h.kubeClient.CoreV1().Pods("default").Create(context.Background(), existing, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := controller.podsLister.Pods("default").Get(existing.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	newPod := existing.DeepCopy()
+	newPod.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+			Kind:       workloadv1alpha1.ModelServingKind.Kind,
+			Name:       ms.Name,
+			UID:        ms.UID,
+		},
+	}
+
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
+	assert.ErrorContains(t, err, "does not match expected identity")
+
+	_, err = h.kubeClient.CoreV1().Pods("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "stale pod from previous same-named ModelServing should have been deleted, got err=%v", err)
+}
+
 func TestDeletePodGroupEnqueues(t *testing.T) {
 	ms := newModelServingForDeleteTest("default", "ms")
 	h := newTestController(t, ms)
