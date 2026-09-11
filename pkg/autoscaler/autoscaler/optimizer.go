@@ -218,7 +218,11 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		klog.Warning("skip recommended instances")
 		return nil, nil
 	}
-	if recommendedInstances*100 >= instancesCountSum*(*autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent) {
+	panicThreshold := int32(200)
+	if autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent != nil {
+		panicThreshold = *autoscalePolicy.Spec.Behavior.ScaleUp.PanicPolicy.PanicThresholdPercent
+	}
+	if recommendedInstances*100 >= instancesCountSum*panicThreshold {
 		optimizer.Status.RefreshPanicMode()
 	}
 	CorrectedInstancesAlgorithm := algorithm.CorrectedInstancesAlgorithm{
