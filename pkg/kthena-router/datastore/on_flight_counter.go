@@ -37,6 +37,8 @@ type OnFlightCounter interface {
 	Incr(ctx context.Context, podName types.NamespacedName) (int64, error)
 	// Decr atomically decrements the counter for podName and returns the new value.
 	Decr(ctx context.Context, podName types.NamespacedName) (int64, error)
+	// Add atomically adds the delta to the counter for podName and returns the new value.
+	Add(ctx context.Context, podName types.NamespacedName, delta int64) (int64, error)
 	// Delete removes the counter entry for podName. Call this when a pod is
 	// removed so stale keys do not accumulate in Redis.
 	Delete(ctx context.Context, podName types.NamespacedName) error
@@ -65,6 +67,19 @@ func (r *RedisOnFlightCounter) Incr(ctx context.Context, podName types.Namespace
 
 func (r *RedisOnFlightCounter) Decr(ctx context.Context, podName types.NamespacedName) (int64, error) {
 	val, err := r.client.HIncrBy(ctx, redisOnFlightHashKey, podOnFlightField(podName), -1).Result()
+	if err != nil {
+		return 0, err
+	}
+	if val < 0 {
+		// Guard against stale negative values after a router restart.
+		_ = r.client.HSet(ctx, redisOnFlightHashKey, podOnFlightField(podName), 0).Err()
+		val = 0
+	}
+	return val, nil
+}
+
+func (r *RedisOnFlightCounter) Add(ctx context.Context, podName types.NamespacedName, delta int64) (int64, error) {
+	val, err := r.client.HIncrBy(ctx, redisOnFlightHashKey, podOnFlightField(podName), delta).Result()
 	if err != nil {
 		return 0, err
 	}
