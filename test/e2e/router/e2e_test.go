@@ -119,6 +119,12 @@ func TestModelRouteMultiModels(t *testing.T) {
 	TestModelRouteMultiModelsShared(t, testCtx, testNamespace, false, "")
 }
 
+// TestModelRouteResponses tests POST /v1/responses routing through a ModelRoute.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestModelRouteResponses(t *testing.T) {
+	TestModelRouteResponsesShared(t, testCtx, testNamespace, false, "")
+}
+
 // TestModelRoutePrefillDecodeDisaggregation tests PD disaggregation with ModelServing, ModelServer, and ModelRoute.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {

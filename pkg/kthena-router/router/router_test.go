@@ -79,7 +79,7 @@ func withMetricsEndpoint(handler http.Handler) http.Handler {
 			fmt.Fprint(w, `{"data":[]}`)
 			return
 		}
-		if r.URL.Path != "/v1/chat/completions" {
+		if r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/v1/responses" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -1693,6 +1693,622 @@ func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `data: {"id":"decode-resp"}`)
 }
 
+// --- OpenAI Responses API (/v1/responses) end-to-end routing ---
+
+// responsesSSE builds a minimal Responses SSE stream ending in the given terminal
+// event. usageJSON is either "" or a leading-comma usage fragment.
+func responsesSSE(terminalEvent, usageJSON string) string {
+	return "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_1"}}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"OK"}` + "\n\n" +
+		"event: " + terminalEvent + "\n" +
+		`data: {"type":"` + terminalEvent + `","response":{"id":"resp_1"` + usageJSON + `}}` + "\n\n"
+}
+
+const responsesUsageJSON = `,"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}`
+
+// registerResponsesModelServer wires ModelRoute -> ModelServer -> one Pod, all
+// pointing at backendURL. A non-empty upstreamModel makes the ModelServer rewrite
+// the request model.
+func registerResponsesModelServer(t *testing.T, store datastore.Store, backendURL *url.URL, routeModel, upstreamModel string) {
+	t.Helper()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+	spec := aiv1alpha1.ModelServerSpec{
+		WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+		InferenceEngine: "vLLM",
+	}
+	if upstreamModel != "" {
+		spec.Model = &upstreamModel
+	}
+	ms := &aiv1alpha1.ModelServer{ObjectMeta: v1.ObjectMeta{Name: "resp-ms", Namespace: "default"}, Spec: spec}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+	}
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-mr", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: routeModel,
+			Rules:     []*aiv1alpha1.Rule{{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "resp-ms"}}}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateModelServer(ms, sets.New(types.NamespacedName{Name: "resp-pod", Namespace: "default"})))
+	assert.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(mr))
+}
+
+func outputTokenMetricValue(t *testing.T, router *Router, model, path string) float64 {
+	t.Helper()
+	ch := make(chan prometheus.Metric)
+	go func() {
+		router.metrics.TokensTotal.Collect(ch)
+		close(ch)
+	}()
+	var value float64
+	for collected := range ch {
+		metric := &dto.Metric{}
+		if err := collected.Write(metric); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		labels := make(map[string]string, len(metric.Label))
+		for _, label := range metric.Label {
+			labels[label.GetName()] = label.GetValue()
+		}
+		if labels[metrics.LabelModel] == model &&
+			labels[metrics.LabelPath] == path &&
+			labels[metrics.LabelTokenType] == metrics.TokenTypeOutput {
+			value += metric.GetCounter().GetValue()
+		}
+	}
+	return value
+}
+
+// doResponsesRequest runs a /v1/responses request through the full router handler
+// with an access-log context attached, and returns the recorder and context.
+func doResponsesRequest(t *testing.T, router *Router, body string) (*connectors.TestResponseRecorder, *accesslog.AccessLogContext) {
+	t.Helper()
+	w := connectors.CreateTestResponseRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	accessCtx := accesslog.NewAccessLogContext("responses-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+	router.HandlerFunc()(c)
+	return w, accessCtx
+}
+
+func TestRouter_HandlerFunc_Responses_AggregatedModelServer(t *testing.T) {
+	t.Run("non-streaming", func(t *testing.T) {
+		var seen map[string]interface{}
+		backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "/v1/responses", r.URL.Path)
+			raw, _ := io.ReadAll(r.Body)
+			assert.NoError(t, json.Unmarshal(raw, &seen))
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"resp_1","object":"response","status":"completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`)
+		})
+		router, store, backend := setupTestRouter(t, backendHandler)
+		defer backend.Close()
+		backendURL, _ := url.Parse(backend.URL)
+		registerResponsesModelServer(t, store, backendURL, "responses-model", "")
+
+		w, accessCtx := doResponsesRequest(t, router, `{"model":"responses-model","input":"hi there","instructions":"be brief"}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), `"id":"resp_1"`)
+		assert.Equal(t, "responses-model", seen["model"], "model is not rewritten when ModelServer has no Model override")
+		assert.Equal(t, "hi there", seen["input"])
+		assert.Equal(t, "be brief", seen["instructions"])
+		assert.NotContains(t, seen, "include_usage")
+		assert.NotContains(t, seen, "stream_options")
+		assert.NotContains(t, seen, "max_tokens")
+		assert.Equal(t, 7, accessCtx.OutputTokens, "usage.output_tokens feeds output-token accounting")
+	})
+
+	streamingCases := []struct {
+		name       string
+		terminal   string
+		usageJSON  string
+		wantOutput int
+	}{
+		{"response.completed with usage", "response.completed", responsesUsageJSON, 7},
+		{"response.incomplete with usage", "response.incomplete", responsesUsageJSON, 7},
+		{"response.failed with usage", "response.failed", responsesUsageJSON, 7},
+		{"terminal event without usage is not fabricated", "response.completed", "", 0},
+	}
+	for _, tc := range streamingCases {
+		t.Run("streaming/"+tc.name, func(t *testing.T) {
+			body := responsesSSE(tc.terminal, tc.usageJSON)
+			var seen map[string]interface{}
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v1/responses", r.URL.Path)
+				raw, _ := io.ReadAll(r.Body)
+				assert.NoError(t, json.Unmarshal(raw, &seen))
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, body)
+			})
+			router, store, backend := setupTestRouter(t, backendHandler)
+			defer backend.Close()
+			backendURL, _ := url.Parse(backend.URL)
+			registerResponsesModelServer(t, store, backendURL, "responses-model", "")
+
+			w, accessCtx := doResponsesRequest(t, router, `{"model":"responses-model","input":"hi","stream":true}`)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, true, seen["stream"], "streaming flag is forwarded unchanged")
+			assert.NotContains(t, seen, "stream_options")
+			// SSE forwarded verbatim, no data: [DONE] required or added.
+			assert.Equal(t, body, w.Body.String())
+			assert.NotContains(t, w.Body.String(), "[DONE]")
+			assert.Contains(t, w.Body.String(), "event: "+tc.terminal)
+			assert.Equal(t, tc.wantOutput, accessCtx.OutputTokens)
+		})
+	}
+}
+
+func TestRouter_HandlerFunc_Responses_InferencePool(t *testing.T) {
+	setup := func(t *testing.T, backendHandler http.Handler) (*Router, *httptest.Server) {
+		t.Helper()
+		router, store, backend := setupTestRouter(t, backendHandler)
+		backendURL, _ := url.Parse(backend.URL)
+		backendPort, _ := strconv.Atoi(backendURL.Port())
+		pool := &inferencev1.InferencePool{
+			ObjectMeta: v1.ObjectMeta{Name: "resp-pool", Namespace: "default"},
+			Spec: inferencev1.InferencePoolSpec{
+				TargetPorts: []inferencev1.Port{{Number: inferencev1.PortNumber(backendPort)}},
+				Selector: inferencev1.LabelSelector{MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+					"app": "resp-pool",
+				}},
+				EndpointPickerRef: inferencev1.EndpointPickerRef{Name: "picker"},
+			},
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: v1.ObjectMeta{Name: "resp-pool-pod", Namespace: "default", Labels: map[string]string{"app": "resp-pool"}},
+			Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+		}
+		pathType := gatewayv1.PathMatchPathPrefix
+		prefix := "/v1"
+		parentKind := gatewayv1.Kind("Gateway")
+		backendGroup := inferencePoolBackendGroup
+		backendKind := inferencePoolBackendKind
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: v1.ObjectMeta{Name: "resp-pool-route", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &parentKind}}},
+				Rules: []gatewayv1.HTTPRouteRule{{
+					Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &prefix}}},
+					BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
+						Group: &backendGroup, Kind: &backendKind, Name: "resp-pool",
+					}}}},
+				}},
+			},
+		}
+		assert.NoError(t, store.AddOrUpdateInferencePool(pool))
+		assert.NoError(t, store.AddOrUpdatePod(pod, nil))
+		assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+		return router, backend
+	}
+
+	runInferencePoolRequest := func(t *testing.T, router *Router, body string) (*connectors.TestResponseRecorder, *accesslog.AccessLogContext) {
+		t.Helper()
+		w := connectors.CreateTestResponseRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set(GatewayKey, "default/gw")
+		accessCtx := accesslog.NewAccessLogContext("resp-pool", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "")
+		c.Set(accesslog.AccessLogContextKey, accessCtx)
+		router.HandlerFunc()(c)
+		return w, accessCtx
+	}
+
+	t.Run("non-streaming", func(t *testing.T) {
+		var seen map[string]interface{}
+		router, backend := setup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "/v1/responses", r.URL.Path)
+			raw, _ := io.ReadAll(r.Body)
+			assert.NoError(t, json.Unmarshal(raw, &seen))
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`)
+		}))
+		defer backend.Close()
+
+		w, accessCtx := runInferencePoolRequest(t, router, `{"model":"pool-model","input":"hi"}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), `"id":"resp_1"`)
+		assert.Equal(t, "pool-model", seen["model"], "InferencePool routing does not rewrite the model")
+		assert.NotContains(t, seen, "include_usage")
+		assert.Equal(t, 7, accessCtx.OutputTokens)
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		body := responsesSSE("response.completed", responsesUsageJSON)
+		router, backend := setup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, body)
+		}))
+		defer backend.Close()
+
+		w, accessCtx := runInferencePoolRequest(t, router, `{"model":"pool-model","input":"hi","stream":true}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, body, w.Body.String())
+		assert.NotContains(t, w.Body.String(), "[DONE]")
+		assert.Equal(t, 7, accessCtx.OutputTokens)
+	})
+}
+
+// TestRouter_HandlerFunc_Responses_InferencePool_URLRewrite covers the review concern that
+// an HTTPRoute URLRewrite filter changes req.URL.Path before the response is parsed, which
+// could make a "/v1/responses" request no longer be recognized as Responses API. The backend
+// here receives the rewritten path, but the response must still be parsed as Responses (SSE
+// forwarded without requiring "data: [DONE]", usage.output_tokens reaching the access log).
+func TestRouter_HandlerFunc_Responses_InferencePool_URLRewrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := responsesSSE("response.completed", responsesUsageJSON)
+	var receivedPath string
+	// Built directly rather than via setupTestRouter: its withMetricsEndpoint test
+	// wrapper only forwards exact "/v1/chat/completions" or "/v1/responses" paths to
+	// the real handler, which would swallow the deliberately-rewritten backend path
+	// this test needs to observe.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, body)
+	}))
+	defer backend.Close()
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-pool-rewrite", Namespace: "default"},
+		Spec: inferencev1.InferencePoolSpec{
+			TargetPorts: []inferencev1.Port{{Number: inferencev1.PortNumber(backendPort)}},
+			Selector: inferencev1.LabelSelector{MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+				"app": "resp-pool-rewrite",
+			}},
+			EndpointPickerRef: inferencev1.EndpointPickerRef{Name: "picker"},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-pool-rewrite-pod", Namespace: "default", Labels: map[string]string{"app": "resp-pool-rewrite"}},
+		Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+	}
+	pathType := gatewayv1.PathMatchPathPrefix
+	prefix := "/v1"
+	parentKind := gatewayv1.Kind("Gateway")
+	backendGroup := inferencePoolBackendGroup
+	backendKind := inferencePoolBackendKind
+	rewriteType := gatewayv1.FullPathHTTPPathModifier
+	rewrittenPath := "/backend/rewritten-path"
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-pool-rewrite-route", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &parentKind}}},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &prefix}}},
+				Filters: []gatewayv1.HTTPRouteFilter{{
+					Type: gatewayv1.HTTPRouteFilterURLRewrite,
+					URLRewrite: &gatewayv1.HTTPURLRewriteFilter{
+						Path: &gatewayv1.HTTPPathModifier{Type: rewriteType, ReplaceFullPath: &rewrittenPath},
+					},
+				}},
+				BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
+					Group: &backendGroup, Kind: &backendKind, Name: "resp-pool-rewrite",
+				}}}},
+			}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateInferencePool(pool))
+	assert.NoError(t, store.AddOrUpdatePod(pod, nil))
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+	w := connectors.CreateTestResponseRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"pool-model","input":"hi","stream":true}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(GatewayKey, "default/gw")
+	accessCtx := accesslog.NewAccessLogContext("resp-pool-rewrite", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, rewrittenPath, receivedPath, "the backend must receive the rewritten path")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, body, w.Body.String(), "Responses SSE is still forwarded verbatim despite the rewritten backend path")
+	assert.NotContains(t, w.Body.String(), "[DONE]")
+	assert.Equal(t, 7, accessCtx.OutputTokens, "usage.output_tokens must still be parsed as Responses usage")
+}
+
+// TestRouter_HandlerFunc_Responses_InferencePool_URLRewrite_CustomPublicPath covers the
+// opposite URLRewrite direction from the test above: a custom public path (e.g.
+// /llm/v1/responses) rewritten by an HTTPRoute to the canonical upstream path
+// "/v1/responses". The original client-facing path alone no longer identifies this as
+// a Responses request, so the response parser selection must also recognize the
+// rewritten path once it matches "/v1/responses".
+func TestRouter_HandlerFunc_Responses_InferencePool_URLRewrite_CustomPublicPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := responsesSSE("response.completed", responsesUsageJSON)
+	var receivedPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, body)
+	}))
+	defer backend.Close()
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+	pool := &inferencev1.InferencePool{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-pool-rewrite-custom", Namespace: "default"},
+		Spec: inferencev1.InferencePoolSpec{
+			TargetPorts: []inferencev1.Port{{Number: inferencev1.PortNumber(backendPort)}},
+			Selector: inferencev1.LabelSelector{MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+				"app": "resp-pool-rewrite-custom",
+			}},
+			EndpointPickerRef: inferencev1.EndpointPickerRef{Name: "picker"},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-pool-rewrite-custom-pod", Namespace: "default", Labels: map[string]string{"app": "resp-pool-rewrite-custom"}},
+		Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+	}
+	pathType := gatewayv1.PathMatchPathPrefix
+	prefix := "/llm/v1"
+	parentKind := gatewayv1.Kind("Gateway")
+	backendGroup := inferencePoolBackendGroup
+	backendKind := inferencePoolBackendKind
+	rewriteType := gatewayv1.FullPathHTTPPathModifier
+	rewrittenPath := "/v1/responses"
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "resp-pool-rewrite-custom-route", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &parentKind}}},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &prefix}}},
+				Filters: []gatewayv1.HTTPRouteFilter{{
+					Type: gatewayv1.HTTPRouteFilterURLRewrite,
+					URLRewrite: &gatewayv1.HTTPURLRewriteFilter{
+						Path: &gatewayv1.HTTPPathModifier{Type: rewriteType, ReplaceFullPath: &rewrittenPath},
+					},
+				}},
+				BackendRefs: []gatewayv1.HTTPBackendRef{{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
+					Group: &backendGroup, Kind: &backendKind, Name: "resp-pool-rewrite-custom",
+				}}}},
+			}},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateInferencePool(pool))
+	assert.NoError(t, store.AddOrUpdatePod(pod, nil))
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(route))
+
+	w := connectors.CreateTestResponseRecorder()
+	c, _ := gin.CreateTestContext(w)
+	// The public path is custom; the HTTPRoute above rewrites it to canonical /v1/responses.
+	c.Request, _ = http.NewRequest(http.MethodPost, "/llm/v1/responses", bytes.NewBufferString(`{"model":"pool-model","input":"hi","stream":true}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(GatewayKey, "default/gw")
+	accessCtx := accesslog.NewAccessLogContext("resp-pool-rewrite-custom", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, rewrittenPath, receivedPath, "the backend must receive the rewritten canonical path")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, body, w.Body.String(), "Responses SSE is still forwarded verbatim despite the custom public path")
+	assert.NotContains(t, w.Body.String(), "[DONE]")
+	assert.Equal(t, 7, accessCtx.OutputTokens, "usage.output_tokens must be parsed as Responses usage "+
+		"even though the original public path was custom")
+}
+
+func TestRouter_HandlerFunc_Responses_Disaggregated(t *testing.T) {
+	setup := func(t *testing.T, backendHandler http.Handler) (*Router, datastore.Store, *httptest.Server) {
+		t.Helper()
+		router, store, backend := setupTestRouter(t, backendHandler)
+		backendURL, _ := url.Parse(backend.URL)
+		backendIP := backendURL.Hostname()
+		backendPort, _ := strconv.Atoi(backendURL.Port())
+		ms := &aiv1alpha1.ModelServer{
+			ObjectMeta: v1.ObjectMeta{Name: "resp-pd-ms", Namespace: "default"},
+			Spec: aiv1alpha1.ModelServerSpec{
+				Model:           func(s string) *string { return &s }("backend-model"),
+				WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+				InferenceEngine: "vLLM",
+				WorkloadSelector: &aiv1alpha1.WorkloadSelector{PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "group",
+					DecodeLabels:  map[string]string{"app": "decode"},
+					PrefillLabels: map[string]string{"app": "prefill"},
+				}},
+			},
+		}
+		decodePod := &corev1.Pod{
+			ObjectMeta: v1.ObjectMeta{Name: "resp-decode", Namespace: "default", Labels: map[string]string{"app": "decode", "group": "g"}},
+			Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+		}
+		prefillPod := &corev1.Pod{
+			ObjectMeta: v1.ObjectMeta{Name: "resp-prefill", Namespace: "default", Labels: map[string]string{"app": "prefill", "group": "g"}},
+			Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+		}
+		mr := &aiv1alpha1.ModelRoute{
+			ObjectMeta: v1.ObjectMeta{Name: "resp-pd-mr", Namespace: "default"},
+			Spec: aiv1alpha1.ModelRouteSpec{
+				ModelName: "responses-pd-model",
+				Rules:     []*aiv1alpha1.Rule{{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "resp-pd-ms"}}}},
+			},
+		}
+		store.AddOrUpdateModelServer(ms, sets.New(
+			types.NamespacedName{Name: "resp-decode", Namespace: "default"},
+			types.NamespacedName{Name: "resp-prefill", Namespace: "default"},
+		))
+		store.AddOrUpdatePod(decodePod, []*aiv1alpha1.ModelServer{ms})
+		store.AddOrUpdatePod(prefillPod, []*aiv1alpha1.ModelServer{ms})
+		store.AddOrUpdateModelRoute(mr)
+		return router, store, backend
+	}
+
+	t.Run("streaming", func(t *testing.T) {
+		var prefill, decode map[string]interface{}
+		decodeSSE := responsesSSE("response.completed", responsesUsageJSON)
+		router, store, backend := setup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "/v1/responses", r.URL.Path)
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]interface{}
+			assert.NoError(t, json.Unmarshal(raw, &body))
+			if body["max_output_tokens"] == float64(1) {
+				prefill = body
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"id":"prefill"}`)
+				return
+			}
+			decode = body
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, decodeSSE)
+		}))
+		defer backend.Close()
+
+		before := outputTokenMetricValue(t, router, "responses-pd-model", "/v1/responses")
+		beforeFairness, _ := store.GetTokenCount("pd-responses-user", "responses-pd-model")
+
+		// Built directly rather than via doResponsesRequest so common.UserIdKey can be
+		// set beforehand, needed to verify PD fairness accounting below.
+		w := connectors.CreateTestResponseRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"responses-pd-model","input":"hi","stream":true}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set(common.UserIdKey, "pd-responses-user")
+		accessCtx := accesslog.NewAccessLogContext("responses-pd-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "")
+		c.Set(accesslog.AccessLogContextKey, accessCtx)
+		router.HandlerFunc()(c)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		// prefill: protocol-correct one-token cap, no Chat Completions fields.
+		assert.Equal(t, float64(1), prefill["max_output_tokens"])
+		assert.NotContains(t, prefill, "max_tokens")
+		assert.NotContains(t, prefill, "max_completion_tokens")
+		assert.NotContains(t, prefill, "stream")
+		assert.NotContains(t, prefill, "stream_options")
+		assert.Equal(t, "backend-model", prefill["model"])
+		// decode: no Chat Completions usage fields, opaque input preserved.
+		assert.NotContains(t, decode, "include_usage")
+		assert.NotContains(t, decode, "stream_options")
+		assert.Equal(t, "hi", decode["input"])
+		assert.Equal(t, "backend-model", decode["model"])
+		// client-visible SSE forwarded verbatim.
+		assert.Equal(t, decodeSSE, w.Body.String())
+		assert.NotContains(t, w.Body.String(), "[DONE]")
+		// output_tokens from the terminal event reaches decoder output-token accounting.
+		assert.Equal(t, float64(7), outputTokenMetricValue(t, router, "responses-pd-model", "/v1/responses")-before)
+		// output_tokens from PD Responses decoding must also reach the access log...
+		assert.Equal(t, 7, accessCtx.OutputTokens)
+		// ...and per-user fairness accounting, not just rate limiting/metrics.
+		afterFairness, err := store.GetTokenCount("pd-responses-user", "responses-pd-model")
+		assert.NoError(t, err)
+		assert.Greater(t, afterFairness, beforeFairness)
+	})
+
+	t.Run("non-streaming", func(t *testing.T) {
+		var prefill, decode map[string]interface{}
+		router, _, backend := setup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]interface{}
+			assert.NoError(t, json.Unmarshal(raw, &body))
+			w.Header().Set("Content-Type", "application/json")
+			if body["max_output_tokens"] == float64(1) {
+				prefill = body
+				fmt.Fprint(w, `{"id":"prefill"}`)
+				return
+			}
+			decode = body
+			fmt.Fprint(w, `{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`)
+		}))
+		defer backend.Close()
+
+		before := outputTokenMetricValue(t, router, "responses-pd-model", "/v1/responses")
+		w, _ := doResponsesRequest(t, router, `{"model":"responses-pd-model","input":"hi","max_output_tokens":64}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), `"id":"resp_1"`)
+		assert.Equal(t, float64(1), prefill["max_output_tokens"])
+		assert.NotContains(t, prefill, "max_tokens")
+		assert.NotContains(t, decode, "include_usage")
+		assert.Equal(t, float64(64), decode["max_output_tokens"], "decode keeps the client's output cap")
+		assert.Equal(t, float64(7), outputTokenMetricValue(t, router, "responses-pd-model", "/v1/responses")-before)
+	})
+}
+
+func TestRouter_HandlerFunc_Responses_ModelRewrite(t *testing.T) {
+	var seen map[string]interface{}
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		assert.NoError(t, json.Unmarshal(raw, &seen))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`)
+	})
+	router, store, backend := setupTestRouter(t, backendHandler)
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+	registerResponsesModelServer(t, store, backendURL, "responses-model", "backend-model")
+
+	body := `{"model":"responses-model","input":"hi","instructions":"brief","previous_response_id":"resp_prev","tools":[{"type":"web_search"}]}`
+	w, accessCtx := doResponsesRequest(t, router, body)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "backend-model", seen["model"], "model is rewritten to the ModelServer's Model")
+	assert.Equal(t, "hi", seen["input"])
+	assert.Equal(t, "brief", seen["instructions"])
+	assert.Equal(t, "resp_prev", seen["previous_response_id"])
+	assert.Equal(t, []interface{}{map[string]interface{}{"type": "web_search"}}, seen["tools"])
+	assert.NotContains(t, seen, "include_usage")
+	assert.NotContains(t, seen, "stream_options")
+	assert.NotContains(t, seen, "max_tokens")
+	assert.Equal(t, 7, accessCtx.OutputTokens)
+}
+
+func TestRouter_HandlerFunc_Responses_PreservesOpaqueFields(t *testing.T) {
+	reqBody := `{"model":"responses-model","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],` +
+		`"instructions":"be brief","previous_response_id":"resp_prev",` +
+		`"tools":[{"type":"function","name":"lookup"}],"metadata":{"trace":"abc"},` +
+		`"reasoning":{"effort":"high"}}`
+
+	var rawSeen []byte
+	var seen map[string]interface{}
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawSeen, _ = io.ReadAll(r.Body)
+		assert.NoError(t, json.Unmarshal(rawSeen, &seen))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`)
+	})
+	router, store, backend := setupTestRouter(t, backendHandler)
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+	registerResponsesModelServer(t, store, backendURL, "responses-model", "") // no rewrite
+
+	w, _ := doResponsesRequest(t, router, reqBody)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	// No model rewrite -> original body forwarded byte-for-byte.
+	assert.JSONEq(t, reqBody, string(rawSeen))
+	assert.Equal(t, reqBody, string(rawSeen))
+	// Representative Responses fields survive and are not converted to Chat Completions fields.
+	assert.Contains(t, seen, "input")
+	assert.Equal(t, "be brief", seen["instructions"])
+	assert.Equal(t, "resp_prev", seen["previous_response_id"])
+	assert.Contains(t, seen, "tools")
+	assert.Equal(t, map[string]interface{}{"trace": "abc"}, seen["metadata"])
+	assert.Equal(t, map[string]interface{}{"effort": "high"}, seen["reasoning"])
+	for _, cc := range []string{"stream_options", "include_usage", "max_tokens", "max_completion_tokens", "messages"} {
+		assert.NotContains(t, seen, cc)
+	}
+}
+
 func TestRouter_HandlerFunc_ModelNotFound(t *testing.T) {
 	router, _, backend := setupTestRouter(t, nil)
 	defer backend.Close()
@@ -3217,4 +3833,100 @@ func TestRouter_ProxyToPDDisaggregated_RetryBehavior(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, w.Code)
 		})
 	}
+}
+
+// TestRouter_ProxyToPDDisaggregated_DecodeUpstreamError covers the review concern that a
+// non-2xx Responses upstream response, if written to c.Writer immediately, would make
+// c.Writer.Written() true and stop the retry loop above from trying another prefill/decode
+// pair on the very first failed attempt. connectors.DecodeUpstreamError lets decoderProxy
+// report such a response without writing it, so this verifies the retry loop actually uses
+// that: it keeps retrying while the error is only a captured-but-unwritten
+// DecodeUpstreamError, and forwards the real upstream response once retries are exhausted.
+func TestRouter_ProxyToPDDisaggregated_DecodeUpstreamError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.2"},
+	}
+	info1 := &datastore.PodInfo{Pod: pod1}
+	info2 := &datastore.PodInfo{Pod: pod2}
+
+	t.Run("retries the second pod pair instead of stopping on the first non-2xx", func(t *testing.T) {
+		store := datastore.New()
+		router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+		ctx := &framework.Context{
+			Model:       "responses-model",
+			PrefillPods: []*datastore.PodInfo{info1, info2},
+			DecodePods:  []*datastore.PodInfo{info1, info2},
+		}
+
+		mockConnector := &mockKVConnector{}
+		mockConnector.proxyHandler = func(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *connectors.OnFlightHooks) (int, error) {
+			if mockConnector.calls.Load() == 1 {
+				// First pod pair: a genuine non-2xx Responses response, captured but not
+				// written yet. c.Writer.Written() must stay false so the loop retries.
+				return 0, &connectors.DecodeUpstreamError{
+					StatusCode: http.StatusServiceUnavailable,
+					Header:     http.Header{},
+					Body:       []byte(`{"error":"pod 1 overloaded"}`),
+				}
+			}
+			// Second pod pair succeeds.
+			c.Writer.WriteHeader(http.StatusOK)
+			_, _ = c.Writer.Write([]byte(`{"id":"resp_1"}`))
+			return 7, nil
+		}
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest("POST", "/v1/responses", bytes.NewBufferString(`{"model":"responses-model"}`))
+
+		err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "responses-model"}, 8000, 2*time.Second)
+
+		assert.NoError(t, err)
+		assert.Equal(t, int32(2), mockConnector.calls.Load(),
+			"must retry the second pod pair after the first returns a captured, unwritten Responses error")
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, `{"id":"resp_1"}`, w.Body.String())
+	})
+
+	t.Run("forwards the last attempt's real status, body, and headers once retries are exhausted", func(t *testing.T) {
+		store := datastore.New()
+		router := NewRouter(store, "../scheduler/testdata/configmap.yaml")
+		ctx := &framework.Context{
+			Model:       "responses-model",
+			PrefillPods: []*datastore.PodInfo{info1, info2},
+			DecodePods:  []*datastore.PodInfo{info1, info2},
+		}
+
+		mockConnector := &mockKVConnector{}
+		mockConnector.proxyHandler = func(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *connectors.OnFlightHooks) (int, error) {
+			// Every attempt fails with a genuine (not connection-level) upstream error.
+			n := mockConnector.calls.Load()
+			return 0, &connectors.DecodeUpstreamError{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     http.Header{"X-Upstream-Pod": []string{fmt.Sprintf("pod-%d", n)}},
+				Body:       []byte(fmt.Sprintf(`{"error":"pod %d overloaded"}`, n)),
+			}
+		}
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest("POST", "/v1/responses", bytes.NewBufferString(`{"model":"responses-model"}`))
+
+		err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "responses-model"}, 8000, 2*time.Second)
+
+		var respErr *connectors.DecodeUpstreamError
+		assert.ErrorAs(t, err, &respErr)
+		assert.Equal(t, int32(2), mockConnector.calls.Load())
+		// The client must see the LAST attempt's real upstream response, not a generic 500.
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Equal(t, `{"error":"pod 2 overloaded"}`, w.Body.String())
+		assert.Equal(t, "pod-2", w.Header().Get("X-Upstream-Pod"))
+	})
 }

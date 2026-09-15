@@ -18,6 +18,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -264,6 +265,102 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 			2*time.Second,
 		)
 	}
+}
+
+// TestModelRouteResponsesShared exercises POST /v1/responses (OpenAI Responses API)
+// end to end through a ModelRoute -> ModelServer, against the shared llm-d-inference-sim
+// backend which serves /v1/responses natively. It verifies non-streaming and
+// streaming behavior, native usage fields, and that opaque Responses request
+// fields survive routing.
+func TestModelRouteResponsesShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	ctx := context.Background()
+
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteResponses.yaml"))
+	modelRoute.Namespace = testNamespace
+	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+
+	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelRoute")
+	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	modelName := modelRoute.Spec.ModelName
+	// The route is served by the same backend as /v1/chat/completions; wait for it
+	// to become routable using the existing chat-completions readiness probe.
+	utils.WaitForChatModelReady(t, utils.DefaultRouterURL, modelName, []utils.ChatMessage{utils.NewChatMessage("user", "ready?")}, 3*time.Minute)
+
+	responsesURL := strings.Replace(utils.DefaultRouterURL, "/v1/chat/completions", "/v1/responses", 1)
+	// The ModelServer rewrites the request model to this upstream name.
+	const upstreamModel = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+
+	postResponses := func(t *testing.T, body string) (*http.Response, string) {
+		t.Helper()
+		client := &http.Client{Timeout: 30 * time.Second}
+		var resp *http.Response
+		var text string
+		for attempt := 0; attempt < 5; attempt++ {
+			req, err := http.NewRequest(http.MethodPost, responsesURL, strings.NewReader(body))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err = client.Do(req)
+			if err != nil {
+				t.Logf("attempt %d: %v, retrying...", attempt+1, err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			raw, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			require.NoError(t, err)
+			text = string(raw)
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+			t.Logf("attempt %d: status %d body %s, retrying...", attempt+1, resp.StatusCode, text)
+			time.Sleep(2 * time.Second)
+		}
+		return resp, text
+	}
+
+	// A structured-list input plus fields that only exist in the Responses API.
+	const inputAndInstructions = `"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply OK"}]}],` +
+		`"instructions":"Be brief.","metadata":{"trace":"e2e"},"max_output_tokens":16`
+
+	t.Run("NonStreaming", func(t *testing.T) {
+		resp, body := postResponses(t, `{"model":"`+modelName+`",`+inputAndInstructions+`}`)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+		t.Logf("responses body: %s", body)
+
+		var parsed struct {
+			Object string `json:"object"`
+			Model  string `json:"model"`
+			Usage  struct {
+				InputTokens  *int `json:"input_tokens"`
+				OutputTokens *int `json:"output_tokens"`
+				TotalTokens  *int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &parsed))
+		assert.Equal(t, "response", parsed.Object)
+		assert.Equal(t, upstreamModel, parsed.Model, "response echoes the rewritten upstream model")
+		assert.NotNil(t, parsed.Usage.InputTokens, "Responses usage.input_tokens is populated")
+		assert.NotNil(t, parsed.Usage.OutputTokens, "Responses usage.output_tokens is populated")
+		assert.NotNil(t, parsed.Usage.TotalTokens, "Responses usage.total_tokens is populated")
+	})
+
+	t.Run("Streaming", func(t *testing.T) {
+		resp, body := postResponses(t, `{"model":"`+modelName+`","stream":true,`+inputAndInstructions+`}`)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+		t.Logf("responses stream: %s", body)
+		assert.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
+		assert.Contains(t, body, "response.completed", "terminal Responses event is forwarded")
+		assert.Contains(t, body, `"output_tokens"`, "usage is present on the terminal streaming event")
+		assert.NotContains(t, body, "[DONE]", "Responses SSE must not require a Chat Completions [DONE] marker")
+	})
 }
 
 // TestModelRouteMultiModelsShared is a shared test function that can be used by both

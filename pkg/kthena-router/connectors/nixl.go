@@ -64,7 +64,7 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 
 	req := c.Request
 	prefillBody := cloneReqBody(reqBody)
-	n.prefillRequest = n.buildPrefillRequest(req, prefillBody)
+	n.prefillRequest = n.buildPrefillRequest(c, req, prefillBody)
 	decodeBody := cloneReqBody(reqBody)
 	n.decodeRequestBody = AddTokenUsage(c, decodeBody)
 
@@ -198,9 +198,9 @@ func cloneReqBody(reqBody map[string]interface{}) map[string]interface{} {
 	return clone
 }
 
-func (n *NIXLConnector) buildPrefillRequest(req *http.Request, reqBody map[string]interface{}) *http.Request {
+func (n *NIXLConnector) buildPrefillRequest(c *gin.Context, req *http.Request, reqBody map[string]interface{}) *http.Request {
 	// Prepare the body for a generic prefill request.
-	preparePrefillBody(reqBody)
+	preparePrefillBody(reqBody, responsesPrefillPath(c, req))
 
 	// Add NIXL-specific parameters for KV cache transfer.
 	reqBody["kv_transfer_params"] = &KVTransferParams{

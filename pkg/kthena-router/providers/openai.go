@@ -205,7 +205,30 @@ func (p *openAIResponsesUsageParser) FinalStreamUsage() (TokenUsage, bool) {
 }
 
 func (p *openAIResponsesUsageParser) RecordStreamLineWritten(line string) {
-	p.completed = p.completed || isJSONStreamEvent(line, "response.completed")
+	p.completed = p.completed || isResponsesTerminalEvent(line)
+}
+
+// isResponsesTerminalEvent reports whether line is a Responses streaming event
+// that ends the response: response.completed, response.incomplete, or
+// response.failed. Any of them may carry final usage on its embedded response
+// object, which ParseStreamLine records.
+func isResponsesTerminalEvent(line string) bool {
+	payload, ok := streamDataPayload(line)
+	if !ok {
+		return false
+	}
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return false
+	}
+	switch event.Type {
+	case "response.completed", "response.incomplete", "response.failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *openAIResponsesUsageParser) StreamCompleted() bool {

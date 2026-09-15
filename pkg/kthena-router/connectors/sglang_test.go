@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
 )
 
 // TestSGLangConnectorRetryIsolation checks that calling Proxy() twice on the
@@ -182,6 +183,91 @@ func TestSGLangConnectorPrefillTimeoutCancelsDecode(t *testing.T) {
 	case <-decodeCancelled:
 	case <-time.After(time.Second):
 		t.Fatal("decode request was not cancelled after prefill timed out")
+	}
+}
+
+// TestSGLangConnectorPrefillBodyResponsesAPIURLRewrite covers both HTTPRoute
+// URLRewrite directions for SGLang's own prefill-body preparation: the canonical
+// public path rewritten to a custom upstream path, and a custom public path
+// rewritten to the canonical upstream path. Either way the prefill request must
+// be shaped for the Responses API (max_output_tokens), not Chat Completions
+// (max_tokens).
+func TestSGLangConnectorPrefillBodyResponsesAPIURLRewrite(t *testing.T) {
+	tests := []struct {
+		name         string
+		originalPath string
+		currentPath  string
+		isResponses  bool
+	}{
+		{
+			name:         "canonical public path rewritten to custom upstream path",
+			originalPath: "/v1/responses",
+			currentPath:  "/backend/rewritten-path",
+			isResponses:  true,
+		},
+		{
+			name:         "custom public path rewritten to canonical upstream path",
+			originalPath: "/llm/v1/responses",
+			currentPath:  "/v1/responses",
+			isResponses:  true,
+		},
+		{
+			name:         "chat completions unaffected",
+			originalPath: "/v1/chat/completions",
+			currentPath:  "/v1/chat/completions",
+			isResponses:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var prefillBody map[string]interface{}
+			prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &prefillBody)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer prefillServer.Close()
+
+			decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":1}}`))
+			}))
+			defer decodeServer.Close()
+
+			req, _ := http.NewRequest("POST", tt.currentPath, nil)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = req
+			// The original client-facing path is recorded on the access-log context,
+			// matching what AccessLogMiddleware captures before URLRewrite runs.
+			accessCtx := accesslog.NewAccessLogContext("req-1", http.MethodPost, tt.originalPath, "HTTP/1.1", "")
+			c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+			reqBody := map[string]interface{}{
+				"model": "test-model",
+				"messages": []interface{}{
+					map[string]interface{}{"role": "user", "content": "hello"},
+				},
+			}
+
+			connector := NewSGLangConnector()
+			if _, err := connector.Proxy(c, reqBody, prefillServer.Listener.Addr().String(), decodeServer.Listener.Addr().String(), 0, nil); err != nil {
+				t.Fatalf("Proxy() failed: %v", err)
+			}
+
+			if prefillBody == nil {
+				t.Fatal("prefill server never received a request body")
+			}
+			_, hasMaxOutputTokens := prefillBody["max_output_tokens"]
+			_, hasMaxTokens := prefillBody["max_tokens"]
+			if hasMaxOutputTokens != tt.isResponses {
+				t.Errorf("max_output_tokens present = %v, want %v (body=%v)", hasMaxOutputTokens, tt.isResponses, prefillBody)
+			}
+			if hasMaxTokens == tt.isResponses {
+				t.Errorf("max_tokens present = %v, want %v (body=%v)", hasMaxTokens, !tt.isResponses, prefillBody)
+			}
+		})
 	}
 }
 

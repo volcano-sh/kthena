@@ -127,7 +127,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	// The prefill sender uses bootstrap_room to track the ZMQ metadata sent by the
 	// decode receiver; it does not need bootstrap_host.
 	prefillBody := cloneReqBody(reqBody)
-	preparePrefillBody(prefillBody)
+	preparePrefillBody(prefillBody, responsesPrefillPath(c, req))
 	prefillBody["bootstrap_room"] = bootstrapRoom
 	prefillRequest, err := buildRequest(req, prefillBody)
 	if err != nil {

@@ -622,22 +622,58 @@ func TestOpenAIAdapterResponseParser(t *testing.T) {
 	})
 
 	t.Run("responses", func(t *testing.T) {
-		parser := adapter.ResponseParser(nil, "/v1/responses")
+		newParser := func() ResponseUsageParser { return adapter.ResponseParser(nil, "/v1/responses") }
+		wantUsage := TokenUsage{PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15}
 
-		result := parser.ParseStreamLine(`data: {"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}`)
-		assert.False(t, result.HasUsage)
-		_, ok := parser.FinalStreamUsage()
-		assert.False(t, ok, "usage from an incomplete stream must not be recorded")
-		parser.RecordStreamLineWritten(`data: {"type":"response.completed"}`)
-		assert.True(t, parser.StreamCompleted())
+		t.Run("usage is not recorded before a terminal event", func(t *testing.T) {
+			parser := newParser()
+			result := parser.ParseStreamLine(`data: {"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}`)
+			assert.False(t, result.HasUsage, "responses stream lines are not surfaced mid-stream")
+			_, ok := parser.FinalStreamUsage()
+			assert.False(t, ok, "usage from an unterminated stream must not be recorded")
+		})
 
-		usage, ok := parser.FinalStreamUsage()
-		assert.True(t, ok)
-		assert.Equal(t, TokenUsage{PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15}, usage)
+		terminalLines := map[string]string{
+			"response.completed":  `data: {"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}`,
+			"response.incomplete": `data: {"type":"response.incomplete","response":{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}`,
+			"response.failed":     `data: {"type":"response.failed","response":{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}`,
+		}
+		for name, line := range terminalLines {
+			t.Run(name+" with usage", func(t *testing.T) {
+				parser := newParser()
+				parser.ParseStreamLine(line)
+				parser.RecordStreamLineWritten(line)
+				assert.True(t, parser.StreamCompleted())
+				usage, ok := parser.FinalStreamUsage()
+				assert.True(t, ok)
+				assert.Equal(t, wantUsage, usage)
+			})
+		}
 
-		usage, ok = adapter.ResponseParser(nil, "/v1/responses").ParseBody([]byte(`{"usage":{"input_tokens":8,"output_tokens":2}}`))
-		assert.True(t, ok)
-		assert.Equal(t, TokenUsage{PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10}, usage)
+		t.Run("terminal event without usage does not fabricate usage", func(t *testing.T) {
+			parser := newParser()
+			line := `data: {"type":"response.failed","response":{"error":{"code":"server_error"}}}`
+			parser.ParseStreamLine(line)
+			parser.RecordStreamLineWritten(line)
+			assert.True(t, parser.StreamCompleted())
+			_, ok := parser.FinalStreamUsage()
+			assert.False(t, ok)
+		})
+
+		t.Run("bare object usage line is recorded at the terminal event", func(t *testing.T) {
+			parser := newParser()
+			parser.ParseStreamLine(`data: {"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10}}`)
+			parser.RecordStreamLineWritten(`data: {"type":"response.completed"}`)
+			usage, ok := parser.FinalStreamUsage()
+			assert.True(t, ok)
+			assert.Equal(t, TokenUsage{PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10}, usage)
+		})
+
+		t.Run("non-streaming body", func(t *testing.T) {
+			usage, ok := newParser().ParseBody([]byte(`{"usage":{"input_tokens":8,"output_tokens":2}}`))
+			assert.True(t, ok)
+			assert.Equal(t, TokenUsage{PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10}, usage)
+		})
 	})
 }
 

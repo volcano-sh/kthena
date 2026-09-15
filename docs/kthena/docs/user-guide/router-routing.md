@@ -296,6 +296,42 @@ spec:
 
 **NOTE**: Deploy [ModelServing](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServing-ds1.5b-pd-disaggregation.yaml) with PD roles first, then apply [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServer-ds1.5b-pd-disaggregation.yaml) and [ModelRoute](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRoute-ds1.5b-pd-disaggregation.yaml).
 
+## OpenAI Responses API
+
+Kthena Router routes `POST /v1/responses` the same way it routes `/v1/chat/completions` and `/v1/completions`: through the same `ModelRoute` matching, scheduling, authentication, rate limiting, and access logging described throughout this guide. The Router forwards Responses requests as received — it does not translate a Responses request into Chat Completions or vice versa — so the selected upstream model server must natively implement `POST /v1/responses`. A backend that only implements `/v1/chat/completions` will not work here, even if the request carries a `model` field; that field is still required for `ModelRoute` matching, as with any other protocol.
+
+**Supported request forms**:
+
+- `input` as a plain string, or as a structured list of message items (`{"role": "...", "content": [...]}`).
+- `instructions`.
+- `max_output_tokens` — the Responses equivalent of the Chat Completions `max_tokens` / `max_completion_tokens` fields.
+- Opaque or provider-specific fields such as `previous_response_id`, `tools`, `metadata`, and `reasoning` are forwarded unchanged. When a `ModelServer` rewrites `model`, only the `model` field changes; the rest of the request body is preserved.
+
+**Streaming**: `stream: true` requests are forwarded as Server-Sent Events without modification. The Router recognizes `response.completed`, `response.incomplete`, and `response.failed` as terminal events and does not require or inject a Chat Completions `data: [DONE]` marker.
+
+**Usage accounting**: The Router reads `usage.input_tokens`, `usage.output_tokens`, and `usage.total_tokens` — from the response body, or from whichever terminal event carries `usage` in a streamed response — and feeds them into the same output-token rate limiting, access logs, and `kthena_router_tokens_total` metric used for Chat Completions.
+
+**Routing coverage**: Responses requests are supported through every backend path described in this guide, provided the upstream natively supports `/v1/responses`:
+
+- Aggregated `ModelServer` targets (see [Simple Model-Based Routing](#1-simple-model-based-routing) above).
+- `InferencePool` / Gateway API targets — see [Gateway API Support](./gateway-api-support) and [Gateway API Inference Extension Support](./gateway-inference-extension-support).
+- PD-Disaggregated targets (see [PD-Disaggregated Routing](#5-pd-disaggregated-routing) above), including the default HTTP connector and the SGLang and NIXL KV connectors. The prefill request caps generation with `max_output_tokens` instead of the Chat Completions `max_tokens` / `max_completion_tokens` fields. PD mode additionally requires the upstream's Responses response to carry the selected connector's transfer metadata: the NIXL connector needs `kv_transfer_params` in the prefill response to hand the KV cache off to the decode Pod. As of vLLM v0.10.0, its Responses API response does not populate `kv_transfer_params`, so NIXL-based PD-Disaggregated routing is not currently usable with vLLM Responses endpoints; the default HTTP connector and SGLang's bootstrap-based connector do not depend on this field and are unaffected.
+
+**Try it out** (using the `deepseek-simple` ModelRoute from [Simple Model-Based Routing](#1-simple-model-based-routing)):
+
+```bash
+export MODEL="deepseek-simple"
+
+curl http://$ROUTER_IP/v1/responses \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"model\": \"$MODEL\",
+        \"input\": \"San Francisco is a\"
+    }"
+```
+
+**Multi-turn conversations**: Responses requests can chain turns with `previous_response_id` or a `conversation` identifier. If a backend keeps per-conversation state on the Pod that produced a response, follow-up turns need to reach that same Pod to use it. Kthena Router does not currently guarantee this, for Responses or for Chat Completions: [Session Boost](./session-boost) affects queue *ordering* only and explicitly does not guarantee Pod affinity on its own, and this PR does not add a Responses-specific affinity mechanism. Pod-level conversation affinity is tracked as related future work in [#1144](https://github.com/volcano-sh/kthena/issues/1144).
+
 ---
 
 This comprehensive routing system enables flexible, scalable, and maintainable model serving infrastructure that can adapt to various deployment patterns and user requirements.

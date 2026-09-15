@@ -75,7 +75,7 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	h.decodeRequest = BuildDecodeRequest(c, c.Request, decodeBody)
 
 	prefillBody := cloneReqBody(reqBody)
-	h.prefillRequest = buildPrefillRequest(c.Request, prefillBody)
+	h.prefillRequest = buildPrefillRequest(c, c.Request, prefillBody)
 
 	// --- Prefill phase ---
 	if metricsRecorder != nil {

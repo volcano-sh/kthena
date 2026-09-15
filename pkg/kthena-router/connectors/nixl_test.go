@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 )
 
@@ -378,6 +379,80 @@ func TestNIXLConnectorProxy(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestNIXLBuildPrefillRequestResponsesAPIURLRewrite covers both HTTPRoute
+// URLRewrite directions for NIXL's own prefill-body preparation: the canonical
+// public path rewritten to a custom upstream path, and a custom public path
+// rewritten to the canonical upstream path. Either way the prefill body must be
+// shaped for the Responses API (max_output_tokens), not Chat Completions
+// (max_tokens).
+func TestNIXLBuildPrefillRequestResponsesAPIURLRewrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name         string
+		originalPath string
+		currentPath  string
+		isResponses  bool
+	}{
+		{
+			name:         "canonical public path rewritten to custom upstream path",
+			originalPath: "/v1/responses",
+			currentPath:  "/backend/rewritten-path",
+			isResponses:  true,
+		},
+		{
+			name:         "custom public path rewritten to canonical upstream path",
+			originalPath: "/llm/v1/responses",
+			currentPath:  "/v1/responses",
+			isResponses:  true,
+		},
+		{
+			name:         "chat completions unaffected",
+			originalPath: "/v1/chat/completions",
+			currentPath:  "/v1/chat/completions",
+			isResponses:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("POST", tt.originalPath, nil)
+			accessCtx := accesslog.NewAccessLogContext("req-1", http.MethodPost, tt.originalPath, "HTTP/1.1", "")
+			c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+			// req.URL.Path reflects the HTTPRoute URLRewrite result.
+			req := httptest.NewRequest("POST", tt.currentPath, nil)
+			reqBody := map[string]interface{}{"model": "m", "stream": true}
+
+			connector := NewNIXLConnector().(*NIXLConnector)
+			result := connector.buildPrefillRequest(c, req, reqBody)
+			if result == nil {
+				t.Fatal("buildPrefillRequest returned nil")
+			}
+
+			body, err := io.ReadAll(result.Body)
+			if err != nil {
+				t.Fatalf("failed to read prefill request body: %v", err)
+			}
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(body, &parsed); err != nil {
+				t.Fatalf("failed to unmarshal prefill request body: %v", err)
+			}
+
+			_, hasMaxOutputTokens := parsed["max_output_tokens"]
+			_, hasMaxTokens := parsed["max_tokens"]
+			if hasMaxOutputTokens != tt.isResponses {
+				t.Errorf("max_output_tokens present = %v, want %v (body=%v)", hasMaxOutputTokens, tt.isResponses, parsed)
+			}
+			if hasMaxTokens == tt.isResponses {
+				t.Errorf("max_tokens present = %v, want %v (body=%v)", hasMaxTokens, !tt.isResponses, parsed)
+			}
+		})
+	}
 }
 
 func TestNIXLPrefillTimeoutIncludesResponseBody(t *testing.T) {
