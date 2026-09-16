@@ -680,7 +680,8 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 
 	req := c.Request
 	upstreamTimeout := upstreamTimeoutFor(modelServer)
-	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port, upstreamTimeout); err != nil {
+	retry := retryPolicyFor(modelServer)
+	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port, upstreamTimeout, retry); err != nil {
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
 		if !c.Writer.Written() {
@@ -697,6 +698,25 @@ func upstreamTimeoutFor(ms *v1alpha1.ModelServer) time.Duration {
 		return 0
 	}
 	return ms.Spec.TrafficPolicy.Timeout.Duration
+}
+
+// retryPolicy holds the ModelServer trafficPolicy.retry settings for one request.
+type retryPolicy struct {
+	attempts int
+	interval time.Duration
+}
+
+// retryPolicyFor returns the retry policy configured on the ModelServer. A
+// non-positive attempts leaves the candidate list as the only bound.
+func retryPolicyFor(ms *v1alpha1.ModelServer) retryPolicy {
+	if ms == nil || ms.Spec.TrafficPolicy == nil || ms.Spec.TrafficPolicy.Retry == nil {
+		return retryPolicy{}
+	}
+	policy := retryPolicy{attempts: int(ms.Spec.TrafficPolicy.Retry.Attempts)}
+	if interval := ms.Spec.TrafficPolicy.Retry.RetryInterval; interval != nil {
+		policy.interval = interval.Duration
+	}
+	return policy
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
@@ -838,6 +858,7 @@ func (r *Router) proxy(
 	stream bool,
 	port int32,
 	timeout time.Duration,
+	retry retryPolicy,
 	onUsage func(u providers.TokenUsage),
 ) error {
 	// Capture body bytes once so each retry attempt gets a fresh reader.
@@ -854,6 +875,18 @@ func (r *Router) proxy(
 	}
 
 	for i := 0; i < len(ctx.BestPods); i++ {
+		if retry.attempts > 0 && i >= retry.attempts {
+			break
+		}
+		// Every iteration past the first follows a failed attempt, so this is
+		// the gap between retries rather than a delay on the first request.
+		if i > 0 && retry.interval > 0 {
+			select {
+			case <-time.After(retry.interval):
+			case <-c.Request.Context().Done():
+				return c.Request.Context().Err()
+			}
+		}
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		accesslog.SetUpstreamInfo(c, 0, i+1)
 		pod := ctx.BestPods[i]
@@ -900,6 +933,7 @@ func (r *Router) proxyModelEndpoint(
 	modelRequest ModelRequest,
 	port int32,
 	timeout time.Duration,
+	retry retryPolicy,
 ) error {
 	// Mark start of upstream processing
 	accesslog.MarkUpstreamStart(c)
@@ -919,7 +953,7 @@ func (r *Router) proxyModelEndpoint(
 		stream := isStreaming(modelRequest)
 		modelName := ctx.Model
 		userID := c.GetString(common.UserIdKey)
-		err := r.proxy(c, decodeRequest, ctx, stream, port, timeout, func(usage providers.TokenUsage) {
+		err := r.proxy(c, decodeRequest, ctx, stream, port, timeout, retry, func(usage providers.TokenUsage) {
 			if usage.TotalTokens <= 0 {
 				return
 			}
@@ -956,7 +990,7 @@ func (r *Router) proxyModelEndpoint(
 	}
 
 	// PD disaggregated mode - use KV connector
-	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port, timeout)
+	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port, timeout, retry)
 }
 
 func (r *Router) proxyExternalProvider(
@@ -1400,6 +1434,7 @@ func (r *Router) proxyToPDDisaggregated(
 	modelRequest ModelRequest,
 	port int32,
 	timeout time.Duration,
+	retry retryPolicy,
 ) error {
 	// Get metrics recorder from context
 	var metricsRecorder *metrics.RequestMetricsRecorder
@@ -1415,10 +1450,24 @@ func (r *Router) proxyToPDDisaggregated(
 		maxRetry = len(ctx.PrefillPods)
 	}
 
+	attempted := 0
 	for i := 0; i < maxRetry; i++ {
 		if ctx.PrefillPods[i] == nil || ctx.DecodePods[i] == nil {
 			continue
 		}
+		if retry.attempts > 0 && attempted >= retry.attempts {
+			break
+		}
+		// Every attempt past the first follows a failed pair, so this is the gap
+		// between retries rather than a delay on the first request.
+		if attempted > 0 && retry.interval > 0 {
+			select {
+			case <-time.After(retry.interval):
+			case <-c.Request.Context().Done():
+				return c.Request.Context().Err()
+			}
+		}
+		attempted++
 		prefillPod := ctx.PrefillPods[i].GetPod()
 		decodePod := ctx.DecodePods[i].GetPod()
 		accesslog.SetUpstreamInfo(c, 0, i+1)
