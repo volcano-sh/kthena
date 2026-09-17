@@ -1,0 +1,24 @@
+# Router scheduler config — KVCache Aware
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-config
+  namespace: kthena-system
+data:
+  routerConfiguration: |
+    scheduler:
+      pluginConfig:
+        - name: kvcache-aware
+          args:
+            blockSizeToHash: 16
+            maxBlocksToMatch: 128
+      plugins:
+        Filter:
+          enabled: []
+          disabled:
+            - least-request
+            - lora-affinity
+        Score:
+          enabled:
+            - name: kvcache-aware
+              weight: 1

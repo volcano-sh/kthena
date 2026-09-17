@@ -216,6 +216,45 @@ docker-buildx: ## Build and push docker image for cross-platform support
 		--push .
 
 
+##@ Benchmark
+
+# Benchmark entry point: run a router A/B test locally via make instead of CI.
+# Scenario and router configs are referenced by bare name (no .yaml extension),
+# resolved under benchmark/router-benchmark/scenarios and .../plugins.
+BENCHMARK_DIR ?= benchmark/router-benchmark
+SCENARIO ?= smoke-test-s2
+ROUTER_CONFIG_A ?= router-config-random
+ROUTER_CONFIG_B ?= router-config-least-latency
+
+.PHONY: benchmark
+benchmark: benchmark-setup benchmark-deps benchmark-run ## Run a full A/B benchmark (setup + deps + run)
+
+.PHONY: benchmark-setup
+benchmark-setup: ## Create a Kind cluster and install Kthena
+	./hack/local-up-kthena.sh
+
+.PHONY: benchmark-deps
+benchmark-deps: ## Install benchmark Python deps and AIPerf
+	pip install -r $(BENCHMARK_DIR)/scripts/requirements.txt
+	pip install 'aiperf>=0.9,<0.11'
+
+.PHONY: benchmark-run
+benchmark-run: ## Run the A/B test (override SCENARIO / ROUTER_CONFIG_A / ROUTER_CONFIG_B)
+	cd $(BENCHMARK_DIR) && python scripts/ab_test.py \
+		--scenario scenarios/$(SCENARIO).yaml \
+		--router-config-a plugins/$(ROUTER_CONFIG_A).yaml \
+		--router-config-b plugins/$(ROUTER_CONFIG_B).yaml \
+		--output results/
+
+.PHONY: benchmark-dry-run
+benchmark-dry-run: ## Render scenario resources to /tmp without touching a cluster
+	cd $(BENCHMARK_DIR) && python scripts/ab_test.py \
+		--scenario scenarios/$(SCENARIO).yaml --dry-run
+
+.PHONY: benchmark-cleanup
+benchmark-cleanup: ## Tear down the Kind cluster
+	./hack/local-up-kthena.sh -q
+
 ##@ Dependencies
 
 ## Location to install dependencies to
