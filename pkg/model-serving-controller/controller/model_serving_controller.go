@@ -1765,6 +1765,7 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 		return nil
 	}
 	if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
+		c.graceMap.Delete(key)
 		return err
 	}
 	// Wait for the grace period before processing
