@@ -200,7 +200,7 @@ func TestNewTestController_HasSyncedQueueAndStores(t *testing.T) {
 	require.True(t, h.controller.podsInformer.HasSynced())
 	require.True(t, h.controller.servicesInformer.HasSynced())
 	require.True(t, h.controller.modelServingsInformer.HasSynced())
-	require.True(t, h.controller.initialSync)
+	require.True(t, h.controller.initialSync.Load())
 }
 
 func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
@@ -5960,13 +5960,13 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	startActions := len(kubeClient.Actions())
 
 	// Verify initialSync is false before syncAll
-	assert.False(t, controller.initialSync, "initialSync should be false before syncAll")
+	assert.False(t, controller.initialSync.Load(), "initialSync should be false before syncAll")
 
 	// Call syncAll - this should handle the failed pod properly after the fix
 	controller.syncAll()
 
 	// Verify initialSync is true after syncAll
-	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
+	assert.True(t, controller.initialSync.Load(), "initialSync should be true after syncAll")
 
 	assertPodDeleted(t, kubeClient, startActions, failedPod.Name, "Failed pod should be deleted after syncAll processes it")
 }
@@ -6220,7 +6220,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	controller.syncAll()
 
 	// Verify initialSync is true
-	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
+	assert.True(t, controller.initialSync.Load(), "initialSync should be true after syncAll")
 
 	// Verify running pod is NOT in graceMap (it's healthy)
 	_, runningInGraceMap := controller.graceMap.Load(getPodGracePeriodKey(runningPod))
@@ -6577,7 +6577,7 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	startActions := len(kubeClient.Actions())
 
 	// Verify before syncAll, initialSync is false
-	assert.False(t, controller.initialSync)
+	assert.False(t, controller.initialSync.Load())
 
 	// The key test: Before the fix, calling addPod directly with initialSync=false
 	// for a failed pod would return early without processing.

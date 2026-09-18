@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"istio.io/istio/pkg/util/sets"
@@ -109,8 +110,8 @@ type ModelServingController struct {
 	// nolint
 	workqueue       workqueue.RateLimitingInterface
 	store           datastore.Store
-	graceMap        sync.Map // key: podGracePeriodKey, value:time
-	initialSync     bool     // indicates whether the initial sync has been completed
+	graceMap        sync.Map    // key: podGracePeriodKey, value:time
+	initialSync     atomic.Bool // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
 }
@@ -372,7 +373,7 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 		}
 	default:
 		klog.V(4).Infof("handleDefault: %s/%s", newPod.Namespace, newPod.Name)
-		if !c.initialSync {
+		if !c.initialSync.Load() {
 			roleName := utils.GetRoleName(newPod)
 			roleTemplateHash := c.resolveRoleTemplateHash(ms, roleName, newPod)
 			c.store.AddServingGroupAndRole(types.NamespacedName{
@@ -637,7 +638,7 @@ func (c *ModelServingController) syncAll() {
 		c.addModelServing(ms)
 	}
 
-	c.initialSync = true
+	c.initialSync.Store(true)
 }
 
 // syncServingGroupReplicas scales up or down whole ServingGroups to meet the top-level

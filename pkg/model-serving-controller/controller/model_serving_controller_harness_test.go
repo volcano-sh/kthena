@@ -82,7 +82,7 @@ func newTestController(t *testing.T, modelServings ...*workloadv1alpha1.ModelSer
 		t.Fatalf("timed out waiting for informer caches to sync")
 	}
 	require.Eventually(t, func() bool {
-		return controller.initialSync
+		return controller.initialSync.Load()
 	}, 5*time.Second, 10*time.Millisecond, "timed out waiting for initial sync")
 
 	t.Cleanup(cancel)
