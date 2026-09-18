@@ -33,13 +33,33 @@ type ModelServerSpec struct {
 	InferenceEngine InferenceEngine `json:"inferenceEngine"`
 	// WorkloadSelector is used to match the model serving instances.
 	// Currently, they must be pods within the same namespace as modelServer object.
+	// `workloadSelector.matchLabels` and `endpoints` are mutually exclusive ways of
+	// declaring the serving instances, so exactly one of them must be used.
+	// `workloadSelector.pdGroup` does not select instances; it only assigns them
+	// prefill and decode roles, and therefore is the sole `workloadSelector` field
+	// that may also be combined with `endpoints`.
 	//
-	// +kubebuilder:validation:Required
-	WorkloadSelector *WorkloadSelector `json:"workloadSelector"`
+	// +optional
+	WorkloadSelector *WorkloadSelector `json:"workloadSelector,omitempty"`
+
+	// Endpoints is a static list of model serving instances. It is intended for
+	// deployments where the serving instances are not discoverable as pods of the
+	// cluster the router runs in, for example when the router reads its
+	// configuration from local files instead of the Kubernetes API server.
+	// `endpoints` and `workloadSelector.matchLabels` are mutually exclusive;
+	// exactly one of them must be specified.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1024
+	Endpoints []Endpoint `json:"endpoints,omitempty"`
 
 	// WorkloadPort defines the port and protocol configuration for the model server.
-	// +kubebuilder:validation:Required
-	WorkloadPort WorkloadPort `json:"workloadPort"`
+	// It may be omitted only when every entry in `endpoints` declares its own
+	// `port`; endpoints without an explicit `port` fall back to `workloadPort.port`.
+	// +optional
+	WorkloadPort WorkloadPort `json:"workloadPort,omitempty"`
 
 	// Traffic Policy for accessing the model server instance.
 	// +optional
@@ -84,6 +104,40 @@ type PDGroup struct {
 	PrefillLabels map[string]string `json:"prefillLabels"`
 	// The labels to match the model serving instances for decode.
 	DecodeLabels map[string]string `json:"decodeLabels"`
+}
+
+// Endpoint describes a single statically configured model serving instance.
+type Endpoint struct {
+	// Name uniquely identifies the endpoint within the ModelServer. Together with
+	// the ModelServer name it forms the instance identity in the router, for
+	// example in metrics and debug output.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name"`
+
+	// Address is the IP address or DNS name of the model serving instance.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=253
+	Address string `json:"address"`
+
+	// Port is the port the model serving instance listens on. It defaults to
+	// `spec.workloadPort.port` when unset.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port *int32 `json:"port,omitempty"`
+
+	// Labels are attached to the endpoint. They do not select serving instances;
+	// they are only matched against `workloadSelector.pdGroup` to assign the
+	// endpoint a prefill or decode role, `pdGroup` being the sole
+	// `workloadSelector` field that may be combined with `endpoints`.
+	//
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // WorkloadPort defines the port and protocol configuration for the model server.

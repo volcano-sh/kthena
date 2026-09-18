@@ -192,6 +192,23 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		return err
 	}
 
+	// Refresh the per-ModelServer upstream transport to match the current
+	// connectionPool config. Update is a no-op when the config is unchanged.
+	var cp *aiv1alpha1.ConnectionPool
+	if ms.Spec.TrafficPolicy != nil {
+		cp = ms.Spec.TrafficPolicy.ConnectionPool
+	}
+	c.transportRegistry.Update(utils.GetNamespaceName(ms), cp)
+
+	if len(ms.Spec.Endpoints) > 0 {
+		return SyncStaticEndpoints(c.store, ms)
+	}
+
+	if ms.Spec.WorkloadSelector == nil {
+		klog.Warningf("model server %s specifies neither workloadSelector nor endpoints, skipping", key)
+		return nil
+	}
+
 	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: ms.Spec.WorkloadSelector.MatchLabels})
 	if err != nil {
 		return fmt.Errorf("invalid selector: %v", err)
@@ -210,14 +227,6 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 	}
 
 	_ = c.store.AddOrUpdateModelServer(ms, pods)
-
-	// Refresh the per-ModelServer upstream transport to match the current
-	// connectionPool config. Update is a no-op when the config is unchanged.
-	var cp *aiv1alpha1.ConnectionPool
-	if ms.Spec.TrafficPolicy != nil {
-		cp = ms.Spec.TrafficPolicy.ConnectionPool
-	}
-	c.transportRegistry.Update(utils.GetNamespaceName(ms), cp)
 
 	// Bind every ready pod selected by this ModelServer. Pods that already have
 	// an entry in the store get the binding appended so their runtime metrics and
@@ -282,6 +291,10 @@ func (c *ModelServerController) addOrUpdatePod(pod *corev1.Pod) error {
 
 	servers := []*aiv1alpha1.ModelServer{}
 	for _, item := range modelServers {
+		// ModelServers backed by static endpoints do not select cluster pods.
+		if item.Spec.WorkloadSelector == nil || len(item.Spec.Endpoints) > 0 {
+			continue
+		}
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: item.Spec.WorkloadSelector.MatchLabels})
 		if err != nil || !selector.Matches(labels.Set(pod.Labels)) {
 			continue

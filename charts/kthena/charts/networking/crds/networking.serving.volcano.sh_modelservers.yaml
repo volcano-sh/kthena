@@ -55,6 +55,57 @@ spec:
           spec:
             description: ModelServerSpec defines the desired state of ModelServer.
             properties:
+              endpoints:
+                description: |-
+                  Endpoints is a static list of model serving instances. It is intended for
+                  deployments where the serving instances are not discoverable as pods of the
+                  cluster the router runs in, for example when the router reads its
+                  configuration from local files instead of the Kubernetes API server.
+                  `endpoints` and `workloadSelector.matchLabels` are mutually exclusive;
+                  exactly one of them must be specified.
+                items:
+                  description: Endpoint describes a single statically configured model
+                    serving instance.
+                  properties:
+                    address:
+                      description: Address is the IP address or DNS name of the model
+                        serving instance.
+                      maxLength: 253
+                      type: string
+                    labels:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Labels are attached to the endpoint. They do not select serving instances;
+                        they are only matched against `workloadSelector.pdGroup` to assign the
+                        endpoint a prefill or decode role, `pdGroup` being the sole
+                        `workloadSelector` field that may be combined with `endpoints`.
+                      type: object
+                    name:
+                      description: |-
+                        Name uniquely identifies the endpoint within the ModelServer. Together with
+                        the ModelServer name it forms the instance identity in the router, for
+                        example in metrics and debug output.
+                      maxLength: 253
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    port:
+                      description: |-
+                        Port is the port the model serving instance listens on. It defaults to
+                        `spec.workloadPort.port` when unset.
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                  required:
+                  - address
+                  - name
+                  type: object
+                maxItems: 1024
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               inferenceEngine:
                 description: The inference engine used to serve the model.
                 enum:
@@ -144,8 +195,10 @@ spec:
                     type: string
                 type: object
               workloadPort:
-                description: WorkloadPort defines the port and protocol configuration
-                  for the model server.
+                description: |-
+                  WorkloadPort defines the port and protocol configuration for the model server.
+                  It may be omitted only when every entry in `endpoints` declares its own
+                  `port`; endpoints without an explicit `port` fall back to `workloadPort.port`.
                 properties:
                   port:
                     description: The port of the model server. The number must be
@@ -169,6 +222,11 @@ spec:
                 description: |-
                   WorkloadSelector is used to match the model serving instances.
                   Currently, they must be pods within the same namespace as modelServer object.
+                  `workloadSelector.matchLabels` and `endpoints` are mutually exclusive ways of
+                  declaring the serving instances, so exactly one of them must be used.
+                  `workloadSelector.pdGroup` does not select instances; it only assigns them
+                  prefill and decode roles, and therefore is the sole `workloadSelector` field
+                  that may also be combined with `endpoints`.
                 properties:
                   matchLabels:
                     additionalProperties:
@@ -207,8 +265,6 @@ spec:
                 type: object
             required:
             - inferenceEngine
-            - workloadPort
-            - workloadSelector
             type: object
           status:
             description: ModelServerStatus defines the observed state of ModelServer.

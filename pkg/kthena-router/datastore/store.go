@@ -899,7 +899,7 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 	if value, ok := s.modelServer.Load(name); !ok {
 		modelServerObj = newModelServer(ms)
 		// New object — no concurrent access yet, safe to write without lock
-		if len(pods) != 0 {
+		if pods != nil {
 			modelServerObj.pods = pods
 		}
 	} else {
@@ -909,8 +909,11 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		modelServerObj.mutex.Lock()
 		selectorChanged := !reflect.DeepEqual(modelServerObj.modelServer.Spec.WorkloadSelector, ms.Spec.WorkloadSelector)
 		modelServerObj.modelServer = ms
-		if len(pods) != 0 {
-			// do not operate s.pods here, which are done within pod handler
+		if pods != nil {
+			// A non-nil set is an explicit replacement, so an empty set clears the
+			// previous pods instead of being ignored; callers pass nil to leave the
+			// pod set untouched. Do not operate s.pods here, which are done within
+			// pod handler.
 			modelServerObj.pods = pods
 		}
 		if selectorChanged {
@@ -1794,14 +1797,20 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
-	modelServers := podInfo.GetModelServers()
-	for msName := range modelServers {
+	var fallback int32
+	for msName := range podInfo.GetModelServers() {
 		if msValue, ok := s.modelServer.Load(msName); ok {
 			ms := msValue.(*modelServer).getModelServer()
 			if ms != nil && ms.Spec.WorkloadPort.Port > 0 {
-				return uint32(ms.Spec.WorkloadPort.Port)
+				fallback = ms.Spec.WorkloadPort.Port
+				break
 			}
 		}
+	}
+	// Statically configured endpoints may carry their own port, which overrides
+	// `spec.workloadPort.port` and is the only port when the latter is unset.
+	if port := utils.EndpointPort(podInfo.GetPod(), fallback); port > 0 {
+		return uint32(port)
 	}
 	return 0
 }

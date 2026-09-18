@@ -39,11 +39,16 @@ import (
 )
 
 const (
-	routerConfigFile = "/etc/config/routerConfiguration.yaml"
+	// DefaultRouterConfigFile is the router configuration mounted from the
+	// kthena-router ConfigMap.
+	DefaultRouterConfigFile = "/etc/config/routerConfiguration.yaml"
 )
 
-func NewRouter(store datastore.Store, transportRegistry *common.TransportRegistry) *router.Router {
-	return router.NewRouter(store, routerConfigFile, transportRegistry)
+func NewRouter(store datastore.Store, configFile string, transportRegistry *common.TransportRegistry) *router.Router {
+	if configFile == "" {
+		configFile = DefaultRouterConfigFile
+	}
+	return router.NewRouter(store, configFile, transportRegistry)
 }
 
 // Starts router

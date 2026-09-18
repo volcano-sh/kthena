@@ -51,6 +51,25 @@ _Appears in:_
 | `maxConnectionsPerHost` _integer_ | MaxConnectionsPerHost limits dialing, active and idle connections per host.<br />0 means unlimited. Defaults to 0 when omitted. |  | Minimum: 0 <br /> |
 
 
+#### Endpoint
+
+
+
+Endpoint describes a single statically configured model serving instance.
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name uniquely identifies the endpoint within the ModelServer. Together with<br />the ModelServer name it forms the instance identity in the router, for<br />example in metrics and debug output. |  | MaxLength: 253 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br />Required: \{\} <br /> |
+| `address` _string_ | Address is the IP address or DNS name of the model serving instance. |  | MaxLength: 253 <br />Required: \{\} <br /> |
+| `port` _integer_ | Port is the port the model serving instance listens on. It defaults to<br />`spec.workloadPort.port` when unset. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels are attached to the endpoint. They do not select serving instances;<br />they are only matched against `workloadSelector.pdGroup` to assign the<br />endpoint a prefill or decode role, `pdGroup` being the sole<br />`workloadSelector` field that may be combined with `endpoints`. |  |  |
+
+
 #### ExternalModelProvider
 
 
@@ -352,8 +371,9 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | The real model that the modelServers are running.<br />If the `model` in LLM inference request is different from this field, it should be overwritten by this field.<br />Otherwise, the `model` in LLM inference request will not be mutated. |  | MaxLength: 256 <br /> |
 | `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang] <br />Required: \{\} <br /> |
-| `workloadSelector` _[WorkloadSelector](#workloadselector)_ | WorkloadSelector is used to match the model serving instances.<br />Currently, they must be pods within the same namespace as modelServer object. |  | Required: \{\} <br /> |
-| `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server. |  | Required: \{\} <br /> |
+| `workloadSelector` _[WorkloadSelector](#workloadselector)_ | WorkloadSelector is used to match the model serving instances.<br />Currently, they must be pods within the same namespace as modelServer object.<br />`workloadSelector.matchLabels` and `endpoints` are mutually exclusive ways of<br />declaring the serving instances, so exactly one of them must be used.<br />`workloadSelector.pdGroup` does not select instances; it only assigns them<br />prefill and decode roles, and therefore is the sole `workloadSelector` field<br />that may also be combined with `endpoints`. |  |  |
+| `endpoints` _[Endpoint](#endpoint) array_ | Endpoints is a static list of model serving instances. It is intended for<br />deployments where the serving instances are not discoverable as pods of the<br />cluster the router runs in, for example when the router reads its<br />configuration from local files instead of the Kubernetes API server.<br />`endpoints` and `workloadSelector.matchLabels` are mutually exclusive;<br />exactly one of them must be specified. |  | MaxItems: 1024 <br /> |
+| `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server.<br />It may be omitted only when every entry in `endpoints` declares its own<br />`port`; endpoints without an explicit `port` fall back to `workloadPort.port`. |  |  |
 | `trafficPolicy` _[TrafficPolicy](#trafficpolicy)_ | Traffic Policy for accessing the model server instance. |  |  |
 | `kvConnector` _[KVConnectorSpec](#kvconnectorspec)_ | KVConnector specifies the KV connector configuration for PD disaggregated routing |  |  |
 
