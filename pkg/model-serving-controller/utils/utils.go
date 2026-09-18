@@ -503,8 +503,8 @@ func exclusiveConditionTypes(condition1 metav1.Condition, condition2 metav1.Cond
 	return false
 }
 
-// ParseAdmissionRequest parses the HTTP request and extracts the AdmissionReview and ModelServing.
-func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview, *workloadv1alpha1.ModelServing, error) {
+// ParseAdmissionRequest extracts the AdmissionReview and its typed object.
+func ParseAdmissionRequest[T any](r *http.Request) (*admissionv1.AdmissionReview, *T, error) {
 	// Verify the content type is accurate
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
@@ -527,9 +527,12 @@ func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview
 		return nil, nil, fmt.Errorf("failed to decode body: %v", err)
 	}
 
-	var ms workloadv1alpha1.ModelServing
+	if admissionReview.Request == nil {
+		return nil, nil, fmt.Errorf("admission review request is nil")
+	}
+	var ms T
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &ms); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode modelServing: %v", err)
+		return nil, nil, fmt.Errorf("failed to decode object: %v", err)
 	}
 
 	return &admissionReview, &ms, nil
