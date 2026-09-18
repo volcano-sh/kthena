@@ -600,7 +600,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `matchLabels` _object (keys:string, values:string)_ | The base labels to match the model serving instances.<br />All serving instances must match these labels. |  |  |
+| `matchLabels` _object (keys:string, values:string)_ | The base labels to match the model serving instances.<br />All serving instances must match these labels. |  | MinProperties: 1 <br />Required: \{\} <br /> |
 | `pdGroup` _[PDGroup](#pdgroup)_ | PDGroup is used to further match different roles of the model serving instances,<br />mainly used in case like PD disaggregation. |  |  |
 
 

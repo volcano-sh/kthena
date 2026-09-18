@@ -67,8 +67,9 @@ const (
 type WorkloadSelector struct {
 	// The base labels to match the model serving instances.
 	// All serving instances must match these labels.
-	// +kube:validation:Required
-	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinProperties=1
+	MatchLabels map[string]string `json:"matchLabels"`
 	// PDGroup is used to further match different roles of the model serving instances,
 	// mainly used in case like PD disaggregation.
 	PDGroup *PDGroup `json:"pdGroup,omitempty"`
