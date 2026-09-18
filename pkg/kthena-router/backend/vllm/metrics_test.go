@@ -44,6 +44,16 @@ func histogramMetricFamily(sum float64, count uint64) *dto.MetricFamily {
 	}
 }
 
+// multiSeries joins the series of several families into one family, like a pod
+// running one vLLM engine per data parallel rank.
+func multiSeries(families ...*dto.MetricFamily) *dto.MetricFamily {
+	joined := &dto.MetricFamily{}
+	for _, family := range families {
+		joined.Metric = append(joined.Metric, family.Metric...)
+	}
+	return joined
+}
+
 // makePreviousHistogram builds a *dto.Histogram for use as prior scrape data.
 func makePreviousHistogram(sum float64, count uint64) *dto.Histogram {
 	return &dto.Histogram{SampleSum: &sum, SampleCount: &count}
@@ -102,6 +112,19 @@ func TestGetCountMetricsInfo(t *testing.T) {
 				utils.KVCacheUsage:      0.0,
 				utils.RequestWaitingNum: 0.0,
 				utils.RequestRunningNum: 0.0,
+			},
+		},
+		{
+			name: "data parallel engines: counts are summed and kv cache usage averaged",
+			allMetrics: map[string]*dto.MetricFamily{
+				KVCacheUsage:      multiSeries(gaugeMetricFamily(0.2), gaugeMetricFamily(0.6)),
+				RequestWaitingNum: multiSeries(gaugeMetricFamily(4.0), gaugeMetricFamily(0.0)),
+				RequestRunningNum: multiSeries(gaugeMetricFamily(5.0), gaugeMetricFamily(3.0)),
+			},
+			want: map[string]float64{
+				utils.KVCacheUsage:      0.4,
+				utils.RequestWaitingNum: 4.0,
+				utils.RequestRunningNum: 8.0,
 			},
 		},
 		{
@@ -178,6 +201,20 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				utils.TTFT: 0.0,
 			},
 			wantHistogramKeys: []string{utils.TTFT},
+		},
+		{
+			name: "data parallel engines are merged before the delta average",
+			allMetrics: map[string]*dto.MetricFamily{
+				// engines: sum=10,count=5 and sum=30,count=5 -> sum=40,count=10; previous sum=20,count=6 -> 20/4 = 5.0
+				ITL: multiSeries(histogramMetricFamily(10.0, 5), histogramMetricFamily(30.0, 5)),
+			},
+			previousHistogram: map[string]*dto.Histogram{
+				utils.TPOT: makePreviousHistogram(20.0, 6),
+			},
+			wantMetrics: map[string]float64{
+				utils.TPOT: 5.0,
+			},
+			wantHistogramKeys: []string{utils.TPOT},
 		},
 		{
 			name:              "empty input returns empty maps",
