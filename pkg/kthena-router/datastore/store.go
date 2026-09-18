@@ -45,6 +45,7 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -172,7 +173,7 @@ type CallbackFunc func(data EventData)
 // PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
 type PodRuntimeInspector interface {
 	GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
-	GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error)
+	GetPodModels(engine string, pod *corev1.Pod, port uint32, apiKey string) ([]string, error)
 }
 
 type realPodRuntimeInspector struct{}
@@ -181,8 +182,8 @@ func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, por
 	return backend.GetPodMetrics(engine, pod, port, previousHistogram)
 }
 
-func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
-	return backend.GetPodModels(engine, pod, port)
+func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, port uint32, apiKey string) ([]string, error) {
+	return backend.GetPodModels(engine, pod, port, apiKey)
 }
 
 type Option func(*store)
@@ -1783,8 +1784,16 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 	if podObj.Status.PodIP == "" {
 		return
 	}
-	port := s.getPodWorkloadPort(podInfo)
-	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
+	ms := s.modelServerForPod(podInfo)
+	apiKey, err := s.modelServerAPIKey(ms)
+	if err != nil {
+		// Probing anonymously would hide the misconfiguration.
+		klog.V(4).Infof("skipping model discovery for pod %s/%s: %v",
+			podObj.GetNamespace(), podObj.GetName(), err)
+		return
+	}
+
+	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, workloadPort(ms), apiKey)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
 		return
@@ -1794,16 +1803,60 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
-	modelServers := podInfo.GetModelServers()
-	for msName := range modelServers {
-		if msValue, ok := s.modelServer.Load(msName); ok {
-			ms := msValue.(*modelServer).getModelServer()
-			if ms != nil && ms.Spec.WorkloadPort.Port > 0 {
-				return uint32(ms.Spec.WorkloadPort.Port)
-			}
+	return workloadPort(s.modelServerForPod(podInfo))
+}
+
+func workloadPort(ms *aiv1alpha1.ModelServer) uint32 {
+	if ms == nil || ms.Spec.WorkloadPort.Port <= 0 {
+		return 0
+	}
+	return uint32(ms.Spec.WorkloadPort.Port)
+}
+
+// modelServerForPod picks one ModelServer by name when a pod matches several,
+// so the port and the API key always come from the same one.
+func (s *store) modelServerForPod(podInfo *PodInfo) *aiv1alpha1.ModelServer {
+	msNames := podInfo.GetModelServers().UnsortedList()
+	sort.Slice(msNames, func(i, j int) bool { return msNames[i].String() < msNames[j].String() })
+
+	var fallback *aiv1alpha1.ModelServer
+	for _, msName := range msNames {
+		ms := s.GetModelServer(msName)
+		if ms == nil {
+			continue
+		}
+		if ms.Spec.WorkloadPort.Port > 0 {
+			return ms
+		}
+		if fallback == nil {
+			fallback = ms
 		}
 	}
-	return 0
+	return fallback
+}
+
+// modelServerAPIKey returns "" with no error when no key is configured, and an
+// error when one is configured but unusable. The two are not the same.
+func (s *store) modelServerAPIKey(ms *aiv1alpha1.ModelServer) (string, error) {
+	if ms == nil || ms.Spec.APIKeySecretRef == nil {
+		return "", nil
+	}
+
+	ref := ms.Spec.APIKeySecretRef
+	secretName := types.NamespacedName{Namespace: ms.Namespace, Name: ref.Name}
+	secret := s.GetSecret(secretName)
+	if secret == nil {
+		return "", fmt.Errorf("secret %s is not available, check it exists and carries the %s label",
+			secretName, aiv1alpha1.ExternalModelProviderSecretLabelKey)
+	}
+
+	// A Secret written from a file carries a trailing newline that
+	// http.Transport rejects.
+	key, err := providers.NormalizeCredential(secret.Data[ref.Key])
+	if err != nil {
+		return "", fmt.Errorf("key %q in secret %s is unusable: %w", ref.Key, secretName, err)
+	}
+	return key, nil
 }
 
 func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {

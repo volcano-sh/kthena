@@ -66,7 +66,7 @@ func newStoreWithMockBackend() *store {
 				utils.RequestRunningNum: 5,
 			}, nil
 		},
-		modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
+		modelsFn: func(_ string, _ *corev1.Pod, _ uint32, _ string) ([]string, error) {
 			return []string{"test-model"}, nil
 		},
 	})).(*store)

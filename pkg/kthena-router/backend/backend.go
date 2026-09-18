@@ -29,7 +29,7 @@ import (
 
 type MetricsProvider interface {
 	GetPodMetrics(pod *corev1.Pod, port uint32) (map[string]*dto.MetricFamily, error)
-	GetPodModels(pod *corev1.Pod, port uint32) ([]string, error)
+	GetPodModels(pod *corev1.Pod, port uint32, apiKey string) ([]string, error)
 	GetCountMetricsInfo(allMetrics map[string]*dto.MetricFamily) map[string]float64
 	GetHistogramPodMetrics(allMetrics map[string]*dto.MetricFamily, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
 }
@@ -71,14 +71,14 @@ func GetMetricsProvider(engine string) (MetricsProvider, error) {
 	return nil, fmt.Errorf("unsupported engine: %s", engine)
 }
 
-func GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
+func GetPodModels(engine string, pod *corev1.Pod, port uint32, apiKey string) ([]string, error) {
 	provider, err := GetMetricsProvider(engine)
 	if err != nil {
 		klog.Errorf("Failed to get inference engine %s for pod %s: %v", engine, podRef(pod), err)
 		return nil, err
 	}
 
-	return provider.GetPodModels(pod, port)
+	return provider.GetPodModels(pod, port, apiKey)
 }
 
 // podRef returns a "namespace/name" identifier for logging, tolerating a nil pod.

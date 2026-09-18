@@ -21,6 +21,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apisv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -469,6 +470,11 @@ func (in *ModelServerSpec) DeepCopyInto(out *ModelServerSpec) {
 		in, out := &in.KVConnector, &out.KVConnector
 		*out = new(KVConnectorSpec)
 		**out = **in
+	}
+	if in.APIKeySecretRef != nil {
+		in, out := &in.APIKeySecretRef, &out.APIKeySecretRef
+		*out = new(corev1.SecretKeySelector)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

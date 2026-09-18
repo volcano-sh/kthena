@@ -55,6 +55,39 @@ spec:
           spec:
             description: ModelServerSpec defines the desired state of ModelServer.
             properties:
+              apiKeySecretRef:
+                description: |-
+                  APIKeySecretRef references the API key the serving instances require, for
+                  example a vLLM engine started with --api-key. The router sends it as a bearer
+                  token when discovering the models a pod serves. The Secret must live in this
+                  ModelServer's namespace and carry the
+                  networking.serving.volcano.sh/external-model-provider-credential label.
+                properties:
+                  key:
+                    description: The key of the secret to select from.  Must be a
+                      valid secret key.
+                    type: string
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                  optional:
+                    description: Specify whether the Secret or its key must be defined
+                    type: boolean
+                required:
+                - key
+                type: object
+                x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: apiKeySecretRef.name is required
+                  rule: has(self.name) && self.name != ''
+                - message: apiKeySecretRef.optional must be false or unset
+                  rule: '!has(self.optional) || !self.optional'
               inferenceEngine:
                 description: The inference engine used to serve the model.
                 enum:

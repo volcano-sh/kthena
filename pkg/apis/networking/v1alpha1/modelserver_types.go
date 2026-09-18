@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -48,6 +49,16 @@ type ModelServerSpec struct {
 	// KVConnector specifies the KV connector configuration for PD disaggregated routing
 	// +optional
 	KVConnector *KVConnectorSpec `json:"kvConnector,omitempty"`
+
+	// APIKeySecretRef references the API key the serving instances require, for
+	// example a vLLM engine started with --api-key. The router sends it as a bearer
+	// token when discovering the models a pod serves. The Secret must live in this
+	// ModelServer's namespace and carry the
+	// networking.serving.volcano.sh/external-model-provider-credential label.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="has(self.name) && self.name != ''",message="apiKeySecretRef.name is required"
+	// +kubebuilder:validation:XValidation:rule="!has(self.optional) || !self.optional",message="apiKeySecretRef.optional must be false or unset"
+	APIKeySecretRef *corev1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
 }
 
 // InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.

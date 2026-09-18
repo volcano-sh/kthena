@@ -823,6 +823,50 @@ func (s *failSecretDeleteStore) DeleteSecret(name types.NamespacedName) error {
 	return s.Store.DeleteSecret(name)
 }
 
+func TestExternalModelProviderController_SecretSyncKeepsModelServerReference(t *testing.T) {
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	store := datastore.New()
+	controller, err := NewExternalModelProviderController(kthenaClient, kthenaInformerFactory, kubeInformerFactory, store)
+	assert.NoError(t, err)
+
+	secretName := types.NamespacedName{Namespace: "default", Name: "vllm-key"}
+	modelServer := modelServerWithAPIKeySecretRef(secretName.Namespace, "ms1", secretName.Name)
+	assert.NoError(t, controller.modelServerIndexer.Add(modelServer))
+	assert.NoError(t, kubeInformerFactory.Core().V1().Secrets().Informer().GetIndexer().Add(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: secretName.Namespace, Name: secretName.Name},
+		Data: map[string][]byte{
+			"api-key":      []byte("s3cret"),
+			"unreferenced": []byte("must-not-be-cached"),
+		},
+	}))
+
+	// No provider references this Secret; the ModelServer alone must keep it.
+	assert.NoError(t, controller.syncSecretHandler(secretName.String()))
+	stored := store.GetSecret(secretName)
+	if assert.NotNil(t, stored) {
+		assert.Equal(t, map[string][]byte{"api-key": []byte("s3cret")}, stored.Data)
+	}
+
+	assert.NoError(t, controller.modelServerIndexer.Delete(modelServer))
+	assert.NoError(t, controller.syncSecretHandler(secretName.String()))
+	assert.Nil(t, store.GetSecret(secretName))
+}
+
+func modelServerWithAPIKeySecretRef(namespace, name, secretName string) *aiv1alpha1.ModelServer {
+	return &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: aiv1alpha1.ModelServerSpec{
+			APIKeySecretRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  "api-key",
+			},
+		},
+	}
+}
+
 func providerWithSecretRef(namespace, name, secretName string) *aiv1alpha1.ExternalModelProvider {
 	return &aiv1alpha1.ExternalModelProvider{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
