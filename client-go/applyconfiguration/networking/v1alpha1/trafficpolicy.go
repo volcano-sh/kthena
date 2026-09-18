@@ -28,6 +28,7 @@ type TrafficPolicyApplyConfiguration struct {
 	Timeout        *v1.Duration                      `json:"timeout,omitempty"`
 	Retry          *RetryApplyConfiguration          `json:"retry,omitempty"`
 	ConnectionPool *ConnectionPoolApplyConfiguration `json:"connectionPool,omitempty"`
+	SessionSticky  *SessionStickyApplyConfiguration  `json:"sessionSticky,omitempty"`
 }
 
 // TrafficPolicyApplyConfiguration constructs a declarative configuration of the TrafficPolicy type for use with
@@ -57,5 +58,13 @@ func (b *TrafficPolicyApplyConfiguration) WithRetry(value *RetryApplyConfigurati
 // If called multiple times, the ConnectionPool field is set to the value of the last call.
 func (b *TrafficPolicyApplyConfiguration) WithConnectionPool(value *ConnectionPoolApplyConfiguration) *TrafficPolicyApplyConfiguration {
 	b.ConnectionPool = value
+	return b
+}
+
+// WithSessionSticky sets the SessionSticky field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the SessionSticky field is set to the value of the last call.
+func (b *TrafficPolicyApplyConfiguration) WithSessionSticky(value *SessionStickyApplyConfiguration) *TrafficPolicyApplyConfiguration {
+	b.SessionSticky = value
 	return b
 }

@@ -515,6 +515,61 @@ _Appears in:_
 | `targetModels` _[TargetModel](#targetmodel) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
 
 
+#### SessionKeySource
+
+
+
+SessionKeySource defines one session key extraction rule.
+
+
+
+_Appears in:_
+- [SessionSticky](#sessionsticky)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[SessionKeySourceType](#sessionkeysourcetype)_ |  |  | Enum: [Header Query Cookie JWTClaim] <br />Required: \{\} <br /> |
+| `name` _string_ | Name is the header name, query key, cookie name, or JWT claim name. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### SessionKeySourceType
+
+_Underlying type:_ _string_
+
+SessionKeySourceType identifies how a session key fragment is read.
+
+_Validation:_
+- Enum: [Header Query Cookie JWTClaim]
+
+_Appears in:_
+- [SessionKeySource](#sessionkeysource)
+
+| Field | Description |
+| --- | --- |
+| `Header` |  |
+| `Query` |  |
+| `Cookie` |  |
+| `JWTClaim` |  |
+
+
+#### SessionSticky
+
+
+
+SessionSticky configures per-ModelServer session key extraction and binding TTL.
+The backing store (memory vs Redis) is configured in the router process, not here.
+
+
+
+_Appears in:_
+- [TrafficPolicy](#trafficpolicy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is binding TTL in seconds.<br />Once the session has been idle for more than the specified duration, the session becomes invalid.<br />When unset, the default is 300 (5 minutes). |  | Minimum: 1 <br /> |
+| `sources` _[SessionKeySource](#sessionkeysource) array_ | Sources are evaluated in order; the first non-empty extracted value is the session key. |  | MaxItems: 16 <br /> |
+
+
 #### StringMatch
 
 
@@ -567,6 +622,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `retry` _[Retry](#retry)_ | The retry policy for the inference request. |  |  |
 | `connectionPool` _[ConnectionPool](#connectionpool)_ | ConnectionPool configures the upstream HTTP connection pool used when<br />forwarding to this ModelServer's pods. When omitted, a shared default<br />pool is used. Each ModelServer that sets this gets its own isolated pool. |  |  |
+| `sessionSticky` _[SessionSticky](#sessionsticky)_ | SessionSticky pins requests with the same extracted session key to the same<br />backend Pod of this ModelServer for a TTL. Nil or omitted disables session<br />affinity for this ModelServer. It does not override ModelRoute weighted<br />selection among ModelServers. |  |  |
 
 
 #### WorkloadPort

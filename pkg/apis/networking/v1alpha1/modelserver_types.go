@@ -120,6 +120,7 @@ type KVConnectorSpec struct {
 	Type KVConnectorType `json:"type,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.sessionSticky) || self.sessionSticky == null || size(self.sessionSticky.sources) > 0", message="sessionSticky.sources must be non-empty when sessionSticky is set"
 type TrafficPolicy struct {
 	// Timeout bounds how long the router waits for the backend to start responding,
 	// covering connection setup, sending the request and waiting for the response
@@ -136,6 +137,13 @@ type TrafficPolicy struct {
 	// pool is used. Each ModelServer that sets this gets its own isolated pool.
 	// +optional
 	ConnectionPool *ConnectionPool `json:"connectionPool,omitempty"`
+
+	// SessionSticky pins requests with the same extracted session key to the same
+	// backend Pod of this ModelServer for a TTL. Nil or omitted disables session
+	// affinity for this ModelServer. It does not override ModelRoute weighted
+	// selection among ModelServers.
+	// +optional
+	SessionSticky *SessionSticky `json:"sessionSticky,omitempty"`
 
 	// TODO: add LoadBalancer policy
 }
@@ -161,6 +169,42 @@ type ConnectionPool struct {
 	// Defaults to 90s when omitted.
 	// +optional
 	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
+}
+
+// SessionSticky configures per-ModelServer session key extraction and binding TTL.
+// The backing store (memory vs Redis) is configured in the router process, not here.
+type SessionSticky struct {
+	// SessionAffinitySeconds is binding TTL in seconds.
+	// Once the session has been idle for more than the specified duration, the session becomes invalid.
+	// When unset, the default is 300 (5 minutes).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	SessionAffinitySeconds *int32 `json:"sessionAffinitySeconds,omitempty"`
+	// Sources are evaluated in order; the first non-empty extracted value is the session key.
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Sources []SessionKeySource `json:"sources,omitempty"`
+}
+
+// SessionKeySourceType identifies how a session key fragment is read.
+// +kubebuilder:validation:Enum=Header;Query;Cookie;JWTClaim
+type SessionKeySourceType string
+
+const (
+	SessionKeySourceHeader   SessionKeySourceType = "Header"
+	SessionKeySourceQuery    SessionKeySourceType = "Query"
+	SessionKeySourceCookie   SessionKeySourceType = "Cookie"
+	SessionKeySourceJWTClaim SessionKeySourceType = "JWTClaim"
+)
+
+// SessionKeySource defines one session key extraction rule.
+type SessionKeySource struct {
+	// +kubebuilder:validation:Required
+	Type SessionKeySourceType `json:"type"`
+	// Name is the header name, query key, cookie name, or JWT claim name.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 type Retry struct {

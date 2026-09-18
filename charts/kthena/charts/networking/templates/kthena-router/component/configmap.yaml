@@ -37,3 +37,9 @@ data:
               weight: 1
             - name: prefix-cache
               weight: 1
+    sessionSticky:
+      backend: {{ .Values.kthenaRouter.sessionSticky.backend | default "memory" | quote }}
+      {{- if eq (.Values.kthenaRouter.sessionSticky.backend | default "memory") "redis" }}
+      redis:
+        address: {{ required "kthenaRouter.sessionSticky.redis.address is required when sessionSticky.backend is redis" .Values.kthenaRouter.sessionSticky.redis.address | quote }}
+      {{- end }}

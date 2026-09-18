@@ -964,6 +964,82 @@ func TestValidateModelServer(t *testing.T) {
 			},
 			expectValid: true,
 		},
+		{
+			name: "valid model server with session sticky",
+			modelServer: &networkingv1alpha1.ModelServer{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServer",
+				},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: "default"},
+				Spec: networkingv1alpha1.ModelServerSpec{
+					InferenceEngine: networkingv1alpha1.VLLM,
+					WorkloadSelector: &networkingv1alpha1.WorkloadSelector{
+						MatchLabels: map[string]string{"app": "test-server"},
+					},
+					WorkloadPort: networkingv1alpha1.WorkloadPort{Port: 8000},
+					TrafficPolicy: &networkingv1alpha1.TrafficPolicy{
+						SessionSticky: &networkingv1alpha1.SessionSticky{
+							Sources: []networkingv1alpha1.SessionKeySource{
+								{Type: networkingv1alpha1.SessionKeySourceHeader, Name: "X-S"},
+							},
+						},
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "invalid session sticky empty sources",
+			modelServer: &networkingv1alpha1.ModelServer{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServer",
+				},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: "default"},
+				Spec: networkingv1alpha1.ModelServerSpec{
+					InferenceEngine: networkingv1alpha1.VLLM,
+					WorkloadSelector: &networkingv1alpha1.WorkloadSelector{
+						MatchLabels: map[string]string{"app": "test-server"},
+					},
+					WorkloadPort: networkingv1alpha1.WorkloadPort{Port: 8000},
+					TrafficPolicy: &networkingv1alpha1.TrafficPolicy{
+						SessionSticky: &networkingv1alpha1.SessionSticky{
+							Sources: []networkingv1alpha1.SessionKeySource{},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.trafficPolicy.sessionSticky.sources: Required value: sources must be non-empty when sessionSticky is set",
+		},
+		{
+			name: "invalid session affinity seconds",
+			modelServer: &networkingv1alpha1.ModelServer{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "networking.serving.volcano.sh/v1alpha1",
+					Kind:       "ModelServer",
+				},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: "default"},
+				Spec: networkingv1alpha1.ModelServerSpec{
+					InferenceEngine: networkingv1alpha1.VLLM,
+					WorkloadSelector: &networkingv1alpha1.WorkloadSelector{
+						MatchLabels: map[string]string{"app": "test-server"},
+					},
+					WorkloadPort: networkingv1alpha1.WorkloadPort{Port: 8000},
+					TrafficPolicy: &networkingv1alpha1.TrafficPolicy{
+						SessionSticky: &networkingv1alpha1.SessionSticky{
+							SessionAffinitySeconds: func() *int32 { v := int32(0); return &v }(),
+							Sources: []networkingv1alpha1.SessionKeySource{
+								{Type: networkingv1alpha1.SessionKeySourceQuery, Name: "s"},
+							},
+						},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.trafficPolicy.sessionSticky.sessionAffinitySeconds: Invalid value: 0: must be >= 1",
+		},
 	}
 
 	kubeClient := fake.NewSimpleClientset()
