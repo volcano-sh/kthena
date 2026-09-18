@@ -375,6 +375,28 @@ func TestBuildPodMetricURL(t *testing.T) {
 	}
 }
 
+func TestScrapePodRejectsLargeResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, strings.Repeat("x", maxPodMetricResponseSize+1))
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(serverURL.Port())
+	require.NoError(t, err)
+
+	collector := &MetricCollector{}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod"},
+		Status:     corev1.PodStatus{PodIP: "127.0.0.1"},
+	}
+	_, err = collector.scrapePod(context.Background(), pod, &workload.PodMetricSource{Port: int32(port)})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+}
+
 func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n# TYPE queue_depth_alt gauge\nqueue_depth_alt 40\n")
