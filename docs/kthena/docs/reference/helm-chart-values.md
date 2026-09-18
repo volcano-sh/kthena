@@ -49,6 +49,7 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |
 | networking.kthenaRouter.tls.secretName | string | `"kthena-router-tls"` | Secret name to store the certificate and key. |
+| networking.kthenaRouter.tolerations | list | `[]` |  |
 | networking.kthenaRouter.webhook.enabled | bool | `true` | Enable webhook for Kthena Router. |
 | networking.kthenaRouter.webhook.port | int | `8443` | Container port for Kthena Router webhook. |
 | networking.kthenaRouter.webhook.servicePort | int | `443` | Service port for Kthena Router webhook. |
@@ -65,6 +66,7 @@ A Helm chart for deploying Kthena
 | workload.controllerManager.replicas | int | `1` | Number of Controller Manager instances to run. |
 | workload.controllerManager.runtimeImage.repository | string | `"ghcr.io/volcano-sh/runtime"` | Image repository for the Runtime. |
 | workload.controllerManager.runtimeImage.tag | string | `"latest"` | Image tag for the Runtime. |
+| workload.controllerManager.tolerations | list | `[]` |  |
 | workload.controllerManager.webhook.enabled | bool | `true` | Enable webhook for the Controller Manager. |
 | workload.controllerManager.webhook.tls.certSecretName | string | `"kthena-controller-manager-webhook-certs"` | Secret name for storing webhook certificates. |
 | workload.controllerManager.webhook.tls.serviceName | string | `"kthena-controller-manager-webhook"` | Service name for the webhook. |

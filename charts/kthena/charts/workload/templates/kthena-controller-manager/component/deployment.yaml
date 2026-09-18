@@ -81,3 +81,7 @@ spec:
             secretName: {{ .Values.controllerManager.webhook.tls.certSecretName }}
             optional: true
       serviceAccountName: kthena-controller-manager
+      {{- with .Values.controllerManager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

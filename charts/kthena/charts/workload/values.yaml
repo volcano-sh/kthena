@@ -54,4 +54,5 @@ controllerManager:
     accessKey: ""
     # secretKey is the secret key for the downloader.
     secretKey: ""
-
+  ## Tolerations for Controller Manager pods.
+  tolerations: []

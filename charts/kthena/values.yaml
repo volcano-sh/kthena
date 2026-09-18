@@ -34,6 +34,8 @@ workload:
         certSecretName: kthena-controller-manager-webhook-certs
         # -- Service name for the webhook.
         serviceName: kthena-controller-manager-webhook
+    ## Tolerations for Controller Manager pods.
+    tolerations: []
 
 networking:
   # -- Enable the networking subchart.
@@ -137,6 +139,8 @@ networking:
     # -- Drain timeout for kthena-router graceful shutdown.
     # -- This should be less than terminationGracePeriodSeconds.
     drainTimeout: 5m
+    ## Tolerations for Kthena Router pods.
+    tolerations: []
 
 global:
   # -- Certificate Management Mode.<br/>

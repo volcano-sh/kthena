@@ -182,3 +182,7 @@ spec:
         {{- end }}
       serviceAccountName: kthena-router
       terminationGracePeriodSeconds: {{ .Values.kthenaRouter.terminationGracePeriodSeconds }}
+      {{- with .Values.kthenaRouter.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
