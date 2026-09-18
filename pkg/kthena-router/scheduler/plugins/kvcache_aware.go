@@ -378,6 +378,7 @@ func (t *KVCacheAware) runGC() {
 	}
 }
 
+// gcStaleFields walks the keyspace with SCAN until the cursor wraps or the tick's context budget runs out.
 func (t *KVCacheAware) gcStaleFields() {
 	if t.redisClient == nil {
 		return
@@ -386,30 +387,45 @@ func (t *KVCacheAware) gcStaleFields() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	keys, nextCursor, err := t.redisClient.Scan(ctx, t.gcCursor, t.keyPrefix+"*", kvCacheGCScanSize).Result()
-	if err != nil {
-		klog.V(4).Infof("KVCacheAware.gcStaleFields: scan failed: %v", err)
-		return
-	}
-	t.gcCursor = nextCursor
-
-	now := time.Now()
-	staleFields := make(map[string][]string)
-	for _, key := range keys {
-		podTimes, err := t.redisClient.HGetAll(ctx, key).Result()
+	for {
+		keys, nextCursor, err := t.redisClient.Scan(ctx, t.gcCursor, t.keyPrefix+"*", kvCacheGCScanSize).Result()
 		if err != nil {
-			klog.V(4).Infof("KVCacheAware.gcStaleFields: failed to read %s: %v", key, err)
-			continue
+			klog.V(4).Infof("KVCacheAware.gcStaleFields: scan failed: %v", err)
+			return
 		}
-		for pod, ts := range podTimes {
-			updatedAt, err := strconv.ParseInt(ts, 10, 64)
-			if err == nil && now.Sub(time.Unix(updatedAt, 0)) > kvCacheFieldFreshDuration {
-				staleFields[key] = append(staleFields[key], pod)
+		now := time.Now()
+		staleFields := make(map[string][]string)
+		interrupted := false
+		for _, key := range keys {
+			podTimes, err := t.redisClient.HGetAll(ctx, key).Result()
+			if err != nil {
+				if ctx.Err() != nil {
+					interrupted = true
+					break
+				}
+				klog.V(4).Infof("KVCacheAware.gcStaleFields: failed to read %s: %v", key, err)
+				continue
+			}
+			for pod, ts := range podTimes {
+				updatedAt, err := strconv.ParseInt(ts, 10, 64)
+				if err == nil && now.Sub(time.Unix(updatedAt, 0)) > kvCacheFieldFreshDuration {
+					staleFields[key] = append(staleFields[key], pod)
+				}
 			}
 		}
-	}
-	if len(staleFields) > 0 {
-		t.deleteStaleFields(staleFields)
+		if len(staleFields) > 0 {
+			t.deleteStaleFields(staleFields)
+		}
+		if interrupted {
+			return
+		}
+		t.gcCursor = nextCursor
+		if nextCursor == 0 {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
 	}
 }
 
