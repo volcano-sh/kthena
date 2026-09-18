@@ -241,6 +241,54 @@ func TestUpdateRoleStatus(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestSetRoleFailure(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+
+	s := &store{
+		mutex: sync.RWMutex{},
+		servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+			key: {
+				"group0": &ServingGroup{
+					Name: "group0",
+					roles: map[string]map[string]*Role{
+						"prefill": {
+							"prefill-0": &Role{Name: "prefill-0", Status: RoleCreating},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// 1. Recording a new failure updates the Role and reports a change.
+	changed := s.SetRoleFailure(key, "group0", "prefill", "prefill-0", "ImagePullBackOff", "back-off pulling image")
+	assert.True(t, changed)
+	role := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
+	assert.Equal(t, "ImagePullBackOff", role.FailureReason)
+	assert.Equal(t, "back-off pulling image", role.FailureMessage)
+
+	// 2. Recording the exact same failure again is a no-op (no change reported).
+	changed = s.SetRoleFailure(key, "group0", "prefill", "prefill-0", "ImagePullBackOff", "back-off pulling image")
+	assert.False(t, changed)
+
+	// 3. Clearing the failure (empty reason/message) once the Pod recovers updates the Role.
+	changed = s.SetRoleFailure(key, "group0", "prefill", "prefill-0", "", "")
+	assert.True(t, changed)
+	assert.Empty(t, role.FailureReason)
+	assert.Empty(t, role.FailureMessage)
+
+	// 4. Clearing an already-clear failure is a no-op.
+	changed = s.SetRoleFailure(key, "group0", "prefill", "prefill-0", "", "")
+	assert.False(t, changed)
+
+	// 5. Setting a failure for a Role/group/modelServing that no longer exists is a silent no-op:
+	// there's no live Role to attach the failure to (it may have been recreated already).
+	assert.False(t, s.SetRoleFailure(key, "group0", "prefill", "nonexistent", "X", "Y"))
+	assert.False(t, s.SetRoleFailure(key, "nonexistgroup", "prefill", "prefill-0", "X", "Y"))
+	nonExistKey := types.NamespacedName{Namespace: "ns2", Name: "model2"}
+	assert.False(t, s.SetRoleFailure(nonExistKey, "group0", "prefill", "prefill-0", "X", "Y"))
+}
+
 func TestDeleteRole(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
 

@@ -380,6 +380,21 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 				Name:      ms.Name,
 			}, servingGroupName, utils.ObjectRevision(newPod), roleTemplateHash, roleName, utils.GetRoleID(newPod))
 		}
+
+		// Some actionable failures (e.g. a Pod that can't be scheduled at all) neither make the
+		// Pod Ready nor Failed nor restart a container, so they never reach the two cases above.
+		// They also should NOT trigger handleErrorPod's delete-and-recreate behavior: recreating
+		// a Pod that can't be scheduled would not help and would just add churn. Instead, just
+		// record/clear the failure detail for status-surfacing purposes.
+		reason, message := "", ""
+		if detail, ok := utils.ExtractPodFailureDetail(newPod); ok {
+			reason, message = detail.Reason, detail.Message
+		}
+		roleName := utils.GetRoleName(newPod)
+		roleID := utils.GetRoleID(newPod)
+		if c.store.SetRoleFailure(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, reason, message) {
+			c.enqueueModelServing(ms)
+		}
 	}
 }
 
@@ -1701,6 +1716,10 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 		Name:      ms.Name,
 	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), roleTemplateHash, roleName, roleID)
 
+	// The pod backing this role is healthy again: clear any previously recorded failure so a
+	// resolved problem (e.g. old failed Pod replaced by a healthy one) doesn't linger in status.
+	c.store.SetRoleFailure(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, "", "")
+
 	// Check and update role status to Running when all pods in the role are ready
 	roleBecameRunning := false
 	roleReady, err := c.checkRoleReady(ms, servingGroupName, roleName, roleID)
@@ -1785,6 +1804,14 @@ func (c *ModelServingController) markPodUnavailable(ms *workloadv1alpha1.ModelSe
 
 	roleName := utils.GetRoleName(errPod)
 	roleID := utils.GetRoleID(errPod)
+
+	// Record the actionable failure detail (if any) while the Pod object is still live, so it
+	// can be surfaced on the ModelServing's Progressing/UpdateInProgress condition. This is the
+	// only point where the raw Pod status is available before handlePodAfterGraceTime deletes it.
+	if detail, ok := utils.ExtractPodFailureDetail(errPod); ok {
+		c.store.SetRoleFailure(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, detail.Reason, detail.Message)
+	}
+
 	// Update role status back to Creating when pod fails
 	if roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID); roleStatus == datastore.RoleRunning {
 		if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleCreating); err != nil {
@@ -1881,6 +1908,39 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 			klog.Warningf("mark pod %s unavailable: %v", pod.Name, err)
 		}
 		c.enqueueModelServing(ms)
+	}
+	return nil
+}
+
+// firstRoleFailure returns the most actionable Pod-level failure recorded for any Role in the
+// given ServingGroup, if any. Roles are scanned in a deterministic (sorted) order so that, when
+// multiple roles/pods are failing simultaneously, the choice of which one to surface is stable
+// across calls instead of depending on Go's randomized map iteration order.
+func (c *ModelServingController) firstRoleFailure(ms *workloadv1alpha1.ModelServing, groupName string) *utils.PodFailureDetail {
+	rolesByName, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), groupName)
+	if err != nil {
+		return nil
+	}
+
+	roleNames := make([]string, 0, len(rolesByName))
+	for name := range rolesByName {
+		roleNames = append(roleNames, name)
+	}
+	slices.Sort(roleNames)
+
+	for _, roleName := range roleNames {
+		roleIDs := make([]string, 0, len(rolesByName[roleName]))
+		for id := range rolesByName[roleName] {
+			roleIDs = append(roleIDs, id)
+		}
+		slices.Sort(roleIDs)
+
+		for _, roleID := range roleIDs {
+			role := rolesByName[roleName][roleID]
+			if role != nil && role.FailureReason != "" {
+				return &utils.PodFailureDetail{Reason: role.FailureReason, Message: role.FailureMessage}
+			}
+		}
 	}
 	return nil
 }
@@ -2284,6 +2344,11 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 		}
 		available, updated := 0, 0
 		progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
+		// The most actionable (lowest-ordinal) Pod-level failure among the progressing groups, if
+		// any. Groups are already iterated in ordinal order (GetServingGroupByModelServing sorts
+		// them), so keeping only the first one found gives a deterministic, low-noise result
+		// instead of arbitrarily picking among several simultaneously-failing groups.
+		var progressingFailure *utils.PodFailureDetail
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
 		referencedRevisions := make([]string, 0, len(groups))
@@ -2315,6 +2380,9 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 				klog.V(2).Infof("Update servingGroup %s status to Running", group.Name)
 			} else {
 				progressingGroups = append(progressingGroups, ordinal)
+				if progressingFailure == nil {
+					progressingFailure = c.firstRoleFailure(latestMS, group.Name)
+				}
 			}
 
 			if group.Revision == revision {
@@ -2330,7 +2398,7 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 
 		copy := latestMS.DeepCopy()
 		shouldUpdate := utils.SetConditionWithRolloutAndProgressState(
-			copy, progressingGroups, updatedGroups, currentGroups, rolloutActive, progressActive,
+			copy, progressingGroups, updatedGroups, currentGroups, rolloutActive, progressActive, progressingFailure,
 		)
 
 		// Update revision fields following StatefulSet's logic:
