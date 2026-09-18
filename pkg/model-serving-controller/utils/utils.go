@@ -475,6 +475,9 @@ func SetConditionWithRolloutAndProgressState(
 			// Available and progressing/updateInprogress are not allowed to be true at the same time.
 			if exclusiveConditionTypes(curCondition, newCond) && curCondition.Status == metav1.ConditionTrue && newCond.Status == metav1.ConditionTrue {
 				ms.Status.Conditions[i].Status = metav1.ConditionFalse
+				ms.Status.Conditions[i].LastTransitionTime = newCond.LastTransitionTime
+				ms.Status.Conditions[i].Reason = newCond.Reason
+				ms.Status.Conditions[i].Message = newCond.Message
 				shouldUpdate = true
 			}
 		}
