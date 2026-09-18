@@ -1145,6 +1145,13 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 			continue
 		}
 		for _, pod := range pods {
+			if len(pod.OwnerReferences) == 0 {
+				// continue (not break): an ownerless pod doesn't affect its siblings, so keep
+				// checking them. No re-enqueue: nothing here can resolve an ownerless pod.
+				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s has no owner references, expected ModelServing %s/%s (UID=%s)",
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID)
+				continue
+			}
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 				// If the pod is not owned by the ModelServing, we do not need to handle it.
 				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
