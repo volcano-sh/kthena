@@ -35,9 +35,12 @@ import (
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
@@ -436,12 +439,13 @@ func TestDoDisaggregatedScale_RatioRaisesDecode(t *testing.T) {
 		}),
 	}
 	ac := &AutoscaleController{
-		client:                 client,
-		modelServingLister:     msLister,
-		podsLister:             fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
-		scalerMap:              map[string]*autoscalerAutoscaler{},
-		optimizerMap:           map[string]*autoscalerOptimizer{},
-		disaggregatedScalerMap: map[string]*autoscaler.DisaggregatedAutoscaler{},
+		client:                    client,
+		modelServingLister:        msLister,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newModelServingIndexer(policy.DeepCopy())),
+		podsLister:                fakePodLister{podsByNs: map[string][]*corev1.Pod{ns: pods}},
+		scalerMap:                 map[string]*autoscalerAutoscaler{},
+		optimizerMap:              map[string]*autoscalerOptimizer{},
+		disaggregatedScalerMap:    map[string]*autoscaler.DisaggregatedAutoscaler{},
 	}
 
 	if err := ac.doDisaggregatedScale(context.Background(), policy); err != nil {
@@ -630,7 +634,10 @@ func TestUpdateDisaggregatedPolicyStatus_TargetFoundIndependentFromReady(t *test
 	ns := "default"
 	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap", Namespace: ns, Generation: 1}}
 	fakeClient := clientfake.NewSimpleClientset(policy.DeepCopy())
-	ac := &AutoscaleController{client: fakeClient}
+	ac := &AutoscaleController{
+		client:                    fakeClient,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newModelServingIndexer(policy.DeepCopy())),
+	}
 
 	if err := ac.updateDisaggregatedPolicyStatus(context.Background(), policy, nil, fmt.Errorf("metric collection failed"), true); err != nil {
 		t.Fatalf("updateDisaggregatedPolicyStatus error: %v", err)
@@ -650,7 +657,10 @@ func TestUpdateDisaggregatedPolicyStatus_TargetFoundIndependentFromReady(t *test
 
 	policy = &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap-missing", Namespace: ns, Generation: 1}}
 	fakeClient = clientfake.NewSimpleClientset(policy.DeepCopy())
-	ac = &AutoscaleController{client: fakeClient}
+	ac = &AutoscaleController{
+		client:                    fakeClient,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newModelServingIndexer(policy.DeepCopy())),
+	}
 	if err := ac.updateDisaggregatedPolicyStatus(context.Background(), policy, nil, fmt.Errorf("role decode not found"), false); err != nil {
 		t.Fatalf("updateDisaggregatedPolicyStatus missing target error: %v", err)
 	}
@@ -671,6 +681,45 @@ func findPolicyCondition(conditions []metav1.Condition, conditionType string) *m
 		}
 	}
 	return nil
+}
+
+func TestUpdateDisaggregatedPolicyStatus_RetriesOnConflict(t *testing.T) {
+	ns := "default"
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Name: "ap-conflict", Namespace: ns, Generation: 1}}
+	fakeClient := clientfake.NewSimpleClientset(policy.DeepCopy())
+
+	conflicts := 2
+	fakeClient.PrependReactor("update", "autoscalingpolicies", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "status" {
+			return false, nil, nil
+		}
+		if conflicts > 0 {
+			conflicts--
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "workload.volcano.sh", Resource: "autoscalingpolicies"}, "ap-conflict", fmt.Errorf("resourceVersion conflict"))
+		}
+		return false, nil, nil
+	})
+
+	ac := &AutoscaleController{
+		client:                    fakeClient,
+		autoscalingPoliciesLister: workloadLister.NewAutoscalingPolicyLister(newModelServingIndexer(policy.DeepCopy())),
+	}
+
+	if err := ac.updateDisaggregatedPolicyStatus(context.Background(), policy, nil, fmt.Errorf("metric collection failed"), true); err != nil {
+		t.Fatalf("expected updateDisaggregatedPolicyStatus to succeed after retrying on conflict, got: %v", err)
+	}
+	if conflicts != 0 {
+		t.Fatalf("expected all injected conflicts to be consumed, %d remaining", conflicts)
+	}
+
+	updated, err := fakeClient.WorkloadV1alpha1().AutoscalingPolicies(ns).Get(context.Background(), "ap-conflict", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated policy error: %v", err)
+	}
+	ready := findPolicyCondition(updated.Status.Conditions, "Ready")
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ReconcileFailed" {
+		t.Fatalf("expected Ready=False/ReconcileFailed after retry, got %#v", ready)
+	}
 }
 
 func TestFormatAutoscalerMapKey_IncludesNamespaceAndTarget(t *testing.T) {
