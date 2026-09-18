@@ -53,11 +53,21 @@ type MetricCollector struct {
 	Target         *v1alpha1.Target
 	Scope          Scope
 	MetricTargets  map[string]float64
-	promClients    map[string]promapi.Client
+	promClients    map[string]promClientEntry
 	promClientsMu  sync.Mutex
+	// policyNamespace is where Secrets referenced by metric sources are read from.
+	policyNamespace string
+	getSecret       SecretGetter
 }
 
-func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPolicy, metricTargets map[string]float64) *MetricCollector {
+// promClientEntry caches one Prometheus client per serverURL with the auth material it was built from.
+type promClientEntry struct {
+	authKey   string
+	client    promapi.Client
+	transport *http.Transport
+}
+
+func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPolicy, metricTargets map[string]float64, getSecret SecretGetter) *MetricCollector {
 	namespace := target.TargetRef.Namespace
 	if namespace == "" {
 		namespace = policy.Namespace
@@ -69,8 +79,10 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 			Namespace:     namespace,
 			OwnedPolicyId: policy.UID,
 		},
-		MetricTargets: metricTargets,
-		promClients:   make(map[string]promapi.Client),
+		MetricTargets:   metricTargets,
+		promClients:     make(map[string]promClientEntry),
+		policyNamespace: policy.Namespace,
+		getSecret:       getSecret,
 	}
 }
 
@@ -483,7 +495,7 @@ func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src
 	}
 
 	timeout := util.AutoscaleCtxTimeoutSeconds * time.Second
-	api, err := collector.getPrometheusAPI(src.ServerURL, timeout)
+	api, err := collector.getPrometheusAPI(ctx, src, timeout)
 	if err != nil {
 		return 0, err
 	}
@@ -522,33 +534,39 @@ func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src
 	}
 }
 
-func (collector *MetricCollector) getPrometheusAPI(serverURL string, timeout time.Duration) (prometheusv1.API, error) {
+func (collector *MetricCollector) getPrometheusAPI(ctx context.Context, src *v1alpha1.PrometheusMetricSource, timeout time.Duration) (prometheusv1.API, error) {
+	material, err := resolvePrometheusAuth(ctx, collector.getSecret, collector.policyNamespace, src.Auth)
+	if err != nil {
+		return nil, err
+	}
+	authKey := material.cacheKey()
+
 	collector.promClientsMu.Lock()
 	defer collector.promClientsMu.Unlock()
 	if collector.promClients == nil {
-		collector.promClients = make(map[string]promapi.Client)
+		collector.promClients = make(map[string]promClientEntry)
 	}
 
-	if client, ok := collector.promClients[serverURL]; ok {
-		return prometheusv1.NewAPI(client), nil
+	cached, hit := collector.promClients[src.ServerURL]
+	if hit && cached.authKey == authKey {
+		return prometheusv1.NewAPI(cached.client), nil
 	}
 
-	transport := &http.Transport{
-		TLSHandshakeTimeout:   timeout,
-		ResponseHeaderTimeout: timeout,
-		ExpectContinueTimeout: timeout,
+	roundTripper, transport, err := material.roundTripper(timeout)
+	if err != nil {
+		return nil, err
 	}
-	// NOTE: PrometheusMetricSource.Auth (TLS / bearer token) is intentionally
-	// not honored yet. The field semantics are documented on the API types and
-	// will be implemented in a follow-up change.
 	client, err := promapi.NewClient(promapi.Config{
-		Address:      serverURL,
-		RoundTripper: transport,
+		Address:      src.ServerURL,
+		RoundTripper: roundTripper,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	collector.promClients[serverURL] = client
+	if hit && cached.transport != nil {
+		cached.transport.CloseIdleConnections()
+	}
+	collector.promClients[src.ServerURL] = promClientEntry{authKey: authKey, client: client, transport: transport}
 	return prometheusv1.NewAPI(client), nil
 }

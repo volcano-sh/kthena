@@ -1,7 +1,6 @@
 # Configuration for crd-ref-docs with optimized recursion handling
 processor:
   ignoreFields: []
-  maxRecursionDepth: 20  # Increased from default to reduce recursion warnings
   ignoreTypes:
     - "k8s.io/apimachinery/pkg/apis/meta/v1.*"
 render:

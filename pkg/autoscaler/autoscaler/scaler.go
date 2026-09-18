@@ -37,10 +37,10 @@ type ScalingMeta struct {
 	Generations
 }
 
-func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy) *Autoscaler {
+func NewAutoscaler(autoscalePolicy *workload.AutoscalingPolicy, getSecret SecretGetter) *Autoscaler {
 	return &Autoscaler{
 		Status:    NewStatus(&autoscalePolicy.Spec.Behavior),
-		Collector: NewMetricCollector(&autoscalePolicy.Spec.HomogeneousTarget.Target, autoscalePolicy, GetMetricTargets(autoscalePolicy)),
+		Collector: NewMetricCollector(&autoscalePolicy.Spec.HomogeneousTarget.Target, autoscalePolicy, GetMetricTargets(autoscalePolicy), getSecret),
 		Meta: &ScalingMeta{
 			Config:    autoscalePolicy.Spec.HomogeneousTarget,
 			Namespace: autoscalePolicy.Namespace,

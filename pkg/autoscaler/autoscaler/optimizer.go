@@ -137,12 +137,12 @@ func NewOptimizerMeta(policy *workload.AutoscalingPolicy) *OptimizerMeta {
 	}
 }
 
-func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy) *Optimizer {
+func NewOptimizer(autoscalePolicy *workload.AutoscalingPolicy, getSecret SecretGetter) *Optimizer {
 	metricTargets := GetMetricTargets(autoscalePolicy)
 	collectors := make(map[string]*MetricCollector)
 	for _, param := range autoscalePolicy.Spec.HeterogeneousTarget.Params {
 		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
-		collectors[targetKey] = NewMetricCollector(&param.Target, autoscalePolicy, metricTargets)
+		collectors[targetKey] = NewMetricCollector(&param.Target, autoscalePolicy, metricTargets, getSecret)
 	}
 
 	meta := NewOptimizerMeta(autoscalePolicy)

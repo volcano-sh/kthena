@@ -247,11 +247,16 @@ func (ac *AutoscaleController) schedule(ctx context.Context, autoscalePolicy *wo
 	return nil
 }
 
+// getSecret reads a Secret referenced by a metric source.
+func (ac *AutoscaleController) getSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
+	return ac.kubeClient.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
 func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) error {
 	key := formatAutoscalerMapKey(autoscalePolicy.Namespace, autoscalePolicy.Name, nil)
 	optimizer, ok := ac.optimizerMap[key]
 	if !ok || optimizer.NeedUpdate(autoscalePolicy) {
-		optimizer = autoscaler.NewOptimizer(autoscalePolicy)
+		optimizer = autoscaler.NewOptimizer(autoscalePolicy, ac.getSecret)
 		ac.optimizerMap[key] = optimizer
 		klog.Infof("asp: %s changed, create new optimizer", autoscalePolicy.Name)
 	}
@@ -295,7 +300,7 @@ func (ac *AutoscaleController) doScale(ctx context.Context, autoscalePolicy *wor
 	key := formatAutoscalerMapKey(autoscalePolicy.Namespace, autoscalePolicy.Name, &target.TargetRef)
 	scaler, ok := ac.scalerMap[key]
 	if !ok || scaler.NeedUpdate(autoscalePolicy) {
-		scaler = autoscaler.NewAutoscaler(autoscalePolicy)
+		scaler = autoscaler.NewAutoscaler(autoscalePolicy, ac.getSecret)
 		ac.scalerMap[key] = scaler
 		klog.Infof("asp: %s changed, create new scaler", autoscalePolicy.Name)
 	}
@@ -332,7 +337,7 @@ func (ac *AutoscaleController) doDisaggregatedScale(ctx context.Context, autosca
 	key := formatAutoscalerMapKey(autoscalePolicy.Namespace, autoscalePolicy.Name, &target.TargetRef)
 	disaggregatedScaler, ok := ac.disaggregatedScalerMap[key]
 	if !ok || disaggregatedScaler.NeedUpdate(autoscalePolicy) {
-		disaggregatedScaler = autoscaler.NewDisaggregatedAutoscaler(autoscalePolicy)
+		disaggregatedScaler = autoscaler.NewDisaggregatedAutoscaler(autoscalePolicy, ac.getSecret)
 		if disaggregatedScaler == nil {
 			return fmt.Errorf("failed to create disaggregated scaler: policy or target is nil")
 		}

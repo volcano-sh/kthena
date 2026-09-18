@@ -822,17 +822,17 @@ _Appears in:_
 
 
 
-PrometheusAuth configures authentication when connecting to an external Prometheus server.
-
-NOTE: This struct describes the intended configuration surface. The runtime
-does not honor any of these fields yet; they are reserved for a follow-up
-implementation. Setting them today has no effect on Prometheus requests.
+PrometheusAuth configures authentication for an external Prometheus server; referenced Secrets must live in the policy namespace and carry the label workload.serving.volcano.sh/prometheus-auth-credential=true.
 
 
 
 _Appears in:_
 - [PrometheusMetricSource](#prometheusmetricsource)
 
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `bearerTokenSecret` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | BearerTokenSecret references a Secret key whose value is sent as the bearer token. |  |  |
+| `tlsConfig` _[PrometheusTLSConfig](#prometheustlsconfig)_ | TLSConfig controls TLS certificate validation for https serverURLs. |  |  |
 
 
 #### PrometheusMetricSource
@@ -859,7 +859,24 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `serverURL` _string_ | ServerURL is the base URL of the Prometheus HTTP API server.<br />Example: "http://prometheus.monitoring.svc:9090". |  | Format: uri <br />MinLength: 1 <br /> |
 | `query` _string_ | Query is a PromQL instant-query expression. It must evaluate to a single<br />scalar or a one-element vector, e.g. "avg(rate(vllm:request_latency[1m]))".<br />More Query details refer to https://prometheus.io/docs/prometheus/latest/querying/basics |  | MinLength: 1 <br /> |
-| `auth` _[PrometheusAuth](#prometheusauth)_ | Auth holds optional authentication configuration for the Prometheus server. |  |  |
+| `auth` _[PrometheusAuth](#prometheusauth)_ | Auth holds optional authentication configuration for the Prometheus server.<br />Referenced Secrets must live in the AutoscalingPolicy namespace and carry the label workload.serving.volcano.sh/prometheus-auth-credential=true. |  |  |
+
+
+#### PrometheusTLSConfig
+
+
+
+PrometheusTLSConfig holds TLS settings for Prometheus HTTPS connections.
+
+
+
+_Appears in:_
+- [PrometheusAuth](#prometheusauth)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify disables TLS certificate verification. For development only. |  |  |
+| `caSecret` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | CASecret references a Secret key holding the PEM CA bundle used to verify the server certificate. |  |  |
 
 
 #### RecoveryPolicy

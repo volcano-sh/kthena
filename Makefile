@@ -53,12 +53,14 @@ gen-crd: controller-gen
 gen-docs: crd-ref-docs helm-docs ## Generate CRD and CLI reference documentation
     # Generate CRD ref docs
 	mkdir -p docs/kthena/docs/api
+	# crd-ref-docs takes the recursion depth from --max-depth only, not from its config file
 	$(CRD_REF_DOCS) \
 		--source-path=./pkg/apis \
 		--config=docs/kthena/crd-ref-docs-config.yaml \
 		--output-path=docs/kthena/docs/reference/crd \
 		--renderer=markdown \
-		--output-mode=group
+		--output-mode=group \
+		--max-depth=12
 	# Generate Kthena CLI docs using a standalone doc-gen program
 	go run ./cli/kthena/internal/tools/docgen/main.go
 	# Generate Helm Chart docs
