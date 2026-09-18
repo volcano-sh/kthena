@@ -2906,3 +2906,113 @@ func BenchmarkSelectRuleRegex(b *testing.B) {
 		}
 	}
 }
+
+type fakeOnFlightCounter struct {
+	mu          sync.Mutex
+	deletedPods []types.NamespacedName
+}
+
+func (f *fakeOnFlightCounter) Incr(ctx context.Context, podName types.NamespacedName) (int64, error) {
+	return 1, nil
+}
+
+func (f *fakeOnFlightCounter) Decr(ctx context.Context, podName types.NamespacedName) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeOnFlightCounter) Delete(ctx context.Context, podName types.NamespacedName) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletedPods = append(f.deletedPods, podName)
+	return nil
+}
+
+func (f *fakeOnFlightCounter) BatchGet(ctx context.Context, podNames []types.NamespacedName) (map[types.NamespacedName]int64, error) {
+	return nil, nil
+}
+
+func TestStore_DeleteModelServer_CleansUpOnFlightCounter(t *testing.T) {
+	fakeCounter := &fakeOnFlightCounter{}
+	s := New(WithRedisOnFlightCounter(fakeCounter))
+
+	podName := types.NamespacedName{Namespace: "default", Name: "test-pod"}
+	ms1Name := types.NamespacedName{Namespace: "default", Name: "test-ms1"}
+	ms2Name := types.NamespacedName{Namespace: "default", Name: "test-ms2"}
+
+	ms1 := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ms1Name.Namespace,
+			Name:      ms1Name.Name,
+		},
+	}
+	ms2 := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ms2Name.Namespace,
+			Name:      ms2Name.Name,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: podName.Namespace,
+			Name:      podName.Name,
+		},
+	}
+
+	// Add ms1, ms2, and pod associated with both
+	assert.NoError(t, s.AddOrUpdateModelServer(ms1, sets.New(podName)))
+	assert.NoError(t, s.AddOrUpdateModelServer(ms2, sets.New(podName)))
+	assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms1, ms2}))
+
+	// Verify pod exists with 2 ModelServers
+	podInfo := s.GetPodInfo(podName)
+	assert.NotNil(t, podInfo)
+	assert.Equal(t, 2, podInfo.GetModelServerCount())
+
+	// Step 1: Delete ms1. Pod is still owned by ms2, so it must not be evicted or cleaned up in Redis.
+	assert.NoError(t, s.DeleteModelServer(ms1Name))
+	assert.NotNil(t, s.GetPodInfo(podName), "pod should remain in store while owned by ms2")
+
+	fakeCounter.mu.Lock()
+	assert.Empty(t, fakeCounter.deletedPods, "Redis counter must not be deleted while pod is still owned by another ModelServer")
+	fakeCounter.mu.Unlock()
+
+	// Step 2: Delete ms2. Pod now has 0 ModelServers, so it is evicted and its Redis counter is cleaned up.
+	assert.NoError(t, s.DeleteModelServer(ms2Name))
+	assert.Nil(t, s.GetPodInfo(podName), "pod should be evicted from store when last ModelServer is deleted")
+
+	fakeCounter.mu.Lock()
+	assert.Equal(t, []types.NamespacedName{podName}, fakeCounter.deletedPods, "Redis counter must be deleted when pod is evicted by DeleteModelServer")
+	fakeCounter.mu.Unlock()
+}
+
+func TestStore_DeletePod_CleansUpOnFlightCounter(t *testing.T) {
+	fakeCounter := &fakeOnFlightCounter{}
+	s := New(WithRedisOnFlightCounter(fakeCounter))
+
+	podName := types.NamespacedName{Namespace: "default", Name: "tracked-pod"}
+	msName := types.NamespacedName{Namespace: "default", Name: "test-ms"}
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: msName.Namespace,
+			Name:      msName.Name,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: podName.Namespace,
+			Name:      podName.Name,
+		},
+	}
+
+	assert.NoError(t, s.AddOrUpdateModelServer(ms, sets.New(podName)))
+	assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+
+	// DeletePod cleans up tracked pod and its Redis counter
+	assert.NoError(t, s.DeletePod(podName))
+	assert.Nil(t, s.GetPodInfo(podName))
+
+	fakeCounter.mu.Lock()
+	assert.Equal(t, []types.NamespacedName{podName}, fakeCounter.deletedPods, "DeletePod must delete Redis counter for tracked pod")
+	fakeCounter.mu.Unlock()
+}
