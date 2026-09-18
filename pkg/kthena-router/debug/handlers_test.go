@@ -77,6 +77,11 @@ func (m *MockStore) GetPodsByModelServer(name types.NamespacedName) ([]*datastor
 	return args.Get(0).([]*datastore.PodInfo), args.Error(1)
 }
 
+func (m *MockStore) HasModelServerForModel(modelName string) bool {
+	args := m.Called(modelName)
+	return args.Bool(0)
+}
+
 func (m *MockStore) AddOrUpdatePod(pod *corev1.Pod, modelServer []*aiv1alpha1.ModelServer) error {
 	args := m.Called(pod, modelServer)
 	return args.Error(0)
