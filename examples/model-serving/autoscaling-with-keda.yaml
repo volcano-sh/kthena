@@ -1,0 +1,66 @@
+# Autoscale a ModelServing with KEDA + Prometheus.
+#
+#   Prometheus  ->  KEDA  ->  HPA  ->  ModelServing  ->  Pods
+#
+# Assumes KEDA and a Prometheus that scrapes the kthena-router /metrics
+# endpoint are already installed in the cluster. KEDA auto-creates the HPA
+# from the ScaledObject below. See docs/model-serving/autoscaling.md.
+
+---
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: autoscaling-sample
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1                       # ServingGroup replicas — KEDA updates this field
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: prefill
+        replicas: 1                 # role replicas, stay fixed
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: nginx           # stub; swap for a real engine (e.g. vllm) + ModelRoute to drive the metric
+                ports:
+                  - containerPort: 8080
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: leader
+                image: nginx           # stub; swap for a real engine (e.g. vllm) + ModelRoute to drive the metric
+                ports:
+                  - containerPort: 8080
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: autoscaling-sample-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: workload.serving.volcano.sh/v1alpha1
+    kind: ModelServing
+    name: autoscaling-sample
+  pollingInterval: 15               # seconds between Prometheus polls
+  cooldownPeriod: 120               # seconds to wait before scaling down
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: prometheus
+      metadata:
+        # Default Service for the `prometheus-community/prometheus` Helm chart.
+        # For kube-prometheus-stack use e.g.
+        #   http://<release>-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
+        metricName: kthena_router_active_downstream_requests
+        # Router-level metric, labeled by the served model name.
+        query: |
+          sum(kthena_router_active_downstream_requests{model="autoscaling-sample"})
+        threshold: "100"            # scale up when active requests exceed this
