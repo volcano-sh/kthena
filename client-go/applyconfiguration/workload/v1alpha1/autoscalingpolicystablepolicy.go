@@ -25,12 +25,21 @@ import (
 
 // AutoscalingPolicyStablePolicyApplyConfiguration represents a declarative configuration of the AutoscalingPolicyStablePolicy type for use
 // with apply.
+//
+// AutoscalingPolicyStablePolicy defines the stable scaling policy for both scale up and scale down operations.
 type AutoscalingPolicyStablePolicyApplyConfiguration struct {
-	Instances           *int32                             `json:"instances,omitempty"`
-	Percent             *int32                             `json:"percent,omitempty"`
-	Period              *v1.Duration                       `json:"period,omitempty"`
-	SelectPolicy        *workloadv1alpha1.SelectPolicyType `json:"selectPolicy,omitempty"`
-	StabilizationWindow *v1.Duration                       `json:"stabilizationWindow,omitempty"`
+	// Instances defines the maximum absolute number of instances to scale per period.
+	Instances *int32 `json:"instances,omitempty"`
+	// Percent defines the maximum percentage of current instances to scale per period.
+	Percent *int32 `json:"percent,omitempty"`
+	// Period defines the time duration over which scaling metrics are evaluated.
+	Period *v1.Duration `json:"period,omitempty"`
+	// SelectPolicy determines the selection strategy for scaling operations.
+	// 'Or' means scaling is performed if either the Percent or Instances requirement is met.
+	// 'And' means scaling is performed only if both Percent and Instances requirements are met.
+	SelectPolicy *workloadv1alpha1.SelectPolicyType `json:"selectPolicy,omitempty"`
+	// StabilizationWindow defines the time window to stabilize scaling actions and prevent rapid oscillations.
+	StabilizationWindow *v1.Duration `json:"stabilizationWindow,omitempty"`
 }
 
 // AutoscalingPolicyStablePolicyApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyStablePolicy type for use with

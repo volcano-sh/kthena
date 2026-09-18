@@ -41,7 +41,7 @@ func ptr[T any](v T) *T { return &v }
 func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
@@ -131,7 +131,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
@@ -288,7 +288,7 @@ func TestHTTPRouteController_AllowedRoutesNamespaces(t *testing.T) {
 			}
 			kubeClient := kubefake.NewSimpleClientset(namespaces...)
 			kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-			gatewayClient := gatewayfake.NewSimpleClientset()
+			gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 			gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 			store := datastore.New()
 
@@ -365,7 +365,7 @@ func TestHTTPRouteController_AllowedRoutesNamespaces(t *testing.T) {
 func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
@@ -420,7 +420,7 @@ func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 func TestHTTPRouteController_SyncHandler_MovesRouteWithGatewayOnlyInInformer(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
@@ -481,7 +481,7 @@ func TestHTTPRouteController_SyncHandler_MovesRouteWithGatewayOnlyInInformer(t *
 func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 

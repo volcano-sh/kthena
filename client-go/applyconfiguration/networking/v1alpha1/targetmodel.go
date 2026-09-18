@@ -20,10 +20,18 @@ package v1alpha1
 
 // TargetModelApplyConfiguration represents a declarative configuration of the TargetModel type for use
 // with apply.
+//
+// LLM inference traffic target model.
 type TargetModelApplyConfiguration struct {
-	ModelServerName           *string `json:"modelServerName,omitempty"`
+	// ModelServerName is used to specify the correlated modelServer within the same namespace.
+	// It is mutually exclusive with ExternalModelProviderName.
+	ModelServerName *string `json:"modelServerName,omitempty"`
+	// ExternalModelProviderName is used to specify the correlated ExternalModelProvider within the same namespace.
+	// It is mutually exclusive with ModelServerName.
 	ExternalModelProviderName *string `json:"externalModelProviderName,omitempty"`
-	Weight                    *uint32 `json:"weight,omitempty"`
+	// Weight is used to specify the percentage of traffic should be sent to the target model.
+	// The value should be in the range of [0, 100].
+	Weight *uint32 `json:"weight,omitempty"`
 }
 
 // TargetModelApplyConfiguration constructs a declarative configuration of the TargetModel type for use with

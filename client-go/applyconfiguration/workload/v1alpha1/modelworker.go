@@ -26,15 +26,30 @@ import (
 
 // ModelWorkerApplyConfiguration represents a declarative configuration of the ModelWorker type for use
 // with apply.
+//
+// ModelWorker defines the model worker configuration.
+//
+// Deprecated: ModelBooster is deprecated as of Kthena v1.1.
+// Use ModelServing, ModelServer, and ModelRoute instead.
+// ModelBooster will be removed no earlier than Kthena v1.5.
 type ModelWorkerApplyConfiguration struct {
-	Type        *workloadv1alpha1.ModelWorkerType `json:"type,omitempty"`
-	Image       *string                           `json:"image,omitempty"`
-	Replicas    *int32                            `json:"replicas,omitempty"`
-	Pods        *int32                            `json:"pods,omitempty"`
-	Resources   *v1.ResourceRequirements          `json:"resources,omitempty"`
-	Affinity    *v1.Affinity                      `json:"affinity,omitempty"`
-	Tolerations []v1.Toleration                   `json:"tolerations,omitempty"`
-	Config      *apiextensionsv1.JSON             `json:"config,omitempty"`
+	// Type is the type of the model worker.
+	Type *workloadv1alpha1.ModelWorkerType `json:"type,omitempty"`
+	// Image is the container image for the worker.
+	Image *string `json:"image,omitempty"`
+	// Replicas is the number of replicas for the worker.
+	Replicas *int32 `json:"replicas,omitempty"`
+	// Pods is the number of pods for the worker.
+	Pods *int32 `json:"pods,omitempty"`
+	// Resources specifies the resource requirements for the worker.
+	Resources *v1.ResourceRequirements `json:"resources,omitempty"`
+	// Affinity specifies the affinity rules for scheduling the worker pods.
+	Affinity *v1.Affinity `json:"affinity,omitempty"`
+	// Tolerations specifies the tolerations for scheduling the worker pods.
+	Tolerations []v1.Toleration `json:"tolerations,omitempty"`
+	// Config contains worker-specific configuration in JSON format.
+	// You can find vLLM config here https://docs.vllm.ai/en/stable/configuration/engine_args.html
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
 }
 
 // ModelWorkerApplyConfiguration constructs a declarative configuration of the ModelWorker type for use with

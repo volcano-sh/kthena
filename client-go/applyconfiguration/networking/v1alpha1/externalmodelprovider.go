@@ -26,6 +26,8 @@ import (
 
 // ExternalModelProviderApplyConfiguration represents a declarative configuration of the ExternalModelProvider type for use
 // with apply.
+//
+// ExternalModelProvider is the Schema for the externalmodelproviders API.
 type ExternalModelProviderApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
@@ -43,6 +45,7 @@ func ExternalModelProvider(name, namespace string) *ExternalModelProviderApplyCo
 	b.WithAPIVersion("networking.serving.volcano.sh/v1alpha1")
 	return b
 }
+
 func (b ExternalModelProviderApplyConfiguration) IsApplyConfiguration() {}
 
 // WithKind sets the Kind field in the declarative configuration to the given value

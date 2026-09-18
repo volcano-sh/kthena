@@ -20,9 +20,39 @@ package v1alpha1
 
 // HeterogeneousTargetApplyConfiguration represents a declarative configuration of the HeterogeneousTarget type for use
 // with apply.
+//
+// HeterogeneousTarget defines the configuration for optimization-based autoscaling across multiple deployments.
+//
+// It distributes replicas across several ModelServing groups with different
+// hardware (and therefore different Cost) to satisfy the overall demand at the
+// lowest cost. Each group is described by one entry in Params.
+//
+// Example (split capacity between an H100 group and a cheaper A100 group):
+//
+// heterogeneousTarget:
+// costExpansionRatePercent: 200
+// params:
+// - cost: 100
+// minReplicas: 0
+// maxReplicas: 4
+// target:
+// targetRef:
+// kind: ModelServing
+// name: llama-h100
+// - cost: 60
+// minReplicas: 1
+// maxReplicas: 8
+// target:
+// targetRef:
+// kind: ModelServing
+// name: llama-a100
 type HeterogeneousTargetApplyConfiguration struct {
-	Params                   []HeterogeneousTargetParamApplyConfiguration `json:"params,omitempty"`
-	CostExpansionRatePercent *int32                                       `json:"costExpansionRatePercent,omitempty"`
+	// Params defines the configuration parameters for multiple ModelServing groups to be optimized.
+	Params []HeterogeneousTargetParamApplyConfiguration `json:"params,omitempty"`
+	// CostExpansionRatePercent defines the percentage rate at which the cost expands during optimization calculations.
+	// For example, 200 allows the optimizer to spend up to 2x the minimal cost to
+	// meet performance targets before refusing to scale further.
+	CostExpansionRatePercent *int32 `json:"costExpansionRatePercent,omitempty"`
 }
 
 // HeterogeneousTargetApplyConfiguration constructs a declarative configuration of the HeterogeneousTarget type for use with

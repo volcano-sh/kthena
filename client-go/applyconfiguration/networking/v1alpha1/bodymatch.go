@@ -20,7 +20,11 @@ package v1alpha1
 
 // BodyMatchApplyConfiguration represents a declarative configuration of the BodyMatch type for use
 // with apply.
+//
+// BodyMatch defines the predicate used to match request body content
 type BodyMatchApplyConfiguration struct {
+	// Model is the name of the model or lora adapter to match.
+	// If this field is not specified, any model or lora adapter will be matched.
 	Model *string `json:"model,omitempty"`
 }
 

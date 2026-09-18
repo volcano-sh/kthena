@@ -24,8 +24,12 @@ import (
 
 // AutoscalingPolicyMetricApplyConfiguration represents a declarative configuration of the AutoscalingPolicyMetric type for use
 // with apply.
+//
+// AutoscalingPolicyMetric defines a metric and its target value for scaling decisions.
 type AutoscalingPolicyMetricApplyConfiguration struct {
-	Name        *string            `json:"name,omitempty"`
+	// Name defines the metric key used by the scaling algorithm.
+	Name *string `json:"name,omitempty"`
+	// TargetValue defines the target value for the metric that triggers scaling operations.
 	TargetValue *resource.Quantity `json:"targetValue,omitempty"`
 }
 

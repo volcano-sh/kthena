@@ -24,14 +24,26 @@ import (
 
 // ModelServingSpecApplyConfiguration represents a declarative configuration of the ModelServingSpec type for use
 // with apply.
+//
+// ModelServingSpec defines the specification of the ModelServing resource.
 type ModelServingSpecApplyConfiguration struct {
-	Replicas             *int32                             `json:"replicas,omitempty"`
-	SchedulerName        *string                            `json:"schedulerName,omitempty"`
-	Plugins              []PluginSpecApplyConfiguration     `json:"plugins,omitempty"`
-	Template             *ServingGroupApplyConfiguration    `json:"template,omitempty"`
-	RolloutStrategy      *RolloutStrategyApplyConfiguration `json:"rolloutStrategy,omitempty"`
-	RecoveryPolicy       *workloadv1alpha1.RecoveryPolicy   `json:"recoveryPolicy,omitempty"`
-	RevisionHistoryLimit *int32                             `json:"revisionHistoryLimit,omitempty"`
+	// Number of ServingGroups. That is the number of instances that run serving tasks
+	// Default to 1.
+	Replicas *int32 `json:"replicas,omitempty"`
+	// SchedulerName defines the name of the scheduler used by ModelServing
+	SchedulerName *string `json:"schedulerName,omitempty"`
+	// Plugins defines optional plugin chain to customize serving pods.
+	Plugins []PluginSpecApplyConfiguration `json:"plugins,omitempty"`
+	// Template defines the template for ServingGroup
+	Template *ServingGroupApplyConfiguration `json:"template,omitempty"`
+	// RolloutStrategy defines the strategy that will be applied to update replicas
+	RolloutStrategy *RolloutStrategyApplyConfiguration `json:"rolloutStrategy,omitempty"`
+	// RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt
+	RecoveryPolicy *workloadv1alpha1.RecoveryPolicy `json:"recoveryPolicy,omitempty"`
+	// RevisionHistoryLimit is the maximum number of non-live revisions to retain.
+	// Revisions still referenced by the ModelServing or its workloads do not count
+	// toward this limit.
+	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 }
 
 // ModelServingSpecApplyConfiguration constructs a declarative configuration of the ModelServingSpec type for use with

@@ -24,9 +24,17 @@ import (
 
 // ModelStatusApplyConfiguration represents a declarative configuration of the ModelStatus type for use
 // with apply.
+//
+// ModelStatus defines the observed state of ModelBooster.
+//
+// Deprecated: ModelBooster is deprecated as of Kthena v1.1.
+// Use ModelServing, ModelServer, and ModelRoute instead.
+// ModelBooster will be removed no earlier than Kthena v1.5.
 type ModelStatusApplyConfiguration struct {
-	Conditions         []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
-	ObservedGeneration *int64                           `json:"observedGeneration,omitempty"`
+	// Conditions represents the latest available observations of the model's state.
+	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	// ObservedGeneration track of generation
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
 }
 
 // ModelStatusApplyConfiguration constructs a declarative configuration of the ModelStatus type for use with

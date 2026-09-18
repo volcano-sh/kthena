@@ -24,12 +24,27 @@ import (
 
 // RoleApplyConfiguration represents a declarative configuration of the Role type for use
 // with apply.
+//
+// Role defines the specific pod instance role that performs the inference task.
 type RoleApplyConfiguration struct {
-	Name                                         *string                            `json:"name,omitempty"`
-	Replicas                                     *int32                             `json:"replicas,omitempty"`
-	EntryTemplate                                *PodTemplateSpecApplyConfiguration `json:"entryTemplate,omitempty"`
-	WorkerReplicas                               *int32                             `json:"workerReplicas,omitempty"`
-	WorkerTemplate                               *PodTemplateSpecApplyConfiguration `json:"workerTemplate,omitempty"`
+	// The name of a role. Name must be unique within an ServingGroup
+	Name *string `json:"name,omitempty"`
+	// The number of a certain role.
+	// For example, in Disaggregated Prefilling, setting the replica count for both the P and D roles to 1 results in 1P1D deployment configuration.
+	// This approach can similarly be applied to configure a xPyD deployment scenario.
+	// Default to 1.
+	Replicas *int32 `json:"replicas,omitempty"`
+	// EntryTemplate defines the template for the entry pod of a role.
+	// Required: Currently, a role must have only one entry-pod.
+	EntryTemplate *PodTemplateSpecApplyConfiguration `json:"entryTemplate,omitempty"`
+	// WorkerReplicas defines the number for the worker pod of a role.
+	// Required: Need to set the number of worker-pod replicas.
+	WorkerReplicas *int32 `json:"workerReplicas,omitempty"`
+	// WorkerTemplate defines the template for the worker pod of a role.
+	WorkerTemplate *PodTemplateSpecApplyConfiguration `json:"workerTemplate,omitempty"`
+	// RollingUpdateConfiguration defines the parameters to be used for RoleRollingUpdate.
+	// It is inlined so rolling update fields can be set directly under a Role.
+	// These fields do not take effect when ModelServing uses ServingGroupRollingUpdate.
 	RollingUpdateConfigurationApplyConfiguration `json:",omitempty,inline"`
 }
 

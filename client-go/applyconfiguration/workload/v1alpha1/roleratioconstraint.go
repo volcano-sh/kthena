@@ -24,11 +24,19 @@ import (
 
 // RoleRatioConstraintApplyConfiguration represents a declarative configuration of the RoleRatioConstraint type for use
 // with apply.
+//
+// RoleRatioConstraint defines the acceptable ratio range between two roles.
 type RoleRatioConstraintApplyConfiguration struct {
-	NumeratorRole   *string            `json:"numeratorRole,omitempty"`
-	DenominatorRole *string            `json:"denominatorRole,omitempty"`
-	MinRatio        *resource.Quantity `json:"minRatio,omitempty"`
-	MaxRatio        *resource.Quantity `json:"maxRatio,omitempty"`
+	// NumeratorRole is the role on the numerator side of the ratio.
+	NumeratorRole *string `json:"numeratorRole,omitempty"`
+	// DenominatorRole is the role on the denominator side of the ratio.
+	DenominatorRole *string `json:"denominatorRole,omitempty"`
+	// MinRatio is the minimum allowed value of
+	// replicas[numeratorRole] / replicas[denominatorRole].
+	MinRatio *resource.Quantity `json:"minRatio,omitempty"`
+	// MaxRatio is the maximum allowed value of
+	// replicas[numeratorRole] / replicas[denominatorRole].
+	MaxRatio *resource.Quantity `json:"maxRatio,omitempty"`
 }
 
 // RoleRatioConstraintApplyConfiguration constructs a declarative configuration of the RoleRatioConstraint type for use with

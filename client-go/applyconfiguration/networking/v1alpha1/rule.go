@@ -25,7 +25,10 @@ import (
 // RuleApplyConfiguration represents a declarative configuration of the Rule type for use
 // with apply.
 type RuleApplyConfiguration struct {
-	Name         *string                           `json:"name,omitempty"`
+	// Name is the name of the rule.
+	Name *string `json:"name,omitempty"`
+	// Match conditions to be satisfied for the rule to be activated.
+	// Empty `modelMatch` means matching all requests.
 	ModelMatch   *ModelMatchApplyConfiguration     `json:"modelMatch,omitempty"`
 	TargetModels []*networkingv1alpha1.TargetModel `json:"targetModels,omitempty"`
 }

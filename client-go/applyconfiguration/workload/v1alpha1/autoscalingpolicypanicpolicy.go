@@ -24,11 +24,18 @@ import (
 
 // AutoscalingPolicyPanicPolicyApplyConfiguration represents a declarative configuration of the AutoscalingPolicyPanicPolicy type for use
 // with apply.
+//
+// AutoscalingPolicyPanicPolicy defines the emergency scaling policy for handling sudden traffic surges.
 type AutoscalingPolicyPanicPolicyApplyConfiguration struct {
-	Percent               *int32       `json:"percent,omitempty"`
-	Period                *v1.Duration `json:"period,omitempty"`
-	PanicThresholdPercent *int32       `json:"panicThresholdPercent,omitempty"`
-	PanicModeHold         *v1.Duration `json:"panicModeHold,omitempty"`
+	// Percent defines the maximum percentage of current instances to scale up during panic mode.
+	Percent *int32 `json:"percent,omitempty"`
+	// Period defines the evaluation period for panic mode scaling decisions.
+	Period *v1.Duration `json:"period,omitempty"`
+	// PanicThresholdPercent defines the metric threshold percentage that triggers panic mode.
+	// When metrics exceed this percentage of target values, panic mode is activated.
+	PanicThresholdPercent *int32 `json:"panicThresholdPercent,omitempty"`
+	// PanicModeHold defines the duration to remain in panic mode before returning to normal scaling.
+	PanicModeHold *v1.Duration `json:"panicModeHold,omitempty"`
 }
 
 // AutoscalingPolicyPanicPolicyApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyPanicPolicy type for use with

@@ -25,10 +25,17 @@ import (
 // RateLimitApplyConfiguration represents a declarative configuration of the RateLimit type for use
 // with apply.
 type RateLimitApplyConfiguration struct {
-	InputTokensPerUnit  *uint32                            `json:"inputTokensPerUnit,omitempty"`
-	OutputTokensPerUnit *uint32                            `json:"outputTokensPerUnit,omitempty"`
-	Unit                *networkingv1alpha1.RateLimitUnit  `json:"unit,omitempty"`
-	Global              *GlobalRateLimitApplyConfiguration `json:"global,omitempty"`
+	// InputTokensPerUnit is the maximum number of input tokens allowed per unit of time.
+	// If this field is not set, there is no limit on input tokens.
+	InputTokensPerUnit *uint32 `json:"inputTokensPerUnit,omitempty"`
+	// OutputTokensPerUnit is the maximum number of output tokens allowed per unit of time.
+	// If this field is not set, there is no limit on output tokens.
+	OutputTokensPerUnit *uint32 `json:"outputTokensPerUnit,omitempty"`
+	// Unit is the time unit for the rate limit.
+	Unit *networkingv1alpha1.RateLimitUnit `json:"unit,omitempty"`
+	// Global contains configuration for global rate limiting using distributed storage.
+	// If this field is set, global rate limiting will be used; otherwise, local rate limiting will be used.
+	Global *GlobalRateLimitApplyConfiguration `json:"global,omitempty"`
 }
 
 // RateLimitApplyConfiguration constructs a declarative configuration of the RateLimit type for use with

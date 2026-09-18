@@ -25,9 +25,14 @@ import (
 
 // ProviderAuthApplyConfiguration represents a declarative configuration of the ProviderAuth type for use
 // with apply.
+//
+// ProviderAuth defines how a provider credential is loaded and sent upstream.
 type ProviderAuthApplyConfiguration struct {
-	Scheme    *networkingv1alpha1.ProviderAuthScheme `json:"scheme,omitempty"`
-	SecretRef *v1.SecretKeySelector                  `json:"secretRef,omitempty"`
+	// Scheme overrides the protocol adapter's default authentication scheme.
+	// OpenAI defaults to Bearer and Anthropic defaults to APIKey.
+	Scheme *networkingv1alpha1.ProviderAuthScheme `json:"scheme,omitempty"`
+	// SecretRef references a credential Secret in the same namespace.
+	SecretRef *v1.SecretKeySelector `json:"secretRef,omitempty"`
 }
 
 // ProviderAuthApplyConfiguration constructs a declarative configuration of the ProviderAuth type for use with

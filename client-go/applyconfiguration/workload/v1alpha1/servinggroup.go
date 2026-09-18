@@ -20,11 +20,18 @@ package v1alpha1
 
 // ServingGroupApplyConfiguration represents a declarative configuration of the ServingGroup type for use
 // with apply.
+//
+// ServingGroup is the smallest unit to complete the inference task
 type ServingGroupApplyConfiguration struct {
-	RestartGracePeriodSeconds *int64                             `json:"restartGracePeriodSeconds,omitempty"`
-	GangPolicy                *GangPolicyApplyConfiguration      `json:"gangPolicy,omitempty"`
-	NetworkTopology           *NetworkTopologyApplyConfiguration `json:"networkTopology,omitempty"`
-	Roles                     []RoleApplyConfiguration           `json:"roles,omitempty"`
+	// RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
+	// Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
+	RestartGracePeriodSeconds *int64 `json:"restartGracePeriodSeconds,omitempty"`
+	// GangPolicy defines the gang scheduler config.
+	GangPolicy *GangPolicyApplyConfiguration `json:"gangPolicy,omitempty"`
+	// NetworkTopology defines the network topology affinity scheduling policy for the roles of the `ServingGroup`,
+	// it works only when the scheduler supports network topology-aware scheduling.
+	NetworkTopology *NetworkTopologyApplyConfiguration `json:"networkTopology,omitempty"`
+	Roles           []RoleApplyConfiguration           `json:"roles,omitempty"`
 }
 
 // ServingGroupApplyConfiguration constructs a declarative configuration of the ServingGroup type for use with

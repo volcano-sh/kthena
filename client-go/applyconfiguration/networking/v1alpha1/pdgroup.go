@@ -20,10 +20,17 @@ package v1alpha1
 
 // PDGroupApplyConfiguration represents a declarative configuration of the PDGroup type for use
 // with apply.
+//
+// PDGroup is used to specify the group key of PD instances.
+// Also, the labels to match the model serving instances for prefill and decode.
 type PDGroupApplyConfiguration struct {
-	GroupKey      *string           `json:"groupKey,omitempty"`
+	// GroupKey is the key to distinguish different PD groups.
+	// Only PD instances with the same group key and value could be paired.
+	GroupKey *string `json:"groupKey,omitempty"`
+	// The labels to match the model serving instances for prefill.
 	PrefillLabels map[string]string `json:"prefillLabels,omitempty"`
-	DecodeLabels  map[string]string `json:"decodeLabels,omitempty"`
+	// The labels to match the model serving instances for decode.
+	DecodeLabels map[string]string `json:"decodeLabels,omitempty"`
 }
 
 // PDGroupApplyConfiguration constructs a declarative configuration of the PDGroup type for use with

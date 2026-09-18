@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -47,7 +48,7 @@ func NewInferencePoolController(
 	dynamicInformerFactory dynamicinformer.DynamicSharedInformerFactory,
 	store datastore.Store,
 ) (*InferencePoolController, error) {
-	gvr := inferencev1.SchemeGroupVersion.WithResource("inferencepools")
+	gvr := schema.GroupVersion(inferencev1.GroupVersion).WithResource("inferencepools")
 	inferencePoolInformer := dynamicInformerFactory.ForResource(gvr).Informer()
 
 	controller := &InferencePoolController{

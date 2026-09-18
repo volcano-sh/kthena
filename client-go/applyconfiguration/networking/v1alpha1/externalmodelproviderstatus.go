@@ -24,6 +24,8 @@ import (
 
 // ExternalModelProviderStatusApplyConfiguration represents a declarative configuration of the ExternalModelProviderStatus type for use
 // with apply.
+//
+// ExternalModelProviderStatus defines the observed state of ExternalModelProvider.
 type ExternalModelProviderStatusApplyConfiguration struct {
 	ObservedGeneration *int64                           `json:"observedGeneration,omitempty"`
 	Conditions         []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`

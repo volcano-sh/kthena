@@ -20,8 +20,18 @@ package v1alpha1
 
 // MetadataApplyConfiguration represents a declarative configuration of the Metadata type for use
 // with apply.
+//
+// Metadata is a simplified version of ObjectMeta in Kubernetes.
 type MetadataApplyConfiguration struct {
-	Labels      map[string]string `json:"labels,omitempty"`
+	// Map of string keys and values that can be used to organize and categorize
+	// (scope and select) objects. May match selectors of replication controllers
+	// and services.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
+	Labels map[string]string `json:"labels,omitempty"`
+	// Annotations is an unstructured key value map stored with a resource that may be
+	// set by external tools to store and retrieve arbitrary metadata. They are not
+	// queryable and should be preserved when modifying objects.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 

@@ -24,9 +24,13 @@ import (
 
 // NetworkTopologyApplyConfiguration represents a declarative configuration of the NetworkTopology type for use
 // with apply.
+//
+// NetworkTopologySpec defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
 type NetworkTopologyApplyConfiguration struct {
+	// GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`.
 	GroupPolicy *v1beta1.NetworkTopologySpec `json:"groupPolicy,omitempty"`
-	RolePolicy  *v1beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
+	// RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`.
+	RolePolicy *v1beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
 }
 
 // NetworkTopologyApplyConfiguration constructs a declarative configuration of the NetworkTopology type for use with

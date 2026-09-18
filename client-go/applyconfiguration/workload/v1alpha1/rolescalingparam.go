@@ -20,11 +20,26 @@ package v1alpha1
 
 // RoleScalingParamApplyConfiguration represents a declarative configuration of the RoleScalingParam type for use
 // with apply.
+//
+// RoleScalingParam defines the scaling configuration for one role.
 type RoleScalingParamApplyConfiguration struct {
-	MinReplicas   *int32                                      `json:"minReplicas,omitempty"`
-	MaxReplicas   *int32                                      `json:"maxReplicas,omitempty"`
-	Metrics       []AutoscalingPolicyMetricApplyConfiguration `json:"metrics,omitempty"`
-	MetricSources map[string]MetricSourceApplyConfiguration   `json:"metricSources,omitempty"`
+	// MinReplicas defines the minimum number of replicas for this role.
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
+	// MaxReplicas defines the maximum number of replicas for this role.
+	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
+	// Metrics defines the list of metrics used to evaluate scaling decisions
+	// for this role, allowing different roles to scale on different signals.
+	//
+	// When set, these metrics override spec.metrics for this role. When omitted,
+	// the role inherits spec.metrics. A fixed role (minReplicas == maxReplicas)
+	// may omit metrics; the autoscaler keeps it at that fixed size and does not
+	// collect metrics for it.
+	Metrics []AutoscalingPolicyMetricApplyConfiguration `json:"metrics,omitempty"`
+	// MetricSources declares how each metric is fetched for this role.
+	// Keys must match role-level metrics when present, otherwise top-level
+	// spec.metrics[].name.
+	// Missing keys are treated as missing metrics for that reconcile loop.
+	MetricSources map[string]MetricSourceApplyConfiguration `json:"metricSources,omitempty"`
 }
 
 // RoleScalingParamApplyConfiguration constructs a declarative configuration of the RoleScalingParam type for use with

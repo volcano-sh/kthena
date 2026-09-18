@@ -20,10 +20,16 @@ package v1alpha1
 
 // DisaggregatedScalingStatusApplyConfiguration represents a declarative configuration of the DisaggregatedScalingStatus type for use
 // with apply.
+//
+// DisaggregatedScalingStatus reports the observed state of a DisaggregatedTarget.
 type DisaggregatedScalingStatusApplyConfiguration struct {
-	Roles         []TargetScalingStatusApplyConfiguration `json:"roles,omitempty"`
-	RatioStatus   *RoleRatioStatusApplyConfiguration      `json:"ratioStatus,omitempty"`
-	RatioAdjusted *bool                                   `json:"ratioAdjusted,omitempty"`
+	// Roles reports the observed scaling state per role.
+	Roles []TargetScalingStatusApplyConfiguration `json:"roles,omitempty"`
+	// RatioStatus reports the observed value of the configured ratio constraint.
+	RatioStatus *RoleRatioStatusApplyConfiguration `json:"ratioStatus,omitempty"`
+	// RatioAdjusted is true when the most recent reconcile had to override the
+	// metric-derived replica counts to satisfy the ratio constraint.
+	RatioAdjusted *bool `json:"ratioAdjusted,omitempty"`
 }
 
 // DisaggregatedScalingStatusApplyConfiguration constructs a declarative configuration of the DisaggregatedScalingStatus type for use with

@@ -25,11 +25,18 @@ import (
 
 // PluginSpecApplyConfiguration represents a declarative configuration of the PluginSpec type for use
 // with apply.
+//
+// PluginSpec declares a plugin instance attached to a ModelServing.
 type PluginSpecApplyConfiguration struct {
-	Name   *string                        `json:"name,omitempty"`
-	Type   *workloadv1alpha1.PluginType   `json:"type,omitempty"`
-	Config *v1.JSON                       `json:"config,omitempty"`
-	Scope  *PluginScopeApplyConfiguration `json:"scope,omitempty"`
+	// Name uniquely identifies the plugin instance within the ModelServing.
+	Name *string `json:"name,omitempty"`
+	// Type indicates plugin category. For now, only BuiltIn is supported.
+	Type *workloadv1alpha1.PluginType `json:"type,omitempty"`
+	// Config is an opaque JSON blob interpreted by the plugin implementation.
+	Config *v1.JSON `json:"config,omitempty"`
+	// Scope optionally narrows where this plugin runs.
+	// By default, it runs on all pods.
+	Scope *PluginScopeApplyConfiguration `json:"scope,omitempty"`
 }
 
 // PluginSpecApplyConfiguration constructs a declarative configuration of the PluginSpec type for use with

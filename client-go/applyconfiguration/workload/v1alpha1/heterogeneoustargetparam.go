@@ -20,11 +20,30 @@ package v1alpha1
 
 // HeterogeneousTargetParamApplyConfiguration represents a declarative configuration of the HeterogeneousTargetParam type for use
 // with apply.
+//
+// HeterogeneousTargetParam defines the configuration parameters for a specific deployment type in heterogeneous scaling.
+//
+// Example (one expensive H100 group within a HeterogeneousTarget):
+//
+// cost: 100
+// minReplicas: 0
+// maxReplicas: 4
+// target:
+// targetRef:
+// kind: ModelServing
+// name: llama-h100
 type HeterogeneousTargetParamApplyConfiguration struct {
-	Target      *TargetApplyConfiguration `json:"target,omitempty"`
-	Cost        *int32                    `json:"cost,omitempty"`
-	MinReplicas *int32                    `json:"minReplicas,omitempty"`
-	MaxReplicas *int32                    `json:"maxReplicas,omitempty"`
+	// Target defines the scaling instance configuration for this deployment type.
+	Target *TargetApplyConfiguration `json:"target,omitempty"`
+	// Cost defines the relative cost factor used in optimization calculations.
+	// This factor balances performance requirements against deployment costs.
+	// Values are relative across params, e.g. 100 for an H100 group and 60 for a
+	// cheaper A100 group makes the optimizer prefer A100 replicas when adequate.
+	Cost *int32 `json:"cost,omitempty"`
+	// MinReplicas defines the minimum number of replicas to maintain for this deployment type.
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
+	// MaxReplicas defines the maximum number of replicas allowed for this deployment type.
+	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 }
 
 // HeterogeneousTargetParamApplyConfiguration constructs a declarative configuration of the HeterogeneousTargetParam type for use with

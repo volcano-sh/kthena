@@ -20,13 +20,33 @@ package v1alpha1
 
 // AutoscalingPolicySpecApplyConfiguration represents a declarative configuration of the AutoscalingPolicySpec type for use
 // with apply.
+//
+// AutoscalingPolicySpec defines the desired state of AutoscalingPolicy.
+//
+// At most one of HomogeneousTarget, HeterogeneousTarget, or DisaggregatedTarget
+// may be set. When the spec is used standalone (as an AutoscalingPolicy custom
+// resource), exactly one target must be set; this is enforced by the
+// autoscalingpolicy validating webhook rather than a CEL rule.
 type AutoscalingPolicySpecApplyConfiguration struct {
-	TolerancePercent    *int32                                       `json:"tolerancePercent,omitempty"`
-	Metrics             []AutoscalingPolicyMetricApplyConfiguration  `json:"metrics,omitempty"`
-	Behavior            *AutoscalingPolicyBehaviorApplyConfiguration `json:"behavior,omitempty"`
-	HomogeneousTarget   *HomogeneousTargetApplyConfiguration         `json:"homogeneousTarget,omitempty"`
-	HeterogeneousTarget *HeterogeneousTargetApplyConfiguration       `json:"heterogeneousTarget,omitempty"`
-	DisaggregatedTarget *DisaggregatedTargetApplyConfiguration       `json:"disaggregatedTarget,omitempty"`
+	// TolerancePercent defines the percentage of deviation tolerated before scaling actions are triggered.
+	// current_replicas represents the current number of instances, while target_replicas represents the expected number of instances calculated from monitoring metrics.
+	// Scaling operations are performed only when |current_replicas - target_replicas| >= current_replicas * TolerancePercent / 100.
+	TolerancePercent *int32 `json:"tolerancePercent,omitempty"`
+	// Metrics defines the list of metrics used to evaluate scaling decisions.
+	// This is the default metric list applied to scalable units. For
+	// DisaggregatedTarget, role-level metrics override this list for that role.
+	Metrics []AutoscalingPolicyMetricApplyConfiguration `json:"metrics,omitempty"`
+	// Behavior defines the scaling behavior configuration for both scale up and scale down operations.
+	Behavior *AutoscalingPolicyBehaviorApplyConfiguration `json:"behavior,omitempty"`
+	// HomogeneousTarget enables traditional metric-based scaling for a single
+	// ModelServing deployment (whole-deployment granularity).
+	HomogeneousTarget *HomogeneousTargetApplyConfiguration `json:"homogeneousTarget,omitempty"`
+	// HeterogeneousTarget enables optimization-based scaling across multiple
+	// ModelServing deployments with different hardware capabilities.
+	HeterogeneousTarget *HeterogeneousTargetApplyConfiguration `json:"heterogeneousTarget,omitempty"`
+	// DisaggregatedTarget enables coordinated autoscaling of roles within a
+	// single ModelServing that uses disaggregated serving.
+	DisaggregatedTarget *DisaggregatedTargetApplyConfiguration `json:"disaggregatedTarget,omitempty"`
 }
 
 // AutoscalingPolicySpecApplyConfiguration constructs a declarative configuration of the AutoscalingPolicySpec type for use with

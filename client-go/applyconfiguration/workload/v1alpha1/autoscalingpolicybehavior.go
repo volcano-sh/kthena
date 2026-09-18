@@ -20,9 +20,13 @@ package v1alpha1
 
 // AutoscalingPolicyBehaviorApplyConfiguration represents a declarative configuration of the AutoscalingPolicyBehavior type for use
 // with apply.
+//
+// AutoscalingPolicyBehavior defines the scaling behavior configuration for both scale up and scale down operations.
 type AutoscalingPolicyBehaviorApplyConfiguration struct {
-	ScaleUp   *AutoscalingPolicyScaleUpPolicyApplyConfiguration `json:"scaleUp,omitempty"`
-	ScaleDown *AutoscalingPolicyStablePolicyApplyConfiguration  `json:"scaleDown,omitempty"`
+	// ScaleUp defines the policy configuration for scaling up (increasing replicas).
+	ScaleUp *AutoscalingPolicyScaleUpPolicyApplyConfiguration `json:"scaleUp,omitempty"`
+	// ScaleDown defines the policy configuration for scaling down (decreasing replicas).
+	ScaleDown *AutoscalingPolicyStablePolicyApplyConfiguration `json:"scaleDown,omitempty"`
 }
 
 // AutoscalingPolicyBehaviorApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyBehavior type for use with

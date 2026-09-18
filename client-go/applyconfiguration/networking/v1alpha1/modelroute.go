@@ -27,6 +27,8 @@ import (
 
 // ModelRouteApplyConfiguration represents a declarative configuration of the ModelRoute type for use
 // with apply.
+//
+// ModelRoute is the Schema for the Modelroutes API.
 type ModelRouteApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
@@ -44,6 +46,7 @@ func ModelRoute(name, namespace string) *ModelRouteApplyConfiguration {
 	b.WithAPIVersion("networking.serving.volcano.sh/v1alpha1")
 	return b
 }
+
 func (b ModelRouteApplyConfiguration) IsApplyConfiguration() {}
 
 // WithKind sets the Kind field in the declarative configuration to the given value

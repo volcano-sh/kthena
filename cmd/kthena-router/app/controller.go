@@ -24,6 +24,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
@@ -144,7 +145,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 			}
 			cacheSyncs = append(cacheSyncs,
 				kubeInformerFactory.Core().V1().Namespaces().Informer().HasSynced,
-				dynamicInformerFactory.ForResource(inferencev1.SchemeGroupVersion.WithResource("inferencepools")).Informer().HasSynced,
+				dynamicInformerFactory.ForResource(schema.GroupVersion(inferencev1.GroupVersion).WithResource("inferencepools")).Informer().HasSynced,
 			)
 			dynamicInformerFactory.Start(stop)
 		}

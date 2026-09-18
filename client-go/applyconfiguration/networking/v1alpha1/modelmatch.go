@@ -24,10 +24,19 @@ import (
 
 // ModelMatchApplyConfiguration represents a declarative configuration of the ModelMatch type for use
 // with apply.
+//
+// ModelMatch defines the predicate used to match LLM inference requests to a given
+// TargetModels. Multiple match conditions are ANDed together, i.e. the match will
+// evaluate to true only if all conditions are satisfied.
 type ModelMatchApplyConfiguration struct {
+	// Header to match: prefix, exact, regex
+	// If unset, any header will be matched.
 	Headers map[string]*networkingv1alpha1.StringMatch `json:"headers,omitempty"`
-	Uri     *StringMatchApplyConfiguration             `json:"uri,omitempty"`
-	Body    *BodyMatchApplyConfiguration               `json:"body,omitempty"`
+	// URI to match: prefix, exact, regex
+	// If this field is not specified, a default prefix match on the "/" path is provided.
+	Uri *StringMatchApplyConfiguration `json:"uri,omitempty"`
+	// Body contains conditions to match request body content
+	Body *BodyMatchApplyConfiguration `json:"body,omitempty"`
 }
 
 // ModelMatchApplyConfiguration constructs a declarative configuration of the ModelMatch type for use with

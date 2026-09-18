@@ -20,9 +20,16 @@ package v1alpha1
 
 // WorkloadSelectorApplyConfiguration represents a declarative configuration of the WorkloadSelector type for use
 // with apply.
+//
+// WorkloadSelector is used to match the model serving instances.
+// Currently, they must be pods within the same namespace as modelServer object.
 type WorkloadSelectorApplyConfiguration struct {
-	MatchLabels map[string]string          `json:"matchLabels,omitempty"`
-	PDGroup     *PDGroupApplyConfiguration `json:"pdGroup,omitempty"`
+	// The base labels to match the model serving instances.
+	// All serving instances must match these labels.
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+	// PDGroup is used to further match different roles of the model serving instances,
+	// mainly used in case like PD disaggregation.
+	PDGroup *PDGroupApplyConfiguration `json:"pdGroup,omitempty"`
 }
 
 // WorkloadSelectorApplyConfiguration constructs a declarative configuration of the WorkloadSelector type for use with

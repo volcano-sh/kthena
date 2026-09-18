@@ -24,12 +24,23 @@ import (
 
 // TargetScalingStatusApplyConfiguration represents a declarative configuration of the TargetScalingStatus type for use
 // with apply.
+//
+// TargetScalingStatus reports the observed scaling state of a single scalable
+// unit (a whole ModelServing, or one role within it).
 type TargetScalingStatusApplyConfiguration struct {
-	Name            *string  `json:"name,omitempty"`
-	CurrentReplicas *int32   `json:"currentReplicas,omitempty"`
-	DesiredReplicas *int32   `json:"desiredReplicas,omitempty"`
-	Mode            *string  `json:"mode,omitempty"`
-	LastScaleTime   *v1.Time `json:"lastScaleTime,omitempty"`
+	// Name identifies the unit when this status appears in a list.
+	// It is required for HeterogeneousStatus entries and DisaggregatedStatus roles,
+	// and may be empty for HomogeneousStatus because the target is implied.
+	Name *string `json:"name,omitempty"`
+	// CurrentReplicas is the number of replicas currently observed.
+	CurrentReplicas *int32 `json:"currentReplicas,omitempty"`
+	// DesiredReplicas is the number of replicas the controller computed from
+	// metrics, before ratio enforcement.
+	DesiredReplicas *int32 `json:"desiredReplicas,omitempty"`
+	// Mode reports whether the unit is currently in "Stable" or "Panic" mode.
+	Mode *string `json:"mode,omitempty"`
+	// LastScaleTime is the last time the unit was scaled by the controller.
+	LastScaleTime *v1.Time `json:"lastScaleTime,omitempty"`
 }
 
 // TargetScalingStatusApplyConfiguration constructs a declarative configuration of the TargetScalingStatus type for use with

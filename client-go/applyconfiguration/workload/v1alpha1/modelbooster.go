@@ -26,6 +26,12 @@ import (
 
 // ModelBoosterApplyConfiguration represents a declarative configuration of the ModelBooster type for use
 // with apply.
+//
+// ModelBooster is the Schema for the models API.
+//
+// Deprecated: ModelBooster is deprecated as of Kthena v1.1.
+// Use ModelServing, ModelServer, and ModelRoute instead.
+// ModelBooster will be removed no earlier than Kthena v1.5.
 type ModelBoosterApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
@@ -43,6 +49,7 @@ func ModelBooster(name, namespace string) *ModelBoosterApplyConfiguration {
 	b.WithAPIVersion("workload.serving.volcano.sh/v1alpha1")
 	return b
 }
+
 func (b ModelBoosterApplyConfiguration) IsApplyConfiguration() {}
 
 // WithKind sets the Kind field in the declarative configuration to the given value

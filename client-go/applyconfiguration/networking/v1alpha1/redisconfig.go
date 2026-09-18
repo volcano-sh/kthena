@@ -20,7 +20,10 @@ package v1alpha1
 
 // RedisConfigApplyConfiguration represents a declarative configuration of the RedisConfig type for use
 // with apply.
+//
+// RedisConfig contains Redis connection configuration
 type RedisConfigApplyConfiguration struct {
+	// Address is the Redis server address in the format "host:port".
 	Address *string `json:"address,omitempty"`
 }
 

@@ -20,8 +20,33 @@ package v1alpha1
 
 // MetricSourceApplyConfiguration represents a declarative configuration of the MetricSource type for use
 // with apply.
+//
+// MetricSource is a discriminated union selecting the metric backend.
+//
+// Exactly one backend config must be provided:
+// - Pod        -> set the pod field only.
+// - Prometheus -> set the prometheus field only.
+//
+// Example (scrape the metric directly from each pod's /metrics endpoint):
+//
+// metricSources:
+// gpu_cache_usage:
+// pod:
+// name: vllm:gpu_cache_usage_perc
+// uri: /metrics
+// port: 8000
+//
+// Example (read the metric from an external Prometheus server):
+//
+// metricSources:
+// http_rps:
+// prometheus:
+// serverURL: http://prometheus.monitoring.svc:9090
+// query: sum(rate(http_requests_total[2m]))
 type MetricSourceApplyConfiguration struct {
-	Pod        *PodMetricSourceApplyConfiguration        `json:"pod,omitempty"`
+	// Pod configures direct pod endpoint scraping.
+	Pod *PodMetricSourceApplyConfiguration `json:"pod,omitempty"`
+	// Prometheus configures an external Prometheus server as the metric source.
 	Prometheus *PrometheusMetricSourceApplyConfiguration `json:"prometheus,omitempty"`
 }
 

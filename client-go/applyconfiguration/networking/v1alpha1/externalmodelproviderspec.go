@@ -24,13 +24,24 @@ import (
 
 // ExternalModelProviderSpecApplyConfiguration represents a declarative configuration of the ExternalModelProviderSpec type for use
 // with apply.
+//
+// ExternalModelProviderSpec defines the desired state of ExternalModelProvider.
 type ExternalModelProviderSpecApplyConfiguration struct {
-	ProviderType       *networkingv1alpha1.ExternalProviderType `json:"providerType,omitempty"`
-	Model              *string                                  `json:"model,omitempty"`
-	BaseURL            *string                                  `json:"baseURL,omitempty"`
-	InsecureSkipVerify *bool                                    `json:"insecureSkipVerify,omitempty"`
-	Auth               *ProviderAuthApplyConfiguration          `json:"auth,omitempty"`
-	Headers            map[string]string                        `json:"headers,omitempty"`
+	// ProviderType selects the protocol adapter used for this provider.
+	ProviderType *networkingv1alpha1.ExternalProviderType `json:"providerType,omitempty"`
+	// Model is the actual upstream model name. When set, it overwrites the
+	// model in the request, matching ModelServer.Spec.Model behavior.
+	Model *string `json:"model,omitempty"`
+	// BaseURL is the provider endpoint root. External providers must use HTTPS.
+	// Example: https://api.deepseek.com
+	BaseURL *string `json:"baseURL,omitempty"`
+	// InsecureSkipVerify disables server certificate-chain and hostname
+	// verification for HTTPS. It does not enable plain HTTP.
+	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
+	// Auth references a credential Secret in the same namespace.
+	Auth *ProviderAuthApplyConfiguration `json:"auth,omitempty"`
+	// Non-sensitive static headers added to upstream requests.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // ExternalModelProviderSpecApplyConfiguration constructs a declarative configuration of the ExternalModelProviderSpec type for use with

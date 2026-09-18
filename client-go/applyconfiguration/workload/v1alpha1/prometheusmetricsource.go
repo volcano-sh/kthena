@@ -24,10 +24,27 @@ import (
 
 // PrometheusMetricSourceApplyConfiguration represents a declarative configuration of the PrometheusMetricSource type for use
 // with apply.
+//
+// PrometheusMetricSource configures an external Prometheus server as a metric backend.
+//
+// The Query is executed as an instant query and must return a single scalar or a
+// single-sample vector; the resulting value drives the scaling decision.
+//
+// Example:
+//
+// prometheus:
+// serverURL: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+// query: sum(rate(http_requests_total[2m]))
 type PrometheusMetricSourceApplyConfiguration struct {
-	ServerURL *string                          `json:"serverURL,omitempty"`
-	Query     *string                          `json:"query,omitempty"`
-	Auth      *workloadv1alpha1.PrometheusAuth `json:"auth,omitempty"`
+	// ServerURL is the base URL of the Prometheus HTTP API server.
+	// Example: "http://prometheus.monitoring.svc:9090".
+	ServerURL *string `json:"serverURL,omitempty"`
+	// Query is a PromQL instant-query expression. It must evaluate to a single
+	// scalar or a one-element vector, e.g. "avg(rate(vllm:request_latency[1m]))".
+	// More Query details refer to https://prometheus.io/docs/prometheus/latest/querying/basics
+	Query *string `json:"query,omitempty"`
+	// Auth holds optional authentication configuration for the Prometheus server.
+	Auth *workloadv1alpha1.PrometheusAuth `json:"auth,omitempty"`
 }
 
 // PrometheusMetricSourceApplyConfiguration constructs a declarative configuration of the PrometheusMetricSource type for use with

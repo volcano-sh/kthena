@@ -24,10 +24,35 @@ import (
 
 // PodMetricSourceApplyConfiguration represents a declarative configuration of the PodMetricSource type for use
 // with apply.
+//
+// PodMetricSource configures pod-endpoint scraping for a metric.
+//
+// For each matching Pod, metrics are scraped from the constructed access link and extracted from Prometheus’s text output
+// for the metric family identified by Name.
+//
+// Example (the pod exposes "vllm:num_requests_waiting" on :8000/metrics):
+//
+// pod:
+// name: vllm:num_requests_waiting
+// uri: /metrics
+// port: 8000
+// labelSelector:
+// matchLabels:
+// role: decode
+//
+// The resulting scrape URL would look like: http://10.1.2.3:8000/metrics
 type PodMetricSourceApplyConfiguration struct {
-	Name          *string                             `json:"name,omitempty"`
-	Uri           *string                             `json:"uri,omitempty"`
-	Port          *int32                              `json:"port,omitempty"`
+	// Name is the Prometheus metric name matched against labels in the pod's scraped output.
+	// Defaults to the policy metric key when omitted.
+	// For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
+	Name *string `json:"name,omitempty"`
+	// Uri defines the HTTP path where metrics are exposed (e.g., "/metrics").
+	Uri *string `json:"uri,omitempty"`
+	// Port defines the network port where metrics are exposed by the pods (e.g., 8000).
+	Port *int32 `json:"port,omitempty"`
+	// LabelSelector defines additional filtering for pods exposing this metric.
+	// Only pods matching both the target and this selector are scraped, e.g.
+	// matchLabels with role=decode to scrape only the decode role's pods.
 	LabelSelector *v1.LabelSelectorApplyConfiguration `json:"labelSelector,omitempty"`
 }
 

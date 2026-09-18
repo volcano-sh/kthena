@@ -20,10 +20,30 @@ package v1alpha1
 
 // HomogeneousTargetApplyConfiguration represents a declarative configuration of the HomogeneousTarget type for use
 // with apply.
+//
+// HomogeneousTarget defines the configuration for traditional metric-based autoscaling of a single deployment.
+//
+// Example (scale podinfo-ms between 1 and 6 replicas based on RPS):
+//
+// homogeneousTarget:
+// minReplicas: 1
+// maxReplicas: 6
+// target:
+// targetRef:
+// kind: ModelServing
+// name: podinfo-ms
+// metricSources:
+// podinfo_rps:
+// prometheus:
+// serverURL: http://prometheus.monitoring.svc:9090
+// query: sum(rate(http_requests_total[2m]))
 type HomogeneousTargetApplyConfiguration struct {
-	Target      *TargetApplyConfiguration `json:"target,omitempty"`
-	MinReplicas *int32                    `json:"minReplicas,omitempty"`
-	MaxReplicas *int32                    `json:"maxReplicas,omitempty"`
+	// Target defines the object to be monitored and scaled.
+	Target *TargetApplyConfiguration `json:"target,omitempty"`
+	// MinReplicas defines the minimum number of replicas to maintain (e.g., 1).
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
+	// MaxReplicas defines the maximum number of replicas allowed (e.g., 6).
+	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 }
 
 // HomogeneousTargetApplyConfiguration constructs a declarative configuration of the HomogeneousTarget type for use with

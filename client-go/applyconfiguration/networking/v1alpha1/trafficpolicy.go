@@ -25,8 +25,17 @@ import (
 // TrafficPolicyApplyConfiguration represents a declarative configuration of the TrafficPolicy type for use
 // with apply.
 type TrafficPolicyApplyConfiguration struct {
-	Timeout        *v1.Duration                      `json:"timeout,omitempty"`
-	Retry          *RetryApplyConfiguration          `json:"retry,omitempty"`
+	// Timeout bounds how long the router waits for the backend to start responding,
+	// covering connection setup, sending the request and waiting for the response
+	// headers. It does not bound inference response bodies, so a streamed response
+	// may run longer. Connector setup exchanges may use the timeout for their
+	// complete response. By default, there is no timeout.
+	Timeout *v1.Duration `json:"timeout,omitempty"`
+	// The retry policy for the inference request.
+	Retry *RetryApplyConfiguration `json:"retry,omitempty"`
+	// ConnectionPool configures the upstream HTTP connection pool used when
+	// forwarding to this ModelServer's pods. When omitted, a shared default
+	// pool is used. Each ModelServer that sets this gets its own isolated pool.
 	ConnectionPool *ConnectionPoolApplyConfiguration `json:"connectionPool,omitempty"`
 }
 

@@ -20,6 +20,8 @@ package v1alpha1
 
 // RoleRatioStatusApplyConfiguration represents a declarative configuration of the RoleRatioStatus type for use
 // with apply.
+//
+// RoleRatioStatus reports the observed value for the ratio constraint.
 type RoleRatioStatusApplyConfiguration struct {
 	NumeratorRole   *string `json:"numeratorRole,omitempty"`
 	DenominatorRole *string `json:"denominatorRole,omitempty"`

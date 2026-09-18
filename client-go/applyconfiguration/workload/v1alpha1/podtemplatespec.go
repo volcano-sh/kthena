@@ -24,9 +24,13 @@ import (
 
 // PodTemplateSpecApplyConfiguration represents a declarative configuration of the PodTemplateSpec type for use
 // with apply.
+//
+// PodTemplateSpec describes the data a pod should have when created from a template
 type PodTemplateSpecApplyConfiguration struct {
+	// Object's metadata.
 	Metadata *MetadataApplyConfiguration `json:"metadata,omitempty"`
-	Spec     *v1.PodSpec                 `json:"spec,omitempty"`
+	// Specification of the desired behavior of the pod.
+	Spec *v1.PodSpec `json:"spec,omitempty"`
 }
 
 // PodTemplateSpecApplyConfiguration constructs a declarative configuration of the PodTemplateSpec type for use with

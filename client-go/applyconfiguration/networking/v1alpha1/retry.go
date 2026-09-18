@@ -25,7 +25,10 @@ import (
 // RetryApplyConfiguration represents a declarative configuration of the Retry type for use
 // with apply.
 type RetryApplyConfiguration struct {
-	Attempts      *int32       `json:"attempts,omitempty"`
+	// The maximum number of times an individual inference request to a model server should be retried.
+	// If the maximum number of retries has been done without a successgful response, the request will be considered failed.
+	Attempts *int32 `json:"attempts,omitempty"`
+	// RetryInterval is the interval between retries.
 	RetryInterval *v1.Duration `json:"retryInterval,omitempty"`
 }
 

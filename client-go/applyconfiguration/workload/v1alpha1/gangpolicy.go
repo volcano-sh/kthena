@@ -20,7 +20,23 @@ package v1alpha1
 
 // GangPolicyApplyConfiguration represents a declarative configuration of the GangPolicy type for use
 // with apply.
+//
+// GangPolicy defines the gang scheduling configuration.
 type GangPolicyApplyConfiguration struct {
+	// MinRoleReplicas defines the minimum number of replicas required for each role
+	// in gang scheduling, pods in each role are strictly gang required.
+	// This map allows users to specify different minimum replica requirements for different roles.
+	// If this field is not set, all roles in the ServingGroup are considered gang required by default.
+	// For example if you specify a 2P(prefill) 4D(decode) serving group and set the below gangPolicy:
+	// ```yaml
+	// gangPolicy:
+	// minRoleReplicas:
+	// prefill: 1
+	// decode: 1
+	// ```
+	// It will result in the following behavior:
+	// At least one prefill and one decode must be scheduled before any of the pods in the serving group can run.
+	// And pods within a role must be scheduled together.
 	MinRoleReplicas map[string]int32 `json:"minRoleReplicas,omitempty"`
 }
 

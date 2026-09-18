@@ -20,8 +20,12 @@ package v1alpha1
 
 // WorkloadPortApplyConfiguration represents a declarative configuration of the WorkloadPort type for use
 // with apply.
+//
+// WorkloadPort defines the port and protocol configuration for the model server.
 type WorkloadPortApplyConfiguration struct {
-	Port     *int32  `json:"port,omitempty"`
+	// The port of the model server. The number must be between 1 and 65535.
+	Port *int32 `json:"port,omitempty"`
+	// The protocol of the model server. Supported values are "http" and "https".
 	Protocol *string `json:"protocol,omitempty"`
 }
 

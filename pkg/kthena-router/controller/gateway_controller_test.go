@@ -51,7 +51,7 @@ func newTestGateway(name, namespace, gatewayClassName string) *gatewayv1.Gateway
 }
 
 func TestGatewayController_Lifecycle(t *testing.T) {
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
@@ -139,7 +139,7 @@ func TestGatewayController_Lifecycle(t *testing.T) {
 }
 
 func TestGatewayController_GatewayClassFilter(t *testing.T) {
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
@@ -184,7 +184,7 @@ func TestGatewayController_GatewayClassFilter(t *testing.T) {
 }
 
 func TestGatewayController_ErrorHandling(t *testing.T) {
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
@@ -209,7 +209,7 @@ func TestGatewayController_ErrorHandling(t *testing.T) {
 }
 
 func TestGatewayController_WorkQueueProcessing(t *testing.T) {
-	gatewayClient := gatewayfake.NewSimpleClientset()
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 

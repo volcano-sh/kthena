@@ -24,8 +24,30 @@ import (
 
 // TargetApplyConfiguration represents a declarative configuration of the Target type for use
 // with apply.
+//
+// Target defines a ModelServing deployment that can be monitored and scaled.
+//
+// Example:
+//
+// target:
+// targetRef:
+// kind: ModelServing
+// name: podinfo-ms
+// metricSources:
+// podinfo_rps:
+// prometheus:
+// serverURL: http://prometheus.monitoring.svc:9090
+// query: sum(rate(http_requests_total[2m]))
 type TargetApplyConfiguration struct {
-	TargetRef     *v1.ObjectReference                       `json:"targetRef,omitempty"`
+	// TargetRef references the target object to be monitored and scaled.
+	// Default target GVK is ModelServing. Currently supported kinds: ModelServing.
+	// Example: kind=ModelServing, name=podinfo-ms.
+	TargetRef *v1.ObjectReference `json:"targetRef,omitempty"`
+	// MetricSources declares how to fetch specific metrics for this target.
+	// Keys must match AutoscalingPolicy.spec.metrics[].name.
+	// Missing keys are treated as missing metrics for that reconcile loop.
+	// For example, a key "podinfo_rps" here must correspond to a metric named
+	// "podinfo_rps" in the referenced AutoscalingPolicy.
 	MetricSources map[string]MetricSourceApplyConfiguration `json:"metricSources,omitempty"`
 }
 

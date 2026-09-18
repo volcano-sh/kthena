@@ -20,7 +20,10 @@ package v1alpha1
 
 // GlobalRateLimitApplyConfiguration represents a declarative configuration of the GlobalRateLimit type for use
 // with apply.
+//
+// GlobalRateLimit contains configuration for global rate limiting
 type GlobalRateLimitApplyConfiguration struct {
+	// Redis contains configuration for Redis-based global rate limiting.
 	Redis *RedisConfigApplyConfiguration `json:"redis,omitempty"`
 }
 

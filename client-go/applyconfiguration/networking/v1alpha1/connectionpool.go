@@ -24,11 +24,21 @@ import (
 
 // ConnectionPoolApplyConfiguration represents a declarative configuration of the ConnectionPool type for use
 // with apply.
+//
+// ConnectionPool configures the HTTP connection pool for a ModelServer.
 type ConnectionPoolApplyConfiguration struct {
-	MaxIdleConnections        *int32       `json:"maxIdleConnections,omitempty"`
-	MaxIdleConnectionsPerHost *int32       `json:"maxIdleConnectionsPerHost,omitempty"`
-	MaxConnectionsPerHost     *int32       `json:"maxConnectionsPerHost,omitempty"`
-	IdleTimeout               *v1.Duration `json:"idleTimeout,omitempty"`
+	// MaxIdleConnections is the total idle connections across all endpoints.
+	// Defaults to 100 when omitted.
+	MaxIdleConnections *int32 `json:"maxIdleConnections,omitempty"`
+	// MaxIdleConnectionsPerHost is the idle connections per pod/endpoint.
+	// Defaults to 64 when omitted.
+	MaxIdleConnectionsPerHost *int32 `json:"maxIdleConnectionsPerHost,omitempty"`
+	// MaxConnectionsPerHost limits dialing, active and idle connections per host.
+	// 0 means unlimited. Defaults to 0 when omitted.
+	MaxConnectionsPerHost *int32 `json:"maxConnectionsPerHost,omitempty"`
+	// IdleTimeout is how long an idle connection stays open before closing.
+	// Defaults to 90s when omitted.
+	IdleTimeout *v1.Duration `json:"idleTimeout,omitempty"`
 }
 
 // ConnectionPoolApplyConfiguration constructs a declarative configuration of the ConnectionPool type for use with

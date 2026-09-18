@@ -24,10 +24,22 @@ import (
 
 // DisaggregatedTargetApplyConfiguration represents a declarative configuration of the DisaggregatedTarget type for use
 // with apply.
+//
+// DisaggregatedTarget defines coordinated autoscaling for disaggregated
+// serving roles within a single ModelServing deployment.
 type DisaggregatedTargetApplyConfiguration struct {
-	TargetRef       *v1.ObjectReference                           `json:"targetRef,omitempty"`
-	Roles           map[string]RoleScalingParamApplyConfiguration `json:"roles,omitempty"`
-	RatioConstraint *RoleRatioConstraintApplyConfiguration        `json:"ratioConstraint,omitempty"`
+	// TargetRef references the ModelServing deployment that contains
+	// all scalable roles.
+	TargetRef *v1.ObjectReference `json:"targetRef,omitempty"`
+	// Roles defines per-role scaling parameters. The map key is roleName
+	// from ModelServing.spec.template.roles[].name. A single role is allowed so
+	// users can autoscale one role independently without configuring a P/D pair.
+	// RatioConstraint, when set, still requires two distinct roles.
+	Roles map[string]RoleScalingParamApplyConfiguration `json:"roles,omitempty"`
+	// RatioConstraint defines the acceptable ratio range of a single role pair.
+	// It enforces that replicas[numeratorRole] / replicas[denominatorRole] stays
+	// within [minRatio, maxRatio] when denominator replica is non-zero.
+	RatioConstraint *RoleRatioConstraintApplyConfiguration `json:"ratioConstraint,omitempty"`
 }
 
 // DisaggregatedTargetApplyConfiguration constructs a declarative configuration of the DisaggregatedTarget type for use with

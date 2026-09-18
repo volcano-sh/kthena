@@ -24,13 +24,24 @@ import (
 
 // ModelServerSpecApplyConfiguration represents a declarative configuration of the ModelServerSpec type for use
 // with apply.
+//
+// ModelServerSpec defines the desired state of ModelServer.
 type ModelServerSpecApplyConfiguration struct {
-	Model            *string                             `json:"model,omitempty"`
-	InferenceEngine  *networkingv1alpha1.InferenceEngine `json:"inferenceEngine,omitempty"`
+	// The real model that the modelServers are running.
+	// If the `model` in LLM inference request is different from this field, it should be overwritten by this field.
+	// Otherwise, the `model` in LLM inference request will not be mutated.
+	Model *string `json:"model,omitempty"`
+	// The inference engine used to serve the model.
+	InferenceEngine *networkingv1alpha1.InferenceEngine `json:"inferenceEngine,omitempty"`
+	// WorkloadSelector is used to match the model serving instances.
+	// Currently, they must be pods within the same namespace as modelServer object.
 	WorkloadSelector *WorkloadSelectorApplyConfiguration `json:"workloadSelector,omitempty"`
-	WorkloadPort     *WorkloadPortApplyConfiguration     `json:"workloadPort,omitempty"`
-	TrafficPolicy    *TrafficPolicyApplyConfiguration    `json:"trafficPolicy,omitempty"`
-	KVConnector      *KVConnectorSpecApplyConfiguration  `json:"kvConnector,omitempty"`
+	// WorkloadPort defines the port and protocol configuration for the model server.
+	WorkloadPort *WorkloadPortApplyConfiguration `json:"workloadPort,omitempty"`
+	// Traffic Policy for accessing the model server instance.
+	TrafficPolicy *TrafficPolicyApplyConfiguration `json:"trafficPolicy,omitempty"`
+	// KVConnector specifies the KV connector configuration for PD disaggregated routing
+	KVConnector *KVConnectorSpecApplyConfiguration `json:"kvConnector,omitempty"`
 }
 
 // ModelServerSpecApplyConfiguration constructs a declarative configuration of the ModelServerSpec type for use with

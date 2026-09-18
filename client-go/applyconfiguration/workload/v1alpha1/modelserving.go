@@ -26,6 +26,8 @@ import (
 
 // ModelServingApplyConfiguration represents a declarative configuration of the ModelServing type for use
 // with apply.
+//
+// ModelServing is the Schema for the LLM Serving API
 type ModelServingApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
@@ -43,6 +45,7 @@ func ModelServing(name, namespace string) *ModelServingApplyConfiguration {
 	b.WithAPIVersion("workload.serving.volcano.sh/v1alpha1")
 	return b
 }
+
 func (b ModelServingApplyConfiguration) IsApplyConfiguration() {}
 
 // WithKind sets the Kind field in the declarative configuration to the given value

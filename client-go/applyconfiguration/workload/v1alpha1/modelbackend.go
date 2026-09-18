@@ -25,17 +25,69 @@ import (
 
 // ModelBackendApplyConfiguration represents a declarative configuration of the ModelBackend type for use
 // with apply.
+//
+// ModelBackend defines the configuration for a model backend.
+//
+// Deprecated: ModelBooster is deprecated as of Kthena v1.1.
+// Use ModelServing, ModelServer, and ModelRoute instead.
+// ModelBooster will be removed no earlier than Kthena v1.5.
 type ModelBackendApplyConfiguration struct {
-	Name             *string                            `json:"name,omitempty"`
-	Type             *workloadv1alpha1.ModelBackendType `json:"type,omitempty"`
-	ModelURI         *string                            `json:"modelURI,omitempty"`
-	CacheURI         *string                            `json:"cacheURI,omitempty"`
-	EnvFrom          []v1.EnvFromSource                 `json:"envFrom,omitempty"`
-	Env              []v1.EnvVar                        `json:"env,omitempty"`
-	Replicas         *int32                             `json:"replicas,omitempty"`
-	Workers          []ModelWorkerApplyConfiguration    `json:"workers,omitempty"`
-	SchedulerName    *string                            `json:"schedulerName,omitempty"`
-	RuntimeClassName *string                            `json:"runtimeClassName,omitempty"`
+	// Name is the name of the backend. Can't duplicate with other ModelBackend name in the same ModelBooster CR.
+	// Note: update name will cause the old ModelServing deletion and a new ModelServing creation.
+	Name *string `json:"name,omitempty"`
+	// Type is the type of the backend.
+	Type *workloadv1alpha1.ModelBackendType `json:"type,omitempty"`
+	// ModelURI is the source from which the model is fetched by the downloader init container.
+	// Supported schemes:
+	// hf://NAMESPACE/REPO         — Hugging Face Hub repository
+	// ms://NAMESPACE/REPO         — ModelScope repository
+	// s3://BUCKET/PATH            — S3-compatible object storage
+	// obs://BUCKET/PATH           — Huawei Object Storage Service (OBS)
+	// pvc:///CLAIM_NAME/PATH      — path inside a PVC already mounted via CacheURI
+	//
+	// When using pvc://, the downloader reads the given path from the container filesystem.
+	// The downloader init container only mounts the volume specified by CacheURI, so the
+	// modelURI path must be reachable through that mount.  Both CacheURI and modelURI must
+	// reference the same PVC, and the modelURI path must start with the CacheURI mount point.
+	// Example: CacheURI: pvc://model-storage, ModelURI: pvc:///model-storage/models/Qwen
+	ModelURI *string `json:"modelURI,omitempty"`
+	// CacheURI specifies where the downloaded model is stored and how the storage volume is
+	// mounted inside every pod (both the downloader init container and the inference engine).
+	// Supported schemes:
+	// pvc://CLAIM_NAME    — PersistentVolumeClaim; the PVC is mounted at /CLAIM_NAME
+	// hostpath://PATH     — host-local directory; mounted at /PATH
+	// (empty)             — an ephemeral EmptyDir volume is used (no persistence)
+	//
+	// The downloader writes model files under a hashed sub-directory of this mount path.
+	// The inference engine reads from the same path.  When ModelURI uses pvc://, CacheURI
+	// must also use pvc:// and reference the same PVC so the source path is visible.
+	CacheURI *string `json:"cacheURI,omitempty"`
+	// List of sources to populate environment variables in the container.
+	// The keys defined within a source must be a C_IDENTIFIER. All invalid keys
+	// will be reported as an event when the container is starting. When a key exists in multiple
+	// sources, the value associated with the last source will take precedence.
+	// Values defined by an Env with a duplicate key will take precedence.
+	// Cannot be updated.
+	EnvFrom []v1.EnvFromSource `json:"envFrom,omitempty"`
+	// List of environment variables to set in the container.
+	// Supported names:
+	// "ENDPOINT": When you download model from s3, you have to specify it.
+	// "RUNTIME_URL": default is http://localhost:8000
+	// "RUNTIME_PORT": default is 8100
+	// "RUNTIME_METRICS_PATH": default is /metrics
+	// "HF_ENDPOINT":The url of hugging face. Default is https://huggingface.co/
+	// "KTHENA_SKIP_ENGINE_DEPENDENCY_INSTALL": default is false. When set to true, skip startup-time pip install of engine connector dependencies.
+	// Cannot be updated.
+	Env []v1.EnvVar `json:"env,omitempty"`
+	// Replicas is the fixed number of replicas for the backend.
+	Replicas *int32 `json:"replicas,omitempty"`
+	// Workers is the list of workers associated with this backend.
+	Workers []ModelWorkerApplyConfiguration `json:"workers,omitempty"`
+	// SchedulerName defines the name of the scheduler used by ModelServing for this backend.
+	SchedulerName *string `json:"schedulerName,omitempty"`
+	// RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group,
+	// which should be used to run pods generated for this backend.
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 }
 
 // ModelBackendApplyConfiguration constructs a declarative configuration of the ModelBackend type for use with

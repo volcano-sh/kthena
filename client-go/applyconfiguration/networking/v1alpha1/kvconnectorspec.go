@@ -24,7 +24,11 @@ import (
 
 // KVConnectorSpecApplyConfiguration represents a declarative configuration of the KVConnectorSpec type for use
 // with apply.
+//
+// KVConnectorSpec defines KV connector configuration for PD disaggregated routing
 type KVConnectorSpecApplyConfiguration struct {
+	// Type specifies the connector type.
+	// If you do not know which type to use, please use "http" as default.
 	Type *networkingv1alpha1.KVConnectorType `json:"type,omitempty"`
 }
 

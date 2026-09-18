@@ -24,10 +24,31 @@ import (
 
 // RollingUpdateConfigurationApplyConfiguration represents a declarative configuration of the RollingUpdateConfiguration type for use
 // with apply.
+//
+// RollingUpdateConfiguration defines availability and partition settings for
+// the rollout granularity where it is configured.
 type RollingUpdateConfigurationApplyConfiguration struct {
+	// MaxUnavailable is the maximum number of resources that may be
+	// unavailable during an update. It can be an absolute number (for example,
+	// 5) or a percentage (for example, 10%). A percentage is calculated from
+	// ModelServing replicas for ServingGroupRollingUpdate and from the
+	// corresponding Role's replicas for RoleRollingUpdate, then rounded down.
+	// It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
-	MaxSurge       *intstr.IntOrString `json:"maxSurge,omitempty"`
-	Partition      *intstr.IntOrString `json:"partition,omitempty"`
+	// MaxSurge is the maximum number of resources that may be created above
+	// the desired replica count during an update. It can be an absolute number
+	// (for example, 1) or a percentage (for example, 25%). A percentage is
+	// calculated from ModelServing replicas for ServingGroupRollingUpdate and
+	// from the corresponding Role's replicas for RoleRollingUpdate, then rounded
+	// up. It defaults to 0.
+	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
+	// Partition protects the first N existing replicas in ascending ordinal order
+	// from updates. The remaining replicas are eligible for rolling update.
+	// For a contiguous ordinal set, this is equivalent to protecting [0, Partition).
+	// Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).
+	// Absolute number is calculated from percentage by rounding up.
+	// The default value is 0.
+	Partition *intstr.IntOrString `json:"partition,omitempty"`
 }
 
 // RollingUpdateConfigurationApplyConfiguration constructs a declarative configuration of the RollingUpdateConfiguration type for use with

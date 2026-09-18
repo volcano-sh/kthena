@@ -24,8 +24,16 @@ import (
 
 // PluginScopeApplyConfiguration represents a declarative configuration of the PluginScope type for use
 // with apply.
+//
+// PluginScope restricts where a plugin is applied.
+// Roles is a whitelist; empty means all roles.
+// Target limits to entry/worker/all pods; empty means all pods.
 type PluginScopeApplyConfiguration struct {
-	Roles  []string                       `json:"roles,omitempty"`
+	// Roles limits the plugin to the specified role names.
+	Roles []string `json:"roles,omitempty"`
+	// Target limits the plugin to specific pod target (Entry/Worker/All).
+	// kubebuilder:default=All
+	// kubebuilder:validation:Enum={All,Entry,Worker}
 	Target *workloadv1alpha1.PluginTarget `json:"target,omitempty"`
 }
 

@@ -24,12 +24,25 @@ import (
 
 // AutoscalingPolicyStatusApplyConfiguration represents a declarative configuration of the AutoscalingPolicyStatus type for use
 // with apply.
+//
+// AutoscalingPolicyStatus defines the observed state of AutoscalingPolicy.
 type AutoscalingPolicyStatusApplyConfiguration struct {
-	ObservedGeneration  *int64                                        `json:"observedGeneration,omitempty"`
-	Conditions          []v1.ConditionApplyConfiguration              `json:"conditions,omitempty"`
-	HomogeneousStatus   *TargetScalingStatusApplyConfiguration        `json:"homogeneousStatus,omitempty"`
+	// ObservedGeneration is the most recent generation observed by the controller.
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
+	// Conditions represents the latest available observations of the policy's state.
+	// Well-known condition types include:
+	// - "Ready":                   the policy is actively reconciled.
+	// - "TargetFound":             the referenced ModelServing (and roles) exist.
+	// - "RatioConstraintViolated": the desired counts could not satisfy ratioConstraint
+	// given the per-role min/max bounds.
+	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	// HomogeneousStatus reports the observed state when HomogeneousTarget is used.
+	HomogeneousStatus *TargetScalingStatusApplyConfiguration `json:"homogeneousStatus,omitempty"`
+	// DisaggregatedStatus reports the observed state when DisaggregatedTarget is used.
 	DisaggregatedStatus *DisaggregatedScalingStatusApplyConfiguration `json:"disaggregatedStatus,omitempty"`
-	HeterogeneousStatus []TargetScalingStatusApplyConfiguration       `json:"heterogeneousStatus,omitempty"`
+	// HeterogeneousStatus reports the per-target observed state when
+	// HeterogeneousTarget is used.
+	HeterogeneousStatus []TargetScalingStatusApplyConfiguration `json:"heterogeneousStatus,omitempty"`
 }
 
 // AutoscalingPolicyStatusApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyStatus type for use with

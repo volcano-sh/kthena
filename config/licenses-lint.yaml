@@ -70,3 +70,5 @@ allowlisted_modules:
 - github.com/russross/blackfriday/v2
 # miniredis is MIT licensed: https://github.com/alicebob/miniredis
 - github.com/alicebob/miniredis/v2
+# filepath-securejoin is BSD-3-Clause and MPL-2.0, split across LICENSE.BSD and LICENSE.MPL-2.0: https://github.com/cyphar/filepath-securejoin/blob/main/COPYING.md
+- github.com/cyphar/filepath-securejoin

@@ -24,10 +24,24 @@ import (
 
 // ModelBoosterSpecApplyConfiguration represents a declarative configuration of the ModelBoosterSpec type for use
 // with apply.
+//
+// ModelBoosterSpec defines the desired state of ModelBooster.
+//
+// Deprecated: ModelBooster is deprecated as of Kthena v1.1.
+// Use ModelServing, ModelServer, and ModelRoute instead.
+// ModelBooster will be removed no earlier than Kthena v1.5.
 type ModelBoosterSpecApplyConfiguration struct {
-	Name       *string                                          `json:"name,omitempty"`
-	Owner      *string                                          `json:"owner,omitempty"`
-	Backend    *ModelBackendApplyConfiguration                  `json:"backend,omitempty"`
+	// Name is the name of the model. ModelBooster CR name is restricted by kubernetes, for example, can't contain uppercase letters.
+	// So we use this field to specify the ModelBooster name.
+	Name *string `json:"name,omitempty"`
+	// Owner is the owner of the model.
+	Owner *string `json:"owner,omitempty"`
+	// Backend is the model backend associated with this model.
+	// ModelBackend is the minimum unit of inference instance. It can be vLLM or vLLMDisaggregated.
+	Backend *ModelBackendApplyConfiguration `json:"backend,omitempty"`
+	// ModelMatch defines the predicate used to match LLM inference requests to a given
+	// TargetModels. Multiple match conditions are ANDed together, i.e. the match will
+	// evaluate to true only if all conditions are satisfied.
 	ModelMatch *networkingv1alpha1.ModelMatchApplyConfiguration `json:"modelMatch,omitempty"`
 }
 

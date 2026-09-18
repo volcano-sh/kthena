@@ -26,6 +26,9 @@ import (
 
 // AutoscalingPolicyApplyConfiguration represents a declarative configuration of the AutoscalingPolicy type for use
 // with apply.
+//
+// AutoscalingPolicy defines the autoscaling policy configuration for model serving workloads.
+// It specifies scaling rules, metrics, and behavior for automatic replica adjustment.
 type AutoscalingPolicyApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
@@ -43,6 +46,7 @@ func AutoscalingPolicy(name, namespace string) *AutoscalingPolicyApplyConfigurat
 	b.WithAPIVersion("workload.serving.volcano.sh/v1alpha1")
 	return b
 }
+
 func (b AutoscalingPolicyApplyConfiguration) IsApplyConfiguration() {}
 
 // WithKind sets the Kind field in the declarative configuration to the given value

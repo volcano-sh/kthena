@@ -20,6 +20,9 @@ package v1alpha1
 
 // StringMatchApplyConfiguration represents a declarative configuration of the StringMatch type for use
 // with apply.
+//
+// StringMatch defines the matching conditions for string fields.
+// Only one of the fields may be set.
 type StringMatchApplyConfiguration struct {
 	Exact  *string `json:"exact,omitempty"`
 	Prefix *string `json:"prefix,omitempty"`

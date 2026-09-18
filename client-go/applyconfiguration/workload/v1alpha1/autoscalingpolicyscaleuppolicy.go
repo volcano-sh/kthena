@@ -20,9 +20,15 @@ package v1alpha1
 
 // AutoscalingPolicyScaleUpPolicyApplyConfiguration represents a declarative configuration of the AutoscalingPolicyScaleUpPolicy type for use
 // with apply.
+//
+// AutoscalingPolicyScaleUpPolicy defines the scaling up policy configuration.
 type AutoscalingPolicyScaleUpPolicyApplyConfiguration struct {
+	// StablePolicy defines the stable scaling policy that uses average metric values over time windows.
+	// This policy smooths out short-term fluctuations and avoids unnecessary frequent scaling operations.
 	StablePolicy *AutoscalingPolicyStablePolicyApplyConfiguration `json:"stablePolicy,omitempty"`
-	PanicPolicy  *AutoscalingPolicyPanicPolicyApplyConfiguration  `json:"panicPolicy,omitempty"`
+	// PanicPolicy defines the emergency scaling policy for handling sudden traffic spikes.
+	// This policy activates during rapid load surges to prevent service degradation or timeouts.
+	PanicPolicy *AutoscalingPolicyPanicPolicyApplyConfiguration `json:"panicPolicy,omitempty"`
 }
 
 // AutoscalingPolicyScaleUpPolicyApplyConfiguration constructs a declarative configuration of the AutoscalingPolicyScaleUpPolicy type for use with
