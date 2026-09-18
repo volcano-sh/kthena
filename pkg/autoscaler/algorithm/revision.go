@@ -53,8 +53,9 @@ func (alg CorrectedInstancesAlgorithm) GetCorrectedInstances() int32 {
 
 func (alg CorrectedInstancesAlgorithm) getCorrectedInstancesForPanic() int32 {
 	corrected := alg.RecommendedInstances
-	if pastSample, ok := alg.History.MinCorrectedForPanic.GetBest(alg.CurrentInstances); ok && pastSample > 0 {
-		relativeConstraint := pastSample + int32(float64(pastSample)*float64(*alg.Behavior.ScaleUp.PanicPolicy.Percent)/100.0)
+	if pastSample, ok := alg.History.MinCorrectedForPanic.GetBest(alg.CurrentInstances); ok && pastSample > 0 && alg.Behavior.ScaleUp.PanicPolicy.Percent != nil {
+		panicPercent := *alg.Behavior.ScaleUp.PanicPolicy.Percent
+		relativeConstraint := pastSample + int32(float64(pastSample)*float64(panicPercent)/100.0)
 		corrected = min(corrected, relativeConstraint)
 	}
 	corrected = max(corrected, alg.CurrentInstances)
@@ -80,8 +81,16 @@ func (alg CorrectedInstancesAlgorithm) getCorrectedInstancesForStableScaleDown()
 		corrected = max(corrected, betterRecommendation)
 	}
 	if pastSample, ok := alg.History.MaxCorrected.GetBest(alg.CurrentInstances); ok {
-		absoluteConstraint := pastSample - *alg.Behavior.ScaleDown.Instances
-		relativeConstraint := pastSample - pastSample*(*alg.Behavior.ScaleDown.Percent)/100
+		scaleDownInstances := int32(1)
+		if alg.Behavior.ScaleDown.Instances != nil {
+			scaleDownInstances = *alg.Behavior.ScaleDown.Instances
+		}
+		scaleDownPercent := int32(100)
+		if alg.Behavior.ScaleDown.Percent != nil {
+			scaleDownPercent = *alg.Behavior.ScaleDown.Percent
+		}
+		absoluteConstraint := pastSample - scaleDownInstances
+		relativeConstraint := pastSample - pastSample*scaleDownPercent/100
 		var constraint int32
 		switch alg.Behavior.ScaleDown.SelectPolicy {
 		case v1alpha1.SelectPolicyOr:
@@ -103,8 +112,16 @@ func (alg CorrectedInstancesAlgorithm) getCorrectedInstancesForStableScaleUp() i
 		corrected = min(corrected, betterRecommendation)
 	}
 	if pastSample, ok := alg.History.MinCorrectedForStable.GetBest(alg.CurrentInstances); ok {
-		absoluteConstraint := pastSample + *alg.Behavior.ScaleUp.StablePolicy.Instances
-		relativeConstraint := pastSample + pastSample*(*alg.Behavior.ScaleUp.StablePolicy.Percent)/100
+		scaleUpInstances := int32(1)
+		if alg.Behavior.ScaleUp.StablePolicy.Instances != nil {
+			scaleUpInstances = *alg.Behavior.ScaleUp.StablePolicy.Instances
+		}
+		scaleUpPercent := int32(100)
+		if alg.Behavior.ScaleUp.StablePolicy.Percent != nil {
+			scaleUpPercent = *alg.Behavior.ScaleUp.StablePolicy.Percent
+		}
+		absoluteConstraint := pastSample + scaleUpInstances
+		relativeConstraint := pastSample + pastSample*scaleUpPercent/100
 		var constraint int32
 		switch alg.Behavior.ScaleUp.StablePolicy.SelectPolicy {
 		case v1alpha1.SelectPolicyOr:
