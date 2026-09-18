@@ -66,7 +66,7 @@ type GangPolicy struct {
 1. Deploy model serving with the MinRoleReplicas configuration
 
 ```sh
-kubectl apply -f examples/model-serving/gang-scheduling.yaml
+kubectl apply -f examples/model-serving/gangPolicy.yaml
 
 NAMESPACE            NAME                                               READY   STATUS    RESTARTS   AGE
 default              sample-0-decode-0-0                                1/1     Running   0          15s
