@@ -1,0 +1,58 @@
+{{- with .Values.kthenaRouter.tokenizerService }}
+{{- if and .enabled (eq .mode "standalone") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kthena-tokenizer
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-tokenizer
+    {{- include "kthena.labels" $ | nindent 4 }}
+spec:
+  replicas: {{ .standalone.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: kthena-tokenizer
+      {{- include "kthena.selectorLabels" $ | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: kthena-tokenizer
+        {{- include "kthena.labels" $ | nindent 8 }}
+    spec:
+      serviceAccountName: kthena-tokenizer
+      containers:
+        - name: kthena-tokenizer
+          image: "{{ .image.repository }}:{{ .image.tag }}"
+          imagePullPolicy: {{ .image.pullPolicy }}
+          env:
+            - name: TOKENIZER_PORT
+              value: {{ .port | quote }}
+            - name: MAX_TOKENIZERS
+              value: {{ .maxTokenizers | quote }}
+            {{- with .models }}
+            - name: MODEL_TOKENIZERS
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- with .extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - containerPort: {{ .port }}
+              name: tokenizer
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources: {{- toYaml .resources | nindent 12 }}
+{{- end }}
+{{- end }}

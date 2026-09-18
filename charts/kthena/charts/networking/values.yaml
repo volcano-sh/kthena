@@ -100,6 +100,47 @@ kthenaRouter:
     # inferenceExtension controls whether Gateway API Inference Extension features are enabled
     # This requires gatewayAPI.enabled to be true
     inferenceExtension: false
+  # tokenizerService deploys the dedicated tokenizer service used by the
+  # kvcache-aware plugin to tokenize prompts without loading the inference engines.
+  # A Go control plane watches ModelServers and supervises one `vllm launch render`
+  # subprocess per served model with a configured tokenizer source, so
+  # tokenization and chat-template rendering match the inference engine.
+  tokenizerService:
+    # enabled controls whether the tokenizer service is deployed (default: false)
+    enabled: false
+    # mode selects the deployment mode: "sidecar" (runs in the router pod) or
+    # "standalone" (dedicated Deployment + Service)
+    mode: sidecar
+    # port the tokenizer service listens on
+    port: 8100
+    image:
+      # repository is the container image repository for the tokenizer service.
+      repository: ghcr.io/volcano-sh/kthena-tokenizer
+      # tag is the container image tag for the tokenizer service.
+      tag: latest
+      # pullPolicy is the image pull policy for the tokenizer service.
+      pullPolicy: IfNotPresent
+    # models maps a served model name (ModelServer.spec.model) to its tokenizer
+    # source: a Hugging Face repository id or a mounted local path. Served names
+    # are engine-side aliases, so the source must be configured explicitly;
+    # unmapped models fall back to engine-side tokenization.
+    models: {}
+    # maxTokenizers limits the number of concurrently loaded model tokenizers
+    maxTokenizers: 8
+    # extraEnv is appended to the tokenizer container, e.g. HF_TOKEN or HF_ENDPOINT
+    extraEnv: []
+    # resources for the tokenizer container
+    resources:
+      limits:
+        cpu: "2"
+        memory: 4Gi
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    # standalone mode settings (ignored in sidecar mode)
+    standalone:
+      # replicas is the number of tokenizer service instances to run
+      replicas: 1
   # kubeAPIQPS is the QPS (queries per second) to use while talking with kubernetes apiserver
   # If 0 or not specified, uses default value (5)
   kubeAPIQPS: 0

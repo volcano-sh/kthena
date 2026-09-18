@@ -648,6 +648,62 @@ func TestNormalizeTokenizerPort(t *testing.T) {
 	}
 }
 
+func TestNormalizeTokenizerServiceArgs(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name string
+		args *TokenizerServiceArgs
+		want tokenization.TokenizerServiceConfig
+	}{
+		{
+			name: "nil args disables service",
+			args: nil,
+			want: tokenization.TokenizerServiceConfig{},
+		},
+		{
+			name: "disabled args",
+			args: &TokenizerServiceArgs{Enabled: false, Endpoint: "http://127.0.0.1:8100"},
+			want: tokenization.TokenizerServiceConfig{},
+		},
+		{
+			name: "enabled without endpoint disables service",
+			args: &TokenizerServiceArgs{Enabled: true},
+			want: tokenization.TokenizerServiceConfig{},
+		},
+		{
+			name: "enabled defaults fallback to true",
+			args: &TokenizerServiceArgs{Enabled: true, Endpoint: "http://127.0.0.1:8100"},
+			want: tokenization.TokenizerServiceConfig{
+				Enabled:          true,
+				Endpoint:         "http://127.0.0.1:8100",
+				FallbackToEngine: true,
+			},
+		},
+		{
+			name: "explicit fallback false is respected",
+			args: &TokenizerServiceArgs{
+				Enabled:          true,
+				Endpoint:         "http://tokenizer.kthena-system.svc:8100",
+				FallbackToEngine: boolPtr(false),
+			},
+			want: tokenization.TokenizerServiceConfig{
+				Enabled:          true,
+				Endpoint:         "http://tokenizer.kthena-system.svc:8100",
+				FallbackToEngine: false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeTokenizerServiceArgs(tt.args); got != tt.want {
+				t.Fatalf("normalizeTokenizerServiceArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestKVCacheAware_Score_Core(t *testing.T) {
 	pods := createTestPods("pod1", "pod2", "pod3")
 

@@ -301,12 +301,15 @@ data:
 
 **Plugin arguments:**
 
-| Parameter             | Default | Description                                                                      |
-| --------------------- | ------- | -------------------------------------------------------------------------------- |
-| `blockSizeToHash`     | 16      | Number of tokens per block. Must match the vLLM block size for optimal matching. |
-| `maxBlocksToMatch`    | 128     | Maximum number of blocks to process per request. Limits Redis queries.           |
-| `vllmTokenizerPort`   | 8000    | Port used to fetch the tokenizer from vLLM pods.                                 |
-| `sglangTokenizerPort` | 30000   | Port used to fetch the tokenizer from SGLang pods.                               |
+| Parameter             | Default  | Description                                                                                                                            |
+| --------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `blockSizeToHash`     | 16       | Number of tokens per block. Must match the vLLM block size for optimal matching.                                                       |
+| `maxBlocksToMatch`    | 128      | Maximum number of blocks to process per request. Limits Redis queries.                                                                 |
+| `vllmTokenizerPort`   | 8000     | Port used to fetch the tokenizer from vLLM pods.                                                                                       |
+| `sglangTokenizerPort` | 30000    | Port used to fetch the tokenizer from SGLang pods.                                                                                     |
+| `tokenizerService`    | disabled | Use the dedicated [Tokenizer Service](./tokenizer-service.md) instead of engine pods for prompt tokenization, with automatic fallback. |
+
+> **Tip:** By default the plugin tokenizes prompts by calling the `/tokenize` endpoint of a backend engine pod, which adds load and latency to GPU pods. Consider enabling the [Tokenizer Service](./tokenizer-service.md) to offload tokenization to a dedicated, GPU-free component.
 
 **Helm values:**
 

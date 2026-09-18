@@ -163,6 +163,7 @@ IMG_CONTROLLER ?= ${HUB}/kthena-controller-manager:${TAG}
 IMG_ROUTER ?= ${HUB}/kthena-router:${TAG}
 IMG_DOWNLOADER ?= ${HUB}/downloader:${TAG}
 IMG_RUNTIME ?= ${HUB}/runtime:${TAG}
+IMG_TOKENIZER ?= ${HUB}/kthena-tokenizer:${TAG}
 IMG_E2E_EXTERNAL_PROVIDER_MOCK ?= ${HUB}/kthena-external-provider-mock:${TAG}
 
 .PHONY: docker-build-router
@@ -180,6 +181,10 @@ docker-build-downloader: generate
 .PHONY: docker-build-runtime
 docker-build-runtime: generate
 	$(CONTAINER_TOOL) build -t ${IMG_RUNTIME} --target runtime -f python/Dockerfile python
+
+.PHONY: docker-build-tokenizer
+docker-build-tokenizer:
+	$(CONTAINER_TOOL) build -t ${IMG_TOKENIZER} -f docker/Dockerfile.kthena-tokenizer .
 
 .PHONY: docker-build-e2e-external-provider-mock
 docker-build-e2e-external-provider-mock:

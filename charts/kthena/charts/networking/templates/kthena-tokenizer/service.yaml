@@ -1,0 +1,21 @@
+{{- with .Values.kthenaRouter.tokenizerService }}
+{{- if and .enabled (eq .mode "standalone") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: kthena-tokenizer
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-tokenizer
+    {{- include "kthena.labels" $ | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: kthena-tokenizer
+    {{- include "kthena.selectorLabels" $ | nindent 4 }}
+  ports:
+    - port: {{ .port }}
+      targetPort: tokenizer
+      name: http
+  type: ClusterIP
+{{- end }}
+{{- end }}

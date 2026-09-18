@@ -1,0 +1,28 @@
+# Build the tokenizer service binary
+FROM golang:1.26.4 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+
+COPY go.mod go.mod
+COPY go.sum go.sum
+# Cache deps before build
+RUN go mod download
+
+# Copy the go source
+COPY cmd/ cmd/
+COPY pkg/ pkg/
+COPY client-go/ client-go/
+
+# Build. GOARCH is left empty so the binary matches the build platform.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o kthena-tokenizer cmd/kthena-tokenizer/main.go
+
+# The tokenizer service delegates tokenization and chat-template rendering to
+# `vllm launch render` subprocesses, so the runtime image is the CPU-only vLLM
+# image (no GPU required) plus the Go control-plane binary.
+FROM vllm/vllm-openai-cpu:latest
+
+COPY --from=builder /workspace/kthena-tokenizer /usr/local/bin/kthena-tokenizer
+
+ENTRYPOINT ["/usr/local/bin/kthena-tokenizer"]

@@ -91,7 +91,7 @@ func TestTokenizerManager(t *testing.T) {
 	// Test with empty model name
 	t.Run("Empty model name", func(t *testing.T) {
 		pods := []*datastore.PodInfo{}
-		result := manager.GetTokenizer("", pods)
+		result := manager.newEngineTokenizer("", pods)
 		if result != nil {
 			t.Error("Expected nil tokenizer for empty model name")
 		}
@@ -99,7 +99,7 @@ func TestTokenizerManager(t *testing.T) {
 
 	// Test with empty pods
 	t.Run("Empty pods", func(t *testing.T) {
-		result := manager.GetTokenizer("test-model", []*datastore.PodInfo{})
+		result := manager.newEngineTokenizer("test-model", []*datastore.PodInfo{})
 		if result != nil {
 			t.Error("Expected nil tokenizer for empty pods")
 		}
@@ -122,17 +122,17 @@ func TestTokenizerManager(t *testing.T) {
 			},
 		}
 
-		result := manager.GetTokenizer("test-model", pods)
+		result := manager.newEngineTokenizer("test-model", pods)
 		// Note: The actual implementation may return a tokenizer even without annotation
 		// This test verifies the behavior doesn't panic
-		t.Logf("GetTokenizer returned: %v", result)
+		t.Logf("newEngineTokenizer returned: %v", result)
 	})
 
 	// Test vLLM engine routing
 	t.Run("vLLM engine", func(t *testing.T) {
 		pod := testutil.PodInfoWithEngine("pod-vllm", "default", "10.0.0.10", EngineVLLM)
 
-		tok := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod})
+		tok := manager.newEngineTokenizer("test-model", []*datastore.PodInfo{pod})
 		if tok == nil {
 			t.Fatal("Expected non-nil tokenizer for vLLM pod")
 		}
@@ -142,7 +142,7 @@ func TestTokenizerManager(t *testing.T) {
 	t.Run("SGLang engine", func(t *testing.T) {
 		pod := testutil.PodInfoWithEngine("pod-sglang", "default", "10.0.0.11", EngineSGLang)
 
-		tok := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod})
+		tok := manager.newEngineTokenizer("test-model", []*datastore.PodInfo{pod})
 		if tok == nil {
 			t.Fatal("Expected non-nil tokenizer for SGLang pod")
 		}
@@ -152,7 +152,7 @@ func TestTokenizerManager(t *testing.T) {
 	t.Run("IPv6 endpoint", func(t *testing.T) {
 		pod := testutil.PodInfoWithEngine("pod-vllm-ipv6", "default", "fd00::1", EngineVLLM)
 
-		tok := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod})
+		tok := manager.newEngineTokenizer("test-model", []*datastore.PodInfo{pod})
 		remote, ok := tok.(*remoteTokenizerImpl)
 		if !ok {
 			t.Fatalf("Expected remote tokenizer, got %T", tok)
@@ -199,9 +199,164 @@ func TestTokenizerManagerRejectsOutOfRangePort(t *testing.T) {
 	})
 	pod := testutil.PodInfoWithEngine("pod-vllm", "default", "10.0.0.10", EngineVLLM)
 
-	if tokenizer := manager.GetTokenizer("test-model", []*datastore.PodInfo{pod}); tokenizer != nil {
+	if tokenizer := manager.newEngineTokenizer("test-model", []*datastore.PodInfo{pod}); tokenizer != nil {
 		t.Fatalf("expected no tokenizer for an out-of-range endpoint port, got %T", tokenizer)
 	}
+}
+
+// newTokenizeTestServer returns an httptest server that answers /tokenize with
+// the given tokens and counts the requests it received.
+func newTokenizeTestServer(t *testing.T, tokens []int, statusCode int) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		if statusCode != http.StatusOK {
+			w.WriteHeader(statusCode)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"count":  len(tokens),
+			"tokens": tokens,
+		})
+	}))
+	t.Cleanup(server.Close)
+	return server, &requests
+}
+
+func TestTokenizerServiceTokenizePrompt(t *testing.T) {
+	prompt := &common.ChatMessage{Text: "hello"}
+
+	t.Run("service success skips engine pods", func(t *testing.T) {
+		service, serviceRequests := newTokenizeTestServer(t, []int{1, 2, 3}, http.StatusOK)
+		engine, engineRequests := newTokenizeTestServer(t, []int{9, 9, 9}, http.StatusOK)
+		engineAddr := engine.Listener.Addr().(*net.TCPAddr)
+
+		manager := NewTokenizerManager(TokenizerManagerConfig{
+			EndpointPorts: map[string]int{EngineVLLM: engineAddr.Port},
+			Service: TokenizerServiceConfig{
+				Enabled:          true,
+				Endpoint:         service.URL,
+				FallbackToEngine: true,
+			},
+		})
+		pod := testutil.PodInfoWithEngine("pod-vllm", "default", engineAddr.IP.String(), EngineVLLM)
+
+		tokens, err := manager.TokenizePrompt("test-model", prompt, []*datastore.PodInfo{pod})
+		if err != nil {
+			t.Fatalf("TokenizePrompt failed: %v", err)
+		}
+		if !reflect.DeepEqual(tokens, []uint32{1, 2, 3}) {
+			t.Fatalf("tokens = %v, want [1 2 3]", tokens)
+		}
+		if serviceRequests.Load() != 1 {
+			t.Fatalf("service requests = %d, want 1", serviceRequests.Load())
+		}
+		if engineRequests.Load() != 0 {
+			t.Fatalf("engine requests = %d, want 0", engineRequests.Load())
+		}
+	})
+
+	t.Run("service tokenizer is created once and reused", func(t *testing.T) {
+		service, _ := newTokenizeTestServer(t, []int{1, 2, 3}, http.StatusOK)
+
+		manager := NewTokenizerManager(TokenizerManagerConfig{
+			Service: TokenizerServiceConfig{
+				Enabled:          true,
+				Endpoint:         service.URL,
+				FallbackToEngine: false,
+			},
+		})
+
+		first := manager.serviceTokenizerFor("test-model")
+		if first == nil {
+			t.Fatal("expected a service tokenizer")
+		}
+		for i := 0; i < 3; i++ {
+			if _, err := manager.TokenizePrompt("test-model", prompt, nil); err != nil {
+				t.Fatalf("TokenizePrompt failed: %v", err)
+			}
+		}
+		if second := manager.serviceTokenizerFor("test-model"); second != first {
+			t.Fatal("expected the cached service tokenizer to be reused")
+		}
+	})
+
+	t.Run("service failure falls back to engine", func(t *testing.T) {
+		service, serviceRequests := newTokenizeTestServer(t, nil, http.StatusServiceUnavailable)
+		engine, engineRequests := newTokenizeTestServer(t, []int{4, 5}, http.StatusOK)
+		engineAddr := engine.Listener.Addr().(*net.TCPAddr)
+
+		manager := NewTokenizerManager(TokenizerManagerConfig{
+			EndpointPorts: map[string]int{EngineVLLM: engineAddr.Port},
+			Service: TokenizerServiceConfig{
+				Enabled:          true,
+				Endpoint:         service.URL,
+				FallbackToEngine: true,
+			},
+		})
+		pod := testutil.PodInfoWithEngine("pod-vllm", "default", engineAddr.IP.String(), EngineVLLM)
+
+		tokens, err := manager.TokenizePrompt("test-model", prompt, []*datastore.PodInfo{pod})
+		if err != nil {
+			t.Fatalf("TokenizePrompt failed: %v", err)
+		}
+		if !reflect.DeepEqual(tokens, []uint32{4, 5}) {
+			t.Fatalf("tokens = %v, want [4 5]", tokens)
+		}
+		if serviceRequests.Load() == 0 {
+			t.Fatal("expected the tokenizer service to be tried first")
+		}
+		if engineRequests.Load() != 1 {
+			t.Fatalf("engine requests = %d, want 1", engineRequests.Load())
+		}
+	})
+
+	t.Run("service failure without fallback returns error", func(t *testing.T) {
+		service, _ := newTokenizeTestServer(t, nil, http.StatusServiceUnavailable)
+		engine, engineRequests := newTokenizeTestServer(t, []int{4, 5}, http.StatusOK)
+		engineAddr := engine.Listener.Addr().(*net.TCPAddr)
+
+		manager := NewTokenizerManager(TokenizerManagerConfig{
+			EndpointPorts: map[string]int{EngineVLLM: engineAddr.Port},
+			Service: TokenizerServiceConfig{
+				Enabled:          true,
+				Endpoint:         service.URL,
+				FallbackToEngine: false,
+			},
+		})
+		pod := testutil.PodInfoWithEngine("pod-vllm", "default", engineAddr.IP.String(), EngineVLLM)
+
+		if _, err := manager.TokenizePrompt("test-model", prompt, []*datastore.PodInfo{pod}); err == nil {
+			t.Fatal("expected error when service fails and fallback is disabled")
+		}
+		if engineRequests.Load() != 0 {
+			t.Fatalf("engine requests = %d, want 0", engineRequests.Load())
+		}
+	})
+
+	t.Run("service works without any pods", func(t *testing.T) {
+		service, _ := newTokenizeTestServer(t, []int{7}, http.StatusOK)
+
+		manager := NewTokenizerManager(TokenizerManagerConfig{
+			EndpointPorts: map[string]int{EngineVLLM: 8000},
+			Service: TokenizerServiceConfig{
+				Enabled:          true,
+				Endpoint:         service.URL,
+				FallbackToEngine: true,
+			},
+		})
+
+		tokens, err := manager.TokenizePrompt("test-model", prompt, nil)
+		if err != nil {
+			t.Fatalf("TokenizePrompt failed: %v", err)
+		}
+		if !reflect.DeepEqual(tokens, []uint32{7}) {
+			t.Fatalf("tokens = %v, want [7]", tokens)
+		}
+	})
 }
 
 func TestTokenizerManagerReusesHTTPConnections(t *testing.T) {

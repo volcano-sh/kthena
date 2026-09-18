@@ -79,6 +79,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/external-model-provider',
             'user-guide/config-router',
             'user-guide/kvcache-aware',
+            'user-guide/tokenizer-service',
             'user-guide/fairness-scheduling',
             'user-guide/session-boost',
             'user-guide/rate-limit',

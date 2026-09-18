@@ -85,6 +85,22 @@ type KVCacheAwareArgs struct {
 	VLLMTokenizerPort int `yaml:"vllmTokenizerPort,omitempty"`
 	// SGLangTokenizerPort overrides the default SGLang tokenizer port (30000).
 	SGLangTokenizerPort int `yaml:"sglangTokenizerPort,omitempty"`
+	// TokenizerService configures the optional dedicated tokenizer service.
+	TokenizerService *TokenizerServiceArgs `yaml:"tokenizerService,omitempty"`
+}
+
+// TokenizerServiceArgs configures the dedicated tokenizer service used for
+// prompt tokenization instead of the backend inference engines.
+type TokenizerServiceArgs struct {
+	// Enabled turns on the dedicated tokenizer service. Default: false.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Endpoint is the base URL of the tokenizer service, e.g.
+	// "http://127.0.0.1:8100" for the sidecar deployment or
+	// "http://kthena-tokenizer.kthena-system.svc:8100" for standalone.
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// FallbackToEngine falls back to engine-side tokenization when the
+	// tokenizer service fails. Default: true.
+	FallbackToEngine *bool `yaml:"fallbackToEngine,omitempty"`
 }
 
 type KVCacheAware struct {
@@ -154,6 +170,7 @@ func NewKVCacheAware(pluginArg runtime.RawExtension) *KVCacheAware {
 			tokenization.EngineVLLM:   vllmPort,
 			tokenization.EngineSGLang: sglangPort,
 		},
+		Service: normalizeTokenizerServiceArgs(args.TokenizerService),
 	}
 	manager := tokenization.NewTokenizerManager(managerConfig)
 
@@ -184,6 +201,29 @@ func normalizeTokenizerPort(engine string, configuredPort, defaultPort int) int 
 		klog.Warningf("KVCacheAware: invalid %s tokenizer port %d, using default %d", engine, configuredPort, defaultPort)
 	}
 	return defaultPort
+}
+
+// normalizeTokenizerServiceArgs validates the tokenizer service plugin args and
+// converts them to the tokenization package config. The feature is disabled by
+// default; fallback to engine tokenization defaults to true.
+func normalizeTokenizerServiceArgs(args *TokenizerServiceArgs) tokenization.TokenizerServiceConfig {
+	if args == nil || !args.Enabled {
+		return tokenization.TokenizerServiceConfig{}
+	}
+	if args.Endpoint == "" {
+		klog.Warningf("KVCacheAware: tokenizerService.enabled is true but endpoint is empty, disabling tokenizer service")
+		return tokenization.TokenizerServiceConfig{}
+	}
+	fallback := true
+	if args.FallbackToEngine != nil {
+		fallback = *args.FallbackToEngine
+	}
+	klog.Infof("KVCacheAware: tokenizer service enabled, endpoint=%s, fallbackToEngine=%v", args.Endpoint, fallback)
+	return tokenization.TokenizerServiceConfig{
+		Enabled:          true,
+		Endpoint:         args.Endpoint,
+		FallbackToEngine: fallback,
+	}
 }
 
 func (t *KVCacheAware) Name() string {
