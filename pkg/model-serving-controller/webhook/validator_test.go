@@ -131,6 +131,71 @@ func TestValidateModelServingMissingReplicasDoesNotPanic(t *testing.T) {
 	assert.Contains(t, reason, "spec.template.roles[0].replicas")
 }
 
+func TestValidateTemplateMetadataLabels(t *testing.T) {
+	tests := []struct {
+		name      string
+		role      workloadv1alpha1.Role
+		wantError string
+	}{
+		{
+			name: "rejects reserved entry template label",
+			role: workloadv1alpha1.Role{
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+					Metadata: &workloadv1alpha1.Metadata{Labels: map[string]string{
+						workloadv1alpha1.EntryLabelKey: "false",
+					}},
+				},
+			},
+			wantError: "spec.template.roles[0].entryTemplate.metadata.labels[modelserving.volcano.sh/entry]",
+		},
+		{
+			name: "rejects reserved worker template label",
+			role: workloadv1alpha1.Role{
+				WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+					Metadata: &workloadv1alpha1.Metadata{Labels: map[string]string{
+						workloadv1alpha1.RoleLabelKey: "other-role",
+					}},
+				},
+			},
+			wantError: "spec.template.roles[0].workerTemplate.metadata.labels[modelserving.volcano.sh/role]",
+		},
+		{
+			name: "allows non-conflicting labels in controller namespace",
+			role: workloadv1alpha1.Role{
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+					Metadata: &workloadv1alpha1.Metadata{Labels: map[string]string{
+						"modelserving.volcano.sh/rolename": "decode-instance",
+					}},
+				},
+			},
+		},
+		{
+			name: "allows custom labels",
+			role: workloadv1alpha1.Role{
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+					Metadata: &workloadv1alpha1.Metadata{Labels: map[string]string{"team": "inference"}},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validateTemplateMetadataLabels(&workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{tt.role}},
+				},
+			})
+			if tt.wantError == "" {
+				assert.Empty(t, errs)
+				return
+			}
+			assert.Len(t, errs, 1)
+			assert.Contains(t, errs[0].Error(), tt.wantError)
+		})
+	}
+}
+
 func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.T) {
 	replicas := int32(1)
 	longName := "this-is-a-very-long-name-that-exceeds-the-allowed-length-for-generated-name"
