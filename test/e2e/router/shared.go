@@ -708,7 +708,6 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		rateLimitWindowSeconds = 60
 		windowResetBuffer      = 10 * time.Second
 		inputTokenLimit        = 30
-		outputTokenLimit       = 100
 		tokensPerRequest       = 10
 	)
 	ctx := context.Background()
@@ -936,14 +935,19 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		t.Logf("Rate limit reset mechanism verified (quota restored: %d requests)", postResetSuccess)
 	})
 
-	// Test 4: Verify output token rate limit enforcement
-	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
-		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
+	// Test 4: Clearing inputTokensPerUnit on update must drop the in-memory input limiter.
+	// The previous version of this case tried to isolate output limiting by nil-ing input
+	// on update; that only 429'd because the stale input limiter was left behind.
+	t.Run("VerifyPartialUpdateClearsInputLimiter", func(t *testing.T) {
+		t.Log("Test 4: Clearing inputTokensPerUnit must stop enforcing the old input limiter")
 
 		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
 		modelRoute.Name = modelRoute.Name + "-test4"
 		modelRoute.Spec.ModelName = modelRoute.Spec.ModelName + "-test4"
+		if modelRoute.Spec.RateLimit != nil {
+			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
+		}
 		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
@@ -961,59 +965,52 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Update ModelRoute to disable input token limit
-		createdModelRoute.Spec.RateLimit.InputTokensPerUnit = nil
-		outputLimit := uint32(outputTokenLimit)
-		createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
+		warmUpResp := utils.SendChatRequestUntilRouterProgrammed(t, createdModelRoute.Spec.ModelName, standardMessage)
+		warmUpBody, warmUpErr := io.ReadAll(warmUpResp.Body)
+		warmUpResp.Body.Close()
+		require.NoError(t, warmUpErr, "Failed to read warm-up response body")
+		require.Equal(t, http.StatusOK, warmUpResp.StatusCode,
+			"Warm-up request should succeed. Response: %s", string(warmUpBody))
 
-		updatedModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update ModelRoute")
-
-		// Wait for update to propagate
-		time.Sleep(2 * time.Second)
-
-		longerPrompt := []utils.ChatMessage{
-			utils.NewChatMessage("user", "Write a detailed explanation of rate limiting"),
-		}
-
-		// Send requests until we hit the output token limit
-		var successfulRequests int
-		var totalResponseSize int
-		var rateLimited bool
-
-		for attempt := 0; attempt < 20; attempt++ {
-			resp := utils.SendChatRequest(t, updatedModelRoute.Spec.ModelName, longerPrompt)
+		quotaRequests := inputTokenLimit / tokensPerRequest
+		gotInputLimit := false
+		for i := 1; i < quotaRequests+5; i++ {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			responseBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
-
-			require.NoError(t, readErr, "Failed to read response body")
-
-			if resp.StatusCode == http.StatusOK {
-				successfulRequests++
-				totalResponseSize += len(responseBody)
-				t.Logf("Request %d succeeded, response size: %d bytes (total: %d bytes)",
-					attempt+1, len(responseBody), totalResponseSize)
-			} else if resp.StatusCode == http.StatusTooManyRequests {
-				t.Logf("Output rate limited after %d requests", successfulRequests)
-				assert.Contains(t, strings.ToLower(string(responseBody)), "rate limit",
-					"Output rate limit error should mention rate limit")
-				rateLimited = true
+			require.NoError(t, readErr, "Failed to read response body on request %d", i+1)
+			if resp.StatusCode == http.StatusTooManyRequests {
+				assert.Contains(t, strings.ToLower(string(responseBody)), "rate limit")
+				gotInputLimit = true
 				break
-			} else if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusServiceUnavailable {
-				// Transient: Envoy is still syncing the updated route to the data plane.
-				t.Logf("Data plane not ready (status %d), retrying attempt %d...", resp.StatusCode, attempt+1)
-				time.Sleep(1 * time.Second)
-			} else {
-				t.Fatalf("Unexpected HTTP status %d on attempt %d: %s", resp.StatusCode, attempt+1, string(responseBody))
 			}
+			require.Equal(t, http.StatusOK, resp.StatusCode,
+				"Request %d should succeed or be rate-limited. Response: %s", i+1, string(responseBody))
 		}
+		require.True(t, gotInputLimit, "input limiter must reject a request before it is cleared")
 
-		// Verify output rate limiting was enforced
-		assert.True(t, rateLimited, "Expected output rate limiting to be enforced")
-		assert.Greater(t, successfulRequests, 0,
-			"Expected at least one successful request before output rate limiting")
+		current, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+		require.NoError(t, err, "Failed to get ModelRoute before update")
+		current.Spec.RateLimit.InputTokensPerUnit = nil
+		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, current, metav1.UpdateOptions{})
+		require.NoError(t, err, "Failed to clear inputTokensPerUnit")
 
-		t.Logf(" Output token rate limit enforced after %d requests", successfulRequests)
+		require.Eventually(t, func() bool {
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
+			responseBody, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				t.Logf("read after clear: %v", readErr)
+				return false
+			}
+			if resp.StatusCode == http.StatusOK {
+				return true
+			}
+			t.Logf("after clearing inputTokensPerUnit got HTTP %d: %s", resp.StatusCode, string(responseBody))
+			return false
+		}, 30*time.Second, 500*time.Millisecond, "requests should succeed after inputTokensPerUnit is cleared")
+
+		t.Log("Input limiter dropped after partial rateLimit update")
 	})
 }
 
