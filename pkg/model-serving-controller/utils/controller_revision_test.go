@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -117,90 +118,69 @@ func TestGetControllerRevision(t *testing.T) {
 	assert.Equal(t, "revision-v2", cr.Labels[ControllerRevisionRevisionLabelKey])
 }
 
-// TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions tests that
-// CleanupOldControllerRevisions always preserves CurrentRevision and UpdateRevision
-func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *testing.T) {
-	ctx := context.Background()
-	client := kubefake.NewSimpleClientset()
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-ms",
-			Namespace: "default",
-			UID:       "test-uid",
+func TestCleanupOldControllerRevisionsRetainsPinnedRevisionsAndHistoryLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		limit      int32
+		current    string
+		update     string
+		references []string
+		revisions  []string
+		want       []string
+	}{
+		{
+			name:      "current and update with zero history",
+			limit:     0,
+			current:   "r1",
+			update:    "r5",
+			revisions: []string{"r1", "r2", "r3", "r4", "r5"},
+			want:      []string{"r1", "r5"},
 		},
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "workload.kthena.io/v1alpha1",
-			Kind:       "ModelServing",
+		{
+			name:       "durable reference and newest unused with limit one",
+			limit:      1,
+			current:    "r1",
+			update:     "r5",
+			references: []string{"r2"},
+			revisions:  []string{"r1", "r2", "r3", "r4", "r5"},
+			want:       []string{"r1", "r2", "r4", "r5"},
 		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
-				Roles: []workloadv1alpha1.Role{
-					{
-						Name: "prefill",
-					},
+		{
+			name:       "durable reference with zero history",
+			limit:      0,
+			current:    "r1",
+			update:     "r3",
+			references: []string{"r2"},
+			revisions:  []string{"r1", "r2", "r3"},
+			want:       []string{"r1", "r2", "r3"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{Name: "cleanup", Namespace: "default", UID: "cleanup-uid"},
+				Spec:       workloadv1alpha1.ModelServingSpec{RevisionHistoryLimit: ptr.To(tt.limit)},
+				Status: workloadv1alpha1.ModelServingStatus{
+					CurrentRevision: tt.current, UpdateRevision: tt.update, RevisionReferences: tt.references,
 				},
-			},
-		},
-		Status: workloadv1alpha1.ModelServingStatus{
-			// Set CurrentRevision and UpdateRevision to older revisions that would normally be deleted
-			CurrentRevision: "revision-v1",
-			UpdateRevision:  "revision-v5",
-		},
+			}
+			client := kubefake.NewSimpleClientset()
+			for _, revision := range tt.revisions {
+				_, err := CreateControllerRevision(ctx, client, ms, revision, nil)
+				assert.NoError(t, err)
+			}
+			assert.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
+
+			list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: labels.SelectorFromSet(map[string]string{ControllerRevisionLabelKey: ms.Name}).String(),
+			})
+			assert.NoError(t, err)
+			remaining := make([]string, 0, len(list.Items))
+			for _, cr := range list.Items {
+				remaining = append(remaining, cr.Labels[ControllerRevisionRevisionLabelKey])
+			}
+			assert.ElementsMatch(t, tt.want, remaining)
+		})
 	}
-
-	templateData := ms.Spec.Template.Roles
-
-	// Create a few revisions to test cleanup
-	// The revisions that are not CurrentRevision or UpdateRevision should be deleted
-	revisions := []string{"revision-v1", "revision-v2", "revision-v3", "revision-v4", "revision-v5"}
-	for _, rev := range revisions {
-		_, err := CreateControllerRevision(ctx, client, ms, rev, templateData)
-		assert.NoError(t, err)
-	}
-
-	// Manually run cleanup
-	err := CleanupOldControllerRevisions(ctx, client, ms)
-	assert.NoError(t, err)
-
-	// List all remaining ControllerRevisions
-	selector := labels.SelectorFromSet(map[string]string{
-		ControllerRevisionLabelKey: ms.Name,
-	})
-	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector.String(),
-	})
-	assert.NoError(t, err)
-
-	// Verify CurrentRevision and UpdateRevision are preserved
-	currentRevisionName := GenerateControllerRevisionName(ms.GetName(), ms.Status.CurrentRevision)
-	updateRevisionName := GenerateControllerRevisionName(ms.GetName(), ms.Status.UpdateRevision)
-
-	remainingRevisionNames := make(map[string]bool)
-	for _, cr := range list.Items {
-		remainingRevisionNames[cr.Name] = true
-	}
-
-	// CurrentRevision should be preserved even though it's old
-	currentCR, err := GetControllerRevision(ctx, client, ms, ms.Status.CurrentRevision)
-	assert.NoError(t, err, "CurrentRevision should be preserved")
-	assert.NotNil(t, currentCR, "CurrentRevision ControllerRevision should exist")
-	assert.True(t, remainingRevisionNames[currentRevisionName],
-		"CurrentRevision %s should be in remaining revisions", currentRevisionName)
-
-	// UpdateRevision should be preserved even though it's old
-	updateCR, err := GetControllerRevision(ctx, client, ms, ms.Status.UpdateRevision)
-	assert.NoError(t, err, "UpdateRevision should be preserved")
-	assert.NotNil(t, updateCR, "UpdateRevision ControllerRevision should exist")
-	assert.True(t, remainingRevisionNames[updateRevisionName],
-		"UpdateRevision %s should be in remaining revisions", updateRevisionName)
-
-	// Verify other revisions (not CurrentRevision or UpdateRevision) are deleted
-	assert.False(t, remainingRevisionNames["revision-v2"], "revision-v2 should be deleted")
-	assert.False(t, remainingRevisionNames["revision-v3"], "revision-v3 should be deleted")
-	assert.False(t, remainingRevisionNames["revision-v4"], "revision-v4 should be deleted")
-
-	// The total number of preserved revisions should be exactly 2 (CurrentRevision and UpdateRevision)
-	assert.Equal(t, 2, len(list.Items),
-		"Should preserve exactly CurrentRevision and UpdateRevision")
 }

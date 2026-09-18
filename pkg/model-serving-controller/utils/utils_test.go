@@ -479,3 +479,21 @@ func TestGetMaxSurgeForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestGeneratePodsDoesNotMutateRoleTemplates(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{SchedulerName: "volcano"}}
+	role := workloadv1alpha1.Role{
+		Name: "decode", WorkerReplicas: 2,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "image:v1", Env: []corev1.EnvVar{{Name: "USER", Value: "value"}}}},
+		}},
+	}
+	role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	before := role.DeepCopy()
+	entry := GenerateEntryPod(role, ms, "group", "decode-0", "revision", "hash")
+	worker := GenerateWorkerPod(role, ms, entry, "group", "decode-0", 1, "revision", "hash")
+	// Hooks may mutate any part of the generated Pod without changing templates.
+	entry.Spec.Containers[0].Image = "mutated"
+	worker.Spec.Containers[0].Env[0].Value = "mutated"
+	assert.Equal(t, before, &role)
+}

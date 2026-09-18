@@ -17723,6 +17723,15 @@ spec:
                   have been created (updated or not, ready or not)
                 format: int32
                 type: integer
+              revisionReferences:
+                description: |-
+                  RevisionReferences contains ControllerRevision identities still needed by
+                  child resources during an in-progress rollout or recovery. The controller
+                  retains these references until replacement resources are observed so
+                  history cleanup remains safe across Pod deletion and controller restart.
+                items:
+                  type: string
+                type: array
               updateRevision:
                 description: |-
                   UpdateRevision, if not empty, indicates the ControllerRevision version targeted by

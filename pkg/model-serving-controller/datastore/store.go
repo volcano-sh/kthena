@@ -167,11 +167,11 @@ func (s *store) GetRolesByGroup(modelServingName types.NamespacedName, groupName
 	defer s.mutex.RUnlock()
 	servingGroups, ok := s.servingGroup[modelServingName]
 	if !ok {
-		return nil, fmt.Errorf("cannot find modelServing %s", modelServingName.Name)
+		return nil, fmt.Errorf("%w: modelServing %s", ErrServingGroupNotFound, modelServingName)
 	}
 	servingGroup, ok := servingGroups[groupName]
 	if !ok {
-		return nil, fmt.Errorf("cannot find servingGroup %s", groupName)
+		return nil, fmt.Errorf("%w: %s", ErrServingGroupNotFound, groupName)
 	}
 
 	// Return a snapshot copy of the roles map to avoid concurrent map access issues.
