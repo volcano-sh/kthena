@@ -63,6 +63,39 @@ class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
 
+# Newer vLLM releases encode events as tagged maps instead of arrays and may
+# use bytes (sha256) block hashes. Field sets are trimmed to what the runtime
+# consumes; msgspec ignores unknown map fields.
+class MapBlockStored(msgspec.Struct, omit_defaults=True, gc=False, tag="BlockStored"):
+    block_hashes: list[Union[int, bytes]]
+    parent_block_hash: Optional[Union[int, bytes]] = None
+    token_ids: list[int] = []
+    block_size: int = 0
+    lora_id: Optional[int] = None
+    medium: Optional[str] = None
+
+
+class MapBlockRemoved(msgspec.Struct, omit_defaults=True, gc=False, tag="BlockRemoved"):
+    block_hashes: list[Union[int, bytes]]
+    medium: Optional[str] = None
+
+
+class MapAllBlocksCleared(msgspec.Struct, omit_defaults=True, gc=False, tag="AllBlocksCleared"):
+    pass
+
+
+class MapKVEventBatch(EventBatch):
+    events: list[Union[MapBlockStored, MapBlockRemoved, MapAllBlocksCleared]]
+
+
+def normalize_engine_hash(block_hash: Union[int, bytes]) -> int:
+    """Map an engine block hash to an int key. Newer vLLM emits sha256 bytes;
+    the full digest is kept so distinct hashes stay distinct."""
+    if isinstance(block_hash, bytes):
+        return int.from_bytes(block_hash, byteorder='big')
+    return block_hash
+
+
 class VLLMZMQSubscriber:
 
     def __init__(self, pod_identifier: str, model_name: str):
@@ -72,6 +105,7 @@ class VLLMZMQSubscriber:
         self.running = False
         self.event_publisher = get_event_publisher()
         self.decoder = Decoder(type=KVEventBatch)
+        self.map_decoder = Decoder(type=MapKVEventBatch)
         self._connection_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
 
@@ -196,7 +230,11 @@ class VLLMZMQSubscriber:
             return
 
         try:
-            event_batch = self.decoder.decode(payload)
+            try:
+                event_batch = self.decoder.decode(payload)
+            except msgspec.ValidationError:
+                # Newer vLLM encodes events as tagged maps.
+                event_batch = self.map_decoder.decode(payload)
 
             if not event_batch or not hasattr(event_batch, 'events'):
                 logger.warning("Invalid event batch structure")
@@ -232,24 +270,26 @@ class VLLMZMQSubscriber:
             return
 
         try:
-            if isinstance(event, BlockStored):
+            if isinstance(event, (BlockStored, MapBlockStored)):
 
                 vllm_event = VLLMBlockStoredEvent(
-                    block_hashes=event.block_hashes,
-                    parent_block_hash=event.parent_block_hash,
+                    block_hashes=[normalize_engine_hash(h) for h in event.block_hashes],
+                    parent_block_hash=(
+                        normalize_engine_hash(event.parent_block_hash)
+                        if event.parent_block_hash is not None else None),
                     token_ids=event.token_ids,
                     block_size=event.block_size,
                     lora_id=event.lora_id
                 )
                 event_type = EventType.VLLM_BLOCK_STORED
 
-            elif isinstance(event, BlockRemoved):
+            elif isinstance(event, (BlockRemoved, MapBlockRemoved)):
                 vllm_event = VLLMBlockRemovedEvent(
-                    block_hashes=event.block_hashes
+                    block_hashes=[normalize_engine_hash(h) for h in event.block_hashes]
                 )
                 event_type = EventType.VLLM_BLOCK_REMOVED
 
-            elif isinstance(event, AllBlocksCleared):
+            elif isinstance(event, (AllBlocksCleared, MapAllBlocksCleared)):
                 vllm_event = VLLMAllBlocksClearedEvent()
                 event_type = EventType.VLLM_ALL_BLOCKS_CLEARED
 

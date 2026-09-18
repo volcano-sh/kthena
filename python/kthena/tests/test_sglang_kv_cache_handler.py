@@ -86,7 +86,7 @@ async def test_block_stored_writes_matrix_and_mapping_keys():
     pipeline = _FakePipeline()
     redis_client = _make_redis_client(pipeline)
     manager = SGLangKVCacheRedisManager(redis_client=redis_client)
-    handler = SGLangKVCacheEventHandler(redis_manager=manager)
+    handler = SGLangKVCacheEventHandler(kv_manager=manager)
 
     token_ids = list(range(32))  # 2 blocks of 16
     sglang_block_hashes = [111, 222]
@@ -140,7 +140,7 @@ async def test_block_removed_uses_in_memory_mapping():
     manager.hash_mapping[111] = 999
     manager.hash_mapping[222] = 888
 
-    handler = SGLangKVCacheEventHandler(redis_manager=manager)
+    handler = SGLangKVCacheEventHandler(kv_manager=manager)
     event_data = SGLangEventData(
         event_type=EventType.SGLANG_BLOCK_REMOVED,
         timestamp=datetime.now(timezone.utc),
@@ -181,7 +181,7 @@ async def test_all_blocks_cleared_clears_pod_from_matrix():
     redis_client.scan_keys = AsyncMock(side_effect=[matrix_keys, mapping_keys])
 
     manager = SGLangKVCacheRedisManager(redis_client=redis_client)
-    handler = SGLangKVCacheEventHandler(redis_manager=manager)
+    handler = SGLangKVCacheEventHandler(kv_manager=manager)
     event_data = SGLangEventData(
         event_type=EventType.SGLANG_ALL_BLOCKS_CLEARED,
         timestamp=datetime.now(timezone.utc),

@@ -36,10 +36,29 @@ from kthena.runtime.kv_cache_manager import (
     get_vllm_kv_cache_handler,
     get_sglang_kv_cache_handler,
 )
+from kthena.runtime.memory_kv_manager import get_memory_kv_manager
 from kthena.runtime.redis_client import get_redis_client
+from kthena.runtime.router_registry import (
+    DEFAULT_ROUTER_TTL_SECONDS,
+    get_router_registry,
+)
 from kthena.runtime.standard import MetricStandard, EngineType
 from kthena.runtime.zmq_subscriber import get_vllm_zmq_subscriber
 from kthena.runtime.sglang_zmq_subscriber import get_sglang_zmq_subscriber
+
+# KV event sync backend: "redis" writes standardized block hashes to Redis;
+# "memory" pushes them directly to registered router instances.
+KV_SYNC_MODE_REDIS = "redis"
+KV_SYNC_MODE_MEMORY = "memory"
+
+
+def get_kv_event_sync_mode() -> str:
+    mode = os.getenv("KV_EVENT_SYNC_MODE", KV_SYNC_MODE_REDIS).lower()
+    if mode not in (KV_SYNC_MODE_REDIS, KV_SYNC_MODE_MEMORY):
+        logging.getLogger(__name__).warning(
+            "Invalid KV_EVENT_SYNC_MODE %r, falling back to %r", mode, KV_SYNC_MODE_REDIS)
+        return KV_SYNC_MODE_REDIS
+    return mode
 
 
 class AppState:
@@ -53,6 +72,8 @@ class AppState:
         self.engine_metrics_url: Optional[str] = None
         self.pod_identifier: Optional[str] = None
         self.model_name: Optional[str] = None
+        self.kv_sync_mode: str = KV_SYNC_MODE_REDIS
+        self.memory_kv_manager = None
 
 
 TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
@@ -96,14 +117,20 @@ async def lifespan(app: FastAPI):
         follow_redirects=True,
     )
 
-    try:
-        redis_client = get_redis_client()
-        await redis_client.connect()
-        state.redis_client = redis_client
-        logger.info("Redis client initialized successfully")
-    except Exception as e:
-        logger.warning("Failed to initialize Redis client:%s",e)
+    state.kv_sync_mode = get_kv_event_sync_mode()
+    if state.kv_sync_mode == KV_SYNC_MODE_MEMORY:
+        state.memory_kv_manager = get_memory_kv_manager()
         state.redis_client = None
+        logger.info("KV event sync mode: memory (push to registered routers)")
+    else:
+        try:
+            redis_client = get_redis_client()
+            await redis_client.connect()
+            state.redis_client = redis_client
+            logger.info("Redis client initialized successfully")
+        except Exception as e:
+            logger.warning("Failed to initialize Redis client:%s",e)
+            state.redis_client = None
 
     try:
         event_publisher = get_event_publisher()
@@ -115,7 +142,7 @@ async def lifespan(app: FastAPI):
         engine = state.metric_standard.engine if state.metric_standard else None
 
         if pod_identifier and model_name and engine == EngineType.VLLM:
-            vllm_kv_cache_handler = get_vllm_kv_cache_handler()
+            vllm_kv_cache_handler = get_vllm_kv_cache_handler(state.memory_kv_manager)
             for event_type in (
                 EventType.VLLM_BLOCK_STORED,
                 EventType.VLLM_BLOCK_REMOVED,
@@ -124,7 +151,7 @@ async def lifespan(app: FastAPI):
                 event_publisher.subscribe(event_type, vllm_kv_cache_handler)
             logger.info("vLLM KV-cache event handler registered")
         elif pod_identifier and model_name and engine == EngineType.SGLANG:
-            sglang_kv_cache_handler = get_sglang_kv_cache_handler()
+            sglang_kv_cache_handler = get_sglang_kv_cache_handler(state.memory_kv_manager)
             for event_type in (
                 EventType.SGLANG_BLOCK_STORED,
                 EventType.SGLANG_BLOCK_REMOVED,
@@ -190,6 +217,9 @@ async def lifespan(app: FastAPI):
     if state.event_publisher:
         cleanup_tasks.append(('Event system', state.event_publisher.stop()))
 
+    if state.memory_kv_manager:
+        cleanup_tasks.append(('Memory KV manager', state.memory_kv_manager.close()))
+
     if state.redis_client:
         cleanup_tasks.append(('Redis client', state.redis_client.disconnect()))
 
@@ -211,6 +241,64 @@ async def health_check() -> JSONResponse:
     return JSONResponse(
         content={"status": "healthy", "service": "runtime"},
         status_code=200
+    )
+
+
+@router.post("/kvcache/routers/register", tags=["KVCache"])
+async def register_router(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
+    """Register (or renew) a router instance for in-memory KV event push.
+
+    Request body:
+    - router_id: str - Unique identifier of the router instance (e.g. pod name)
+    - endpoint: str - Base URL the runtime pushes KV events to,
+      e.g. "http://10.0.0.5:9080"
+    - generation: str (optional) - Identifier of the router process; changes
+      when the router container restarts so a fresh snapshot is pushed
+    - ttl_seconds: int (optional) - Registration TTL; routers must re-register
+      before it expires (default: 90)
+
+    When the registration is new (renewed after expiry, or from a new process
+    generation), or when a previous event push to this router failed, the
+    current KV block snapshot is pushed to the router in the background.
+    """
+    state = get_app_state(request.app)
+    if state.kv_sync_mode != KV_SYNC_MODE_MEMORY:
+        raise HTTPException(
+            status_code=409,
+            detail="Runtime is not in memory KV event sync mode "
+                   "(set KV_EVENT_SYNC_MODE=memory)")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    router_id = body.get("router_id")
+    endpoint = body.get("endpoint")
+    generation = body.get("generation", "")
+    ttl_seconds = body.get("ttl_seconds", DEFAULT_ROUTER_TTL_SECONDS)
+
+    try:
+        needs_snapshot = get_router_registry().register(
+            router_id, endpoint, ttl_seconds, generation)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if state.memory_kv_manager and state.pod_identifier:
+        endpoint_base = endpoint.rstrip("/")
+        # Also resend a snapshot when a previous push to this router failed,
+        # so a transient delivery failure cannot leave it divergent forever.
+        if needs_snapshot or state.memory_kv_manager.is_dirty(endpoint_base):
+            needs_snapshot = True
+            background_tasks.add_task(
+                state.memory_kv_manager.push_snapshot,
+                endpoint_base,
+                state.pod_identifier,
+            )
+
+    return JSONResponse(
+        content={"registered": True, "snapshot_scheduled": needs_snapshot},
+        status_code=200,
     )
 
 
