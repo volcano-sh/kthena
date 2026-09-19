@@ -24,7 +24,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -108,7 +107,7 @@ func (r *Router) findHTTPRouteMatch(c *gin.Context, gatewayKey string) (httpRout
 		if !hostnameMatched {
 			continue
 		}
-		result, matched := findBestHTTPRouteRuleMatch(route, c.Request.URL.Path)
+		result, matched := findBestHTTPRouteRuleMatch(route, c.Request.URL.Path, r.store.CompileHTTPRouteRegex)
 		if matched {
 			result.hostname = hostnamePrecedence
 			if !found || compareHTTPRouteMatchPrecedence(result, best) < 0 {
@@ -156,7 +155,7 @@ func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
 	return parentRef.Kind == nil || *parentRef.Kind == "Gateway"
 }
 
-func findBestHTTPRouteRuleMatch(route *gatewayv1.HTTPRoute, requestPath string) (httpRouteMatchResult, bool) {
+func findBestHTTPRouteRuleMatch(route *gatewayv1.HTTPRoute, requestPath string, compileRegex func(string) (*regexp.Regexp, error)) (httpRouteMatchResult, bool) {
 	var best httpRouteMatchResult
 	found := false
 	for i := range route.Spec.Rules {
@@ -188,7 +187,7 @@ func findBestHTTPRouteRuleMatch(route *gatewayv1.HTTPRoute, requestPath string) 
 				// into a path-only match and could select the wrong backend.
 				continue
 			}
-			matched, matchedPrefix, pathPrecedence := matchHTTPRoutePath(match.Path, requestPath, route)
+			matched, matchedPrefix, pathPrecedence := matchHTTPRoutePath(match.Path, requestPath, route, compileRegex)
 			if !matched {
 				continue
 			}
@@ -378,7 +377,7 @@ const (
 // matchHTTPRoutePath checks only the path predicate. It returns the matched
 // prefix needed by ReplacePrefixMatch URLRewrite and the path score used to
 // compare rules inside one HTTPRoute.
-func matchHTTPRoutePath(path *gatewayv1.HTTPPathMatch, requestPath string, route *gatewayv1.HTTPRoute) (bool, string, httpRoutePathPrecedence) {
+func matchHTTPRoutePath(path *gatewayv1.HTTPPathMatch, requestPath string, route *gatewayv1.HTTPRoute, compileRegex func(string) (*regexp.Regexp, error)) (bool, string, httpRoutePathPrecedence) {
 	if path == nil {
 		return true, "/", httpRoutePathPrecedence{matchType: httpPathPrefixPrecedence, characters: 1}
 	}
@@ -395,9 +394,8 @@ func matchHTTPRoutePath(path *gatewayv1.HTTPPathMatch, requestPath string, route
 		}
 		return true, matchedPrefix, httpRoutePathPrecedence{matchType: httpPathPrefixPrecedence, characters: len(matchedPrefix)}
 	case gatewayv1.PathMatchRegularExpression:
-		expression, err := regexp.Compile(pathValue)
+		expression, err := compileRegex(pathValue)
 		if err != nil {
-			klog.Warningf("Invalid regex pattern '%s' in HTTPRoute %s/%s: %v", pathValue, route.Namespace, route.Name, err)
 			return false, "", httpRoutePathPrecedence{}
 		}
 		return expression.MatchString(requestPath), "", httpRoutePathPrecedence{matchType: httpPathRegularExpressionPrecedence}

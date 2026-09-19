@@ -1831,6 +1831,122 @@ func TestAddOrUpdateHTTPRoute_UpdatesGatewayRoutes(t *testing.T) {
 	assert.Len(t, s.GetHTTPRoutesByGateway("default/gateway-b"), 1)
 }
 
+func newTestHTTPRouteStore() *store {
+	return &store{
+		httpRoutes:         make(map[string]*gatewayv1.HTTPRoute),
+		gatewayRoutes:      make(map[string]sets.Set[string]),
+		httpRouteRegexRefs: make(map[string]int),
+	}
+}
+
+func regexHTTPRoute(namespace, name, pattern string) *gatewayv1.HTTPRoute {
+	regexType := gatewayv1.PathMatchRegularExpression
+	return &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{
+							Path: &gatewayv1.HTTPPathMatch{Type: &regexType, Value: &pattern},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func cachedHTTPRoutePatterns(s *store) []string {
+	var out []string
+	s.httpRouteRegexCache.Range(func(key, _ any) bool {
+		out = append(out, key.(string))
+		return true
+	})
+	return out
+}
+
+func TestCompileHTTPRouteRegexReusesCompiledPattern(t *testing.T) {
+	s := &store{}
+
+	first, err := s.CompileHTTPRouteRegex("^/v1/cache-me$")
+	assert.NoError(t, err)
+	second, err := s.CompileHTTPRouteRegex("^/v1/cache-me$")
+	assert.NoError(t, err)
+	assert.Same(t, first, second, "the same pattern should not be recompiled")
+
+	re, err := s.CompileHTTPRouteRegex("^(unclosed")
+	assert.Error(t, err)
+	assert.Nil(t, re)
+	// Failures are cached too, so a bad pattern is not recompiled per request.
+	_, errAgain := s.CompileHTTPRouteRegex("^(unclosed")
+	assert.Equal(t, err, errAgain)
+}
+
+func TestCompileHTTPRouteRegexConcurrent(t *testing.T) {
+	s := &store{}
+
+	var wg sync.WaitGroup
+	got := make([]*regexp.Regexp, 32)
+	for i := range got {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			re, err := s.CompileHTTPRouteRegex("^/v1/concurrent-[a-z]+$")
+			assert.NoError(t, err)
+			got[i] = re
+		}(i)
+	}
+	wg.Wait()
+	for i := 1; i < len(got); i++ {
+		assert.Same(t, got[0], got[i], "all goroutines should share one compiled pattern")
+	}
+}
+
+func TestGCHTTPRouteRegexCacheDropsUnreferencedPatterns(t *testing.T) {
+	s := newTestHTTPRouteStore()
+	const pattern = "^/v1/gc-me$"
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(regexHTTPRoute("default", "r1", pattern)))
+
+	_, err := s.CompileHTTPRouteRegex(pattern)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{pattern}, cachedHTTPRoutePatterns(s), "pattern should be cached after first compile")
+
+	assert.NoError(t, s.DeleteHTTPRoute("default/r1"))
+	assert.Empty(t, cachedHTTPRoutePatterns(s), "deleting the route should drop its compiled pattern")
+}
+
+func TestGCHTTPRouteRegexCacheDropsPatternsRemovedByUpdate(t *testing.T) {
+	s := newTestHTTPRouteStore()
+	const oldPattern = "^/v1/old-regex$"
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(regexHTTPRoute("default", "r1", oldPattern)))
+
+	_, err := s.CompileHTTPRouteRegex(oldPattern)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{oldPattern}, cachedHTTPRoutePatterns(s))
+
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(regexHTTPRoute("default", "r1", "^/v1/new-regex$")))
+	assert.Empty(t, cachedHTTPRoutePatterns(s), "updating a route away from a regex should drop its compiled pattern")
+}
+
+func TestGCHTTPRouteRegexCacheKeepsPatternsStillInUse(t *testing.T) {
+	s := newTestHTTPRouteStore()
+	const shared = "^/v1/shared$"
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(regexHTTPRoute("default", "r1", shared)))
+	assert.NoError(t, s.AddOrUpdateHTTPRoute(regexHTTPRoute("default", "r2", shared)))
+
+	_, err := s.CompileHTTPRouteRegex(shared)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{shared}, cachedHTTPRoutePatterns(s))
+
+	// r2 still references the pattern, so it must survive r1 going away.
+	assert.NoError(t, s.DeleteHTTPRoute("default/r1"))
+	assert.Equal(t, []string{shared}, cachedHTTPRoutePatterns(s))
+
+	assert.NoError(t, s.DeleteHTTPRoute("default/r2"))
+	assert.Empty(t, cachedHTTPRoutePatterns(s))
+}
+
 func TestAddOrUpdatePod_MetricsPreservedOnUpdate(t *testing.T) {
 	sampleCount := uint64(100)
 	sampleSum := 0.42
