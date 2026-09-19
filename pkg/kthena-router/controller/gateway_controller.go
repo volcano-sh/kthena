@@ -129,15 +129,8 @@ func (c *GatewayController) processNextWorkItem() bool {
 		return true
 	}
 
-	if err := c.syncHandler(key); err != nil {
-		if c.workqueue.NumRequeues(key) < maxRetries {
-			klog.Errorf("error syncing gateway %q: %s, requeuing", key, err.Error())
-			c.workqueue.AddRateLimited(key)
-			return true
-		}
-		klog.Errorf("giving up on syncing gateway %q after %d retries: %s", key, maxRetries, err)
-		c.workqueue.Forget(obj)
-	}
+	err := c.syncHandler(key)
+	retryOrForget(c.workqueue, "gateway", key, err, klog.Errorf)
 	return true
 }
 
