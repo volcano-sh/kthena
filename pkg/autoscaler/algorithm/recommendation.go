@@ -23,6 +23,7 @@ import (
 )
 
 type Metrics = map[string]float64
+type ReporterCounts = map[string]int32
 
 type RecommendedInstancesAlgorithm struct {
 	MinInstances          int32
@@ -31,7 +32,9 @@ type RecommendedInstancesAlgorithm struct {
 	Tolerance             float64
 	MetricTargets         Metrics
 	UnreadyInstancesCount int32
+	MetricUnreadyCounts   map[string]int32
 	ReadyInstancesMetrics []Metrics
+	MetricReporterCounts  ReporterCounts
 	ExternalMetrics       Metrics
 }
 
@@ -62,7 +65,9 @@ func (alg *RecommendedInstancesAlgorithm) GetRecommendedInstances() (recommended
 				name,
 				target,
 				alg.UnreadyInstancesCount,
+				alg.MetricUnreadyCounts,
 				alg.ReadyInstancesMetrics,
+				alg.MetricReporterCounts,
 			); ok {
 				updateRecommendation(&recommendedInstances, &skip, desired)
 			}
@@ -103,8 +108,11 @@ func getDesiredInstancesForSingleInstanceMetric(
 	name string,
 	target float64,
 	unreadyCount int32,
+	metricUnreadyCounts map[string]int32,
 	readyMetrics []Metrics,
+	reporterCounts ReporterCounts,
 ) (desired int32, ok bool) {
+	metricUnreadyCount := unreadyCount
 	currentMetricSum := 0.0
 	missingCount := int32(0)
 	metricsCount := int32(0)
@@ -117,13 +125,18 @@ func getDesiredInstancesForSingleInstanceMetric(
 			missingCount++
 		}
 	}
+	if count, exists := reporterCounts[name]; exists {
+		metricUnreadyCount = metricUnreadyCounts[name]
+		metricsCount = count
+		missingCount = max(currentCount-metricUnreadyCount-count, 0)
+	}
 	if metricsCount == 0 {
 		return 0, false
 	}
 	ratio := currentMetricSum / float64(metricsCount) / target
-	shouldAddUnready := unreadyCount > 0 && getDirection(ratio) > 0
+	shouldAddUnready := metricUnreadyCount > 0 && getDirection(ratio) > 0
 	klog.InfoS("recommendation", "metricsCount", metricsCount, "currentMetricSum", currentMetricSum, "ratio", ratio,
-		"unreadyCount", unreadyCount, "shouldAddUnready", shouldAddUnready, "missingCount", missingCount, "tolerance", tolerance)
+		"unreadyCount", metricUnreadyCount, "shouldAddUnready", shouldAddUnready, "missingCount", missingCount, "tolerance", tolerance)
 	if !shouldAddUnready && missingCount == 0 {
 		if math.Abs(ratio-1.0) <= tolerance {
 			return currentCount, true
@@ -135,7 +148,7 @@ func getDesiredInstancesForSingleInstanceMetric(
 		currentMetricSum += float64(missingCount) * target
 	}
 	if shouldAddUnready {
-		metricsCount += unreadyCount
+		metricsCount += metricUnreadyCount
 	}
 	newRatio := currentMetricSum / float64(metricsCount) / target
 	if math.Abs(newRatio-1.0) <= tolerance || getDirection(ratio) != getDirection(newRatio) {
