@@ -325,8 +325,74 @@ spec:
                                   server as the metric source.
                                 properties:
                                   auth:
-                                    description: Auth holds optional authentication
-                                      configuration for the Prometheus server.
+                                    description: |-
+                                      Auth holds optional authentication configuration for the Prometheus server.
+                                      Referenced Secrets must live in the AutoscalingPolicy namespace and carry the label workload.serving.volcano.sh/prometheus-auth-credential=true.
+                                    properties:
+                                      bearerTokenSecret:
+                                        description: BearerTokenSecret references
+                                          a Secret key whose value is sent as the
+                                          bearer token.
+                                        properties:
+                                          key:
+                                            description: The key of the secret to
+                                              select from.  Must be a valid secret
+                                              key.
+                                            type: string
+                                          name:
+                                            default: ""
+                                            description: |-
+                                              Name of the referent.
+                                              This field is effectively required, but due to backwards compatibility is
+                                              allowed to be empty. Instances of this type with an empty value here are
+                                              almost certainly wrong.
+                                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                            type: string
+                                          optional:
+                                            description: Specify whether the Secret
+                                              or its key must be defined
+                                            type: boolean
+                                        required:
+                                        - key
+                                        type: object
+                                        x-kubernetes-map-type: atomic
+                                      tlsConfig:
+                                        description: TLSConfig controls TLS certificate
+                                          validation for https serverURLs.
+                                        properties:
+                                          caSecret:
+                                            description: CASecret references a Secret
+                                              key holding the PEM CA bundle used to
+                                              verify the server certificate.
+                                            properties:
+                                              key:
+                                                description: The key of the secret
+                                                  to select from.  Must be a valid
+                                                  secret key.
+                                                type: string
+                                              name:
+                                                default: ""
+                                                description: |-
+                                                  Name of the referent.
+                                                  This field is effectively required, but due to backwards compatibility is
+                                                  allowed to be empty. Instances of this type with an empty value here are
+                                                  almost certainly wrong.
+                                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                                type: string
+                                              optional:
+                                                description: Specify whether the Secret
+                                                  or its key must be defined
+                                                type: boolean
+                                            required:
+                                            - key
+                                            type: object
+                                            x-kubernetes-map-type: atomic
+                                          insecureSkipVerify:
+                                            description: InsecureSkipVerify disables
+                                              TLS certificate verification. For development
+                                              only.
+                                            type: boolean
+                                        type: object
                                     type: object
                                   query:
                                     description: |-
@@ -609,8 +675,74 @@ spec:
                                       Prometheus server as the metric source.
                                     properties:
                                       auth:
-                                        description: Auth holds optional authentication
-                                          configuration for the Prometheus server.
+                                        description: |-
+                                          Auth holds optional authentication configuration for the Prometheus server.
+                                          Referenced Secrets must live in the AutoscalingPolicy namespace and carry the label workload.serving.volcano.sh/prometheus-auth-credential=true.
+                                        properties:
+                                          bearerTokenSecret:
+                                            description: BearerTokenSecret references
+                                              a Secret key whose value is sent as
+                                              the bearer token.
+                                            properties:
+                                              key:
+                                                description: The key of the secret
+                                                  to select from.  Must be a valid
+                                                  secret key.
+                                                type: string
+                                              name:
+                                                default: ""
+                                                description: |-
+                                                  Name of the referent.
+                                                  This field is effectively required, but due to backwards compatibility is
+                                                  allowed to be empty. Instances of this type with an empty value here are
+                                                  almost certainly wrong.
+                                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                                type: string
+                                              optional:
+                                                description: Specify whether the Secret
+                                                  or its key must be defined
+                                                type: boolean
+                                            required:
+                                            - key
+                                            type: object
+                                            x-kubernetes-map-type: atomic
+                                          tlsConfig:
+                                            description: TLSConfig controls TLS certificate
+                                              validation for https serverURLs.
+                                            properties:
+                                              caSecret:
+                                                description: CASecret references a
+                                                  Secret key holding the PEM CA bundle
+                                                  used to verify the server certificate.
+                                                properties:
+                                                  key:
+                                                    description: The key of the secret
+                                                      to select from.  Must be a valid
+                                                      secret key.
+                                                    type: string
+                                                  name:
+                                                    default: ""
+                                                    description: |-
+                                                      Name of the referent.
+                                                      This field is effectively required, but due to backwards compatibility is
+                                                      allowed to be empty. Instances of this type with an empty value here are
+                                                      almost certainly wrong.
+                                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                                    type: string
+                                                  optional:
+                                                    description: Specify whether the
+                                                      Secret or its key must be defined
+                                                    type: boolean
+                                                required:
+                                                - key
+                                                type: object
+                                                x-kubernetes-map-type: atomic
+                                              insecureSkipVerify:
+                                                description: InsecureSkipVerify disables
+                                                  TLS certificate verification. For
+                                                  development only.
+                                                type: boolean
+                                            type: object
                                         type: object
                                       query:
                                         description: |-
@@ -814,8 +946,73 @@ spec:
                                 server as the metric source.
                               properties:
                                 auth:
-                                  description: Auth holds optional authentication
-                                    configuration for the Prometheus server.
+                                  description: |-
+                                    Auth holds optional authentication configuration for the Prometheus server.
+                                    Referenced Secrets must live in the AutoscalingPolicy namespace and carry the label workload.serving.volcano.sh/prometheus-auth-credential=true.
+                                  properties:
+                                    bearerTokenSecret:
+                                      description: BearerTokenSecret references a
+                                        Secret key whose value is sent as the bearer
+                                        token.
+                                      properties:
+                                        key:
+                                          description: The key of the secret to select
+                                            from.  Must be a valid secret key.
+                                          type: string
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                        optional:
+                                          description: Specify whether the Secret
+                                            or its key must be defined
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    tlsConfig:
+                                      description: TLSConfig controls TLS certificate
+                                        validation for https serverURLs.
+                                      properties:
+                                        caSecret:
+                                          description: CASecret references a Secret
+                                            key holding the PEM CA bundle used to
+                                            verify the server certificate.
+                                          properties:
+                                            key:
+                                              description: The key of the secret to
+                                                select from.  Must be a valid secret
+                                                key.
+                                              type: string
+                                            name:
+                                              default: ""
+                                              description: |-
+                                                Name of the referent.
+                                                This field is effectively required, but due to backwards compatibility is
+                                                allowed to be empty. Instances of this type with an empty value here are
+                                                almost certainly wrong.
+                                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                              type: string
+                                            optional:
+                                              description: Specify whether the Secret
+                                                or its key must be defined
+                                              type: boolean
+                                          required:
+                                          - key
+                                          type: object
+                                          x-kubernetes-map-type: atomic
+                                        insecureSkipVerify:
+                                          description: InsecureSkipVerify disables
+                                            TLS certificate verification. For development
+                                            only.
+                                          type: boolean
+                                      type: object
                                   type: object
                                 query:
                                   description: |-

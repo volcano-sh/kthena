@@ -412,6 +412,7 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
 		policy,
 		algorithm.Metrics{"queue_depth": 10, "queue_depth_alt": 10},
+		nil,
 	)
 
 	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{

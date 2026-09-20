@@ -102,6 +102,9 @@ func (v *AutoscalingPolicyValidator) validateAutoscalingPolicy(policy *registryv
 	// Validate disaggregated target role-level metric and ratio configuration.
 	allErrs = append(allErrs, v.validateDisaggregatedTarget(policy)...)
 
+	// Validate prometheus auth references on every metric source.
+	allErrs = append(allErrs, v.validateMetricSources(policy)...)
+
 	// Validate scale down behavior
 	allErrs = append(allErrs, v.validateScaleDownBehavior(policy)...)
 
@@ -163,6 +166,64 @@ func (v *AutoscalingPolicyValidator) validateTarget(policy *registryv1.Autoscali
 	}
 
 	return allErrs
+}
+
+// validateMetricSources validates the metric sources of whichever target is set.
+func (v *AutoscalingPolicyValidator) validateMetricSources(policy *registryv1.AutoscalingPolicy) field.ErrorList {
+	var allErrs field.ErrorList
+	specPath := field.NewPath("spec")
+
+	switch {
+	case policy.Spec.HomogeneousTarget != nil:
+		allErrs = append(allErrs, validatePrometheusSources(
+			policy.Spec.HomogeneousTarget.Target.MetricSources,
+			specPath.Child("homogeneousTarget", "target", "metricSources"))...)
+	case policy.Spec.HeterogeneousTarget != nil:
+		for idx, param := range policy.Spec.HeterogeneousTarget.Params {
+			allErrs = append(allErrs, validatePrometheusSources(
+				param.Target.MetricSources,
+				specPath.Child("heterogeneousTarget", "params").Index(idx).Child("target", "metricSources"))...)
+		}
+	case policy.Spec.DisaggregatedTarget != nil:
+		for roleName, roleParam := range policy.Spec.DisaggregatedTarget.Roles {
+			allErrs = append(allErrs, validatePrometheusSources(
+				roleParam.MetricSources,
+				specPath.Child("disaggregatedTarget", "roles").Key(roleName).Child("metricSources"))...)
+		}
+	}
+	return allErrs
+}
+
+// validatePrometheusSources checks prometheus auth references and that tlsConfig is only used with https.
+func validatePrometheusSources(sources map[string]registryv1.MetricSource, path *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	for name, source := range sources {
+		if source.Prometheus == nil || source.Prometheus.Auth == nil {
+			continue
+		}
+		auth := source.Prometheus.Auth
+		authPath := path.Key(name).Child("prometheus", "auth")
+		if auth.BearerTokenSecret != nil {
+			allErrs = append(allErrs, requireSecretName(auth.BearerTokenSecret, authPath.Child("bearerTokenSecret"))...)
+		}
+		if auth.TLSConfig != nil {
+			if !strings.HasPrefix(source.Prometheus.ServerURL, "https://") {
+				allErrs = append(allErrs, field.Invalid(authPath.Child("tlsConfig"), source.Prometheus.ServerURL, "tlsConfig requires an https serverURL"))
+			}
+			if auth.TLSConfig.CASecret != nil {
+				allErrs = append(allErrs, requireSecretName(auth.TLSConfig.CASecret, authPath.Child("tlsConfig", "caSecret"))...)
+			}
+		}
+	}
+	return allErrs
+}
+
+// requireSecretName rejects an empty Secret name; the CRD schema already requires key.
+func requireSecretName(ref *corev1.SecretKeySelector, path *field.Path) field.ErrorList {
+	if ref.Name == "" {
+		return field.ErrorList{field.Required(path.Child("name"), "secret name must be set")}
+	}
+	return nil
 }
 
 // validateTargetRef ensures the target ref kind is ModelServing (or empty) and name is set.
