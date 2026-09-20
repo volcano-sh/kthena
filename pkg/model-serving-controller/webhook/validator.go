@@ -85,6 +85,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validGeneratedNameLength(modelServing)...)
 	allErrs = append(allErrs, validateRoleNames(modelServing)...)
 	allErrs = append(allErrs, validateWorkerImages(modelServing)...)
+	allErrs = append(allErrs, validatePodTemplates(modelServing)...)
 	allErrs = append(allErrs, validatorReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateMaxUnavailableForRoles(modelServing)...)
