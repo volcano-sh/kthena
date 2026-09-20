@@ -16,6 +16,8 @@ metadata:
       kind: ModelBooster
       name: test-model
       uid: randomUID
+  annotations:
+    kthena.volcano.sh/model-repo-id: s3://aios_models/deepseek-ai/DeepSeek-V3-W8A8/vllm-ascend
 spec:
   model: "deepseek-v3"
   inferenceEngine: "vLLM"
