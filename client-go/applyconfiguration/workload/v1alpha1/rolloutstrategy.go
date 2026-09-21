@@ -38,6 +38,7 @@ type RolloutStrategyApplyConfiguration struct {
 	// rolloutStrategy.rollingUpdateConfiguration must not be set.
 	// Kthena performs RoleRollingUpdate across all ServingGroups at the same time.
 	// Therefore, we recommend using it only in scenarios with a single ServingGroup.
+	//
 	Type *workloadv1alpha1.RolloutStrategyType `json:"type,omitempty"`
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
 	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable

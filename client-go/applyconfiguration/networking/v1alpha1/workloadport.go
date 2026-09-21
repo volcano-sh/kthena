@@ -24,6 +24,7 @@ package v1alpha1
 // WorkloadPort defines the port and protocol configuration for the model server.
 type WorkloadPortApplyConfiguration struct {
 	// The port of the model server. The number must be between 1 and 65535.
+	//
 	Port *int32 `json:"port,omitempty"`
 	// The protocol of the model server. Supported values are "http" and "https".
 	Protocol *string `json:"protocol,omitempty"`

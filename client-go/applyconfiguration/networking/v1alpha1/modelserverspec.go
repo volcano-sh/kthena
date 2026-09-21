@@ -35,6 +35,7 @@ type ModelServerSpecApplyConfiguration struct {
 	InferenceEngine *networkingv1alpha1.InferenceEngine `json:"inferenceEngine,omitempty"`
 	// WorkloadSelector is used to match the model serving instances.
 	// Currently, they must be pods within the same namespace as modelServer object.
+	//
 	WorkloadSelector *WorkloadSelectorApplyConfiguration `json:"workloadSelector,omitempty"`
 	// WorkloadPort defines the port and protocol configuration for the model server.
 	WorkloadPort *WorkloadPortApplyConfiguration `json:"workloadPort,omitempty"`
