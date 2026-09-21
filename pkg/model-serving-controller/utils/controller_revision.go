@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -58,18 +59,29 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal template data: %v", err)
 	}
+	validateExisting := func(existing *appsv1.ControllerRevision) (*appsv1.ControllerRevision, error) {
+		if !metav1.IsControlledBy(existing, ms) {
+			return nil, fmt.Errorf("ControllerRevision %s/%s is not controlled by the current ModelServing UID", ms.Namespace, existing.Name)
+		}
+		if bytes.Equal(existing.Data.Raw, data) {
+			return existing, nil
+		}
+		desiredRoles, desiredOK := templateData.([]workloadv1alpha1.Role)
+		existingRoles, decodeErr := GetRolesFromControllerRevision(existing)
+		if desiredOK && decodeErr == nil && EqualRoleTemplatesForRevision(existingRoles, desiredRoles) {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("ControllerRevision %s/%s already exists with different template data", ms.Namespace, existing.Name)
+	}
 
 	// Check if ControllerRevision already exists
 	controllerRevisionName := GenerateControllerRevisionName(ms.Name, revision)
 	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err == nil {
 		// A revision name identifies immutable historical template data. Never
-		// overwrite it: doing so would make stable ordinal recovery use a
-		// template different from the one referenced by live resources.
-		if string(existing.Data.Raw) != string(data) {
-			return nil, fmt.Errorf("ControllerRevision %s/%s already exists with different template data", ms.Namespace, controllerRevisionName)
-		}
-		return existing, nil
+		// overwrite it: semantic equality may reuse it, but different data is a
+		// collision and must remain unchanged.
+		return validateExisting(existing)
 	} else if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to get ControllerRevision: %v", err)
 	}
@@ -95,6 +107,13 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 
 	// Create ControllerRevision
 	created, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, cr, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		existing, getErr := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, fmt.Errorf("failed to get concurrently created ControllerRevision: %v", getErr)
+		}
+		return validateExisting(existing)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ControllerRevision: %v", err)
 	}
