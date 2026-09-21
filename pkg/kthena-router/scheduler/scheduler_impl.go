@@ -24,11 +24,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 
+	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/workloadport"
 )
 
 const (
@@ -136,6 +138,10 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		if len(decodePods) == 0 {
 			return fmt.Errorf("no decode pod found")
 		}
+		decodePods = filterPodsByWorkloadPort(ctx, decodePods)
+		if len(decodePods) == 0 {
+			return fmt.Errorf("no decode pod has a valid workload port")
+		}
 
 		// The initial pod list contains both prefill and decode roles. Filter the
 		// role-specific list after retrieving it from the store so overloaded
@@ -162,6 +168,11 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName, decodePodName)
 			if err != nil || len(selectedPods) == 0 {
 				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", decodePodName, "error", err)
+				continue
+			}
+			selectedPods = filterPodsByWorkloadPort(ctx, selectedPods)
+			if len(selectedPods) == 0 {
+				klog.V(4).InfoS("prefill pods have no valid workload port", "decode instance", decodePodName)
 				continue
 			}
 
@@ -211,6 +222,29 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	ctx.BestPods = TopNPodInfos(scores, topN)
 
 	return nil
+}
+
+// filterPodsByWorkloadPort applies the ModelServer's per-Pod named-port
+// eligibility to candidates loaded inside the scheduler. The optimized PD path
+// reloads role-specific candidates from the datastore, so it cannot rely on
+// the router's initial aggregate-list filtering.
+func filterPodsByWorkloadPort(ctx *framework.Context, pods []*datastore.PodInfo) []*datastore.PodInfo {
+	if ctx == nil || ctx.PortName == "" {
+		return pods
+	}
+	selector := networkingv1alpha1.WorkloadPort{PortName: ctx.PortName}
+	eligible := make([]*datastore.PodInfo, 0, len(pods))
+	for _, podInfo := range pods {
+		if podInfo == nil {
+			continue
+		}
+		if _, err := workloadport.Resolve(selector, podInfo.GetPod()); err != nil {
+			klog.Warningf("skipping scheduling candidate with invalid workload port: %v", err)
+			continue
+		}
+		eligible = append(eligible, podInfo)
+	}
+	return eligible
 }
 
 func (s *SchedulerImpl) RunFilterPlugins(pods []*datastore.PodInfo, ctx *framework.Context) ([]*datastore.PodInfo, error) {

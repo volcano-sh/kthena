@@ -777,17 +777,17 @@ PodMetricSource configures pod-endpoint scraping for a metric.
 For each matching Pod, metrics are scraped from the constructed access link and extracted from Prometheus’s text output
 for the metric family identified by Name.
 
-Example (the pod exposes "vllm:num_requests_waiting" on :8000/metrics):
+Example (each pod exposes "vllm:num_requests_waiting" on its named "metrics" port):
 
 	pod:
 	  name: vllm:num_requests_waiting
 	  uri: /metrics
-	  port: 8000
+	  portName: metrics
 	  labelSelector:
 	    matchLabels:
 	      role: decode
 
-The resulting scrape URL would look like: http://10.1.2.3:8000/metrics
+The resulting scrape URL uses the container port named "metrics" from each selected Pod.
 
 
 
@@ -798,7 +798,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the Prometheus metric name matched against labels in the pod's scraped output.<br />Defaults to the policy metric key when omitted.<br />For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series. |  |  |
 | `uri` _string_ | Uri defines the HTTP path where metrics are exposed (e.g., "/metrics"). | /metrics | Pattern: `^/` <br /> |
-| `port` _integer_ | Port defines the network port where metrics are exposed by the pods (e.g., 8000). | 8100 | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `port` _integer_ | Port defines the network port where metrics are exposed by the pods (e.g., 8000).<br />When both port and portName are omitted, the runtime uses port 8100. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `portName` _string_ | PortName selects a named TCP container port from each matching Pod.<br />Pods may use different numbers for the same name. |  | MaxLength: 15 <br />MinLength: 1 <br />Pattern: `^([a-z0-9]+-)*[a-z0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$` <br /> |
 
 
 #### PodTemplateSpec

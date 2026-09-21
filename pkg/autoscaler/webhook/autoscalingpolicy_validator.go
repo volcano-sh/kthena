@@ -26,6 +26,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
 )
@@ -147,14 +148,22 @@ func (v *AutoscalingPolicyValidator) validateTarget(policy *registryv1.Autoscali
 
 	switch {
 	case policy.Spec.HomogeneousTarget != nil:
+		targetPath := specPath.Child("homogeneousTarget").Child("target")
 		allErrs = append(allErrs, validateTargetRef(
 			&policy.Spec.HomogeneousTarget.Target.TargetRef,
-			specPath.Child("homogeneousTarget").Child("target").Child("targetRef"))...)
+			targetPath.Child("targetRef"))...)
+		allErrs = append(allErrs, validateMetricSources(
+			policy.Spec.HomogeneousTarget.Target.MetricSources,
+			targetPath.Child("metricSources"))...)
 	case policy.Spec.HeterogeneousTarget != nil:
 		for idx, param := range policy.Spec.HeterogeneousTarget.Params {
+			targetPath := specPath.Child("heterogeneousTarget").Child("params").Index(idx).Child("target")
 			allErrs = append(allErrs, validateTargetRef(
 				&param.Target.TargetRef,
-				specPath.Child("heterogeneousTarget").Child("params").Index(idx).Child("target").Child("targetRef"))...)
+				targetPath.Child("targetRef"))...)
+			allErrs = append(allErrs, validateMetricSources(
+				param.Target.MetricSources,
+				targetPath.Child("metricSources"))...)
 		}
 	case policy.Spec.DisaggregatedTarget != nil:
 		allErrs = append(allErrs, validateTargetRef(
@@ -162,6 +171,32 @@ func (v *AutoscalingPolicyValidator) validateTarget(policy *registryv1.Autoscali
 			specPath.Child("disaggregatedTarget").Child("targetRef"))...)
 	}
 
+	return allErrs
+}
+
+// validateMetricSources validates pod scrape ports. A named port is resolved
+// against each selected Pod at runtime, while an omitted port preserves the
+// legacy default of 8100.
+func validateMetricSources(sources map[string]registryv1.MetricSource, path *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	for name, source := range sources {
+		if source.Pod == nil {
+			continue
+		}
+		podPath := path.Key(name).Child("pod")
+		if source.Pod.PortName == "" {
+			if source.Pod.Port < 0 || source.Pod.Port > 65535 {
+				allErrs = append(allErrs, field.Invalid(podPath.Child("port"), source.Pod.Port, "must be between 1 and 65535 when set"))
+			}
+			continue
+		}
+		if source.Pod.Port != 0 {
+			allErrs = append(allErrs, field.Forbidden(podPath.Child("port"), "port and portName are mutually exclusive"))
+		}
+		if reasons := validation.IsValidPortName(source.Pod.PortName); len(reasons) != 0 {
+			allErrs = append(allErrs, field.Invalid(podPath.Child("portName"), source.Pod.PortName, strings.Join(reasons, ", ")))
+		}
+	}
 	return allErrs
 }
 
@@ -231,6 +266,7 @@ func (v *AutoscalingPolicyValidator) validateDisaggregatedTarget(policy *registr
 			continue
 		}
 		rolePath := disaggregatedPath.Child("roles").Key(roleName)
+		allErrs = append(allErrs, validateMetricSources(roleParam.MetricSources, rolePath.Child("metricSources"))...)
 		fixedRole := isFixedRoleScalingParam(roleParam)
 		if roleParam.MinReplicas > roleParam.MaxReplicas {
 			allErrs = append(allErrs, field.Invalid(rolePath.Child("minReplicas"), roleParam.MinReplicas, "minReplicas must be <= maxReplicas"))

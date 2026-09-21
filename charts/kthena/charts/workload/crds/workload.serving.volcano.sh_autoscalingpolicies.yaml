@@ -306,13 +306,21 @@ spec:
                                       For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
                                     type: string
                                   port:
-                                    default: 8100
-                                    description: Port defines the network port where
-                                      metrics are exposed by the pods (e.g., 8000).
+                                    description: |-
+                                      Port defines the network port where metrics are exposed by the pods (e.g., 8000).
+                                      When both port and portName are omitted, the runtime uses port 8100.
                                     format: int32
                                     maximum: 65535
                                     minimum: 1
                                     type: integer
+                                  portName:
+                                    description: |-
+                                      PortName selects a named TCP container port from each matching Pod.
+                                      Pods may use different numbers for the same name.
+                                    maxLength: 15
+                                    minLength: 1
+                                    pattern: ^([a-z0-9]+-)*[a-z0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
+                                    type: string
                                   uri:
                                     default: /metrics
                                     description: Uri defines the HTTP path where metrics
@@ -320,6 +328,9 @@ spec:
                                     pattern: ^/
                                     type: string
                                 type: object
+                                x-kubernetes-validations:
+                                - message: port and portName are mutually exclusive
+                                  rule: '!(has(self.port) && has(self.portName))'
                               prometheus:
                                 description: Prometheus configures an external Prometheus
                                   server as the metric source.
@@ -589,14 +600,21 @@ spec:
                                           For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
                                         type: string
                                       port:
-                                        default: 8100
-                                        description: Port defines the network port
-                                          where metrics are exposed by the pods (e.g.,
-                                          8000).
+                                        description: |-
+                                          Port defines the network port where metrics are exposed by the pods (e.g., 8000).
+                                          When both port and portName are omitted, the runtime uses port 8100.
                                         format: int32
                                         maximum: 65535
                                         minimum: 1
                                         type: integer
+                                      portName:
+                                        description: |-
+                                          PortName selects a named TCP container port from each matching Pod.
+                                          Pods may use different numbers for the same name.
+                                        maxLength: 15
+                                        minLength: 1
+                                        pattern: ^([a-z0-9]+-)*[a-z0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
+                                        type: string
                                       uri:
                                         default: /metrics
                                         description: Uri defines the HTTP path where
@@ -604,6 +622,9 @@ spec:
                                         pattern: ^/
                                         type: string
                                     type: object
+                                    x-kubernetes-validations:
+                                    - message: port and portName are mutually exclusive
+                                      rule: '!(has(self.port) && has(self.portName))'
                                   prometheus:
                                     description: Prometheus configures an external
                                       Prometheus server as the metric source.
@@ -795,13 +816,21 @@ spec:
                                     For example, set it to "vllm:gpu_cache_usage_perc" to read that exact series.
                                   type: string
                                 port:
-                                  default: 8100
-                                  description: Port defines the network port where
-                                    metrics are exposed by the pods (e.g., 8000).
+                                  description: |-
+                                    Port defines the network port where metrics are exposed by the pods (e.g., 8000).
+                                    When both port and portName are omitted, the runtime uses port 8100.
                                   format: int32
                                   maximum: 65535
                                   minimum: 1
                                   type: integer
+                                portName:
+                                  description: |-
+                                    PortName selects a named TCP container port from each matching Pod.
+                                    Pods may use different numbers for the same name.
+                                  maxLength: 15
+                                  minLength: 1
+                                  pattern: ^([a-z0-9]+-)*[a-z0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
+                                  type: string
                                 uri:
                                   default: /metrics
                                   description: Uri defines the HTTP path where metrics
@@ -809,6 +838,9 @@ spec:
                                   pattern: ^/
                                   type: string
                               type: object
+                              x-kubernetes-validations:
+                              - message: port and portName are mutually exclusive
+                                rule: '!(has(self.port) && has(self.portName))'
                             prometheus:
                               description: Prometheus configures an external Prometheus
                                 server as the metric source.

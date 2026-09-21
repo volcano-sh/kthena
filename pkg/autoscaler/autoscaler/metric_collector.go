@@ -115,7 +115,7 @@ func (collector *MetricCollector) UpdateMetrics(
 	currentHistograms := make(map[string]HistogramInfo)
 	unreadyPods := sets.New[string]()
 
-	// Group pod metrics by identical PodMetricSource (uri/port/selector) so we
+	// Group pod metrics by identical PodMetricSource (uri/port/portName/selector) so we
 	// scrape each ready pod endpoint once per reconcile and extract every
 	// required metric from the same payload. Prometheus-sourced metrics stay
 	// per-metric.
@@ -225,7 +225,7 @@ type podMetricGroup struct {
 
 // podMetricGroupKey returns a stable key identifying a pod scrape configuration.
 func podMetricGroupKey(s *v1alpha1.PodMetricSource) string {
-	return fmt.Sprintf("%s|%d|%s", s.Uri, s.Port, metav1.FormatLabelSelector(s.LabelSelector))
+	return fmt.Sprintf("%s|%d|%s|%s", s.Uri, s.Port, s.PortName, metav1.FormatLabelSelector(s.LabelSelector))
 }
 
 // collectPodMetricsGroup scrapes each ready pod in the target group exactly
@@ -362,7 +362,10 @@ func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]Histogram
 }
 
 func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) (string, error) {
-	url := collector.buildPodMetricURL(pod, podSource)
+	url, err := collector.buildPodMetricURL(pod, podSource)
+	if err != nil {
+		return "", err
+	}
 	podCtx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(podCtx, http.MethodGet, url, nil)
@@ -384,17 +387,61 @@ func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod
 	return string(body), nil
 }
 
-func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) string {
+func (collector *MetricCollector) buildPodMetricURL(pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) (string, error) {
 	uri := podSource.Uri
 	if uri == "" {
 		uri = "/metrics"
 	}
-	port := podSource.Port
-	if port == 0 {
-		port = 8100
+	port, err := resolvePodMetricPort(pod, podSource)
+	if err != nil {
+		return "", err
 	}
 	hostPort := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(int(port)))
-	return fmt.Sprintf("http://%s%s", hostPort, uri)
+	return fmt.Sprintf("http://%s%s", hostPort, uri), nil
+}
+
+// resolvePodMetricPort resolves a named port separately for every selected Pod.
+// Named ports must appear exactly once among regular containers and use TCP.
+func resolvePodMetricPort(pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) (int32, error) {
+	if podSource.PortName == "" {
+		port := podSource.Port
+		if port == 0 {
+			port = 8100
+		}
+		if port < 1 || port > 65535 {
+			return 0, fmt.Errorf("invalid pod metric port %d", port)
+		}
+		return port, nil
+	}
+	if podSource.Port != 0 {
+		return 0, fmt.Errorf("pod metric port and portName are mutually exclusive")
+	}
+	if pod == nil {
+		return 0, fmt.Errorf("cannot resolve pod metric portName %q without a Pod", podSource.PortName)
+	}
+
+	var resolved int32
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			if port.Name != podSource.PortName {
+				continue
+			}
+			if resolved != 0 {
+				return 0, fmt.Errorf("Pod %s/%s declares pod metric portName %q more than once", pod.Namespace, pod.Name, podSource.PortName)
+			}
+			if port.Protocol != "" && port.Protocol != corev1.ProtocolTCP {
+				return 0, fmt.Errorf("Pod %s/%s pod metric portName %q must use TCP", pod.Namespace, pod.Name, podSource.PortName)
+			}
+			if port.ContainerPort < 1 || port.ContainerPort > 65535 {
+				return 0, fmt.Errorf("Pod %s/%s pod metric portName %q has invalid port %d", pod.Namespace, pod.Name, podSource.PortName, port.ContainerPort)
+			}
+			resolved = port.ContainerPort
+		}
+	}
+	if resolved == 0 {
+		return 0, fmt.Errorf("Pod %s/%s does not declare pod metric portName %q", pod.Namespace, pod.Name, podSource.PortName)
+	}
+	return resolved, nil
 }
 
 // parsePrometheusFamilies decodes a Prometheus text exposition payload once and

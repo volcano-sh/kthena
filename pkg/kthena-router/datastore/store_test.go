@@ -49,6 +49,35 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
+func TestStoreGetPodWorkloadPortFromNamedContainerPort(t *testing.T) {
+	s := New().(*store)
+	serverName := types.NamespacedName{Namespace: "default", Name: "named"}
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: serverName.Name, Namespace: serverName.Namespace},
+		Spec:       aiv1alpha1.ModelServerSpec{WorkloadPort: aiv1alpha1.WorkloadPort{PortName: "inference"}},
+	}
+	if err := s.AddOrUpdateModelServer(ms, nil); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default"},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Ports: []corev1.ContainerPort{
+			{Name: "inference", ContainerPort: 7100},
+		}}}},
+	}
+	info := &PodInfo{Pod: pod, modelServer: sets.New(serverName)}
+	for _, want := range []uint32{7100, 7102} {
+		pod.Spec.Containers[0].Ports[0].ContainerPort = int32(want)
+		if got, ok := s.getPodWorkloadPort(info); !ok || got != want {
+			t.Fatalf("resolved metrics port = %d, valid=%t, want %d", got, ok, want)
+		}
+	}
+	pod.Spec.Containers[0].Ports = nil
+	if got, ok := s.getPodWorkloadPort(info); ok || got != 0 {
+		t.Fatalf("missing named port produced metrics port %d, valid=%t", got, ok)
+	}
+}
+
 func TestParseMetricsScrapeInterval(t *testing.T) {
 	tests := []struct {
 		name     string

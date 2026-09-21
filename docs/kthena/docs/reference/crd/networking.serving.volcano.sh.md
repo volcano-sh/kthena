@@ -638,7 +638,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `port` _integer_ | The port of the model server. The number must be between 1 and 65535. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `port` _integer_ | The port of the model server. The number must be between 1 and 65535.<br />Use this when all selected Pods listen on the same port. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `portName` _string_ | PortName selects a named TCP container port from each selected Pod.<br />Pods may use different numbers for the same name. |  | MaxLength: 15 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]+(-[a-z0-9]+)*$` <br /> |
 | `protocol` _string_ | The protocol of the model server. Supported values are "http" and "https". | http | Enum: [http https] <br /> |
 
 

@@ -174,6 +174,38 @@ func TestValidateAutoscalingPolicy_NoErrors(t *testing.T) {
 	assert.Empty(t, errorMsg)
 }
 
+func TestValidateAutoscalingPolicy_PodMetricPortName(t *testing.T) {
+	validator := NewAutoscalingPolicyValidator()
+	newPolicy := func(source registryv1.PodMetricSource) *registryv1.AutoscalingPolicy {
+		return &registryv1.AutoscalingPolicy{
+			Spec: registryv1.AutoscalingPolicySpec{
+				Metrics: []registryv1.AutoscalingPolicyMetric{{Name: "queue_depth", TargetValue: resource.MustParse("1")}},
+				HomogeneousTarget: &registryv1.HomogeneousTarget{
+					Target: registryv1.Target{
+						TargetRef: corev1.ObjectReference{Name: "model"},
+						MetricSources: map[string]registryv1.MetricSource{
+							"queue_depth": {Pod: &source},
+						},
+					},
+					MinReplicas: 1,
+					MaxReplicas: 2,
+				},
+			},
+		}
+	}
+
+	allowed, message := validator.validateAutoscalingPolicy(newPolicy(registryv1.PodMetricSource{PortName: "metrics"}))
+	assert.True(t, allowed, message)
+
+	allowed, message = validator.validateAutoscalingPolicy(newPolicy(registryv1.PodMetricSource{Port: 8100, PortName: "metrics"}))
+	assert.False(t, allowed)
+	assert.Contains(t, message, "port and portName are mutually exclusive")
+
+	allowed, message = validator.validateAutoscalingPolicy(newPolicy(registryv1.PodMetricSource{PortName: "123"}))
+	assert.False(t, allowed)
+	assert.Contains(t, message, "portName")
+}
+
 func TestValidateAutoscalingPolicy_DisaggregatedTarget(t *testing.T) {
 	validator := NewAutoscalingPolicyValidator()
 

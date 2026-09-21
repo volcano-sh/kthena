@@ -40,6 +40,8 @@ type Context struct {
 	ModelServerName types.NamespacedName
 	UpstreamModel   string
 	PDGroup         *aiv1alpha1.PDGroup
+	// PortName selects the actual upstream port from each Pod when set.
+	PortName string
 	// 1. In PD Disaggregated mode, both DecodePods and PrefillPods are set.
 	DecodePods  []*datastore.PodInfo
 	PrefillPods []*datastore.PodInfo

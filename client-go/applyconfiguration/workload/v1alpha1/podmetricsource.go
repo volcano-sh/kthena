@@ -30,17 +30,17 @@ import (
 // For each matching Pod, metrics are scraped from the constructed access link and extracted from Prometheus’s text output
 // for the metric family identified by Name.
 //
-// Example (the pod exposes "vllm:num_requests_waiting" on :8000/metrics):
+// Example (each pod exposes "vllm:num_requests_waiting" on its named "metrics" port):
 //
 // pod:
 // name: vllm:num_requests_waiting
 // uri: /metrics
-// port: 8000
+// portName: metrics
 // labelSelector:
 // matchLabels:
 // role: decode
 //
-// The resulting scrape URL would look like: http://10.1.2.3:8000/metrics
+// The resulting scrape URL uses the container port named "metrics" from each selected Pod.
 type PodMetricSourceApplyConfiguration struct {
 	// Name is the Prometheus metric name matched against labels in the pod's scraped output.
 	// Defaults to the policy metric key when omitted.
@@ -49,7 +49,11 @@ type PodMetricSourceApplyConfiguration struct {
 	// Uri defines the HTTP path where metrics are exposed (e.g., "/metrics").
 	Uri *string `json:"uri,omitempty"`
 	// Port defines the network port where metrics are exposed by the pods (e.g., 8000).
+	// When both port and portName are omitted, the runtime uses port 8100.
 	Port *int32 `json:"port,omitempty"`
+	// PortName selects a named TCP container port from each matching Pod.
+	// Pods may use different numbers for the same name.
+	PortName *string `json:"portName,omitempty"`
 	// LabelSelector defines additional filtering for pods exposing this metric.
 	// Only pods matching both the target and this selector are scraped, e.g.
 	// matchLabels with role=decode to scrape only the decode role's pods.
@@ -83,6 +87,14 @@ func (b *PodMetricSourceApplyConfiguration) WithUri(value string) *PodMetricSour
 // If called multiple times, the Port field is set to the value of the last call.
 func (b *PodMetricSourceApplyConfiguration) WithPort(value int32) *PodMetricSourceApplyConfiguration {
 	b.Port = &value
+	return b
+}
+
+// WithPortName sets the PortName field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PortName field is set to the value of the last call.
+func (b *PodMetricSourceApplyConfiguration) WithPortName(value string) *PodMetricSourceApplyConfiguration {
+	b.PortName = &value
 	return b
 }
 

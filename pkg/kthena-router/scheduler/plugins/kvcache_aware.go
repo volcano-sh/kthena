@@ -194,6 +194,9 @@ func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods [
 	if t.tokenizerManager == nil {
 		return nil, fmt.Errorf("tokenizer manager not available")
 	}
+	if ctx.PortName != "" {
+		return t.tokenizerManager.TokenizePromptForPortName(ctx.Model, ctx.Prompt, pods, ctx.PortName)
+	}
 	return t.tokenizerManager.TokenizePrompt(ctx.Model, ctx.Prompt, pods)
 }
 

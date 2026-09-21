@@ -55,6 +55,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/workloadport"
 )
 
 const (
@@ -442,6 +443,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var modelRoute *v1alpha1.ModelRoute
 	var modelServer *v1alpha1.ModelServer
 	var inferencePoolFullName string
+	var portName string
 
 	// Get gateway key from context if available (set by Gateway listener)
 	var gatewayKey string
@@ -519,6 +521,21 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 			c.Set("finishReason", "pod_discovery")
 			return fmt.Errorf("can't find model server: %v", modelServerName)
 		}
+		if modelServer.Spec.WorkloadPort.PortName != "" {
+			eligible := make([]*datastore.PodInfo, 0, len(pods))
+			for _, pod := range pods {
+				if pod == nil {
+					continue
+				}
+				podObj := pod.GetPod()
+				if _, portErr := workloadport.Resolve(modelServer.Spec.WorkloadPort, podObj); portErr != nil {
+					klog.Warningf("skipping ModelServer %s Pod with invalid workload port: %v", modelServerName, portErr)
+					continue
+				}
+				eligible = append(eligible, pod)
+			}
+			pods = eligible
+		}
 		if len(pods) == 0 {
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("no available pods for model server: %v", modelServerName))
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("no available pods for model server: %v", modelServerName))
@@ -532,6 +549,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		}
 
 		port = modelServer.Spec.WorkloadPort.Port
+		portName = modelServer.Spec.WorkloadPort.PortName
 	} else if matched, inferencePoolName, httpRouteErr := r.handleHTTPRoute(c, gatewayKey); httpRouteErr != nil {
 		klog.Errorf("failed to select InferencePool for matched HTTPRoute: %v", httpRouteErr)
 		accesslog.SetError(c, "inference_pool_selection", httpRouteErr.Error())
@@ -659,6 +677,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		ModelServerName: modelServerName,
 		UpstreamModel:   upstreamModelForMetrics,
 		PDGroup:         pdGroup,
+		PortName:        portName,
 		MetricsRecorder: metricsRecorder,
 		StickyPodName:   stickyHint,
 	}
@@ -961,6 +980,11 @@ func (r *Router) proxy(
 		accesslog.SetUpstreamInfo(c, 0, i+1)
 		pod := ctx.BestPods[i]
 		podObj := pod.GetPod()
+		resolvedPort, portErr := workloadport.Resolve(v1alpha1.WorkloadPort{Port: port, PortName: ctx.PortName}, podObj)
+		if portErr != nil {
+			klog.Warningf("skipping Pod with invalid workload port: %v", portErr)
+			continue
+		}
 		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
 
 		// Track this request as in-flight to the chosen pod.
@@ -971,7 +995,7 @@ func (r *Router) proxy(
 		}
 
 		// Request dispatched to the pod.
-		err := proxyRequest(c, req, podObj.Status.PodIP, port, stream, timeout, rt, onUsage)
+		err := proxyRequest(c, req, podObj.Status.PodIP, resolvedPort, stream, timeout, rt, onUsage)
 
 		if ctx.MetricsRecorder != nil {
 			ctx.MetricsRecorder.DecActiveUpstreamRequests()
@@ -1539,10 +1563,16 @@ func (r *Router) proxyToPDDisaggregated(
 		prefillPod := ctx.PrefillPods[i].GetPod()
 		decodePod := ctx.DecodePods[i].GetPod()
 		accesslog.SetUpstreamInfo(c, 0, i+1)
+		prefillPort, prefillErr := workloadport.Resolve(v1alpha1.WorkloadPort{Port: port, PortName: ctx.PortName}, prefillPod)
+		decodePort, decodeErr := workloadport.Resolve(v1alpha1.WorkloadPort{Port: port, PortName: ctx.PortName}, decodePod)
+		if prefillErr != nil || decodeErr != nil {
+			klog.Warningf("skipping prefill/decode pair with invalid workload port: prefill=%v decode=%v", prefillErr, decodeErr)
+			continue
+		}
 
 		// Build addresses for prefill and decode pods
-		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(port)))
-		decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(port)))
+		prefillAddr := net.JoinHostPort(prefillPod.Status.PodIP, strconv.Itoa(int(prefillPort)))
+		decodeAddr := net.JoinHostPort(decodePod.Status.PodIP, strconv.Itoa(int(decodePort)))
 
 		klog.V(4).Infof("Attempting PD disaggregated request: prefill=%s, decode=%s", prefillAddr, decodeAddr)
 
