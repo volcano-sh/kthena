@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 
@@ -272,6 +273,19 @@ func decodeRevisionPatch(data []byte) (*modelServingRevisionPatch, error) {
 		roleNames[role.Name] = struct{}{}
 	}
 	return &patch, nil
+}
+
+// revisionDataEqual follows the Kubernetes controller-history pattern of using
+// byte equality as the fast path, then compares decoded API values when their
+// serialized representation differs. The semantic fallback prevents an API
+// type addition or equivalent JSON encoding from creating a needless revision.
+func revisionDataEqual(left, right []byte) bool {
+	if bytes.Equal(left, right) {
+		return true
+	}
+	leftPatch, leftErr := decodeRevisionPatch(left)
+	rightPatch, rightErr := decodeRevisionPatch(right)
+	return leftErr == nil && rightErr == nil && apiequality.Semantic.DeepEqual(leftPatch, rightPatch)
 }
 
 func revisionRole(source modelServingRevisionRole) workloadv1alpha1.Role {

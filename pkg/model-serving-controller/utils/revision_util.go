@@ -18,6 +18,7 @@ import (
 	"hash"
 	"hash/fnv"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/rand"
 
@@ -68,4 +69,34 @@ func removeRoleReplicasForRoleTemplateHash(role workloadv1alpha1.Role) workloadv
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
 	copy := removeRoleReplicasForRoleTemplateHash(role)
 	return Revision(copy)
+}
+
+// EqualRoleTemplatesForRevision reports whether two Role collections describe
+// the same rendered workload. Hash equality remains the fast path in the
+// controller, while this comparison is authoritative when a controller or API
+// dependency upgrade changes the in-memory Go representation used by the hash.
+//
+// Keep this normalization aligned with ModelServingRevision and
+// CalRoleTemplateHash: replica counts and rollout controls affect orchestration,
+// not the Pod templates identified by a revision.
+func EqualRoleTemplatesForRevision(left, right []workloadv1alpha1.Role) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	leftCopy := make([]workloadv1alpha1.Role, len(left))
+	rightCopy := make([]workloadv1alpha1.Role, len(right))
+	for i := range left {
+		leftCopy[i] = removeRoleReplicasForRoleTemplateHash(*left[i].DeepCopy())
+		rightCopy[i] = removeRoleReplicasForRoleTemplateHash(*right[i].DeepCopy())
+	}
+	return apiequality.Semantic.DeepEqual(leftCopy, rightCopy)
+}
+
+// EqualRoleTemplateForRevision is the single-Role form used by RoleRollingUpdate.
+func EqualRoleTemplateForRevision(left, right workloadv1alpha1.Role) bool {
+	return apiequality.Semantic.DeepEqual(
+		removeRoleReplicasForRoleTemplateHash(*left.DeepCopy()),
+		removeRoleReplicasForRoleTemplateHash(*right.DeepCopy()),
+	)
 }

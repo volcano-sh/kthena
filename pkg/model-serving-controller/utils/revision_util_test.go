@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -186,6 +187,30 @@ func TestMaxSurgeDoesNotChangeRevisionOrRoleTemplateHash(t *testing.T) {
 	if ModelServingRevision(newModelServing([]workloadv1alpha1.Role{withoutSurge})) !=
 		ModelServingRevision(newModelServing([]workloadv1alpha1.Role{withSurge})) {
 		t.Fatal("rolling update policy must not change ModelServing revision")
+	}
+}
+
+func TestEqualRoleTemplatesForRevisionUsesKubernetesSemantics(t *testing.T) {
+	left := newRole("decode", int32Ptr(1), 0)
+	left.EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("1"),
+	}
+	right := *left.DeepCopy()
+	right.Replicas = int32Ptr(5)
+	right.MaxUnavailable = func() *intstr.IntOrString { value := intstr.FromInt(0); return &value }()
+	right.MaxSurge = func() *intstr.IntOrString { value := intstr.FromInt(1); return &value }()
+	right.EntryTemplate.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("1000m")
+
+	if !EqualRoleTemplatesForRevision([]workloadv1alpha1.Role{left}, []workloadv1alpha1.Role{right}) {
+		t.Fatal("semantically equal templates with replica, rollout, and Quantity representation differences were not equal")
+	}
+	if !EqualRoleTemplateForRevision(left, right) {
+		t.Fatal("single-Role semantic comparison was not equal")
+	}
+
+	right.EntryTemplate.Spec.Containers[0].Image = "different-image"
+	if EqualRoleTemplatesForRevision([]workloadv1alpha1.Role{left}, []workloadv1alpha1.Role{right}) {
+		t.Fatal("real Pod template change was treated as equal")
 	}
 }
 
