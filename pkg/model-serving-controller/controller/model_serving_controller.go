@@ -844,16 +844,19 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 // the new revision otherwise. It traverses every Role to align actual pods to expected status.
 //
 // Main processing steps:
-// 1. Iterate over all existing ServingGroups and skip those already marked as "Deleting".
-// 2. Identify if the current ServingGroup falls under the rollout Partition protection.
-// 3. Fallback to an older revision (ControllerRevision) if the group is protected by the partition.
-// 4. Update memory caches and use `manageRoleReplicas` to add/remove out-of-sync Pods and Services for each role.
+//  1. Iterate over all existing ServingGroups and skip those already marked as "Deleting".
+//  2. Identify if the current ServingGroup must keep using its recorded revision.
+//  3. Load the recorded Role configuration for a partition-protected group or an
+//     outdated group waiting for ServingGroupRollingUpdate.
+//  4. Update memory caches and use `manageRoleReplicas` to add/remove out-of-sync Pods and Services for each role.
 func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
+	isServingGroupRollingUpdate := ms.Spec.RolloutStrategy == nil ||
+		ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate
 	for index, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
@@ -861,10 +864,12 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
 		isPartitionProtected := partition > 0 && index < partition
+		useRecordedRevision := isPartitionProtected ||
+			(isServingGroupRollingUpdate && servingGroup.Revision != newRevision)
 
 		rolesToManage := ms.Spec.Template.Roles
 		revisionToUse := newRevision
-		if isPartitionProtected {
+		if useRecordedRevision {
 			if revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroup.Name); ok && revision != "" {
 				revisionToUse = revision
 			} else if ms.Status.CurrentRevision != "" {
@@ -874,15 +879,15 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 			if revisionToUse != "" {
 				cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revisionToUse)
 				if err != nil {
-					return fmt.Errorf("failed to get ControllerRevision %s for protected ServingGroup %s: %v", revisionToUse, servingGroup.Name, err)
+					return fmt.Errorf("failed to get ControllerRevision %s for ServingGroup %s: %v", revisionToUse, servingGroup.Name, err)
 				} else if cr != nil {
 					if oldRoles, err := utils.GetRolesFromControllerRevision(cr); err != nil {
-						return fmt.Errorf("failed to get roles from ControllerRevision %s for protected ServingGroup %s: %v", revisionToUse, servingGroup.Name, err)
+						return fmt.Errorf("failed to get roles from ControllerRevision %s for ServingGroup %s: %v", revisionToUse, servingGroup.Name, err)
 					} else {
 						rolesToManage = oldRoles
 					}
 				} else if revisionToUse != newRevision {
-					return fmt.Errorf("ControllerRevision %s for protected ServingGroup %s was not found", revisionToUse, servingGroup.Name)
+					return fmt.Errorf("ControllerRevision %s for ServingGroup %s was not found", revisionToUse, servingGroup.Name)
 				}
 			}
 		}
