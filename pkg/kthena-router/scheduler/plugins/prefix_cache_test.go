@@ -108,6 +108,14 @@ func TestHashPrompt(t *testing.T) {
 	}
 }
 
+// seedPodInStore registers the pod in the datastore so the prefix store's Add accepts it.
+func seedPodInStore(t testing.TB, ds datastore.Store, pod *datastore.PodInfo) {
+	t.Helper()
+	if err := ds.AddOrUpdatePod(pod.Pod, nil); err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+}
+
 func TestPrefixCacheScore(t *testing.T) {
 	// We construct a minimal PrefixCache by hand to avoid yaml/flag plumbing.
 	t.Run("all pods present in score map, non-matching pods score 0", func(t *testing.T) {
@@ -126,6 +134,7 @@ func TestPrefixCacheScore(t *testing.T) {
 		pod3 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod3", Namespace: "ns1"}}}
 
 		// Pre-populate cache: only pod1 has a matching prefix for "hello world"
+		seedPodInStore(t, mockDS, pod1)
 		prompt := "hello world"
 		hashes := plugin.hashPrompt("test-model", prompt)
 		prefixStore.Add("test-model", hashes, pod1)
@@ -272,6 +281,7 @@ func TestPrefixCacheScoreMetrics(t *testing.T) {
 	pod2 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"}}}
 
 	const model = "prefixmetrics-model"
+	seedPodInStore(t, mockDS, pod1)
 	prompt := "hello world from prefix cache metrics test"
 	hashes := plugin.hashPrompt(model, prompt)
 	prefixStore.Add(model, hashes, pod1)
@@ -308,6 +318,7 @@ func TestPrefixCacheEntriesProviderRegistered(t *testing.T) {
 	plugin := NewPrefixCache(mockDS, runtime.RawExtension{Raw: []byte{}})
 
 	pod := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
+	seedPodInStore(t, mockDS, pod)
 	const model = "prefixentries-model"
 	hashes := plugin.hashPrompt(model, "some prompt that yields a single block")
 	plugin.store.Add(model, hashes, pod)
@@ -331,6 +342,7 @@ func benchmarkPrefixScore(b *testing.B, withMetrics bool) {
 	pods := []*datastore.PodInfo{pod1, pod2}
 
 	const model = "bench-prefix-model"
+	seedPodInStore(b, mockDS, pod1)
 	prompt := strings.Repeat("the quick brown fox jumps over the lazy dog ", 40)
 	hashes := plugin.hashPrompt(model, prompt)
 	prefixStore.Add(model, hashes, pod1)
@@ -373,12 +385,15 @@ func TestNewPrefixCacheWithEmptyArgs(t *testing.T) {
 }
 
 func TestNewPrefixCacheRespectsTopKMatches(t *testing.T) {
-	plugin := NewPrefixCache(datastore.New(), runtime.RawExtension{
+	mockDS := datastore.New()
+	plugin := NewPrefixCache(mockDS, runtime.RawExtension{
 		Raw: []byte(`{"blockSizeToHash": 64, "maxBlocksToMatch": 128, "maxHashCacheSize": 50000, "topKMatches": 1}`),
 	})
 
 	pod1 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
 	pod2 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "ns1"}}}
+	seedPodInStore(t, mockDS, pod1)
+	seedPodInStore(t, mockDS, pod2)
 
 	prompt := "same prompt for both pods"
 	hashes := plugin.hashPrompt("test-model", prompt)
