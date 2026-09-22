@@ -31,11 +31,9 @@ type ModelRouteSpecApplyConfiguration struct {
 	// `model` in the LLM request, it could be a base model name, lora adapter name or even
 	// a virtual model name. This field is used to match scenarios other than model adapter name and
 	// this field could be empty, but it and `ModelAdapters` can't both be empty.
-	//
 	ModelName *string `json:"modelName,omitempty"`
 	// `model` in the LLM request could be lora adapter name,
 	// here is a list of Lora Adapter Names to match.
-	//
 	LoraAdapters []string `json:"loraAdapters,omitempty"`
 	// ParentRefs references the Gateways that this ModelRoute should be attached to.
 	// If empty, the ModelRoute will be attached to all Gateways in the same namespace.
@@ -43,7 +41,6 @@ type ModelRouteSpecApplyConfiguration struct {
 	// An ordered list of route rules for LLM traffic. The first rule
 	// matching an incoming request will be used.
 	// If no rule is matched, an HTTP 404 status code MUST be returned.
-	//
 	Rules []*networkingv1alpha1.Rule `json:"rules,omitempty"`
 	// Rate limit for the LLM request based on prompt tokens or output tokens.
 	// There is no limitation if this field is not set.

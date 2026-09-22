@@ -29,10 +29,8 @@ import (
 type ModelServingSpecApplyConfiguration struct {
 	// Number of ServingGroups. That is the number of instances that run serving tasks
 	// Default to 1.
-	//
 	Replicas *int32 `json:"replicas,omitempty"`
 	// SchedulerName defines the name of the scheduler used by ModelServing
-	//
 	SchedulerName *string `json:"schedulerName,omitempty"`
 	// Plugins defines optional plugins that customize serving pods or manage
 	// auxiliary resources through controller lifecycle hooks.
