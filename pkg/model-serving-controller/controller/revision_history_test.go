@@ -61,20 +61,28 @@ func semanticRevisionTestModelServing(name, image string) *workloadv1alpha1.Mode
 func TestDesiredRevisionReusesSemanticHistoryAfterHashDrift(t *testing.T) {
 	ctx := context.Background()
 	ms := semanticRevisionTestModelServing("semantic-upgrade", "image:v1")
-	ms.Status.CurrentRevision = "legacy-hash"
-	ms.Status.UpdateRevision = "legacy-hash"
+	legacyHashInput := ms.DeepCopy().Spec.Template.Roles
+	for i := range legacyHashInput {
+		legacyHashInput[i].Replicas = nil
+		legacyHashInput[i].RollingUpdateConfiguration = workloadv1alpha1.RollingUpdateConfiguration{}
+	}
+	legacyHash := utils.Revision(legacyHashInput)
+	require.NotEqual(t, legacyHash, utils.ModelServingRevision(ms),
+		"test requires the legacy struct hash and serialized hash to differ")
+	ms.Status.CurrentRevision = legacyHash
+	ms.Status.UpdateRevision = legacyHash
 	historical := ms.DeepCopy().Spec.Template.Roles
 	*historical[0].Replicas = 7
 
 	client := kubefake.NewSimpleClientset()
-	_, err := utils.CreateControllerRevision(ctx, client, ms, "legacy-hash", historical)
+	_, err := utils.CreateControllerRevision(ctx, client, ms, legacyHash, historical)
 	require.NoError(t, err)
 	controller := &ModelServingController{kubeClientSet: client}
 	ctx = controller.withRevisionHistory(ctx, ms)
 
 	got, err := controller.revisionHistory(ctx, ms).desiredRevision(ctx)
 	require.NoError(t, err)
-	require.Equal(t, "legacy-hash", got)
+	require.Equal(t, legacyHash, got)
 	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, list.Items, 1, "hash drift must not create another ControllerRevision")
