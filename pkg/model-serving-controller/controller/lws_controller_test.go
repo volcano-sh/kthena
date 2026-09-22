@@ -24,10 +24,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
@@ -534,6 +537,46 @@ func TestEnsureLWSHeadlessService(t *testing.T) {
 	assert.Equal(t, map[string]string{lwsv1.SetNameLabelKey: lws.Name}, service.Spec.Selector)
 	require.Len(t, service.OwnerReferences, 1)
 	assert.Equal(t, lws.UID, service.OwnerReferences[0].UID)
+
+	tests := []struct {
+		name   string
+		mutate func(*corev1.Service)
+	}{
+		{name: "no owner", mutate: func(s *corev1.Service) { s.OwnerReferences = nil }},
+		{name: "different owner UID", mutate: func(s *corev1.Service) { s.OwnerReferences[0].UID = "old-uid" }},
+		{name: "not headless", mutate: func(s *corev1.Service) { s.Spec.ClusterIP = "10.0.0.1" }},
+		{name: "does not publish unready addresses", mutate: func(s *corev1.Service) { s.Spec.PublishNotReadyAddresses = false }},
+		{name: "wrong selector", mutate: func(s *corev1.Service) { s.Spec.Selector[lwsv1.SetNameLabelKey] = "other" }},
+		{name: "extra selector", mutate: func(s *corev1.Service) { s.Spec.Selector["extra"] = "value" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			existing := service.DeepCopy()
+			tt.mutate(existing)
+			client := kubefake.NewSimpleClientset(existing)
+			controller := &LWSController{kubeClient: client}
+			err := controller.ensureLWSHeadlessService(context.Background(), lws)
+			require.ErrorContains(t, err, "service default/sample")
+			// Invalid services must not be adopted, modified, or deleted.
+			require.Len(t, client.Actions(), 1)
+			assert.Equal(t, "get", client.Actions()[0].GetVerb())
+		})
+	}
+
+	t.Run("concurrent creation is retried", func(t *testing.T) {
+		client := kubefake.NewSimpleClientset()
+		client.PrependReactor("create", "services", func(action clienttesting.Action) (bool, runtime.Object, error) {
+			// Another actor creates a conflicting Service after our GET.
+			existing := service.DeepCopy()
+			existing.OwnerReferences = nil
+			require.NoError(t, client.Tracker().Add(existing))
+			return true, nil, apierrors.NewAlreadyExists(schema.GroupResource{Resource: "services"}, lws.Name)
+		})
+		controller := &LWSController{kubeClient: client}
+		err := controller.ensureLWSHeadlessService(context.Background(), lws)
+		require.True(t, apierrors.IsAlreadyExists(err), "expected a retryable creation conflict, got %v", err)
+		require.ErrorContains(t, controller.ensureLWSHeadlessService(context.Background(), lws), "is not controlled by LeaderWorkerSet")
+	})
 }
 
 func TestDeletedLWSHeadlessServiceIsRecreated(t *testing.T) {
