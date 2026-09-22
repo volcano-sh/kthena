@@ -70,8 +70,11 @@ func removeRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv
 
 // ModelServingRevision calculates the revision of a ModelServing object.
 func ModelServingRevision(ms *workloadv1alpha1.ModelServing) string {
-	roles := removeRoleReplicasForRevision(ms).Spec.Template.Roles
-	return serializedRevision(roles)
+	data, err := BuildRevisionData(ms)
+	if err != nil {
+		return ""
+	}
+	return RevisionDataHash(data, modelServingCollisionCount(ms))
 }
 
 // removeRoleReplicasForRoleTemplateHash removes fields that do not change rendered pods when calculating role template hash.
@@ -88,14 +91,9 @@ func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
 	return serializedRevision(copy)
 }
 
-// EqualRoleTemplatesForRevision reports whether two Role collections describe
-// the same rendered workload. Hash equality remains the fast path in the
-// controller, while this comparison is authoritative when a controller or API
-// dependency upgrade changes the in-memory Go representation used by the hash.
-//
-// Keep this normalization aligned with ModelServingRevision and
-// CalRoleTemplateHash: replica counts and rollout controls affect orchestration,
-// not the Pod templates identified by a revision.
+// EqualRoleTemplatesForRevision compares legacy Roles-only revision data.
+// The live controller uses EqualModelServingRevisions and EqualRoleRevisions,
+// which also account for scheduler/plugins through the shared comparator.
 func EqualRoleTemplatesForRevision(left, right []workloadv1alpha1.Role) bool {
 	if len(left) != len(right) {
 		return false
@@ -110,7 +108,7 @@ func EqualRoleTemplatesForRevision(left, right []workloadv1alpha1.Role) bool {
 	return apiequality.Semantic.DeepEqual(leftCopy, rightCopy)
 }
 
-// EqualRoleTemplateForRevision is the single-Role form used by RoleRollingUpdate.
+// EqualRoleTemplateForRevision is the single-Role legacy compatibility helper.
 func EqualRoleTemplateForRevision(left, right workloadv1alpha1.Role) bool {
 	return apiequality.Semantic.DeepEqual(
 		removeRoleReplicasForRoleTemplateHash(*left.DeepCopy()),

@@ -111,8 +111,9 @@ func TestRevisionEntryPointsAreStableAndPreserveSpec(t *testing.T) {
 	original := ms.DeepCopy()
 
 	const (
-		wantModelServingRevision = "55746986d4"
+		wantModelServingRevision = "8566755bc6"
 		wantRoleTemplateHash     = "77c9446dc4"
+		wantRoleRevisionHash     = "67cd749666"
 	)
 	for i := 0; i < 2; i++ {
 		if got := ModelServingRevision(ms); got != wantModelServingRevision {
@@ -120,6 +121,9 @@ func TestRevisionEntryPointsAreStableAndPreserveSpec(t *testing.T) {
 		}
 		if got := CalRoleTemplateHash(ms.Spec.Template.Roles[0]); got != wantRoleTemplateHash {
 			t.Fatalf("CalRoleTemplateHash() call %d = %q, want %q", i+1, got, wantRoleTemplateHash)
+		}
+		if got, err := RoleRevisionHash(ms, "decode"); err != nil || got != wantRoleRevisionHash {
+			t.Fatalf("RoleRevisionHash() call %d = %q, %v; want %q", i+1, got, err, wantRoleRevisionHash)
 		}
 	}
 
