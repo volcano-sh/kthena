@@ -15,6 +15,7 @@ package utils
 
 import (
 	"hash/fnv"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -70,6 +71,60 @@ func TestRevision(t *testing.T) {
 	}
 	if hash1 != hash3 {
 		t.Errorf("Hash should be equal for identical objects, got %s and %s", hash1, hash2)
+	}
+}
+
+func TestSerializedRevisionIgnoresOmittedNilFields(t *testing.T) {
+	type roleBeforeDependencyUpgrade struct {
+		Name string `json:"name"`
+	}
+	type roleAfterDependencyUpgrade struct {
+		Name        string  `json:"name"`
+		WorkloadRef *string `json:"workloadRef,omitempty"`
+	}
+
+	before := roleBeforeDependencyUpgrade{Name: "decode"}
+	afterWithNilField := roleAfterDependencyUpgrade{Name: "decode"}
+	if Revision(before) == Revision(afterWithNilField) {
+		t.Fatal("test requires direct Go-struct hashing to observe the added field")
+	}
+	if serializedRevision(before) != serializedRevision(afterWithNilField) {
+		t.Fatal("an added nil field omitted from JSON changed the serialized revision")
+	}
+
+	workloadRef := "inference.example.com/workload"
+	afterWithValue := roleAfterDependencyUpgrade{Name: "decode", WorkloadRef: &workloadRef}
+	if serializedRevision(before) == serializedRevision(afterWithValue) {
+		t.Fatal("a non-nil field included in JSON did not change the serialized revision")
+	}
+}
+
+func TestRevisionEntryPointsAreStableAndPreserveSpec(t *testing.T) {
+	role := workloadv1alpha1.Role{
+		Name:     "decode",
+		Replicas: int32Ptr(2),
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "image:v1"}},
+		}},
+	}
+	ms := newModelServing([]workloadv1alpha1.Role{role})
+	original := ms.DeepCopy()
+
+	const (
+		wantModelServingRevision = "55746986d4"
+		wantRoleTemplateHash     = "77c9446dc4"
+	)
+	for i := 0; i < 2; i++ {
+		if got := ModelServingRevision(ms); got != wantModelServingRevision {
+			t.Fatalf("ModelServingRevision() call %d = %q, want %q", i+1, got, wantModelServingRevision)
+		}
+		if got := CalRoleTemplateHash(ms.Spec.Template.Roles[0]); got != wantRoleTemplateHash {
+			t.Fatalf("CalRoleTemplateHash() call %d = %q, want %q", i+1, got, wantRoleTemplateHash)
+		}
+	}
+
+	if !reflect.DeepEqual(ms.Spec, original.Spec) {
+		t.Fatal("revision entry points mutated the ModelServing spec")
 	}
 }
 
