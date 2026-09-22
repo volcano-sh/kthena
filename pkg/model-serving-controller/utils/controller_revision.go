@@ -46,7 +46,7 @@ const (
 )
 
 // CreateControllerRevision maintains the legacy wrapped Role revision format
-// used by the current controller integration. New v1 revision paths must use
+// used by older controllers. New v1 revision paths must use
 // BuildRevisionData and RecordModelServingRevision so revision data remains
 // immutable.
 func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, revision string, templateData interface{}) (*appsv1.ControllerRevision, error) {
@@ -134,7 +134,21 @@ func GetControllerRevision(
 	cr, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, nil
+			// A canonical migration baseline is a complete immutable snapshot.
+			// It remains usable if the redundant legacy Roles-only object is lost.
+			baseline, baselineErr := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName+"-baseline", metav1.GetOptions{})
+			if apierrors.IsNotFound(baselineErr) {
+				return nil, nil
+			}
+			if baselineErr != nil {
+				return nil, baselineErr
+			}
+			if !metav1.IsControlledBy(baseline, ms) || baseline.Annotations[legacyRevisionSource] != controllerRevisionName ||
+				baseline.Annotations[ControllerRevisionDataVersionAnnotation] != ControllerRevisionDataVersionV1 ||
+				baseline.Labels[ControllerRevisionRevisionLabelKey] != revision {
+				return nil, fmt.Errorf("legacy baseline %s has conflicting identity", baseline.Name)
+			}
+			return baseline, nil
 		}
 		return nil, err
 	}
@@ -146,10 +160,25 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 	if cr == nil || cr.Data.Raw == nil {
 		return nil, fmt.Errorf("ControllerRevision or its data is nil")
 	}
+	if cr.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 {
+		patch, err := decodeRevisionPatch(cr.Data.Raw)
+		if err != nil {
+			return nil, err
+		}
+		roles := make([]workloadv1alpha1.Role, 0, len(patch.Spec.Template.Roles))
+		for _, role := range patch.Spec.Template.Roles {
+			roles = append(roles, revisionRole(role))
+		}
+		return roles, nil
+	}
+	return decodeLegacyRevisionRoles(cr.Data.Raw)
+}
+
+func decodeLegacyRevisionRoles(data []byte) ([]workloadv1alpha1.Role, error) {
 
 	// Try to unmarshal as wrapped data first.
 	var wrapper map[string]json.RawMessage
-	if err := json.Unmarshal(cr.Data.Raw, &wrapper); err == nil {
+	if err := json.Unmarshal(data, &wrapper); err == nil {
 		if rawData, ok := wrapper["data"]; ok {
 			var roles []workloadv1alpha1.Role
 			if err := json.Unmarshal(rawData, &roles); err != nil {
@@ -161,7 +190,7 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 
 	// Fallback: try to unmarshal directly (for backward compatibility or if not wrapped)
 	var roles []workloadv1alpha1.Role
-	if err := json.Unmarshal(cr.Data.Raw, &roles); err != nil {
+	if err := json.Unmarshal(data, &roles); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal roles from ControllerRevision: %v", err)
 	}
 
@@ -214,8 +243,12 @@ func CleanupOldControllerRevisions(
 	deletedCount := 0
 	for i := range list.Items {
 		revision := &list.Items[i]
+		if !metav1.IsControlledBy(revision, ms) {
+			continue
+		}
 		// Skip if this revision must be preserved
-		if _, preserved := preservedRevisionNames[revision.Name]; preserved {
+		identityName := GenerateControllerRevisionName(ms.Name, revision.Labels[ControllerRevisionRevisionLabelKey])
+		if _, preserved := preservedRevisionNames[identityName]; preserved {
 			continue
 		}
 

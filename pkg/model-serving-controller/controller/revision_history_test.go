@@ -22,12 +22,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
@@ -35,8 +38,184 @@ import (
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
+
+func testRevisionPlugin(value string) workloadv1alpha1.PluginSpec {
+	return workloadv1alpha1.PluginSpec{
+		Name: plugins.DemoPluginName, Type: workloadv1alpha1.PluginTypeBuiltIn,
+		Scope:  &workloadv1alpha1.PluginScope{Roles: []string{"decode"}},
+		Config: &apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf(`{"annotations":{"revision-test":"%s"}}`, value))},
+	}
+}
+
+func TestReadyPodWithMissingHistoryRemainsObserved(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+	c, err := NewModelServingController(client, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	ms := semanticRevisionTestModelServing("ready-history-missing", "image")
+	ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{testRevisionPlugin("current")}
+	groupName := ms.Name + "-0"
+	pod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, "decode-0", "missing", "old-role-hash")
+	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+	require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+	require.ErrorContains(t, c.handleReadyPod(ms, groupName, pod), "resolve ready Pod revision")
+	roles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, "decode")
+	require.NoError(t, err)
+	require.Len(t, roles, 1)
+	require.Equal(t, "missing", roles[0].Revision)
+	require.Equal(t, datastore.RoleRunning, roles[0].Status)
+	ctx := c.withRevisionHistory(context.Background(), ms)
+	require.NoError(t, c.manageRollingUpdate(ctx, ms, "desired"))
+	require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName))
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource == "events" {
+			continue // RevisionUnresolved warnings are expected, workload writes are not.
+		}
+		require.NotEqual(t, "delete", action.GetVerb())
+		require.NotEqual(t, "create", action.GetVerb())
+	}
+}
+
+func TestProtectedRecoveryIgnoresDesiredComparisonCache(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+	c, err := NewModelServingController(client, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	old := semanticRevisionTestModelServing("protected-cache", "old-image")
+	old.Spec.Template.Roles[0].WorkerReplicas = 1
+	old.Spec.Template.Roles[0].WorkerTemplate = old.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+	recordTestRevision(t, client, old, "old")
+	groupName := old.Name + "-0"
+	entry := utils.GenerateEntryPod(old.Spec.Template.Roles[0], old, groupName, "decode-0", "old", "legacy-typed-role-hash")
+	entry, err = client.CoreV1().Pods(old.Namespace).Create(context.Background(), entry, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(entry))
+	current := old.DeepCopy()
+	current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "new-image"
+	ctx := c.withRevisionHistory(context.Background(), current)
+	require.Equal(t, templateDifferent, c.compareRoleTemplate(ctx, current,
+		datastore.ServingGroup{Name: groupName, Revision: "old"}, current.Spec.Template.Roles[0], datastore.Role{Revision: "old"}))
+	require.NoError(t, c.CreatePodsByRole(ctx, current.Spec.Template.Roles[0], current, 0, 0, "old", "unused"))
+	pods, err := client.CoreV1().Pods(old.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2, "the existing legacy entry must not block historical worker recreation")
+	for _, pod := range pods.Items {
+		require.Equal(t, "old-image", pod.Spec.Containers[0].Image)
+		require.Equal(t, "old", utils.ObjectRevision(&pod))
+	}
+}
+
+func TestLegacyPluginBaselinePreventsFirstRollButDetectsLaterChanges(t *testing.T) {
+	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		t.Run(string(strategy), func(t *testing.T) {
+			ms := semanticRevisionTestModelServing("plugin-migration", "image:v1")
+			ms.Spec.SchedulerName = "volcano"
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: strategy}
+			prefill := *ms.Spec.Template.Roles[0].DeepCopy()
+			prefill.Name = "prefill"
+			ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, prefill)
+			ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{testRevisionPlugin("original")}
+			client := kubefake.NewSimpleClientset()
+			original, err := utils.CreateControllerRevision(context.Background(), client, ms, "legacy", ms.Spec.Template.Roles)
+			require.NoError(t, err)
+			c := &ModelServingController{kubeClientSet: client}
+			ctx := c.withRevisionHistory(context.Background(), ms)
+			revision, err := c.revisionHistory(ctx, ms).desiredRevision(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "legacy", revision)
+			group := datastore.ServingGroup{Name: ms.Name + "-0", Revision: "legacy"}
+			require.Equal(t, templateEquivalent, c.compareServingGroupTemplate(ctx, ms, group, revision))
+			for _, desired := range ms.Spec.Template.Roles {
+				require.Equal(t, templateEquivalent, c.compareRoleTemplate(ctx, ms, group, desired,
+					datastore.Role{Revision: "legacy", RoleTemplateHash: "pre-upgrade-hash"}))
+			}
+			// A fresh cache models a controller restart: do not adopt the edit as
+			// another compatibility baseline.
+			ms = ms.DeepCopy()
+			ms.Generation++
+			ms.Spec.Plugins[0] = testRevisionPlugin("changed")
+			ctx = c.withRevisionHistory(context.Background(), ms)
+			revision, err = c.revisionHistory(ctx, ms).desiredRevision(ctx)
+			require.NoError(t, err)
+			require.NotEqual(t, "legacy", revision)
+			require.Equal(t, templateDifferent, c.compareServingGroupTemplate(ctx, ms, group, revision))
+			require.Equal(t, templateDifferent, c.compareRoleTemplate(ctx, ms, group, ms.Spec.Template.Roles[0], datastore.Role{Revision: "legacy"}))
+			require.Equal(t, templateEquivalent, c.compareRoleTemplate(ctx, ms, group, ms.Spec.Template.Roles[1], datastore.Role{Revision: "legacy"}))
+			unchanged, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, original.Data, unchanged.Data)
+		})
+	}
+}
+
+func TestPartitionRecoveryRestoresHistoricalPluginChain(t *testing.T) {
+	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		t.Run(string(strategy), func(t *testing.T) {
+			client := kubefake.NewSimpleClientset()
+			c, err := NewModelServingController(client, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
+			require.NoError(t, err)
+			ms := semanticRevisionTestModelServing("plugin-recovery", "image:old")
+			ms.Spec.SchedulerName = "volcano"
+			ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{testRevisionPlugin("old")}
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: strategy}
+			partition := intstr.FromInt32(1)
+			if strategy == workloadv1alpha1.ServingGroupRollingUpdate {
+				ms.Spec.Replicas = ptr.To[int32](2)
+				ms.Spec.RolloutStrategy.RollingUpdateConfiguration = &workloadv1alpha1.RollingUpdateConfiguration{Partition: &partition}
+			} else {
+				ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+				ms.Spec.Template.Roles[0].Partition = &partition
+			}
+			recordTestRevision(t, client, ms, "old")
+			ms = ms.DeepCopy()
+			ms.Status.CurrentRevision = "old"
+			ms.Spec.Plugins[0] = testRevisionPlugin("new")
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:new"
+			recordTestRevision(t, client, ms, "new")
+			original := ms.DeepCopy()
+			ctx := c.withRevisionHistory(context.Background(), ms)
+			if strategy == workloadv1alpha1.ServingGroupRollingUpdate {
+				c.store.AddServingGroup(utils.GetNamespaceName(ms), 1, "new")
+				err = c.scaleUpServingGroups(ctx, ms, []datastore.ServingGroup{{Name: ms.Name + "-1", Revision: "new"}}, 2, "new")
+				require.NoError(t, err)
+			} else {
+				c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "old")
+				c.store.AddRole(utils.GetNamespaceName(ms), ms.Name+"-0", "decode", "decode-1", "new", "new-role")
+				c.scaleUpRoles(ctx, ms, ms.Name+"-0", ms.Spec.Template.Roles[0], []datastore.Role{{Name: "decode-1", Revision: "new"}}, 2, 0, "new")
+				require.NoError(t, c.revisionHistory(ctx, ms).errors())
+			}
+			pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 1)
+			pod := pods.Items[0]
+			require.Equal(t, "old", utils.ObjectRevision(&pod))
+			require.Equal(t, "image:old", pod.Spec.Containers[0].Image)
+			require.Equal(t, "old", pod.Annotations["revision-test"])
+			require.Equal(t, "volcano", pod.Spec.SchedulerName)
+			require.Equal(t, original, ms, "historical rendering must not mutate desired spec")
+		})
+	}
+}
+
+// Seed the persisted snapshot that production sync records before reconciling.
+// Tests may choose a historical identity to exercise hash drift independently
+// of the snapshot contents.
+func recordTestRevision(t *testing.T, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, revision string) {
+	t.Helper()
+	data, err := utils.BuildRevisionData(ms)
+	require.NoError(t, err)
+	_, err = client.AppsV1().ControllerRevisions(ms.Namespace).Create(context.Background(), &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: utils.GenerateControllerRevisionName(ms.Name, revision), Namespace: ms.Namespace,
+			Labels:          map[string]string{utils.ControllerRevisionLabelKey: ms.Name, utils.ControllerRevisionRevisionLabelKey: revision},
+			Annotations:     map[string]string{utils.ControllerRevisionDataVersionAnnotation: utils.ControllerRevisionDataVersionV1},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
+		},
+		Revision: 1, Data: runtime.RawExtension{Raw: data},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+}
 
 func semanticRevisionTestModelServing(name, image string) *workloadv1alpha1.ModelServing {
 	return &workloadv1alpha1.ModelServing{
@@ -85,7 +264,13 @@ func TestDesiredRevisionReusesSemanticHistoryAfterHashDrift(t *testing.T) {
 	require.Equal(t, legacyHash, got)
 	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, list.Items, 1, "hash drift must not create another ControllerRevision")
+	require.Len(t, list.Items, 2, "migration adds one immutable baseline without changing the legacy identity")
+	gotAgain, err := controller.revisionHistory(context.Background(), ms).desiredRevision(ctx)
+	require.NoError(t, err)
+	require.Equal(t, legacyHash, gotAgain)
+	listAgain, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, listAgain.Items, 2, "subsequent reconciles must reuse the baseline")
 }
 
 func TestDesiredRevisionCreatesHistoryForRealTemplateChange(t *testing.T) {
@@ -107,7 +292,7 @@ func TestDesiredRevisionCreatesHistoryForRealTemplateChange(t *testing.T) {
 	require.NotEqual(t, "old-hash", got)
 	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, list.Items, 2, "a real template change must persist a new ControllerRevision")
+	require.Len(t, list.Items, 3, "legacy data, its baseline, and the genuinely changed revision")
 }
 
 func TestRoleTemplateHashUsesSemanticHistoryFallback(t *testing.T) {
@@ -125,7 +310,9 @@ func TestRoleTemplateHashUsesSemanticHistoryFallback(t *testing.T) {
 		datastore.Role{Name: "decode-0", Revision: "legacy-hash", RoleTemplateHash: "legacy-role-hash"},
 	)
 	require.True(t, ok)
-	require.Equal(t, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), got)
+	expected, err := utils.RoleRevisionHash(ms, "decode")
+	require.NoError(t, err)
+	require.Equal(t, expected, got)
 }
 
 func TestServingGroupComparisonUsesEachObservedRoleRevision(t *testing.T) {
