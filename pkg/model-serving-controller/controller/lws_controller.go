@@ -428,15 +428,22 @@ func buildLWSStatus(lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.ModelServin
 }
 
 func (c *LWSController) ensureLWSHeadlessService(ctx context.Context, lws *lwsv1.LeaderWorkerSet) error {
-	_, err := c.kubeClient.CoreV1().Services(lws.Namespace).Get(ctx, lws.Name, metav1.GetOptions{})
+	service, err := c.kubeClient.CoreV1().Services(lws.Namespace).Get(ctx, lws.Name, metav1.GetOptions{})
 	if err == nil {
+		if !metav1.IsControlledBy(service, lws) {
+			return fmt.Errorf("service %s/%s is not controlled by LeaderWorkerSet %s", service.Namespace, service.Name, lws.Name)
+		}
+		if service.Spec.ClusterIP != corev1.ClusterIPNone || !service.Spec.PublishNotReadyAddresses ||
+			!reflect.DeepEqual(service.Spec.Selector, map[string]string{lwsv1.SetNameLabelKey: lws.Name}) {
+			return fmt.Errorf("service %s/%s does not match the required LWS headless service configuration", service.Namespace, service.Name)
+		}
 		return nil
 	}
 	if !errors.IsNotFound(err) {
 		return err
 	}
 
-	service := &corev1.Service{
+	service = &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      lws.Name,
 			Namespace: lws.Namespace,
@@ -455,7 +462,7 @@ func (c *LWSController) ensureLWSHeadlessService(ctx context.Context, lws *lwsv1
 			},
 		},
 	}
-	if _, err := c.kubeClient.CoreV1().Services(lws.Namespace).Create(ctx, service, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+	if _, err := c.kubeClient.CoreV1().Services(lws.Namespace).Create(ctx, service, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create LWS headless service: %w", err)
 	}
 	return nil
