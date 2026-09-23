@@ -6,6 +6,7 @@
 - **Distributed Cache Coordination**: Leverage Redis for cross-pod cache coordination in distributed inference environments
 - **Advanced Tokenization Support**: Integrate with model-specific tokenizers and chat template processing for accurate token sequence handling
 - **Semantic Cache Alignment**: Use token-based blocks instead of byte-based blocks for better semantic alignment with model inference patterns
+- **Storage-tier Aware Scoring**: Account for the storage medium of cached KV blocks when scoring cache hits
 
 ## 1. Introduction
 
@@ -35,6 +36,7 @@ The plugin addresses the challenge of efficiently routing inference requests to 
 
 **Redis-based Distributed Cache**
 - Uses Redis hash structures for block-to-pod mappings
+- Stores the cache block's storage medium alongside the last-updated timestamp when reported by the runtime
 - Efficient pipeline operations for batch queries
 - Timeout handling and error recovery
 
@@ -53,8 +55,9 @@ The plugin addresses the challenge of efficiently routing inference requests to 
 
 **Scoring Mechanism**
 - Scores pods based on consecutive token block matches from the beginning
-- Score calculation: `(matching consecutive blocks / total blocks) * 100`
+- Score calculation: `(weighted matching consecutive blocks / total blocks) * 100`
 - Range: 0-100, higher scores indicate better KV cache hit potential
+- Applies per-medium weights for reported storage tiers while keeping timestamp-only entries at weight 1.0
 - Early termination when no pods have consecutive matches
 
 ## 3. Technical Implementation
@@ -80,9 +83,14 @@ Input Prompt → Tokenization → Block Division → Hash Generation → Redis Q
 Key: "matrix:kv:block:deepseek-ai/DeepSeek-R1-Distill-Qwen-7B@12345678901234567890"
 Fields: {
   "pod-name-1.namespace.svc.cluster.local": "1703123456",
-  "pod-name-2.namespace.svc.cluster.local": "1703123789"
+  "pod-name-2.namespace.svc.cluster.local": "1703123789|GPU",
+  "pod-name-3.namespace.svc.cluster.local": "1703123900|CPU_PINNED"
 }
 ```
+
+Timestamp-only values remain valid and are treated as weight `1.0`. When a runtime reports a storage medium, the value is extended as `timestamp|medium`. New block updates overwrite the previous value for the same pod and block.
+
+If the medium is not reported or empty, the plugin falls back to weight `1.0`. A reported medium that is not present in `tierWeights` also uses `1.0`; operators should configure any reported tier they want discounted. This keeps existing runtime behavior unchanged and avoids penalizing engines that do not expose storage-tier information.
 
 ### 3.3. Configuration Parameters
 
@@ -90,6 +98,10 @@ Fields: {
 # KVCacheAware configuration
 blockSizeToHash: 16       # Tokens per block for hashing
 maxBlocksToMatch: 128     # Maximum blocks to process
+tierWeights:              # Optional per-medium score weights
+  gpu: 1.0
+  cpu: 0.8
+  cpu_pinned: 0.8
 ```
 
 ### 3.4. Scoring Algorithm
@@ -99,7 +111,9 @@ The plugin implements a consecutive block matching algorithm:
 1. **First Block Filtering**: Only consider pods that have the first token block
 2. **Consecutive Matching**: For each subsequent block, only keep pods that have both the current and all previous blocks
 3. **Early Termination**: Stop processing when no pods have consecutive matches
-4. **Score Calculation**: `(consecutive_matches / total_blocks) * 100`
+4. **Score Calculation**: `(weighted_consecutive_matches / total_blocks) * 100`
+
+Missing and unknown media default to weight `1.0`. Configured weights must be between `0.0` and `1.0`; values outside that range are ignored.
 
 ## 4. Integration with Kthena
 
@@ -130,6 +144,19 @@ Uses the existing Redis infrastructure:
 - **Singleton Pattern**: Leverages `utils.TryGetRedisClient()` for connection management
 - **Pipeline Operations**: Efficient batch queries for multiple blocks
 - **Error Handling**: Graceful degradation when Redis is unavailable
+
+### 4.4. Runtime Event Integration
+
+The runtime KV cache handlers write block ownership into the shared Redis key space. When vLLM or SGLang block events include a `medium` field, the handler stores that medium with the pod entry. The cache handler persists the value so the router can apply tier weights during scoring.
+
+The known medium values are the values reported by the upstream engine events when the corresponding cache tier is enabled:
+
+| Engine | Values |
+| ------ | ------ |
+| vLLM | `GPU`, `CPU`, `FS`, `OBJ` |
+| SGLang | `GPU`, `CPU_PINNED`, `DISK`, `EXTERNAL` |
+
+For vLLM, `FS` is the filesystem secondary tier and `OBJ` is the object-store secondary tier. For SGLang, `DISK` is the SSD/NVMe tier and `EXTERNAL` is the shared or remote pool tier, such as Mooncake.
 
 ## 5. Performance Considerations
 
