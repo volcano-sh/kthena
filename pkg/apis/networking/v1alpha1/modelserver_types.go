@@ -87,13 +87,23 @@ type PDGroup struct {
 }
 
 // WorkloadPort defines the port and protocol configuration for the model server.
+// +kubebuilder:validation:XValidation:rule="has(self.port) != has(self.portName)",message="exactly one of port or portName must be set"
 type WorkloadPort struct {
 	// The port of the model server. The number must be between 1 and 65535.
-	//
-	// +kubebuilder:validation:Required
+	// Use this when all selected Pods listen on the same port.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port"`
+	Port int32 `json:"port,omitempty"`
+
+	// PortName selects a named TCP container port from each selected Pod.
+	// Pods may use different numbers for the same name.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(-[a-z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="self.matches('[a-z]')",message="portName must contain a lowercase letter"
+	PortName string `json:"portName,omitempty"`
 
 	// The protocol of the model server. Supported values are "http" and "https".
 	// +optional

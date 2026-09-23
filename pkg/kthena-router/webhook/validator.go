@@ -29,6 +29,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -313,6 +314,20 @@ func (v *KthenaRouterValidator) validateModelServer(modelServer *networkingv1alp
 	var allErrs field.ErrorList
 	specField := field.NewPath("spec")
 	workloadSelectorField := specField.Child("workloadSelector")
+	workloadPortField := specField.Child("workloadPort")
+	workloadPort := modelServer.Spec.WorkloadPort
+	if workloadPort.PortName == "" {
+		if workloadPort.Port < 1 || workloadPort.Port > 65535 {
+			allErrs = append(allErrs, field.Invalid(workloadPortField.Child("port"), workloadPort.Port, "must be between 1 and 65535 when portName is unset"))
+		}
+	} else {
+		if workloadPort.Port != 0 {
+			allErrs = append(allErrs, field.Forbidden(workloadPortField.Child("port"), "port and portName are mutually exclusive"))
+		}
+		if reasons := validation.IsValidPortName(workloadPort.PortName); len(reasons) != 0 {
+			allErrs = append(allErrs, field.Invalid(workloadPortField.Child("portName"), workloadPort.PortName, strings.Join(reasons, ", ")))
+		}
+	}
 
 	if modelServer.Spec.WorkloadSelector == nil {
 		allErrs = append(allErrs, field.Required(workloadSelectorField, "workloadSelector must be specified"))

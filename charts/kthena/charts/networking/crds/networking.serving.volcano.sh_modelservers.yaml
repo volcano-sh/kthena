@@ -196,12 +196,24 @@ spec:
                   for the model server.
                 properties:
                   port:
-                    description: The port of the model server. The number must be
-                      between 1 and 65535.
+                    description: |-
+                      The port of the model server. The number must be between 1 and 65535.
+                      Use this when all selected Pods listen on the same port.
                     format: int32
                     maximum: 65535
                     minimum: 1
                     type: integer
+                  portName:
+                    description: |-
+                      PortName selects a named TCP container port from each selected Pod.
+                      Pods may use different numbers for the same name.
+                    maxLength: 15
+                    minLength: 1
+                    pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: portName must contain a lowercase letter
+                      rule: self.matches('[a-z]')
                   protocol:
                     default: http
                     description: The protocol of the model server. Supported values
@@ -210,9 +222,10 @@ spec:
                     - http
                     - https
                     type: string
-                required:
-                - port
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one of port or portName must be set
+                  rule: has(self.port) != has(self.portName)
               workloadSelector:
                 description: |-
                   WorkloadSelector is used to match the model serving instances.

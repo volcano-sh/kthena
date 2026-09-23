@@ -384,6 +384,49 @@ func TestPDSchedulerFiltersOverloadedDecodePod(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestPDSchedulerFiltersPodsWithoutNamedWorkloadPort(t *testing.T) {
+	store := datastore.New()
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model-server", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{WorkloadSelector: &aiv1alpha1.WorkloadSelector{PDGroup: &aiv1alpha1.PDGroup{
+			GroupKey: "pd-group", DecodeLabels: map[string]string{"role": "decode"}, PrefillLabels: map[string]string{"role": "prefill"},
+		}}},
+	}
+	modelServerName := types.NamespacedName{Namespace: "default", Name: "test-model-server"}
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, nil))
+
+	newPod := func(name, role, ip string, port int32) *corev1.Pod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: map[string]string{"pd-group": "group-1", "role": role}},
+			Status:     corev1.PodStatus{PodIP: ip},
+		}
+		if port != 0 {
+			pod.Spec.Containers = []corev1.Container{{Ports: []corev1.ContainerPort{{Name: "inference", ContainerPort: port}}}}
+		}
+		return pod
+	}
+	decode := newPod("decode", "decode", "10.0.0.1", 8101)
+	invalidPrefill := newPod("prefill-invalid", "prefill", "10.0.0.2", 0)
+	validPrefill := newPod("prefill-valid", "prefill", "10.0.0.3", 8103)
+	for _, pod := range []*corev1.Pod{decode, invalidPrefill, validPrefill} {
+		require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	}
+
+	pods, err := store.GetPodsByModelServer(modelServerName)
+	require.NoError(t, err)
+	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
+		ModelServerName: modelServerName,
+		PDGroup:         modelServer.Spec.WorkloadSelector.PDGroup,
+		PortName:        "inference",
+	}
+	require.NoError(t, NewScheduler(store, nil).Schedule(ctx, pods))
+	require.Len(t, ctx.DecodePods, 1)
+	require.Len(t, ctx.PrefillPods, 1)
+	require.NotNil(t, ctx.PrefillPods[0])
+	assert.Equal(t, "prefill-valid", ctx.PrefillPods[0].Pod.Name)
+}
+
 // BenchmarkRunScorePlugins measures the scoring loop at default verbosity
 func BenchmarkRunScorePlugins(b *testing.B) {
 	for _, podCount := range []int{8, 32} {

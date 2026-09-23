@@ -24,7 +24,11 @@ package v1alpha1
 // WorkloadPort defines the port and protocol configuration for the model server.
 type WorkloadPortApplyConfiguration struct {
 	// The port of the model server. The number must be between 1 and 65535.
+	// Use this when all selected Pods listen on the same port.
 	Port *int32 `json:"port,omitempty"`
+	// PortName selects a named TCP container port from each selected Pod.
+	// Pods may use different numbers for the same name.
+	PortName *string `json:"portName,omitempty"`
 	// The protocol of the model server. Supported values are "http" and "https".
 	Protocol *string `json:"protocol,omitempty"`
 }
@@ -40,6 +44,14 @@ func WorkloadPort() *WorkloadPortApplyConfiguration {
 // If called multiple times, the Port field is set to the value of the last call.
 func (b *WorkloadPortApplyConfiguration) WithPort(value int32) *WorkloadPortApplyConfiguration {
 	b.Port = &value
+	return b
+}
+
+// WithPortName sets the PortName field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PortName field is set to the value of the last call.
+func (b *WorkloadPortApplyConfiguration) WithPortName(value string) *WorkloadPortApplyConfiguration {
+	b.PortName = &value
 	return b
 }
 

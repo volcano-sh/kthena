@@ -46,6 +46,7 @@ import (
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/workloadport"
 )
 
 var (
@@ -1773,7 +1774,10 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 	if podObj.Status.PodIP == "" {
 		return
 	}
-	port := s.getPodWorkloadPort(pod)
+	port, ok := s.getPodWorkloadPort(pod)
+	if !ok {
+		return
+	}
 	previousHistogram := getPreviousHistogram(pod)
 	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, port, previousHistogram)
 	if gaugeMetrics != nil {
@@ -1799,7 +1803,10 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 	if podObj.Status.PodIP == "" {
 		return
 	}
-	port := s.getPodWorkloadPort(podInfo)
+	port, ok := s.getPodWorkloadPort(podInfo)
+	if !ok {
+		return
+	}
 	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
@@ -1809,17 +1816,39 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 	podInfo.UpdateModels(models)
 }
 
-func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
-	modelServers := podInfo.GetModelServers()
-	for msName := range modelServers {
+func (s *store) getPodWorkloadPort(podInfo *PodInfo) (uint32, bool) {
+	modelServers := podInfo.GetModelServersList()
+	sort.Slice(modelServers, func(i, j int) bool {
+		if modelServers[i].Namespace == modelServers[j].Namespace {
+			return modelServers[i].Name < modelServers[j].Name
+		}
+		return modelServers[i].Namespace < modelServers[j].Namespace
+	})
+	var resolved uint32
+	for _, msName := range modelServers {
 		if msValue, ok := s.modelServer.Load(msName); ok {
 			ms := msValue.(*modelServer).getModelServer()
-			if ms != nil && ms.Spec.WorkloadPort.Port > 0 {
-				return uint32(ms.Spec.WorkloadPort.Port)
+			if ms == nil {
+				continue
 			}
+			if ms.Spec.WorkloadPort.PortName == "" && ms.Spec.WorkloadPort.Port == 0 {
+				continue
+			}
+			port, err := workloadport.Resolve(ms.Spec.WorkloadPort, podInfo.GetPod())
+			if err != nil {
+				klog.V(4).Infof("skip runtime inspection for Pod %s: ModelServer %s: %v", podInfo.GetPodNamespacedName(), msName, err)
+				return 0, false
+			}
+			if resolved != 0 && resolved != uint32(port) {
+				klog.V(4).Infof("skip runtime inspection for Pod %s: ModelServers select different workload ports", podInfo.GetPodNamespacedName())
+				return 0, false
+			}
+			resolved = uint32(port)
 		}
 	}
-	return 0
+	// Preserve the runtime inspector's default port when no ModelServer has
+	// supplied a workload port yet.
+	return resolved, true
 }
 
 func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {

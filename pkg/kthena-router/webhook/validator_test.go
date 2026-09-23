@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -1057,6 +1058,30 @@ func TestValidateModelServer(t *testing.T) {
 				assert.Empty(t, reason, "Reason should be empty for valid model servers")
 			}
 		})
+	}
+}
+
+func TestValidateModelServerNamedWorkloadPort(t *testing.T) {
+	validator := NewKthenaRouterValidator(fake.NewSimpleClientset(), 8080)
+	modelServer := &networkingv1alpha1.ModelServer{
+		Spec: networkingv1alpha1.ModelServerSpec{
+			InferenceEngine: networkingv1alpha1.VLLM,
+			WorkloadSelector: &networkingv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "test"},
+			},
+			WorkloadPort: networkingv1alpha1.WorkloadPort{PortName: "inference"},
+		},
+	}
+	if valid, reason := validator.validateModelServer(modelServer); !valid {
+		t.Fatalf("valid named port rejected: %s", reason)
+	}
+	modelServer.Spec.WorkloadPort.Port = 8000
+	if valid, reason := validator.validateModelServer(modelServer); valid || !strings.Contains(reason, "mutually exclusive") {
+		t.Fatalf("port and portName accepted: valid=%t reason=%s", valid, reason)
+	}
+	modelServer.Spec.WorkloadPort = networkingv1alpha1.WorkloadPort{PortName: "1234"}
+	if valid, reason := validator.validateModelServer(modelServer); valid || !strings.Contains(reason, "portName") {
+		t.Fatalf("invalid portName accepted: valid=%t reason=%s", valid, reason)
 	}
 }
 

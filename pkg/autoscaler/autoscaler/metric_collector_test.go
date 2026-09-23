@@ -346,8 +346,10 @@ func TestBuildPodMetricURL(t *testing.T) {
 	tests := []struct {
 		name      string
 		podIP     string
+		ports     []corev1.ContainerPort
 		podSource *workload.PodMetricSource
 		want      string
+		wantErr   string
 	}{
 		{
 			name:      "IPv4 with defaults",
@@ -364,15 +366,109 @@ func TestBuildPodMetricURL(t *testing.T) {
 			},
 			want: "http://[fd00::1]:8000/custom-metrics",
 		},
+		{
+			name:  "named port",
+			podIP: "10.1.2.4",
+			ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: 9123}},
+			podSource: &workload.PodMetricSource{
+				PortName: "metrics",
+			},
+			want: "http://10.1.2.4:9123/metrics",
+		},
+		{
+			name:      "missing named port",
+			podIP:     "10.1.2.5",
+			podSource: &workload.PodMetricSource{PortName: "metrics"},
+			wantErr:   "does not declare pod metric portName",
+		},
+		{
+			name:  "duplicate named port",
+			podIP: "10.1.2.6",
+			ports: []corev1.ContainerPort{
+				{Name: "metrics", ContainerPort: 9123},
+				{Name: "metrics", ContainerPort: 9124},
+			},
+			podSource: &workload.PodMetricSource{PortName: "metrics"},
+			wantErr:   "more than once",
+		},
+		{
+			name:      "UDP named port",
+			podIP:     "10.1.2.7",
+			ports:     []corev1.ContainerPort{{Name: "metrics", ContainerPort: 9123, Protocol: corev1.ProtocolUDP}},
+			podSource: &workload.PodMetricSource{PortName: "metrics"},
+			wantErr:   "must use TCP",
+		},
 	}
 
 	collector := &MetricCollector{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pod := &corev1.Pod{Status: corev1.PodStatus{PodIP: tt.podIP}}
-			assert.Equal(t, tt.want, collector.buildPodMetricURL(pod, tt.podSource))
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "model-0", Namespace: "default"},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Ports: tt.ports}}},
+				Status:     corev1.PodStatus{PodIP: tt.podIP},
+			}
+			got, err := collector.buildPodMetricURL(pod, tt.podSource)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestUpdateMetricsResolvesNamedPortPerPod(t *testing.T) {
+	newMetricServer := func(value string) (*httptest.Server, int32) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth "+value+"\n")
+		}))
+		t.Cleanup(server.Close)
+		serverURL, err := url.Parse(server.URL)
+		require.NoError(t, err)
+		port, err := strconv.Atoi(serverURL.Port())
+		require.NoError(t, err)
+		return server, int32(port)
+	}
+
+	_, firstPort := newMetricServer("2")
+	_, secondPort := newMetricServer("3")
+	labels := map[string]string{
+		workload.ModelServingNameLabelKey: "model",
+		workload.EntryLabelKey:            "true",
+	}
+	newReadyPod := func(name string, port int32) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  "model",
+				Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: port}},
+			}}},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				PodIP:      "127.0.0.1",
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			},
+		}
+	}
+
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(newReadyPod("model-0", firstPort)))
+	require.NoError(t, indexer.Add(newReadyPod("model-1", secondPort)))
+	podLister := corelister.NewPodLister(indexer)
+	collector := NewMetricCollector(
+		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
+		&workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}},
+		algorithm.Metrics{"queue_depth": 1},
+	)
+
+	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", PortName: "metrics"}},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, unreadyCount)
+	assert.Equal(t, float64(5), readyMetrics["queue_depth"])
 }
 
 func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) {

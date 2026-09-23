@@ -782,6 +782,68 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	assert.Equal(t, float64(1), requestCounterValue(t, router, "test-model", "/v1/chat/completions", "200", "successful_request")-requestsBefore)
 }
 
+func TestRouter_ProxyRetriesUsingEachPodsNamedPort(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"second-pod"}`)
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	backendPort, err := strconv.Atoi(backendURL.Port())
+	require.NoError(t, err)
+
+	failed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	failedURL, err := url.Parse(failed.URL)
+	require.NoError(t, err)
+	failedPort, err := strconv.Atoi(failedURL.Port())
+	require.NoError(t, err)
+	failed.Close()
+
+	makePod := func(name string, port int) *datastore.PodInfo {
+		return &datastore.PodInfo{Pod: &corev1.Pod{
+			ObjectMeta: v1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Ports: []corev1.ContainerPort{
+				{Name: "inference", ContainerPort: int32(port)},
+			}}}},
+			Status: corev1.PodStatus{PodIP: backendURL.Hostname()},
+		}}
+	}
+	router := NewRouter(datastore.New(), "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+	ctx := &framework.Context{PortName: "inference", BestPods: []*datastore.PodInfo{
+		makePod("failed", failedPort), makePod("healthy", backendPort),
+	}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, err = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"test"}`))
+	require.NoError(t, err)
+	c.Request.URL.Scheme = "http"
+	err = router.proxy(c, c.Request, ctx, false, 0, 2*time.Second, http.DefaultTransport, nil)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"id":"second-pod"`)
+}
+
+func TestRouter_ProxyToPDDisaggregated_UsesEachNamedPort(t *testing.T) {
+	prefill := &corev1.Pod{Status: corev1.PodStatus{PodIP: "10.0.0.1"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Ports: []corev1.ContainerPort{{Name: "inference", ContainerPort: 7100}}}}}}
+	decode := &corev1.Pod{Status: corev1.PodStatus{PodIP: "10.0.0.2"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Ports: []corev1.ContainerPort{{Name: "inference", ContainerPort: 7132}}}}}}
+	ctx := &framework.Context{Model: "test-model", PortName: "inference", PrefillPods: []*datastore.PodInfo{{Pod: prefill}}, DecodePods: []*datastore.PodInfo{{Pod: decode}}}
+	connector := &mockKVConnector{proxyHandler: func(_ *gin.Context, _ map[string]interface{}, prefillAddr, decodeAddr string, _ *connectors.OnFlightHooks) (int, error) {
+		assert.Equal(t, "10.0.0.1:7100", prefillAddr)
+		assert.Equal(t, "10.0.0.2:7132", decodeAddr)
+		return 1, nil
+	}}
+	router := NewRouter(datastore.New(), "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model"}`))
+	require.NoError(t, router.proxyToPDDisaggregated(c, c.Request, ctx, connector, ModelRequest{"model": "test-model"}, 0, 2*time.Second))
+	assert.Equal(t, int32(1), connector.calls.Load())
+}
+
 // TestRouter_HandlerFunc_UsesPerModelServerTransport verifies that when a
 // ModelServer has a per-ModelServer transport registered, the aggregated
 // forwarding path uses it instead of the shared default and still succeeds.

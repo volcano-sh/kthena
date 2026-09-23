@@ -161,6 +161,20 @@ func TestTokenizerManager(t *testing.T) {
 			t.Fatalf("Tokenizer endpoint = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("named per-pod endpoint port", func(t *testing.T) {
+		pod := testutil.PodInfoWithEngine("pod-vllm-host-network", "default", "10.0.0.12", EngineVLLM)
+		pod.Pod.Spec.Containers = []v1.Container{{Ports: []v1.ContainerPort{{Name: "inference", ContainerPort: 18123}}}}
+
+		tok := manager.GetTokenizerForPortName("test-model", []*datastore.PodInfo{pod}, "inference")
+		remote, ok := tok.(*remoteTokenizerImpl)
+		if !ok {
+			t.Fatalf("Expected remote tokenizer, got %T", tok)
+		}
+		if got, want := remote.GetEndpoint(), "http://10.0.0.12:18123"; got != want {
+			t.Fatalf("Tokenizer endpoint = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestBuildTokenizerEndpoint(t *testing.T) {

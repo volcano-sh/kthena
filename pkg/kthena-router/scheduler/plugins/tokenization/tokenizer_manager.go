@@ -27,9 +27,11 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
+	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/workloadport"
 	"k8s.io/klog/v2"
 )
 
@@ -56,10 +58,16 @@ func NewTokenizerManager(config TokenizerManagerConfig) *TokenizerManager {
 
 // GetTokenizer creates a tokenizer by randomly selecting from the provided pods
 func (m *TokenizerManager) GetTokenizer(model string, pods []*datastore.PodInfo) Tokenizer {
-	return m.createTokenizerFromPods(model, pods)
+	return m.createTokenizerFromPods(model, pods, "")
 }
 
-func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datastore.PodInfo) Tokenizer {
+// GetTokenizerForPortName creates a tokenizer that uses each selected Pod's
+// named workload port instead of the engine's fixed default endpoint port.
+func (m *TokenizerManager) GetTokenizerForPortName(model string, pods []*datastore.PodInfo, portName string) Tokenizer {
+	return m.createTokenizerFromPods(model, pods, portName)
+}
+
+func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datastore.PodInfo, portName string) Tokenizer {
 	if len(pods) == 0 {
 		klog.Warningf("No pods provided for model %s", model)
 		return nil
@@ -87,10 +95,21 @@ func (m *TokenizerManager) createTokenizerFromPods(model string, pods []*datasto
 			unsupportedEngines[podInfo.GetEngine()] = struct{}{}
 			continue
 		}
-		port, ok := m.config.EndpointPorts[engine]
-		if !ok || port < 1 || port > maxEndpointPort {
-			klog.Warningf("TokenizerManager: no valid endpoint port for engine %q, skipping pod %s", engine, pod.Name)
-			continue
+		port := 0
+		if portName != "" {
+			resolved, err := workloadport.Resolve(networkingv1alpha1.WorkloadPort{PortName: portName}, pod)
+			if err != nil {
+				klog.Warningf("TokenizerManager: cannot resolve portName %q for pod %s: %v", portName, pod.Name, err)
+				continue
+			}
+			port = int(resolved)
+		} else {
+			var ok bool
+			port, ok = m.config.EndpointPorts[engine]
+			if !ok || port < 1 || port > maxEndpointPort {
+				klog.Warningf("TokenizerManager: no valid endpoint port for engine %q, skipping pod %s", engine, pod.Name)
+				continue
+			}
 		}
 		endpoint := buildTokenizerEndpoint(pod.Status.PodIP, port)
 
@@ -145,7 +164,27 @@ func (m *TokenizerManager) TokenizePrompt(
 	prompt *common.ChatMessage,
 	pods []*datastore.PodInfo,
 ) ([]uint32, error) {
-	tokenizer := m.GetTokenizer(model, pods)
+	return m.tokenizePrompt(model, prompt, pods, "")
+}
+
+// TokenizePromptForPortName tokenizes through the same Pod-specific named port
+// that the router will use for inference.
+func (m *TokenizerManager) TokenizePromptForPortName(
+	model string,
+	prompt *common.ChatMessage,
+	pods []*datastore.PodInfo,
+	portName string,
+) ([]uint32, error) {
+	return m.tokenizePrompt(model, prompt, pods, portName)
+}
+
+func (m *TokenizerManager) tokenizePrompt(
+	model string,
+	prompt *common.ChatMessage,
+	pods []*datastore.PodInfo,
+	portName string,
+) ([]uint32, error) {
+	tokenizer := m.createTokenizerFromPods(model, pods, portName)
 	if tokenizer == nil {
 		return nil, fmt.Errorf("no tokenizer available for model %s", model)
 	}
