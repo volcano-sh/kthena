@@ -503,6 +503,132 @@ func TestKVCacheAware_GCStaleFields(t *testing.T) {
 	}
 }
 
+func TestParseGCDurationArg(t *testing.T) {
+	fallback := time.Hour
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "unset uses the fallback", raw: "", want: fallback},
+		{name: "a valid duration is honoured", raw: "5s", want: 5 * time.Second},
+		{name: "zero falls back", raw: "0s", want: fallback},
+		{name: "negative falls back", raw: "-1m", want: fallback},
+		{name: "a bare number falls back", raw: "24", want: fallback},
+		{name: "nonsense falls back", raw: "soon", want: fallback},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseGCDurationArg("gcInterval", tc.raw, fallback); got != tc.want {
+				t.Errorf("parseGCDurationArg(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKVCacheAware_GCKnobsFromArgs(t *testing.T) {
+	// One end to end case, because the argument names have to survive the YAML to
+	// JSON bridge the plugin args go through. parseGCDurationArg is unit tested above.
+	plugin := NewKVCacheAware(runtime.RawExtension{
+		Raw: []byte("gcInterval: 5s\ngcFieldFreshDuration: 2m\ngcScanSize: 7\n"),
+	})
+	defer plugin.Stop()
+
+	if got := plugin.effectiveGCInterval(); got != 5*time.Second {
+		t.Errorf("gc interval = %v, want %v", got, 5*time.Second)
+	}
+	if got := plugin.effectiveGCFreshDuration(); got != 2*time.Minute {
+		t.Errorf("gc fresh duration = %v, want %v", got, 2*time.Minute)
+	}
+	if got := plugin.effectiveGCScanSize(); got != 7 {
+		t.Errorf("gc scan size = %d, want 7", got)
+	}
+}
+
+func TestKVCacheAware_ZeroValuePluginKeepsGCDefaults(t *testing.T) {
+	// Several tests build the plugin as a struct literal. A zero value must keep
+	// behaving the way it did before these knobs existed.
+	plugin := &KVCacheAware{}
+
+	if got := plugin.effectiveGCInterval(); got != kvCacheGCInterval {
+		t.Errorf("gc interval = %v, want %v", got, kvCacheGCInterval)
+	}
+	if got := plugin.effectiveGCFreshDuration(); got != kvCacheFieldFreshDuration {
+		t.Errorf("gc fresh duration = %v, want %v", got, kvCacheFieldFreshDuration)
+	}
+	if got := plugin.effectiveGCScanSize(); got != kvCacheGCScanSize {
+		t.Errorf("gc scan size = %d, want %d", got, kvCacheGCScanSize)
+	}
+}
+
+func TestKVCacheAware_GCStaleFieldsHonoursConfiguredFreshness(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer client.Close()
+
+	// A one minute window: the field below is 5 minutes old, so it is stale here
+	// while the 24h default would keep it.
+	plugin := &KVCacheAware{
+		keyPrefix:       kvCacheKeyPrefix,
+		redisClient:     client,
+		gcFreshDuration: time.Minute,
+	}
+
+	ctx := context.Background()
+	key := KVCacheAwareBlock{ModelName: "qwen", ChunkHash: 987}.String(kvCacheKeyPrefix)
+	if err := client.HSet(ctx, key,
+		"recent-pod.default", fmt.Sprintf("%d", time.Now().Unix()),
+		"older-pod.default", fmt.Sprintf("%d", time.Now().Add(-5*time.Minute).Unix()),
+	).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	plugin.gcStaleFields()
+
+	stale, err := client.HExists(ctx, key, "older-pod.default").Result()
+	if err != nil {
+		t.Fatalf("failed to check older-pod.default: %v", err)
+	}
+	if stale {
+		t.Error("expected the field older than the configured window to be removed")
+	}
+	fresh, err := client.HExists(ctx, key, "recent-pod.default").Result()
+	if err != nil {
+		t.Fatalf("failed to check recent-pod.default: %v", err)
+	}
+	if !fresh {
+		t.Error("expected the field inside the configured window to remain")
+	}
+}
+
+func TestKVCacheAware_StopIsIdempotentAndEndsTheGCLoop(t *testing.T) {
+	plugin := &KVCacheAware{
+		gcInterval: time.Millisecond,
+		gcStopCh:   make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		plugin.runGC()
+		close(done)
+	}()
+
+	plugin.Stop()
+	plugin.Stop() // second call must not panic on a closed channel
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runGC did not return after Stop")
+	}
+}
+
 // Helper function to create test pods
 func createTestPods(names ...string) []*datastore.PodInfo {
 	pods := make([]*datastore.PodInfo, len(names))
