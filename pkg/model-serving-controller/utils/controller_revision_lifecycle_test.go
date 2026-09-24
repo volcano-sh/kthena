@@ -93,6 +93,39 @@ func TestRecordModelServingRevisionLifecycle(t *testing.T) {
 	}
 }
 
+func TestRecordModelServingRevisionReusesSemanticallyEqualEncoding(t *testing.T) {
+	ctx := context.Background()
+	client := kubefake.NewSimpleClientset()
+	ms := lifecycleTestModelServing()
+	encodedA := []byte(`{"spec":{"schedulerName":"volcano","plugins":[],"template":{"roles":[{"name":"role","entryTemplate":{"spec":{"containers":[{"name":"main","image":"image"}]}},"workerReplicas":0}]}}}`)
+	encodedB := []byte(`{
+  "spec": {
+    "template": {"roles": [{"workerReplicas": 0, "entryTemplate": {"spec": {"containers": [{"image": "image", "name": "main"}]}}, "name": "role"}]},
+    "plugins": [],
+    "schedulerName": "volcano"
+  }
+}`)
+
+	first, _, err := RecordModelServingRevision(ctx, client, ms, encodedA)
+	if err != nil {
+		t.Fatalf("RecordModelServingRevision(encodedA) error = %v", err)
+	}
+	second, _, err := RecordModelServingRevision(ctx, client, ms, encodedB)
+	if err != nil {
+		t.Fatalf("RecordModelServingRevision(encodedB) error = %v", err)
+	}
+	if second.Name != first.Name || second.Revision != first.Revision {
+		t.Fatalf("semantically equal encoding created another revision: first=%s/%d second=%s/%d", first.Name, first.Revision, second.Name, second.Revision)
+	}
+	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list ControllerRevisions error = %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("ControllerRevision count = %d, want 1", len(list.Items))
+	}
+}
+
 func TestRecordModelServingRevisionRejectsInvalidDataBeforeAPIAccess(t *testing.T) {
 	tests := []struct {
 		name string

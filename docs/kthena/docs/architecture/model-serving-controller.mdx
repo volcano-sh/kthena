@@ -39,6 +39,53 @@ The Custom Resource Definition (CRD) of `ModelServing` is primarily divided into
 `Entry` Pod serves as the entry point to receive serving requests and distribute tasks, while the `Worker` Pod is responsible for executing the actual serving computations.
 - Supports network topology aware scheduling: Enables the co-location scheduling of `Entry` Pods and `Worker` Pods within the same `Role` to the same **HyperNode**.
 
+## Revisions and conservative rolling updates
+
+The controller stores immutable **whole-ModelServing** snapshots in
+`ControllerRevision` objects. A Role template hash is derived from the fields
+applicable to that Role; it is not a separate Role revision history.
+
+Both ModelServing and Role comparisons use the same hash-plus-semantic comparison.
+Hashes are computed from normalized JSON, rather than the Go struct layout. When
+hashes or serialized representations differ, decoded Kubernetes semantic equality
+decides whether the effective workload changed. Hash drift alone does not trigger
+a rollout, and matching hashes do not conceal different data.
+
+| Input | Effect on rolling updates |
+| --- | --- |
+| Role names, entry templates, worker replica count | Included. Role list order is normalized. |
+| Worker templates | Included when workers exist; retained in snapshots even when unused. |
+| Pod-template labels, annotations and PodSpec | Included, except inputs overwritten by the controller as described below. |
+| Ordered plugins, their type, config and effective Entry/Worker scope | Included for Roles to which they apply. Adding another Role to a plugin whitelist does not roll existing targets. Worker-only plugins do not roll entry-only Roles. |
+| Top-level `schedulerName` | Stored in snapshots, but changing the effective scheduler is rejected by the update webhook. Omitting it defaults to `volcano` at admission; an explicit empty string uses Kubernetes `default-scheduler`. |
+| ModelServing/Role `replicas` and rollout controls (`partition`, `maxSurge`, `maxUnavailable`, rollout strategy) | Not template identity; applied as current scaling/rollout controls. |
+| `recoveryPolicy`, `revisionHistoryLimit`, ModelServing metadata/status, ServingGroup `restartGracePeriodSeconds`, `gangPolicy`, `networkTopology` | Not template identity. |
+| Nested Pod `schedulerName`, controller-owned `GROUP_SIZE`, `ENTRY_ADDRESS`, `WORKER_INDEX` environment entries | Normalized because the controller overwrites them. |
+
+Plugins are compared as ordered configuration inputs, not by executing hooks and
+comparing their output. Kubernetes Pod admission defaults are not broadly removed
+from templates: plugins may observe those inputs before Pod admission.
+
+Older Roles-only revisions do not contain scheduler/plugin snapshots. On the first
+upgrade, the controller creates a durable compatibility baseline from historical
+Roles and the current scheduler/plugins, retaining running Pods and their revision
+identities. The original revision data is not rewritten; a metadata annotation
+records its baseline. **Plugin edits simultaneous with this first migration cannot
+be detected**, because the old snapshot lacks the previous plugin configuration.
+Later plugin edits are compared with the stored baseline, including after restart.
+
+Missing, malformed, foreign-owned or unsupported history pauses affected
+template-driven creation/deletion and is retried; it is never evidence that a
+running replica should be replaced. A lost established baseline is not silently
+rebuilt from current plugins. Explicit replica scale-down remains a scaling action.
+
+Missing ordinals below `partition` are recreated from the historical snapshot,
+including historical plugins and worker layout, while current operational replica
+counts and rollout controls remain in effect. Revision cleanup preserves observed
+ServingGroup and Role references and is deferred while partitions, rollout,
+recovery or unresolved history remain, so missing protected ordinals can recover
+after controller restart without introducing a new status/CRD field.
+
 ## Example
 
 Read the [examples](https://github.com/volcano-sh/kthena/tree/main/examples/model-serving/sample.yaml) to learn more.
