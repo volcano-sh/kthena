@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -29,127 +30,119 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
-func TestBuildRevisionDataCanonicalSemantics(t *testing.T) {
-	prefill := revisionTestRole("prefill", "prefill:v1")
-	decode := revisionTestRole("decode", "decode:v1")
-	base := revisionTestModelServing(prefill, decode)
+func TestBuildRevisionDataCanonicalProjection(t *testing.T) {
+	base := revisionTestModelServing(
+		revisionTestRole("prefill", "prefill:v1"),
+		revisionTestRole("decode", "decode:v1"),
+	)
 	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{
 		{
-			Name:   "injector",
-			Config: &apiextensionsv1.JSON{Raw: []byte(`{"z":1,"a":2}`)},
-			Scope: &workloadv1alpha1.PluginScope{
-				Roles: []string{"prefill", "decode"},
-			},
+			Name:   "first",
+			Config: &apiextensionsv1.JSON{Raw: []byte(`{"z":1,"a":2,"value":9007199254740993}`)},
+			Scope:  &workloadv1alpha1.PluginScope{Roles: []string{"decode", "prefill"}},
 		},
+		{Name: "second"},
 	}
-
-	equivalent := base.DeepCopy()
-	equivalent.Spec.SchedulerName = defaultSchedulerName
-	equivalent.Spec.Template.Roles[0], equivalent.Spec.Template.Roles[1] =
-		equivalent.Spec.Template.Roles[1], equivalent.Spec.Template.Roles[0]
-	equivalent.Spec.Plugins[0].Type = workloadv1alpha1.PluginTypeBuiltIn
-	equivalent.Spec.Plugins[0].Config.Raw = []byte(`{"a":2,"z":1}`)
-	equivalent.Spec.Plugins[0].Scope.Roles[0], equivalent.Spec.Plugins[0].Scope.Roles[1] =
-		equivalent.Spec.Plugins[0].Scope.Roles[1], equivalent.Spec.Plugins[0].Scope.Roles[0]
-	equivalent.Spec.Plugins[0].Scope.Target = workloadv1alpha1.PluginTargetAll
-	equivalent.Spec.Replicas = ptr.To[int32](9)
-	equivalent.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
-	equivalent.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
-		Type: workloadv1alpha1.ServingGroupRollingUpdate,
-	}
-	equivalent.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](30)
-	equivalent.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{
-		MinRoleReplicas: map[string]int32{"prefill": 1},
-	}
-	equivalent.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{}
-	for i := range equivalent.Spec.Template.Roles {
-		equivalent.Spec.Template.Roles[i].Replicas = ptr.To[int32](7)
-		equivalent.Spec.Template.Roles[i].MaxUnavailable = ptr.To(intstr.FromInt32(2))
-		equivalent.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromInt32(1))
-	}
-
+	base.OwnerReferences = []metav1.OwnerReference{{Kind: "LeaderWorkerSet", Name: "owner", UID: "owner"}}
+	base.Labels = map[string]string{"live": "value"}
+	base.Annotations = map[string]string{"live": "value"}
 	baseData, err := BuildRevisionData(base)
 	if err != nil {
-		t.Fatalf("BuildRevisionData(base) error = %v", err)
-	}
-	equivalentData, err := BuildRevisionData(equivalent)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(equivalent) error = %v", err)
-	}
-	if string(baseData) != string(equivalentData) {
-		t.Fatalf("equivalent ModelServings produced different data:\nbase: %s\nother: %s", baseData, equivalentData)
-	}
-
-	if got := base.Spec.Plugins[0].Scope.Roles; got[0] != "prefill" || got[1] != "decode" {
-		t.Fatalf("BuildRevisionData mutated plugin scope roles: %v", got)
-	}
-	if got := base.Spec.Template.Roles[0].Name; got != "prefill" {
-		t.Fatalf("BuildRevisionData mutated role order: first role = %q", got)
-	}
-	if got := base.Spec.Template.Roles[0].EntryTemplate.Spec.RestartPolicy; got != "" {
-		t.Fatalf("BuildRevisionData mutated input restart policy to %q", got)
-	}
-}
-
-func TestBuildRevisionDataDeduplicatesPluginScopeRoles(t *testing.T) {
-	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
-	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{
-		Name:  "plugin",
-		Scope: &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}},
-	}}
-	equivalent := base.DeepCopy()
-	equivalent.Spec.Plugins[0].Scope.Roles = []string{"prefill", "prefill"}
-
-	baseData, err := BuildRevisionData(base)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(base) error = %v", err)
-	}
-	equivalentData, err := BuildRevisionData(equivalent)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(equivalent) error = %v", err)
-	}
-	if string(baseData) != string(equivalentData) {
-		t.Fatalf("duplicate plugin scope roles produced different data:\nbase: %s\nother: %s", baseData, equivalentData)
-	}
-	if got := len(equivalent.Spec.Plugins[0].Scope.Roles); got != 2 {
-		t.Fatalf("BuildRevisionData mutated input plugin scope roles: %v", equivalent.Spec.Plugins[0].Scope.Roles)
-	}
-}
-
-func TestBuildRevisionDataTracksRevisionedFields(t *testing.T) {
-	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
-	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "first"}, {Name: "second"}}
-	baseData, err := BuildRevisionData(base)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(base) error = %v", err)
+		t.Fatal(err)
 	}
 
 	tests := []struct {
 		name   string
 		mutate func(*workloadv1alpha1.ModelServing)
+		equal  bool
 	}{
-		{name: "scheduler name", mutate: func(ms *workloadv1alpha1.ModelServing) { ms.Spec.SchedulerName = "custom" }},
-		{name: "plugin order", mutate: func(ms *workloadv1alpha1.ModelServing) {
-			ms.Spec.Plugins[0], ms.Spec.Plugins[1] = ms.Spec.Plugins[1], ms.Spec.Plugins[0]
-		}},
-		{name: "role template", mutate: func(ms *workloadv1alpha1.ModelServing) {
-			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "prefill:v2"
-		}},
-		{name: "role environment", mutate: func(ms *workloadv1alpha1.ModelServing) {
-			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env = append(
-				ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env,
-				corev1.EnvVar{Name: "CUSTOM_SETTING", Value: "enabled"},
-			)
-		}},
-		{name: "worker replicas", mutate: func(ms *workloadv1alpha1.ModelServing) {
-			ms.Spec.Template.Roles[0].WorkerReplicas++
-		}},
+		{
+			name: "canonical defaults and ordering",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.SchedulerName = defaultSchedulerName
+				ms.Spec.Template.Roles[0], ms.Spec.Template.Roles[1] = ms.Spec.Template.Roles[1], ms.Spec.Template.Roles[0]
+				ms.Spec.Plugins[0].Type = workloadv1alpha1.PluginTypeBuiltIn
+				ms.Spec.Plugins[0].Config.Raw = []byte(`{"value":9007199254740993,"a":2,"z":1}`)
+				ms.Spec.Plugins[0].Scope.Roles = []string{"prefill", "decode", "decode"}
+				ms.Spec.Plugins[0].Scope.Target = workloadv1alpha1.PluginTargetAll
+				for i := range ms.Spec.Template.Roles {
+					ms.Spec.Template.Roles[i].EntryTemplate.Metadata = &workloadv1alpha1.Metadata{}
+					ms.Spec.Template.Roles[i].EntryTemplate.Spec.SchedulerName = "ignored"
+				}
+			},
+			equal: true,
+		},
+		{
+			name:   "scheduler name",
+			mutate: func(ms *workloadv1alpha1.ModelServing) { ms.Spec.SchedulerName = "custom" },
+		},
+		{
+			name: "plugin order",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Plugins[0], ms.Spec.Plugins[1] = ms.Spec.Plugins[1], ms.Spec.Plugins[0]
+			},
+		},
+		{
+			name: "plugin name, type, config, and scope",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Plugins[0].Name = "renamed"
+				ms.Spec.Plugins[0].Type = workloadv1alpha1.PluginType("custom")
+				ms.Spec.Plugins[0].Config = &apiextensionsv1.JSON{Raw: []byte(`{"a":3}`)}
+				ms.Spec.Plugins[0].Scope = &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}}
+			},
+		},
+		{
+			name: "role template and worker replicas",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "prefill:v2"
+				ms.Spec.Template.Roles[0].WorkerReplicas++
+			},
+		},
+		{
+			name: "pod environment",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env = append(
+					ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env,
+					corev1.EnvVar{Name: "CUSTOM_SETTING", Value: "enabled"},
+				)
+			},
+		},
+		{
+			name: "explicit pod restart policy",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Template.Roles[0].EntryTemplate.Spec.RestartPolicy = corev1.RestartPolicyAlways
+			},
+		},
+		{
+			name: "operational and live metadata",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Replicas = ptr.To[int32](9)
+				ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+				ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate}
+				ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](30)
+				ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 1}}
+				ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{}
+				ms.OwnerReferences = []metav1.OwnerReference{{Kind: "Deployment", Name: "new", UID: "new"}}
+				ms.Labels = map[string]string{"live": "changed"}
+				ms.Annotations = map[string]string{"live": "changed"}
+				for i := range ms.Spec.Template.Roles {
+					ms.Spec.Template.Roles[i].Replicas = ptr.To[int32](7)
+					ms.Spec.Template.Roles[i].MaxUnavailable = ptr.To(intstr.FromInt(2))
+					ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromInt(1))
+					ms.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
+						{Name: workloadv1alpha1.GroupSizeEnv, Value: "injected"},
+						{Name: workloadv1alpha1.EntryAddressEnv, Value: "injected"},
+						{Name: workloadv1alpha1.WorkerIndexEnv, Value: "injected"},
+					}
+				}
+			},
+			equal: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -158,168 +151,70 @@ func TestBuildRevisionDataTracksRevisionedFields(t *testing.T) {
 			tt.mutate(changed)
 			changedData, err := BuildRevisionData(changed)
 			if err != nil {
-				t.Fatalf("BuildRevisionData(changed) error = %v", err)
+				t.Fatal(err)
 			}
-			if string(baseData) == string(changedData) {
-				t.Fatalf("revisioned field change did not change data: %s", changedData)
+			if equal := bytes.Equal(baseData, changedData); equal != tt.equal {
+				t.Fatalf("canonical data equality = %t, want %t:\nbase: %s\nchanged: %s", equal, tt.equal, baseData, changedData)
 			}
 		})
 	}
 }
 
-func TestBuildRevisionDataNormalizesModelServingDefaultsAndEmptyValues(t *testing.T) {
-	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
-	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "plugin"}}
-
-	equivalent := base.DeepCopy()
-	equivalent.Spec.SchedulerName = defaultSchedulerName
-	equivalent.Spec.Plugins[0].Type = workloadv1alpha1.PluginTypeBuiltIn
-	equivalent.Spec.Plugins[0].Config = &apiextensionsv1.JSON{Raw: []byte("null")}
-	equivalent.Spec.Plugins[0].Scope = &workloadv1alpha1.PluginScope{
-		Roles:  []string{},
-		Target: workloadv1alpha1.PluginTargetAll,
-	}
-	for i := range equivalent.Spec.Template.Roles {
-		role := &equivalent.Spec.Template.Roles[i]
-		role.EntryTemplate.Metadata = &workloadv1alpha1.Metadata{}
-		role.EntryTemplate.Spec.SchedulerName = "ignored-template-scheduler"
-		role.WorkerTemplate.Metadata = &workloadv1alpha1.Metadata{}
-		role.WorkerTemplate.Spec.SchedulerName = "ignored-template-scheduler"
-	}
-
-	baseData, err := BuildRevisionData(base)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(base) error = %v", err)
-	}
-	equivalentData, err := BuildRevisionData(equivalent)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(equivalent) error = %v", err)
-	}
-	if string(baseData) != string(equivalentData) {
-		t.Fatalf("defaults and empty values produced different data:\nbase: %s\nother: %s", baseData, equivalentData)
-	}
-}
-
-func TestBuildRevisionDataPreservesPodAPIDefaultIntent(t *testing.T) {
-	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
-	explicit := base.DeepCopy()
-	explicit.Spec.Template.Roles[0].EntryTemplate.Spec.RestartPolicy = corev1.RestartPolicyAlways
-
-	baseData, err := BuildRevisionData(base)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(base) error = %v", err)
-	}
-	explicitData, err := BuildRevisionData(explicit)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(explicit) error = %v", err)
-	}
-	if string(baseData) == string(explicitData) {
-		t.Fatalf("explicit Pod API default did not change revision data: %s", explicitData)
-	}
-}
-
-func TestBuildRevisionDataIgnoresControllerOwnedEnvValues(t *testing.T) {
-	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
-	role := &base.Spec.Template.Roles[0]
-	role.EntryTemplate.Spec.InitContainers = []corev1.Container{{
-		Name: "entry-init", Image: "init:v1", Env: []corev1.EnvVar{{Name: "KEEP", Value: "entry-init"}},
-	}}
-	role.EntryTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "KEEP", Value: "entry"}}
-	role.WorkerTemplate.Spec.InitContainers = []corev1.Container{{
-		Name: "worker-init", Image: "init:v1", Env: []corev1.EnvVar{{Name: "KEEP", Value: "worker-init"}},
-	}}
-	role.WorkerTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "KEEP", Value: "worker"}}
-
-	equivalent := base.DeepCopy()
-	for _, template := range []*workloadv1alpha1.PodTemplateSpec{
-		&equivalent.Spec.Template.Roles[0].EntryTemplate,
-		equivalent.Spec.Template.Roles[0].WorkerTemplate,
-	} {
-		for i := range template.Spec.InitContainers {
-			addControllerOwnedEnvForTest(&template.Spec.InitContainers[i])
-		}
-		for i := range template.Spec.Containers {
-			addControllerOwnedEnvForTest(&template.Spec.Containers[i])
-		}
-	}
-
-	baseData, err := BuildRevisionData(base)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(base) error = %v", err)
-	}
-	equivalentData, err := BuildRevisionData(equivalent)
-	if err != nil {
-		t.Fatalf("BuildRevisionData(equivalent) error = %v", err)
-	}
-	if string(baseData) != string(equivalentData) {
-		t.Fatalf("controller-owned environment values produced different data:\nbase: %s\nother: %s", baseData, equivalentData)
-	}
-	if got := len(equivalent.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env); got != 4 {
-		t.Fatalf("BuildRevisionData mutated input environment: %v", equivalent.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env)
-	}
-}
-
-func addControllerOwnedEnvForTest(container *corev1.Container) {
-	container.Env = append(container.Env,
-		corev1.EnvVar{Name: workloadv1alpha1.GroupSizeEnv, Value: "invalid-group-size"},
-		corev1.EnvVar{Name: workloadv1alpha1.EntryAddressEnv, Value: "invalid-entry-address"},
-		corev1.EnvVar{Name: workloadv1alpha1.WorkerIndexEnv, Value: "invalid-worker-index"},
+func TestRoleRevisionHashUsesApplicableCanonicalInputs(t *testing.T) {
+	ms := revisionTestModelServing(
+		revisionTestRole("decode", "decode:v1"),
+		revisionTestRole("prefill", "prefill:v1"),
 	)
-}
-
-func TestBuildRevisionDataPreservesPluginConfigNumberPrecision(t *testing.T) {
-	ms := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
-	ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{
-		Name:   "plugin",
-		Config: &apiextensionsv1.JSON{Raw: []byte(`{"value":9007199254740993}`)},
-	}}
-
+	ms.Spec.Template.Roles[0].WorkerReplicas = 0
+	ms.Spec.Template.Roles[0].WorkerTemplate = nil
+	ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{
+		{Name: "global", Type: workloadv1alpha1.PluginTypeBuiltIn},
+		{Name: "worker", Scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetWorker}},
+		{Name: "decode", Scope: &workloadv1alpha1.PluginScope{Roles: []string{"decode"}}, Config: &apiextensionsv1.JSON{Raw: []byte(`{"z":1,"a":2}`)}},
+	}
+	base, err := RoleRevisionHash(ms, "decode")
+	if err != nil {
+		t.Fatal(err)
+	}
 	data, err := BuildRevisionData(ms)
 	if err != nil {
-		t.Fatalf("BuildRevisionData() error = %v", err)
+		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte(`9007199254740993`)) {
-		t.Fatalf("revision data changed plugin config number precision: %s", data)
+	fromData, err := RoleRevisionHashFromRevisionData(data, "decode")
+	if err != nil {
+		t.Fatal(err)
 	}
-}
+	if fromData != base {
+		t.Fatalf("Role identity from revision data = %q, want %q", fromData, base)
+	}
 
-func TestBuildRevisionDataIsStrategicMergePatchWithReplaceMembership(t *testing.T) {
-	current := revisionTestModelServing(
-		revisionTestRole("kept", "kept:current"),
-		revisionTestRole("removed", "removed:current"),
-	)
-	current.Spec.Replicas = ptr.To[int32](4)
-	current.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "removed-plugin"}}
-	target := revisionTestModelServing(revisionTestRole("kept", "kept:target"))
-	target.Spec.Plugins = []workloadv1alpha1.PluginSpec{}
-
-	patch, err := BuildRevisionData(target)
-	if err != nil {
-		t.Fatalf("BuildRevisionData() error = %v", err)
+	tests := []struct {
+		name   string
+		mutate func(*workloadv1alpha1.ModelServing)
+	}{
+		{name: "scheduler", mutate: func(ms *workloadv1alpha1.ModelServing) { ms.Spec.SchedulerName = "custom" }},
+		{name: "applicable plugin config", mutate: func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.Plugins[2].Config = &apiextensionsv1.JSON{Raw: []byte(`{"a":3}`)}
+		}},
+		{name: "applicable plugin order", mutate: func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.Plugins[0], ms.Spec.Plugins[2] = ms.Spec.Plugins[2], ms.Spec.Plugins[0]
+		}},
+		{name: "applicable plugin scope", mutate: func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.Plugins[2].Scope = &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}}
+		}},
 	}
-	currentData, err := json.Marshal(current)
-	if err != nil {
-		t.Fatalf("marshal current ModelServing: %v", err)
-	}
-	patchedData, err := strategicpatch.StrategicMergePatch(currentData, patch, workloadv1alpha1.ModelServing{})
-	if err != nil {
-		t.Fatalf("StrategicMergePatch() error = %v", err)
-	}
-	var patched workloadv1alpha1.ModelServing
-	if err := json.Unmarshal(patchedData, &patched); err != nil {
-		t.Fatalf("unmarshal patched ModelServing: %v", err)
-	}
-	if len(patched.Spec.Template.Roles) != 1 || patched.Spec.Template.Roles[0].Name != "kept" {
-		t.Fatalf("patched roles = %#v, want only kept", patched.Spec.Template.Roles)
-	}
-	if got := patched.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image; got != "kept:target" {
-		t.Fatalf("patched image = %q, want kept:target", got)
-	}
-	if len(patched.Spec.Plugins) != 0 {
-		t.Fatalf("patched plugins = %#v, want empty", patched.Spec.Plugins)
-	}
-	if patched.Spec.Replicas == nil || *patched.Spec.Replicas != 4 {
-		t.Fatalf("patched replicas = %v, want preserved value 4", patched.Spec.Replicas)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changed := ms.DeepCopy()
+			tt.mutate(changed)
+			got, err := RoleRevisionHash(changed, "decode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == base {
+				t.Fatalf("RoleRevisionHash did not change for %s", tt.name)
+			}
+		})
 	}
 }
 
@@ -330,6 +225,7 @@ func TestApplyRevisionPreservesOperationalFields(t *testing.T) {
 		revisionTestRole("removed", "removed:current"),
 	)
 	current.ObjectMeta = metav1.ObjectMeta{Name: "test-ms", Namespace: "default", UID: "test-uid"}
+	current.OwnerReferences = []metav1.OwnerReference{{Kind: "LeaderWorkerSet", Name: "current-owner", UID: "current-owner"}}
 	current.Spec.Replicas = ptr.To[int32](4)
 	current.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
 	current.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](20)
@@ -376,6 +272,16 @@ func TestApplyRevisionPreservesOperationalFields(t *testing.T) {
 	if got := *applied.Spec.Replicas; got != 4 {
 		t.Errorf("replicas = %d, want 4", got)
 	}
+	if !reflect.DeepEqual(applied.OwnerReferences, current.OwnerReferences) {
+		t.Fatal("ApplyRevision changed current ModelServing ownership")
+	}
+	recovered, err := ModelServingForControllerRevision(current, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(recovered.OwnerReferences, current.OwnerReferences) {
+		t.Fatal("ModelServingForControllerRevision changed current ModelServing ownership")
+	}
 	if got := applied.Spec.RecoveryPolicy; got != workloadv1alpha1.NoneRestartPolicy {
 		t.Errorf("recoveryPolicy = %q, want %q", got, workloadv1alpha1.NoneRestartPolicy)
 	}
@@ -401,14 +307,11 @@ func TestApplyRevisionPreservesOperationalFields(t *testing.T) {
 	if got := *applied.Spec.Template.Roles[1].Replicas; got != 3 {
 		t.Errorf("prefill replicas = %d, want 3", got)
 	}
-	if got := *applied.Spec.Template.Roles[2].Replicas; got != 1 {
-		t.Errorf("restored replicas = %d, want 1", got)
-	}
 	if applied.Spec.Template.Roles[0].MaxUnavailable == nil || applied.Spec.Template.Roles[1].MaxUnavailable == nil {
 		t.Error("rolling update configuration was not preserved for existing roles")
 	}
-	if applied.Spec.Template.Roles[2].MaxUnavailable != nil {
-		t.Error("restored role inherited rolling update configuration")
+	if applied.Spec.Template.Roles[2].Replicas == nil || *applied.Spec.Template.Roles[2].Replicas != 1 {
+		t.Errorf("historical-only v1 Role replicas = %v, want API default 1", applied.Spec.Template.Roles[2].Replicas)
 	}
 	if len(applied.Spec.Template.Roles) != 3 {
 		t.Fatalf("roles = %d, want 3", len(applied.Spec.Template.Roles))
@@ -472,6 +375,80 @@ func TestRevisionDataHashUsesCollisionCount(t *testing.T) {
 	want := rand.SafeEncodeString(fmt.Sprint(wantHasher.Sum32()))
 	if got := RevisionDataHash(data, ptr.To[int32](1)); got != want {
 		t.Fatalf("RevisionDataHash() = %q, want Kubernetes-compatible hash %q", got, want)
+	}
+}
+
+func TestModelServingForControllerRevisionPreservesLegacyOperationalFields(t *testing.T) {
+	legacyRoles := []workloadv1alpha1.Role{
+		revisionTestRole("prefill", "prefill:old"),
+		revisionTestRole("restored", "restored:old"),
+	}
+	legacyRoles[0].Replicas = ptr.To[int32](2)
+	legacyRoles[1].Replicas = ptr.To[int32](4)
+	legacyRoles[0].RollingUpdateConfiguration.MaxUnavailable = ptr.To(intstr.FromInt(2))
+	data, err := json.Marshal(map[string]interface{}{"data": legacyRoles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := revisionTestModelServing(revisionTestRole("prefill", "prefill:new"))
+	current.ObjectMeta = metav1.ObjectMeta{Name: "test-ms", Namespace: "default", UID: "test-uid"}
+	current.Spec.SchedulerName = "current-scheduler"
+	current.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "current-plugin", Type: workloadv1alpha1.PluginTypeBuiltIn}}
+	current.Spec.Template.Roles[0].Replicas = ptr.To[int32](5)
+	current.Spec.Template.Roles[0].RollingUpdateConfiguration.Partition = ptr.To(intstr.FromInt(1))
+	cr := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{newModelServingOwnerRef(current)}},
+		Data:       runtime.RawExtension{Raw: data},
+	}
+
+	got, err := ModelServingForControllerRevision(current, cr)
+	if err != nil {
+		t.Fatalf("ModelServingForControllerRevision() error = %v", err)
+	}
+	if got.Spec.SchedulerName != "current-scheduler" || len(got.Spec.Plugins) != 1 || got.Spec.Plugins[0].Name != "current-plugin" {
+		t.Fatal("legacy revision changed fields that it never recorded")
+	}
+	if got.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image != "prefill:old" {
+		t.Fatal("legacy Role template was not restored")
+	}
+	if got.Spec.Template.Roles[0].Replicas == nil || *got.Spec.Template.Roles[0].Replicas != 5 {
+		t.Fatal("current Role replicas were not preserved")
+	}
+	if got.Spec.Template.Roles[0].Partition == nil || got.Spec.Template.Roles[0].Partition.IntValue() != 1 {
+		t.Fatal("current Role rollout configuration was not preserved")
+	}
+	if len(got.Spec.Template.Roles) != 2 {
+		t.Fatalf("legacy revision restored %d roles, want the historical-only role", len(got.Spec.Template.Roles))
+	}
+	if got.Spec.Template.Roles[1].Replicas == nil || *got.Spec.Template.Roles[1].Replicas != 1 {
+		t.Fatal("historical-only legacy Role did not use the API default replica count")
+	}
+	if got.Spec.Template.Roles[1].RollingUpdateConfiguration != (workloadv1alpha1.RollingUpdateConfiguration{}) {
+		t.Fatal("historical-only legacy Role restored operational rollout settings")
+	}
+}
+
+func TestModelServingForControllerRevisionRejectsForeignLegacyRevision(t *testing.T) {
+	current := revisionTestModelServing(revisionTestRole("prefill", "prefill:new"))
+	current.ObjectMeta = metav1.ObjectMeta{Name: "test-ms", Namespace: "default", UID: "test-uid"}
+	data, err := json.Marshal(map[string]interface{}{
+		"data": []workloadv1alpha1.Role{revisionTestRole("prefill", "prefill:old")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := current.DeepCopy()
+	foreign.UID = "foreign-uid"
+	cr := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foreign-legacy-revision",
+			OwnerReferences: []metav1.OwnerReference{newModelServingOwnerRef(foreign)},
+		},
+		Data: runtime.RawExtension{Raw: data},
+	}
+
+	if _, err := ModelServingForControllerRevision(current, cr); err == nil {
+		t.Fatal("ModelServingForControllerRevision() error = nil")
 	}
 }
 

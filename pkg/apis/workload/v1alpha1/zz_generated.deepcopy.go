@@ -693,6 +693,11 @@ func (in *ModelServingStatus) DeepCopyInto(out *ModelServingStatus) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.RevisionReferences != nil {
+		in, out := &in.RevisionReferences, &out.RevisionReferences
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

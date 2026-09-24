@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -284,7 +285,7 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 		},
 	}
 
-	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", utils.ObjectRevision(newPod), utils.ObjectRoleTemplateHash(newPod), newPod, true, nil, "entry")
 	assert.ErrorContains(t, err, "does not match expected identity")
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
@@ -774,7 +775,7 @@ func TestCheckServingGroupReady(t *testing.T) {
 			tt.setupFunc(t, controller, ms, groupName)
 
 			// Execute test
-			ok, err := controller.checkServingGroupReady(ms, groupName)
+			ok, err := controller.checkServingGroupReady(ms, groupName, "")
 
 			// Assert
 			if tt.expectError {
@@ -2399,13 +2400,9 @@ func TestScaleUpServingGroups(t *testing.T) {
 	}
 }
 
-// TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails verifies that
-// scale-up does not create a ServingGroup whose revision has no persisted template
-// snapshot. A partition-protected recovery may later need that ControllerRevision
-// to reconstruct the historical Role templates. Continuing after snapshot creation
-// fails would leave Pods and datastore entries referring to a revision that cannot
-// be resolved, so the reconciliation must fail before creating any workload.
-func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing.T) {
+// TestSyncModelServingStopsWhenControllerRevisionCreationFails verifies that
+// reconciliation records the desired revision before creating any workload.
+func TestSyncModelServingStopsWhenControllerRevisionCreationFails(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	// Simulate an API server failure while persisting the template snapshot for
 	// new-revision. The workqueue will retry this reconciliation in production.
@@ -2421,7 +2418,8 @@ func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing
 	require.NoError(t, err)
 
 	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-revision-failure"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-revision-failure", UID: "test-uid"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: "ModelServing"},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
 			Template: workloadv1alpha1.ServingGroup{
@@ -2437,9 +2435,10 @@ func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing
 			},
 		},
 	}
+	require.NoError(t, controller.modelServingsInformer.GetStore().Add(ms))
 
-	err = controller.scaleUpServingGroups(context.Background(), ms, nil, 1, "new-revision")
-	require.ErrorContains(t, err, "failed to create ControllerRevision for new revision new-revision")
+	err = controller.syncModelServing(context.Background(), "default/test-revision-failure")
+	require.ErrorContains(t, err, "record ModelServing revision")
 
 	// The ControllerRevision must be created before Pods or datastore state. This
 	// keeps the operation retryable and prevents partially created ServingGroups
@@ -2449,6 +2448,50 @@ func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing
 	pods, listErr := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, listErr)
 	assert.Empty(t, pods.Items)
+}
+
+func TestSyncModelServingRecordsRevisionWhenScaledToZero(t *testing.T) {
+	ctx := context.Background()
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "scaled-to-zero", UID: "test-uid"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: "ModelServing"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](0),
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name:     "prefill",
+				Replicas: ptr.To[int32](1),
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "example:v1"}},
+				}},
+			}}},
+		},
+	}
+	kubeClient := kubefake.NewSimpleClientset()
+	modelServingClient := kthenafake.NewSimpleClientset(ms.DeepCopy())
+	controller, err := NewModelServingController(
+		kubeClient,
+		modelServingClient,
+		volcanofake.NewSimpleClientset(),
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+	require.NoError(t, controller.modelServingsInformer.GetStore().Add(ms))
+
+	require.NoError(t, controller.syncModelServing(ctx, "default/scaled-to-zero"))
+
+	history, err := kubeClient.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, history.Items, 1)
+	revision := history.Items[0].Labels[utils.ControllerRevisionRevisionLabelKey]
+	assert.NotEmpty(t, revision)
+	assert.Equal(t, utils.ControllerRevisionDataVersionV1, history.Items[0].Annotations[utils.ControllerRevisionDataVersionAnnotation])
+
+	updated, err := modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, revision, updated.Status.CurrentRevision)
+	assert.Equal(t, revision, updated.Status.UpdateRevision)
+	require.NotNil(t, updated.Status.CollisionCount)
+	assert.EqualValues(t, 0, *updated.Status.CollisionCount)
 }
 
 // TestScaleUpRoles tests the scaleUpRoles function with various scenarios
@@ -2601,7 +2644,7 @@ func TestScaleUpRoles(t *testing.T) {
 			targetRole := ms.Spec.Template.Roles[0]
 
 			// Call scaleUpRoles directly
-			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision")
+			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision", nil)
 
 			// Verify the results
 			roles, err := controller.store.GetRoleList(nsn, groupName, "prefill")
@@ -2716,13 +2759,13 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 	controller.store.AddServingGroup(utils.GetNamespaceName(ms), groupOrdinal, oldRevision)
 	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision, "roleTemplateHash")
 
-	err = controller.syncRoleReplicas(context.Background(), ms, newRevision)
+	err = controller.syncRoleReplicas(context.Background(), ms, newRevision, controller.newRoleUpdateCheck(ms))
 	assert.NoError(t, err)
 
 	roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 	assert.NoError(t, err)
-	// Partition-protected ServingGroup should align to ControllerRevision replicas (1), not new spec replicas (2)
-	assert.Equal(t, 1, len(roles))
+	// Replicas are operational and therefore remain sourced from the current spec.
+	assert.Equal(t, 2, len(roles))
 
 	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
 	assert.NoError(t, err)
@@ -2740,6 +2783,296 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 		if assert.NotEmpty(t, createdPod.Spec.Containers) {
 			assert.Equal(t, "old-image:latest", createdPod.Spec.Containers[0].Image)
 		}
+	}
+}
+
+func TestPartitionProtectedRoleRecoveryFailsWhenControllerRevisionMissing(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	partition := intstr.FromInt(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-history", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					Partition: &partition,
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name:     "decode",
+				Replicas: ptr.To[int32](1),
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "decode", Image: "current-image"}},
+				}},
+			}}},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(key, 0, "revision-a")
+
+	err = controller.syncRoleReplicas(context.Background(), ms, "revision-b", controller.newRoleUpdateCheck(ms))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "ControllerRevision")
+}
+
+type protectedServingGroupFixture struct {
+	controller   *ModelServingController
+	kubeClient   *kubefake.Clientset
+	kthenaClient *kthenafake.Clientset
+	modelServing *workloadv1alpha1.ModelServing
+	key          types.NamespacedName
+	groupName    string
+	oldRevision  string
+	newRevision  string
+}
+
+func newProtectedServingGroupFixture(
+	t *testing.T,
+	name string,
+	currentRoles, historicalRoles []workloadv1alpha1.Role,
+	status datastore.ServingGroupStatus,
+) *protectedServingGroupFixture {
+	t.Helper()
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller, err := NewModelServingController(kubeClient, kthenaClient, nil, apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+
+	partition := intstr.FromInt(1)
+	oldRevision, newRevision := "revision-a", "revision-b"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: &partition},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: currentRoles},
+		},
+		Status: workloadv1alpha1.ModelServingStatus{CurrentRevision: oldRevision, UpdateRevision: newRevision},
+	}
+	oldMS := ms.DeepCopy()
+	oldMS.Spec.Template.Roles = historicalRoles
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, oldMS, oldRevision, historicalRoles)
+	require.NoError(t, err)
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	key := utils.GetNamespaceName(ms)
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	controller.store.AddServingGroup(key, 0, oldRevision)
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, groupName, status))
+	return &protectedServingGroupFixture{
+		controller: controller, kubeClient: kubeClient, kthenaClient: kthenaClient,
+		modelServing: ms, key: key, groupName: groupName,
+		oldRevision: oldRevision, newRevision: newRevision,
+	}
+}
+
+func (f *protectedServingGroupFixture) addRole(t *testing.T, roleName string) string {
+	t.Helper()
+	roleID := utils.GenerateRoleID(roleName, 0)
+	f.controller.store.AddRole(f.key, f.groupName, roleName, roleID, f.oldRevision, roleName+"-hash")
+	return roleID
+}
+
+func (f *protectedServingGroupFixture) addEntryPod(t *testing.T, roleName, roleID string) *corev1.Pod {
+	t.Helper()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: roleID + "-pod", Namespace: f.modelServing.Namespace,
+		Labels: map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: f.modelServing.Name,
+			workloadv1alpha1.GroupNameLabelKey:        f.groupName,
+			workloadv1alpha1.RoleLabelKey:             roleName,
+			workloadv1alpha1.RoleIDKey:                roleID,
+			workloadv1alpha1.EntryLabelKey:            utils.Entry,
+			workloadv1alpha1.RevisionLabelKey:         f.oldRevision,
+		},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: workloadv1alpha1.ModelServingKind.Kind, Name: f.modelServing.Name, UID: f.modelServing.UID}},
+	}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: roleName, Image: "old-image"}}}}
+	require.NoError(t, f.controller.podsInformer.GetIndexer().Add(pod))
+	return pod
+}
+
+func TestHistoricalRecoveryReadinessUsesRecoveredWorkload(t *testing.T) {
+	for _, tt := range []struct {
+		name                   string
+		rolePartition          bool
+		oldWorkers, newWorkers int32
+	}{
+		{name: "serving group partition", newWorkers: 1},
+		{name: "role partition increased workers", rolePartition: true, newWorkers: 2},
+		{name: "role partition decreased workers", rolePartition: true, oldWorkers: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			currentRole := workloadv1alpha1.Role{
+				Name: "decode", Replicas: ptr.To[int32](1), WorkerReplicas: tt.newWorkers,
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "decode", Image: "new-image"}}}},
+			}
+			currentRole.WorkerTemplate = currentRole.EntryTemplate.DeepCopy()
+			historicalRole := *currentRole.DeepCopy()
+			historicalRole.WorkerReplicas = tt.oldWorkers
+			historicalRole.EntryTemplate.Spec.Containers[0].Image = "old-image"
+			historicalRole.WorkerTemplate = historicalRole.EntryTemplate.DeepCopy()
+			f := newProtectedServingGroupFixture(t, "recover-readiness", []workloadv1alpha1.Role{currentRole}, []workloadv1alpha1.Role{historicalRole}, datastore.ServingGroupCreating)
+			if tt.rolePartition {
+				f.modelServing.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+				f.modelServing.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt(1))
+			}
+			roleID := f.addRole(t, "decode")
+			if tt.oldWorkers > 0 {
+				// Keep the entry so the current worker count would hide missing historical workers.
+				pod := utils.GenerateEntryPod(historicalRole, f.modelServing, f.groupName, roleID, f.oldRevision, "decode-hash")
+				_, err := f.kubeClient.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, f.controller.podsInformer.GetIndexer().Add(pod))
+			}
+			require.NoError(t, f.controller.syncRoleReplicas(ctx, f.modelServing, f.newRevision, f.controller.newRoleUpdateCheck(f.modelServing)))
+			pods, err := f.kubeClient.CoreV1().Pods(f.modelServing.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 1+int(tt.oldWorkers))
+			for i := range pods.Items {
+				pod := &pods.Items[i]
+				assert.Equal(t, f.oldRevision, utils.ObjectRevision(pod))
+				assert.Equal(t, "old-image", pod.Spec.Containers[0].Image)
+				pod.Status.Phase = corev1.PodRunning
+				pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+				require.NoError(t, f.controller.podsInformer.GetIndexer().Update(pod))
+				require.NoError(t, f.controller.handleReadyPod(f.modelServing, f.groupName, pod))
+			}
+			assert.Equal(t, datastore.RoleRunning, f.controller.store.GetRoleStatus(f.key, f.groupName, "decode", roleID))
+			assert.Equal(t, datastore.ServingGroupRunning, f.controller.store.GetServingGroupStatus(f.key, f.groupName))
+		})
+	}
+}
+
+func TestRoleUpdateCheckReusesHistoryWithinReconciliation(t *testing.T) {
+	ctx := context.Background()
+	kubeClient := kubefake.NewSimpleClientset()
+	c := &ModelServingController{kubeClientSet: kubeClient}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "comparison", Namespace: "default", UID: "comparison-uid"},
+		Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+			{Name: "decode", EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Image: "old"}}}}},
+			{Name: "prefill", EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Image: "old"}}}}},
+		}}},
+	}
+	data, err := utils.BuildRevisionData(ms)
+	require.NoError(t, err)
+	history, _, err := utils.RecordModelServingRevision(ctx, kubeClient, ms, data)
+	require.NoError(t, err)
+	oldRevision := history.Labels[utils.ControllerRevisionRevisionLabelKey]
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "new"
+	data, err = utils.BuildRevisionData(ms)
+	require.NoError(t, err)
+	history, _, err = utils.RecordModelServingRevision(ctx, kubeClient, ms, data)
+	require.NoError(t, err)
+	newRevision := history.Labels[utils.ControllerRevisionRevisionLabelKey]
+	kubeClient.ClearActions()
+
+	needsUpdate := c.newRoleUpdateCheck(ms)
+	for _, revision := range []string{oldRevision, newRevision} {
+		for _, role := range ms.Spec.Template.Roles {
+			for i := 0; i < 10; i++ {
+				outdated, err := needsUpdate(ctx, datastore.ServingGroup{}, role, datastore.Role{
+					Name: utils.GenerateRoleID(role.Name, i), Revision: revision,
+				})
+				require.NoError(t, err)
+				assert.Equal(t, revision == oldRevision && role.Name == "decode", outdated)
+			}
+		}
+	}
+	// Multiple Roles and replicas share one GET per historical revision.
+	require.Len(t, kubeClient.Actions(), 2)
+	for _, action := range kubeClient.Actions() {
+		assert.True(t, action.Matches("get", "controllerrevisions"))
+	}
+
+	// A later reconciliation must see spec changes instead of reusing old results.
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old"
+	outdated, err := c.newRoleUpdateCheck(ms)(ctx, datastore.ServingGroup{}, ms.Spec.Template.Roles[0], datastore.Role{Revision: oldRevision})
+	require.NoError(t, err)
+	assert.False(t, outdated)
+	require.Len(t, kubeClient.Actions(), 3)
+}
+
+func TestProtectedHistoricalServingGroupRoleMembership(t *testing.T) {
+	t.Run("new roles are not injected into an intact old group", func(t *testing.T) {
+		decode := workloadv1alpha1.Role{Name: "decode", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "decode", Image: "decode"}}}}}
+		prefill := workloadv1alpha1.Role{Name: "prefill", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "prefill", Image: "prefill"}}}}}
+		f := newProtectedServingGroupFixture(t, "role-membership-add", []workloadv1alpha1.Role{decode, prefill}, []workloadv1alpha1.Role{decode}, datastore.ServingGroupRunning)
+		roleID := f.addRole(t, "decode")
+		f.addEntryPod(t, "decode", roleID)
+
+		require.NoError(t, f.controller.syncRoleReplicas(context.Background(), f.modelServing, f.newRevision, f.controller.newRoleUpdateCheck(f.modelServing)))
+		roles, err := f.controller.store.GetRoleList(f.key, f.groupName, "prefill")
+		require.NoError(t, err)
+		assert.Empty(t, roles)
+	})
+
+	t.Run("removed historical roles are recovered", func(t *testing.T) {
+		decode := workloadv1alpha1.Role{Name: "decode", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "decode", Image: "decode"}}}}}
+		prefill := workloadv1alpha1.Role{Name: "prefill", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "prefill", Image: "old-prefill"}}}}}
+		f := newProtectedServingGroupFixture(t, "role-membership-remove", []workloadv1alpha1.Role{decode}, []workloadv1alpha1.Role{decode, prefill}, datastore.ServingGroupCreating)
+		f.addRole(t, "decode")
+		prefillID := f.addRole(t, "prefill")
+		f.controller.store.DeleteRole(f.key, f.groupName, "prefill", prefillID)
+
+		require.NoError(t, f.controller.syncRoleReplicas(context.Background(), f.modelServing, f.newRevision, f.controller.newRoleUpdateCheck(f.modelServing)))
+		roles, err := f.controller.store.GetRoleList(f.key, f.groupName, "prefill")
+		require.NoError(t, err)
+		require.Len(t, roles, 1)
+		pods, err := f.kubeClient.CoreV1().Pods(f.modelServing.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: workloadv1alpha1.RoleLabelKey + "=prefill"})
+		require.NoError(t, err)
+		require.Len(t, pods.Items, 1)
+		assert.Equal(t, f.oldRevision, pods.Items[0].Labels[workloadv1alpha1.RevisionLabelKey])
+		assert.Equal(t, "old-prefill", pods.Items[0].Spec.Containers[0].Image)
+	})
+}
+
+func TestProtectedHistoricalHeadlessServiceUsesHistoricalRole(t *testing.T) {
+	tests := []struct {
+		name, currentImage, historicalImage string
+		expectService                       bool
+	}{
+		{name: "historical worker template is restored", historicalImage: "old-worker", expectService: true},
+		{name: "current-only worker template is ignored", currentImage: "worker", expectService: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			currentRole := workloadv1alpha1.Role{Name: "decode", Replicas: ptr.To[int32](1), WorkerReplicas: 0, EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "decode", Image: "entry"}}}}}
+			historicalRole := *currentRole.DeepCopy()
+			if tt.currentImage != "" {
+				currentRole.WorkerReplicas = 1
+				currentRole.WorkerTemplate = &workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: tt.currentImage}}}}
+			}
+			if tt.historicalImage != "" {
+				historicalRole.WorkerReplicas = 1
+				historicalRole.WorkerTemplate = &workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: tt.historicalImage}}}}
+			}
+			f := newProtectedServingGroupFixture(t, "headless-history", []workloadv1alpha1.Role{currentRole}, []workloadv1alpha1.Role{historicalRole}, datastore.ServingGroupRunning)
+			f.addRole(t, "decode")
+
+			require.NoError(t, f.controller.syncHeadlessServices(context.Background(), f.modelServing, f.newRevision))
+			services, err := f.kubeClient.CoreV1().Services(f.modelServing.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			if tt.expectService {
+				require.Len(t, services.Items, 1)
+			} else {
+				assert.Empty(t, services.Items)
+			}
+		})
 	}
 }
 
@@ -2866,7 +3199,7 @@ func TestManageRoleReplicas(t *testing.T) {
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision, false, nil, controller.newRoleUpdateCheck(ms))
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -2937,7 +3270,7 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 		controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", ordinal), "old-revision", "old-hash")
 	}
 
-	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision")
+	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision", false, nil, controller.newRoleUpdateCheck(ms))
 
 	roles, err := controller.store.GetRoleList(key, groupName, "decode")
 	require.NoError(t, err)
@@ -2967,6 +3300,7 @@ func TestHasUpdateableOutdatedRole(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		Spec: workloadv1alpha1.ModelServingSpec{
 			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+			Template:        workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{targetRole}},
 		},
 	}
 	newHash := utils.CalRoleTemplateHash(targetRole)
@@ -3009,7 +3343,7 @@ func TestHasUpdateableOutdatedRole(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, controller.hasUpdateableOutdatedRole(ms, "test-0", targetRole, tt.roles))
+			assert.Equal(t, tt.want, controller.hasUpdateableOutdatedRole(context.Background(), ms, "test-0", targetRole, tt.roles, controller.newRoleUpdateCheck(ms)))
 		})
 	}
 }
@@ -3859,7 +4193,7 @@ func TestModelServingVersionControl(t *testing.T) {
 			}
 
 			// Verify status revisions
-			err = controller.UpdateModelServingStatus(ms, newRevision)
+			err = controller.UpdateModelServingStatus(context.Background(), ms, newRevision)
 			assert.NoError(t, err)
 
 			// Get updated ModelServing to check status
@@ -3877,9 +4211,9 @@ func TestModelServingVersionControl(t *testing.T) {
 	}
 }
 
-// TestScaleUpServingGroups_TemplateRecovery tests that for ordinal < partition:
-// 1. Priority: use template from ControllerRevision (recovery scenario)
-// 2. Fail safely when a historical ControllerRevision no longer exists.
+// TestScaleUpServingGroups_TemplateRecovery verifies that partition-protected
+// recovery uses persisted revision data and never creates current templates
+// under a historical revision label.
 func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 	ctx := context.Background()
 
@@ -3893,7 +4227,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 		initialTemplateRoles   []workloadv1alpha1.Role
 		recoveryTemplateRoles  []workloadv1alpha1.Role // Template stored in ControllerRevision
 		currentTemplateRoles   []workloadv1alpha1.Role // Current ms.Spec.Template.Roles
-		wantError              bool
+		expectError            bool
 	}{
 		{
 			name:                   "recovery_with_controller_revision",
@@ -3932,6 +4266,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 			hasControllerRevision:  false,
 			expectedTemplateSource: "ms.Spec.Template.Roles",
 			currentRevision:        "revision-v1",
+			expectError:            true,
 			initialTemplateRoles: []workloadv1alpha1.Role{
 				{
 					Name:     "prefill",
@@ -3944,7 +4279,6 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 					Replicas: ptr.To[int32](2),
 				},
 			},
-			wantError: true,
 		},
 	}
 
@@ -4021,11 +4355,13 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 
 			newRevision := "revision-v2"
 			err = controller.scaleUpServingGroups(ctx, ms, existingGroups, int(tt.partition), newRevision)
-			if tt.wantError {
-				assert.ErrorContains(t, err, "was not found")
+			if tt.expectError {
+				require.ErrorContains(t, err, "ControllerRevision not found")
+				_, exists := controller.store.GetServingGroupRevision(utils.GetNamespaceName(ms), utils.GenerateServingGroupName(msName, tt.ordinal))
+				assert.False(t, exists)
 				return
 			}
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			// Verify the group was created with correct revision
 			groupName := utils.GenerateServingGroupName(msName, tt.ordinal)
@@ -4173,7 +4509,7 @@ func TestUpdateModelServingStatusLabelSelector(t *testing.T) {
 				}
 			}
 
-			err = controller.UpdateModelServingStatus(ms, tt.revision)
+			err = controller.UpdateModelServingStatus(context.Background(), ms, tt.revision)
 			assert.NoError(t, err, "case %d: UpdateModelServingStatus should not error", idx)
 
 			updated, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), tt.msName, metav1.GetOptions{})
@@ -4218,7 +4554,7 @@ func TestUpdateModelServingStatusCountsAllServingGroups(t *testing.T) {
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
 	}
 
-	require.NoError(t, controller.UpdateModelServingStatus(ms, "new-revision"))
+	require.NoError(t, controller.UpdateModelServingStatus(context.Background(), ms, "new-revision"))
 	updated, err := kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, int32(3), updated.Status.Replicas)
@@ -4290,13 +4626,83 @@ func TestUpdateModelServingStatusDistinguishesScalingFromRollingUpdate(t *testin
 				))
 			}
 
-			require.NoError(t, controller.UpdateModelServingStatus(ms, tt.newRevision))
+			require.NoError(t, controller.UpdateModelServingStatus(context.Background(), ms, tt.newRevision))
 			updated, err := kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
 			require.NoError(t, err)
 			require.NotEmpty(t, updated.Status.Conditions)
 			assert.Equal(t, string(tt.wantCondition), updated.Status.Conditions[len(updated.Status.Conditions)-1].Type)
 		})
 	}
+}
+
+func TestUpdateModelServingStatusRefreshesAfterConflict(t *testing.T) {
+	ctx := context.Background()
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "status-conflict", UID: "test-uid"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](0),
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name:     "prefill",
+				Replicas: ptr.To[int32](1),
+			}}},
+		},
+	}
+	serverMS := ms.DeepCopy()
+	serverCollisionCount := int32(3)
+	serverMS.Status.CollisionCount = &serverCollisionCount
+	modelServingClient := kthenafake.NewSimpleClientset(serverMS)
+	controller, err := NewModelServingController(
+		kubefake.NewSimpleClientset(),
+		modelServingClient,
+		volcanofake.NewSimpleClientset(),
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+	updates := 0
+	modelServingClient.PrependReactor("update", "modelservings", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{
+				Group: workloadv1alpha1.SchemeGroupVersion.Group, Resource: "modelservings",
+			}, ms.Name, fmt.Errorf("injected conflict"))
+		}
+		return false, nil, nil
+	})
+	collisionCount := int32(2)
+	ms.Status.CollisionCount = &collisionCount
+
+	require.NoError(t, controller.UpdateModelServingStatus(ctx, ms, "revision-v2"))
+	assert.Equal(t, 2, updates)
+	updated, err := modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "revision-v2", updated.Status.CurrentRevision)
+	assert.Equal(t, "revision-v2", updated.Status.UpdateRevision)
+	require.NotNil(t, updated.Status.CollisionCount)
+	assert.Equal(t, serverCollisionCount, *updated.Status.CollisionCount, "collision count must not decrease after a concurrent status update")
+}
+
+func TestUpdateModelServingStatusRejectsNewerGeneration(t *testing.T) {
+	ctx := context.Background()
+	observed := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "generation-change", Generation: 1},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](0),
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "prefill", Replicas: ptr.To[int32](1)}}},
+		},
+	}
+	latest := observed.DeepCopy()
+	latest.Generation = 2
+	modelServingClient := kthenafake.NewSimpleClientset(latest)
+	controller, err := NewModelServingController(
+		kubefake.NewSimpleClientset(), modelServingClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	err = controller.UpdateModelServingStatus(ctx, observed, "revision-v1")
+	require.ErrorContains(t, err, "generation changed from 1 to 2")
+	unchanged, err := modelServingClient.WorkloadV1alpha1().ModelServings(latest.Namespace).Get(ctx, latest.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, unchanged.Status.UpdateRevision)
 }
 
 func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
@@ -4434,7 +4840,7 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			}
 
 			// Call UpdateModelServingStatus
-			err = controller.UpdateModelServingStatus(ms, tt.newRevision)
+			err = controller.UpdateModelServingStatus(context.Background(), ms, tt.newRevision)
 			assert.NoError(t, err)
 
 			// Get updated ModelServing to check status
@@ -4447,6 +4853,59 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 				"UpdateRevision: %s", tt.description)
 		})
 	}
+}
+
+func TestDeletingProtectedServingGroupKeepsRevisionForRecovery(t *testing.T) {
+	currentRole := workloadv1alpha1.Role{Name: "decode", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "decode", Image: "new-image"}}}}}
+	historicalRole := *currentRole.DeepCopy()
+	historicalRole.EntryTemplate.Spec.Containers[0].Image = "old-image"
+	f := newProtectedServingGroupFixture(t, "deleting-protected", []workloadv1alpha1.Role{currentRole}, []workloadv1alpha1.Role{historicalRole}, datastore.ServingGroupDeleting)
+
+	require.NoError(t, f.controller.UpdateModelServingStatus(context.Background(), f.modelServing, f.newRevision))
+	updated, err := f.kthenaClient.WorkloadV1alpha1().ModelServings(f.modelServing.Namespace).Get(context.Background(), f.modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, f.oldRevision, updated.Status.CurrentRevision)
+
+	f.controller.store.DeleteServingGroup(f.key, f.groupName)
+	require.NoError(t, f.controller.scaleUpServingGroups(context.Background(), updated, nil, 1, f.newRevision))
+	revision, exists := f.controller.store.GetServingGroupRevision(f.key, f.groupName)
+	require.True(t, exists)
+	assert.Equal(t, f.oldRevision, revision)
+	pods, err := f.kubeClient.CoreV1().Pods(f.modelServing.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 1)
+	assert.Equal(t, f.oldRevision, pods.Items[0].Labels[workloadv1alpha1.RevisionLabelKey])
+	assert.Equal(t, "old-image", pods.Items[0].Spec.Containers[0].Image)
+}
+
+func TestProtectedHistoricalRecoverySurvivesControllerRestart(t *testing.T) {
+	currentRole := workloadv1alpha1.Role{Name: "decode", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "decode", Image: "new-image"}}}}}
+	historicalRole := *currentRole.DeepCopy()
+	historicalRole.EntryTemplate.Spec.Containers[0].Image = "old-image"
+	f := newProtectedServingGroupFixture(t, "restart-recovery", []workloadv1alpha1.Role{currentRole}, []workloadv1alpha1.Role{historicalRole}, datastore.ServingGroupRunning)
+
+	// Persist the old live revision before simulating the old group disappearing.
+	require.NoError(t, f.controller.UpdateModelServingStatus(context.Background(), f.modelServing, f.newRevision))
+	persisted, err := f.kthenaClient.WorkloadV1alpha1().ModelServings(f.modelServing.Namespace).Get(context.Background(), f.modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, f.oldRevision, persisted.Status.CurrentRevision)
+	assert.Contains(t, persisted.Status.RevisionReferences, f.oldRevision)
+
+	// A new controller starts with an empty datastore. Its first recovery sync
+	// uses only the persisted status and the immutable ControllerRevision.
+	restarted, err := NewModelServingController(f.kubeClient, f.kthenaClient, nil, apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	require.NoError(t, restarted.modelServingsInformer.GetIndexer().Add(persisted))
+	restarted.syncAll()
+	require.NoError(t, restarted.scaleUpServingGroups(context.Background(), persisted, nil, 1, f.newRevision))
+	revision, exists := restarted.store.GetServingGroupRevision(f.key, f.groupName)
+	require.True(t, exists)
+	assert.Equal(t, f.oldRevision, revision)
+	pods, err := f.kubeClient.CoreV1().Pods(f.modelServing.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 1)
+	assert.Equal(t, f.oldRevision, pods.Items[0].Labels[workloadv1alpha1.RevisionLabelKey])
+	assert.Equal(t, "old-image", pods.Items[0].Spec.Containers[0].Image)
 }
 
 // TestScaleDownRoles tests the scaleDownRoles function with various scenarios
@@ -5565,7 +6024,7 @@ func TestCheckRoleReady(t *testing.T) {
 			}
 
 			// Check role readiness
-			ready, err := controller.checkRoleReady(ms, groupName, tt.roleName, tt.roleID)
+			ready, err := controller.checkRoleReady(ms, groupName, tt.roleName, tt.roleID, "")
 
 			// Verify results
 			assert.NoError(t, err)
@@ -5847,7 +6306,7 @@ func TestManageHeadlessService(t *testing.T) {
 			}
 
 			// Call the function being tested
-			err = controller.syncHeadlessServices(context.TODO(), tt.modelServing)
+			err = controller.syncHeadlessServices(context.TODO(), tt.modelServing, "")
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -7564,6 +8023,7 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 				tt.notRunningOutdatedGroups,
 				tt.runningOutdatedGroups,
 				"v1",
+				controller.newRoleUpdateCheck(ms),
 			)
 
 			assert.NoError(t, err)
@@ -7573,8 +8033,9 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 }
 
 func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
 	controller, err := NewModelServingController(
-		kubefake.NewSimpleClientset(),
+		kubeClient,
 		kthenafake.NewSimpleClientset(),
 		nil,
 		apiextfake.NewSimpleClientset(),
@@ -7603,6 +8064,8 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 			}}},
 		},
 	}
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old-revision", ms.Spec.Template.Roles)
+	require.NoError(t, err)
 	key := utils.GetNamespaceName(ms)
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		controller.store.AddServingGroup(key, ordinal, "old-revision")
@@ -7611,7 +8074,7 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 
 	groups, err := controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", controller.newRoleUpdateCheck(ms)))
 	require.Len(t, groups, 2, "rolling update waits for replica sync to create surge capacity")
 
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
@@ -7625,13 +8088,13 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 
 	// An unready surge consumes its slot but cannot authorize deletion when
 	// maxUnavailable is zero.
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", controller.newRoleUpdateCheck(ms)))
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal)))
 	}
 
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, surgeName, datastore.ServingGroupRunning))
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", controller.newRoleUpdateCheck(ms)))
 
 	// The highest outdated group is replaced first while the temporary capacity
 	// remains available.
@@ -7642,7 +8105,7 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 1), datastore.ServingGroupRunning))
 
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", controller.newRoleUpdateCheck(ms)))
 
 	// Once all remaining groups use the new revision, replica synchronization
 	// derives the normal desired count. The high ordinal remains a normal replica
@@ -7739,7 +8202,7 @@ func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {
 				require.NoError(t, controller.store.UpdateServingGroupStatus(key, group.Name, group.Status))
 			}
 
-			require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new"))
+			require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new", controller.newRoleUpdateCheck(ms)))
 			groups, err := controller.store.GetServingGroupByModelServing(key)
 			require.NoError(t, err)
 			outdatedLeft := 0
@@ -7776,7 +8239,7 @@ func TestManageRollingUpdateTreatsServingGroupNotFoundAsEmpty(t *testing.T) {
 	_, err = controller.store.GetServingGroupByModelServing(key)
 	require.ErrorIs(t, err, datastore.ErrServingGroupNotFound)
 
-	assert.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new"))
+	assert.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new", controller.newRoleUpdateCheck(ms)))
 }
 
 func TestHasUpdateableOutdatedServingGroup(t *testing.T) {
@@ -7899,9 +8362,102 @@ func TestSyncServingGroupReplicasPreservesSparseOrdinals(t *testing.T) {
 	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 2), groups[1].Name)
 }
 
-func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
+func TestExistingOldServingGroupDoesNotRequireHistoricalRevision(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
 	controller, err := NewModelServingController(
-		kubefake.NewSimpleClientset(),
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	partition := intstr.FromInt(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-workload", Namespace: "default", UID: types.UID("old-workload-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					Partition: &partition,
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name:           "decode",
+				Replicas:       ptr.To[int32](1),
+				WorkerReplicas: 1,
+				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "decode", Image: "current-image"}},
+				}},
+				WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "current-image"}}}},
+			}}},
+		},
+	}
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	key := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(key, 0, "revision-a")
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, groupName, datastore.ServingGroupRunning))
+	roleID := utils.GenerateRoleID("decode", 0)
+	controller.store.AddRole(key, groupName, "decode", roleID, "revision-a", "role-hash")
+	require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, "decode", roleID, datastore.RoleRunning))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "decode-pod",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             "decode",
+				workloadv1alpha1.RoleIDKey:                roleID,
+				workloadv1alpha1.EntryLabelKey:            utils.Entry,
+				workloadv1alpha1.RevisionLabelKey:         "revision-a",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+				Kind:       workloadv1alpha1.ModelServingKind.Kind,
+				Name:       ms.Name,
+				UID:        ms.UID,
+			}},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "decode", Image: "current-image"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(pod))
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name:      "decode-service",
+		Namespace: ms.Namespace,
+		Labels: map[string]string{
+			workloadv1alpha1.GroupNameLabelKey: groupName,
+			workloadv1alpha1.RoleLabelKey:      "decode",
+			workloadv1alpha1.RoleIDKey:         roleID,
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+			Kind:       workloadv1alpha1.ModelServingKind.Kind,
+			Name:       ms.Name,
+			UID:        ms.UID,
+		}},
+	}}
+	require.NoError(t, controller.servicesInformer.GetIndexer().Add(service))
+
+	controllerRevisionGets := 0
+	kubeClient.PrependReactor("get", "controllerrevisions", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		controllerRevisionGets++
+		return true, nil, fmt.Errorf("historical ControllerRevision must not be read")
+	})
+
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "revision-b"))
+	require.NoError(t, controller.syncRoleReplicas(context.Background(), ms, "revision-b", controller.newRoleUpdateCheck(ms)))
+	require.NoError(t, controller.syncHeadlessServices(context.Background(), ms, "revision-b"))
+	assert.Zero(t, controllerRevisionGets, "an intact old ServingGroup must not load historical revision data")
+}
+
+func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(
+		kubeClient,
 		kthenafake.NewSimpleClientset(),
 		nil,
 		apiextfake.NewSimpleClientset(),
@@ -7919,6 +8475,8 @@ func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
 			},
 		},
 	}
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old", ms.Spec.Template.Roles)
+	require.NoError(t, err)
 	key := utils.GetNamespaceName(ms)
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		controller.store.AddServingGroup(key, ordinal, "old")
@@ -7972,13 +8530,14 @@ func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T
 		controller.store.AddServingGroup(key, group.ordinal, group.revision)
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, group.ordinal), group.status))
 	}
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new", controller.newRoleUpdateCheck(ms)))
 	assert.Equal(t, datastore.ServingGroupNotFound, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
 }
 
 func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
 	controller, err := NewModelServingController(
-		kubefake.NewSimpleClientset(),
+		kubeClient,
 		kthenafake.NewSimpleClientset(),
 		nil,
 		apiextfake.NewSimpleClientset(),
@@ -7996,6 +8555,8 @@ func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
 			},
 		},
 	}
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old", ms.Spec.Template.Roles)
+	require.NoError(t, err)
 	key := utils.GetNamespaceName(ms)
 	for ordinal := 0; ordinal < 3; ordinal++ {
 		revision := "old"
@@ -8015,38 +8576,6 @@ func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
 	require.Len(t, groups, 2)
 	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 0), groups[0].Name)
 	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 2), groups[1].Name)
-}
-
-func TestPartitionProtectedServingGroupReadinessUsesHistoricalTemplateWithSparseOrdinals(t *testing.T) {
-	kubeClient := kubefake.NewSimpleClientset()
-	controller, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
-	require.NoError(t, err)
-
-	partition := intstr.FromInt(1)
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Name: "partition-ready", Namespace: "default", UID: types.UID("partition-ready-uid")},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Replicas: ptr.To[int32](1),
-			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
-				Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: &partition},
-			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: ptr.To[int32](2)}}},
-		},
-	}
-	oldRoles := []workloadv1alpha1.Role{{Name: "decode", Replicas: ptr.To[int32](1)}}
-	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old-revision", oldRoles)
-	require.NoError(t, err)
-
-	key := utils.GetNamespaceName(ms)
-	groupName := utils.GenerateServingGroupName(ms.Name, 2)
-	controller.store.AddServingGroup(key, 2, "old-revision")
-	controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", 0), "old-revision", utils.CalRoleTemplateHash(oldRoles[0]))
-	require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, "decode", utils.GenerateRoleID("decode", 0), datastore.RoleRunning))
-
-	ready, err := controller.checkServingGroupReady(ms, groupName)
-	require.NoError(t, err)
-	assert.True(t, ready, "protected group should be ready according to its historical revision")
 }
 
 func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T) {
@@ -8128,6 +8657,7 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 				nil,
 				[]datastore.ServingGroup{{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning}},
 				newRevision,
+				controller.newRoleUpdateCheck(ms),
 			)
 			require.NoError(t, err)
 
@@ -8146,7 +8676,9 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
 	groupName := "test-ms-0"
-	oldRevision := "old-revision"
+	// These cases exercise RoleTemplateHash compatibility without a revision
+	// identity. Missing history for an identified Role is covered separately.
+	oldRevision := ""
 
 	newRole := func(name, image string, replicas int32, maxUnavailable *intstr.IntOrString) workloadv1alpha1.Role {
 		return workloadv1alpha1.Role{
@@ -8163,12 +8695,17 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 
 	addRole := func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing, roleName, roleID, roleTemplateHash string, status datastore.RoleStatus) {
 		t.Helper()
-		store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, roleID, oldRevision, roleTemplateHash)
+		revision := oldRevision
+		if ms.Status.CurrentRevision != "" {
+			revision = ms.Status.CurrentRevision
+		}
+		store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, roleID, revision, roleTemplateHash)
 		require.NoError(t, store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, status))
 	}
 
 	tests := []struct {
 		name              string
+		revision          string
 		roles             []workloadv1alpha1.Role
 		setupStore        func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing)
 		expected          []roleToDelete
@@ -8340,7 +8877,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			expectedOutdated: true,
 		},
 		{
-			name: "missing roleTemplateHash without ControllerRevision is skipped",
+			name: "missing revision identity and hash is outdated",
 			roles: []workloadv1alpha1.Role{
 				newRole("prefill", "nginx:latest", 1, nil),
 			},
@@ -8349,6 +8886,22 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 				store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
 				addRole(t, store, ms, "prefill", "prefill-0", "", datastore.RoleRunning)
 			},
+			expected:         []roleToDelete{{roleName: "prefill", roleID: "prefill-0"}},
+			expectedOutdated: true,
+		},
+		{
+			name:     "missing revision history is outdated even with matching role hash",
+			revision: "missing-revision",
+			roles: []workloadv1alpha1.Role{
+				newRole("prefill", "nginx:latest", 1, nil),
+			},
+			setupStore: func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing) {
+				t.Helper()
+				store.AddServingGroup(utils.GetNamespaceName(ms), 0, "missing-revision")
+				addRole(t, store, ms, "prefill", "prefill-0", utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), datastore.RoleRunning)
+			},
+			expected:         []roleToDelete{{roleName: "prefill", roleID: "prefill-0"}},
+			expectedOutdated: true,
 		},
 		{
 			name: "partition protects first outdated roles with non-continuous ordinals",
@@ -8386,6 +8939,10 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			revision := oldRevision
+			if tt.revision != "" {
+				revision = tt.revision
+			}
 			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
 				Spec: workloadv1alpha1.ModelServingSpec{
@@ -8393,13 +8950,16 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 					Template:        workloadv1alpha1.ServingGroup{Roles: tt.roles},
 				},
 			}
+			ms.Status.CurrentRevision = revision
 			store := datastore.New()
 			tt.setupStore(t, store, ms)
 
 			controller := &ModelServingController{store: store, kubeClientSet: kubefake.NewSimpleClientset()}
 			rolesToDelete, hasOutdatedRoles, err := controller.rolesToDeleteForRoleRollingUpdate(
+				context.Background(),
 				ms,
-				datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning},
+				datastore.ServingGroup{Name: groupName, Revision: revision, Status: datastore.ServingGroupRunning},
+				controller.newRoleUpdateCheck(ms),
 			)
 
 			if tt.expectErrContains != "" {
@@ -8414,58 +8974,13 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 	}
 }
 
-func TestRolesToDeleteForRoleRollingUpdate_LegacyRoleTemplateHashFromControllerRevision(t *testing.T) {
-	ns := "default"
-	msName := "test-ms"
-	groupName := "test-ms-0"
-	oldRevision := "old-revision"
-	roleName := "prefill"
-	oldRole := workloadv1alpha1.Role{
-		Name:     roleName,
-		Replicas: ptr.To[int32](1),
-		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:old"}}},
-		},
-	}
-	newRole := workloadv1alpha1.Role{
-		Name:     roleName,
-		Replicas: ptr.To[int32](1),
-		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:new"}}},
-		},
-	}
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{newRole}},
-		},
-	}
-
-	kubeClient := kubefake.NewSimpleClientset()
-	_, err := utils.CreateControllerRevision(context.TODO(), kubeClient, ms, oldRevision, []workloadv1alpha1.Role{oldRole})
-	require.NoError(t, err)
-
-	store := datastore.New()
-	store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
-	store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, "prefill-0", oldRevision, "")
-	require.NoError(t, store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, "prefill-0", datastore.RoleRunning))
-
-	controller := &ModelServingController{store: store, kubeClientSet: kubeClient}
-	rolesToDelete, hasOutdatedRoles, err := controller.rolesToDeleteForRoleRollingUpdate(
-		ms,
-		datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning},
-	)
-
-	require.NoError(t, err)
-	assert.True(t, hasOutdatedRoles)
-	assert.Equal(t, []roleToDelete{{roleName: roleName, roleID: "prefill-0"}}, rolesToDelete)
-}
-
 func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
 	newRevision := "new-revision-hash"
-	oldRevision := "old-revision-hash"
+	// These cases exercise the legacy RoleTemplateHash fallback. They have no
+	// revision identity, so a missing ControllerRevision is not involved.
+	oldRevision := ""
 
 	tests := []struct {
 		description              string
@@ -8858,86 +9373,6 @@ func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestFindOutdatedRolesInServingGroups_LegacyMissingRoleTemplateHash(t *testing.T) {
-	ns := "default"
-	msName := "test-ms"
-	revision := "same-revision"
-	roleName := "prefill"
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
-			Name:      msName,
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
-				Roles: []workloadv1alpha1.Role{
-					{
-						Name:     roleName,
-						Replicas: ptr.To[int32](1),
-						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	store := datastore.New()
-	nsn := types.NamespacedName{Namespace: ns, Name: msName}
-	store.AddServingGroup(nsn, 0, revision)
-	store.AddRole(nsn, "test-ms-0", roleName, "prefill-0", revision, "")
-
-	controller := &ModelServingController{store: store}
-	result := controller.findOutdatedRolesInServingGroups(ms, []datastore.ServingGroup{{Name: "test-ms-0", Revision: revision, Status: datastore.ServingGroupRunning}}, revision)
-
-	assert.Empty(t, result, "legacy role with missing roleTemplateHash should not be treated as outdated by default")
-}
-
-func TestResolveRoleTemplateHashForComparison_FromControllerRevision(t *testing.T) {
-	ns := "default"
-	msName := "test-ms"
-	oldRevision := "old-revision"
-	roleName := "prefill"
-
-	oldRole := workloadv1alpha1.Role{
-		Name:     roleName,
-		Replicas: ptr.To[int32](1),
-		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1.25"}}},
-		},
-	}
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
-			Name:      msName,
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
-				Roles: []workloadv1alpha1.Role{oldRole},
-			},
-		},
-	}
-
-	kubeClient := kubefake.NewSimpleClientset()
-	_, err := utils.CreateControllerRevision(context.TODO(), kubeClient, ms, oldRevision, []workloadv1alpha1.Role{oldRole})
-	assert.NoError(t, err)
-
-	controller := &ModelServingController{kubeClientSet: kubeClient}
-	hash, ok := controller.resolveRoleTemplateHashForComparison(
-		ms,
-		datastore.ServingGroup{Name: "test-ms-0", Revision: oldRevision},
-		roleName,
-		datastore.Role{Name: "prefill-0", RoleTemplateHash: ""},
-	)
-
-	assert.True(t, ok)
-	assert.Equal(t, utils.CalRoleTemplateHash(oldRole), hash)
 }
 
 func TestResolveRoleTemplateHash_UsesPodRevisionControllerRevision(t *testing.T) {
