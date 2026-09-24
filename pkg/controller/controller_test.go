@@ -23,10 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestOnStoppedLeading verifies that the OnStoppedLeading callback only exits the
-// process when leadership is lost unexpectedly while the manager is still supposed
-// to be running, and not when the manager's own context was already canceled as
-// part of a graceful shutdown.
 func TestOnStoppedLeading(t *testing.T) {
 	t.Run("exits when leadership is lost unexpectedly", func(t *testing.T) {
 		ctx := context.Background()

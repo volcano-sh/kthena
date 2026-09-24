@@ -195,16 +195,8 @@ func initLeaderElector(ctx context.Context, kubeClient kubernetes.Interface, sta
 	return leaderElector, nil
 }
 
-// onStoppedLeading builds the OnStoppedLeading callback for the leader elector.
-//
-// The leaderelection library invokes OnStoppedLeading whenever its Run loop returns,
-// including during a graceful shutdown that already canceled ctx. In that case the
-// controllers started under ctx are already stopping intentionally, so there is
-// nothing to recover from. But if ctx is still active, leadership was lost
-// unexpectedly (e.g. lease renewal failures) while the controllers it started have
-// already been stopped via ctx cancellation, leaving the process alive with no
-// active controllers and no signal for kubelet to restart it. Exiting here lets the
-// container restart and re-enter leader election.
+// onStoppedLeading exits the process if leadership is lost while ctx is still active,
+// so the pod restarts and re-enters leader election.
 func onStoppedLeading(ctx context.Context, exit func()) func() {
 	return func() {
 		if ctx.Err() != nil {
