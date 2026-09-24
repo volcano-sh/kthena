@@ -1111,13 +1111,27 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 	// This has improved the robustness of the end-to-end tests.
 	require.Eventually(t, func() bool {
 		// Wait for the rolling update to complete
-		utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
-
-		// Get final state
 		finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
-		require.NoError(t, err, "Failed to get final ModelServing")
-		assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
-		assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
+		if err != nil {
+			t.Logf("Failed to get final ModelServing: %v", err)
+			return false
+		}
+		if finalMS.Status.ObservedGeneration != finalMS.Generation {
+			t.Logf("ModelServing status is at generation %d, expecting %d", finalMS.Status.ObservedGeneration, finalMS.Generation)
+			return false
+		}
+		if *finalMS.Spec.Replicas != 2 {
+			t.Logf("Final ModelServing has %d replicas in spec, expecting 2", *finalMS.Spec.Replicas)
+			return false
+		}
+		if finalMS.Status.Replicas != 2 {
+			t.Logf("Final ModelServing has %d replicas in status, expecting 2", finalMS.Status.Replicas)
+			return false
+		}
+		if finalMS.Status.AvailableReplicas != 2 {
+			t.Logf("Final ModelServing has %d available replicas, expecting 2", finalMS.Status.AvailableReplicas)
+			return false
+		}
 
 		// Verify that the prefill role image has been updated
 		prefillRoleUpdated := false
@@ -1127,7 +1141,10 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 				break
 			}
 		}
-		assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
+		if !prefillRoleUpdated {
+			t.Logf("Prefill role has not been updated to nginx:alpine yet")
+			return false
+		}
 
 		prefillPodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=prefill", modelServing.Name)
 		prefillPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
