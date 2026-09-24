@@ -70,6 +70,13 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 	if err != nil {
 		return nil, err
 	}
+	// Do not emit unused Pod templates. In particular, an empty worker template
+	// is invalid under native Pod validation even when no workers are requested.
+	for i := range serving.Spec.Template.Roles {
+		if serving.Spec.Template.Roles[i].WorkerReplicas == 0 {
+			serving.Spec.Template.Roles[i].WorkerTemplate = nil
+		}
+	}
 	return serving, nil
 }
 

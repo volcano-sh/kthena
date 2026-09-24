@@ -72,3 +72,7 @@ allowlisted_modules:
 - github.com/alicebob/miniredis/v2
 # filepath-securejoin is BSD-3-Clause and MPL-2.0, split across LICENSE.BSD and LICENSE.MPL-2.0: https://github.com/cyphar/filepath-securejoin/blob/main/COPYING.md
 - github.com/cyphar/filepath-securejoin
+# Kubernetes code is Apache-2.0: https://github.com/kubernetes/kubernetes/blob/v1.35.3/LICENSE
+# Its logo/LICENSE allows either Apache-2.0 or CC-BY-4.0, but the linter cannot
+# recognize this short declaration: https://github.com/kubernetes/kubernetes/blob/v1.35.3/logo/LICENSE
+- k8s.io/kubernetes

@@ -64,9 +64,6 @@ spec:
                 volumeMounts: ${VOLUME_MOUNTS}
             volumes: ${VOLUMES}
         workerReplicas: 0
-        workerTemplate:
-          spec:
-            containers: []
       - name: decode
         replicas: ${DECODE_REPLICAS}
         entryTemplate:
@@ -121,6 +118,3 @@ spec:
                 volumeMounts: ${VOLUME_MOUNTS}
             volumes: ${VOLUMES}
         workerReplicas: 0
-        workerTemplate:
-          spec:
-            containers: []

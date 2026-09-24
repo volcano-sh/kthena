@@ -362,6 +362,14 @@ func TestCreateModelServingResources(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+			for _, role := range got.Spec.Template.Roles {
+				if role.WorkerReplicas == 0 {
+					assert.Nil(t, role.WorkerTemplate, "role %s must omit its unused worker template", role.Name)
+				} else {
+					require.NotNil(t, role.WorkerTemplate, "role %s needs a worker template", role.Name)
+					assert.NotEmpty(t, role.WorkerTemplate.Spec.Containers)
+				}
+			}
 			if tt.checkFn != nil {
 				tt.checkFn(t, got)
 				return
@@ -391,6 +399,7 @@ func TestBuildModelServingWorkerPodsOmitted(t *testing.T) {
 	workerReplicas := got.Spec.Template.Roles[0].WorkerReplicas
 	assert.GreaterOrEqual(t, workerReplicas, int32(0), "workerReplicas must never be negative")
 	assert.Equal(t, int32(0), workerReplicas)
+	assert.Nil(t, got.Spec.Template.Roles[0].WorkerTemplate)
 }
 
 // TestBuildModelServingWorkerPodsToWorkerReplicas covers the workerReplicas calculation for
@@ -422,6 +431,12 @@ func TestBuildModelServingWorkerPodsToWorkerReplicas(t *testing.T) {
 			workerReplicas := got.Spec.Template.Roles[0].WorkerReplicas
 			assert.GreaterOrEqual(t, workerReplicas, int32(0), "workerReplicas must never be negative")
 			assert.Equal(t, tt.wantWorkerReplicas, workerReplicas)
+			if workerReplicas == 0 {
+				assert.Nil(t, got.Spec.Template.Roles[0].WorkerTemplate)
+			} else {
+				require.NotNil(t, got.Spec.Template.Roles[0].WorkerTemplate)
+				assert.NotEmpty(t, got.Spec.Template.Roles[0].WorkerTemplate.Spec.Containers)
+			}
 
 			var engine *corev1.Container
 			for i := range got.Spec.Template.Roles[0].EntryTemplate.Spec.Containers {

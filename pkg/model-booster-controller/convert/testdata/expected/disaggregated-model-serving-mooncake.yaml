@@ -193,9 +193,6 @@ spec:
         name: prefill
         replicas: 1
         workerReplicas: 0
-        workerTemplate:
-          spec:
-            containers: []
       - entryTemplate:
           metadata:
             labels:
@@ -370,8 +367,5 @@ spec:
         name: decode
         replicas: 1
         workerReplicas: 0
-        workerTemplate:
-          spec:
-            containers: []
 status:
   availableReplicas: 0
