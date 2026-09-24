@@ -1,6 +1,6 @@
 # ModelServing Plugin Framework
 
-The ModelServing plugin framework lets you customize Pods created by the ModelServing controller through optional plugins. The framework supports different inference engines (e.g., vLLM, TensorRT-LLM) and different accelerators (GPU, NPU, etc.).
+The ModelServing plugin framework lets you customize Pods and opt in to auxiliary Role resources managed by the ModelServing controller. The framework supports different inference engines (e.g., vLLM, TensorRT-LLM), accelerators (GPU, NPU, etc.), and optional integrations such as per-Role Headless Services.
 
 ## Overview
 
@@ -8,6 +8,7 @@ The plugin framework provides an extensible way to customize Pods before creatio
 
 - **Opt-in**: When `plugins` is not configured, ModelServing behavior remains unchanged
 - **Multi-plugin composition**: Support multiple plugins per ModelServing, executed in list order
+- **Unified lifecycle hooks**: Pod and Role lifecycle hooks share one `Plugin` interface and `HookRequest`
 - **Observability**: Track plugin execution status via Kubernetes Events and Status conditions
 
 ## Workflow
@@ -19,8 +20,9 @@ flowchart LR
     PG["Pod Generator<br/>GenerateEntry/Worker"]
     PM["Plugin Manager<br/>(run in order)"]
   end
-  PL["Plugins<br/>BuiltIn/Webhook"]
+  PL["Plugins<br/>BuiltIn"]
   POD["Pod<br/>(mutated spec)"]
+  AUX["Optional Role resources<br/>(for example, Headless Service)"]
   OBS["Events / Status<br/>Annotations"]
 
   MS -->|reconcile| PG;
@@ -28,6 +30,7 @@ flowchart LR
   PG -->|OnPodCreate| PM;
   PM -->|mutate Pod spec| POD;
   POD -.->|OnPodReady| PM;
+  PM -.->|OnRoleSync / OnRoleDelete| AUX;
   PM -.->|events/conditions| OBS;
 ```
 
@@ -36,6 +39,7 @@ flowchart LR
 3. Plugins can modify Pod labels, annotations, env, volumes, nodeSelector, affinity, etc.
 4. The mutated Pod is created in the cluster
 5. When the Pod is ready, the `OnPodReady` hook is triggered (for logging, metrics, etc.)
+6. The Plugin Manager invokes `OnRoleSync` and `OnRoleDelete` inside the controller's existing Role lifecycle paths. Plugins that do not need these events implement them as no-ops.
 
 ## When to Use Plugins
 
@@ -63,15 +67,19 @@ An optional `plugins` field is added to `ModelServingSpec`:
 
 Built-in plugins live in `pkg/model-serving-controller/plugins/`. To add a custom plugin:
 
-1. **Implement the Plugin interface** with `Name()`, `OnPodCreate()`, and `OnPodReady()`:
+1. **Implement the Plugin interface** and its Pod and Role lifecycle hooks:
 
 ```go
 type Plugin interface {
     Name() string
     OnPodCreate(ctx context.Context, req *HookRequest) error
     OnPodReady(ctx context.Context, req *HookRequest) error
+    OnRoleSync(ctx context.Context, req *HookRequest) error
+    OnRoleDelete(ctx context.Context, req *HookRequest) error
 }
 ```
+
+All hooks receive the same request type. Fields that do not apply to a hook may be nil or zero-valued; for example, `Pod` is nil for Role hooks. Runtime resources such as `KubeClient` and cache-backed listers are carried by `HookRequest`, following the same pattern as lifecycle context. `OnRoleSync` must be idempotent, and `OnRoleDelete` must issue cleanup without making core Role deletion wait for an auxiliary object to disappear. Implement unused hooks as no-ops.
 
 2. **Define a config struct** for your plugin and decode it from `spec.Config` using `DecodeJSON()`:
 
@@ -110,6 +118,16 @@ See `pkg/model-serving-controller/plugins/demo_plugin.go` for a reference implem
 ### Using Plugins
 
 Kthena ships with a built-in demo plugin `demo-pod-tweaks` that can set `runtimeClassName`, add annotations, and inject environment variables. Use it to validate the plugin flow before developing your own.
+
+Kthena also ships with `headless-service`. It injects `ENTRY_ADDRESS`, sets each in-scope Entry and Worker Pod's hostname and Service subdomain, and creates one Headless Service for each Role replica that has a `workerTemplate`. The Service selects every Pod in the Role replica so `<pod-hostname>.<service-name>` resolves for both Entry and Worker Pods. Without the plugin, none of these generated DNS settings or the Service is added:
+
+```yaml
+plugins:
+  - name: headless-service
+    type: BuiltIn
+```
+
+The plugin recreates an accidentally deleted desired Service while it remains configured. Removing the plugin stops creation and recovery; an existing Service remains until its corresponding Role is deleted. Services are auxiliary and do not determine whether a Role or ServingGroup still exists.
 
 **Example: Using the demo plugin**
 
@@ -159,6 +177,7 @@ plugins:
 ### Plugin Execution Order
 
 - Plugins execute in the order defined in the `plugins` list
+- A plugin name may appear only once
 - Each plugin sees the Pod after previous plugins have applied their mutations
 - If any plugin returns an error, Pod creation fails and the controller retries via workqueue
 

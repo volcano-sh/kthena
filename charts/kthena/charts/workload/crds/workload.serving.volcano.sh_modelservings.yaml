@@ -57,8 +57,9 @@ spec:
               resource.
             properties:
               plugins:
-                description: Plugins defines optional plugin chain to customize serving
-                  pods.
+                description: |-
+                  Plugins defines optional plugins that customize serving pods or manage
+                  auxiliary resources through controller lifecycle hooks.
                 items:
                   description: PluginSpec declares a plugin instance attached to a
                     ModelServing.

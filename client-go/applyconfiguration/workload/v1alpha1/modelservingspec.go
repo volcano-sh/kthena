@@ -32,7 +32,8 @@ type ModelServingSpecApplyConfiguration struct {
 	Replicas *int32 `json:"replicas,omitempty"`
 	// SchedulerName defines the name of the scheduler used by ModelServing
 	SchedulerName *string `json:"schedulerName,omitempty"`
-	// Plugins defines optional plugin chain to customize serving pods.
+	// Plugins defines optional plugins that customize serving pods or manage
+	// auxiliary resources through controller lifecycle hooks.
 	Plugins []PluginSpecApplyConfiguration `json:"plugins,omitempty"`
 	// Template defines the template for ServingGroup
 	Template *ServingGroupApplyConfiguration `json:"template,omitempty"`

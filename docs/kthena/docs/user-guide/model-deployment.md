@@ -249,6 +249,27 @@ spec:
 
 Below are examples of ModelServing configurations for different deployment scenarios.
 
+### Headless Service plugin
+
+ModelServing does not create per-Role-replica Headless Services by default. If
+entry and worker Pods rely on the generated `ENTRY_ADDRESS` or per-Pod DNS,
+enable the built-in plugin explicitly:
+
+```yaml
+spec:
+  plugins:
+    - name: headless-service
+      type: BuiltIn
+```
+
+Without the plugin, no new Headless Services are created or recovered. Removing
+the plugin does not immediately delete existing Services; they are deleted when
+their corresponding Roles are deleted. `ENTRY_ADDRESS` is injected into new
+Entry and Worker Pods only when this plugin runs. The plugin also sets each
+Pod's hostname to its generated Pod name and its subdomain to the Entry Service
+name. Because that Service selects both Entry and Worker Pods, every Pod in the
+Role replica receives a DNS record under the Headless Service domain.
+
 ### GPU PD Disaggregation
 
 This example demonstrates a disaggregated deployment using NVIDIA GPUs with prefill and decode roles.

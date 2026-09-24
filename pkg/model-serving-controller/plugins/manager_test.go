@@ -50,6 +50,22 @@ func (t *testPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (t *testPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "role-sync-"+t.name)
+	if t.errOn == "role-sync" {
+		return assertError
+	}
+	return nil
+}
+
+func (t *testPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "role-delete-"+t.name)
+	if t.errOn == "role-delete" {
+		return assertError
+	}
+	return nil
+}
+
 type pluginError string
 
 func (p pluginError) Error() string { return string(p) }
@@ -111,5 +127,65 @@ func TestNewChainTypeValidation(t *testing.T) {
 
 	if _, err := NewChain(registry, []workloadv1alpha1.PluginSpec{{Name: "demo", Type: workloadv1alpha1.PluginType("Unsupported")}}); err == nil {
 		t.Fatalf("expected error for unsupported type")
+	}
+}
+
+func TestNewChainRejectsDuplicatePlugins(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register("demo", func(spec workloadv1alpha1.PluginSpec) (Plugin, error) {
+		return &testPlugin{name: spec.Name, calls: &[]string{}}, nil
+	})
+
+	_, err := NewChain(registry, []workloadv1alpha1.PluginSpec{
+		{Name: "demo", Type: workloadv1alpha1.PluginTypeBuiltIn},
+		{Name: "demo", Type: workloadv1alpha1.PluginTypeBuiltIn},
+	})
+	if err == nil || !strings.Contains(err.Error(), "configured more than once") {
+		t.Fatalf("expected duplicate plugin error, got %v", err)
+	}
+}
+
+func TestChainRoleLifecycleHooks(t *testing.T) {
+	calls := []string{}
+	chain := &Chain{entries: []entry{
+		{plugin: &testPlugin{name: "all", calls: &calls}, spec: workloadv1alpha1.PluginSpec{Name: "all"}},
+		{plugin: &testPlugin{name: "scoped", calls: &calls}, spec: workloadv1alpha1.PluginSpec{
+			Name:  "scoped",
+			Scope: &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}},
+		}},
+	}}
+	req := &HookRequest{RoleName: "decode", RoleID: "decode-0"}
+
+	if err := chain.OnRoleSync(context.Background(), req); err != nil {
+		t.Fatalf("unexpected Role sync error: %v", err)
+	}
+	if err := chain.OnRoleDelete(context.Background(), req); err != nil {
+		t.Fatalf("unexpected Role delete error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "role-sync-all,role-delete-all" {
+		t.Fatalf("Role lifecycle scope mismatch, got %s", got)
+	}
+}
+
+func TestRoleDeleteChainIgnoresCurrentCleanupPluginScope(t *testing.T) {
+	calls := []string{}
+	registry := NewRegistry()
+	registry.Register("cleanup", func(spec workloadv1alpha1.PluginSpec) (Plugin, error) {
+		return &testPlugin{name: spec.Name, calls: &calls}, nil
+	})
+	registry.RegisterRoleDelete("cleanup")
+	chain, err := NewRoleDeleteChain(registry, []workloadv1alpha1.PluginSpec{{
+		Name:  "cleanup",
+		Type:  workloadv1alpha1.PluginTypeBuiltIn,
+		Scope: &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected chain build error: %v", err)
+	}
+	if err := chain.OnRoleDelete(context.Background(), &HookRequest{RoleName: "decode"}); err != nil {
+		t.Fatalf("unexpected Role delete error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "role-delete-cleanup" {
+		t.Fatalf("cleanup hook mismatch, got %s", got)
 	}
 }

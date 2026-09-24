@@ -33,6 +33,7 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/config"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
+	msplugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +70,17 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 	}
 	if err != nil {
 		return nil, err
+	}
+	// ModelBooster worker pods use ENTRY_ADDRESS to reach their entry pod, so add
+	// the Headless Service plugin for multi-pod roles.
+	for _, role := range serving.Spec.Template.Roles {
+		if role.WorkerReplicas > 0 {
+			serving.Spec.Plugins = append(serving.Spec.Plugins, workload.PluginSpec{
+				Name: msplugins.HeadlessServicePluginName,
+				Type: workload.PluginTypeBuiltIn,
+			})
+			break
+		}
 	}
 	return serving, nil
 }
