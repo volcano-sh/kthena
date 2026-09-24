@@ -311,7 +311,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		c.Set("model", modelName)
 
 		// Create metrics recorder for this request
-		path := c.Request.URL.Path
+		path := requestPathLabel(c)
 		hasModel := r.store.HasModel(modelName)
 		metricsModel := metrics.UnknownModel
 		if hasModel {
@@ -699,11 +699,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		backendName = inferencePoolFullName
 	}
 	accesslog.SetBackendInfo(c, backendType, backendName, upstreamModel)
+	modelIsRegistered := r.store.HasModel(modelName)
 	destination := metrics.DestinationLabels{
 		ModelRoute:    modelRouteName,
 		BackendType:   backendType,
 		BackendName:   backendName,
-		UpstreamModel: upstreamModel,
+		UpstreamModel: upstreamModelLabelForMetrics(modelServer, modelName, isLora, modelIsRegistered),
 	}
 	if recorder, exists := c.Get("metricsRecorder"); exists {
 		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
@@ -852,6 +853,10 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	if !matched {
 		return false, types.NamespacedName{}, nil
 	}
+
+	// Attribute request metrics to the path template of the rule that matched:
+	// this is the HTTPRoute that serves the request.
+	setRequestPathLabel(c, matchResult.matchedPathTemplate)
 
 	// Record Gateway API match into access log (gatewayKey is already "namespace/name").
 	httpRouteKey := fmt.Sprintf("%s/%s", matchResult.route.Namespace, matchResult.route.Name)

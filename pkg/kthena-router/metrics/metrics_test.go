@@ -309,6 +309,29 @@ func TestRequestRecorderFlushesInputTokensAsUnresolved(t *testing.T) {
 	}
 }
 
+func TestRequestRecorderAttributesTokensToThePathSelectedDuringRouting(t *testing.T) {
+	m := DefaultMetrics
+	const model = "metricstest-recorder-selected-path"
+	const selectedPath = "/custom"
+	r := NewRequestMetricsRecorder(m, model, UnknownPath)
+
+	selectedBefore := counterVal(t, &m.TokensTotal, model, selectedPath, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone)
+	fallbackBefore := counterVal(t, &m.TokensTotal, model, UnknownPath, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone)
+
+	// Input tokens are measured before routing, so the path selected while
+	// routing must also apply to them.
+	r.RecordInputTokens(5)
+	r.SetPathLabel(selectedPath)
+	r.BindDestination(DestinationLabels{})
+
+	if got := counterVal(t, &m.TokensTotal, model, selectedPath, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone) - selectedBefore; got != 5 {
+		t.Errorf("input token delta on the selected path = %v, want 5", got)
+	}
+	if got := counterVal(t, &m.TokensTotal, model, UnknownPath, TokenTypeInput, DestinationLabelValueNone, BackendTypeUnresolved, DestinationLabelValueNone, DestinationLabelValueNone) - fallbackBefore; got != 0 {
+		t.Errorf("input token delta on the fallback path = %v, want 0", got)
+	}
+}
+
 func TestActiveUpstreamRequestsKeepModelServerCompatibilityLabel(t *testing.T) {
 	m := DefaultMetrics
 	const modelRoute = "default/mr-external"

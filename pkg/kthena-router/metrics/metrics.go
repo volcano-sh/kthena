@@ -44,6 +44,7 @@ const (
 	LabelStage         = "stage"
 
 	UnknownModel            = "unknown"
+	UnknownPath             = "other"
 	FairnessAggregateUserID = "_all"
 
 	// kvcache-aware error stage values
@@ -735,6 +736,17 @@ func NewRequestMetricsRecorder(metrics *Metrics, model, path string) *RequestMet
 		model:     model,
 		path:      path,
 		startTime: time.Now(),
+	}
+}
+
+// SetPathLabel replaces the `path` label used for this request's metrics.
+// Routing happens after the recorder is created, so the router sets the final
+// value once the route that serves the request is known. It must be called
+// before BindDestination so tokens buffered while routing are attributed to the
+// same path.
+func (r *RequestMetricsRecorder) SetPathLabel(path string) {
+	if path != "" {
+		r.path = path
 	}
 }
 
