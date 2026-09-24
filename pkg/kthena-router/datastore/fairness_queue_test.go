@@ -934,3 +934,60 @@ func TestRun_SemaphoreMode_EmptyQueueDoesNotConsumePermit(t *testing.T) {
 	}
 	req.Release()
 }
+
+// TestPriorityRefresh_PreservesSameUserFIFO verifies that same-user FIFO holds while dequeue-time priority refresh is enabled.
+func TestPriorityRefresh_PreservesSameUserFIFO(t *testing.T) {
+	tracker := newMockTokenTracker()
+	cfg := FairnessQueueConfig{
+		MaxConcurrent:             0,
+		MaxQPS:                    100,
+		MaxPriorityRefreshRetries: 2,
+		RebuildThreshold:          64,
+	}
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
+	defer pq.Close()
+
+	base := time.Unix(1000, 0)
+	push := func(userID string, offset time.Duration, priority float64) {
+		t.Helper()
+		req := &Request{
+			UserID:      userID,
+			ModelName:   "model-1",
+			Priority:    priority,
+			RequestTime: base.Add(offset),
+		}
+		if err := pq.PushRequest(req); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+	push("user-a", 0*time.Millisecond, 0)
+	push("user-b", 1*time.Millisecond, 1)
+	push("user-a", 2*time.Millisecond, 0)
+	push("user-a", 3*time.Millisecond, 0)
+	push("user-a", 4*time.Millisecond, 0)
+
+	// Tracked usage grows between dequeues: user-a keeps reporting tokens for
+	// the requests being served while the queue still holds its burst.
+	usage := []float64{2, 4, 5, 6, 8}
+	popped := make([]*Request, 0, len(usage))
+	for i := range usage {
+		tracker.SetTokenCount("user-a", "model-1", usage[i])
+		tracker.SetTokenCount("user-b", "model-1", usage[i])
+		req, err := pq.popWhenAvailable(context.Background())
+		if err != nil {
+			t.Fatalf("popWhenAvailable failed: %v", err)
+		}
+		popped = append(popped, req)
+	}
+
+	lastDequeuedAt := make(map[string]time.Time)
+	order := make([]string, 0, len(popped))
+	for _, req := range popped {
+		order = append(order, fmt.Sprintf("%s@%dms", req.UserID, req.RequestTime.Sub(base)/time.Millisecond))
+		if prev, ok := lastDequeuedAt[req.UserID]; ok && req.RequestTime.Before(prev) {
+			t.Fatalf("same-user FIFO violated: %s request arriving at %v was dequeued after the request arriving at %v; dequeue order: %v",
+				req.UserID, req.RequestTime.Sub(base), prev.Sub(base), order)
+		}
+		lastDequeuedAt[req.UserID] = req.RequestTime
+	}
+}
