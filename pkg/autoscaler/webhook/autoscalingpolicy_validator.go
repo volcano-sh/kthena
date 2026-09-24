@@ -232,9 +232,6 @@ func (v *AutoscalingPolicyValidator) validateDisaggregatedTarget(policy *registr
 		}
 		rolePath := disaggregatedPath.Child("roles").Key(roleName)
 		fixedRole := isFixedRoleScalingParam(roleParam)
-		if roleParam.MinReplicas > roleParam.MaxReplicas {
-			allErrs = append(allErrs, field.Invalid(rolePath.Child("minReplicas"), roleParam.MinReplicas, "minReplicas must be <= maxReplicas"))
-		}
 		// Fixed roles are declared with equal min/max bounds. They are intentionally
 		// exempt from the metrics requirement because the autoscaler never computes a
 		// recommendation for them; it always returns the fixed replica count.
