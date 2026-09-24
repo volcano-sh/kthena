@@ -18,9 +18,11 @@ package utils
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -165,6 +167,70 @@ func TestSetCondition(t *testing.T) {
 		assert.Equal(t, string(workloadv1alpha1.ModelServingProgressing), cond.Type)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)
+	})
+
+	t.Run("superseded condition reports the state that replaced it", func(t *testing.T) {
+		wentTrue := metav1.NewTime(time.Now().Add(-time.Hour))
+		ms := &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{},
+			Status: workloadv1alpha1.ModelServingStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(workloadv1alpha1.ModelServingAvailable),
+						Status:             metav1.ConditionTrue,
+						Reason:             "AllGroupsReady",
+						Message:            AllGroupsIsReady,
+						LastTransitionTime: wentTrue,
+					},
+				},
+			},
+		}
+
+		// A rollout starts, so UpdateInProgress goes True and Available has to go False.
+		shouldUpdate := SetCondition(ms, []int{3}, []int{2, 3}, []int{0, 1})
+		assert.True(t, shouldUpdate)
+		assert.Len(t, ms.Status.Conditions, 2)
+
+		available := meta.FindStatusCondition(ms.Status.Conditions, string(workloadv1alpha1.ModelServingAvailable))
+		if assert.NotNil(t, available) {
+			assert.Equal(t, metav1.ConditionFalse, available.Status)
+			// The reason and message have to explain the False state, not the True one it left.
+			assert.Equal(t, "GroupsUpdating", available.Reason)
+			assert.Contains(t, available.Message, SomeGroupsAreProgressing)
+			assert.NotEqual(t, AllGroupsIsReady, available.Message)
+			// metav1.Condition requires LastTransitionTime to move when Status does.
+			assert.True(t, available.LastTransitionTime.After(wentTrue.Time))
+		}
+	})
+
+	t.Run("superseded UpdateInProgress reports completion", func(t *testing.T) {
+		wentTrue := metav1.NewTime(time.Now().Add(-time.Hour))
+		ms := &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{},
+			Status: workloadv1alpha1.ModelServingStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(workloadv1alpha1.ModelServingUpdateInProgress),
+						Status:             metav1.ConditionTrue,
+						Reason:             "GroupsUpdating",
+						Message:            SomeGroupsAreProgressing + ": [0 4], " + SomeGroupsAreUpdated + ": [0]",
+						LastTransitionTime: wentTrue,
+					},
+				},
+			},
+		}
+
+		// The rollout finishes: nothing is progressing, so Available goes True.
+		shouldUpdate := SetCondition(ms, []int{}, []int{0, 1, 2, 3}, []int{})
+		assert.True(t, shouldUpdate)
+
+		updating := meta.FindStatusCondition(ms.Status.Conditions, string(workloadv1alpha1.ModelServingUpdateInProgress))
+		if assert.NotNil(t, updating) {
+			assert.Equal(t, metav1.ConditionFalse, updating.Status)
+			assert.Equal(t, "AllGroupsReady", updating.Reason)
+			assert.Equal(t, AllGroupsIsReady, updating.Message)
+			assert.True(t, updating.LastTransitionTime.After(wentTrue.Time))
+		}
 	})
 }
 
