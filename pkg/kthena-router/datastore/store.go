@@ -45,6 +45,7 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -172,7 +173,7 @@ type CallbackFunc func(data EventData)
 // PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
 type PodRuntimeInspector interface {
 	GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
-	GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error)
+	GetPodModels(engine string, pod *corev1.Pod, port uint32, apiKey string) ([]string, error)
 }
 
 type realPodRuntimeInspector struct{}
@@ -181,8 +182,8 @@ func (realPodRuntimeInspector) GetPodMetrics(engine string, pod *corev1.Pod, por
 	return backend.GetPodMetrics(engine, pod, port, previousHistogram)
 }
 
-func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
-	return backend.GetPodModels(engine, pod, port)
+func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, port uint32, apiKey string) ([]string, error) {
+	return backend.GetPodModels(engine, pod, port, apiKey)
 }
 
 type Option func(*store)
@@ -391,6 +392,9 @@ type store struct {
 	externalModelProviders sync.Map // map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
 	pods                   sync.Map // map[types.NamespacedName]*PodInfo
 	secrets                sync.Map // map[types.NamespacedName]*corev1.Secret
+	// apiKeyErrors is the last API key failure reported for a ModelServer, so a
+	// misconfiguration is logged when it appears instead of on every scrape.
+	apiKeyErrors sync.Map // map[types.NamespacedName]string
 
 	// onFlightCounter is optional. When non-nil (Redis-backed), in-flight request
 	// counts are shared across all router replicas via Redis. When nil, only the
@@ -935,6 +939,7 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 }
 
 func (s *store) DeleteModelServer(ms types.NamespacedName) error {
+	s.apiKeyErrors.Delete(ms)
 	value, ok := s.modelServer.LoadAndDelete(ms)
 	if !ok {
 		return nil
@@ -1802,8 +1807,15 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 	if podObj.Status.PodIP == "" {
 		return
 	}
-	port := s.getPodWorkloadPort(podInfo)
-	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
+	ms := s.modelServerForPod(podInfo)
+	apiKey, err := s.modelServerAPIKey(ms)
+	s.reportAPIKeyError(ms, err)
+	if err != nil {
+		// Probing anonymously would hide the misconfiguration.
+		return
+	}
+
+	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, s.podWorkloadPort(podInfo, ms), apiKey)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
 		return
@@ -1813,22 +1825,95 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
-	var fallback int32
-	for msName := range podInfo.GetModelServers() {
-		if msValue, ok := s.modelServer.Load(msName); ok {
-			ms := msValue.(*modelServer).getModelServer()
-			if ms != nil && ms.Spec.WorkloadPort.Port > 0 {
-				fallback = ms.Spec.WorkloadPort.Port
-				break
-			}
-		}
-	}
-	// Statically configured endpoints may carry their own port, which overrides
-	// `spec.workloadPort.port` and is the only port when the latter is unset.
-	if port := utils.EndpointPort(podInfo.GetPod(), fallback); port > 0 {
+	return s.podWorkloadPort(podInfo, s.modelServerForPod(podInfo))
+}
+
+// podWorkloadPort takes the port from ms so it always pairs with the API key
+// resolved from the same ModelServer. Statically configured endpoints may carry
+// their own port, which overrides `spec.workloadPort.port` and is the only port
+// when the latter is unset.
+func (s *store) podWorkloadPort(podInfo *PodInfo, ms *aiv1alpha1.ModelServer) uint32 {
+	if port := utils.EndpointPort(podInfo.GetPod(), int32(workloadPort(ms))); port > 0 {
 		return uint32(port)
 	}
 	return 0
+}
+
+func workloadPort(ms *aiv1alpha1.ModelServer) uint32 {
+	if ms == nil || ms.Spec.WorkloadPort.Port <= 0 {
+		return 0
+	}
+	return uint32(ms.Spec.WorkloadPort.Port)
+}
+
+// modelServerForPod picks one ModelServer by name when a pod matches several,
+// so the port and the API key always come from the same one.
+func (s *store) modelServerForPod(podInfo *PodInfo) *aiv1alpha1.ModelServer {
+	msNames := podInfo.GetModelServers().UnsortedList()
+	sort.Slice(msNames, func(i, j int) bool { return msNames[i].String() < msNames[j].String() })
+
+	var fallback *aiv1alpha1.ModelServer
+	for _, msName := range msNames {
+		ms := s.GetModelServer(msName)
+		if ms == nil {
+			continue
+		}
+		if ms.Spec.WorkloadPort.Port > 0 {
+			return ms
+		}
+		if fallback == nil {
+			fallback = ms
+		}
+	}
+	return fallback
+}
+
+// reportAPIKeyError reports an API key failure when it appears and stays quiet
+// until the error changes or clears. updatePodModels runs once per pod per scrape
+// interval, a second by default, so logging every call would bury the rest of the
+// log. Recovery is reported too, so a fixed Secret does not look like a router
+// that simply stopped complaining.
+func (s *store) reportAPIKeyError(ms *aiv1alpha1.ModelServer, err error) {
+	if ms == nil {
+		return
+	}
+	name := utils.GetNamespaceName(ms)
+	if err == nil {
+		if _, reported := s.apiKeyErrors.LoadAndDelete(name); reported {
+			klog.Infof("API key for ModelServer %s resolves again, resuming model discovery", name)
+		}
+		return
+	}
+
+	msg := err.Error()
+	if previous, reported := s.apiKeyErrors.Swap(name, msg); reported && previous.(string) == msg {
+		return
+	}
+	klog.Warningf("skipping model discovery for ModelServer %s: %v", name, err)
+}
+
+// modelServerAPIKey returns "" with no error when no key is configured, and an
+// error when one is configured but unusable. The two are not the same.
+func (s *store) modelServerAPIKey(ms *aiv1alpha1.ModelServer) (string, error) {
+	if ms == nil || ms.Spec.APIKeySecretRef == nil {
+		return "", nil
+	}
+
+	ref := ms.Spec.APIKeySecretRef
+	secretName := types.NamespacedName{Namespace: ms.Namespace, Name: ref.Name}
+	secret := s.GetSecret(secretName)
+	if secret == nil {
+		return "", fmt.Errorf("secret %s is not available, check it exists and carries the %s label",
+			secretName, aiv1alpha1.ExternalModelProviderSecretLabelKey)
+	}
+
+	// A Secret written from a file carries a trailing newline that
+	// http.Transport rejects.
+	key, err := providers.NormalizeCredential(secret.Data[ref.Key])
+	if err != nil {
+		return "", fmt.Errorf("key %q in secret %s is unusable: %w", ref.Key, secretName, err)
+	}
+	return key, nil
 }
 
 func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {

@@ -35,9 +35,19 @@ type ModelList struct {
 	Data []Model `json:"data"`
 }
 
-func FetchPodModels(podIP string, port uint32) ([]string, error) {
+// FetchPodModels lists the models a pod serves. apiKey is sent as a bearer token
+// when set, for backends that require authentication on /v1/models.
+func FetchPodModels(podIP string, port uint32, apiKey string) ([]string, error) {
 	url := metrics.PodEndpointURL(podIP, port, "/v1/models")
-	resp, err := metrics.HTTPClient().Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := metrics.HTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -65,9 +75,9 @@ func FetchPodModels(podIP string, port uint32) ([]string, error) {
 	return models, nil
 }
 
-func (engine *vllmEngine) GetPodModels(pod *corev1.Pod, port uint32) ([]string, error) {
+func (engine *vllmEngine) GetPodModels(pod *corev1.Pod, port uint32, apiKey string) ([]string, error) {
 	if port == 0 {
 		port = 8000
 	}
-	return FetchPodModels(pod.Status.PodIP, port)
+	return FetchPodModels(pod.Status.PodIP, port, apiKey)
 }

@@ -298,4 +298,45 @@ spec:
 
 ---
 
+## Backends That Require an API Key
+
+If you start the engine with an API key, for example vLLM with `--api-key`, give the Router the same key. Without it the Router cannot list the models your pods serve, so requests for those models get no backend.
+
+Create the Secret in the ModelServer's namespace, label it as a credential, and point `apiKeySecretRef` at it:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vllm-api-key
+  namespace: default
+  labels:
+    networking.serving.volcano.sh/external-model-provider-credential: "true"
+type: Opaque
+stringData:
+  api-key: "replace-with-the-engine-api-key"
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: qwen
+  namespace: default
+spec:
+  inferenceEngine: vLLM
+  workloadSelector:
+    matchLabels:
+      app: qwen
+  workloadPort:
+    port: 8000
+  apiKeySecretRef:
+    name: vllm-api-key
+    key: api-key
+```
+
+The `networking.serving.volcano.sh/external-model-provider-credential` label is required. If your models still do not appear, check that label first, then that `key` matches the key inside the Secret.
+
+Your clients do not need to change. Keep sending the API key the way you do today.
+
+---
+
 This comprehensive routing system enables flexible, scalable, and maintainable model serving infrastructure that can adapt to various deployment patterns and user requirements.

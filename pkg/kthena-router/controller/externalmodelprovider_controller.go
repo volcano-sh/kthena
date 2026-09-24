@@ -47,18 +47,23 @@ type ExternalModelProviderController struct {
 	kthenaClient                 clientset.Interface
 	externalModelProviderLister  listerv1alpha1.ExternalModelProviderLister
 	externalModelProviderIndexer cache.Indexer
+	modelServerIndexer           cache.Indexer
 	secretLister                 corelisters.SecretLister
 	externalModelProviderSynced  cache.InformerSynced
 	secretSynced                 cache.InformerSynced
 	registration                 cache.ResourceEventHandlerRegistration
 	secretRegistration           cache.ResourceEventHandlerRegistration
+	modelServerRegistration      cache.ResourceEventHandlerRegistration
 
 	workqueue   workqueue.TypedRateLimitingInterface[QueueItem]
 	initialSync *atomic.Bool
 	store       datastore.Store
 }
 
-const externalModelProviderSecretRefIndex = "externalModelProviderSecretRef"
+const (
+	externalModelProviderSecretRefIndex = "externalModelProviderSecretRef"
+	modelServerSecretRefIndex           = "modelServerSecretRef"
+)
 
 func NewExternalModelProviderController(
 	kthenaClient clientset.Interface,
@@ -67,17 +72,24 @@ func NewExternalModelProviderController(
 	store datastore.Store,
 ) (*ExternalModelProviderController, error) {
 	externalModelProviderInformer := kthenaInformerFactory.Networking().V1alpha1().ExternalModelProviders()
+	modelServerInformer := kthenaInformerFactory.Networking().V1alpha1().ModelServers()
 	secretInformer := secretInformerFactory.Core().V1().Secrets()
 	if err := externalModelProviderInformer.Informer().AddIndexers(cache.Indexers{
 		externalModelProviderSecretRefIndex: externalModelProviderSecretRefIndexFunc,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to add Secret reference index for externalmodelprovider controller: %w", err)
 	}
+	if err := modelServerInformer.Informer().AddIndexers(cache.Indexers{
+		modelServerSecretRefIndex: modelServerSecretRefIndexFunc,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to add Secret reference index for modelserver: %w", err)
+	}
 
 	controller := &ExternalModelProviderController{
 		kthenaClient:                 kthenaClient,
 		externalModelProviderLister:  externalModelProviderInformer.Lister(),
 		externalModelProviderIndexer: externalModelProviderInformer.Informer().GetIndexer(),
+		modelServerIndexer:           modelServerInformer.Informer().GetIndexer(),
 		secretLister:                 secretInformer.Lister(),
 		externalModelProviderSynced:  externalModelProviderInformer.Informer().HasSynced,
 		secretSynced:                 secretInformer.Informer().HasSynced,
@@ -114,6 +126,18 @@ func NewExternalModelProviderController(
 		return nil, fmt.Errorf("failed to add secret event handler for externalmodelprovider controller: %w", err)
 	}
 
+	controller.modelServerRegistration, err = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: controller.enqueueModelServerSecret,
+		UpdateFunc: func(old, new interface{}) {
+			controller.enqueueModelServerSecret(old)
+			controller.enqueueModelServerSecret(new)
+		},
+		DeleteFunc: controller.enqueueModelServerSecret,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add modelserver event handler for externalmodelprovider controller: %w", err)
+	}
+
 	return controller, nil
 }
 
@@ -121,7 +145,7 @@ func (c *ExternalModelProviderController) Run(stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	if ok := cache.WaitForCacheSync(stopCh, c.registration.HasSynced, c.secretRegistration.HasSynced); !ok {
+	if ok := cache.WaitForCacheSync(stopCh, c.registration.HasSynced, c.secretRegistration.HasSynced, c.modelServerRegistration.HasSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 	// add initialSync signal
@@ -256,7 +280,11 @@ func (c *ExternalModelProviderController) syncSecret(secretName types.Namespaced
 }
 
 func (c *ExternalModelProviderController) syncSecretForProviders(secretName types.NamespacedName, providers []*networkingv1alpha1.ExternalModelProvider) error {
-	if len(providers) == 0 {
+	modelServers, err := c.modelServersForSecret(secretName)
+	if err != nil {
+		return err
+	}
+	if len(providers) == 0 && len(modelServers) == 0 {
 		return c.store.DeleteSecret(secretName)
 	}
 
@@ -269,15 +297,23 @@ func (c *ExternalModelProviderController) syncSecretForProviders(secretName type
 	}
 
 	projected := secret.DeepCopy()
-	projected.Data = make(map[string][]byte, len(providers))
+	projected.Data = make(map[string][]byte, len(providers)+len(modelServers))
+	project := func(key string) {
+		if value, ok := secret.Data[key]; ok {
+			projected.Data[key] = append([]byte(nil), value...)
+		}
+	}
 	for _, provider := range providers {
 		if provider.Spec.Auth == nil {
 			continue
 		}
-		key := provider.Spec.Auth.SecretRef.Key
-		if value, ok := secret.Data[key]; ok {
-			projected.Data[key] = append([]byte(nil), value...)
+		project(provider.Spec.Auth.SecretRef.Key)
+	}
+	for _, modelServer := range modelServers {
+		if modelServer.Spec.APIKeySecretRef == nil {
+			continue
 		}
+		project(modelServer.Spec.APIKeySecretRef.Key)
 	}
 	projected.StringData = nil
 	return c.store.AddOrUpdateSecret(projected)
@@ -312,6 +348,37 @@ func externalModelProviderSecretRefIndexFunc(obj interface{}) ([]string, error) 
 		Namespace: provider.Namespace,
 		Name:      provider.Spec.Auth.SecretRef.Name,
 	}.String()}, nil
+}
+
+func modelServerSecretRefIndexFunc(obj interface{}) ([]string, error) {
+	modelServer, ok := obj.(*networkingv1alpha1.ModelServer)
+	if !ok {
+		return nil, fmt.Errorf("expected ModelServer in Secret reference index, got %T", obj)
+	}
+	if modelServer.Spec.APIKeySecretRef == nil || modelServer.Spec.APIKeySecretRef.Name == "" {
+		return nil, nil
+	}
+	return []string{types.NamespacedName{
+		Namespace: modelServer.Namespace,
+		Name:      modelServer.Spec.APIKeySecretRef.Name,
+	}.String()}, nil
+}
+
+func (c *ExternalModelProviderController) modelServersForSecret(secretName types.NamespacedName) ([]*networkingv1alpha1.ModelServer, error) {
+	objects, err := c.modelServerIndexer.ByIndex(modelServerSecretRefIndex, secretName.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up ModelServers for Secret %s: %w", secretName, err)
+	}
+
+	modelServers := make([]*networkingv1alpha1.ModelServer, 0, len(objects))
+	for _, object := range objects {
+		modelServer, ok := object.(*networkingv1alpha1.ModelServer)
+		if !ok {
+			return nil, fmt.Errorf("expected ModelServer in Secret reference index, got %T", object)
+		}
+		modelServers = append(modelServers, modelServer)
+	}
+	return modelServers, nil
 }
 
 func providerSecretName(provider *networkingv1alpha1.ExternalModelProvider) (types.NamespacedName, bool) {
@@ -429,6 +496,22 @@ func (c *ExternalModelProviderController) enqueueProviderSecret(obj interface{})
 	if !ok {
 		return
 	}
+	c.workqueue.Add(QueueItem{ResourceType: ResourceTypeSecret, Key: secretName.String()})
+}
+
+func (c *ExternalModelProviderController) enqueueModelServerSecret(obj interface{}) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	modelServer, ok := obj.(*networkingv1alpha1.ModelServer)
+	if !ok {
+		utilruntime.HandleError(fmt.Errorf("expected ModelServer, got %T", obj))
+		return
+	}
+	if modelServer.Spec.APIKeySecretRef == nil || modelServer.Spec.APIKeySecretRef.Name == "" {
+		return
+	}
+	secretName := types.NamespacedName{Namespace: modelServer.Namespace, Name: modelServer.Spec.APIKeySecretRef.Name}
 	c.workqueue.Add(QueueItem{ResourceType: ResourceTypeSecret, Key: secretName.String()})
 }
 

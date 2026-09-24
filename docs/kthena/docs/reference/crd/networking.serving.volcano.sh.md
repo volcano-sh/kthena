@@ -376,6 +376,7 @@ _Appears in:_
 | `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server.<br />It may be omitted only when every entry in `endpoints` declares its own<br />`port`; endpoints without an explicit `port` fall back to `workloadPort.port`. |  |  |
 | `trafficPolicy` _[TrafficPolicy](#trafficpolicy)_ | Traffic Policy for accessing the model server instance. |  |  |
 | `kvConnector` _[KVConnectorSpec](#kvconnectorspec)_ | KVConnector specifies the KV connector configuration for PD disaggregated routing |  |  |
+| `apiKeySecretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | APIKeySecretRef references the API key the serving instances require, for<br />example a vLLM engine started with --api-key. The router sends it as a bearer<br />token when discovering the models a pod serves. The Secret must live in this<br />ModelServer's namespace and carry the<br />networking.serving.volcano.sh/external-model-provider-credential label. |  |  |
 
 
 #### ModelServerStatus
