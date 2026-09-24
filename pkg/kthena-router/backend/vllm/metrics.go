@@ -80,13 +80,17 @@ func (engine *vllmEngine) GetCountMetricsInfo(allMetrics map[string]*dto.MetricF
 	wantMetrics := make(map[string]float64)
 	for _, metricName := range CounterAndGaugeMetrics {
 		metricInfo, exist := allMetrics[metricName]
-		if !exist {
+		if !exist || len(metricInfo.Metric) == 0 {
 			continue
 		}
+		var total float64
 		for _, metric := range metricInfo.Metric {
-			metricValue := metric.GetGauge().GetValue()
-			wantMetrics[mapOfMetricsName[metricName]] = metricValue
+			total += metric.GetGauge().GetValue()
 		}
+		if metricName == KVCacheUsage {
+			total /= float64(len(metricInfo.Metric))
+		}
+		wantMetrics[mapOfMetricsName[metricName]] = total
 	}
 
 	return wantMetrics
@@ -97,21 +101,30 @@ func (engine *vllmEngine) GetHistogramPodMetrics(allMetrics map[string]*dto.Metr
 	histogramMetrics := make(map[string]*dto.Histogram)
 	for _, metricName := range HistogramMetrics {
 		metricInfo, exist := allMetrics[metricName]
-		if !exist {
+		if !exist || len(metricInfo.Metric) == 0 {
 			continue
 		}
-		for _, metric := range metricInfo.Metric {
-			metricValue := metric.GetHistogram()
-			histogramMetrics[mapOfMetricsName[metricName]] = metricValue
-			previousMetric := previousHistogram[mapOfMetricsName[metricName]]
-			if previousMetric == nil {
-				// Ignore the effects of history and give each pod a fair chance at the initial.
-				wantMetrics[mapOfMetricsName[metricName]] = float64(0.0)
-			} else {
-				wantMetrics[mapOfMetricsName[metricName]] = metrics.LastPeriodAvg(previousMetric, metricValue)
-			}
+		metricValue := mergeHistograms(metricInfo.Metric)
+		histogramMetrics[mapOfMetricsName[metricName]] = metricValue
+		previousMetric := previousHistogram[mapOfMetricsName[metricName]]
+		if previousMetric == nil {
+			// Ignore the effects of history and give each pod a fair chance at the initial.
+			wantMetrics[mapOfMetricsName[metricName]] = float64(0.0)
+		} else {
+			wantMetrics[mapOfMetricsName[metricName]] = metrics.LastPeriodAvg(previousMetric, metricValue)
 		}
 	}
 
 	return wantMetrics, histogramMetrics
+}
+
+// mergeHistograms adds up the sample counts and sums across every series.
+func mergeHistograms(series []*dto.Metric) *dto.Histogram {
+	var count uint64
+	var sum float64
+	for _, metric := range series {
+		count += metric.GetHistogram().GetSampleCount()
+		sum += metric.GetHistogram().GetSampleSum()
+	}
+	return &dto.Histogram{SampleCount: &count, SampleSum: &sum}
 }
