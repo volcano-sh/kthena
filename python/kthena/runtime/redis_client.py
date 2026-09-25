@@ -103,6 +103,8 @@ class RedisClient:
             await self.connect()
 
     async def _execute_with_retry(self, operation, *args, **kwargs) -> Any:
+        # operation must resolve self._client when called. A bound method would
+        # keep addressing the client that the reconnect below replaces.
         last_error = None
         for attempt in range(self.config.max_retries + 1):
             try:
@@ -123,7 +125,9 @@ class RedisClient:
 
     async def keys(self, pattern: str) -> List[str]:
         try:
-            result = await self._execute_with_retry(self._client.keys, pattern)
+            result = await self._execute_with_retry(
+                lambda *a, **kw: self._client.keys(*a, **kw), pattern
+            )
             return result or []
         except (RedisError, ConnectionError, TimeoutError):
             return []
@@ -141,7 +145,8 @@ class RedisClient:
         try:
             while True:
                 cursor, batch = await self._execute_with_retry(
-                    self._client.scan, cursor=cursor, match=pattern, count=count
+                    lambda **kw: self._client.scan(**kw),
+                    cursor=cursor, match=pattern, count=count,
                 )
                 keys.extend(batch)
                 if cursor == 0:
