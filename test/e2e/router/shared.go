@@ -41,14 +41,8 @@ import (
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/restmapper"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -82,79 +76,7 @@ func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kth
 
 func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
 	t.Helper()
-	ctx := context.Background()
-
-	config, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
-
-	dynamicClient, err := dynamic.NewForConfig(config)
-	require.NoError(t, err, "Failed to create dynamic client")
-
-	redisManifestPath := filepath.Join(routercontext.TestDataDir, "redis-standalone.yaml")
-
-	redisObjects := utils.LoadUnstructuredYAMLFromFile(redisManifestPath)
-	require.NotEmpty(t, redisObjects, "Redis manifest is empty")
-
-	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(kubeClient.Discovery()))
-	type createdResourceRef struct {
-		gvr       schema.GroupVersionResource
-		namespace string
-		name      string
-	}
-	createdRefs := make([]createdResourceRef, 0, len(redisObjects))
-	var redisDeploymentName string
-
-	for _, obj := range redisObjects {
-		if obj.GetKind() == "Deployment" && redisDeploymentName == "" {
-			redisDeploymentName = obj.GetName()
-		}
-		gvk := obj.GroupVersionKind()
-		mapping, mapErr := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-		require.NoError(t, mapErr, "Failed to map GVK %s", gvk.String())
-
-		resourceClient := dynamicClient.Resource(mapping.Resource)
-		namespaceToUse := obj.GetNamespace()
-		resource := func() dynamic.ResourceInterface {
-			if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-				if namespaceToUse == "" {
-					namespaceToUse = namespace
-					obj.SetNamespace(namespaceToUse)
-				}
-				return resourceClient.Namespace(namespaceToUse)
-			}
-			return resourceClient
-		}()
-
-		_, createErr := resource.Create(ctx, obj, metav1.CreateOptions{})
-		if createErr != nil {
-			require.True(t, apierrors.IsAlreadyExists(createErr), "Failed to create %s/%s: %v", gvk.Kind, obj.GetName(), createErr)
-			continue
-		}
-
-		createdRefs = append(createdRefs, createdResourceRef{
-			gvr:       mapping.Resource,
-			namespace: namespaceToUse,
-			name:      obj.GetName(),
-		})
-	}
-
-	require.NotEmpty(t, redisDeploymentName, "Redis Deployment not found in manifest")
-
-	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, redisDeploymentName, 1, 2*time.Minute)
-	t.Log("Redis is ready")
-
-	return func() {
-		cleanupCtx := context.Background()
-		for i := len(createdRefs) - 1; i >= 0; i-- {
-			ref := createdRefs[i]
-			resourceClient := dynamicClient.Resource(ref.gvr)
-			if ref.namespace != "" {
-				_ = resourceClient.Namespace(ref.namespace).Delete(cleanupCtx, ref.name, metav1.DeleteOptions{})
-			} else {
-				_ = resourceClient.Delete(cleanupCtx, ref.name, metav1.DeleteOptions{})
-			}
-		}
-	}
+	return utils.EnsureRedis(t, kubeClient, namespace, filepath.Join(routercontext.TestDataDir, "redis-standalone.yaml"))
 }
 
 func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namespace string, replicas int32) func() {
