@@ -17,19 +17,26 @@ limitations under the License.
 package tokenizer
 
 import (
+	"fmt"
+	"sync"
+
 	"github.com/pkoukk/tiktoken-go"
 	tiktokenloader "github.com/pkoukk/tiktoken-go-loader"
 )
 
 const encodingName = "cl100k_base"
 
+var getBPE = sync.OnceValues(func() (*tiktoken.Tiktoken, error) {
+	tiktoken.SetBpeLoader(tiktokenloader.NewOfflineLoader())
+	return tiktoken.GetEncoding(encodingName)
+})
+
 type TickToken struct{}
 
 func (t *TickToken) CalculateTokenNum(prompt string) (int, error) {
-	tiktoken.SetBpeLoader(tiktokenloader.NewOfflineLoader())
-	encoding, err := tiktoken.GetEncoding(encodingName)
+	encoding, err := getBPE()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to initialize BPE encoding: %w", err)
 	}
 	return len(encoding.Encode(prompt, nil, nil)), nil
 }
