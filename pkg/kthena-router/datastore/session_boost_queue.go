@@ -251,24 +251,53 @@ func (pq *RequestPriorityQueue) drainPendingRelease() bool {
 	}
 }
 
-// waitGraceAndDequeue holds a just-freed slot for up to SessionBoostGracePeriod
+// waitGraceAndDequeue holds a just-freed slot for the duration of SessionBoostGracePeriod
 // before dispatching, giving a same-session follow-up time to arrive. It does not
 // need to watch for the follow-up itself: boosted requests outrank others in the
 // heap and, among boosted requests, the one whose session completed most recently
-// wins, so once the timer fires tryBackpressureDequeue admits the warmest boosted
-// follow-up first if one showed up. The wait always runs for the full window even
-// when the head is already boosted, because a follow-up from an even-more-recently
-// completed session may yet arrive and should be the one to ride the warm prefix
-// cache. The wait stays responsive to shutdown via ctx/stopCh.
+// wins. The wait always runs for the full window even when a boosted follow-up is
+// already waiting, because a follow-up from an even-more-recently completed session
+// may yet arrive and should be the one to ride the warm prefix cache.
+// It actively listens to notifyCh and releaseCh while waiting so that additional
+// capacity can be drained without stealing the slot reserved for this grace period.
+// The wait stays responsive to shutdown via ctx/stopCh.
 func (pq *RequestPriorityQueue) waitGraceAndDequeue(ctx context.Context) {
 	klog.V(4).Infof("[SessionBoost] grace: holding freed slot for %v", pq.config.SessionBoostGracePeriod)
+
+	// Reserve one inflight permit so calls to tryBackpressureDequeue made while waiting
+	// do not consume the slot we are holding for the grace period.
+	pq.inflightCount.Add(1)
+
+	var released bool
+	defer func() {
+		if !released {
+			pq.inflightCount.Add(-1)
+		}
+	}()
+
 	timer := time.NewTimer(pq.config.SessionBoostGracePeriod)
 	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-pq.stopCh:
-	case <-timer.C:
-		pq.tryBackpressureDequeue(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-pq.stopCh:
+			return
+		case <-pq.notifyCh:
+			// Drain other permits if additional capacity exists. We do not dispatch
+			// the boosted request for this slot until the grace timer fully expires,
+			// allowing even warmer follow-ups time to arrive.
+			pq.tryBackpressureDequeue(ctx)
+		case <-pq.releaseCh:
+			// Another slot freed up. Dispatch any waiting requests into it.
+			pq.tryBackpressureDequeue(ctx)
+		case <-timer.C:
+			// Grace period expired. Release the reservation and dispatch whatever is next.
+			released = true
+			pq.inflightCount.Add(-1)
+			pq.tryBackpressureDequeue(ctx)
+			return
+		}
 	}
 }
 
