@@ -2745,15 +2745,16 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 
 func TestManageRoleReplicas(t *testing.T) {
 	tests := []struct {
-		name             string
-		roleReplicas     int32
-		workerReplicas   int32
-		initialRoleIDs   []int
-		addEntryPod      bool
-		mismatchOwnerUID bool
-		expectedRoleSize int
-		expectedPodCount int
-		expectRequeue    bool
+		name              string
+		roleReplicas      int32
+		workerReplicas    int32
+		initialRoleIDs    []int
+		addEntryPod       bool
+		mismatchOwnerUID  bool
+		noOwnerReferences bool
+		expectedRoleSize  int
+		expectedPodCount  int
+		expectRequeue     bool
 	}{
 		{
 			name:             "recreate missing pods when role count matches",
@@ -2795,6 +2796,18 @@ func TestManageRoleReplicas(t *testing.T) {
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
+		},
+		{
+			// Regression test: a pod with no OwnerReferences must not panic.
+			name:              "does not panic and does not requeue when pod has no owner references",
+			roleReplicas:      1,
+			workerReplicas:    0,
+			initialRoleIDs:    []int{0},
+			addEntryPod:       true,
+			noOwnerReferences: true,
+			expectedRoleSize:  1,
+			expectedPodCount:  1,
+			expectRequeue:     false,
 		},
 	}
 
@@ -2861,12 +2874,17 @@ func TestManageRoleReplicas(t *testing.T) {
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
 				}
+				if tt.noOwnerReferences {
+					entryPod.OwnerReferences = nil
+				}
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			assert.NotPanics(t, func() {
+				controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			})
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -3012,6 +3030,82 @@ func TestHasUpdateableOutdatedRole(t *testing.T) {
 			assert.Equal(t, tt.want, controller.hasUpdateableOutdatedRole(ms, "test-0", targetRole, tt.roles))
 		})
 	}
+}
+
+// TestSyncHandlerSurvivesOwnerlessPodThroughRealReconcile reproduces the reported panic
+// through the real reconcile chain (syncHandler -> ... -> manageRoleReplicasPerGroup)
+// and verifies reconciliation keeps working afterward.
+func TestSyncHandlerSurvivesOwnerlessPodThroughRealReconcile(t *testing.T) {
+	roleName := "default"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "owner-check-ms",
+			UID:       types.UID("ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     roleName,
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "entry-container", Image: "test-image:latest"}},
+							},
+						},
+					},
+				},
+			},
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+		},
+	}
+
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	revision := "rev-1"
+	roleID := utils.GenerateRoleID(roleName, 0)
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
+	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, roleID, revision, "test-hash")
+
+	foreignPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foreign-pod-no-owner",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+			},
+			// Deliberately no OwnerReferences.
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "test-image:latest"}}},
+	}
+	_, err := h.kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), foreignPod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID)
+	require.Eventually(t, func() bool {
+		pods, err := controller.getPodsByIndex(RoleIDKey, roleIDValue)
+		return err == nil && len(pods) == 1
+	}, 2*time.Second, 10*time.Millisecond, "owner-less pod never reached the real pods informer index")
+
+	key := namespacedKey(ms.Namespace, ms.Name)
+	var syncErr error
+	require.NotPanics(t, func() {
+		syncErr = controller.syncHandler(context.Background(), key)
+	}, "reconciling a ModelServing with an owner-less same-labeled pod must not panic")
+	require.NoError(t, syncErr, "reconciliation must succeed despite the owner-less pod")
+
+	// Reconciling again must still succeed.
+	require.NotPanics(t, func() {
+		syncErr = controller.syncHandler(context.Background(), key)
+	}, "reconciliation must keep working after encountering an owner-less pod")
+	require.NoError(t, syncErr)
 }
 
 // TestScaleDownServingGroups tests the scaleDownServingGroups function with various scenarios
