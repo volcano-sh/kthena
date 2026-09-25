@@ -53,6 +53,32 @@ type GangPolicy struct {
 }
 ```
 
+## Queue Placement
+
+To place a ModelServing's PodGroups in a Volcano [Queue](https://volcano.sh/en/docs/queue/), set the `scheduling.volcano.sh/queue-name` annotation on the ModelServing itself, not on the pod template. Kthena copies it into `PodGroup.spec.queue`; without it, the PodGroup uses Volcano's `default` queue.
+
+```yaml
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: sample
+  annotations:
+    scheduling.volcano.sh/queue-name: my-queue   # the Queue must already exist
+spec:
+  schedulerName: volcano   # the CRD default; any other scheduler means no PodGroup
+  template:
+    roles:
+      - name: prefill
+        entryTemplate:
+          spec:
+            nodeSelector:            # workerTemplate.spec takes it too
+              nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+```
+
+- **Set it at creation.** On a running ModelServing the controller skips updates whose `spec` is unchanged, so an annotation edit alone takes effect only at the next reconcile (a spec change, a pod event, or a controller restart). Pods already bound to a node do not move.
+- `nodeSelector`, `affinity` and `tolerations` are ordinary `corev1.PodSpec` fields, set per role on `entryTemplate.spec` or `workerTemplate.spec`.
+- **ModelBooster cannot set the queue annotation** — the ModelBooster controller does not propagate annotations onto the ModelServing it generates. For node targeting it exposes `spec.backend.workers[].affinity.nodeAffinity`, which does reach its pods.
+
 ## Preparation
 
 ### Prerequisites
@@ -66,7 +92,7 @@ type GangPolicy struct {
 1. Deploy model serving with the MinRoleReplicas configuration
 
 ```sh
-kubectl apply -f examples/model-serving/gang-scheduling.yaml
+kubectl apply -f examples/model-serving/gangPolicy.yaml
 
 NAMESPACE            NAME                                               READY   STATUS    RESTARTS   AGE
 default              sample-0-decode-0-0                                1/1     Running   0          15s
