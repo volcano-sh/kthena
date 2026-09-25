@@ -55,8 +55,8 @@ func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 	}
 }
 
-// ServingGroupRegex is a regular expression that extracts the parent modelServing and ordinal from the Name of an ServingGroup
-var servingGroupRegex = regexp.MustCompile("(.*)-([0-9]+)$")
+// ServingGroupRegex is a regular expression that extracts the parent modelServing and ordinal from the Name of a ServingGroup.
+var servingGroupRegex = regexp.MustCompile("^(.+)-([0-9]+)$")
 
 // GetParentNameAndOrdinal gets the name of ServingGroup's parent modelServing and ServingGroup's ordinal as extracted from its Name.
 // For example, the Servinggroup name is vllm-sample-0, this function can be used to obtain the modelServing name corresponding to the ServingGroup,
