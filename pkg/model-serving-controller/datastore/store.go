@@ -39,6 +39,11 @@ type Store interface {
 	GetRolesByGroup(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error)
 	GetRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string) RoleStatus
 	UpdateRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) error
+	// SetRoleFailure records (or, when reason is empty, clears) the last observed Pod-level failure
+	// for a Role, and reports whether that changed the previously recorded value. It is best-effort:
+	// if the Role is not found (e.g. it was already deleted/recreated) the call is a no-op, since the
+	// failure no longer applies to any live Role.
+	SetRoleFailure(modelServingName types.NamespacedName, groupName, roleName, roleID, reason, message string) bool
 	DeleteRole(modelServingName types.NamespacedName, groupName, roleName, roleID string)
 	DeleteModelServing(modelServingName types.NamespacedName)
 	DeleteServingGroup(modelServingName types.NamespacedName, groupName string)
@@ -75,6 +80,13 @@ type Role struct {
 	Revision         string // Revision of the ServingGroup
 	RoleTemplateHash string // Revision of the Role, used for RoleRollingUpdate strategy
 	Status           RoleStatus
+	// FailureReason is a stable, programmatic identifier for the last observed Pod-level
+	// failure of this Role (e.g. a container waiting/terminated reason reported by kubelet,
+	// or "Unschedulable"). Empty when no failure is currently observed for the Role.
+	FailureReason string
+	// FailureMessage is a short, human-readable detail for FailureReason (Pod/container name,
+	// exit code, etc). Empty when FailureReason is empty.
+	FailureMessage string
 }
 
 type ServingGroupStatus string
@@ -217,6 +229,38 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 
 	role.Status = status
 	return nil
+}
+
+// SetRoleFailure records or clears the last observed Pod-level failure for a Role.
+// Passing an empty reason clears any previously recorded failure (e.g. once the Role's
+// Pod becomes ready again). If the Role can't be found, the call is silently ignored:
+// a Role that no longer exists in the store has no failure to surface either.
+func (s *store) SetRoleFailure(modelServingName types.NamespacedName, groupName, roleName, roleID, reason, message string) bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	servingGroups, ok := s.servingGroup[modelServingName]
+	if !ok {
+		return false
+	}
+	servingGroup, ok := servingGroups[groupName]
+	if !ok {
+		return false
+	}
+	roleMap, ok := servingGroup.roles[roleName]
+	if !ok {
+		return false
+	}
+	role, ok := roleMap[roleID]
+	if !ok {
+		return false
+	}
+	if role.FailureReason == reason && role.FailureMessage == message {
+		return false
+	}
+	role.FailureReason = reason
+	role.FailureMessage = message
+	return true
 }
 
 // GetRoleStatus returns the status of a specific role
