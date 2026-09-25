@@ -3,6 +3,7 @@ import type { Config } from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import remarkLocalizedDocLinks from './plugins/remark-localized-doc-links';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
@@ -41,12 +42,13 @@ const config: Config = {
   onBrokenAnchors: 'warn',
   trailingSlash: false,
 
-  // Even if you don't use internationalization, you can use this field to set
-  // useful metadata like html lang. For example, if your site is Chinese, you
-  // may want to replace "en" with "zh-Hans".
   i18n: {
     defaultLocale: 'en',
-    locales: ['en'],
+    locales: ['en', 'zh-Hans'],
+    localeConfigs: {
+      en: { label: 'English' },
+      'zh-Hans': { label: '中文', htmlLang: 'zh-Hans' },
+    },
   },
 
   markdown: {
@@ -75,6 +77,8 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
+          editLocalizedFiles: true,
+          beforeDefaultRemarkPlugins: [remarkLocalizedDocLinks],
           // Please change this to your repo.
           // Remove this to remove the "edit this page" links.
           editUrl:
@@ -85,6 +89,7 @@ const config: Config = {
         blog: {
           blogSidebarCount: 'ALL',
           showReadingTime: true,
+          editLocalizedFiles: true,
           feedOptions: {
             type: ['rss', 'atom'],
             xslt: true,
@@ -121,7 +126,7 @@ const config: Config = {
           type: 'docSidebar',
           sidebarId: 'tutorialSidebar',
           position: 'left',
-          label: 'Tutorial',
+          label: 'Documentation',
         },
         { to: '/blog', label: 'Blog', position: 'left' },
         {
@@ -130,6 +135,10 @@ const config: Config = {
         {
           href: 'https://github.com/volcano-sh/kthena',
           label: 'GitHub',
+          position: 'right',
+        },
+        {
+          type: 'localeDropdown',
           position: 'right',
         },
       ],
@@ -141,7 +150,7 @@ const config: Config = {
           title: 'Docs',
           items: [
             {
-              label: 'Tutorial',
+              label: 'Documentation',
               to: '/docs/intro',
             },
           ],
