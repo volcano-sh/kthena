@@ -47,8 +47,10 @@ type Context struct {
 	// 2. PD aggregated mode, BestPods is selected for inference.
 	BestPods []*datastore.PodInfo
 
-	// StickyPodName, when set before scheduling, pins aggregated scheduling to that Pod if it survives filters.
+	// StickyPodName pins aggregated scheduling or the PD Decode Pod if it survives filters.
 	StickyPodName string
+	// StickyPrefillPodName completes the PD pair identified by StickyPodName.
+	StickyPrefillPodName string
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder

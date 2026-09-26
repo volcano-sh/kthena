@@ -136,3 +136,12 @@ func TestBinding_ValidEqual(t *testing.T) {
 	require.False(t, Binding{}.Valid())
 	require.Equal(t, "ms-a/pod-a", a.String())
 }
+
+func TestBinding_Pair(t *testing.T) {
+	a := Binding{ModelServer: "ms-a", Pod: "decode-a", PrefillPod: "prefill-a"}
+	require.True(t, a.Valid())
+	require.True(t, a.ValidPD())
+	require.True(t, a.Equal(Binding{ModelServer: "ms-a", Pod: "decode-a", PrefillPod: "prefill-a"}))
+	require.False(t, a.Equal(Binding{ModelServer: "ms-a", Pod: "decode-a", PrefillPod: "prefill-b"}))
+	require.Equal(t, "ms-a/prefill-a->decode-a", a.String())
+}

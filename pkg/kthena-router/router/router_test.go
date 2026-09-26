@@ -56,6 +56,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -66,6 +67,48 @@ func TestMain(m *testing.M) {
 	flag.Parse()
 	exitCode := m.Run()
 	os.Exit(exitCode)
+}
+
+func TestRouter_FinalizeSessionSticky_ReplacesModeMismatchedBinding(t *testing.T) {
+	store := sessionsticky.NewMemoryStore()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	router := &Router{sessionStickyStore: store}
+	key := "sticky:model-route:session"
+	prev := sessionsticky.Binding{ModelServer: "ms", Pod: "old-decode"}
+	_, err := store.Commit(t.Context(), key, prev, time.Minute)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ctx := &framework.Context{
+		PDGroup: &aiv1alpha1.PDGroup{},
+		PrefillPods: []*datastore.PodInfo{
+			datastore.NewPodInfo(&corev1.Pod{ObjectMeta: v1.ObjectMeta{Name: "new-prefill"}}, ""),
+		},
+		DecodePods: []*datastore.PodInfo{
+			datastore.NewPodInfo(&corev1.Pod{ObjectMeta: v1.ObjectMeta{Name: "new-decode"}}, ""),
+		},
+	}
+
+	router.finalizeSessionSticky(
+		c,
+		ctx,
+		&aiv1alpha1.SessionSticky{},
+		"session",
+		key,
+		prev,
+		true,
+		"ms",
+	)
+
+	got, ok := store.Get(t.Context(), key)
+	require.True(t, ok)
+	require.Equal(t, sessionsticky.Binding{
+		ModelServer: "ms",
+		Pod:         "new-decode",
+		PrefillPod:  "new-prefill",
+	}, got)
 }
 
 func withMetricsEndpoint(handler http.Handler) http.Handler {

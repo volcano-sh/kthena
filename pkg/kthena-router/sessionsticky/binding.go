@@ -22,23 +22,32 @@ import "fmt"
 const (
 	redisFieldModelServer = "modelServer"
 	redisFieldPod         = "pod"
+	redisFieldPrefillPod  = "prefillPod"
 )
 
-// Binding is the stored affinity target: ModelServer short name (same
-// namespace as the ModelServer that owns the sticky spec) and the selected Pod name.
+// Binding is the stored affinity target. Pod is the selected backend Pod for
+// aggregated models and the Decode Pod for PD-disaggregated models.
 type Binding struct {
 	ModelServer string
 	Pod         string
+	PrefillPod  string
 }
 
-// Valid reports whether both fields are set.
+// Valid reports whether the binding has an owning ModelServer and backend Pod.
 func (b Binding) Valid() bool {
 	return b.ModelServer != "" && b.Pod != ""
 }
 
+// ValidPD reports whether the binding identifies a complete PD pair.
+func (b Binding) ValidPD() bool {
+	return b.Valid() && b.PrefillPod != ""
+}
+
 // Equal reports whether two bindings refer to the same server and pod.
 func (b Binding) Equal(other Binding) bool {
-	return b.ModelServer == other.ModelServer && b.Pod == other.Pod
+	return b.ModelServer == other.ModelServer &&
+		b.Pod == other.Pod &&
+		b.PrefillPod == other.PrefillPod
 }
 
 // String returns a debug representation.
@@ -46,5 +55,8 @@ func (b Binding) String() string {
 	if !b.Valid() {
 		return ""
 	}
-	return fmt.Sprintf("%s/%s", b.ModelServer, b.Pod)
+	if b.PrefillPod == "" {
+		return fmt.Sprintf("%s/%s", b.ModelServer, b.Pod)
+	}
+	return fmt.Sprintf("%s/%s->%s", b.ModelServer, b.PrefillPod, b.Pod)
 }

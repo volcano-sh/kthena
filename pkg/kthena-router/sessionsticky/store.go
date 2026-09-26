@@ -29,7 +29,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
-// Store persists session key → ModelServer+Pod binding with TTL.
+// Store persists session key → ModelServer backend binding with TTL.
 type Store interface {
 	Get(ctx context.Context, key string) (Binding, bool)
 	Delete(ctx context.Context, key string)
@@ -167,25 +167,26 @@ func (s *MemoryStore) Close() error {
 	return nil
 }
 
-// RedisStore uses a Redis hash (modelServer/pod fields) with compare-and-refresh semantics.
+// RedisStore uses a Redis hash with compare-and-refresh semantics.
 type RedisStore struct {
 	rdb *redis.Client
 }
 
 // stickyCommitScript: create hash if missing; refresh TTL if same binding; otherwise return existing fields.
-// Returns {modelServer, pod}.
+// Returns {modelServer, pod, prefillPod}.
 const stickyCommitScript = `
 local ms = redis.call('HGET', KEYS[1], 'modelServer')
 local pod = redis.call('HGET', KEYS[1], 'pod')
+local prefill = redis.call('HGET', KEYS[1], 'prefillPod')
 if (not ms) or (not pod) then
-  redis.call('HSET', KEYS[1], 'modelServer', ARGV[1], 'pod', ARGV[2])
-  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
-  return {ARGV[1], ARGV[2]}
-elseif ms == ARGV[1] and pod == ARGV[2] then
-  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
-  return {ARGV[1], ARGV[2]}
+  redis.call('HSET', KEYS[1], 'modelServer', ARGV[1], 'pod', ARGV[2], 'prefillPod', ARGV[3])
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
+  return {ARGV[1], ARGV[2], ARGV[3]}
+elseif ms == ARGV[1] and pod == ARGV[2] and (prefill or '') == ARGV[3] then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
+  return {ARGV[1], ARGV[2], ARGV[3]}
 else
-  return {ms, pod}
+  return {ms, pod, prefill or ''}
 end
 `
 
@@ -202,7 +203,7 @@ func NewRedisStore(addr string) (*RedisStore, error) {
 }
 
 func (s *RedisStore) Get(ctx context.Context, key string) (Binding, bool) {
-	vals, err := s.rdb.HMGet(ctx, key, redisFieldModelServer, redisFieldPod).Result()
+	vals, err := s.rdb.HMGet(ctx, key, redisFieldModelServer, redisFieldPod, redisFieldPrefillPod).Result()
 	if err == redis.Nil {
 		return Binding{}, false
 	}
@@ -231,7 +232,8 @@ func (s *RedisStore) Commit(ctx context.Context, key string, binding Binding, tt
 	if sec < 1 {
 		sec = 1
 	}
-	res, err := s.rdb.Eval(ctx, stickyCommitScript, []string{key}, binding.ModelServer, binding.Pod, sec).Result()
+	res, err := s.rdb.Eval(ctx, stickyCommitScript, []string{key},
+		binding.ModelServer, binding.Pod, binding.PrefillPod, sec).Result()
 	if err != nil {
 		return binding, err
 	}
@@ -247,12 +249,13 @@ func (s *RedisStore) Close() error {
 }
 
 func bindingFromRedisFields(vals []interface{}) (Binding, bool) {
-	if len(vals) < 2 {
+	if len(vals) < 3 {
 		return Binding{}, false
 	}
 	ms, _ := vals[0].(string)
 	pod, _ := vals[1].(string)
-	b := Binding{ModelServer: ms, Pod: pod}
+	prefill, _ := vals[2].(string)
+	b := Binding{ModelServer: ms, Pod: pod, PrefillPod: prefill}
 	if !b.Valid() {
 		return Binding{}, false
 	}

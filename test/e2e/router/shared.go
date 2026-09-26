@@ -36,6 +36,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
 	routermetrics "github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
@@ -45,10 +46,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/restmapper"
+	"k8s.io/utils/ptr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -2110,26 +2113,53 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		require.Error(t, err)
 	})
 
-	t.Run("E2E_SS_08_PDBypassLogsWhenSessionStickyConfigured", func(t *testing.T) {
+	t.Run("E2E_SS_08_PDPairStickinessAndFailover", func(t *testing.T) {
 		t.Log("Deploying PD stack for SS-08...")
-		pdServingName := routercontext.Deployment1_5bName
-		pdModelServerName := "deepseek-r1-1-5b-pd-disaggregation"
+		pdServingName := "e2e-ss08-pd-" + utils.RandomString(6)
+		pdModelServerName := pdServingName + "-server"
+		sessionKey := "ss08-pd-" + utils.RandomString(8)
+
+		redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
+		defer redisCleanup()
+		utils.SessionStickyPatchRouterConfigAndRollout(t, testCtx.KubeClient, testCtx.KthenaClient,
+			kthenaNamespace, testCtx.Namespace, utils.SessionStickyE2ERouterYAMLRedis("redis-server:6379"),
+			routercontext.ModelServer1_5bName, defaultScalingTimeout, reconnectRouter)
+		defer utils.SessionStickyPatchRouterConfigAndRollout(t, testCtx.KubeClient, testCtx.KthenaClient,
+			kthenaNamespace, testCtx.Namespace, utils.SessionStickyE2ERouterYAMLMemory(),
+			routercontext.ModelServer1_5bName, defaultScalingTimeout, reconnectRouter)
+
+		redisPort := utils.AllocateLocalPort(t)
+		redisForward, err := utils.SetupPortForward(kthenaNamespace, "redis-server", redisPort, "6379")
+		require.NoError(t, err)
+		defer redisForward.Close()
+		stickyStore, err := sessionsticky.NewRedisStore("127.0.0.1:" + redisPort)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, stickyStore.Close()) }()
+		storeKey := sessionsticky.MappingKey(types.NamespacedName{
+			Namespace: testNamespace,
+			Name:      pdModelServerName,
+		}, sessionKey)
 
 		modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing](filepath.Join(routercontext.TestDataDir, "ModelServing-ds1.5b-pd-disaggregation.yaml"))
+		modelServing.Name = pdServingName
 		modelServing.Namespace = testNamespace
-		_, errMS := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
-		if errMS != nil && !apierrors.IsAlreadyExists(errMS) {
-			require.NoError(t, errMS)
+		for i := range modelServing.Spec.Template.Roles {
+			role := &modelServing.Spec.Template.Roles[i]
+			role.Replicas = ptr.To[int32](2)
+			delete(role.EntryTemplate.Metadata.Labels, workloadv1alpha1.GroupNameLabelKey)
+			role.EntryTemplate.Metadata.Labels["app"] = pdServingName
 		}
-		if errMS == nil {
-			t.Cleanup(func() {
-				_ = testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(context.Background(), pdServingName, metav1.DeleteOptions{})
-			})
-		}
+		_, err = testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(context.Background(), pdServingName, metav1.DeleteOptions{})
+		})
 		utils.WaitForModelServingReady(t, ctx, testCtx.KthenaClient, testNamespace, pdServingName)
 
 		modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-pd-disaggregation.yaml"))
+		modelServer.Name = pdModelServerName
 		modelServer.Namespace = testNamespace
+		modelServer.Spec.WorkloadSelector.MatchLabels = map[string]string{"app": pdServingName}
 		if modelServer.Spec.TrafficPolicy == nil {
 			modelServer.Spec.TrafficPolicy = &networkingv1alpha1.TrafficPolicy{}
 		}
@@ -2138,28 +2168,15 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 				{Type: networkingv1alpha1.SessionKeySourceHeader, Name: "X-Sticky-Session"},
 			},
 		}
-		createdPD, errSrv := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
-		if errSrv != nil && !apierrors.IsAlreadyExists(errSrv) {
-			require.NoError(t, errSrv)
-		}
-		if apierrors.IsAlreadyExists(errSrv) {
-			existing, getErr := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Get(ctx, pdModelServerName, metav1.GetOptions{})
-			require.NoError(t, getErr)
-			if existing.Spec.TrafficPolicy == nil {
-				existing.Spec.TrafficPolicy = &networkingv1alpha1.TrafficPolicy{}
-			}
-			existing.Spec.TrafficPolicy.SessionSticky = modelServer.Spec.TrafficPolicy.SessionSticky
-			_, errSrv = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Update(ctx, existing, metav1.UpdateOptions{})
-			require.NoError(t, errSrv)
-		} else if createdPD != nil {
-			t.Cleanup(func() {
-				_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(context.Background(), pdModelServerName, metav1.DeleteOptions{})
-			})
-		}
+		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(context.Background(), pdModelServerName, metav1.DeleteOptions{})
+		})
 
 		mr := utils.SessionStickyCreateModelRoute(t, ctx, testCtx.KthenaClient, routercontext.TestDataDir, testNamespace, kthenaNamespace, useGatewayAPI, func(m *networkingv1alpha1.ModelRoute) {
-			m.Name = "deepseek-pd-with-sticky"
-			m.Spec.ModelName = "deepseek-r1-1-5b-pd-disaggregation"
+			m.Name = pdServingName
+			m.Spec.ModelName = pdServingName
 			if len(m.Spec.Rules) > 0 {
 				m.Spec.Rules[0].TargetModels = []*networkingv1alpha1.TargetModel{
 					{ModelServerName: pdModelServerName},
@@ -2169,12 +2186,41 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		utils.SessionStickyRegisterModelRouteCleanup(t, testCtx.KthenaClient, testNamespace, mr)
 		utils.WaitForChatModelReady(t, routerConn.URL, mr.Spec.ModelName, messages, 5*time.Minute)
 
-		routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
-		hdr := map[string]string{"X-Sticky-Session": "ss08-pd"}
+		hdr := map[string]string{"X-Sticky-Session": sessionKey}
 		_ = utils.CheckChatCompletionsWithURLAndHeaders(t, routerConn.URL, mr.Spec.ModelName, messages, hdr)
+		firstBinding, ok := stickyStore.Get(ctx, storeKey)
+		require.True(t, ok)
+		require.True(t, firstBinding.ValidPD())
+		require.Equal(t, pdModelServerName, firstBinding.ModelServer)
+		for range 3 {
+			_ = utils.CheckChatCompletionsWithURLAndHeaders(t, routerConn.URL, mr.Spec.ModelName, messages, hdr)
+			nextBinding, found := stickyStore.Get(ctx, storeKey)
+			require.True(t, found)
+			require.Equal(t, firstBinding, nextBinding,
+				"same session must stick to the same prefill/decode pair")
+		}
 
-		utils.WaitForPodLogsContain(t, testCtx.KubeClient, kthenaNamespace, routerPod.Name, 2*time.Minute,
-			[]string{"session sticky bypassed for PD disaggregated model"}, 90*time.Second, 2*time.Second)
+		boundPrefill, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Get(ctx, firstBinding.PrefillPod, metav1.GetOptions{})
+		require.NoError(t, err)
+		boundPrefill.Labels["modelserving.volcano.sh/rolename"] = "disabled"
+		_, err = testCtx.KubeClient.CoreV1().Pods(testNamespace).Update(ctx, boundPrefill, metav1.UpdateOptions{})
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			resp := utils.SendChatRequestWithRetryQuiet(t, routerConn.URL, mr.Spec.ModelName, messages, hdr)
+			if resp.StatusCode != http.StatusOK || resp.Body == "" ||
+				strings.Contains(strings.ToLower(resp.Body), "error") {
+				return false
+			}
+			reboundBinding, found := stickyStore.Get(ctx, storeKey)
+			return found && reboundBinding.ValidPD() && reboundBinding.PrefillPod != firstBinding.PrefillPod
+		}, 30*time.Second, 500*time.Millisecond, "same session must rebind after the prefill pod becomes unselectable")
+
+		reboundBinding, found := stickyStore.Get(ctx, storeKey)
+		require.True(t, found)
+		require.True(t, reboundBinding.ValidPD())
+		require.NotEqual(t, firstBinding.PrefillPod, reboundBinding.PrefillPod,
+			"making the bound prefill pod unselectable must replace the complete pair")
 	})
 
 	t.Run("E2E_SS_09_StickyDoesNotOverrideModelRouteWeights", func(t *testing.T) {

@@ -15,7 +15,7 @@ creation-date: 2026-04-01
 
 ### Summary
 
-This proposal specifies **session sticky** (session affinity) for **Kthena Router**: after `ModelRoute` selects a `ModelServer`, requests that present the same **session key** are routed to the same **Pod of that ModelServer**, for as long as the mapping is valid under TTL and the Pod remains selectable. The feature is **opt-in** on `ModelServer` (per-server **sources** and **TTL** only). The mapping store is **in-process memory** or **shared Redis**, selected by **router configuration**, not by the CRD. **Failover** clears or replaces stale bindings when the mapped Pod is no longer selectable.
+This proposal specifies **session sticky** (session affinity) for **Kthena Router**: after `ModelRoute` selects a `ModelServer`, requests that present the same **session key** are routed to the same backend of that `ModelServer`, for as long as the mapping is valid under TTL and the backend remains selectable. For an aggregated ModelServer, the backend is one Pod. For a PD-disaggregated ModelServer, the backend is the complete **Prefill/Decode Pod pair** selected from the same PD group. The feature is **opt-in** on `ModelServer` (per-server **sources** and **TTL** only). The mapping store is **in-process memory** or **shared Redis**, selected by **router configuration**, not by the CRD. **Failover** clears or replaces stale bindings when the mapped Pod or pair is no longer selectable.
 
 Session sticky does **not** override `ModelRoute` weighted selection among ModelServers. This matches Istio: VirtualService (our `ModelRoute`) chooses the destination; DestinationRule traffic policy (our `ModelServer.spec.trafficPolicy`) applies affinity inside that destination.
 
@@ -34,38 +34,45 @@ Kubernetes Service `sessionAffinity: ClientIP` only keys on **source IP**. Affin
 1. Session sticky is implemented in **Kthena Router**, applied **after** `ModelRoute` matching and destination selection, then integrated with existing scheduling.
 2. **Backward compatibility**: if **`spec.trafficPolicy.sessionSticky` is nil/omitted**, behavior is unchanged.
 3. **Session key** can be derived from **HTTP headers**, **query parameters**, **cookies**, or **JWT claims**, using an ordered list of sources.
-4. When a mapping exists and the Pod is still selectable **in the already-chosen ModelServer**, the same session key routes to that Pod.
+4. When a mapping exists and the backend is still selectable **in the already-chosen ModelServer**, the same session key routes to that Pod or complete PD pair.
 5. **Declarative configuration** via optional **`ModelServer.spec.trafficPolicy.sessionSticky`**. Store backend is **not** on the CRD.
 6. **Horizontal scaling**: all router replicas share the same Redis store when Redis is configured.
-7. **Failover**: if the mapped Pod is not available, the stale mapping is removed, a new Pod in the same ModelServer is chosen, and the event is logged.
+7. **PD support**: for a PD ModelServer, bind the session to a complete Prefill/Decode pair from the same PD group, preserving the pair for subsequent requests.
+8. **Failover**: if the mapped Pod or either side of the mapped PD pair is not available, the stale mapping is removed, a new backend or pair in the same ModelServer is chosen, and the event is logged.
 
 #### Non-goals (this version)
 
-- Session sticky for **PD disaggregation**. If the resolved ModelServer has `WorkloadSelector.PDGroup`, sticky is **bypassed at runtime** and a warning is logged.
 - Pinning a session across **multiple ModelServers**. Weighted / canary selection on `ModelRoute` stays independent of sticky.
-- **Future work**: PD-specific session sticky semantics in a follow-up proposal.
+- Choosing a different PD pair solely for KV-cache scoring when the bound pair remains selectable. A valid bound pair is pinned and Score is skipped; normal scoring applies only when no valid binding exists.
 
 ### Proposal
 
 #### User stories
 
-**Story 1** — An operator sets **`spec.trafficPolicy.sessionSticky`** on a `ModelServer` with a header source `X-Session-ID`. After `ModelRoute` selects that ModelServer, requests with the same header value hit the same Pod until TTL expires or that Pod leaves the endpoint set.
+**Story 1** — An operator sets **`spec.trafficPolicy.sessionSticky`** on a `ModelServer` with a header source `X-Session-ID`. After `ModelRoute` selects that ModelServer, requests with the same header value hit the same Pod, or the same Prefill/Decode pair for a PD ModelServer, until TTL expires or the backend leaves the selectable endpoint set.
 
-**Story 2** — An operator runs **multiple Kthena Router replicas** with **Redis** enabled in router config (not on the CRD). The same session key sticks to the same Pod of that ModelServer regardless of which replica handles the request.
+**Story 2** — An operator runs **multiple Kthena Router replicas** with **Redis** enabled in router config (not on the CRD). The same session key sticks to the same Pod, or complete PD pair, of that ModelServer regardless of which replica handles the request.
 
 **Story 3** — A `ModelRoute` splits traffic 50/50 between two ModelServers. The same sticky header does **not** collapse that split: sticky only pins the Pod **inside** whichever ModelServer the route selected for that request.
 
 #### Architecture
 
-Session sticky is **not** a scheduler plugin. It looks up a binding before `Schedule`, pins after Filter, and commits after `Schedule` without changing `BestPods`.
+Session sticky is **not** a scheduler plugin. It looks up a binding before `Schedule`, supplies an aggregated Pod or PD pair hint to the scheduler, and commits the selected backend.
 
 **Request path**
 
 1. Match `ModelRoute` and select a destination by **rule weights**. Sticky does not rematch or prefer a ModelServer.
 2. If the chosen `ModelServer` has `trafficPolicy.sessionSticky`, take the first non-empty source (`Header` / `Query` / `Cookie` / `JWTClaim`) as the session key. Empty key: skip sticky.
-3. `Get` binding keyed by **ModelServer identity + session key**. If present, pass `StickyPodName = binding.Pod` into `Schedule`.
+3. `Get` binding keyed by **ModelServer identity + session key**. If present, pass the bound Pod or complete PD pair into `Schedule`.
 4. `Schedule` (aggregated, non-PD): Filter runs. If `StickyPodName` is still in the list, `BestPods` is that Pod and Score is skipped. Otherwise the pin is cleared and Score runs.
-5. After a Pod is chosen, `Commit` `{ModelServer, Pod}` with the ModelServer TTL (store details below). Then proxy.
+5. `Schedule` (PD sticky): same pin-and-skip-Score rule as aggregated, but for a complete pair:
+   1. Require both sticky Decode and Prefill names; a half pair is never preferred.
+   2. Sticky Decode must remain in the filtered decode list.
+   3. Load Prefills in that Decode's PD group and run Filter on them.
+   4. Sticky Prefill must still be selectable in that group.
+   5. Both sides OK → set `DecodePods`/`PrefillPods` to that pair only and return (no Score, no topN fill).
+   6. Otherwise clear sticky names and score new pairs normally.
+6. `Commit` the selected backend with the ModelServer TTL (store details below), then proxy the request using the existing retry behavior.
 
 **How this interacts with other scheduling factors**
 
@@ -73,24 +80,24 @@ Session sticky is **not** a scheduler plugin. It looks up a binding before `Sche
 |------|----------------|
 | Sticky Pod **survives Filter** | `BestPods` is that Pod. Score plugins are skipped. |
 | Sticky Pod **fails Filter** (overloaded, gone, …) | Pin is dropped. Score ranks the remaining Pods as usual. The new winner is committed. |
-| No binding / empty session key | Filter then Score as today. First successful Pod is committed if a key exists. |
-| **PD** (`PDGroup` set) | Sticky is skipped (no pin, no commit). PD Filter/Score is unchanged. |
+| No binding / empty session key | Filter then Score as today. The selected Pod or pair is committed if a key exists. |
+| **PD** (`PDGroup` set) | Sticky binds the complete Prefill/Decode pair. A valid pair is pinned as a unit and Score is skipped; if either side is unavailable, the binding is cleared and a new pair is scored. |
 | **Multi-target ModelRoute** | Each request still follows weights. Sticky for ModelServer A never forces traffic onto A when the route selected B. |
 
 #### Session map storage
 
-The store is a TTL map: **opaque key → Binding `{modelServer, pod}`**.
+The store is a TTL map: **opaque key → Binding `{modelServer, pod, prefillPod}`**. `pod` remains the selected backend Pod for aggregated ModelServers and represents the Decode Pod for PD-disaggregated ModelServers; `prefillPod` is empty for aggregated ModelServers.
 
 | Item | Value |
 |------|--------|
 | Key | `kthena/sticky/` + `sha256(namespace/name\|sessionKey)` (`ModelServer` identity + hashed session material; raw session key is not stored in the Redis/memory key) |
-| Value | ModelServer **short name** and **Pod name** |
-| TTL | `ModelServer.spec.trafficPolicy.sessionSticky.sessionAffinitySeconds` (default **300**); each successful request **Set/Commit**s the full TTL (sliding expiry) |
+| Value | ModelServer **short name**, and for PD the **Prefill Pod** and **Decode Pod** names |
+| TTL | `ModelServer.spec.trafficPolicy.sessionSticky.sessionAffinitySeconds` (default **300**); each scheduled sticky request **Set/Commit**s the full TTL (sliding expiry) |
 | API | `Get` / `Delete` / `Commit`; no separate Refresh RPC |
 
 **Memory** (default): process-local map plus a background sweeper. Suitable for single replica or tests. Replicas do **not** share bindings.
 
-**Redis**: Hash fields `modelServer` and `pod`, plus key TTL. Lua commit is atomic:
+**Redis**: Hash fields `modelServer`, `pod`, and `prefillPod`, plus key TTL. Lua commit is atomic:
 
 - missing → `HSET` + `EXPIRE`, return the new binding
 - same binding → `EXPIRE` only (refresh)
@@ -111,13 +118,14 @@ All replicas in a deployment must use the same backend. Redis mode fails fast at
 
 - Binding is scoped per `ModelServer` (namespace/name in the store key), not per `ModelRoute` and not cluster-global.
 - The same session key on two ModelServers produces two independent bindings.
-- ModelServer name in the binding is the same-namespace short name; Pod name is unique within that namespace.
+- ModelServer name in the binding is the same-namespace short name; Pod names are unique within that namespace.
+- A PD binding is valid only when both Pods exist, pass the current filters, and belong to the same PD group. The binding is invalidated as a unit if either side fails these checks.
 
 #### Risks and mitigations
 
 - **Split brain without Redis**: memory store is per process; multi-replica must use Redis.
-- **Stale Pod**: filter miss clears the pin; commit writes the newly selected Pod.
-- **Concurrent first request**: Redis keeps the first writer's binding. This request still uses the scheduler's `BestPods`. Later requests follow the stored binding.
+- **Stale Pod or PD pair**: filter miss clears the binding; commit writes the newly selected Pod or PD pair.
+- **Concurrent first request**: Redis keeps the first writer's binding. The in-flight request still uses its selected Pod or pair. Later requests follow the stored binding.
 
 ### Design details
 
@@ -166,15 +174,16 @@ Header names are case-insensitive; Cookie names are case-sensitive.
 
 #### Observability
 
-- **Logs**: store errors, failover when mapped Pod is not selectable, Redis issues, PD bypass.
-- **Response header (test/debug only)**: `X-Kthena-Backend-Pod` is off by default; enable only via a router debug flag for e2e.
+- **Logs**: store errors, failover when a mapped Pod or PD pair is not selectable, and Redis issues.
+- **E2E visibility**: PD E2E reads the complete binding from its configured Redis store. No test-only access-log field is added for either Pod.
 
 ### Test plan
 
 #### Unit tests
 
 - Session key extraction: Header, Query; source ordering; nil `sessionSticky`; all sources empty.
-- In-memory store Set/Get/Commit with TTL; Redis commit does not overwrite a different winner.
+- In-memory store Set/Get/Commit with TTL; Redis commit does not overwrite a different winner; PD bindings require a valid Prefill/Decode pair.
+- PD scheduling pins a valid bound pair (skips Score) and rejects a pair when either side is unavailable or belongs to a different PD group. A half pair is never preferred.
 
 #### End-to-end acceptance (`test/e2e/router/`)
 
@@ -184,20 +193,20 @@ Sticky E2E uses a dedicated `ModelServer` (same backend pods as the 1.5B mock) s
 
 | ID | Scenario | Expected outcome |
 |----|----------|------------------|
-| E2E-SS-01 | Header, Query, and Cookie sources; Header listed first when Header and Query are both present. | Same session key pins the same Pod; Header wins over Query. |
+| E2E-SS-01 | Header, Query, and Cookie sources; Header listed first when Header and Query are both present. | Same session key pins the same Pod or complete PD pair; Header wins over Query. |
 | E2E-SS-02 | Two session keys, then reuse the first. | Each key stays on its Pod; first key does not adopt the second. |
 | E2E-SS-03 | `sessionSticky` set; header omitted. | No error; spread across at least two Pods. |
 | E2E-SS-04 | `sessionSticky` absent on the selected ModelServer; sticky-like header present. | Header does not pin; at least two Pods. |
 | E2E-SS-05 | Short TTL; requests before and after expiry. | Sticky within TTL; re-bind after expiry. |
-| E2E-SS-06 | Delete the bound Pod; retry same key. | New healthy Pod. |
+| E2E-SS-06 | Delete the bound Pod; retry same key. | New healthy Pod or, for PD, a new valid pair. |
 | E2E-SS-07 | `sessionSticky` non-null with empty `sources` on ModelServer. | Admission rejected. |
-| E2E-SS-08 | PD ModelServer at runtime with `sessionSticky` set. | Sticky bypassed; warning log. |
+| E2E-SS-08 | PD ModelServer with `sessionSticky` set; repeat the same session key, then make the bound Prefill Pod unselectable and retry. | The same Prefill/Decode pair is selected while both Pods remain selectable; the stale pair is replaced with a new valid pair after Prefill becomes unavailable. |
 | E2E-SS-09 | `ModelRoute` 50/50 across a sticky ModelServer and another ModelServer; same sticky header. | Traffic still spreads across both ModelServers. |
-| E2E-SS-10 | Two router replicas + Redis store. | Same session key → same Pod on both replicas. |
+| E2E-SS-10 | Two router replicas + Redis store with an aggregated or PD ModelServer. | The same session key resolves to the same Pod or complete PD pair on both replicas. |
 
 ### References
 
 - Kubernetes kube-proxy session affinity (conceptual analog).
 - Istio DestinationRule consistent-hash load balancing (affinity on the destination, not the route).
 - Kthena Router E2E: `test/e2e/router/`.
-- Implementation: `pkg/kthena-router/sessionsticky/`, `pkg/kthena-router/router/router.go`, scheduler `StickyPodName` pin in `pkg/kthena-router/scheduler/scheduler_impl.go`.
+- Implementation: `pkg/kthena-router/sessionsticky/`, `pkg/kthena-router/router/router.go`, and aggregated/PD sticky handling in `pkg/kthena-router/scheduler/scheduler_impl.go`.
