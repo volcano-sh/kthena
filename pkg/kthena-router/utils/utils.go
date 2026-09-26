@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -35,6 +36,11 @@ var (
 	TTFT              = "TTFT"
 )
 
+// ErrPromptNotFound is returned when the request body carries none of the
+// "prompt", "messages" or "input" fields. It is distinct from a malformed prompt so that callers
+// can answer "absent" and "present but invalid" with different status codes.
+var ErrPromptNotFound = errors.New("prompt or messages not found in request body")
+
 func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 	return types.NamespacedName{
 		Namespace: obj.GetNamespace(),
@@ -42,6 +48,11 @@ func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 	}
 }
 
+// ParsePrompt extracts the prompt from a completions, chat completions or responses
+// request body. Every error other than ErrPromptNotFound means the body is malformed:
+// a malformed chat message is never dropped silently, because a dropped message
+// yields a prompt that looks valid to the caller while no longer matching what the
+// client sent.
 func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 	if prompt, ok := body["prompt"]; ok {
 		promptStr, ok := prompt.(string)
@@ -58,6 +69,9 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 		if !ok {
 			return nil, fmt.Errorf("messages is not a list")
 		}
+		if len(messageList) == 0 {
+			return nil, fmt.Errorf("messages list is empty")
+		}
 
 		msgs := make([]common.Message, 0, len(messageList)+1)
 		if systemContent, ok := parseMessageContent(body["system"]); ok {
@@ -66,18 +80,21 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 				Content: systemContent,
 			})
 		}
-		for _, message := range messageList {
+		for i, message := range messageList {
 			msgMap, ok := message.(map[string]interface{})
 			if !ok {
-				continue
+				return nil, fmt.Errorf("message at index %d is not an object", i)
 			}
 
 			role, ok := msgMap["role"].(string)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("message at index %d has no string role field", i)
 			}
 
-			content, ok := parseMessageContent(msgMap["content"])
+			content, ok, err := parseChatMessageContent(msgMap["content"])
+			if err != nil {
+				return nil, fmt.Errorf("message at index %d: %w", i, err)
+			}
 			if !ok {
 				continue
 			}
@@ -97,7 +114,7 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 		return parseResponsesPrompt(body["instructions"], input)
 	}
 
-	return nil, fmt.Errorf("prompt or messages not found in request body")
+	return nil, ErrPromptNotFound
 }
 
 func parseResponsesPrompt(instructions, input any) (*common.ChatMessage, error) {
@@ -176,6 +193,37 @@ func parseMessageContent(content any) (string, bool) {
 		return "", false
 	}
 	return strings.Join(parts, "\n"), true
+}
+
+// parseChatMessageContent extracts the text of a single chat message. The chat
+// APIs allow "content" to be a plain string, a list of content parts, or null (for
+// assistant turns that only carry tool_calls). ok is false when the message carries
+// no text at all, in which case it contributes nothing to the prompt. Any other
+// shape is a malformed request and is reported instead of being dropped silently.
+func parseChatMessageContent(content interface{}) (string, bool, error) {
+	switch c := content.(type) {
+	case nil:
+		return "", false, nil
+	case string:
+		return c, true, nil
+	case []interface{}:
+		for _, part := range c {
+			partMap, ok := part.(map[string]interface{})
+			if !ok {
+				return "", false, fmt.Errorf("message content part is not an object")
+			}
+			switch partType, _ := partMap["type"].(string); partType {
+			case "text", "input_text", "output_text":
+				if _, ok := partMap["text"].(string); !ok {
+					return "", false, fmt.Errorf("text content part has no string text field")
+				}
+			}
+		}
+		text, ok := parseMessageContent(c)
+		return text, ok, nil
+	default:
+		return "", false, fmt.Errorf("message content is neither a string nor a list of content parts")
+	}
 }
 
 func GetPromptString(chatMessage *common.ChatMessage) string {
