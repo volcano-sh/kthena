@@ -1655,11 +1655,20 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	defer cancel()
 
 	var pri float64
+	// fairnessTracked is true when OnRequestStart was called below, so exactly
+	// one matching OnRequestFinish call is made on every exit path: enqueue
+	// error, abandonment, or once an admitted request has been served. As in
+	// S-LoRA's VTC, a user stays active while their request is in service, not
+	// just while it waits in the queue, so the token usage recorded during the
+	// upstream call is reflected in the active minimum used for counter-lift.
+	fairnessTracked := false
 	if EnableSessionBoost {
 		// In session-boost mode the queue orders by session boost, not per-user
 		// priority, so skip the token-tracker priority computation entirely.
 		pri = 0
 	} else if userId != "" {
+		r.store.OnRequestStart(userId, modelName)
+		fairnessTracked = true
 		pri = r.calculateRequestPriority(userId, modelName)
 	} else {
 		// Assign lowest priority to unauthenticated requests so they don't
@@ -1679,6 +1688,9 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	}
 
 	if err := r.store.Enqueue(queueReq); err != nil {
+		if fairnessTracked {
+			r.store.OnRequestFinish(userId, modelName)
+		}
 		klog.Errorf("%s failed to enqueue: reqID=%s sessionID=%s user=%s model=%s err=%v",
 			logPrefix, requestID, sessionID, userId, modelName, err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, fmt.Sprintf("failed to enqueue request: %v", err))
@@ -1687,6 +1699,9 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 
 	select {
 	case <-queueReq.NotifyChan:
+		if fairnessTracked {
+			defer r.store.OnRequestFinish(userId, modelName)
+		}
 		if queueReq.Release != nil {
 			defer queueReq.Release()
 		}
@@ -1706,6 +1721,9 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		// in first it releases the inflight permit we own; otherwise it marks the
 		// request abandoned so the loop skips admission and no permit can leak.
 		queueReq.Abandon()
+		if fairnessTracked {
+			r.store.OnRequestFinish(userId, modelName)
+		}
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
 			// Exceeded the queue-wait timeout. In session-boost mode this is expected
 			// load-shedding when SESSION_BOOST_TIMEOUT is set, and under sustained

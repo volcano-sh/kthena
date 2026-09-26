@@ -2886,6 +2886,66 @@ func TestHandleFairnessScheduling(t *testing.T) {
 	}
 }
 
+// requestLifecycleStore counts OnRequestStart/OnRequestFinish calls on top of
+// a real Store.
+type requestLifecycleStore struct {
+	datastore.Store
+	started  atomic.Int32
+	finished atomic.Int32
+}
+
+func (s *requestLifecycleStore) OnRequestStart(userId, modelName string) {
+	s.started.Add(1)
+	s.Store.OnRequestStart(userId, modelName)
+}
+
+func (s *requestLifecycleStore) OnRequestFinish(userId, modelName string) {
+	s.finished.Add(1)
+	s.Store.OnRequestFinish(userId, modelName)
+}
+
+// TestHandleFairnessScheduling_UserActiveWhileServed verifies that an admitted
+// request keeps its user active until the upstream call has completed, so VTC
+// sees usage recorded while the request is in service.
+func TestHandleFairnessScheduling_UserActiveWhileServed(t *testing.T) {
+	var finishedWhenServed atomic.Int32
+	finishedWhenServed.Store(-1)
+	var lifecycle *requestLifecycleStore
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		finishedWhenServed.Store(lifecycle.finished.Load())
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"fair-ok"}`)
+	})
+
+	router, store, backend := setupFairnessTestRouter(t, backendHandler)
+	defer backend.Close()
+	router.queueTimeout = 5 * time.Second
+	lifecycle = &requestLifecycleStore{Store: store}
+	router.store = lifecycle
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	router.store.Run(ctx)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"fair-model","prompt":"hello fairness"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	modelRequest, err := ParseModelRequest(c)
+	require.NoError(t, err)
+	prompt, err := utils.ParsePrompt(modelRequest)
+	require.NoError(t, err)
+	c.Set(PromptKey, prompt)
+	c.Set(common.UserIdKey, "user-test")
+	c.Set("metricsRecorder", metrics.NewRequestMetricsRecorder(router.metrics, "fair-model", "/v1/chat/completions"))
+
+	require.NoError(t, router.handleFairnessScheduling(c, modelRequest, "req-test", "fair-model"))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, int32(0), finishedWhenServed.Load(), "OnRequestFinish must not run before the request is served")
+	assert.Equal(t, int32(1), lifecycle.started.Load())
+	assert.Equal(t, int32(1), lifecycle.finished.Load())
+}
+
 // --- Test helper: store wrapper that accepts Enqueue but never notifies ---
 
 // blockingEnqueueStore wraps a real Store but overrides Enqueue so the
