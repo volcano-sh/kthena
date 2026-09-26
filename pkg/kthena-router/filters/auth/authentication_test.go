@@ -346,6 +346,21 @@ func TestValidateIssuer(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid issuer")
 	})
+
+	t.Run("issuer not configured", func(t *testing.T) {
+		token := jwt.New()
+		token.Set("iss", "https://any-issuer.example.com")
+		jwks := &Jwks{}
+		err := authenticator.validateIssuer(token, jwks)
+		assert.NoError(t, err)
+	})
+
+	t.Run("issuer not configured and token has no issuer claim", func(t *testing.T) {
+		token := jwt.New()
+		jwks := &Jwks{}
+		err := authenticator.validateIssuer(token, jwks)
+		assert.NoError(t, err)
+	})
 }
 
 // verify token expiration across all supported claim types(time.Time, float64, json.Number)

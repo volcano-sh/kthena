@@ -122,6 +122,11 @@ func (j *JWTAuthenticator) validateClaims(token jwt.Token, jwks *Jwks) error {
 }
 
 func (j *JWTAuthenticator) validateIssuer(token jwt.Token, jwks *Jwks) error {
+	if jwks.Issuer == "" {
+		// Nothing to match the token against, same as an unset audiences list.
+		return nil
+	}
+
 	var iss string
 	if err := token.Get("iss", &iss); err != nil || iss != jwks.Issuer {
 		return fmt.Errorf("invalid issuer: expected %s, got %v", jwks.Issuer, iss)
