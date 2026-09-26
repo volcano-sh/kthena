@@ -212,6 +212,16 @@ func (r *TokenRateLimiter) DeleteLimiter(model string) {
 	delete(r.outputLimiter, model)
 }
 
+// HasLimiter returns true if an input or output rate limiter is configured for the model
+func (r *TokenRateLimiter) HasLimiter(model string) bool {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	_, hasInput := r.inputLimiter[model]
+	_, hasOutput := r.outputLimiter[model]
+	return hasInput || hasOutput
+}
+
 func getTimeUnitDuration(unit networkingv1alpha1.RateLimitUnit) time.Duration {
 	switch unit {
 	case networkingv1alpha1.Second:

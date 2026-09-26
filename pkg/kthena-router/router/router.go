@@ -147,23 +147,9 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 	// Initialize tokenizer
 	tokenizerInstance := tokenizer.NewSimpleEstimateTokenizer()
 
+	rateLimitSyncer := newRateLimitSyncer(store, loadRateLimiter)
 	store.RegisterCallback("ModelRoute", func(data datastore.EventData) {
-		switch data.EventType {
-		case datastore.EventAdd, datastore.EventUpdate:
-			if data.ModelRoute == nil || data.ModelRoute.Spec.RateLimit == nil {
-				return
-			}
-			klog.Infof("add or update rate limit for model %s", data.ModelName)
-
-			// Configure the unified rate limiter for this model
-			if err := loadRateLimiter.AddOrUpdateLimiter(data.ModelName, data.ModelRoute.Spec.RateLimit); err != nil {
-				klog.Errorf("failed to configure rate limiter for model %s: %v", data.ModelName, err)
-			}
-
-		case datastore.EventDelete:
-			klog.Infof("delete rate limit for model %s", data.ModelName)
-			loadRateLimiter.DeleteLimiter(data.ModelName)
-		}
+		rateLimitSyncer.sync()
 	})
 
 	routerConfig, err := conf.ParseRouterConfig(routerConfigPath)
