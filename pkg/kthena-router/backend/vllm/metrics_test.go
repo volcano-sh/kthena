@@ -17,6 +17,7 @@ limitations under the License.
 package vllm
 
 import (
+	"strconv"
 	"testing"
 
 	dto "github.com/prometheus/client_model/go"
@@ -48,8 +49,12 @@ func histogramMetricFamily(sum float64, count uint64) *dto.MetricFamily {
 // running one vLLM engine per data parallel rank.
 func multiSeries(families ...*dto.MetricFamily) *dto.MetricFamily {
 	joined := &dto.MetricFamily{}
-	for _, family := range families {
-		joined.Metric = append(joined.Metric, family.Metric...)
+	for i, family := range families {
+		for _, metric := range family.Metric {
+			name, value := "engine", strconv.Itoa(i)
+			metric.Label = append(metric.Label, &dto.LabelPair{Name: &name, Value: &value})
+			joined.Metric = append(joined.Metric, metric)
+		}
 	}
 	return joined
 }
@@ -172,7 +177,7 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				utils.TPOT: 0.0,
 				utils.TTFT: 0.0,
 			},
-			wantHistogramKeys: []string{utils.TPOT, utils.TTFT},
+			wantHistogramKeys: []string{utils.TPOT, utils.TPOT + "{}", utils.TTFT, utils.TTFT + "{}"},
 		},
 		{
 			name: "with previous histogram computes correct delta average",
@@ -181,12 +186,13 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				ITL: histogramMetricFamily(20.0, 10),
 			},
 			previousHistogram: map[string]*dto.Histogram{
-				utils.TPOT: makePreviousHistogram(10.0, 5),
+				utils.TPOT:        makePreviousHistogram(10.0, 5),
+				utils.TPOT + "{}": makePreviousHistogram(10.0, 5),
 			},
 			wantMetrics: map[string]float64{
 				utils.TPOT: 2.0,
 			},
-			wantHistogramKeys: []string{utils.TPOT},
+			wantHistogramKeys: []string{utils.TPOT, utils.TPOT + "{}"},
 		},
 		{
 			name: "zero delta count returns zero to avoid division by zero",
@@ -195,26 +201,29 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				TTFT: histogramMetricFamily(15.0, 5),
 			},
 			previousHistogram: map[string]*dto.Histogram{
-				utils.TTFT: makePreviousHistogram(10.0, 5),
+				utils.TTFT:        makePreviousHistogram(10.0, 5),
+				utils.TTFT + "{}": makePreviousHistogram(10.0, 5),
 			},
 			wantMetrics: map[string]float64{
 				utils.TTFT: 0.0,
 			},
-			wantHistogramKeys: []string{utils.TTFT},
+			wantHistogramKeys: []string{utils.TTFT, utils.TTFT + "{}"},
 		},
 		{
 			name: "data parallel engines are merged before the delta average",
 			allMetrics: map[string]*dto.MetricFamily{
-				// engines: sum=10,count=5 and sum=30,count=5 -> sum=40,count=10; previous sum=20,count=6 -> 20/4 = 5.0
+				// engines: sum=10,count=5 and sum=30,count=5; previous 8,4 and 12,2 -> (2+18)/(1+3) = 5.0
 				ITL: multiSeries(histogramMetricFamily(10.0, 5), histogramMetricFamily(30.0, 5)),
 			},
 			previousHistogram: map[string]*dto.Histogram{
-				utils.TPOT: makePreviousHistogram(20.0, 6),
+				utils.TPOT:                  makePreviousHistogram(20.0, 6),
+				utils.TPOT + `{engine="0"}`: makePreviousHistogram(8.0, 4),
+				utils.TPOT + `{engine="1"}`: makePreviousHistogram(12.0, 2),
 			},
 			wantMetrics: map[string]float64{
 				utils.TPOT: 5.0,
 			},
-			wantHistogramKeys: []string{utils.TPOT},
+			wantHistogramKeys: []string{utils.TPOT, utils.TPOT + `{engine="0"}`, utils.TPOT + `{engine="1"}`},
 		},
 		{
 			name:              "empty input returns empty maps",
@@ -241,7 +250,7 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 			wantMetrics: map[string]float64{
 				utils.TTFT: 0.0,
 			},
-			wantHistogramKeys: []string{utils.TTFT},
+			wantHistogramKeys: []string{utils.TTFT, utils.TTFT + "{}"},
 		},
 	}
 
@@ -279,4 +288,35 @@ func TestGetHistogramPodMetrics_StoredHistogramContent(t *testing.T) {
 	require.NotNil(t, stored)
 	assert.InDelta(t, 30.0, stored.GetSampleSum(), 1e-9)
 	assert.Equal(t, uint64(15), stored.GetSampleCount())
+}
+
+func TestGetHistogramPodMetrics_TwoScrapes(t *testing.T) {
+	engine := NewVllmEngine()
+
+	_, stored := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		ITL: multiSeries(histogramMetricFamily(10.0, 5), histogramMetricFamily(30.0, 5)),
+	}, map[string]*dto.Histogram{})
+	require.NotNil(t, stored[utils.TPOT])
+	assert.InDelta(t, 40.0, stored[utils.TPOT].GetSampleSum(), 1e-9)
+	assert.Equal(t, uint64(10), stored[utils.TPOT].GetSampleCount())
+
+	got, _ := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		ITL: multiSeries(histogramMetricFamily(14.0, 7), histogramMetricFamily(42.0, 8)),
+	}, stored)
+	// (56 - 40) / (15 - 10)
+	assert.InDelta(t, 3.2, got[utils.TPOT], 1e-9)
+}
+
+func TestGetHistogramPodMetrics_OneEngineResets(t *testing.T) {
+	engine := NewVllmEngine()
+
+	_, stored := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		ITL: multiSeries(histogramMetricFamily(100.0, 100), histogramMetricFamily(100.0, 100)),
+	}, map[string]*dto.Histogram{})
+
+	got, _ := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		ITL: multiSeries(histogramMetricFamily(10.0, 10), histogramMetricFamily(190.0, 190)),
+	}, stored)
+	// engine 0 restarted with 10 samples, engine 1 gained 90: (10 + 90) / (10 + 90)
+	assert.InDelta(t, 1.0, got[utils.TPOT], 1e-9)
 }

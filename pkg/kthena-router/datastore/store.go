@@ -19,6 +19,7 @@ package datastore
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand"
 	"net/http"
@@ -340,6 +341,8 @@ type PodInfo struct {
 	TimePerOutputToken *dto.Histogram
 	TPOT               float64
 	TTFT               float64
+	// histogramSeries keeps the per-series histograms of the last query, keyed by the engine's series key.
+	histogramSeries map[string]*dto.Histogram
 
 	// onFlightRequestNum tracks requests actively in-flight from the router to this pod.
 	// Updated atomically with zero delay — not subject to the ~1 s engine-metrics poll lag.
@@ -1817,6 +1820,7 @@ func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
 	if podinfo.TimeToFirstToken != nil {
 		previousHistogram[utils.TTFT] = podinfo.TimeToFirstToken
 	}
+	maps.Copy(previousHistogram, podinfo.histogramSeries)
 	return previousHistogram
 }
 
@@ -1842,6 +1846,13 @@ func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.H
 			updateFunc(podinfo, histogramMetrics[name])
 		} else {
 			klog.V(4).Infof("Unknown histogram metric: %s", name)
+		}
+	}
+
+	podinfo.histogramSeries = make(map[string]*dto.Histogram)
+	for name, histogram := range histogramMetrics {
+		if _, known := histogramUpdateFuncs[name]; !known {
+			podinfo.histogramSeries[name] = histogram
 		}
 	}
 }
