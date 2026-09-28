@@ -37,7 +37,7 @@ When Kthena's LWS integration is enabled:
 | `spec.replicas` | `spec.replicas` | Defines the number of independent serving groups. |
 | `spec.leaderWorkerTemplate.leaderTemplate` | `spec.template.roles.EntryTemplate` | Parsed as Leader role definition. If nil, `workerTemplate` is used as Entry Pod. |
 | `spec.leaderWorkerTemplate.workerTemplate` | `spec.template.roles.WorkerTemplate` | Parsed as Worker role definition. |
-| `spec.leaderWorkerTemplate.size` | Worker Role Replicas | Used to calculate replica count for Worker Role: `Replicas = Size - 1` (Assuming Leader is 1). |
+| `spec.leaderWorkerTemplate.size` | Worker Role Replicas | Used to calculate replica count for Worker Role: `Replicas = Size - 1` (Assuming Leader is 1). When workers exist, the generated ModelServing also enables its Headless Service for stable leader DNS. |
 | `spec.startupPolicy` | Startup Policy | Maps startup order policy (e.g., `LeaderFirst`). |
 
 </div>

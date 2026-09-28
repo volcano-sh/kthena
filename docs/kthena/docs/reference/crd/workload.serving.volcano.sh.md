@@ -573,7 +573,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `replicas` _integer_ | Number of ServingGroups. That is the number of instances that run serving tasks<br />Default to 1. | 1 |  |
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing | volcano |  |
-| `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugin chain to customize serving pods. |  |  |
+| `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugins that customize serving pods or manage<br />auxiliary resources through controller lifecycle hooks. |  |  |
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |

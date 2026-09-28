@@ -360,6 +360,13 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 			},
 		},
 	}
+	if workerReplicas > 0 {
+		// Preserve the stable leader DNS provided by the native LWS workload model.
+		ms.Spec.Plugins = append(ms.Spec.Plugins, workloadv1alpha1.PluginSpec{
+			Name: msplugins.HeadlessServicePluginName,
+			Type: workloadv1alpha1.PluginTypeBuiltIn,
+		})
+	}
 	return ms
 }
 

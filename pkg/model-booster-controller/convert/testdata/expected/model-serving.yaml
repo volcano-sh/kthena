@@ -17,6 +17,9 @@ metadata:
       name: test-model
       uid: randomUID
 spec:
+  plugins:
+    - name: headless-service
+      type: BuiltIn
   replicas: 0
   template:
     restartGracePeriodSeconds: 60

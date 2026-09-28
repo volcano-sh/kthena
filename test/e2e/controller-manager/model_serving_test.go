@@ -40,6 +40,7 @@ import (
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	plugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	controllerutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
@@ -382,6 +383,10 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	// so that headless services are actually created by the controller.
 	workerRole := createRole("prefill", 1, 1)
 	modelServing := createBasicModelServing("test-svc-sg-delete", 3, 0, workerRole)
+	modelServing.Spec.Plugins = append(modelServing.Spec.Plugins, workload.PluginSpec{
+		Name: plugins.HeadlessServicePluginName,
+		Type: workload.PluginTypeBuiltIn,
+	})
 
 	t.Log("Creating ModelServing with 3 servingGroup replicas and WorkerTemplate")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -531,6 +536,10 @@ func TestModelServingServiceRecovery(t *testing.T) {
 	// Create a ModelServing with a WorkerTemplate so that headless services are created
 	workerRole := createRole("prefill", 1, 1)
 	modelServing := createBasicModelServing("test-service-recovery", 1, 0, workerRole)
+	modelServing.Spec.Plugins = append(modelServing.Spec.Plugins, workload.PluginSpec{
+		Name: plugins.HeadlessServicePluginName,
+		Type: workload.PluginTypeBuiltIn,
+	})
 
 	t.Log("Creating ModelServing for service recovery test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -566,11 +575,7 @@ func TestModelServingServiceRecovery(t *testing.T) {
 		}
 	}
 
-	// If no headless Service owned by the ModelServing exists, gracefully skip the test
-	if originalService == nil {
-		t.Log("No headless Service owned by ModelServing found, skipping service recovery test")
-		t.Skip()
-	}
+	require.NotNil(t, originalService, "Expected an opted-in Headless Service owned by the ModelServing")
 
 	t.Logf("Deleting headless Service %s (UID: %s)", originalService.Name, originalServiceUID)
 

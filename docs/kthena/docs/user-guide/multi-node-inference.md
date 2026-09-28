@@ -99,6 +99,9 @@ metadata:
   name: llama-multinode
   namespace: default
 spec:
+  plugins:
+    - name: headless-service
+      type: BuiltIn
   schedulerName: volcano
   replicas: 1  # inferGroup replicas
   template:
