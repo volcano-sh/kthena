@@ -18,6 +18,7 @@ package utils
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -107,7 +108,7 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2, 3}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups, nil)
 		assert.True(t, shouldUpdate)
 		assert.Len(t, ms.Status.Conditions, 1)
 		cond := ms.Status.Conditions[0]
@@ -128,7 +129,7 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2, 3}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups, nil)
 		assert.True(t, shouldUpdate)
 		assert.Len(t, ms.Status.Conditions, 1)
 		cond := ms.Status.Conditions[0]
@@ -158,7 +159,7 @@ func TestSetCondition(t *testing.T) {
 		updatedGroups := []int{2}
 		currentGroups := []int{0, 1}
 
-		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups)
+		shouldUpdate := SetCondition(ms, progressingGroups, updatedGroups, currentGroups, nil)
 		assert.True(t, shouldUpdate)
 		assert.Len(t, ms.Status.Conditions, 1)
 		cond := ms.Status.Conditions[0]
@@ -166,6 +167,291 @@ func TestSetCondition(t *testing.T) {
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)
 	})
+
+	t.Run("progressing with pod failure detail uses the specific reason and message", func(t *testing.T) {
+		ms := &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{},
+			Status: workloadv1alpha1.ModelServingStatus{
+				Conditions: []metav1.Condition{},
+			},
+		}
+
+		progressingGroups := []int{0}
+		failure := &PodFailureDetail{
+			Reason:  "ImagePullBackOff",
+			Message: "pod test-ms-0-prefill-0-0 init container downloader: back-off pulling image",
+		}
+
+		shouldUpdate := SetCondition(ms, progressingGroups, nil, nil, failure)
+		assert.True(t, shouldUpdate)
+		assert.Len(t, ms.Status.Conditions, 1)
+		cond := ms.Status.Conditions[0]
+		assert.Equal(t, string(workloadv1alpha1.ModelServingProgressing), cond.Type)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		// The specific, stable failure reason replaces the generic "GroupProgressing" reason.
+		assert.Equal(t, "ImagePullBackOff", cond.Reason)
+		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)
+		assert.Contains(t, cond.Message, failure.Message)
+	})
+
+	t.Run("re-evaluating with an unchanged status still refreshes reason/message", func(t *testing.T) {
+		ms := &workloadv1alpha1.ModelServing{
+			Status: workloadv1alpha1.ModelServingStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(workloadv1alpha1.ModelServingProgressing),
+						Status:             metav1.ConditionTrue,
+						Reason:             "GroupProgressing",
+						Message:            "stale message",
+						LastTransitionTime: metav1.NewTime(metav1.Now().Add(-time.Hour)),
+					},
+				},
+			},
+		}
+		originalTransitionTime := ms.Status.Conditions[0].LastTransitionTime
+
+		failure := &PodFailureDetail{Reason: "CrashLoopBackOff", Message: "pod p container c: crash looping"}
+		shouldUpdate := SetCondition(ms, []int{0}, nil, nil, failure)
+		assert.True(t, shouldUpdate, "message/reason changed even though Status stayed True, so an update is still required")
+
+		cond := ms.Status.Conditions[0]
+		assert.Equal(t, "CrashLoopBackOff", cond.Reason)
+		assert.Contains(t, cond.Message, failure.Message)
+		// Status didn't actually transition (True -> True), so the transition time must be preserved.
+		assert.Equal(t, originalTransitionTime, cond.LastTransitionTime)
+	})
+}
+
+func TestExtractPodFailureDetail(t *testing.T) {
+	tests := []struct {
+		name           string
+		pod            *corev1.Pod
+		expectFailure  bool
+		expectedReason string
+	}{
+		{
+			name: "unschedulable pod is reported as a scheduling failure",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: "0/3 nodes are available: insufficient cpu"},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "Unschedulable",
+		},
+		{
+			name: "pod still pending on normal container creation is not a failure",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+					},
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "main", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}},
+					},
+				},
+			},
+			expectFailure: false,
+		},
+		{
+			name: "init container image pull failure is reported",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "downloader", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+							Reason: "ImagePullBackOff", Message: "back-off pulling image \"bad-registry/model:latest\"",
+						}}},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "ImagePullBackOff",
+		},
+		{
+			name: "init container non-zero exit (e.g. downloader/model-path failure) is reported",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "downloader", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 1, Reason: "Error", Message: "model path not found",
+						}}},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "Error",
+		},
+		{
+			name: "main container crash loop is reported",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "engine", RestartCount: 3, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+							Reason: "CrashLoopBackOff", Message: "back-off restarting failed container",
+						}}},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "CrashLoopBackOff",
+		},
+		{
+			name: "main container OOMKilled after restart is reported from LastTerminationState",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name:         "engine",
+							RestartCount: 1,
+							State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+							LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+								Reason: "OOMKilled", ExitCode: 137,
+							}},
+						},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "OOMKilled",
+		},
+		{
+			name: "pod failed phase without container detail falls back to PodFailed",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			expectFailure:  true,
+			expectedReason: "PodFailed",
+		},
+		{
+			name: "ready running pod has no failure",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "engine", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+					},
+				},
+			},
+			expectFailure: false,
+		},
+		// The following four cases each cover one of the untrusted, unstructured Pod/scheduler
+		// fields (PodScheduled condition Reason, container Terminated Reason,
+		// LastTerminationState.Terminated Reason, pod.Status.Reason) that the CRD's condition
+		// Reason validation (^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$) does not allow through
+		// unchecked: a hyphen or space in any of them would otherwise make the whole
+		// ModelServing status update rejected by the API server instead of just carrying a bad
+		// reason. Each must fall back to the same identifier already used for an empty reason.
+		{
+			name: "invalid PodScheduled reason falls back to Unschedulable",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "failed to schedule", Message: "0/3 nodes are available: insufficient cpu"},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "Unschedulable",
+		},
+		{
+			name: "invalid container Terminated reason falls back to Error",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "downloader", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 1, Reason: "Image Pull Error", Message: "model path not found",
+						}}},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "Error",
+		},
+		{
+			name: "invalid LastTerminationState reason falls back to ContainerRestarted",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name:         "engine",
+							RestartCount: 1,
+							State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+							LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+								Reason: "Some-Invalid-Reason", ExitCode: 137,
+							}},
+						},
+					},
+				},
+			},
+			expectFailure:  true,
+			expectedReason: "ContainerRestarted",
+		},
+		{
+			name: "invalid pod.Status.Reason falls back to PodFailed",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p"},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed, Reason: "node not-ready"},
+			},
+			expectFailure:  true,
+			expectedReason: "PodFailed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detail, ok := ExtractPodFailureDetail(tt.pod)
+			assert.Equal(t, tt.expectFailure, ok)
+			if tt.expectFailure {
+				assert.Equal(t, tt.expectedReason, detail.Reason)
+				assert.NotEmpty(t, detail.Message)
+				assert.Contains(t, detail.Message, "p")
+				// Whatever the source field looked like, the extracted Reason must always be
+				// safe to write into the ModelServing condition's CRD-validated Reason field.
+				assert.Regexp(t, conditionReasonPattern, detail.Reason)
+			}
+		})
+	}
+}
+
+func TestSanitizeReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		reason   string
+		fallback string
+		want     string
+	}{
+		{name: "valid reason is returned unchanged", reason: "ImagePullBackOff", fallback: "Error", want: "ImagePullBackOff"},
+		{name: "reason with a space falls back", reason: "Image Pull Error", fallback: "Error", want: "Error"},
+		{name: "reason with a hyphen falls back", reason: "failed-to-schedule", fallback: "Unschedulable", want: "Unschedulable"},
+		{name: "empty reason falls back", reason: "", fallback: "PodFailed", want: "PodFailed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sanitizeReason(tt.reason, tt.fallback))
+		})
+	}
 }
 
 func TestGetMaxUnavailable(t *testing.T) {
