@@ -4299,6 +4299,90 @@ func TestUpdateModelServingStatusDistinguishesScalingFromRollingUpdate(t *testin
 	}
 }
 
+// TestUpdateModelServingStatusStaleListerOnConflict verifies that once an
+// UpdateStatus call hits a 409 conflict, the retry re-reads the object
+// directly from the API server instead of the (potentially stale) informer
+// lister. The lister is seeded at Generation 3 while the API server already
+// holds Generation 4; without switching to a live read on conflict, the
+// retry would keep resubmitting stale data derived from Generation 3.
+func TestUpdateModelServingStatusStaleListerOnConflict(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	require.NoError(t, err)
+
+	msName := "conflict-ms"
+	newMS := func(generation int64) *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:  "default",
+				Name:       msName,
+				Generation: generation,
+			},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas:      ptr.To[int32](1),
+				SchedulerName: "volcano",
+				Template: workloadv1alpha1.ServingGroup{
+					Roles: []workloadv1alpha1.Role{
+						{
+							Name:     "prefill",
+							Replicas: ptr.To[int32](1),
+							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{Name: "c", Image: "img:latest"},
+									},
+								},
+							},
+						},
+					},
+				},
+				RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+			},
+		}
+	}
+
+	// The API server already has Generation 4 (e.g. a spec change written by
+	// another actor after the informer's last resync).
+	liveMS := newMS(4)
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), liveMS, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// The informer cache has not caught up yet and still reports Generation 3.
+	staleMS := newMS(3)
+	err = controller.modelServingsInformer.GetIndexer().Add(staleMS)
+	require.NoError(t, err)
+
+	revision := "rev-1"
+	controller.store.AddServingGroup(utils.GetNamespaceName(staleMS), 0, revision)
+	groupName := utils.GenerateServingGroupName(msName, 0)
+	controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(staleMS), groupName, datastore.ServingGroupRunning)
+
+	var statusUpdateCalls int
+	kthenaClient.PrependReactor("update", "modelservings", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "status" {
+			return false, nil, nil
+		}
+		statusUpdateCalls++
+		if statusUpdateCalls == 1 {
+			return true, nil, apierrors.NewConflict(workloadv1alpha1.Resource("modelservings"), msName, fmt.Errorf("stale resourceVersion"))
+		}
+		return false, nil, nil
+	})
+
+	err = controller.UpdateModelServingStatus(staleMS, revision)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, statusUpdateCalls, "expected one conflicting attempt followed by one successful retry")
+
+	updated, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), msName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, liveMS.Generation, updated.Status.ObservedGeneration,
+		"observedGeneration must reflect the live object read after the conflict, not the stale lister copy")
+}
+
 func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 	tests := []struct {
 		name                    string
