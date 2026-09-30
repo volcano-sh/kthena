@@ -19,6 +19,7 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
@@ -608,6 +609,49 @@ func TestMatchHTTPRouteHostname(t *testing.T) {
 	}
 }
 
+func TestMatchHTTPRoutePathRegularExpression(t *testing.T) {
+	regexType := gatewayv1.PathMatchRegularExpression
+	regexMatch := func(pattern string) *gatewayv1.HTTPPathMatch {
+		return &gatewayv1.HTTPPathMatch{Type: &regexType, Value: &pattern}
+	}
+	route := &gatewayv1.HTTPRoute{ObjectMeta: v1.ObjectMeta{Namespace: "default", Name: "regex-route"}}
+	compile := func(pattern string) (*regexp.Regexp, error) {
+		return regexp.Compile(pattern)
+	}
+
+	t.Run("matches request path", func(t *testing.T) {
+		matched, matchedPrefix, precedence := matchHTTPRoutePath(regexMatch("^/v1/chat/completions$"), "/v1/chat/completions", route, compile)
+		assert.True(t, matched)
+		assert.Empty(t, matchedPrefix)
+		assert.Equal(t, httpPathRegularExpressionPrecedence, precedence.matchType)
+	})
+
+	t.Run("does not match request path", func(t *testing.T) {
+		matched, _, _ := matchHTTPRoutePath(regexMatch("^/v1/chat/completions$"), "/v1/models", route, compile)
+		assert.False(t, matched)
+	})
+
+	t.Run("invalid regex returns no match without panicking", func(t *testing.T) {
+		matched, _, _ := matchHTTPRoutePath(regexMatch("^(unclosed"), "/v1/chat/completions", route, compile)
+		assert.False(t, matched)
+	})
+
+	t.Run("does not compile regexes for other match types", func(t *testing.T) {
+		compileCount := 0
+		countingCompile := func(pattern string) (*regexp.Regexp, error) {
+			compileCount++
+			return regexp.Compile(pattern)
+		}
+		prefixType := gatewayv1.PathMatchPathPrefix
+		prefix := "/v1"
+		pathMatch := &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: &prefix}
+
+		matched, _, _ := matchHTTPRoutePath(pathMatch, "/v1/chat/completions", route, countingCompile)
+		assert.True(t, matched)
+		assert.Zero(t, compileCount)
+	})
+}
+
 func TestInferencePoolFromHTTPRouteRuleWeights(t *testing.T) {
 	group := inferencePoolBackendGroup
 	kind := inferencePoolBackendKind
@@ -694,4 +738,35 @@ func TestSelectWeightedInferencePool(t *testing.T) {
 			assert.Equal(t, tt.expected, pool.Name)
 		})
 	}
+}
+
+func BenchmarkMatchHTTPRoutePathRegex(b *testing.B) {
+	regexType := gatewayv1.PathMatchRegularExpression
+	value := "^/v1/chat/completions$"
+	pathMatch := &gatewayv1.HTTPPathMatch{Type: &regexType, Value: &value}
+	route := &gatewayv1.HTTPRoute{}
+
+	b.Run("compile-every-request", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			matched, _, _ := matchHTTPRoutePath(pathMatch, "/v1/chat/completions", route, regexp.Compile)
+			if !matched {
+				b.Fatal("expected match")
+			}
+		}
+	})
+
+	b.Run("precompiled", func(b *testing.B) {
+		b.ReportAllocs()
+		cached := regexp.MustCompile(value)
+		compile := func(string) (*regexp.Regexp, error) {
+			return cached, nil
+		}
+		for i := 0; i < b.N; i++ {
+			matched, _, _ := matchHTTPRoutePath(pathMatch, "/v1/chat/completions", route, compile)
+			if !matched {
+				b.Fatal("expected match")
+			}
+		}
+	})
 }
