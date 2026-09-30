@@ -601,6 +601,7 @@ _Appears in:_
 | `currentRevision` _string_ | CurrentRevision, if not empty, indicates the ControllerRevision version preserved by<br />ServingGroups that have not been updated. |  |  |
 | `updateRevision` _string_ | UpdateRevision, if not empty, indicates the ControllerRevision version targeted by<br />the current ModelServing spec. |  |  |
 | `collisionCount` _integer_ | CollisionCount tracks hash collisions for ControllerRevision names. |  |  |
+| `revisionReferences` _string array_ | RevisionReferences contains ControllerRevision identities still needed by<br />child resources during an in-progress rollout or recovery. The controller<br />retains these references until replacement resources are observed so<br />history cleanup remains safe across Pod deletion and controller restart. |  |  |
 | `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
 
 

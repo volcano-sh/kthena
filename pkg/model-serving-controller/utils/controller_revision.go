@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -127,10 +128,25 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 	if cr == nil || cr.Data.Raw == nil {
 		return nil, fmt.Errorf("ControllerRevision or its data is nil")
 	}
+	if cr.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 {
+		patch, err := decodeRevisionPatch(cr.Data.Raw)
+		if err != nil {
+			return nil, err
+		}
+		roles := make([]workloadv1alpha1.Role, 0, len(patch.Spec.Template.Roles))
+		for _, role := range patch.Spec.Template.Roles {
+			roles = append(roles, revisionRole(role))
+		}
+		return roles, nil
+	}
 
+	return decodeLegacyRevisionRoles(cr.Data.Raw)
+}
+
+func decodeLegacyRevisionRoles(data []byte) ([]workloadv1alpha1.Role, error) {
 	// Try to unmarshal as wrapped data first.
 	var wrapper map[string]json.RawMessage
-	if err := json.Unmarshal(cr.Data.Raw, &wrapper); err == nil {
+	if err := json.Unmarshal(data, &wrapper); err == nil {
 		if rawData, ok := wrapper["data"]; ok {
 			var roles []workloadv1alpha1.Role
 			if err := json.Unmarshal(rawData, &roles); err != nil {
@@ -142,23 +158,23 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 
 	// Fallback: try to unmarshal directly (for backward compatibility or if not wrapped)
 	var roles []workloadv1alpha1.Role
-	if err := json.Unmarshal(cr.Data.Raw, &roles); err != nil {
+	if err := json.Unmarshal(data, &roles); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal roles from ControllerRevision: %v", err)
 	}
 
 	return roles, nil
 }
 
-// CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
-// In ModelServing, we typically have at most two revisions (CurrentRevision and UpdateRevision),
-// so this cleanup removes all revisions except CurrentRevision and UpdateRevision.
+const defaultRevisionHistoryLimit int32 = 10
+
+// CleanupOldControllerRevisions removes the oldest non-live revisions until
+// RevisionHistoryLimit is satisfied. CurrentRevision, UpdateRevision, and
+// persisted RevisionReferences are the authoritative live revision pins.
 func CleanupOldControllerRevisions(
 	ctx context.Context,
 	client kubernetes.Interface,
 	ms *workloadv1alpha1.ModelServing,
-	referencedRevisions ...string,
 ) error {
-	// Get all ControllerRevisions for this ModelServing
 	selector := labels.SelectorFromSet(map[string]string{
 		ControllerRevisionLabelKey: ms.Name,
 	})
@@ -167,51 +183,48 @@ func CleanupOldControllerRevisions(
 		LabelSelector: selector.String(),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list ControllerRevisions: %v", err)
+		return fmt.Errorf("list ControllerRevisions: %w", err)
 	}
 
-	// Get the revision names that must be preserved (CurrentRevision and UpdateRevision)
-	var currentRevisionName, updateRevisionName string
+	live := make(map[string]struct{})
 	if ms.Status.CurrentRevision != "" {
-		currentRevisionName = GenerateControllerRevisionName(ms.Name, ms.Status.CurrentRevision)
+		live[ms.Status.CurrentRevision] = struct{}{}
 	}
 	if ms.Status.UpdateRevision != "" {
-		updateRevisionName = GenerateControllerRevisionName(ms.Name, ms.Status.UpdateRevision)
+		live[ms.Status.UpdateRevision] = struct{}{}
 	}
-	preservedRevisionNames := make(map[string]struct{}, len(referencedRevisions)+2)
-	if currentRevisionName != "" {
-		preservedRevisionNames[currentRevisionName] = struct{}{}
-	}
-	if updateRevisionName != "" {
-		preservedRevisionNames[updateRevisionName] = struct{}{}
-	}
-	for _, referencedRevision := range referencedRevisions {
-		if referencedRevision != "" {
-			preservedRevisionNames[GenerateControllerRevisionName(ms.Name, referencedRevision)] = struct{}{}
+	for _, revision := range ms.Status.RevisionReferences {
+		if revision != "" {
+			live[revision] = struct{}{}
 		}
 	}
-
-	// Delete all revisions except CurrentRevision and UpdateRevision
-	deletedCount := 0
+	nonLive := make([]*appsv1.ControllerRevision, 0, len(list.Items))
 	for i := range list.Items {
 		revision := &list.Items[i]
-		// Skip if this revision must be preserved
-		if _, preserved := preservedRevisionNames[revision.Name]; preserved {
+		owner := metav1.GetControllerOfNoCopy(revision)
+		if owner == nil || owner.UID != ms.UID {
 			continue
 		}
-
-		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{})
-		if err != nil && !apierrors.IsNotFound(err) {
-			klog.Warningf("Failed to delete old ControllerRevision %s/%s: %v", ms.Namespace, revision.Name, err)
-		} else {
-			deletedCount++
-			klog.V(4).Infof("Deleted old ControllerRevision %s/%s", ms.Namespace, revision.Name)
+		if _, exists := live[revision.Labels[ControllerRevisionRevisionLabelKey]]; exists {
+			continue
 		}
+		nonLive = append(nonLive, revision)
 	}
 
-	if deletedCount > 0 {
-		klog.V(4).Infof("Cleaned up %d old ControllerRevisions for ModelServing %s/%s (preserved CurrentRevision=%s, UpdateRevision=%s)",
-			deletedCount, ms.Namespace, ms.Name, ms.Status.CurrentRevision, ms.Status.UpdateRevision)
+	sort.Slice(nonLive, func(i, j int) bool {
+		return controllerRevisionLess(nonLive[i], nonLive[j])
+	})
+	limit := defaultRevisionHistoryLimit
+	if ms.Spec.RevisionHistoryLimit != nil {
+		limit = *ms.Spec.RevisionHistoryLimit
+	}
+	excess := len(nonLive) - int(limit)
+	for i := 0; i < excess; i++ {
+		revision := nonLive[i]
+		if err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete old ControllerRevision %s: %w", revision.Name, err)
+		}
+		klog.V(4).Infof("Deleted old ControllerRevision %s/%s", ms.Namespace, revision.Name)
 	}
 
 	return nil

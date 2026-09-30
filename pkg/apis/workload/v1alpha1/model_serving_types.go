@@ -264,6 +264,13 @@ type ModelServingStatus struct {
 	// +optional
 	CollisionCount *int32 `json:"collisionCount,omitempty"`
 
+	// RevisionReferences contains ControllerRevision identities still needed by
+	// child resources during an in-progress rollout or recovery. The controller
+	// retains these references until replacement resources are observed so
+	// history cleanup remains safe across Pod deletion and controller restart.
+	// +optional
+	RevisionReferences []string `json:"revisionReferences,omitempty"`
+
 	// Conditions track the condition of the ModelServing.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

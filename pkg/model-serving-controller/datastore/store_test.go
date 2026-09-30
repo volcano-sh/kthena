@@ -17,6 +17,7 @@ limitations under the License.
 package datastore
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -387,5 +388,19 @@ func TestGetRoleListSortingByIndex(t *testing.T) {
 
 	for i, role := range roles {
 		assert.Equal(t, expectedNames[i], role.Name, "Roles should be sorted by index, not by name")
+	}
+}
+
+func TestGetRolesByGroupMissingSnapshot(t *testing.T) {
+	key := types.NamespacedName{Namespace: "default", Name: "model"}
+	for _, existingModel := range []bool{false, true} {
+		t.Run(fmt.Sprint(existingModel), func(t *testing.T) {
+			s := New()
+			if existingModel {
+				s.AddServingGroup(key, 0, "revision")
+			}
+			_, err := s.GetRolesByGroup(key, "missing")
+			assert.ErrorIs(t, err, ErrServingGroupNotFound)
+		})
 	}
 }

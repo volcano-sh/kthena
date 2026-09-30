@@ -46,6 +46,11 @@ type ModelServingStatusApplyConfiguration struct {
 	UpdateRevision *string `json:"updateRevision,omitempty"`
 	// CollisionCount tracks hash collisions for ControllerRevision names.
 	CollisionCount *int32 `json:"collisionCount,omitempty"`
+	// RevisionReferences contains ControllerRevision identities still needed by
+	// child resources during an in-progress rollout or recovery. The controller
+	// retains these references until replacement resources are observed so
+	// history cleanup remains safe across Pod deletion and controller restart.
+	RevisionReferences []string `json:"revisionReferences,omitempty"`
 	// Conditions track the condition of the ModelServing.
 	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// LabelSelector is a label query over pods that should match the replica count.
@@ -119,6 +124,16 @@ func (b *ModelServingStatusApplyConfiguration) WithUpdateRevision(value string) 
 // If called multiple times, the CollisionCount field is set to the value of the last call.
 func (b *ModelServingStatusApplyConfiguration) WithCollisionCount(value int32) *ModelServingStatusApplyConfiguration {
 	b.CollisionCount = &value
+	return b
+}
+
+// WithRevisionReferences adds the given value to the RevisionReferences field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the RevisionReferences field.
+func (b *ModelServingStatusApplyConfiguration) WithRevisionReferences(values ...string) *ModelServingStatusApplyConfiguration {
+	for i := range values {
+		b.RevisionReferences = append(b.RevisionReferences, values[i])
+	}
 	return b
 }
 
