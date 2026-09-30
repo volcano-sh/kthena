@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	registryv1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
 	"gomodules.xyz/jsonpatch/v2"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -162,18 +163,49 @@ func TestMutateAutoscalingPolicy_EmptyBehavior(t *testing.T) {
 	assert.True(t, ok)
 
 	// Check ScaleDown defaults
-	assert.Equal(t, ptr.To(int32(0)), behavior.ScaleDown.Instances)
+	assert.Equal(t, ptr.To(int32(1)), behavior.ScaleDown.Instances)
 	assert.Equal(t, ptr.To(int32(100)), behavior.ScaleDown.Percent)
+	assert.Equal(t, time.Second*15, behavior.ScaleDown.Period.Duration)
 	assert.Equal(t, time.Minute*5, behavior.ScaleDown.StabilizationWindow.Duration)
 
 	// Check ScaleUp StablePolicy defaults
-	assert.Equal(t, ptr.To(int32(4)), behavior.ScaleUp.StablePolicy.Instances)
+	assert.Equal(t, ptr.To(int32(1)), behavior.ScaleUp.StablePolicy.Instances)
 	assert.Equal(t, ptr.To(int32(100)), behavior.ScaleUp.StablePolicy.Percent)
+	assert.Equal(t, time.Second*15, behavior.ScaleUp.StablePolicy.Period.Duration)
 	assert.Equal(t, time.Duration(0), behavior.ScaleUp.StablePolicy.StabilizationWindow.Duration)
 
 	// Check ScaleUp PanicPolicy defaults
-	assert.Equal(t, ptr.To(int32(0)), behavior.ScaleUp.PanicPolicy.Percent)
+	assert.Equal(t, ptr.To(int32(1000)), behavior.ScaleUp.PanicPolicy.Percent)
 	assert.Equal(t, ptr.To(int32(200)), behavior.ScaleUp.PanicPolicy.PanicThresholdPercent)
+	// A zero hold makes the scaler refuse to enter panic mode at all, see
+	// scaleOneTarget, so this default is what keeps the fast path reachable.
+	assert.Equal(t, time.Second*60, behavior.ScaleUp.PanicPolicy.PanicModeHold.Duration)
+}
+
+// TestMutateAutoscalingPolicy_DefaultsLeavePanicModeReachable checks the
+// consequence of the injected defaults rather than their values. scaleOneTarget
+// only enters panic mode when the hold is above zero, so a zero default silently
+// turns off the fast path for a policy that never wrote a behavior block.
+func TestMutateAutoscalingPolicy_DefaultsLeavePanicModeReachable(t *testing.T) {
+	policy := &registryv1.AutoscalingPolicy{
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []registryv1.AutoscalingPolicyMetric{
+				{Name: "cpu", TargetValue: resource.MustParse("80")},
+			},
+		},
+	}
+
+	patch := createPolicyBatch(policy)
+	require.Len(t, patch, 1)
+	behavior, ok := patch[0].Value.(registryv1.AutoscalingPolicyBehavior)
+	require.True(t, ok)
+
+	status := autoscaler.NewStatus(&behavior)
+	status.RefreshPanicMode()
+
+	assert.True(t, status.IsPanicMode(),
+		"a policy that omits behavior must still be able to enter panic mode")
 }
 
 // TestMutateAutoscalingPolicy_NoChangesNeeded tests when no mutation is required

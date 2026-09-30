@@ -79,26 +79,16 @@ func (m *AutoscalingPolicyMutator) Handle(w http.ResponseWriter, r *http.Request
 }
 
 func createPolicyBatch(policy *registryv1.AutoscalingPolicy) []jsonpatch.Operation {
-	// Define default values
-	DefaultScaleDown := registryv1.AutoscalingPolicyStablePolicy{
-		Instances:           ptr.To(int32(0)),
-		Percent:             ptr.To(int32(100)),
-		Period:              &metav1.Duration{Duration: time.Minute},
-		SelectPolicy:        registryv1.SelectPolicyOr,
-		StabilizationWindow: &metav1.Duration{Duration: time.Minute * 5},
-	}
-	DefaultScaleUpStablePolicy := registryv1.AutoscalingPolicyStablePolicy{
-		Instances:           ptr.To(int32(4)),
-		Percent:             ptr.To(int32(100)),
-		Period:              &metav1.Duration{Duration: time.Minute},
-		SelectPolicy:        registryv1.SelectPolicyOr,
-		StabilizationWindow: &metav1.Duration{Duration: 0},
-	}
+	DefaultScaleDown := defaultStablePolicy(time.Minute * 5)
+	DefaultScaleUpStablePolicy := defaultStablePolicy(0)
+	// Mirrors the markers on AutoscalingPolicyPanicPolicy in
+	// pkg/apis/workload/v1alpha1/autoscalingpolicy_types.go. period is the one
+	// field there with no marker to mirror.
 	DefaultScaleUpPanicPolicy := registryv1.AutoscalingPolicyPanicPolicy{
-		Percent:               ptr.To(int32(0)),
+		Percent:               ptr.To(int32(1000)),
 		Period:                metav1.Duration{Duration: 0},
 		PanicThresholdPercent: ptr.To(int32(200)),
-		PanicModeHold:         &metav1.Duration{Duration: 0},
+		PanicModeHold:         &metav1.Duration{Duration: time.Second * 60},
 	}
 
 	DefaultScaleUp := registryv1.AutoscalingPolicyScaleUpPolicy{
@@ -141,6 +131,24 @@ func createPolicyBatch(policy *registryv1.AutoscalingPolicy) []jsonpatch.Operati
 		patch = append(patch, jsonpatch.NewOperation("add", "/spec/behavior/scaleUp/panicPolicy", DefaultScaleUpPanicPolicy))
 	}
 	return patch
+}
+
+// defaultStablePolicy returns the defaults a stable policy block already has in
+// the API, so scaleDown and scaleUp.stablePolicy cannot drift apart here. The
+// values mirror the kubebuilder markers on AutoscalingPolicyStablePolicy in
+// pkg/apis/workload/v1alpha1/autoscalingpolicy_types.go, which the apiserver
+// applies whenever the enclosing object is present in the manifest. A value that
+// disagreed with a marker would mean the policy an operator ends up with depends
+// on whether they wrote the block out or left it off. stabilizationWindow has no
+// marker to mirror, so the caller passes it in.
+func defaultStablePolicy(stabilizationWindow time.Duration) registryv1.AutoscalingPolicyStablePolicy {
+	return registryv1.AutoscalingPolicyStablePolicy{
+		Instances:           ptr.To(int32(1)),
+		Percent:             ptr.To(int32(100)),
+		Period:              &metav1.Duration{Duration: time.Second * 15},
+		SelectPolicy:        registryv1.SelectPolicyOr,
+		StabilizationWindow: &metav1.Duration{Duration: stabilizationWindow},
+	}
 }
 
 func createPolicyPatchBytes(patch []jsonpatch.Operation) ([]byte, error) {
