@@ -74,10 +74,11 @@ type memoryEntry struct {
 
 // MemoryStore is a process-local TTL map with a background sweeper.
 type MemoryStore struct {
-	mu     sync.RWMutex
-	m      map[string]memoryEntry
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	mu       sync.RWMutex
+	m        map[string]memoryEntry
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -158,12 +159,8 @@ func (s *MemoryStore) Commit(_ context.Context, key string, binding Binding, ttl
 }
 
 func (s *MemoryStore) Close() error {
-	select {
-	case <-s.stopCh:
-	default:
-		close(s.stopCh)
-		s.wg.Wait()
-	}
+	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.wg.Wait()
 	return nil
 }
 
