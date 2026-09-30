@@ -81,24 +81,24 @@ func (m *AutoscalingPolicyMutator) Handle(w http.ResponseWriter, r *http.Request
 func createPolicyBatch(policy *registryv1.AutoscalingPolicy) []jsonpatch.Operation {
 	// Define default values
 	DefaultScaleDown := registryv1.AutoscalingPolicyStablePolicy{
-		Instances:           ptr.To(int32(0)),
+		Instances:           ptr.To(int32(1)),
 		Percent:             ptr.To(int32(100)),
-		Period:              &metav1.Duration{Duration: time.Minute},
+		Period:              &metav1.Duration{Duration: 15 * time.Second},
 		SelectPolicy:        registryv1.SelectPolicyOr,
 		StabilizationWindow: &metav1.Duration{Duration: time.Minute * 5},
 	}
 	DefaultScaleUpStablePolicy := registryv1.AutoscalingPolicyStablePolicy{
-		Instances:           ptr.To(int32(4)),
+		Instances:           ptr.To(int32(1)),
 		Percent:             ptr.To(int32(100)),
-		Period:              &metav1.Duration{Duration: time.Minute},
+		Period:              &metav1.Duration{Duration: 15 * time.Second},
 		SelectPolicy:        registryv1.SelectPolicyOr,
 		StabilizationWindow: &metav1.Duration{Duration: 0},
 	}
 	DefaultScaleUpPanicPolicy := registryv1.AutoscalingPolicyPanicPolicy{
-		Percent:               ptr.To(int32(0)),
+		Percent:               ptr.To(int32(1000)),
 		Period:                metav1.Duration{Duration: 0},
 		PanicThresholdPercent: ptr.To(int32(200)),
-		PanicModeHold:         &metav1.Duration{Duration: 0},
+		PanicModeHold:         &metav1.Duration{Duration: 60 * time.Second},
 	}
 
 	DefaultScaleUp := registryv1.AutoscalingPolicyScaleUpPolicy{

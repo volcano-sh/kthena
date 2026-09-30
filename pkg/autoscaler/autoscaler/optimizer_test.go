@@ -524,3 +524,63 @@ func TestOptimizeRecordsRawRecommendationInStabilizationWindows(t *testing.T) {
 	assert.Equal(t, int32(10), heldMax,
 		"corrected windows must record the corrected value")
 }
+
+func TestOptimizePanicModeEmptyBehaviorRegression(t *testing.T) {
+	var metricValue atomic.Value
+	metricValue.Store("300") // Simulate 300 requests, which causes a 300% spike
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/api/v1/query") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"scalar","result":[1700000000,"%s"]}}`, metricValue.Load())
+	}))
+	t.Cleanup(srv.Close)
+
+	// Fix #1: Declare the targetRef that the policy relies on!
+	targetRef := corev1.ObjectReference{Kind: "ModelServing", Name: "backend-a"}
+
+	policy := &workload.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "hetero-policy", Namespace: "default"},
+		Spec: workload.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics: []workload.AutoscalingPolicyMetric{
+				{Name: "http_rps", TargetValue: resource.MustParse("10")},
+			},
+			// Fix #2: The crucial missing "Behavior" field needs to be explicitly empty
+			Behavior: workload.AutoscalingPolicyBehavior{},
+			HeterogeneousTarget: &workload.HeterogeneousTarget{
+				CostExpansionRatePercent: 100,
+				Params: []workload.HeterogeneousTargetParam{
+					{
+						Target: workload.Target{
+							TargetRef: targetRef,
+							MetricSources: map[string]workload.MetricSource{
+								"http_rps": {Prometheus: &workload.PrometheusMetricSource{
+									ServerURL: srv.URL,
+									Query:     "sum(rate(http_requests_total[2m]))",
+								}},
+							},
+						},
+						Cost:        100,
+						MinReplicas: 0,
+						MaxReplicas: 100,
+					},
+				},
+			},
+		},
+	}
+
+	// Fix #3: Finish the test by running the optimizer and asserting the panic mode!
+	optimizer := NewOptimizer(policy)
+	podLister := corelister.NewPodLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}))
+	targetKey := HeterogeneousTargetKey(targetRef, policy.Namespace)
+	current := map[string]int32{targetKey: 10}
+
+	replicas, err := optimizer.Optimize(context.Background(), podLister, policy, current)
+	require.NoError(t, err)
+	require.NotNil(t, replicas)
+
+	assert.True(t, optimizer.Status.IsPanicMode(), "optimizer should be in panic mode with missing behavior defaults")
+}

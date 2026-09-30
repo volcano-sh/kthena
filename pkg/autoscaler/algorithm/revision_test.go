@@ -347,6 +347,35 @@ func TestGetCorrectedInstances(t *testing.T) {
 			},
 			expectedCorrected: 10,
 		},
+		{
+			name: "when stable scale down and behavior pointers are nil then CRD defaults are used without panic",
+			args: CorrectedInstancesAlgorithm{
+				IsPanic: false,
+				History: emptyHistory(),
+				Behavior: &v1alpha1.AutoscalingPolicyBehavior{
+					ScaleDown: v1alpha1.AutoscalingPolicyStablePolicy{
+						// Instances and Percent are nil (webhook didn't run)
+						SelectPolicy: v1alpha1.SelectPolicyOr,
+					},
+					ScaleUp: v1alpha1.AutoscalingPolicyScaleUpPolicy{
+						StablePolicy: v1alpha1.AutoscalingPolicyStablePolicy{
+							// Instances and Percent are nil (webhook didn't run)
+							SelectPolicy: v1alpha1.SelectPolicyOr,
+						},
+						PanicPolicy: v1alpha1.AutoscalingPolicyPanicPolicy{
+							// Percent is nil (webhook didn't run)
+						},
+					},
+				},
+				MinInstances:         1,
+				MaxInstances:         20,
+				CurrentInstances:     10,
+				RecommendedInstances: 5,
+			},
+			// With CRD defaults (Instances=1, Percent=100): Or selects min(10-1, 10-10*100/100) = min(9, 0) = 0
+			// corrected = max(5, 0) = 5, then min(5, 10) = 5
+			expectedCorrected: 5,
+		},
 	}
 
 	for _, tc := range testcases {

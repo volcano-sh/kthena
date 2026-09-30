@@ -162,17 +162,17 @@ func TestMutateAutoscalingPolicy_EmptyBehavior(t *testing.T) {
 	assert.True(t, ok)
 
 	// Check ScaleDown defaults
-	assert.Equal(t, ptr.To(int32(0)), behavior.ScaleDown.Instances)
+	assert.Equal(t, ptr.To(int32(1)), behavior.ScaleDown.Instances)
 	assert.Equal(t, ptr.To(int32(100)), behavior.ScaleDown.Percent)
 	assert.Equal(t, time.Minute*5, behavior.ScaleDown.StabilizationWindow.Duration)
 
 	// Check ScaleUp StablePolicy defaults
-	assert.Equal(t, ptr.To(int32(4)), behavior.ScaleUp.StablePolicy.Instances)
+	assert.Equal(t, ptr.To(int32(1)), behavior.ScaleUp.StablePolicy.Instances)
 	assert.Equal(t, ptr.To(int32(100)), behavior.ScaleUp.StablePolicy.Percent)
 	assert.Equal(t, time.Duration(0), behavior.ScaleUp.StablePolicy.StabilizationWindow.Duration)
 
 	// Check ScaleUp PanicPolicy defaults
-	assert.Equal(t, ptr.To(int32(0)), behavior.ScaleUp.PanicPolicy.Percent)
+	assert.Equal(t, ptr.To(int32(1000)), behavior.ScaleUp.PanicPolicy.Percent)
 	assert.Equal(t, ptr.To(int32(200)), behavior.ScaleUp.PanicPolicy.PanicThresholdPercent)
 }
 
