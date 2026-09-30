@@ -45,7 +45,7 @@ func NewModelServingValidator() *ModelServingValidator {
 // Handle handles admission requests for ModelServing resources
 func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 	// Parse the admission request
-	admissionReview, modelServing, err := utils.ParseModelServingFromRequest(r)
+	admissionReview, modelServing, err := utils.ParseAdmissionRequest[workloadv1alpha1.ModelServing](r)
 	if err != nil {
 		klog.Errorf("Failed to parse admission request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
