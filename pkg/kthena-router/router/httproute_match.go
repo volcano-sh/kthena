@@ -45,6 +45,9 @@ type httpRouteMatchResult struct {
 	// stored in gin.Context so ReplacePrefixMatch URLRewrite can replace exactly
 	// the prefix that made this rule match.
 	matchedPrefix string
+	// matchedPathTemplate is the matched route's path template, used as the
+	// `path` metric label value.
+	matchedPathTemplate string
 	// path stores the path specificity used to choose the best rule within one
 	// HTTPRoute and then the best match across all applicable HTTPRoutes.
 	path httpRoutePathPrecedence
@@ -165,9 +168,10 @@ func findBestHTTPRouteRuleMatch(route *gatewayv1.HTTPRoute, requestPath string) 
 			// Gateway API treats an omitted matches list as a default PathPrefix
 			// "/" match. Model it explicitly so it can compete with other rules.
 			result := httpRouteMatchResult{
-				route:         route,
-				rule:          rule,
-				matchedPrefix: "/",
+				route:               route,
+				rule:                rule,
+				matchedPrefix:       "/",
+				matchedPathTemplate: "/",
 				path: httpRoutePathPrecedence{
 					matchType:  httpPathPrefixPrecedence,
 					characters: 1,
@@ -195,10 +199,11 @@ func findBestHTTPRouteRuleMatch(route *gatewayv1.HTTPRoute, requestPath string) 
 			pathPrecedence.ruleIndex = i
 			pathPrecedence.matchIndex = j
 			result := httpRouteMatchResult{
-				route:         route,
-				rule:          rule,
-				matchedPrefix: matchedPrefix,
-				path:          pathPrecedence,
+				route:               route,
+				rule:                rule,
+				matchedPrefix:       matchedPrefix,
+				matchedPathTemplate: httpRouteMatchedPathTemplate(match.Path, matchedPrefix),
+				path:                pathPrecedence,
 			}
 			if !found || compareHTTPRoutePathPrecedence(result.path, best.path) < 0 {
 				best = result
@@ -374,6 +379,16 @@ const (
 	httpPathPrefixPrecedence
 	httpPathExactPrecedence
 )
+
+func httpRouteMatchedPathTemplate(path *gatewayv1.HTTPPathMatch, matchedPrefix string) string {
+	if matchedPrefix != "" {
+		return matchedPrefix
+	}
+	if path == nil {
+		return "/"
+	}
+	return httpPathMatchValue(path)
+}
 
 // matchHTTPRoutePath checks only the path predicate. It returns the matched
 // prefix needed by ReplacePrefixMatch URLRewrite and the path score used to
