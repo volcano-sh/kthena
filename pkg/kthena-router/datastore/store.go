@@ -262,11 +262,14 @@ type Store interface {
 	SyncOnFlightCounts()
 
 	// IncrPodOnFlightRequests atomically increments the in-flight request counter for
-	// the given pod. Must be called just before dispatching a request to the pod.
-	IncrPodOnFlightRequests(podName types.NamespacedName)
-	// DecrPodOnFlightRequests atomically decrements the in-flight request counter for
-	// the given pod. Must be called once the response is received (or the request fails).
-	DecrPodOnFlightRequests(podName types.NamespacedName)
+	// the given pod. Must be called just before dispatching a request to the pod. It
+	// returns the PodInfo that was incremented, or nil if the pod is not in the store;
+	// pass it to DecrPodOnFlightRequests when the request finishes.
+	IncrPodOnFlightRequests(podName types.NamespacedName) *PodInfo
+	// DecrPodOnFlightRequests decrements the counter of the PodInfo returned by
+	// IncrPodOnFlightRequests. Must be called once the response is received (or
+	// the request fails).
+	DecrPodOnFlightRequests(podInfo *PodInfo)
 
 	// GetTokenCount returns the token count for a user and model
 	GetTokenCount(userId, modelName string) (float64, error)
@@ -853,11 +856,11 @@ func (s *store) GetPodInfo(podName types.NamespacedName) *PodInfo {
 // When a Redis counter is configured the increment is performed atomically in
 // Redis and the returned global value is stored locally; otherwise the local
 // atomic counter is incremented directly.
-func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) {
+func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) *PodInfo {
 	value, ok := s.pods.Load(podName)
 	if !ok {
 		klog.V(4).Infof("IncrPodOnFlightRequests: pod %s not found in store", podName)
-		return
+		return nil
 	}
 	podInfo := value.(*PodInfo)
 	if s.onFlightCounter != nil {
@@ -865,22 +868,33 @@ func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) {
 		defer cancel()
 		if count, err := s.onFlightCounter.Incr(ctx, podName); err == nil {
 			podInfo.SetOnFlightRequestNum(count)
-			return
+			return podInfo
 		} else {
 			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, falling back to local counter", podName, err)
 		}
 	}
 	podInfo.IncrOnFlightRequests()
+	return podInfo
 }
 
-// DecrPodOnFlightRequests decrements the in-flight counter for the given pod.
-func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
-	value, ok := s.pods.Load(podName)
-	if !ok {
-		klog.V(4).Infof("DecrPodOnFlightRequests: pod %s not found in store", podName)
+// DecrPodOnFlightRequests decrements the in-flight counter of the PodInfo that
+// IncrPodOnFlightRequests returned for the same request.
+func (s *store) DecrPodOnFlightRequests(podInfo *PodInfo) {
+	if podInfo == nil {
 		return
 	}
-	podInfo := value.(*PodInfo)
+	podName := podInfo.GetPodNamespacedName()
+
+	// The pod may have been deleted and re-added since the request was sent.
+	// Then podInfo is the old object: only decrement its own counter. The
+	// Redis key is shared by name and was already deleted with the old pod,
+	// so it must not be touched.
+	if current, ok := s.pods.Load(podName); !ok || current.(*PodInfo) != podInfo {
+		podInfo.DecrOnFlightRequests()
+		return
+	}
+
+	// podInfo is still the current object: same as before.
 	if s.onFlightCounter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()

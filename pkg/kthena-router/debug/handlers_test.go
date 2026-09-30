@@ -363,9 +363,11 @@ func (m *MockStore) GetSecret(name types.NamespacedName) *corev1.Secret {
 
 func (m *MockStore) SyncOnFlightCounts() {}
 
-func (m *MockStore) IncrPodOnFlightRequests(podName types.NamespacedName) {}
+func (m *MockStore) IncrPodOnFlightRequests(podName types.NamespacedName) *datastore.PodInfo {
+	return nil
+}
 
-func (m *MockStore) DecrPodOnFlightRequests(podName types.NamespacedName) {}
+func (m *MockStore) DecrPodOnFlightRequests(podInfo *datastore.PodInfo) {}
 
 func newTestContext(params gin.Params) (*gin.Context, *httptest.ResponseRecorder) {
 	w := httptest.NewRecorder()
