@@ -50,7 +50,7 @@ func (fakePodRuntimeInspector) GetPodMetrics(_ string, _ *corev1.Pod, _ uint32, 
 	}, nil
 }
 
-func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
+func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32, _ string) ([]string, error) {
 	return []string{"test-model"}, nil
 }
 

@@ -38,7 +38,7 @@ func (fakePodRuntimeInspector) GetPodMetrics(_ string, _ *corev1.Pod, _ uint32, 
 	return nil, nil
 }
 
-func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
+func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32, _ string) ([]string, error) {
 	return nil, nil
 }
 
