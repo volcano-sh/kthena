@@ -375,6 +375,15 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 		if len(pq.heap) > 0 {
 			req := heap.Pop(pq).(*Request)
 
+			if !pq.sessionBoost {
+				if idx := pq.earliestQueuedBeforeLocked(req.UserID, req.RequestTime); idx >= 0 {
+					earlier := pq.heap[idx]
+					heap.Remove(pq, idx)
+					heap.Push(pq, req)
+					req = earlier
+				}
+			}
+
 			// Skip cancelled/timed-out requests
 			if req.isCancelled() {
 				pq.metricDecSize(req.ModelName, req.UserID)
@@ -458,6 +467,21 @@ func (r *Request) isCancelled() bool {
 
 func (pq *RequestPriorityQueue) shouldRebuildLocked() bool {
 	return pq.config.RebuildThreshold <= 0 || len(pq.heap) <= pq.config.RebuildThreshold
+}
+
+// earliestQueuedBeforeLocked returns the index of the given user's earliest
+// still-queued request that arrived before the given time, or -1. Caller must hold pq.mu.
+func (pq *RequestPriorityQueue) earliestQueuedBeforeLocked(userID string, before time.Time) int {
+	idx := -1
+	for i, req := range pq.heap {
+		if req.UserID != userID || !req.RequestTime.Before(before) {
+			continue
+		}
+		if idx < 0 || req.RequestTime.Before(pq.heap[idx].RequestTime) {
+			idx = i
+		}
+	}
+	return idx
 }
 
 // rebuildHeap refreshes priorities for all queued items and rebuilds the heap.
