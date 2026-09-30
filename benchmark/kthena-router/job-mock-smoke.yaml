@@ -1,0 +1,45 @@
+# Light benchmark Job: traffic through kthena-router to the mock vLLM backend.
+#
+# Prerequisites (same namespace as the router, or adjust host/model below):
+#   1. kthena-router installed (see charts/ or hack/local-up-kthena.sh)
+#   2. kubectl apply -f examples/kthena-router/LLM-Mock.yaml
+#   3. Confirm ModelRoute model name matches --model below
+#
+# Image: ghcr.io/volcano-sh/benchmark:latest (see benchmark/kthena-router/Dockerfile)
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-mock-smoke
+spec:
+  template:
+    spec:
+      containers:
+        - name: benchmark
+          image: ghcr.io/volcano-sh/benchmark:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --host
+            - "kthena-router.kthena-system"
+            - --backend
+            - "vllm"
+            - --port
+            - "80"
+            - --model
+            - "Llama-3.1"
+            - --tokenizer
+            - "meta-llama/Llama-3.1-8B-Instruct"
+            - --dataset-name
+            - "random"
+            - --num-prompts
+            - "20"
+            - --random-input-len
+            - "64"
+            - --random-output-len
+            - "32"
+            - --request-rate
+            - "2"
+            - --max-concurrency
+            - "4"
+      restartPolicy: Never
+  backoffLimit: 0
