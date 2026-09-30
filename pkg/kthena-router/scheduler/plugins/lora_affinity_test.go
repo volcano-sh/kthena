@@ -63,10 +63,10 @@ func TestLoraAffinityFilter(t *testing.T) {
 			expectedNames: []string{},
 		},
 		{
-			name:          "empty model name uses contains semantics",
+			name:          "empty model name passes all pods",
 			model:         "",
 			pods:          []*datastore.PodInfo{matchingPod, emptyModelPod},
-			expectedNames: []string{"empty-model"},
+			expectedNames: []string{"matching", "empty-model"},
 		},
 	}
 
