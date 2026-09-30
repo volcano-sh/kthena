@@ -1,0 +1,66 @@
+{
+  "sidebar.tutorialSidebar.category.Getting Started": {
+    "message": "快速入门",
+    "description": "The label for category 'Getting Started' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Architecture": {
+    "message": "架构",
+    "description": "The label for category 'Architecture' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.User Guide": {
+    "message": "用户指南",
+    "description": "The label for category 'User Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.User Guide.link.generated-index.title": {
+    "message": "用户指南概览",
+    "description": "The generated-index page title for category 'User Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.User Guide.link.generated-index.description": {
+    "message": "所有用户指南的综合概览。",
+    "description": "The generated-index page description for category 'User Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Router": {
+    "message": "路由器",
+    "description": "The label for category 'Router' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Prefill Decode Disaggregation": {
+    "message": "Prefill-Decode 分离",
+    "description": "The label for category 'Prefill Decode Disaggregation' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.General": {
+    "message": "通用指南",
+    "description": "The label for category 'General' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Developer Guide": {
+    "message": "开发者指南",
+    "description": "The label for category 'Developer Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Timeline": {
+    "message": "项目进展",
+    "description": "The label for category 'Timeline' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Reference": {
+    "message": "参考",
+    "description": "The label for category 'Reference' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.CRD Reference": {
+    "message": "CRD 参考",
+    "description": "The label for category 'CRD Reference' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.doc.Autoscaler": {
+    "message": "自动扩缩容",
+    "description": "The label for the doc item 'Autoscaler' in sidebar 'tutorialSidebar', linking to the doc user-guide/autoscaler"
+  },
+  "sidebar.tutorialSidebar.doc.Router Access Log Fields": {
+    "message": "路由器访问日志字段",
+    "description": "The label for the doc item 'Router Access Log Fields' in sidebar 'tutorialSidebar', linking to the doc reference/router-access-log-fields"
+  },
+  "sidebar.tutorialSidebar.doc.Networking": {
+    "message": "网络",
+    "description": "The label for the doc item 'Networking' in sidebar 'tutorialSidebar', linking to the doc reference/crd/networking.serving.volcano.sh"
+  },
+  "sidebar.tutorialSidebar.doc.Workload": {
+    "message": "工作负载",
+    "description": "The label for the doc item 'Workload' in sidebar 'tutorialSidebar', linking to the doc reference/crd/workload.serving.volcano.sh"
+  }
+}
