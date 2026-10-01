@@ -30,6 +30,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// TestSchedulerPluginKVCacheAwareFixture verifies the Runtime records cache ownership from llm-d-sim events.
+func TestSchedulerPluginKVCacheAwareFixture(t *testing.T) {
+	redisCleanup := ensureRedis(t, testCtx.KubeClient, testNamespace)
+	t.Cleanup(redisCleanup)
+
+	pods := setupKVCacheFixture(t, testCtx.KubeClient, testNamespace)
+	warmedPod := pods[0]
+
+	waitForKVCacheOwnership(t, warmedPod, plugincontext.ModelName,
+		"kthena-router-plugin-e2e-fixed-prompt-kvcache")
+}
+
 // TestSchedulerPluginPrefixCache verifies repeated prompts stick to one pod after warmup.
 func TestSchedulerPluginPrefixCache(t *testing.T) {
 	ctx := context.Background()
