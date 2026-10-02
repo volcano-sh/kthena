@@ -184,9 +184,7 @@ func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx 
 		RetryPeriod:   defaultRetryPeriod,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: startedLeading,
-			OnStoppedLeading: func() {
-				klog.Error("leader election lost")
-			},
+			OnStoppedLeading: onStoppedLeading,
 		},
 		ReleaseOnCancel: false,
 		Name:            leaderElectionId,
@@ -195,6 +193,12 @@ func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx 
 		return nil, err
 	}
 	return leaderElector, nil
+}
+
+// onStoppedLeading runs when this instance loses the leader lease.
+// It exits so the ousted leader stops reconciling and restarts as standby.
+func onStoppedLeading() {
+	klog.Fatalf("leader election lost, exiting to allow a clean standby")
 }
 
 // newResourceLock returns a lease lock which is used to elect leader
