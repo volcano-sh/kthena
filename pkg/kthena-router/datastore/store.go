@@ -821,6 +821,61 @@ func (s *store) GetSessionIDHeader() string {
 	return s.fairnessQueueConfig.SessionIDHeader
 }
 
+// notifyPodQueues notifies the Session Boost queues for all models served by the given pod.
+// If the pod's specific models cannot be determined, it wakes all active waiting queues
+// so that no waiting request is left un-evaluated.
+func (s *store) notifyPodQueues(podInfo *PodInfo) {
+	if !s.fairnessQueueConfig.SessionBoostEnabled || podInfo == nil {
+		return
+	}
+
+	models := sets.New[string]()
+	for m := range podInfo.GetModels() {
+		if m != "" {
+			models.Insert(m)
+		}
+	}
+
+	for msName := range podInfo.GetModelServers() {
+		if val, ok := s.modelServer.Load(msName); ok {
+			msObj := val.(*modelServer)
+			if ms := msObj.getModelServer(); ms != nil && ms.Spec.Model != nil && *ms.Spec.Model != "" {
+				models.Insert(*ms.Spec.Model)
+			}
+		}
+	}
+
+	if models.Len() == 0 {
+		s.requestWaitingQueue.Range(func(key, value any) bool {
+			if queue, ok := value.(*RequestPriorityQueue); ok && queue != nil {
+				queue.Wake()
+			}
+			return true
+		})
+		return
+	}
+
+	for m := range models {
+		if val, ok := s.requestWaitingQueue.Load(m); ok {
+			if queue, ok := val.(*RequestPriorityQueue); ok && queue != nil {
+				queue.Wake()
+			}
+		}
+	}
+}
+
+// notifyModelQueue notifies the Session Boost queue for a specific model if it exists.
+func (s *store) notifyModelQueue(modelName string) {
+	if !s.fairnessQueueConfig.SessionBoostEnabled || modelName == "" {
+		return
+	}
+	if val, ok := s.requestWaitingQueue.Load(modelName); ok {
+		if queue, ok := val.(*RequestPriorityQueue); ok && queue != nil {
+			queue.Wake()
+		}
+	}
+}
+
 func (s *store) GetRequestWaitingQueueStats() []QueueStat {
 	stats := make([]QueueStat, 0)
 	s.requestWaitingQueue.Range(func(modelName, queueVal interface{}) bool {
@@ -941,6 +996,9 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
+	if ms.Spec.Model != nil && *ms.Spec.Model != "" {
+		s.notifyModelQueue(*ms.Spec.Model)
+	}
 	return nil
 }
 
@@ -1142,6 +1200,7 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		}
 
 		oldPodInfo.UpdatePod(pod, engine, newModelServers)
+		s.notifyPodQueues(oldPodInfo)
 		return nil
 	}
 
@@ -1155,6 +1214,7 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 	s.pods.Store(podName, newPodInfo)
 	s.updatePodMetrics(newPodInfo)
 	s.updatePodModels(newPodInfo)
+	s.notifyPodQueues(newPodInfo)
 
 	return nil
 }
@@ -1192,6 +1252,8 @@ func (s *store) AppendModelServerToPod(pod *corev1.Pod, modelServers []*aiv1alph
 			}
 		}
 	}
+
+	s.notifyPodQueues(podInfo)
 
 	return nil
 }
@@ -1795,6 +1857,7 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 	if histogramMetrics != nil {
 		updateHistogramMetrics(pod, histogramMetrics)
 	}
+	s.notifyPodQueues(pod)
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) {
@@ -1820,6 +1883,7 @@ func (s *store) updatePodModels(podInfo *PodInfo) {
 	}
 
 	podInfo.UpdateModels(models)
+	s.notifyPodQueues(podInfo)
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {

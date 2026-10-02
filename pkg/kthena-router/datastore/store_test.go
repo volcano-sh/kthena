@@ -3053,3 +3053,305 @@ func TestGetPodWorkloadPort(t *testing.T) {
 		})
 	}
 }
+
+// TestStore_SessionBoostQueue_WakeOnNewReadyPod is a regression test for Issue #1850:
+// When requests are held in the Session Boost queue because existing backend pods are busy,
+// adding a newly Ready backend pod with available capacity must wake the queue and admit
+// the held requests without requiring an existing request release or new request arrival.
+func TestStore_SessionBoostQueue_WakeOnNewReadyPod(t *testing.T) {
+	inspector := &fakePodRuntimeInspector{
+		modelsFn: func(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
+			return []string{"deepseek-r1"}, nil
+		},
+		metricsFn: func(engine string, pod *corev1.Pod, port uint32, prev map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			waiting := 0.0
+			if pod.Name == "pod-busy" {
+				waiting = 5.0
+			}
+			return map[string]float64{
+				utils.RequestWaitingNum: waiting,
+			}, nil
+		},
+	}
+
+	s := newStore(inspector)
+	s.fairnessQueueConfig.SessionBoostEnabled = true
+	s.fairnessQueueConfig.InflightPerPod = 16
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Run(ctx)
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-deepseek"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           ptr("deepseek-r1"),
+			InferenceEngine: "vLLM",
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
+
+	// Add an initial busy pod
+	podBusy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-busy"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	assert.NoError(t, s.AddOrUpdatePod(podBusy, []*aiv1alpha1.ModelServer{ms}))
+
+	// Enqueue 2 requests for deepseek-r1
+	req1 := &Request{
+		UserID:      "user-1",
+		ModelName:   "deepseek-r1",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+	}
+	req2 := &Request{
+		UserID:      "user-2",
+		ModelName:   "deepseek-r1",
+		RequestTime: time.Now().Add(time.Millisecond),
+		NotifyChan:  make(chan struct{}),
+	}
+
+	assert.NoError(t, s.Enqueue(req1))
+	assert.NoError(t, s.Enqueue(req2))
+
+	// Verify both requests are blocked in queue because pod-busy has RequestWaitingNum > 0
+	select {
+	case <-req1.NotifyChan:
+		t.Fatal("req1 should be blocked while all pods are busy")
+	case <-req2.NotifyChan:
+		t.Fatal("req2 should be blocked while all pods are busy")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Add a new Ready pod with capacity (RequestWaitingNum = 0)
+	podReady := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-ready"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.2"},
+	}
+	assert.NoError(t, s.AddOrUpdatePod(podReady, []*aiv1alpha1.ModelServer{ms}))
+
+	// Both requests must be dequeued and admitted automatically
+	select {
+	case <-req1.NotifyChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout: req1 should be dequeued after new ready pod is added")
+	}
+
+	select {
+	case <-req2.NotifyChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout: req2 should be dequeued after new ready pod is added")
+	}
+}
+
+// TestStore_SessionBoostQueue_WakeOnMetricRefresh verifies Issue #1838:
+// When an existing pod's metrics refresh from busy to available (e.g. RequestWaitingNum > 0 -> 0),
+// the queue is notified and dispatches held requests.
+func TestStore_SessionBoostQueue_WakeOnMetricRefresh(t *testing.T) {
+	var mu sync.Mutex
+	waitingCount := 5.0
+
+	inspector := &fakePodRuntimeInspector{
+		modelsFn: func(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
+			return []string{"qwen-model"}, nil
+		},
+		metricsFn: func(engine string, pod *corev1.Pod, port uint32, prev map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			mu.Lock()
+			w := waitingCount
+			mu.Unlock()
+			return map[string]float64{
+				utils.RequestWaitingNum: w,
+			}, nil
+		},
+	}
+
+	s := newStore(inspector)
+	s.fairnessQueueConfig.SessionBoostEnabled = true
+	s.fairnessQueueConfig.InflightPerPod = 16
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Run(ctx)
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-qwen"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           ptr("qwen-model"),
+			InferenceEngine: "vLLM",
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-1"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+
+	req := &Request{
+		UserID:      "user-1",
+		ModelName:   "qwen-model",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+	}
+	assert.NoError(t, s.Enqueue(req))
+
+	// Verify request is initially blocked
+	select {
+	case <-req.NotifyChan:
+		t.Fatal("req should be blocked while pod is busy")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Backend metric changes: waiting drops to 0
+	mu.Lock()
+	waitingCount = 0.0
+	mu.Unlock()
+
+	// Metric scrape occurs
+	podInfo := s.GetPodInfo(utils.GetNamespaceName(pod))
+	assert.NotNil(t, podInfo)
+	s.updatePodMetrics(podInfo)
+
+	// Queue must wake and admit the request
+	select {
+	case <-req.NotifyChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout: req should be dequeued after metric refresh")
+	}
+}
+
+// TestStore_SessionBoostQueue_DifferentModelNotWoken verifies that adding a ready pod
+// for Model-B does not unblock requests for Model-A whose pods remain busy.
+func TestStore_SessionBoostQueue_DifferentModelNotWoken(t *testing.T) {
+	inspector := &fakePodRuntimeInspector{
+		modelsFn: func(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
+			if pod.Name == "pod-a" {
+				return []string{"model-a"}, nil
+			}
+			return []string{"model-b"}, nil
+		},
+		metricsFn: func(engine string, pod *corev1.Pod, port uint32, prev map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			waiting := 0.0
+			if pod.Name == "pod-a" {
+				waiting = 10.0 // model-a is busy
+			}
+			return map[string]float64{
+				utils.RequestWaitingNum: waiting,
+			}, nil
+		},
+	}
+
+	s := newStore(inspector)
+	s.fairnessQueueConfig.SessionBoostEnabled = true
+	s.fairnessQueueConfig.InflightPerPod = 16
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Run(ctx)
+
+	msA := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-a"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           ptr("model-a"),
+			InferenceEngine: "vLLM",
+		},
+	}
+	msB := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-b"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           ptr("model-b"),
+			InferenceEngine: "vLLM",
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelServer(msA, nil))
+	assert.NoError(t, s.AddOrUpdateModelServer(msB, nil))
+
+	podA := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-a"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	assert.NoError(t, s.AddOrUpdatePod(podA, []*aiv1alpha1.ModelServer{msA}))
+
+	reqA := &Request{
+		UserID:      "user-1",
+		ModelName:   "model-a",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+	}
+	assert.NoError(t, s.Enqueue(reqA))
+
+	// Add ready pod for model-b
+	podB := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-b"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.2"},
+	}
+	assert.NoError(t, s.AddOrUpdatePod(podB, []*aiv1alpha1.ModelServer{msB}))
+
+	// reqA must remain blocked because model-a still has no capacity
+	select {
+	case <-reqA.NotifyChan:
+		t.Fatal("reqA should NOT be admitted when only model-b has capacity")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestStore_SessionBoostQueue_ConcurrentPodUpdates stresses concurrent pod adds,
+// metric updates, and request enqueues to ensure no race conditions or deadlocks.
+func TestStore_SessionBoostQueue_ConcurrentPodUpdates(t *testing.T) {
+	inspector := &fakePodRuntimeInspector{
+		modelsFn: func(engine string, pod *corev1.Pod, port uint32) ([]string, error) {
+			return []string{"stress-model"}, nil
+		},
+		metricsFn: func(engine string, pod *corev1.Pod, port uint32, prev map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+			return map[string]float64{
+				utils.RequestWaitingNum: 0.0,
+			}, nil
+		},
+	}
+
+	s := newStore(inspector)
+	s.fairnessQueueConfig.SessionBoostEnabled = true
+	s.fairnessQueueConfig.InflightPerPod = 100
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.Run(ctx)
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms-stress"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           ptr("stress-model"),
+			InferenceEngine: "vLLM",
+		},
+	}
+	assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
+
+	var wg sync.WaitGroup
+	// Concurrently add pods and enqueues
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		podName := fmt.Sprintf("pod-%d", i)
+		go func(pName string) {
+			defer wg.Done()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: pName},
+				Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+			}
+			_ = s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
+		}(podName)
+
+		go func(id int) {
+			defer wg.Done()
+			req := &Request{
+				UserID:      fmt.Sprintf("user-%d", id),
+				ModelName:   "stress-model",
+				RequestTime: time.Now(),
+				NotifyChan:  make(chan struct{}),
+			}
+			_ = s.Enqueue(req)
+		}(i)
+	}
+	wg.Wait()
+}

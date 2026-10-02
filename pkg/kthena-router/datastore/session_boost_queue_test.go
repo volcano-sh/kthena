@@ -18,6 +18,7 @@ package datastore
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -729,4 +730,181 @@ func TestSessionBoost_ConcurrentAdmitAbandonNoLeak(t *testing.T) {
 			t.Fatalf("iteration %d: inflight leaked, count=%d", i, got)
 		}
 	}
+}
+
+// TestSessionBoostQueue_Wake verifies that Wake() wakes the dequeue loop
+// when backend capacity becomes available, unblocking held requests without
+// needing a request completion (Release) or new arrival.
+func TestSessionBoostQueue_Wake(t *testing.T) {
+	var mu sync.Mutex
+	backendHasCapacity := false
+	checker := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return backendHasCapacity
+	}
+
+	cfg := sessionBoostConfig()
+	cfg.SessionBoostGracePeriod = 0
+	cfg.InflightPerPod = 10
+	q := newSessionBoostQueue(cfg, checker)
+	defer q.Close()
+
+	now := time.Now()
+	req := &Request{
+		UserID:      "user-A",
+		ModelName:   "model-1",
+		RequestTime: now,
+		NotifyChan:  make(chan struct{}),
+	}
+	if err := q.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go q.Run(ctx, 0)
+
+	// Verify request is initially blocked while backends report no capacity.
+	select {
+	case <-req.NotifyChan:
+		t.Fatal("request should be blocked while backend has no capacity")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Backend becomes available.
+	mu.Lock()
+	backendHasCapacity = true
+	mu.Unlock()
+
+	// Calling Wake() must wake the dequeue loop and admit the waiting request.
+	q.Wake()
+
+	select {
+	case <-req.NotifyChan:
+		// Success: request unblocked by Wake()
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout: request should be dequeued after Wake()")
+	}
+}
+
+// TestSessionBoostQueue_WakeOnCapacityIncrease verifies that when podCount increases,
+// scaling maxInflight, Wake() triggers admission of requests previously blocked
+// by the inflight limit.
+func TestSessionBoostQueue_WakeOnCapacityIncrease(t *testing.T) {
+	var mu sync.Mutex
+	podCount := 1
+	podCounter := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return podCount
+	}
+
+	cfg := sessionBoostConfig()
+	cfg.SessionBoostGracePeriod = 0
+	cfg.InflightPerPod = 1 // 1 pod -> maxInflight = 1; 2 pods -> maxInflight = 2
+	q := newSessionBoostQueue(cfg, func() bool { return true })
+	q.podCounter = podCounter
+	defer q.Close()
+
+	now := time.Now()
+	req1 := &Request{UserID: "u1", ModelName: "m", RequestTime: now, NotifyChan: make(chan struct{})}
+	req2 := &Request{UserID: "u2", ModelName: "m", RequestTime: now.Add(time.Millisecond), NotifyChan: make(chan struct{})}
+
+	for _, r := range []*Request{req1, req2} {
+		if err := q.PushRequest(r); err != nil {
+			t.Fatalf("PushRequest failed: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go q.Run(ctx, 0)
+
+	// req1 admitted (inflight = 1 / maxInflight = 1).
+	select {
+	case <-req1.NotifyChan:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout: req1 should be admitted")
+	}
+
+	// req2 must remain blocked by the inflight limit.
+	select {
+	case <-req2.NotifyChan:
+		t.Fatal("req2 should be blocked by maxInflight limit")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Pod count increases from 1 to 2 (maxInflight: 1 -> 2).
+	mu.Lock()
+	podCount = 2
+	mu.Unlock()
+
+	// Waking the queue must admit req2 without requiring req1 to release.
+	q.Wake()
+
+	select {
+	case <-req2.NotifyChan:
+		// Success: req2 admitted
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout: req2 should be admitted after capacity increased and Wake() called")
+	}
+}
+
+func TestSessionBoostQueue_WakeEdgeCases(t *testing.T) {
+	t.Run("wake empty queue", func(t *testing.T) {
+		cfg := sessionBoostConfig()
+		q := newSessionBoostQueue(cfg, func() bool { return true })
+		defer q.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go q.Run(ctx, 0)
+
+		// Must not panic or hang
+		for i := 0; i < 10; i++ {
+			q.Wake()
+		}
+	})
+
+	t.Run("wake closed queue", func(t *testing.T) {
+		cfg := sessionBoostConfig()
+		q := newSessionBoostQueue(cfg, func() bool { return true })
+		q.Close()
+
+		// Must not panic or send on closed channel
+		for i := 0; i < 10; i++ {
+			q.Wake()
+		}
+	})
+
+	t.Run("concurrent wake and push", func(t *testing.T) {
+		cfg := sessionBoostConfig()
+		cfg.InflightPerPod = 100
+		q := newSessionBoostQueue(cfg, func() bool { return true })
+		defer q.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go q.Run(ctx, 0)
+
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(2)
+			go func(id int) {
+				defer wg.Done()
+				r := &Request{
+					UserID:     fmt.Sprintf("user-%d", id),
+					ModelName:  "m",
+					NotifyChan: make(chan struct{}),
+				}
+				_ = q.PushRequest(r)
+			}(i)
+			go func() {
+				defer wg.Done()
+				q.Wake()
+			}()
+		}
+		wg.Wait()
+	})
 }

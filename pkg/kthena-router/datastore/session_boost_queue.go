@@ -187,16 +187,32 @@ func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) bool {
 	return true
 }
 
+// Wake signals the queue's dequeue loop to re-evaluate waiting requests (e.g.
+// when a backend pod becomes ready, metrics refresh, or capacity increases).
+// It is non-blocking, safe for concurrent use, and drops redundant signals when a
+// wake notification is already pending.
+func (pq *RequestPriorityQueue) Wake() {
+	pq.mu.RLock()
+	select {
+	case <-pq.stopCh:
+		pq.mu.RUnlock()
+		return
+	default:
+		pq.mu.RUnlock()
+	}
+	select {
+	case pq.notifyCh <- struct{}{}:
+	default:
+	}
+}
+
 // runSessionBoostMode is the session-boost dequeue loop. It dequeues requests only
 // when backend pods have capacity, using two-level admission control:
 //  1. Inflight limit: at most InflightPerPod requests in flight per backend pod.
 //  2. Backend metrics check: at least one pod reports capacity available.
 //
-// The loop is fully event-driven: it reacts to releases and new arrivals. There
-// is no metrics-refresh signal or independent timer: in single-router operation
-// every moment backend capacity frees up coincides with one of our own requests
-// completing (a release), so releases and arrivals alone cover every dequeue
-// opportunity.
+// The loop is fully event-driven: it reacts to releases, new arrivals, backend pod
+// readiness, and metric refreshes.
 //
 // Session Grace Period: when SessionBoostGracePeriod > 0, a release briefly holds
 // the freed slot (via waitGraceAndDequeue) so a same-session follow-up has time to
