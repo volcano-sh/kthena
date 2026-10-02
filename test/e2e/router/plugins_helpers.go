@@ -17,19 +17,25 @@ limitations under the License.
 package router
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/vllm"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -42,6 +48,11 @@ const (
 	gpuCacheUsageLoadWaitTimeout   = 90 * time.Second
 	gpuCacheUsageLoadConcurrency   = 2
 	gpuCacheUsageLoadMaxTokens     = 256
+	kvCacheFixtureDeploymentName   = "router-plugin-kvcache-mock"
+	kvCacheFixtureAppLabel         = kvCacheFixtureDeploymentName
+	kvCacheOwnershipWaitTimeout    = 90 * time.Second
+	kvCacheMappingPrefix           = "vllm:kv:block"
+	kvCacheOwnershipPrefix         = "matrix:kv:block"
 )
 
 func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string) []corev1.Pod {
@@ -49,6 +60,110 @@ func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string
 	ready := utils.ListReadyPodsByLabel(t, kube, namespace, "app="+plugincontext.DeploymentName)
 	require.NotEmpty(t, ready, "no ready mock pods")
 	return ready
+}
+
+func setupKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace string) []corev1.Pod {
+	t.Helper()
+	ctx := context.Background()
+	deployment := utils.LoadYAMLFromFile[appsv1.Deployment](filepath.Join(plugincontext.TestDataDir, "LLM-Mock-plugins-kvcache.yaml"))
+	deployment.Namespace = namespace
+	_, err := kube.AppsV1().Deployments(namespace).Create(ctx, deployment, metav1.CreateOptions{})
+	require.NoError(t, err, "create KV-cache fixture")
+	t.Cleanup(func() {
+		utils.DeleteDeploymentAndWait(t, kube, namespace, kvCacheFixtureDeploymentName, 2*time.Minute)
+	})
+
+	utils.WaitForDeploymentReady(t, ctx, kube, namespace, kvCacheFixtureDeploymentName, pluginMockReplicaCount, 5*time.Minute)
+	pods := utils.ListReadyPodsByLabel(t, kube, namespace, "app="+kvCacheFixtureAppLabel)
+	require.Len(t, pods, pluginMockReplicaCount, "KV-cache fixture needs %d mock pods", pluginMockReplicaCount)
+	return pods
+}
+
+func waitForKVCacheOwnership(t *testing.T, pod corev1.Pod, model, prompt string) {
+	t.Helper()
+	localPort := utils.AllocateLocalPort(t)
+	pf, err := utils.SetupPortForward(pod.Namespace, "redis-server", localPort, "6379")
+	require.NoError(t, err, "port-forward to Redis")
+	defer pf.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + localPort})
+	defer client.Close()
+
+	owner := pod.Name + "." + pod.Namespace
+	mappingPattern := fmt.Sprintf("%s:%s@*", kvCacheMappingPrefix, owner)
+	lastState := "Redis was not reachable"
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("Last observed KV-cache state: %s", lastState)
+		}
+	})
+	deadline := time.Now().Add(kvCacheOwnershipWaitTimeout)
+	for {
+		// Re-send while polling because ZMQ may drop an event before the subscriber is ready.
+		utils.DirectChatToPod(t, pod, model, prompt, 1)
+
+		ownershipFound := func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			if err := client.Ping(ctx).Err(); err != nil {
+				lastState = err.Error()
+				return false
+			}
+
+			var mappingKeys []string
+			var cursor uint64
+			for {
+				keys, next, err := client.Scan(ctx, cursor, mappingPattern, 0).Result()
+				if err != nil {
+					lastState = err.Error()
+					return false
+				}
+				mappingKeys = append(mappingKeys, keys...)
+				cursor = next
+				if cursor == 0 {
+					break
+				}
+			}
+			if len(mappingKeys) == 0 {
+				lastState = "no block mappings for " + owner
+				return false
+			}
+
+			for _, mappingKey := range mappingKeys {
+				standardHash, err := client.Get(ctx, mappingKey).Result()
+				if err != nil {
+					lastState = fmt.Sprintf("read %s: %v", mappingKey, err)
+					return false
+				}
+				if _, err := strconv.ParseUint(standardHash, 10, 64); err != nil {
+					lastState = fmt.Sprintf("invalid standard hash %q in %s", standardHash, mappingKey)
+					return false
+				}
+
+				ownershipKey := fmt.Sprintf("%s:%s@%s", kvCacheOwnershipPrefix, model, standardHash)
+				timestamp, err := client.HGet(ctx, ownershipKey, owner).Result()
+				if err != nil {
+					lastState = fmt.Sprintf("read %s[%s]: %v", ownershipKey, owner, err)
+					return false
+				}
+				if value, err := strconv.ParseInt(timestamp, 10, 64); err != nil || value <= 0 {
+					lastState = fmt.Sprintf("invalid ownership timestamp %q in %s[%s]", timestamp, ownershipKey, owner)
+					return false
+				}
+				lastState = fmt.Sprintf("mapping=%s standard_hash=%s ownership=%s owner=%s", mappingKey, standardHash, ownershipKey, owner)
+			}
+			return true
+		}()
+		if ownershipFound {
+			t.Logf("KV-cache ownership verified: %s", lastState)
+			return
+		}
+		if time.Now().After(deadline) {
+			require.FailNowf(t, "expected KV-cache ownership in Redis", "last observed state: %s", lastState)
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func waitForSchedulerPluginInMetrics(t *testing.T, metricsURL, pluginName, pluginType string) {
