@@ -1,0 +1,56 @@
+name: "smoke-test-s3-concurrency-scaling"
+description: "s3 scenario: connection pool behavior as concurrent connections scale"
+
+# concurrency=5 was empirically validated on the GitHub-hosted CI runner
+# (4 CPU / 16GB, single-node Kind cluster) against this exact backend shape
+# (8 mocker pods, 250m/1 CPU each): CI runs 30620977224 and 30686693047 both
+# cleared >95% success on random and least-request, with 0 mocker restarts
+# and stable ~2.4s p95 latency on both plugins across the two runs. Residual
+# 503s in both runs are fully accounted for by the fixed 60s benchmark
+# duration cutting off in-flight requests, not backend saturation.
+# concurrency=10 was tried first and rejected: it produced an asymmetric,
+# saturated result (random 94.78% vs least-request 72.55% success,
+# CI run 30619293479) because AIPerf's closed-loop concurrency mode issues
+# more total requests when a config fails fast, so the two plugins did not
+# receive equivalent load at the same nominal concurrency.
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
+load:
+  schedule:
+    mode: "concurrency"
+  concurrency:
+    connections: 5
+    ramp:
+      strategy: "linear"
+      duration: "15s"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 8
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
