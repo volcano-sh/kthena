@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -422,6 +423,110 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, int32(1), unreadyCount)
 	// Expected behavior: scrape the ready pod even though another matching pod is unready.
-	require.Equal(t, float64(40), readyMetrics["queue_depth"])
-	require.Equal(t, float64(40), readyMetrics["queue_depth_alt"])
+	require.Len(t, readyMetrics, 1)
+	require.Equal(t, float64(40), readyMetrics[0]["queue_depth"])
+	require.Equal(t, float64(40), readyMetrics[0]["queue_depth_alt"])
+}
+
+func TestUpdateMetricsReturnsOneEntryPerReadyPod(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n")
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(serverURL.Port())
+	require.NoError(t, err)
+
+	labels := map[string]string{
+		workload.ModelServingNameLabelKey: "model",
+		workload.EntryLabelKey:            "true",
+	}
+	podA := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", Labels: labels},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "127.0.0.1",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	podB := podA.DeepCopy()
+	podB.Name = "pod-b"
+
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(podA))
+	require.NoError(t, indexer.Add(podB))
+	podLister := corelister.NewPodLister(indexer)
+
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
+	collector := NewMetricCollector(
+		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
+		policy,
+		algorithm.Metrics{"queue_depth": 10},
+	)
+
+	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), unreadyCount)
+	// The recommendation algorithm averages over entries, so each ready pod must
+	// keep its own value instead of being summed into a single entry.
+	require.Equal(t, []algorithm.Metrics{{"queue_depth": 40}, {"queue_depth": 40}}, readyMetrics)
+}
+
+func TestUpdateMetricsKeepsReadyPodWithFailedScrapeAsMissing(t *testing.T) {
+	// The first scrape succeeds and every later one returns HTTP 500, so exactly
+	// one of the two ready pods fails regardless of scrape order.
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) > 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n")
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(serverURL.Port())
+	require.NoError(t, err)
+
+	labels := map[string]string{
+		workload.ModelServingNameLabelKey: "model",
+		workload.EntryLabelKey:            "true",
+	}
+	podA := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", Labels: labels},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "127.0.0.1",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	podB := podA.DeepCopy()
+	podB.Name = "pod-b"
+
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(podA))
+	require.NoError(t, indexer.Add(podB))
+	podLister := corelister.NewPodLister(indexer)
+
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
+	collector := NewMetricCollector(
+		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
+		policy,
+		algorithm.Metrics{"queue_depth": 10},
+	)
+
+	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), unreadyCount)
+	// The failed pod stays as an empty entry (missing), not dropped and not zero,
+	// so the recommendation algorithm can apply its missing-pod handling.
+	require.ElementsMatch(t, []algorithm.Metrics{{"queue_depth": 40}, {}}, readyMetrics)
 }

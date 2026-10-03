@@ -99,7 +99,7 @@ type scaleOneTargetInput struct {
 	TolerancePercent      int32
 	MetricTargets         algorithm.Metrics
 	UnreadyInstancesCount int32
-	ReadyInstancesMetrics algorithm.Metrics
+	ReadyInstancesMetrics []algorithm.Metrics
 	ExternalMetrics       algorithm.Metrics
 }
 
@@ -118,7 +118,7 @@ func scaleOneTarget(input scaleOneTargetInput) scaleOneTargetResult {
 		Tolerance:             float64(input.TolerancePercent) * 0.01,
 		MetricTargets:         input.MetricTargets,
 		UnreadyInstancesCount: input.UnreadyInstancesCount,
-		ReadyInstancesMetrics: []algorithm.Metrics{input.ReadyInstancesMetrics},
+		ReadyInstancesMetrics: input.ReadyInstancesMetrics,
 		ExternalMetrics:       input.ExternalMetrics,
 	}
 	recommendedReplicas, skip := instancesAlgorithm.GetRecommendedInstances()

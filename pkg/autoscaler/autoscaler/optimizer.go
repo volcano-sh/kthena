@@ -162,9 +162,8 @@ func (optimizer *Optimizer) NeedUpdate(policy *workload.AutoscalingPolicy) bool 
 }
 
 func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCounts map[string]int32) (map[string]int32, error) {
-	size := len(optimizer.Meta.Config.Params)
 	unreadyInstancesCount := int32(0)
-	readyInstancesMetrics := make([]algorithm.Metrics, 0, size)
+	var readyInstancesMetrics []algorithm.Metrics
 	// externalSamples accumulates per-backend (value, replicas) pairs for each
 	// external metric so that the correct aggregation can be applied afterwards.
 	externalSamples := make(map[string][]backendExternalSample)
@@ -186,7 +185,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 			continue
 		}
 		unreadyInstancesCount += currentUnreadyInstancesCount
-		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics)
+		readyInstancesMetrics = append(readyInstancesMetrics, currentReadyInstancesMetrics...)
 		for metricName, metricValue := range currentExternalMetrics {
 			externalSamples[metricName] = append(externalSamples[metricName], backendExternalSample{
 				value:    metricValue,

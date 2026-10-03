@@ -36,7 +36,7 @@ type RecommendedInstancesAlgorithm struct {
 }
 
 func (alg *RecommendedInstancesAlgorithm) GetRecommendedInstances() (recommendedInstances int32, skip bool) {
-	klog.InfoS("start to getRecommendedInstances", "args", alg)
+	klog.V(4).InfoS("start to getRecommendedInstances", "args", alg)
 	if alg.CurrentInstancesCount < alg.MinInstances {
 		return alg.MinInstances, false
 	}

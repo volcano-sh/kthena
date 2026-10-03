@@ -20,9 +20,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,8 +107,10 @@ func (collector *MetricCollector) UpdateMetrics(
 	ctx context.Context,
 	podLister listerv1.PodLister,
 	targetMetricSources map[string]v1alpha1.MetricSource,
-) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, externalMetrics algorithm.Metrics, err error) {
-	readyInstancesMetric = make(algorithm.Metrics)
+) (unreadyInstancesCount int32, readyInstancesMetrics []algorithm.Metrics, externalMetrics algorithm.Metrics, err error) {
+	// One entry per ready pod, merged across metric groups by pod key, because the
+	// recommendation algorithm averages over pods.
+	perPodMetrics := make(map[string]algorithm.Metrics)
 
 	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
 	if !ok {
@@ -134,11 +138,17 @@ func (collector *MetricCollector) UpdateMetrics(
 		for podKey := range groupUnreadyPods {
 			unreadyPods.Insert(podKey)
 		}
-		for policyKey, v := range values {
-			readyInstancesMetric[policyKey] = v
+		for podKey, podValues := range values {
+			if perPodMetrics[podKey] == nil {
+				perPodMetrics[podKey] = make(algorithm.Metrics, len(podValues))
+			}
+			maps.Copy(perPodMetrics[podKey], podValues)
 		}
 	}
 
+	for _, podKey := range slices.Sorted(maps.Keys(perPodMetrics)) {
+		readyInstancesMetrics = append(readyInstancesMetrics, perPodMetrics[podKey])
+	}
 	unreadyInstancesCount = int32(len(unreadyPods))
 	collector.PastHistograms.Append(currentHistograms)
 	return
@@ -237,8 +247,7 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (values map[string]float64, unreadyPods sets.Set[string], failed bool, err error) {
-	values = make(map[string]float64, len(specs))
+) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], failed bool, err error) {
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
 	if err != nil {
 		return nil, nil, false, err
@@ -255,13 +264,19 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	// Multiple policy keys may target the same scrape metric name.
 	wanted := groupPolicyKeysByScrapeName(specs)
 
+	values = make(map[string]algorithm.Metrics, len(pods))
 	for _, pod := range pods {
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
 			continue
 		}
-		if err = collector.collectPodMetrics(ctx, pod, podSource, wanted, values, pastHistograms, currentHistograms); err != nil {
-			return nil, nil, false, err
+		podValues := make(algorithm.Metrics, len(specs))
+		if scrapeErr := collector.collectPodMetrics(ctx, pod, podSource, wanted, podValues, pastHistograms, currentHistograms); scrapeErr != nil {
+			// Keep the ready pod as an entry with no values so the algorithm counts
+			// its metrics as missing, instead of dropping it or treating it as zero load.
+			klog.Warningf("collect metrics from pod %s failed: %v", metricPodKey(pod), scrapeErr)
+			podValues = make(algorithm.Metrics)
 		}
+		values[metricPodKey(pod)] = podValues
 	}
 	return
 }
