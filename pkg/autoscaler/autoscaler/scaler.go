@@ -63,7 +63,7 @@ func (autoscaler *Autoscaler) UpdateAutoscalePolicy(autoscalePolicy *workload.Au
 }
 
 func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCount int32) (int32, error) {
-	unreadyInstancesCount, readyInstancesMetrics, externalMetrics, err := autoscaler.Collector.UpdateMetrics(ctx, podLister, autoscaler.Meta.Config.Target.MetricSources)
+	unreadyInstancesCount, _, readyInstancesMetrics, _, externalMetrics, err := autoscaler.Collector.UpdateMetrics(ctx, podLister, autoscaler.Meta.Config.Target.MetricSources)
 	if err != nil {
 		klog.Errorf("update metrics error: %v", err)
 		return -1, err

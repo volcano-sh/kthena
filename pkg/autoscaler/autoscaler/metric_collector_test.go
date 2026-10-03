@@ -389,6 +389,7 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 	labels := map[string]string{
 		workload.ModelServingNameLabelKey: "model",
 		workload.EntryLabelKey:            "true",
+		"metrics-alt":                     "true",
 	}
 	readyPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: "default", Labels: labels},
@@ -400,6 +401,7 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 	}
 	unreadyPod := readyPod.DeepCopy()
 	unreadyPod.Name = "unready"
+	delete(unreadyPod.Labels, "metrics-alt")
 	unreadyPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
 
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
@@ -411,17 +413,21 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 	collector := NewMetricCollector(
 		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
 		policy,
-		algorithm.Metrics{"queue_depth": 10, "queue_depth_alt": 10},
+		algorithm.Metrics{"queue_depth": 10, "queue_depth_alt": 10, "missing": 10},
 	)
 
-	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+	unreadyCount, unreadyCounts, readyMetrics, reporterCounts, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
 		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
-		// This creates a second metric group selecting the same pods.
-		"queue_depth_alt": {Pod: &workload.PodMetricSource{Name: "queue_depth_alt", Uri: "/metrics-alt", Port: int32(port)}},
+		"missing":     {Pod: &workload.PodMetricSource{Name: "missing", Port: int32(port)}},
+		// This creates a second metric group selecting only the ready pod.
+		"queue_depth_alt": {Pod: &workload.PodMetricSource{Name: "queue_depth_alt", Uri: "/metrics-alt", Port: int32(port), LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"metrics-alt": "true"}}}},
 	})
 	require.NoError(t, err)
 	require.Equal(t, int32(1), unreadyCount)
+	require.Equal(t, map[string]int32{"queue_depth": 1, "queue_depth_alt": 0, "missing": 1}, unreadyCounts)
 	// Expected behavior: scrape the ready pod even though another matching pod is unready.
 	require.Equal(t, float64(40), readyMetrics["queue_depth"])
 	require.Equal(t, float64(40), readyMetrics["queue_depth_alt"])
+	require.NotContains(t, readyMetrics, "missing")
+	require.Equal(t, algorithm.ReporterCounts{"queue_depth": 1, "queue_depth_alt": 1}, reporterCounts)
 }

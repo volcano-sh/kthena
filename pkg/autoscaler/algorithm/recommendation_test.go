@@ -287,6 +287,38 @@ func TestGetRecommendedInstances(t *testing.T) {
 			expectedSkip:        false,
 		},
 		{
+			name: "givenNoReporterCounts_whenAggregatedMetricExceedsTolerance_thenScaleUp",
+			args: RecommendedInstancesAlgorithm{
+				MinInstances:          int32(2),
+				MaxInstances:          int32(20),
+				CurrentInstancesCount: int32(10),
+				Tolerance:             0.1,
+				MetricTargets:         Metrics{"a": 10.0},
+				UnreadyInstancesCount: int32(0),
+				ReadyInstancesMetrics: []Metrics{{"a": 105.0}},
+				ExternalMetrics:       Metrics{},
+			},
+			expectedRecommended: int32(11),
+			expectedSkip:        false,
+		},
+		{
+			name: "givenReporterCounts_whenSomeInstancesDoNotReport_thenWeightMissingInstances",
+			args: RecommendedInstancesAlgorithm{
+				MinInstances:          int32(2),
+				MaxInstances:          int32(20),
+				CurrentInstancesCount: int32(10),
+				Tolerance:             0.0,
+				MetricTargets:         Metrics{"a": 10.0},
+				UnreadyInstancesCount: int32(2),
+				MetricUnreadyCounts:   map[string]int32{"a": 0},
+				ReadyInstancesMetrics: []Metrics{{"a": 1.0}},
+				MetricReporterCounts:  ReporterCounts{"a": 5},
+				ExternalMetrics:       Metrics{},
+			},
+			expectedRecommended: int32(6),
+			expectedSkip:        false,
+		},
+		{
 			name: "givenMissingInstances_whenShouldScaleDown_thenTreatMissingInstancesAsTarget",
 			args: RecommendedInstancesAlgorithm{
 				MinInstances:          int32(1),
