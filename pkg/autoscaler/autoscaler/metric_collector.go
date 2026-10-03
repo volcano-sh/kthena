@@ -48,6 +48,8 @@ import (
 	inferControllerUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
+const maxPodMetricResponseSize = 10 << 20
+
 type MetricCollector struct {
 	PastHistograms *datastructure.SnapshotSlidingWindow[map[string]HistogramInfo]
 	Target         *v1alpha1.Target
@@ -377,9 +379,12 @@ func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod
 	if !util.IsRequestSuccess(resp.StatusCode) || resp.Body == nil {
 		return "", fmt.Errorf("invalid metric response for pod %s", pod.Name)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPodMetricResponseSize+1))
 	if err != nil {
 		return "", err
+	}
+	if len(body) > maxPodMetricResponseSize {
+		return "", fmt.Errorf("metric response for pod %s exceeds %d bytes", pod.Name, maxPodMetricResponseSize)
 	}
 	return string(body), nil
 }
