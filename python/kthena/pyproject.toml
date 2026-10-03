@@ -8,6 +8,7 @@ exclude = [
     ".git",
     "__pycache__",
     "docs/source/conf.py",
+    "benchmark/router-benchmark/scripts/router_ab_test/profile_pb2.py",
     "old",
     "build",
     "dist",
