@@ -157,7 +157,7 @@ func (*openAIUsageParser) FinalStreamUsage() (TokenUsage, bool) {
 }
 
 func (p *openAIUsageParser) RecordStreamLineWritten(line string) {
-	p.completed = p.completed || strings.TrimSpace(line) == "data: [DONE]"
+	p.completed = p.completed || isStreamDoneLine(line)
 }
 
 func (p *openAIUsageParser) StreamCompleted() bool {

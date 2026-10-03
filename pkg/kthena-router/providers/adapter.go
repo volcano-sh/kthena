@@ -463,14 +463,31 @@ func isJSONStreamEvent(line, eventType string) bool {
 	return event.Type == eventType
 }
 
-func streamDataPayload(line string) ([]byte, bool) {
-	const dataPrefix = "data:"
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, dataPrefix) {
-		return nil, false
+const (
+	streamDataPrefix   = "data:"
+	streamDoneSentinel = "[DONE]"
+)
+
+// streamDataField returns the value of an SSE data field. SSE makes the space
+// after the colon optional and strips at most one, so nothing may match on the
+// raw line: a backend writing "data:[DONE]" means the same as "data: [DONE]".
+func streamDataField(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, streamDataPrefix) {
+		return "", false
 	}
-	payload := strings.TrimSpace(strings.TrimPrefix(line, dataPrefix))
-	if payload == "" || payload == "[DONE]" {
+	return strings.TrimSpace(strings.TrimPrefix(trimmed, streamDataPrefix)), true
+}
+
+// isStreamDoneLine reports whether line is the [DONE] terminator.
+func isStreamDoneLine(line string) bool {
+	payload, ok := streamDataField(line)
+	return ok && payload == streamDoneSentinel
+}
+
+func streamDataPayload(line string) ([]byte, bool) {
+	payload, ok := streamDataField(line)
+	if !ok || payload == "" || payload == streamDoneSentinel {
 		return nil, false
 	}
 	return []byte(payload), true
