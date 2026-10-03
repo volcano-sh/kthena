@@ -400,6 +400,8 @@ type Target struct {
 //	        prometheus:
 //	          serverURL: http://prometheus.monitoring.svc:9090
 //	          query: sum(rate(http_requests_total[2m]))
+//
+// +kubebuilder:validation:XValidation:rule="self.minReplicas <= self.maxReplicas",message="minReplicas must be <= maxReplicas"
 type HomogeneousTarget struct {
 	// Target defines the object to be monitored and scaled.
 	Target Target `json:"target,omitempty"`
@@ -462,6 +464,8 @@ type HeterogeneousTarget struct {
 //	  targetRef:
 //	    kind: ModelServing
 //	    name: llama-h100
+//
+// +kubebuilder:validation:XValidation:rule="self.minReplicas <= self.maxReplicas",message="minReplicas must be <= maxReplicas"
 type HeterogeneousTargetParam struct {
 	// Target defines the scaling instance configuration for this deployment type.
 	Target Target `json:"target,omitempty"`
@@ -506,6 +510,7 @@ type DisaggregatedTarget struct {
 }
 
 // RoleScalingParam defines the scaling configuration for one role.
+// +kubebuilder:validation:XValidation:rule="self.minReplicas <= self.maxReplicas",message="minReplicas must be <= maxReplicas"
 type RoleScalingParam struct {
 	// MinReplicas defines the minimum number of replicas for this role.
 	// +kubebuilder:validation:Minimum=0
