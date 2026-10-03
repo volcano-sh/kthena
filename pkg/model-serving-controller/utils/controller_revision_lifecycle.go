@@ -14,7 +14,6 @@ limitations under the License.
 package utils
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 
@@ -77,7 +76,7 @@ func RecordModelServingRevision(
 			maxRevision = revision.Revision
 		}
 		if revision.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 &&
-			bytes.Equal(revision.Data.Raw, data) {
+			revisionDataEqual(revision.Data.Raw, data) {
 			if equivalent == nil || controllerRevisionLess(equivalent, revision) {
 				equivalent = revision
 			}
@@ -128,7 +127,7 @@ func RecordModelServingRevision(
 			owner := metav1.GetControllerOfNoCopy(existing)
 			if owner != nil && owner.UID == ms.UID &&
 				existing.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 &&
-				bytes.Equal(existing.Data.Raw, data) {
+				revisionDataEqual(existing.Data.Raw, data) {
 				if existing.Revision < nextRevision {
 					existing, err = updateControllerRevision(ctx, client, existing, nextRevision)
 					if err != nil {
