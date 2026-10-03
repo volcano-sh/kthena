@@ -1,0 +1,27 @@
+# Router scheduler config — Least Latency + GPU Usage
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-config
+  namespace: kthena-system
+data:
+  routerConfiguration: |
+    scheduler:
+      pluginConfig:
+        - name: least-latency
+          args:
+            TTFTTPOTWeightFactor: 0.5
+        - name: gpu-usage
+          args: {}
+      plugins:
+        Filter:
+          enabled: []
+          disabled:
+            - least-request
+            - lora-affinity
+        Score:
+          enabled:
+            - name: least-latency
+              weight: 1
+            - name: gpu-usage
+              weight: 1
